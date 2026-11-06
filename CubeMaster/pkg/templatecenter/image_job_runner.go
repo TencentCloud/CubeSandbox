@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,24 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
+
+var errTemplateImageJobCanceled = errors.New("template image job is no longer active")
+
+func ensureTemplateImageJobContinuable(ctx context.Context, jobID, templateID string) error {
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("%w: load job %s: %v", errTemplateImageJobCanceled, jobID, err)
+	}
+	if strings.TrimSpace(job.TemplateID) != strings.TrimSpace(templateID) {
+		return fmt.Errorf("%w: job %s template identity changed", errTemplateImageJobCanceled, jobID)
+	}
+	switch strings.ToUpper(strings.TrimSpace(job.Status)) {
+	case JobStatusPending, JobStatusRunning, JobStatusBuilt:
+		return nil
+	default:
+		return fmt.Errorf("%w: job %s status is %s", errTemplateImageJobCanceled, jobID, job.Status)
+	}
+}
 
 // distributionFailure decides whether a distribution outcome is terminal, and
 // returns the error to record when it is (nil means "keep going").
@@ -77,12 +96,21 @@ func finishTemplateImageJobAfterArtifact(
 	generatedReq *types.CreateCubeSandboxReq,
 	builtFreshArtifact bool,
 ) error {
+	if err := ensureTemplateImageJobContinuable(ctx, jobID, req.TemplateID); err != nil {
+		return err
+	}
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
 		"artifact_id": artifact.ArtifactID,
 	})
 	readyTargets, expected, ready, failed, distErr := distributeRootfsArtifact(ctx, req, generatedReq, artifact, req.TemplateID, jobID)
+	if cancelErr := ensureTemplateImageJobContinuable(ctx, jobID, req.TemplateID); cancelErr != nil {
+		if cleanupErr := cleanupArtifactOnNodes(ctx, artifact.ArtifactID, req.InstanceType, readyTargets); cleanupErr != nil {
+			logger.Warnf("cleanup distributed artifact after job cancellation failed: %v", cleanupErr)
+		}
+		return cancelErr
+	}
 	// Logged at Info even on success: before this, the only way to tell a
 	// distribution that failed on every node from one that never ran was that
 	// template_definitions/replicas stayed empty, which looks identical to the
@@ -122,6 +150,10 @@ func finishTemplateImageJobAfterArtifact(
 		}
 		return failErr
 	}
+	if err := ensureTemplateImageJobContinuable(ctx, jobID, req.TemplateID); err != nil {
+		_ = cleanupArtifactOnNodes(ctx, artifact.ArtifactID, req.InstanceType, readyTargets)
+		return err
+	}
 	var info *TemplateInfo
 	storedReq, err := normalizeStoredTemplateRequest(generatedReq)
 	if err != nil {
@@ -151,6 +183,13 @@ func finishTemplateImageJobAfterArtifact(
 		ArtifactID: artifact.ArtifactID,
 		JobID:      jobID,
 	})
+	if cancelErr := ensureTemplateImageJobContinuable(ctx, jobID, req.TemplateID); cancelErr != nil {
+		if cleanupErr := cleanupTemplateReplicas(ctx, req.TemplateID); cleanupErr != nil {
+			logger.Warnf("cleanup template replicas after job cancellation failed: %v", cleanupErr)
+		}
+		_ = cleanupArtifactOnNodes(ctx, artifact.ArtifactID, req.InstanceType, readyTargets)
+		return cancelErr
+	}
 	// claimWarning is populated by finalizeTemplateReplicas, which claims the
 	// alias *before* publishing the READY status so a client that sees READY
 	// can always resolve the alias.
@@ -174,6 +213,12 @@ func finishTemplateImageJobAfterArtifact(
 			"error_message":   err.Error(),
 		})
 		return err
+	}
+	if cancelErr := ensureTemplateImageJobContinuable(ctx, jobID, req.TemplateID); cancelErr != nil {
+		if cleanupErr := cleanupTemplateReplicas(ctx, req.TemplateID); cleanupErr != nil {
+			logger.Warnf("cleanup finalized replicas after job cancellation failed: %v", cleanupErr)
+		}
+		return cancelErr
 	}
 	// Alias was already claimed by finalizeTemplateReplicas (before the READY
 	// status was published) to avoid the create/claim publish-ordering race.

@@ -34,11 +34,15 @@ func VersionString(binaryName string) string {
 	return fmt.Sprintf("%s %s (%s) built at %s", binaryName, Version, Commit, BuildTime)
 }
 
-func ShowAndExit(show bool) {
+func ShowComponentAndExit(show bool, component string) {
 	if show {
-		fmt.Println(VersionString("cubemaster"))
+		fmt.Println(VersionString(component))
 		os.Exit(0)
 	}
+}
+
+func ShowAndExit(show bool) {
+	ShowComponentAndExit(show, "cubemaster")
 }
 
 func ShowVersion() string {

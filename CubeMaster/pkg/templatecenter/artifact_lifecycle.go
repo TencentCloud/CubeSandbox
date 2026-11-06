@@ -6,6 +6,7 @@ package templatecenter
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,11 +17,26 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+const retiredArtifactFingerprintPrefix = "retired:"
+
+func retiredArtifactFingerprint(artifactID string) string {
+	return fmt.Sprintf("%s%x", retiredArtifactFingerprintPrefix, sha256.Sum256([]byte(artifactID)))
+}
+
+// Retired artifacts retain their data and cleanup records but no longer own
+// the unique reuse key. Status and fingerprint guards prevent retiring a live build.
+func retireArtifactFingerprint(ctx context.Context, db *gorm.DB, artifact *models.RootfsArtifact) (bool, error) {
+	result := db.WithContext(ctx).Unscoped().Table(constants.RootfsArtifactTableName).
+		Where("artifact_id = ? AND template_spec_fingerprint = ?", artifact.ArtifactID, artifact.TemplateSpecFingerprint).
+		Where("status IN ?", []string{ArtifactStatusFailed, ArtifactStatusOrphaned, ArtifactStatusCleanupPending, ArtifactStatusDeleting}).
+		UpdateColumn("template_spec_fingerprint", retiredArtifactFingerprint(artifact.ArtifactID))
+	return result.RowsAffected > 0, result.Error
+}
 
 // requestTemplateCenterArtifactDelete asks CubeTemplateCenter to remove an
 // artifact's data (S3 object, local/shared ext4 file) and its own copy of the
@@ -46,7 +62,7 @@ var requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID s
 }
 
 // countArtifactReferencesTx counts the live references to artifactID inside the
-// given transaction: surviving template replicas, active (PENDING/RUNNING)
+// given transaction: surviving template replicas, active (PENDING/RUNNING/BUILT)
 // build jobs, template definitions, and snapshots indexed by rootfs_artifact_id. When
 // excludeTemplateID is non-empty its own rows are excluded so the caller can
 // decide based on "everyone else" while deleting that template.
@@ -72,7 +88,7 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 
 	var jobCount int64
 	jq := tx.Table(constants.TemplateImageJobTableName).
-		Where("artifact_id = ? AND status IN ?", artifactID, []string{JobStatusPending, JobStatusRunning})
+		Where("artifact_id = ? AND status IN ?", artifactID, []string{JobStatusPending, JobStatusRunning, JobStatusBuilt})
 	if excludeTemplateID != "" {
 		jq = jq.Where("template_id <> ?", excludeTemplateID)
 	}
@@ -103,6 +119,19 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 		return 0, err
 	}
 	return replicaCount + jobCount + defCount + int64(len(snapshots)), nil
+}
+
+// ArtifactSourceUnreferenced rechecks every durable owner before TC claims a
+// source delete. Call it inside a transaction holding the artifact row lock.
+func ArtifactSourceUnreferenced(ctx context.Context, tx *gorm.DB, artifactID string) (bool, error) {
+	refs, err := countArtifactReferencesTx(ctx, tx, artifactID, "")
+	if err != nil || refs > 0 {
+		return false, err
+	}
+	var placements int64
+	err = tx.WithContext(ctx).Unscoped().Table(constants.ArtifactNodePlacementTableName).
+		Where("artifact_id = ?", artifactID).Count(&placements).Error
+	return placements == 0 && err == nil, err
 }
 
 // cleanupArtifactFully implements the three-phase last-owner-cleanup for one
@@ -166,11 +195,10 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			return err
 		}
 		if remaining > 0 {
-			// Still referenced by another template/job: keep it, renew the GC
-			// TTL, and revert a stale CLEANUP_PENDING back to READY so a
-			// re-referenced artifact becomes reusable again.
+			// A retired artifact may already have partially removed data; a
+			// surviving reference must not make it reusable again.
 			updates := map[string]any{"gc_deadline": time.Now().Add(defaultTemplateArtifactTTL).Unix()}
-			if artifact.Status == ArtifactStatusCleanupPending {
+			if artifact.Status == ArtifactStatusCleanupPending && !strings.HasPrefix(artifact.TemplateSpecFingerprint, retiredArtifactFingerprintPrefix) {
 				updates["status"] = ArtifactStatusReady
 			}
 			return tx.Table(constants.RootfsArtifactTableName).
@@ -182,7 +210,10 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		}
 		if err := tx.Table(constants.RootfsArtifactTableName).
 			Where("artifact_id = ?", artifactID).
-			Update("status", ArtifactStatusCleanupPending).Error; err != nil {
+			Updates(map[string]any{
+				"status":                    ArtifactStatusCleanupPending,
+				"template_spec_fingerprint": retiredArtifactFingerprint(artifactID),
+			}).Error; err != nil {
 			return err
 		}
 		proceed = true
@@ -197,6 +228,14 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 	// ── Phase 2 (no lock) ──────────────────────────────────────────────────────
 	allPhysicalOK := true
 	for i := range nodes {
+		if artifactPlacementOnRetiredNode(&nodes[i]) {
+			// CubeOps has permanently removed the node. The placement cannot
+			// be cleaned by RPC and no longer describes reachable storage, so
+			// let phase 3 remove it instead of pinning the artifact forever.
+			logger.Warnf("artifact cleanup: dropping placement on retired node %s (stored ip %s)",
+				nodes[i].NodeID, nodes[i].NodeIP)
+			continue
+		}
 		target := placementToNode(&nodes[i])
 		if target == nil {
 			// Can't resolve an address: treat as not-yet-cleaned so GC retries
@@ -289,21 +328,26 @@ func notifyTemplateCenterArtifactDelete(ctx context.Context, artifactID string) 
 	}
 }
 
-// placementToNode resolves a placement row to a node with a usable host ip,
-// falling back to the local node cache when the recorded ip is empty.
+// placementToNode resolves a placement row to a node with a usable host ip.
+// The live registry address wins even when the stored IP is non-empty: a node
+// may have re-registered under the same stable id at a different address.
 func placementToNode(p *models.ArtifactNodePlacement) *node.Node {
 	if p == nil {
 		return nil
 	}
 	nodeID := strings.TrimSpace(p.NodeID)
 	nodeIP := strings.TrimSpace(p.NodeIP)
-	if nodeIP == "" && nodeID != "" {
-		if cached, ok := localcache.GetNode(nodeID); ok && cached != nil {
-			nodeIP = strings.TrimSpace(cached.HostIP())
+	if nodeID != "" {
+		if liveIP, present := lookupRegisteredNodeIP(nodeID); present && liveIP != "" {
+			nodeIP = liveIP
 		}
 	}
 	if nodeIP == "" {
 		return nil
 	}
 	return &node.Node{InsID: nodeID, IP: nodeIP}
+}
+
+func artifactPlacementOnRetiredNode(p *models.ArtifactNodePlacement) bool {
+	return p != nil && unregisteredCleanupNode(p.NodeID)
 }

@@ -10,7 +10,6 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
 
 // Orphan replica cleanup sweep.
@@ -30,12 +29,12 @@ import (
 // forever (that is exactly how the stuck deletes this fixes were reported).
 // The sweep therefore re-resolves the address from the live node cache by
 // node id first, so the retry converges once the node is back under ANY
-// address; only when the node is absent from the cache does it fall back to
-// the stored IP (the node may be briefly unregistered yet reachable).
+// address. IP-only legacy rows keep using their stored address because they
+// have no stable identity to classify.
 //
-// A row whose node never comes back simply stays: it is small, visible to
-// operators, and retried every tick at negligible cost -- the same "tombstone
-// until cleaned" discipline the artifact placements follow.
+// A registered but unreachable node keeps its row and is retried. Once the
+// initialized CubeOps registry no longer contains that stable node id, the
+// node is permanently retired and the row can be dropped without another RPC.
 
 // orphanCleanupReplica is the projection the sweep needs.
 type orphanCleanupReplica struct {
@@ -92,12 +91,21 @@ func reconcileOrphanReplicaCleanups(ctx context.Context) error {
 	logger.Warnf("found %d orphan replica cleanup(s) left by earlier deletes; retrying cubelet cleanup", len(rows))
 
 	for _, row := range rows {
+		if unregisteredCleanupNode(row.NodeID) {
+			if err := deleteReplicaRowByID(ctx, row.ID); err != nil {
+				logger.Warnf("drop retired-node replica cleanup row failed: id=%d template=%s node=%s err=%v",
+					row.ID, row.TemplateID, row.NodeID, err)
+				continue
+			}
+			logger.Infof("orphan replica cleanup retired with node: template=%s node=%s", row.TemplateID, row.NodeID)
+			continue
+		}
 		locator := templateCleanupLocator{NodeID: row.NodeID, NodeIP: row.NodeIP}
 		// Re-resolve the address from the live node cache: the stored IP may
 		// predate a re-deployment, while the node id is the stable identity.
 		if row.NodeID != "" {
-			if n, ok := localcache.GetNode(row.NodeID); ok && n != nil && n.HostIP() != "" {
-				locator.NodeIP = n.HostIP()
+			if liveIP, present := lookupRegisteredNodeIP(row.NodeID); present && liveIP != "" {
+				locator.NodeIP = liveIP
 			}
 		}
 		// Backend hint is empty: the definition row (which carried it) is

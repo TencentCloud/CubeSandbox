@@ -6,14 +6,62 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
 )
+
+func TestArtifactUploadNeverOverwritesDifferentContent(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", root)
+	t.Setenv(constants.TemplateCallbackTokenEnv, "existing-component-secret")
+	r := setupRouter()
+	InternalAPIGroup(r.Group("")).POST("/artifact/upload", handleArtifactUpload)
+	upload := func(data string) *httptest.ResponseRecorder {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("artifact_id", "rfs-upload"); err != nil {
+			t.Fatal(err)
+		}
+		part, err := writer.CreateFormFile("file", "rootfs.ext4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(part, data)
+		_ = writer.Close()
+		req := httptest.NewRequest(http.MethodPost, "/tc/api/v1/artifact/upload", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set(constants.TemplateCallbackTokenHeader, "existing-component-secret")
+		response := httptest.NewRecorder()
+		r.ServeHTTP(response, req)
+		return response
+	}
+	first := upload("original")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first upload: %d %s", first.Code, first.Body.String())
+	}
+	if got := upload("original"); got.Code != http.StatusOK {
+		t.Fatalf("idempotent upload: %d", got.Code)
+	}
+	if got := upload("different"); got.Code != http.StatusConflict {
+		t.Fatalf("different content: %d", got.Code)
+	}
+	var stored ArtifactUploadResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &stored); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(stored.Ext4Path)
+	if err != nil || string(data) != "original" {
+		t.Fatalf("original overwritten: %q %v", data, err)
+	}
+}
 
 func setupRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)

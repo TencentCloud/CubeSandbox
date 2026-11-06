@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -42,6 +43,16 @@ const (
 
 	snapshotDefaultWorkTimeout = 5 * time.Minute
 	snapshotResumeTimeout      = 30 * time.Second
+)
+
+var (
+	appSnapshotTemplateLocks        = utils.NewResourceLocks()
+	appSnapshotGetLocalSnapshot     = storage.GetLocalSnapshotFor
+	appSnapshotFinalizeS3Package    = storage.FinalizeS3PackageSnapshots
+	appSnapshotInspectObjects       = storage.InspectObjectsFor
+	appSnapshotCleanupObjects       = storage.CleanupObjectsFor
+	appSnapshotCleanupTemplateLocal = storage.CleanupTemplateLocalData
+	appSnapshotDeleteCatalog        = storage.DeleteSnapshotCatalogFor
 )
 
 // detachedSnapshotWorkContext lets an in-flight frozen snapshot finish after
@@ -112,6 +123,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	unlockTemplate, err := appSnapshotTemplateLocks.LockContext(ctx, templateID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("lock template snapshot: %v", err)
+		return rsp, nil
+	}
+	defer unlockTemplate()
 
 	rt := &CubeLog.RequestTrace{
 		Action:       "AppSnapshot",
@@ -130,6 +148,24 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	})
 
 	stepLog.Infof("AppSnapshotRequest: templateID=%s", templateID)
+
+	expectedFingerprint := strings.TrimSpace(createReq.GetAnnotations()[constants.MasterAnnotationTemplateSpecFingerprint])
+	existing, err := reconcileAppSnapshotRetryState(ctx, backend, templateID, expectedFingerprint)
+	if err != nil {
+		stepLog.Errorf("AppSnapshot retry-state reconciliation failed: %v", err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		}
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	if existing != nil {
+		populateAppSnapshotResponseFromCatalog(rsp, existing)
+		stepLog.Infof("AppSnapshot reused complete template package: snapshotPath=%s", existing.SnapshotPath)
+		rsp.Ret.RetMsg = "success"
+		return rsp, nil
+	}
 
 	defer recov.HandleCrash(func(panicError interface{}) {
 		stepLog.Fatalf("AppSnapshot panic info:%s, stack:%s", panicError, string(debug.Stack()))
@@ -195,6 +231,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 
 	snapshotSuccess := false
 	temporaryCubeboxDestroyed := false
+	catalogIntentWritten := false
 	var memoryObject *storage.CowSnapshotObject
 	var rootfsObject *storage.CowSnapshotObject
 
@@ -227,6 +264,14 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 
 	cleanupSnapshotObjects := func() {
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "build rootfs volume", &storage.CowSnapshotObject{
+			Name: storage.TemplateBuildRootfsName(templateID),
+			Kind: storage.CowKindVolume,
+		})
+		if catalogIntentWritten {
+			storage.DeleteSnapshotCatalogFor(backend, templateID)
+			catalogIntentWritten = false
+		}
 	}
 
 	stepLog.Info("Step 2: Getting cubebox spec...")
@@ -285,6 +330,24 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
 		return rsp, nil
 	}
+	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+		SnapshotID:               templateID,
+		InstanceType:             "cubebox",
+		SpecDir:                  specDir,
+		SnapshotPath:             layout.Home,
+		MetaDir:                  layout.MetaDir,
+		BuildRootfsVol:           storage.TemplateBuildRootfsName(templateID),
+		BuildRootfsKind:          storage.CowKindVolume,
+		TemplateSpecFingerprint: expectedFingerprint,
+		Kind:                     storage.CatalogKindTemplate,
+	}); err != nil {
+		cleanupSnapshotObjects()
+		storage.DeleteSnapshotCatalogFor(backend, templateID)
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to persist snapshot retry intent: %v", err)
+		return rsp, nil
+	}
+	catalogIntentWritten = true
 
 	memoryObject, err = storage.CreateMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
 	if err != nil {
@@ -521,7 +584,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// CleanupTemplate calls can resolve physical refs locally. The build
 	// rootfs name is deterministic on cubelet side; we record it so cleanup
 	// works even if the live volume has already been removed by other paths.
-	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+	catalogEntry := &storage.SnapshotCatalogEntry{
 		SnapshotID:        templateID,
 		InstanceType:      "cubebox",
 		SpecDir:           specDir,
@@ -536,22 +599,28 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		BuildRootfsVol:    storage.TemplateBuildRootfsName(templateID),
 		BuildRootfsKind:   storage.CowKindVolume,
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
+		TemplateSpecFingerprint: expectedFingerprint,
 		ComponentVersions: frozenVersions,
+		EnvdVersion:       envdVersion,
 		Kind:              storage.CatalogKindTemplate,
-	}); err != nil {
-		if backend == cow.BackendJFS {
-			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", err)
-			return rsp, nil
-		}
-		// Catalog write failures do not invalidate the snapshot: master will
-		// still receive the physical references in the response and the
-		// deterministic-name cleanup fallback keeps working. Log loudly so
-		// operators notice drift between master and cubelet local view.
-		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
+	}
+	if err := storage.WriteSnapshotCatalogFor(backend, catalogEntry); err != nil {
+		stepLog.Errorf("failed to persist snapshot catalog for %s: %v", templateID, err)
+		cleanupSnapshotObjects()
+		_ = storage.CleanupTemplateLocalData(ctx, templateID, layout.Home)
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to persist snapshot catalog: %v", err)
+		return rsp, nil
 	}
 	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, templateID); err != nil {
-		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
+		stepLog.Errorf("s3 finalize package snapshots %s failed: %v", templateID, err)
+		refs := finalizeCleanupRefs(backend, templateID, cubecowRefsFromCatalogEntry(templateID, catalogEntry))
+		_ = storage.CleanupObjectsFor(ctx, backend, refs)
+		_ = storage.CleanupTemplateLocalData(ctx, templateID, layout.Home)
+		storage.DeleteSnapshotCatalogFor(backend, templateID)
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to finalize snapshot package: %v", err)
+		return rsp, nil
 	}
 
 	// JFS templates become eligible for cross-node use when this call succeeds.
@@ -562,10 +631,173 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 	snapshotSuccess = true
-
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"
 	return rsp, nil
+}
+
+func reconcileAppSnapshotRetryState(ctx context.Context, backend, templateID, expectedFingerprint string) (*storage.SnapshotCatalogEntry, error) {
+	entry, err := appSnapshotGetLocalSnapshot(ctx, backend, templateID)
+	if err == nil && entry != nil {
+		if strings.TrimSpace(entry.Kind) != storage.CatalogKindTemplate {
+			return nil, fmt.Errorf("%w: existing catalog %s has kind %q, refusing template overwrite", storage.ErrCowObjectAlreadyExists, templateID, entry.Kind)
+		}
+		recordedFingerprint := strings.TrimSpace(entry.TemplateSpecFingerprint)
+		expectedFingerprint = strings.TrimSpace(expectedFingerprint)
+		if expectedFingerprint == "" || recordedFingerprint == "" || recordedFingerprint != expectedFingerprint {
+			return nil, fmt.Errorf("%w: existing template package %s fingerprint %q does not match request %q",
+				storage.ErrCowObjectAlreadyExists, templateID, recordedFingerprint, expectedFingerprint)
+		}
+		complete, checkErr := completeAppSnapshotCatalog(ctx, backend, entry)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if complete {
+			if strings.EqualFold(backend, "s3") {
+				if err := appSnapshotFinalizeS3Package(ctx, backend, templateID); err != nil {
+					return nil, fmt.Errorf("finalize existing template package %s: %w", templateID, err)
+				}
+				refreshed, refreshErr := appSnapshotGetLocalSnapshot(ctx, backend, templateID)
+				if refreshErr != nil {
+					return nil, fmt.Errorf("reload finalized template package %s: %w", templateID, refreshErr)
+				}
+				if refreshed == nil {
+					return nil, fmt.Errorf("reload finalized template package %s returned no catalog", templateID)
+				}
+				entry = refreshed
+				complete, checkErr = completeAppSnapshotCatalog(ctx, backend, entry)
+				if checkErr != nil {
+					return nil, checkErr
+				}
+				if !complete {
+					return nil, fmt.Errorf("finalized template package %s is incomplete", templateID)
+				}
+			}
+			return entry, nil
+		}
+		refs := finalizeCleanupRefs(backend, templateID, cubecowRefsFromCatalogEntry(templateID, entry))
+		if err := appSnapshotCleanupObjects(ctx, backend, refs); err != nil {
+			return nil, fmt.Errorf("cleanup incomplete template objects %s: %w", templateID, err)
+		}
+		if err := appSnapshotCleanupTemplateLocal(ctx, templateID, entry.SnapshotPath); err != nil {
+			return nil, fmt.Errorf("cleanup incomplete template metadata %s: %w", templateID, err)
+		}
+		appSnapshotDeleteCatalog(backend, templateID)
+		return nil, nil
+	}
+	if err != nil && !errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
+		return nil, fmt.Errorf("inspect existing template catalog %s: %w", templateID, err)
+	}
+
+	// No catalog: inspect deterministic names before creating anything. A
+	// rootfs plus memory/metadata may be a legacy published package, so it is
+	// ambiguous and must never be deleted automatically. A subset that cannot
+	// represent a complete package is scoped crash residue and is safe to reap.
+	refs := finalizeCleanupRefs(backend, templateID, storage.DefaultTemplateObjectRefs(templateID))
+	statuses, err := appSnapshotInspectObjects(ctx, backend, refs)
+	if err != nil {
+		return nil, fmt.Errorf("inspect uncatalogued template objects %s: %w", templateID, err)
+	}
+	anyObject := false
+	rootfsExists := false
+	publishedCompanionExists := false
+	for _, status := range statuses {
+		if !status.Exists {
+			continue
+		}
+		anyObject = true
+		switch strings.ToLower(strings.TrimSpace(status.Role)) {
+		case "rootfs":
+			rootfsExists = true
+		case "memory", "metadata":
+			publishedCompanionExists = true
+		}
+	}
+	if !anyObject {
+		return nil, nil
+	}
+	if rootfsExists && publishedCompanionExists {
+		return nil, fmt.Errorf("%w: uncatalogued template %s has published rootfs and companion objects", storage.ErrCowObjectAlreadyExists, templateID)
+	}
+	if err := appSnapshotCleanupObjects(ctx, backend, refs); err != nil {
+		return nil, fmt.Errorf("cleanup uncatalogued partial template %s: %w", templateID, err)
+	}
+	snapshotPath := ensureSnapshotCleanupPath(ctx, backend, templateID, "")
+	if err := appSnapshotCleanupTemplateLocal(ctx, templateID, snapshotPath); err != nil {
+		return nil, fmt.Errorf("cleanup uncatalogued template metadata %s: %w", templateID, err)
+	}
+	appSnapshotDeleteCatalog(backend, templateID)
+	return nil, nil
+}
+
+func completeAppSnapshotCatalog(ctx context.Context, backend string, entry *storage.SnapshotCatalogEntry) (bool, error) {
+	if entry == nil ||
+		strings.TrimSpace(entry.SnapshotID) == "" ||
+		strings.TrimSpace(entry.RootfsVol) == "" ||
+		strings.TrimSpace(entry.MemoryVol) == "" {
+		return false, nil
+	}
+	refs := []storage.CowObjectRef{
+		{Name: entry.RootfsVol, Kind: entry.RootfsKind, Role: "rootfs"},
+		{Name: entry.MemoryVol, Kind: entry.MemoryKind, Role: "memory"},
+	}
+	if strings.EqualFold(strings.TrimSpace(backend), "s3") {
+		if strings.TrimSpace(entry.MetadataVol) == "" {
+			return false, nil
+		}
+		refs = append(refs, storage.CowObjectRef{Name: entry.MetadataVol, Kind: entry.MetadataKind, Role: "metadata"})
+	} else {
+		metaDir := strings.TrimSpace(entry.MetaDir)
+		if metaDir == "" {
+			metaDir = filepath.Join(entry.SnapshotPath, storage.SnapshotMetadataDir)
+		}
+		info, err := os.Stat(filepath.Join(metaDir, "catalog.json")) // NOCC:Path Traversal()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if !info.Mode().IsRegular() {
+			return false, nil
+		}
+	}
+	statuses, err := appSnapshotInspectObjects(ctx, backend, refs)
+	if err != nil {
+		return false, err
+	}
+	if len(statuses) != len(refs) {
+		return false, nil
+	}
+	for _, status := range statuses {
+		if !status.Exists {
+			return false, nil
+		}
+		if (status.Role == "rootfs" || status.Role == "memory") && status.SizeBytes == 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func populateAppSnapshotResponseFromCatalog(rsp *cubebox.AppSnapshotResponse, entry *storage.SnapshotCatalogEntry) {
+	if rsp == nil || entry == nil {
+		return
+	}
+	rsp.TemplateID = entry.SnapshotID
+	rsp.SandboxID = entry.SnapshotID + "_0"
+	rsp.SnapshotPath = entry.SnapshotPath
+	rsp.RootfsVol = entry.RootfsVol
+	rsp.RootfsKind = entry.RootfsKind
+	rsp.MemoryVol = entry.MemoryVol
+	rsp.MemoryKind = entry.MemoryKind
+	rsp.RootfsSizeBytes = entry.RootfsSizeBytes
+	versions := guestEnvironmentVersionsFromComponentMap(entry.ComponentVersions, guestEnvironmentVersions{})
+	rsp.GuestImageVersion = versions.GuestImage
+	rsp.AgentVersion = versions.Agent
+	rsp.KernelVersion = versions.Kernel
+	rsp.ShimVersion = versions.Shim
+	rsp.EnvdVersion = entry.EnvdVersion
 }
 
 func inheritIncomingMetadata(dst context.Context, src context.Context) context.Context {

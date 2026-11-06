@@ -31,7 +31,7 @@ import (
 // Without a sweep the job would sit at BUILT forever: no timeout, no error,
 // and a client polling for READY/FAILED would poll indefinitely. This
 // reconciler closes that hole, and deliberately RETRIES the resume before
-// giving up: the ext4 already exists on the shared artifact disk, so the work
+// giving up: the ext4 already has a durable TC/S3 storage locator, so the work
 // is recoverable. Every step of the resume path is idempotent
 // (claimRootfsArtifactForBuild takes FOR UPDATE, finalize overwrites,
 // distribution skips already-READY nodes, UpsertReplica upserts), which is
@@ -287,6 +287,8 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		ArtifactURL             string `json:"artifact_url"`
 		StorageBackend          string `json:"storage_backend"`
 		ObjectKey               string `json:"object_key"`
+		StorageRef              string `json:"storage_ref"`
+		OwnerTCDownloadBase     string `json:"owner_tc_download_base"`
 		CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
 		CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
 		CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
@@ -307,6 +309,8 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		ArtifactURL:             raw.ArtifactURL,
 		StorageBackend:          raw.StorageBackend,
 		ObjectKey:               raw.ObjectKey,
+		StorageRef:              raw.StorageRef,
+		OwnerTCDownloadBase:     raw.OwnerTCDownloadBase,
 		CubeEgressCABaked:       raw.CubeEgressCABaked,
 		CubeEgressCAFingerprint: raw.CubeEgressCAFingerprint,
 		CubeEgressCATargets:     raw.CubeEgressCATargets,
@@ -315,22 +319,9 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 	if err := result.Validate(); err != nil {
 		return nil, err
 	}
-	// The ext4 must still be on disk. CubeMaster and CubeTemplateCenter share
-	// the artifact volume, mounted at possibly different roots (design §9.7),
-	// so localize the TC-reported path onto Master's own mount first; this
-	// holds even if TC has since been shut down -- but not if GC already
-	// reclaimed the artifact.
-	//
-	// S3-backed results (ArtifactURL set) skip the probe: the durable copy is
-	// the bucket object and cubelets pull from the presigned URL, so the local
-	// file is a cache that may legitimately be absent -- on a multi-replica /
-	// un-colocated deployment the resume replay can land on a master that
-	// never shared TC's disk at all.
-	if result.ArtifactURL == "" {
-		if _, err := os.Stat(result.Ext4Path); err != nil {
-			return nil, fmt.Errorf("artifact file %s is gone: %w", result.Ext4Path, err)
-		}
-	}
+	// CubeMaster deliberately does not stat Ext4Path. The file belongs to the
+	// TC tier (or S3) and may not be mounted here; distribution performs a
+	// bounded direct probe against the actual owner instead.
 	return result, nil
 }
 

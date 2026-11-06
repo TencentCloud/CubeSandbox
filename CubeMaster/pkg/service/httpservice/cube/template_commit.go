@@ -29,6 +29,14 @@ import (
 // submitTemplateCommitFn must NOT be swapped concurrently: callers of
 // withCommitStub must not call t.Parallel() on any test that uses it.
 var submitTemplateCommitFn = templatecenter.SubmitTemplateCommit
+var normalizeCommitSandboxIDFn = sandbox.NormalizeSandboxIDParam
+var commitSandboxCacheFn = localcache.GetSandboxCache
+var commitHostIDByIPFn = func(hostIP string) string {
+	if n, ok := localcache.GetNodesByIp(hostIP); ok && n != nil {
+		return n.ID()
+	}
+	return ""
+}
 
 type commitTemplateRequest struct {
 	RequestID     string                      `json:"requestID,omitempty"`
@@ -82,7 +90,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		})
 		return
 	}
-	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
+	if resolved, ret := normalizeCommitSandboxIDFn(c.Request.Context(), req.SandboxID); ret != nil {
 		common.WriteAPI(c, &commitTemplateResponse{Res: &types.Res{Ret: ret}})
 		return
 	} else {
@@ -103,7 +111,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		return
 	}
 	hostIP := ""
-	if cache := localcache.GetSandboxCache(req.SandboxID); cache != nil {
+	if cache := commitSandboxCacheFn(req.SandboxID); cache != nil {
 		hostIP = cache.HostIP
 	}
 	hostID := ""
@@ -127,9 +135,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		hostID = infoRsp.Data[0].HostID
 	}
 	if hostID == "" && hostIP != "" {
-		if n, ok := localcache.GetNodesByIp(hostIP); ok && n != nil {
-			hostID = n.ID()
-		}
+		hostID = commitHostIDByIPFn(hostIP)
 	}
 	if hostIP == "" || hostID == "" {
 		common.WriteAPI(c, &commitTemplateResponse{

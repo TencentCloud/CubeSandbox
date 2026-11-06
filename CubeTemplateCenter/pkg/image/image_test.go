@@ -18,6 +18,25 @@ import (
 	"testing"
 )
 
+func TestBuildExt4RejectsPublishedArtifact(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", root)
+	path := filepath.Join(root, "rfs-existing", "rfs-existing.ext4")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildExt4(t.Context(), nil, BuildOptions{ArtifactID: "rfs-existing"}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("err=%v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "original" {
+		t.Fatalf("original changed: %q %v", data, err)
+	}
+}
+
 func testPrepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*PreparedSource, error) {
 	if req == nil {
 		return nil, errors.New("request is nil")

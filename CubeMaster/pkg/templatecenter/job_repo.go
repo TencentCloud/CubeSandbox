@@ -51,6 +51,8 @@ func getCreateRedoImageJobByIDTx(tx *gorm.DB, templateID, jobID string) (*models
 // RUNNING/BUILT, resurrecting completed work or re-triggering the pipeline.
 var ErrTerminalJobStatusFlip = errors.New("refusing to move a terminal template job back to a non-terminal status")
 
+var ErrStaleJobProgress = errors.New("ignoring template build progress after master took over")
+
 // templateJobTerminal reports whether a job status is terminal.
 func templateJobTerminal(status string) bool {
 	return status == JobStatusReady || status == JobStatusFailed
@@ -277,8 +279,12 @@ func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string
 	values["updated_at"] = time.Now()
 	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
 		Where("job_id = ?", jobID).
-		Where("status NOT IN ? OR status = ?", []string{JobStatusReady, JobStatusFailed}, newStatus).
-		Updates(values)
+		Where("status NOT IN ? OR status = ?", []string{JobStatusReady, JobStatusFailed}, newStatus)
+	if newStatus == JobStatusRunning {
+		tx = tx.Where("status IN ?", []string{JobStatusPending, JobStatusRunning}).
+			Where("COALESCE(phase, '') NOT IN ?", []string{JobPhaseDistributing, JobPhaseCreatingTemplate})
+	}
+	tx = tx.Updates(values)
 	if tx.Error != nil {
 		return tx.Error
 	}
@@ -287,7 +293,30 @@ func UpdateTemplateImageJobIfTransitionAllowed(ctx context.Context, jobID string
 		if err != nil {
 			return err
 		}
+		if newStatus == JobStatusRunning && !templateJobTerminal(job.Status) {
+			return fmt.Errorf("%w: job %s is %s/%s", ErrStaleJobProgress, jobID, job.Status, job.Phase)
+		}
 		return fmt.Errorf("%w: job %s is %s, cannot move to %s", ErrTerminalJobStatusFlip, jobID, job.Status, newStatus)
+	}
+	return nil
+}
+
+// UpdateTemplateImageJobBuildProgress applies a status-less TC progress report
+// only before the build has been claimed by the Master.
+func UpdateTemplateImageJobBuildProgress(ctx context.Context, jobID string, values map[string]any) error {
+	values["updated_at"] = time.Now()
+	tx := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("job_id = ? AND status IN ?", jobID, []string{JobStatusPending, JobStatusRunning}).
+		Where("COALESCE(phase, '') NOT IN ?", []string{JobPhaseDistributing, JobPhaseCreatingTemplate}).
+		Updates(values)
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if tx.RowsAffected == 0 {
+		if _, err := getTemplateImageJobRecordByID(ctx, jobID); err != nil {
+			return err
+		}
+		return ErrStaleJobProgress
 	}
 	return nil
 }

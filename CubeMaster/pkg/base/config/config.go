@@ -120,7 +120,8 @@ type CommonConf struct {
 	// before expiring. Default 6 hours, matching the historical behavior.
 	// Shorter values reduce the stale-read window in multi-replica deployments
 	// at the cost of more frequent DB queries.
-	TemplateCacheTTL time.Duration `yaml:"template_cache_ttl"`
+	TemplateCacheTTL    time.Duration `yaml:"template_cache_ttl"`
+	ArtifactDownloadTTL string        `yaml:"artifact_download_ttl"`
 	// TemplateCenterAddrValue is CubeTemplateCenter's HTTP base URL from conf.yaml.
 	// Named with a Value suffix to avoid colliding with the TemplateCenterAddr()
 	// method on Config. Access via Config.TemplateCenterAddr() which handles the
@@ -988,8 +989,32 @@ func preComHandleConf(config *Config) error {
 	if config.Common.TemplateCacheTTL == 0 {
 		config.Common.TemplateCacheTTL = 360 * time.Minute
 	}
-	return nil
+	if strings.TrimSpace(config.Common.ArtifactDownloadTTL) == "" {
+		config.Common.ArtifactDownloadTTL = "1h"
+	}
+	_, err := config.Common.ArtifactDownloadDuration()
+	return err
 }
+
+// ArtifactDownloadDuration returns the TTL for an artifact's short-lived
+// download credential (presigned S3 URL, or TC/Master ticket). Nodes always
+// download directly from the owning storage (S3 or TemplateCenter); there is
+// no Master-proxied fallback mode.
+func (c *CommonConf) ArtifactDownloadDuration() (time.Duration, error) {
+	raw := "1h"
+	if c != nil && strings.TrimSpace(c.ArtifactDownloadTTL) != "" {
+		raw = strings.TrimSpace(c.ArtifactDownloadTTL)
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse common.artifact_download_ttl: %w", err)
+	}
+	if ttl < time.Minute || ttl > 24*time.Hour {
+		return 0, errors.New("common.artifact_download_ttl must be between 1m and 24h")
+	}
+	return ttl, nil
+}
+
 func preHandleAuthConf(config *Config) error {
 	if config.AuthConf == nil {
 		config.AuthConf = &AuthConf{}

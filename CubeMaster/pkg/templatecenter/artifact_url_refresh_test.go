@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -96,30 +97,59 @@ func TestArtifactDownloadURLFallsBackToStored(t *testing.T) {
 	}
 }
 
+func TestArtifactS3StorageRefUsesNodeEndpointWithoutSecrets(t *testing.T) {
+	t.Setenv("CUBE_S3_ENDPOINT", "http://control-minio:9000")
+	t.Setenv("CUBE_S3_NODE_ENDPOINT", "http://node-minio:9000")
+	t.Setenv("CUBE_S3_BUCKET", "artifact-bucket")
+	t.Setenv("CUBE_S3_ACCESS_KEY_ID", "access-key-must-not-appear")
+	t.Setenv("CUBE_S3_SECRET_ACCESS_KEY", "secret-key-must-not-appear")
+	t.Setenv("CUBE_S3_ARTIFACT_PREFIX", "/template-artifacts/")
+
+	got, err := artifactS3StorageRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "s3://artifact-bucket/template-artifacts?endpoint=http%3A%2F%2Fnode-minio%3A9000"
+	if got != want {
+		t.Fatalf("storage ref = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "access-key") || strings.Contains(got, "secret-key") {
+		t.Fatalf("storage ref leaked credentials: %q", got)
+	}
+}
+
 func TestArtifactStoreKeyStripsConfiguredPrefix(t *testing.T) {
 	artifact := &models.RootfsArtifact{ArtifactID: "rfs-1", ObjectKey: "template-artifacts/rfs-1.ext4"}
 	ctx := context.Background()
-	got := artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	got, err := artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != "rfs-1.ext4" {
 		t.Fatalf("prefixed object_key: got %q want rfs-1.ext4", got)
 	}
 	artifact.ObjectKey = "rfs-1.ext4"
-	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	got, err = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != "rfs-1.ext4" {
 		t.Fatalf("user-key object_key: got %q", got)
 	}
 	artifact.ObjectKey = "old-prefix/nested/rfs-1.ext4"
-	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
-	if got != "rfs-1.ext4" {
-		t.Fatalf("foreign prefix must fall back to derived key, got %q", got)
+	if _, err := artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts"); err == nil {
+		t.Fatal("foreign prefix unexpectedly fell back to the current store")
 	}
 	artifact.ObjectKey = ""
-	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	got, err = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != "rfs-1.ext4" {
 		t.Fatalf("empty object_key: got %q", got)
 	}
-	if artifactStoreKey(ctx, nil) != "" {
-		t.Fatal("nil artifact")
+	if _, err := artifactStoreKey(ctx, nil); err == nil {
+		t.Fatal("nil artifact unexpectedly accepted")
 	}
 	if userKeyFromStoredObjectKey("/template-artifacts/rfs-1.ext4", "template-artifacts") != "rfs-1.ext4" {
 		t.Fatal("leading slash on stored key")

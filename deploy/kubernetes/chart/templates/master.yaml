@@ -58,6 +58,8 @@ spec:
             {{- if $tcAddr }}
             - name: CUBE_TEMPLATE_CENTER_ADDR
               value: {{ $tcAddr | quote }}
+            - name: CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR
+              value: {{ include "cube.templateCenterDownloadAddress" . | quote }}
             # Shared secret gating TC's build-status callbacks
             # (/internal/template/jobs/:job_id/status); without it the handler
             # only warns and accepts anything.
@@ -66,13 +68,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: cube-template-callback-token
+            - name: CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-artifact-download-signing-key
             {{- end }}
-            # Deployment-wide env (CUBE_S3_* among them). CubeMaster re-signs
-            # S3 artifact download URLs at the point of use
-            # (templatecenter.artifactDownloadURL), so it needs the same S3
-            # credentials TC / cubelet / s3lvol read; without them it can only
-            # hand out the stored presigned URL, which dies 7 days after the
-            # build.
+            # Deployment-wide env (CUBE_S3_* among them). CubeMaster signs a
+            # fresh S3 URL with the ticket TTL for every download attempt, so
+            # it needs the same S3 credentials as TC. Ticket issuance fails
+            # closed when signing is unavailable; it never falls back to the
+            # stored build-time URL.
             # cube.artifactS3Env injects the s3Backed CUBE_S3_* set from
             # volumeS3.* / builtin MinIO when global.env does not carry it;
             # placed before global.env so an operator entry still wins.

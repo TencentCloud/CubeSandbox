@@ -84,17 +84,15 @@ func TestCubeRoutesTemplateWritesStayOnCubeMaster(t *testing.T) {
 }
 
 // TestCubeRoutesTemplateProxyRemainder pins the routes that are still proxied
-// to CubeTemplateCenter: the compat matrix (plain DB read/write) and the
-// artifact download (file serving / S3 redirect). Neither goes through the
-// process-local template caches, so cross-process coherency does not apply.
+// to CubeTemplateCenter: only the compat matrix (plain DB read/write). It
+// also pins that no /cube route serves or proxies template rootfs bytes:
+// nodes download directly from S3 or the owning TemplateCenter.
 func TestCubeRoutesTemplateProxyRemainder(t *testing.T) {
 	r := newRouteInspectEngine(t, RegisterCubeRoutes)
 
 	proxiedRoutes := []string{
 		"GET /cube/template/compat",
 		"POST /cube/template/compat",
-		"GET /cube/template/artifact/download",
-		"HEAD /cube/template/artifact/download",
 	}
 	for _, route := range proxiedRoutes {
 		method, path, _ := strings.Cut(route, " ")
@@ -105,6 +103,15 @@ func TestCubeRoutesTemplateProxyRemainder(t *testing.T) {
 		}
 		if !strings.Contains(got, "proxyToTemplateCenter") {
 			t.Errorf("%s: handler = %s, want proxyToTemplateCenter", route, got)
+		}
+	}
+	for _, route := range []string{
+		"GET /cube/template/artifact/download",
+		"HEAD /cube/template/artifact/download",
+	} {
+		method, path, _ := strings.Cut(route, " ")
+		if hasRoute(r, method, path) {
+			t.Errorf("%s: Master must not serve or proxy artifact bytes", route)
 		}
 	}
 }
@@ -126,6 +133,8 @@ func TestTemplateCenterRoutesExcludeWritesAndCachedReads(t *testing.T) {
 		"POST /cube/template/redo",
 		"POST /cube/template/migrate",
 		"GET /cube/template/migrate",
+		"GET /cube/template/artifact/download",
+		"HEAD /cube/template/artifact/download",
 	}
 	for _, route := range absent {
 		method, path, _ := strings.Cut(route, " ")
@@ -139,8 +148,6 @@ func TestTemplateCenterRoutesExcludeWritesAndCachedReads(t *testing.T) {
 		"POST /cube/template/compat",
 		"GET /cube/template/build/:build_id/status",
 		"GET /cube/template/from-image",
-		"GET /cube/template/artifact/download",
-		"HEAD /cube/template/artifact/download",
 	}
 	for _, route := range present {
 		method, path, _ := strings.Cut(route, " ")

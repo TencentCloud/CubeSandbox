@@ -18,6 +18,22 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestCommitReplicaSummary(t *testing.T) {
+	for _, tc := range []struct {
+		healthy, expected int32
+		status            string
+	}{
+		{0, 1, StatusReady},
+		{1, 1, StatusReady},
+		{3, 3, StatusPartiallyReady},
+	} {
+		expected, status := commitReplicaSummary(tc.healthy)
+		if expected != tc.expected || status != tc.status {
+			t.Fatalf("healthy=%d: got (%d, %s), want (%d, %s)", tc.healthy, expected, status, tc.expected, tc.status)
+		}
+	}
+}
+
 func newCommitFixtureRequests() (*types.CreateCubeSandboxReq, *types.CreateCubeSandboxReq) {
 	createReq := &types.CreateCubeSandboxReq{
 		Request:      &types.Request{RequestID: "req-1"},

@@ -2,9 +2,9 @@
 
 GOPATH ?= $(shell go env GOPATH)
 BUILD_FLAGS := -trimpath
-GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+CUBE_VERSION ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo 0.0.0-dev)
+CUBE_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+CUBE_BUILD_TIME ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 
 # CubeMaster 共享代码里 image/disk.go 用了 unix.F_SETPIPE_SZ / CAP_SYS_ADMIN,
 # 是 Linux-only 的。模板中心沿用它, 所以本仓库构建也固定 linux.
@@ -18,9 +18,9 @@ build: $(APPS)
 $(APPS): %:
 	@mkdir -p build
 	CGO_ENABLED=0 go build -o build/$@ $(BUILD_FLAGS) \
-		-ldflags "-X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.GitCommit=$(GIT_COMMIT) \
-		          -X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=$(BUILD_TIME) \
-		          -X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=$(VERSION)" \
+		-ldflags "-X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Commit=$(CUBE_COMMIT) \
+		          -X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.BuildTime=$(CUBE_BUILD_TIME) \
+		          -X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=$(CUBE_VERSION)" \
 		./cmd/$@/
 
 # 本仓库无业务测试, test target 仅编译验证 (CGO=0 + GOOS=linux 跨编译).

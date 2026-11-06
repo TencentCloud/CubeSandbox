@@ -327,21 +327,28 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		// But never rebuild an artifact another CubeMaster holds: the rebuild
 		// would overwrite the shared row (fresh token/sha) and break every
 		// replica the holder already served (issue #1005). Surface it instead.
+		reusableAfterReload := false
 		if artifact, aerr := getRootfsArtifactByID(ctx, jobRecord.ArtifactID); aerr == nil && artifact != nil {
-			if reuseErr := rootfsArtifactReuseVerdict(ctx, artifact); errors.Is(reuseErr, ErrRootfsArtifactForeign) {
+			reuseErr := rootfsArtifactReuseVerdict(ctx, artifact)
+			if reuseErr == nil && artifactStatusReusableForRedo(artifact.Status) {
+				reusableAfterReload = true
+				logger.Infof("redo: artifact %s is reusable after reloading its locator", artifact.ArtifactID)
+			} else if errors.Is(reuseErr, ErrRootfsArtifactForeign) || errors.Is(reuseErr, ErrArtifactLocatorChanged) {
 				failRedoTemplateImageJob(ctx, jobID, resumePhase,
 					fmt.Sprintf("redo cannot rebuild artifact %s here: %v", artifact.ArtifactID, reuseErr))
 				return
 			}
 		}
-		logger.Infof("redo: artifact %q is not reusable, falling back to a full rebuild (resume_phase %s -> %s)",
-			jobRecord.ArtifactID, resumePhase, JobPhaseBuildingExt4)
-		resumePhase = JobPhaseBuildingExt4
-		if err := updateTemplateImageJob(ctx, jobID, map[string]any{
-			"phase":        JobPhaseBuildingExt4,
-			"resume_phase": JobPhaseBuildingExt4,
-		}); err != nil {
-			logger.Warnf("update redo resume phase fail: %v", err)
+		if !reusableAfterReload {
+			logger.Infof("redo: artifact %q is not reusable, falling back to a full rebuild (resume_phase %s -> %s)",
+				jobRecord.ArtifactID, resumePhase, JobPhaseBuildingExt4)
+			resumePhase = JobPhaseBuildingExt4
+			if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+				"phase":        JobPhaseBuildingExt4,
+				"resume_phase": JobPhaseBuildingExt4,
+			}); err != nil {
+				logger.Warnf("update redo resume phase fail: %v", err)
+			}
 		}
 	}
 	if resumePhase == JobPhaseBuildingExt4 {

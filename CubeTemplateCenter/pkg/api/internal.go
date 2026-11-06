@@ -241,11 +241,17 @@ func handleArtifactUploadFilePart(c *gin.Context, ctx context.Context, artifactI
 		}
 	}
 
-	if err := os.Rename(tmpPath, dstPath); err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("promote uploaded artifact file: %v", err)})
+	if err := os.Link(tmpPath, dstPath); err != nil {
+		if os.IsExist(err) {
+			c.JSON(http.StatusConflict, ErrorResponse{Error: "artifact destination already exists with different content; rebuild with a new artifact ID"})
+		} else {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "publish uploaded artifact failed"})
+		}
 		return
 	}
-	cleanupTmp = false
+	// Linking in the same directory publishes without replacing an existing file.
+	// The deferred cleanup only removes our temporary link.
+
 	if err := os.Chmod(dstPath, 0o644); err != nil {
 		log.G(ctx).Warnf("artifact upload: chmod %s failed: %v", dstPath, err)
 	}
@@ -329,12 +335,16 @@ func internalAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+func InternalAPIGroup(g *gin.RouterGroup) *gin.RouterGroup {
+	return g.Group("/tc/api/v1", internalAuthMiddleware())
+}
+
 // RegisterInternalRoutes registers TC's internal API routes. All of them sit
 // behind the shared-token middleware: a forged build submit would burn image
 // pulls and register attacker-controlled rootfs content, and a forged
 // artifact delete destroys template data.
 func RegisterInternalRoutes(g *gin.RouterGroup) {
-	internal := g.Group("/tc/api/v1", internalAuthMiddleware())
+	internal := InternalAPIGroup(g)
 	internal.POST("/build", handleBuildSubmit)
 	internal.POST("/artifact/delete", handleArtifactDelete)
 	internal.POST("/artifact/upload", handleArtifactUpload)

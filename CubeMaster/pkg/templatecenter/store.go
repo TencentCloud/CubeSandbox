@@ -237,6 +237,10 @@ func ListTemplatesWithOptions(ctx context.Context, opts TemplateListOptions) (*T
 	if err != nil {
 		return nil, err
 	}
+	infos, err = applyUnregisteredTemplateListView(ctx, infos)
+	if err != nil {
+		return nil, err
+	}
 	total := len(infos)
 	if opts.Limit <= 0 && opts.Offset <= 0 {
 		return &TemplateListResult{Templates: infos, Total: total}, nil
@@ -622,6 +626,17 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	// longer exist).
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
+	for _, container := range cloned.Containers {
+		if container == nil || container.Image == nil || container.Image.Annotations == nil {
+			continue
+		}
+		imageAnnotations := container.Image.Annotations
+		delete(imageAnnotations, constants.CubeAnnotationRootfsArtifactRefreshToken)
+		if strings.TrimSpace(imageAnnotations[constants.CubeAnnotationRootfsArtifactTicketURL]) != "" {
+			delete(imageAnnotations, constants.CubeAnnotationRootfsArtifactURL)
+			delete(imageAnnotations, constants.CubeAnnotationRootfsArtifactToken)
+		}
+	}
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 	return cloned, nil
 }
@@ -849,6 +864,11 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		replica.ErrorMessage = err.Error()
 		return replica, ""
 	}
+	if err := injectArtifactRefreshToken(ctx, nodeReq, opts.ArtifactID, target.ID()); err != nil {
+		replica.Phase = ReplicaPhaseFailed
+		replica.ErrorMessage = err.Error()
+		return replica, ""
+	}
 	ensureRuntimeTemplateRequest(nodeReq)
 	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
 	if err != nil {
@@ -887,6 +907,46 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	replica.CleanupRequired = false
 	replica.ErrorMessage = ""
 	return replica, envdVersion
+}
+
+func injectArtifactRefreshToken(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq, artifactID, nodeID string) error {
+	artifactID = strings.TrimSpace(artifactID)
+	if req == nil || artifactID == "" {
+		return nil
+	}
+	artifact, err := getRootfsArtifactByID(ctx, artifactID)
+	if err != nil {
+		return fmt.Errorf("load artifact refresh authorization: %w", err)
+	}
+	if err := ensureArtifactStableLocator(ctx, artifact); err != nil {
+		return err
+	}
+	downloadAnnotations, err := artifactDownloadAnnotations(ctx, artifact, "")
+	if err != nil {
+		return err
+	}
+	token, err := BuildArtifactDownloadRefreshToken(ctx, artifact, nodeID, time.Now())
+	if err != nil {
+		return err
+	}
+	downloadAnnotations[constants.CubeAnnotationRootfsArtifactRefreshToken] = token
+	for _, container := range req.Containers {
+		if container == nil || container.Image == nil {
+			continue
+		}
+		annotations := container.Image.Annotations
+		if strings.TrimSpace(annotations[constants.CubeAnnotationRootfsArtifactID]) != artifactID {
+			continue
+		}
+		for _, key := range []string{constants.CubeAnnotationRootfsArtifactURL, constants.CubeAnnotationRootfsArtifactToken,
+			constants.CubeAnnotationRootfsArtifactTicketURL, constants.CubeAnnotationRootfsArtifactDownloadOrigin, constants.CubeAnnotationRootfsArtifactRefreshToken} {
+			delete(annotations, key)
+		}
+		for key, value := range downloadAnnotations {
+			annotations[key] = value
+		}
+	}
+	return nil
 }
 
 func summarizeStatus(replicas []ReplicaStatus) (status string, lastError string) {
@@ -970,23 +1030,99 @@ func createDefinition(ctx context.Context, templateID string, storedReq *sandbox
 	})
 }
 
-// ensureTemplateDefinitionWithOptions checks whether a definition already exists
-// and creates one if missing, threading alias metadata (DisplayName) via opts.
+// ensureTemplateDefinitionWithOptions creates a missing definition or synchronizes
+// a rebuilt artifact before replicas can publish READY. The bool reports creation.
 func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
-	if _, err := GetDefinition(ctx, templateID); err == nil {
-		return false, nil
-	} else if !errors.Is(err, ErrTemplateNotFound) {
-		return false, err
+	if !isReady() {
+		return false, ErrTemplateStoreNotInitialized
 	}
-	if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, opts); err != nil {
-		return false, err
-	}
-	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
-	}
-	// A new definition changes the aggregate list and the per-template info.
-	invalidateTemplateCaches(templateID)
-	return true, nil
+	created := false
+	err := withTemplateWriteLock(templateID, func() error {
+		cacheReq := storedReq
+		changed := false
+		err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			def, err := lockTemplateDefinitionTx(tx, templateID)
+			if errors.Is(err, ErrTemplateNotFound) {
+				if err := createDefinitionTx(ctx, tx, templateID, storedReq, instanceType, version, opts); err != nil {
+					return err
+				}
+				created, changed = true, true
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if def.Status == StatusDeleting {
+				return ErrTemplateNotFound
+			}
+			currentReq := &sandboxtypes.CreateCubeSandboxReq{}
+			if err := json.Unmarshal([]byte(def.RequestJSON), currentReq); err != nil {
+				return err
+			}
+			artifactID := rootfsArtifactIDFromCreateRequest(storedReq)
+			if def.RootfsArtifactID == artifactID && rootfsArtifactIDFromCreateRequest(currentReq) == artifactID {
+				if err := applyStoredCreateBackend(currentReq, def.StorageBackend); err != nil {
+					return err
+				}
+				cacheReq = currentReq
+				return nil
+			}
+			if artifactID == "" || def.Kind == TemplateKindSnapshot {
+				return errors.New("cannot replace template definition without a rootfs artifact or for a snapshot")
+			}
+			var ready int64
+			if err := tx.Model(&models.TemplateReplica{}).
+				Where("template_id = ? AND status = ? AND (artifact_id <> ? OR artifact_id IS NULL)", templateID, ReplicaStatusReady, artifactID).
+				Count(&ready).Error; err != nil {
+				return err
+			}
+			if ready > 0 {
+				return fmt.Errorf("cannot replace artifact for template %s: %d ready replicas still reference another artifact", templateID, ready)
+			}
+			payload, err := json.Marshal(storedReq)
+			if err != nil {
+				return err
+			}
+			alias := def.DisplayName
+			if alias == "" {
+				alias = aliasFromRequestJSON(def.RequestJSON)
+			}
+			requestJSON, _, err := applyAliasToRequestJSON(string(payload), alias)
+			if err != nil {
+				return err
+			}
+			backend := opts.StorageBackend
+			if normalized, ok, err := constants.OptionalSnapshotBackend(backend); err != nil {
+				return err
+			} else if ok {
+				backend = normalized
+			}
+			if err := tx.Model(def).Updates(map[string]any{
+				"request_json":       requestJSON,
+				"rootfs_artifact_id": artifactID,
+				"instance_type":      instanceType,
+				"version":            version,
+				"storage_backend":    backend,
+				"status":             StatusPending,
+				"last_error":         "",
+			}).Error; err != nil {
+				return err
+			}
+			changed = true
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if changed {
+			invalidateTemplateCaches(templateID)
+		}
+		if cacheErr := setTemplateRequestCache(templateID, cacheReq); cacheErr != nil {
+			log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
+		}
+		return nil
+	})
+	return created && err == nil, err
 }
 
 // finalizeTemplateReplicas publishes the aggregate template status computed from
@@ -1052,7 +1188,7 @@ func UpdateDefinitionStatus(ctx context.Context, templateID, status, lastError s
 func GetTemplateInfo(ctx context.Context, templateID string) (*TemplateInfo, error) {
 	templateID = strings.TrimSpace(templateID)
 	if cached, ok := getCachedTemplateInfo(templateID); ok {
-		return cached, nil
+		return applyUnregisteredTemplateInfoView(cached), nil
 	}
 	return getTemplateInfoFromDB(ctx, templateID)
 }
@@ -1074,8 +1210,29 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 			return nil, defErr
 		}
 		info := templateInfoFromJob(job)
+		replicas, replicaErr := ListReplicas(ctx, templateID)
+		if replicaErr != nil {
+			return nil, replicaErr
+		}
+		info.Replicas = make([]ReplicaStatus, 0, len(replicas))
+		for _, replica := range replicas {
+			info.Replicas = append(info.Replicas, replicaModelToStatus(replica))
+		}
+		if len(info.Replicas) == 0 &&
+			(strings.TrimSpace(job.NodeID) != "" || strings.TrimSpace(job.NodeIP) != "") {
+			// A job-only recovery row may predate replica persistence. Its
+			// locator is still the best placement evidence for the dynamic
+			// registry view.
+			info.Replicas = append(info.Replicas, ReplicaStatus{
+				NodeID:       job.NodeID,
+				NodeIP:       job.NodeIP,
+				InstanceType: job.InstanceType,
+				Status:       strings.ToUpper(info.Status),
+				ArtifactID:   job.ArtifactID,
+			})
+		}
 		setTemplateInfoCache(templateID, &info)
-		return &info, nil
+		return applyUnregisteredTemplateInfoView(&info), nil
 	}
 	// Pause snaps are not user-visible templates/snapshots.
 	if strings.EqualFold(strings.TrimSpace(def.Kind), pausesnap.KindPauseSnapshot) {
@@ -1118,7 +1275,7 @@ func getTemplateInfoFromDB(ctx context.Context, templateID string) (*TemplateInf
 		break
 	}
 	setTemplateInfoCache(templateID, out)
-	return out, nil
+	return applyUnregisteredTemplateInfoView(out), nil
 }
 
 func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
@@ -1132,15 +1289,24 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 	if status == "" {
 		status = JobStatusPending
 	}
+	backend := ""
+	var request struct {
+		Backend string `json:"backend"`
+	}
+	if json.Unmarshal([]byte(job.RequestJSON), &request) == nil {
+		backend, _ = constants.NormalizeSnapshotBackend(request.Backend)
+	}
 	info := TemplateInfo{
-		TemplateID:   job.TemplateID,
-		InstanceType: job.InstanceType,
-		Version:      DefaultTemplateVersion,
-		Status:       status,
-		LastError:    job.ErrorMessage,
-		CreatedAt:    formatUTCRFC3339(job.CreatedAt),
-		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
-		JobID:        latestJobIDFromJob(job),
+		TemplateID:     job.TemplateID,
+		Backend:        backend,
+		StorageBackend: backend,
+		InstanceType:   job.InstanceType,
+		Version:        DefaultTemplateVersion,
+		Status:         status,
+		LastError:      job.ErrorMessage,
+		CreatedAt:      formatUTCRFC3339(job.CreatedAt),
+		ImageInfo:      composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
+		JobID:          latestJobIDFromJob(job),
 	}
 	if job.RequestJSON != "" {
 		if job.Operation == JobOperationCommit {
@@ -1359,6 +1525,9 @@ func publishTemplateStatusWithAlias(ctx context.Context, templateID, jobID, stat
 						return err
 					}
 					if err == nil {
+						if (status == StatusReady || status == StatusPartiallyReady) && job.ArtifactID != "" && target.RootfsArtifactID != job.ArtifactID {
+							return fmt.Errorf("cannot publish template %s as %s: definition artifact %q does not match job artifact %q", templateID, status, target.RootfsArtifactID, job.ArtifactID)
+						}
 						claimantJobRowID = job.ID
 						alias = strings.TrimSpace(aliasFromRequestJSON(job.RequestJSON))
 						if strings.TrimSpace(target.DisplayName) != "" {
@@ -1847,9 +2016,37 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 	if req, hit, err := getCachedTemplateRequest(templateID); err != nil {
 		return nil, err
 	} else if hit {
-		reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
-		ensureRuntimeTemplateRequest(req)
-		return req, nil
+		current := true
+		if strings.HasPrefix(templateID, "tpl-") && rootfsArtifactIDFromCreateRequest(req) != "" {
+			if !isReady() {
+				return nil, ErrTemplateStoreNotInitialized
+			}
+			// A redo may finish on another Master; its local invalidation cannot
+			// evict this process's cached artifact or digest.
+			def := &models.TemplateDefinition{}
+			err := store.db.WithContext(ctx).Select("rootfs_artifact_id", "storage_backend", "status").
+				Where("template_id = ?", templateID).First(def).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) || def.Status == StatusDeleting {
+				templateDefinitionCache.Delete(templateID)
+				return nil, ErrTemplateNotFound
+			}
+			if err != nil {
+				return nil, err
+			}
+			current = def.RootfsArtifactID == rootfsArtifactIDFromCreateRequest(req)
+			if current {
+				if err := applyStoredCreateBackend(req, def.StorageBackend); err != nil {
+					return nil, err
+				}
+			} else {
+				templateDefinitionCache.Delete(templateID)
+			}
+		}
+		if current {
+			reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
+			ensureRuntimeTemplateRequest(req)
+			return req, nil
+		}
 	}
 	reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheMiss, time.Since(cacheStart))
 
@@ -2158,22 +2355,40 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
 	}
-	record := &models.TemplateReplica{}
-	// Do not reuse the *gorm.DB chain after First on PostgreSQL: GORM may emit
-	// UPDATE ... FROM t_cube_template_replica (SQLSTATE 42712).
-	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
-		First(record).Error
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
+	upsert := func(tx *gorm.DB) error {
+		record := &models.TemplateReplica{}
+		// Do not reuse the *gorm.DB chain after First on PostgreSQL: GORM may emit
+		// UPDATE ... FROM t_cube_template_replica (SQLSTATE 42712).
+		err := tx.Table(constants.TemplateReplicaTableName).
+			Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+			First(record).Error
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			return tx.Table(constants.TemplateReplicaTableName).
+				Create(replicaStatusToModel(templateID, instanceType, replica)).Error
+		}
+		return tx.Table(constants.TemplateReplicaTableName).
+			Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+			Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+	}
+	if replica.Status != ReplicaStatusReady || replica.ArtifactID == "" {
+		return upsert(store.db.WithContext(ctx))
+	}
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		def, err := lockTemplateDefinitionTx(tx, templateID)
+		if err != nil {
 			return err
 		}
-		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-			Create(replicaStatusToModel(templateID, instanceType, replica)).Error
-	}
-	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
-		Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+		if def.Status == StatusDeleting {
+			return ErrTemplateNotFound
+		}
+		if def.RootfsArtifactID != replica.ArtifactID {
+			return fmt.Errorf("template %s artifact %q does not match ready replica artifact %q", templateID, def.RootfsArtifactID, replica.ArtifactID)
+		}
+		return upsert(tx)
+	})
 }
 
 func EnsureReadyReplica(ctx context.Context, templateID string) error {

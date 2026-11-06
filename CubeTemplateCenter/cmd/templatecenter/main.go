@@ -24,7 +24,7 @@ var (
 func main() {
 	flag.Parse()
 	if *versionFlag || *longVersionFlag {
-		version.ShowAndExit(true)
+		version.ShowComponentAndExit(true, "templatecenter")
 	}
 
 	debug.SetGCPercent(90)

@@ -105,14 +105,20 @@ Public `/cube/template*` routes on CubeMaster:
 | POST `/cube/template`, `/from-image`, `/redo`; DELETE; GET; PUT alias | CubeMaster (local) | cubelet RPCs, process-local caches, or forward-build env |
 | GET `/cube/template/build/:id/status`, GET `/from-image` | CubeMaster (local) | plain DB reads on master-owned rows; proxying made create-200/poll-502 when TC was down |
 | GET/POST `/cube/template/compat` | proxied to TC | uncached DB read/write |
-| GET/HEAD `/cube/template/artifact/download` | proxied to TC | file serving / S3 redirect |
-| GET `/cube/template/artifact/...` (rootfs, CA) | CubeMaster (local) | cubelet pulls from the shared disk via master |
+| GET `/cube/rootfs-artifact`, GET/HEAD CA download | CubeMaster (local) | artifact metadata and CA files; no ext4 bytes |
 
 `RegisterTemplateRoutes` (the TC process) registers only the uncached pure-DB
 and file-serving subset. The two lists are pinned by contract tests
 (`TestCubeRoutesTemplateWritesStayOnCubeMaster`,
 `TestCubeRoutesTemplateProxyRemainder`,
 `TestTemplateCenterRoutesExcludeWritesAndCachedReads`).
+
+New ext4 distribution uses two internal routes outside that public split:
+Cubelet requests a short-lived, node-bound ticket from CubeMaster at
+`GET /internal/template/artifacts/:artifact_id/download-ticket`, then downloads
+directly from S3/MinIO or TC's
+`GET /internal/artifacts/:artifact_id/ext4`. CubeMaster does not carry ext4
+response bytes.
 
 ## 5. Configuration
 
@@ -252,24 +258,24 @@ objects with no CLEANUP_PENDING row left for the backstop.
 `ArtifactNodePlacement` rows record which nodes hold a copy; they drive both
 Phase 2 deletion and download locality.
 
-### 9.7 Shared artifact store
+### 9.7 Durable artifact location and direct download
 
-TC writes the ext4 and CubeMaster serves it to cubelet over
-`/cube/template/artifact/download` — both processes must see the same
-directory. one-click: same host filesystem. Helm: the same PVC (ReadWriteOnce
-is per-node, so the chart pins TC to master's node via required podAffinity;
-`colocateWithMaster=false` requires a genuinely shared ReadWriteMany volume).
-terraform: shared CFS when enabled, otherwise pod-local emptyDir with
-single-replica co-location. Because the directory is shared, a path recorded
-at build time remains valid for the reconciler even if TC has restarted since.
+Every artifact row records a generation, storage reference and owning TC
+download origin. Before distribution, CubeMaster issues a one-hour-by-default
+ticket bound to the target node and generation. S3/MinIO tickets contain a
+fresh presigned URL; fs/local/CBS/CFS tickets point to TC and carry a
+short-lived HMAC capability. Cubelet refreshes the ticket on retry and
+downloads directly from the byte owner.
+
+Helm still defaults TC to the historical Master artifact claim so existing
+files survive upgrades. ReadWriteOnce therefore retains its co-location
+constraint while both workloads mount that claim; new downloads do not depend
+on CubeMaster opening or streaming the file.
 
 ## 10. Known limitations and follow-ups
 
 Released with full awareness; each item lists the planned follow-up.
 
-- **37-day presigned URLs are not refreshed.** Artifacts uploaded to S3 get a
-  long-lived presigned URL recorded at build time; there is no refresh job, so
-  a template older than the presign TTL needs a redo to mint a new URL.
 - **envd-era redo goes straight to FAILED.** Redoing a template built by the
   legacy in-process builder has no reusable artifact record and fails fast
   rather than rebuilding; recreate such templates from the source image.

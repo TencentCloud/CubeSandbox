@@ -26,6 +26,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -94,7 +95,8 @@ type Reconciler struct {
 	runningStaleAfter time.Duration
 	// deleter removes artifact data for CLEANUP_PENDING rows. May be nil, in
 	// which case the backstop sweep is skipped (immediate deletes still work).
-	deleter ArtifactDeleter
+	deleter    ArtifactDeleter
+	localSweep func(context.Context) error
 }
 
 // New builds a Reconciler over db. Cadence and staleness thresholds can be
@@ -122,6 +124,10 @@ func New(db *gorm.DB) *Reconciler {
 // backstop sweep. Called once at startup; optional (nil disables the sweep).
 func (r *Reconciler) SetDeleter(d ArtifactDeleter) {
 	r.deleter = d
+}
+
+func (r *Reconciler) SetLocalSweeper(sweep func(context.Context) error) {
+	r.localSweep = sweep
 }
 
 // Disabled reports whether the operator turned the sweep off.
@@ -155,15 +161,19 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
-// SweepOnce runs a single sweep under the cross-replica session lock. It is
-// exported so operators can trigger it from a test harness.
+// Shared rows require cross-replica exclusion; private files require a sweep
+// on every replica even when another replica owns the shared lock.
 func (r *Reconciler) SweepOnce(ctx context.Context) error {
-	return lock.WithReconcileLock(ctx, r.db, func() error {
+	sharedErr := lock.WithReconcileLock(ctx, r.db, func() error {
 		if err := r.failStaleJobs(ctx); err != nil {
 			return err
 		}
 		return r.cleanupPendingArtifacts(ctx)
 	})
+	if r.localSweep != nil {
+		return errors.Join(sharedErr, r.localSweep(ctx))
+	}
+	return sharedErr
 }
 
 // cleanupPendingArtifacts deletes artifact rows that CubeMaster marked

@@ -20,6 +20,36 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+func TestArtifactDownloadConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, ttl string
+		want      time.Duration
+		invalid   bool
+	}{
+		{"defaults", "", time.Hour, false},
+		{"custom", "2h", 2 * time.Hour, false},
+		{"min", "1m", time.Minute, false},
+		{"max", "24h", 24 * time.Hour, false},
+		{"malformed", "bad", 0, true},
+		{"too_short", "30s", 0, true},
+		{"too_long", "25h", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := &Config{Common: &CommonConf{ArtifactDownloadTTL: tc.ttl}}
+			err := preComHandleConf(conf)
+			if (err != nil) != tc.invalid {
+				t.Fatalf("validation error = %v", err)
+			}
+			if !tc.invalid {
+				got, err := conf.Common.ArtifactDownloadDuration()
+				if err != nil || got != tc.want {
+					t.Fatalf("ttl = %s, %v", got, err)
+				}
+			}
+		})
+	}
+}
+
 func TestInit(t *testing.T) {
 	mydir, err := os.Getwd()
 	if err != nil {

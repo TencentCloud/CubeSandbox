@@ -12,15 +12,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agiledragon/gomonkey/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -30,11 +27,11 @@ import (
 // test gin.Context carrying rt, returning the decoded JSON response.
 func invokeCommitHandler(t *testing.T, req *http.Request, rt *CubeLog.RequestTrace) commitTemplateResponse {
 	t.Helper()
-	patches := gomonkey.NewPatches()
-	patches.ApplyFunc(sandbox.ResolveSandboxID, func(_ context.Context, sandboxID string) (string, error) {
+	oldNormalize := normalizeCommitSandboxIDFn
+	normalizeCommitSandboxIDFn = func(_ context.Context, sandboxID string) (string, *types.Ret) {
 		return sandboxID, nil
-	})
-	defer patches.Reset()
+	}
+	defer func() { normalizeCommitSandboxIDFn = oldNormalize }()
 	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -55,6 +52,16 @@ func withCommitStub(t *testing.T, fn func(ctx context.Context, requestID, sandbo
 	orig := submitTemplateCommitFn
 	t.Cleanup(func() { submitTemplateCommitFn = orig })
 	submitTemplateCommitFn = fn
+}
+
+func withCommitHostStub(t *testing.T) {
+	t.Helper()
+	oldCache, oldHost := commitSandboxCacheFn, commitHostIDByIPFn
+	t.Cleanup(func() { commitSandboxCacheFn, commitHostIDByIPFn = oldCache, oldHost })
+	commitSandboxCacheFn = func(sandboxID string) *localcache.SandboxCache {
+		return &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"}
+	}
+	commitHostIDByIPFn = func(string) string { return "node-1" }
 }
 
 func TestHandleSandboxCommitActionRejectsEmptyRequestID(t *testing.T) {
@@ -95,15 +102,7 @@ func TestHandleSandboxCommitActionRejectsMissingFields(t *testing.T) {
 }
 
 func TestHandleSandboxCommitActionAllowsMissingCreateRequest(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	patches.ApplyFunc(localcache.GetSandboxCache, func(sandboxID string) *localcache.SandboxCache {
-		return &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"}
-	})
-	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
-		return &node.Node{InsID: "node-1", IP: ip}, true
-	})
+	withCommitHostStub(t)
 	var called bool
 	var gotRequestID, gotSandboxID, gotTemplateID string
 	var gotOverride *types.CreateCubeSandboxReq
@@ -135,15 +134,7 @@ func TestHandleSandboxCommitActionAllowsMissingCreateRequest(t *testing.T) {
 }
 
 func TestHandleSandboxCommitActionSanitizesInternalErrors(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	patches.ApplyFunc(localcache.GetSandboxCache, func(sandboxID string) *localcache.SandboxCache {
-		return &localcache.SandboxCache{SandboxID: sandboxID, HostIP: "10.0.0.1"}
-	})
-	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
-		return &node.Node{InsID: "node-1", IP: ip}, true
-	})
+	withCommitHostStub(t)
 	withCommitStub(t, func(context.Context, string, string, string, string, string, *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
 		return nil, fmt.Errorf("load sandbox spec: dial tcp 10.0.0.2:3306: connection refused")
 	})
@@ -177,12 +168,7 @@ func TestHandleSandboxCommitActionRejectsCallerSuppliedNetworkQos(t *testing.T) 
 func TestHandleSandboxCommitActionIgnoresProvidedTemplateID(t *testing.T) {
 	registerKnownSandboxTestID(t)
 
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
-		return &node.Node{InsID: "node-1", IP: ip}, true
-	})
+	withCommitHostStub(t)
 	var submittedTemplateID string
 	withCommitStub(t, func(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, templateID string, req *types.CreateCubeSandboxReq) (*types.TemplateImageJobInfo, error) {
 		submittedTemplateID = templateID

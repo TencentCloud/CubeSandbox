@@ -12,6 +12,7 @@ import (
 type RootfsArtifact struct {
 	gorm.Model
 	ArtifactID              string `json:"artifact_id" gorm:"column:artifact_id"`
+	Generation              int64  `json:"generation" gorm:"column:generation"`
 	TemplateSpecFingerprint string `json:"template_spec_fingerprint" gorm:"column:template_spec_fingerprint"`
 	SourceImageRef          string `json:"source_image_ref" gorm:"column:source_image_ref"`
 	SourceImageDigest       string `json:"source_image_digest" gorm:"column:source_image_digest"`
@@ -24,17 +25,22 @@ type RootfsArtifact struct {
 	GeneratedRequestJSON    string `json:"generated_request_json" gorm:"column:generated_request_json"`
 	WritableLayerSize       string `json:"writable_layer_size" gorm:"column:writable_layer_size"`
 	DownloadToken           string `json:"download_token" gorm:"column:download_token"`
-	// ArtifactURL is the S3/MinIO presigned download URL persisted at build time.
-	// CubeMaster/TC may re-sign it when proxying downloads, but Cubelets now
-	// receive the stable CubeMaster download endpoint rather than this raw URL.
+	// ArtifactURL is a historical S3/MinIO presigned URL persisted at build
+	// time. New Cubelets receive a stable ticket endpoint and obtain a fresh,
+	// short-lived direct URL for every attempt.
 	ArtifactURL string `json:"artifact_url" gorm:"column:artifact_url"`
 	// StorageBackend is "s3", "fs", or empty (legacy: infer from ArtifactURL).
 	StorageBackend string `json:"storage_backend" gorm:"column:storage_backend"`
 	// ObjectKey is the blobstore key. Empty means derive [prefix/]id.ext4.
-	ObjectKey  string `json:"object_key" gorm:"column:object_key"`
-	Status     string `json:"status" gorm:"column:status"`
-	LastError  string `json:"last_error" gorm:"column:last_error"`
-	GCDeadline int64  `json:"gc_deadline" gorm:"column:gc_deadline"`
+	ObjectKey string `json:"object_key" gorm:"column:object_key"`
+	// StorageRef is a stable, non-secret description of the backing store.
+	StorageRef string `json:"storage_ref" gorm:"column:storage_ref"`
+	// OwnerTCDownloadBase is the TemplateCenter HTTP origin that owns or can
+	// reach an fs-backed artifact. Cubelets use it directly after authorization.
+	OwnerTCDownloadBase string `json:"owner_tc_download_base" gorm:"column:owner_tc_download_base"`
+	Status              string `json:"status" gorm:"column:status"`
+	LastError           string `json:"last_error" gorm:"column:last_error"`
+	GCDeadline          int64  `json:"gc_deadline" gorm:"column:gc_deadline"`
 
 	// CubeEgress CA bake metadata (see design/cube-egress-ca-bake.md).
 	// Used for audit/triage; the artifact reuse cache key folds

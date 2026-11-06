@@ -60,13 +60,17 @@ var (
 		err := store.db.WithContext(ctx).
 			Table(constants.TemplateDefinitionTableName).
 			Select("template_id, instance_type, rootfs_artifact_id").
-			Where("status = ?", StatusReady).
+			Where("status IN ?", []string{StatusReady, StatusPartiallyReady}).
 			Limit(limit).
 			Find(&defs).Error
 		return defs, err
 	}
 	backfillLatestJob = func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
-		return getLatestCreateRedoImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
+		job := &models.TemplateImageJob{}
+		err := store.db.WithContext(ctx).Model(job).
+			Where("template_id = ?", templateID).
+			Order("id desc").First(job).Error
+		return job, err
 	}
 	backfillArtifact     = getRootfsArtifactByID
 	backfillReplicas     = ListReplicas
@@ -104,6 +108,9 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		// job rows were cleaned. Nothing to derive the original request from,
 		// so there is no safe way to reconstruct the distribution input.
 		return fmt.Errorf("load latest create/redo job: %w", err)
+	}
+	if job == nil || (job.Operation != JobOperationCreate && job.Operation != JobOperationRedo) {
+		return fmt.Errorf("replica backfill requires an image CREATE/REDO job; warm COMMIT packages require a separate restore path")
 	}
 	artifactID := strings.TrimSpace(def.RootfsArtifactID)
 	if artifactID == "" {

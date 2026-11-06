@@ -242,6 +242,9 @@ const (
 	MasterAnnotationRootfsArtifactID        = "cube.master.rootfs.artifact.id"
 	MasterAnnotationRootfsArtifactJobID     = "cube.master.rootfs.artifact.job_id"
 	MasterAnnotationRootfsArtifactURL       = "cube.master.rootfs.artifact.url"
+	MasterAnnotationRootfsArtifactTicketURL = "cube.master.rootfs.artifact.ticket_url"
+	MasterAnnotationRootfsArtifactRefreshToken = "cube.master.rootfs.artifact.refresh_token"
+	MasterAnnotationRootfsArtifactDownloadOrigin = "cube.master.rootfs.artifact.download_origin"
 	MasterAnnotationRootfsArtifactToken     = "cube.master.rootfs.artifact.token"
 	MasterAnnotationRootfsArtifactSHA256    = "cube.master.rootfs.artifact.sha256"
 	MasterAnnotationRootfsArtifactSizeBytes = "cube.master.rootfs.artifact.size_bytes"
@@ -250,6 +253,8 @@ const (
 	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
 	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
 	MasterAnnotationInstanceType            = "cube.master.instance.type"
+	ArtifactDownloadNodeIDHeader            = "X-Cube-Node-ID"
+	ArtifactDownloadRefreshHeader           = "X-Cube-Artifact-Refresh-Token"
 )
 
 // Inventory version annotations used by Ensure

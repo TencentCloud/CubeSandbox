@@ -25,6 +25,11 @@ const (
 	// deployed environment — a forged BUILT report becomes the rootfs every
 	// node boots from.
 	TemplateCallbackInsecureNoTokenEnv = "CUBE_TEMPLATE_CALLBACK_INSECURE_NO_TOKEN"
+
+	ArtifactDownloadNodeIDHeader  = "X-Cube-Node-ID"
+	ArtifactDownloadRefreshHeader = "X-Cube-Artifact-Refresh-Token"
+	ArtifactDownloadSigningKeyEnv = "CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY"
+	TemplateCenterDownloadAddrEnv = "CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR"
 )
 
 func GetAppSnapshotVersion(annotations map[string]string) string {

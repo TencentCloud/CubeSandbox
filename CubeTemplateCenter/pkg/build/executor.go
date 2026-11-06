@@ -77,6 +77,16 @@ func (e *Executor) InFlight() int {
 	return len(e.inFlight)
 }
 
+// WithIdle serializes local cleanup with Submit and the entire build lifecycle.
+func (e *Executor) WithIdle(fn func() error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.inFlight) > 0 {
+		return nil
+	}
+	return fn()
+}
+
 // Sentinel errors returned by Submit, mapped to HTTP statuses by the handler.
 var (
 	// ErrBuildJobDuplicate means this job is already being built here.

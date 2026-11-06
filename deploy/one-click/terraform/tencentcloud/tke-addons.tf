@@ -157,6 +157,13 @@ resource "random_password" "template_callback_token" {
   special = false
 }
 
+# HMAC key shared only by CubeMaster and CubeTemplateCenter. CubeMaster mints
+# short-lived, node/generation-bound download capabilities; TC verifies them.
+resource "random_password" "artifact_download_signing_key" {
+  count   = local.deploy_addons ? 1 : 0
+  length  = 48
+  special = false
+}
 
 # Write the kubeconfig to a local file (written as soon as TKE is created, independent of the addons).
 # The apiserver is intranet-only, so use the intranet kubeconfig. create.sh then
@@ -281,7 +288,8 @@ resource "kubernetes_secret" "cubemaster_conf" {
   data = {
     # Shared with the templatecenter Deployment: TC presents it as
     # X-Cube-Template-Callback-Token on build-status callbacks.
-    "cube-template-callback-token" = random_password.template_callback_token[0].result
+    "cube-template-callback-token"       = random_password.template_callback_token[0].result
+    "cube-artifact-download-signing-key" = random_password.artifact_download_signing_key[0].result
     "conf.yaml" = yamlencode({
       common = {
         http_port                          = 8089
@@ -446,6 +454,27 @@ resource "kubernetes_deployment" "cubemaster" {
                 key  = "cube-template-callback-token"
               }
             }
+          }
+          env {
+            name = "CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
+                key  = "cube-artifact-download-signing-key"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR"
+            value = "http://cube-templatecenter.cubesandbox.svc.cluster.local:8090"
+          }
+          env {
+            name  = "CUBE_ARTIFACT_STORE_BACKEND"
+            value = "fs"
+          }
+          env {
+            name  = "CUBE_ARTIFACT_STORE_FS_ROOT"
+            value = "/data/CubeMaster/storage"
           }
           port {
             name           = "http"
@@ -753,6 +782,27 @@ resource "kubernetes_deployment" "templatecenter" {
                 key  = "cube-template-callback-token"
               }
             }
+          }
+          env {
+            name = "CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.cubemaster_conf[0].metadata[0].name
+                key  = "cube-artifact-download-signing-key"
+              }
+            }
+          }
+          env {
+            name  = "CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR"
+            value = "http://cube-templatecenter.cubesandbox.svc.cluster.local:8090"
+          }
+          env {
+            name  = "CUBE_ARTIFACT_STORE_BACKEND"
+            value = "fs"
+          }
+          env {
+            name  = "CUBE_ARTIFACT_STORE_FS_ROOT"
+            value = "/data/CubeMaster/storage"
           }
           # TC writes the ext4 into the same shared store CubeMaster serves
           # downloads from. When use_cfs=false, that store is a hostPath, so

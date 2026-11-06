@@ -77,6 +77,30 @@ func TestSparseCopy(t *testing.T) {
 	})
 }
 
+func TestSparseCopyResumesAcrossZeroRun(t *testing.T) {
+	prefix := []byte("existing artifact prefix")
+	tail := append(make([]byte, 2*1024*1024), []byte("artifact suffix")...)
+	f, err := os.CreateTemp(t.TempDir(), "resume-sparse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(prefix); err != nil {
+		t.Fatal(err)
+	}
+	n, err := sparseCopy(f, nil, bytes.NewReader(tail), 1024*1024)
+	if err != nil || n != int64(len(tail)) {
+		t.Fatalf("sparseCopy returned (%d, %v), want (%d, nil)", n, err, len(tail))
+	}
+	got, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := append(bytes.Clone(prefix), tail...); !bytes.Equal(got, want) {
+		t.Fatalf("resumed artifact differs: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
 func TestSparseCopyZeroRunsAtByteOffsets(t *testing.T) {
 	for zeroOffset := 0; zeroOffset <= 16; zeroOffset++ {
 		t.Run(strconv.Itoa(zeroOffset), func(t *testing.T) {

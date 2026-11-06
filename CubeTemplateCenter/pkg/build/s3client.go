@@ -43,6 +43,7 @@ func (f *s3ClientFactory) init() {
 	cfg := s3store.Config{
 		Driver:         backend,
 		Endpoint:       s3.Endpoint,
+		NodeEndpoint:   s3.NodeEndpoint,
 		Bucket:         s3.Bucket,
 		AccessKey:      s3.AccessKey,
 		SecretKey:      s3.SecretKey,

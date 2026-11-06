@@ -61,9 +61,9 @@ spec:
       {{- if and .Values.controlPlane.templateCenter.colocateWithMaster (not $s3Backed) }}
       # TC must land on the same NODE as CubeMaster. ReadWriteOnce is a
       # single-node constraint rather than a single-Pod one, so co-located Pods
-      # can share the artifact PVC — and they have to, because TC writes the ext4
-      # while CubeMaster is the one that serves it to Cubelet over
-      # /cube/template/artifact/download (design 9.7).
+      # can mount the historical shared artifact claim. TC now serves fs-backed
+      # ext4 bytes directly to Cubelet; co-location remains necessary only while
+      # both workloads mount this ReadWriteOnce claim.
       #
       # required, not preferred: a TC scheduled elsewhere would either fail to
       # attach the volume or silently build into a different disk, leaving every
@@ -135,6 +135,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: cube-template-callback-token
+            - name: CUBE_ARTIFACT_DOWNLOAD_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-artifact-download-signing-key
+            - name: CUBE_TEMPLATE_CENTER_DOWNLOAD_ADDR
+              value: {{ include "cube.templateCenterDownloadAddress" . | quote }}
             # S3/MinIO artifact storage. TC reads the SAME CUBE_S3_* variables
             # that Cubelet / s3lvol / volume plugins use, so S3 is configured
             # once for the whole deployment. cube.artifactS3Env injects the

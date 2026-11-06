@@ -281,9 +281,10 @@ controlPlane:
       type: ClusterIP
       port: 8089
     persistence:
-      # Master persists artifact metadata in DB, but may cache ext4 files
-      # locally for faster distribution to nodes. If using S3-only storage
-      # (TC uploads to S3, Master fetches from S3), set enabled=false.
+      # Master persists artifact metadata in DB. This claim remains the default
+      # TC artifact claim for upgrade compatibility with existing fs artifacts;
+      # new bytes are served by TC directly, not streamed through Master. With
+      # S3-only storage, set enabled=false.
       #
       # For multi-replica Master with shared storage, use ReadWriteMany
       # access mode (requires a storage class that supports RWX, e.g., CBS
@@ -316,14 +317,15 @@ controlPlane:
     resources: {}
 
   # Template artifact storage semantics. This declares WHERE the durable copy
-  # of a built ext4 lives, which in turn decides whether CubeMaster and
-  # CubeTemplateCenter can scale beyond one replica:
+  # of a built ext4 lives, which in turn decides how CubeTemplateCenter can
+  # scale:
   #
   #   s3Backed=false (default): artifacts live on the local/shared disk
   #     (master.persistence PVC or hostPath). Multi-replica master/TC is
   #     allowed but DEGRADED (install notes print a warning): artifacts are
-  #     node-local, so a download may hit a master that never built it and TC
-  #     replicas duplicate builds. The default ReadWriteOnce artifact PVC is
+  #     node-local unless the TC replicas share storage, so a TC Service request
+  #     may hit a replica that does not own the file. The default ReadWriteOnce
+  #     artifact PVC is
   #     the exception that still fails validation — it cannot attach on
   #     several nodes, so a second master replica would stay Pending forever.
   #     Use persistence.enabled=false (per-pod scratch) or a ReadWriteMany
@@ -332,7 +334,8 @@ controlPlane:
   #
   #   s3Backed=true: the durable copy is the S3/MinIO object. TC uploads the
   #     ext4 after building; Cubelet downloads straight from S3 via presigned
-  #     URLs that CubeMaster re-signs at each use; the local disk on both
+  #     URLs that CubeMaster signs with the short ticket TTL at each attempt;
+  #     the local disk on both
   #     master and TC is build scratch / cache only. In this mode BOTH
   #     master and TC may run any replica count on any node -- no shared
   #     volume and no co-location required.
@@ -413,6 +416,10 @@ controlPlane:
       port: 8090
       # Only for NodePort / LoadBalancer. Must be empty for ClusterIP.
       nodePort: ""
+    # Routable origin embedded in fs-backed artifact records. Empty uses the
+    # in-cluster TemplateCenter Service; set this when Cubelets need a VPC
+    # address (for example an internal load balancer).
+    downloadAddress: ""
     # VPC-internal CLB, for reaching TC from outside the cluster. Control-plane
     # traffic from CubeMaster uses the ClusterIP Service and does not go through
     # this. The build endpoint is unauthenticated, so keep the CLB internal.
@@ -1530,6 +1537,9 @@ volumeS3:
   # Written into volume-s3.conf. Leave empty when minio.enabled=true (filled
   # from chart MinIO). Set only with minio.enabled=false for an external store.
   endpoint: ""
+  # Optional endpoint embedded in presigned artifact URLs. Use it when
+  # control-plane Pods reach S3 through a different hostname than Cubelets.
+  nodeEndpoint: ""
   accessKeyId: ""
   secretAccessKey: ""
   bucket: ""

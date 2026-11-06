@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,8 @@ type RemoteBuildResult struct {
 	ArtifactURL             string
 	StorageBackend          string
 	ObjectKey               string
+	StorageRef              string
+	OwnerTCDownloadBase     string
 	CubeEgressCABaked       bool
 	CubeEgressCAFingerprint string
 	CubeEgressCATargets     int
@@ -127,7 +130,8 @@ func (r *RemoteBuildResult) Validate() error {
 	if strings.TrimSpace(r.ArtifactID) == "" {
 		missing = append(missing, "artifact_id")
 	}
-	if strings.TrimSpace(r.Ext4Path) == "" {
+	backend := strings.ToLower(strings.TrimSpace(r.StorageBackend))
+	if backend == "" && strings.TrimSpace(r.Ext4Path) == "" {
 		missing = append(missing, "ext4_path")
 	}
 	if strings.TrimSpace(r.Ext4SHA256) == "" {
@@ -144,14 +148,42 @@ func (r *RemoteBuildResult) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("remote build result is missing required field(s): %s", strings.Join(missing, ", "))
 	}
-	// Path-traversal guard: the status callback is unauthenticated, so
-	// ext4_path is attacker-controlled. It must resolve to a file INSIDE one of
-	// the controlled artifact root directories, or Cubelet could be told to
-	// download an arbitrary host path as a rootfs. The check is by prefix on the
-	// cleaned absolute path, matching how artifact_cleanup.go already locates
-	// the artifact dir.
-	if err := r.validateExt4PathWithinStore(); err != nil {
-		return err
+	switch backend {
+	case "":
+		// Legacy shared-disk mode: ext4_path is consumed by Master and must stay
+		// under a Master-controlled artifact root.
+		if err := r.validateExt4PathWithinStore(); err != nil {
+			return err
+		}
+	case "s3":
+		if strings.TrimSpace(r.ObjectKey) == "" {
+			return fmt.Errorf("remote build result for s3 is missing object_key")
+		}
+		if strings.TrimSpace(r.StorageRef) == "" {
+			return fmt.Errorf("remote build result for s3 is missing storage_ref")
+		}
+		artifact := &models.RootfsArtifact{
+			ArtifactID:     r.ArtifactID,
+			StorageBackend: backend,
+			ObjectKey:      r.ObjectKey,
+			StorageRef:     r.StorageRef,
+		}
+		if _, err := artifactStoreKeyWithPrefix(context.Background(), artifact, artifactStorePrefix()); err != nil {
+			return fmt.Errorf("remote build result has invalid s3 locator: %w", err)
+		}
+	case "fs":
+		if strings.TrimSpace(r.ObjectKey) == "" {
+			return fmt.Errorf("remote build result for fs is missing object_key")
+		}
+		locator, err := url.Parse(strings.TrimSpace(r.StorageRef))
+		if err != nil || locator.Scheme != "file" || !filepath.IsAbs(locator.Path) {
+			return fmt.Errorf("remote build result has invalid fs storage_ref")
+		}
+		if strings.TrimSpace(r.OwnerTCDownloadBase) == "" {
+			return fmt.Errorf("remote build result for fs is missing owner_tc_download_base")
+		}
+	default:
+		return fmt.Errorf("remote build result has unsupported storage_backend %q", r.StorageBackend)
 	}
 	return nil
 }
@@ -198,6 +230,9 @@ const remoteBuildReportKey = "remote_build_report"
 // Returns finalResult unchanged on any problem: the primary payload must never
 // be lost in order to keep a diagnostic.
 func preserveRemoteBuildReport(ctx context.Context, jobID string, finalResult []byte) []byte {
+	if store == nil || store.db == nil {
+		return finalResult
+	}
 	record, err := getTemplateImageJobRecordByID(ctx, jobID)
 	if err != nil || record == nil {
 		return finalResult
@@ -351,6 +386,9 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 			// build lock. Reconcile-time contention likewise leaves the durable
 			// BUILT report available for the next pass.
 			logger.Warnf("resume step 1/3 deferred: %v", err)
+			if persistErr := recordRemoteBuildDeferredError(ctx, jobID, err); persistErr != nil {
+				return nil, errors.Join(err, persistErr)
+			}
 			return nil, err
 		}
 		failErr := fmt.Errorf("register remote artifact: %w", err)
@@ -374,6 +412,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		"status":                    JobStatusRunning,
 		"phase":                     JobPhaseDistributing,
 		"progress":                  70,
+		"error_message":             "",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("claim job distribution: %w", err)
@@ -390,6 +429,15 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		generatedReq: generatedReq,
 		adopted:      adopted,
 	}, nil
+}
+
+func recordRemoteBuildDeferredError(ctx context.Context, jobID string, cause error) error {
+	if store == nil || store.db == nil {
+		return ErrTemplateStoreNotInitialized
+	}
+	return store.db.WithContext(ctx).Model(&models.TemplateImageJob{}).
+		Where("job_id = ? AND status = ?", jobID, JobStatusBuilt).
+		UpdateColumn("error_message", fmt.Sprintf("remote artifact registration deferred: %v", cause)).Error
 }
 
 // PrepareTemplateImageJobAfterRemoteBuildCallback performs the synchronous
@@ -510,6 +558,21 @@ func registerRemoteBuiltArtifactWhileTCBuildLocked(ctx context.Context, req *typ
 	return registerRemoteBuiltArtifactOnSession(ctx, store.db.WithContext(ctx), req, result, imageCfg)
 }
 
+func validateReadyArtifactForAdoption(ctx context.Context, artifact *models.RootfsArtifact) error {
+	if artifact == nil {
+		return errors.New("ready artifact is nil")
+	}
+	if strings.EqualFold(strings.TrimSpace(artifact.StorageBackend), "s3") {
+		if strings.TrimSpace(artifact.StorageRef) == "" {
+			return errors.New("ready artifact s3 storage_ref is empty; run explicit migration before adoption")
+		}
+		if _, err := artifactStoreKey(ctx, artifact); err != nil {
+			return fmt.Errorf("invalid ready artifact s3 locator: %w", err)
+		}
+	}
+	return nil
+}
+
 // registerRemoteBuiltArtifactOnSession contains the idempotent fingerprint-first
 // claim/finalize operation. Exclusivity is supplied either by Master's lock
 // wrapper (reconciler replay) or by TC retaining its build lock until the BUILT
@@ -518,23 +581,50 @@ func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, re
 	fingerprint := result.TemplateSpecFingerprint
 	err = func() error {
 		existing, findErr := findRootfsArtifactByFingerprintForUpdate(sess, fingerprint)
+		if findErr == nil && existing.Status == ArtifactStatusReady && !existing.DeletedAt.Valid && existing.ArtifactID != result.ArtifactID {
+			if err := validateReadyArtifactForAdoption(ctx, existing); err != nil {
+				return err
+			}
+			verdict, reason := probeArtifactServability(ctx, existing)
+			switch verdict {
+			case artifactServabilityMissing:
+				changed := sess.WithContext(ctx).Model(&models.RootfsArtifact{}).
+					Where("artifact_id = ? AND status = ? AND COALESCE(generation, 0) = ? AND template_spec_fingerprint = ?", existing.ArtifactID, ArtifactStatusReady, existing.Generation, fingerprint).
+					Updates(map[string]any{"status": ArtifactStatusFailed, "last_error": "serving tier reports missing before adoption: " + reason})
+				if changed.Error != nil {
+					return changed.Error
+				}
+				if changed.RowsAffected == 0 {
+					return errArtifactRegisterRetryable
+				}
+				existing.Status = ArtifactStatusFailed
+			case artifactServabilityUnknown:
+				return fmt.Errorf("%w: cannot verify predecessor %s: %s", errArtifactRegisterRetryable, existing.ArtifactID, reason)
+			}
+		}
 		switch {
 		case findErr == nil && existing.Status == ArtifactStatusReady && !existing.DeletedAt.Valid:
 			// Adopt — INCLUDING our own artifact_id: a duplicate BUILT replay
 			// (callback + reconciler, possibly on different masters) must not
 			// re-finalize an already-READY row and rotate the download_token
-			// its in-flight pulls are using.
+			// its in-flight pulls are using. Never adopt an S3 row with an invalid
+			// stable locator: repairing storage ownership is an explicit migration
+			// operation, not a side effect of build registration.
+			if validationErr := validateReadyArtifactForAdoption(ctx, existing); validationErr != nil {
+				return fmt.Errorf("validate ready artifact %s before adoption: %w", existing.ArtifactID, validationErr)
+			}
 			record = existing
 			adopted = true
 			return nil
 		case findErr == nil && existing.ArtifactID != result.ArtifactID:
-			// A non-READY row under a DIFFERENT artifact_id is a crashed
-			// predecessor's half-registration: a live peer finalizes inside
-			// this same lock, so one cannot be observed mid-flight. The
-			// artifact GC owns that row's lifecycle; leave the job BUILT and
-			// let the image-job reconciler replay once the row is resolved.
-			return fmt.Errorf("%w: fingerprint %.16s held by non-ready artifact %s (status %s, deleted=%v)",
-				errArtifactRegisterRetryable, fingerprint, existing.ArtifactID, existing.Status, existing.DeletedAt.Valid)
+			retired, retireErr := retireArtifactFingerprint(ctx, sess, existing)
+			if retireErr != nil {
+				return fmt.Errorf("retire predecessor artifact %s: %w", existing.ArtifactID, retireErr)
+			}
+			if !retired {
+				return fmt.Errorf("%w: fingerprint %.16s held by non-ready artifact %s (status %s, deleted=%v)",
+					errArtifactRegisterRetryable, fingerprint, existing.ArtifactID, existing.Status, existing.DeletedAt.Valid)
+			}
 		case findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound):
 			return fmt.Errorf("lookup artifact by fingerprint: %w", findErr)
 		}
@@ -549,6 +639,9 @@ func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, re
 			if isDuplicateKeyError(claimErr) {
 				winner, werr := findRootfsArtifactByFingerprintForUpdate(sess, fingerprint)
 				if werr == nil && winner.Status == ArtifactStatusReady && !winner.DeletedAt.Valid {
+					if validationErr := validateReadyArtifactForAdoption(ctx, winner); validationErr != nil {
+						return fmt.Errorf("validate duplicate-key winner %s before adoption: %w", winner.ArtifactID, validationErr)
+					}
 					record = winner
 					adopted = true
 					return nil
@@ -572,6 +665,9 @@ func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, re
 		if errors.Is(finErr, errArtifactFinalizeLostCAS) {
 			winner, werr := getRootfsArtifactByID(ctx, result.ArtifactID)
 			if werr == nil && winner.Status == ArtifactStatusReady {
+				if validationErr := validateReadyArtifactForAdoption(ctx, winner); validationErr != nil {
+					return fmt.Errorf("validate finalize winner %s before adoption: %w", winner.ArtifactID, validationErr)
+				}
 				record = winner
 				adopted = true
 				return nil
@@ -634,6 +730,14 @@ func finalizeRemoteArtifact(
 	record.ArtifactURL = result.ArtifactURL
 	record.StorageBackend = result.StorageBackend
 	record.ObjectKey = result.ObjectKey
+	record.StorageRef = result.StorageRef
+	record.OwnerTCDownloadBase = result.OwnerTCDownloadBase
+	if record.OwnerTCDownloadBase == "" {
+		record.OwnerTCDownloadBase = configuredTemplateCenterDownloadBase()
+	}
+	if record.Generation <= 0 {
+		record.Generation = 1
+	}
 	record.Status = ArtifactStatusReady
 	record.GCDeadline = time.Now().Add(defaultTemplateArtifactTTL).Unix()
 	record.CubeEgressCABaked = result.CubeEgressCABaked
@@ -670,6 +774,9 @@ func finalizeRemoteArtifact(
 		"artifact_url":                   record.ArtifactURL,
 		"storage_backend":                record.StorageBackend,
 		"object_key":                     record.ObjectKey,
+		"storage_ref":                    record.StorageRef,
+		"owner_tc_download_base":         record.OwnerTCDownloadBase,
+		"generation":                     record.Generation,
 		"status":                         record.Status,
 		"gc_deadline":                    record.GCDeadline,
 		"last_error":                     "",

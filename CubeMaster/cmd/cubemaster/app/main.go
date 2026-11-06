@@ -130,10 +130,6 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	log.Init(config.GetLogConfig())
 
-	if err := templatecenter.InitArtifactStore(ctx); err != nil {
-		return fmt.Errorf("artifact store: %w", err)
-	}
-
 	errorcode.InitCubeCodeRetryMap(cfg)
 
 	task.InitTask(ctx, cfg)
@@ -143,6 +139,9 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 	if cfg.InstanceDBConfig == nil {
 		CubeLog.WithContext(ctx).Warnf("run in degraded mode: instance db config missing, skip localcache/instancecache/scheduler/sandbox init")
 		return nil
+	}
+	if err := templatecenter.InitArtifactStore(ctx); err != nil {
+		return fmt.Errorf("artifact store: %w", err)
 	}
 
 	// Run schema migrations BEFORE any business package Init so they all

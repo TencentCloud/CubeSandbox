@@ -25,8 +25,8 @@ import (
 // the same workDir/storeDir/ext4Path, and one goroutine's defer cleanup can
 // wipe the ext4 file while the other is still relying on it — the surviving
 // caller then reaches distributeRootfsArtifact with a partial record
-// (ext4_size_bytes=0, download_token=""), cubelet rejects the pull with
-// "invalid size:0", and the template is marked FAILED.
+// (missing size/hash/stable locator), Cubelet rejects the direct download,
+// and the template is marked FAILED.
 //
 // The lock is keyed by artifactID (deterministic from image+spec fingerprint)
 // so only racing submits for the same image spec are serialized; different
@@ -65,6 +65,7 @@ func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint st
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			row := &models.RootfsArtifact{
 				ArtifactID:              artifactID,
+				Generation:              1,
 				TemplateSpecFingerprint: fingerprint,
 				SourceImageRef:          req.SourceImageRef,
 				SourceImageDigest:       sourceDigest,
@@ -79,8 +80,20 @@ func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint st
 		case err != nil:
 			return err
 		default:
-			if s := strings.ToUpper(strings.TrimSpace(existing.Status)); s == ArtifactStatusDeleting || s == ArtifactStatusCleanupPending {
+			previousStatus := strings.ToUpper(strings.TrimSpace(existing.Status))
+			if previousStatus == ArtifactStatusDeleting || previousStatus == ArtifactStatusCleanupPending {
 				return errArtifactRegisterRetryable
+			}
+			generation := existing.Generation
+			if generation <= 0 {
+				generation = 1
+			}
+			// Reclaiming a previously published/failed row starts a new
+			// generation immediately, so every outstanding TC capability is
+			// revoked while the replacement is being built. A duplicate claim
+			// of the same BUILDING attempt keeps its generation.
+			if previousStatus != ArtifactStatusBuilding {
+				generation++
 			}
 			if updErr := tx.Unscoped().Table(constants.RootfsArtifactTableName).
 				Where("artifact_id = ?", artifactID).
@@ -89,6 +102,7 @@ func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint st
 					"source_image_ref":          req.SourceImageRef,
 					"source_image_digest":       sourceDigest,
 					"writable_layer_size":       req.WritableLayerSize,
+					"generation":                generation,
 					"status":                    ArtifactStatusBuilding,
 					"last_error":                "",
 					"deleted_at":                nil,
@@ -97,6 +111,7 @@ func claimRootfsArtifactForBuild(ctx context.Context, artifactID, fingerprint st
 				return updErr
 			}
 			existing.Status = ArtifactStatusBuilding
+			existing.Generation = generation
 			existing.DeletedAt = gorm.DeletedAt{}
 			claimed = &existing
 			return nil

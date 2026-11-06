@@ -132,10 +132,14 @@ CubeMaster 上对外暴露的 `/cube/template*` 路由：
 | GET `/cube/template/from-image?job_id=...` | CubeMaster（本地） | `from-image` job 轮询读取 master 持久化状态 |
 | GET `/cube/template/migrate?job_id=...` | CubeMaster（本地） | migrate job 轮询读取 master 持久化状态 |
 | GET / POST `/cube/template/compat` | 反代到 TC | 无缓存的 DB 读写 |
-| GET / HEAD `/cube/template/artifact/download` | 反代到 TC | 文件服务 / S3 重定向 |
-| GET `/cube/rootfs-artifact?...` 等元数据接口 | CubeMaster（本地） | 返回的是 master 维护的 artifact 行与模板元数据 |
+| GET `/cube/rootfs-artifact?...` 等元数据接口 | CubeMaster（本地） | 返回 master 维护的 artifact 元数据，不提供 ext4 字节 |
 
 `RegisterTemplateRoutes`（TC 进程）只注册**无缓存纯 DB 路由**与**artifact 下载 / 内部 API**子集。两份清单由合同测试钉住，保证“模板写路由不漂移到 TC”。
+
+新 ext4 分发链路使用两个内部端点：Cubelet 先从 CubeMaster 的
+`GET /internal/template/artifacts/:artifact_id/download-ticket` 获取绑定节点和
+generation 的短期授权，再直连 S3/MinIO，或访问 TC 的
+`GET /internal/artifacts/:artifact_id/ext4`。CubeMaster 不承载 ext4 响应字节。
 
 ## 5. 配置
 
@@ -204,7 +208,7 @@ TC 的副本策略取决于 artifact 字节存在哪里：
 
 - **本地盘 / RWO PVC**：推荐 **1 副本**。否则不同副本彼此看不到对方构建出的 ext4，请求被打到非构建副本时会 404。
 - **ReadWriteMany 共享卷**：可多副本，所有副本能看到同一份 ext4 字节。
-- **S3-backed**：可多副本；artifact 下载统一走 presigned URL / 302。
+- **S3-backed**：可多副本；Cubelet 每次重试重新取票并直连短期 presigned URL。
 
 因此，正确结论不是“TC 永远单例”，而是：**本地盘模式通常单副本；共享存储或 S3 模式支持多副本。** CubeMaster 仍然是无状态、最适合水平扩展的一侧。
 
@@ -234,21 +238,23 @@ job 表没有 owner 列：TC 重启后，任何仍然存活的 TC 副本都可�
 
 `ArtifactNodePlacement` 行记录哪些节点持有副本，同时驱动删除 Phase 2 与下载就近性。
 
-### 9.7 共享 artifact 存储
+### 9.7 稳定 artifact 定位与直连下载
 
-TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供给 cubelet——两个进程必须看到同一份 artifact 字节，或者都能通过同一套 S3 路径 / presigned URL 找到它。
+artifact 行记录 generation、稳定存储引用和负责下载的 TC 地址。分发前，
+CubeMaster 签发默认 1 小时、绑定目标节点与 generation 的短期 ticket：
 
-- one-click：同机文件系统共享
-- Helm：同一个 PVC（本地盘模式时通过同节点亲和保证 master / TC 共置）
-- `s3Backed=true`：由对象存储统一承载 artifact 字节
+- S3/MinIO：ticket 携带新签发的 presigned URL，Cubelet 直连对象存储。
+- 本地盘 / CBS / CFS / fs：ticket 指向 TC，并携带短期 HMAC capability，
+  Cubelet 直连 TC。
 
-因为 artifact 存储是共享的 / 可寻址的，构建期记录的路径与对象引用对 reconciler 始终有效，即使中途发生 TC 重启也不需要把 job “绑死”在某个实例上。
+Cubelet 每次重试都会重新取票；CubeMaster 不承载 ext4 响应字节。Helm
+仍默认复用历史 Master artifact PVC，以保证升级后的旧文件可用；这只保留
+RWO 挂载与共置约束，不再是新下载链路的数据中转要求。
 
 ## 10. 已知限制与后续项
 
 以下问题在当前版本里仍然存在：
 
-- **37 天预签名 URL 不刷新。** 上传到 S3 的 artifact 在构建时记录长时效 presigned URL；没有单独的刷新任务，超过时效后需要 redo 或重新 merge / rebuild 才会得到新 URL。
 - **`hasActiveJob` 不含 `BUILT`。** 幂等窗口覆盖 `PENDING` / `RUNNING`；已 `BUILT` 但 resume 流水线还在分发时，重复创建可能发起第二次分发，而不是挂到第一次上。
 - **envd 时代的 redo 直接 `FAILED`。** 对旧版进程内构建器产出的模板，若缺少可复用 artifact 记录，redo 会快速失败而不是自动重建；这类模板请从源镜像重新创建。
 - **TC 仍依赖 CubeMaster 包。** TC 复用 CubeMaster 的 config loader、log、recovery、nodemeta 与 templatecenter store 包，所以当前 `go.mod` 里仍需要 `replace`。把共享部分抽到 `pkgs/` 仍是后续工作。

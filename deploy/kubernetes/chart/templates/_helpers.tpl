@@ -525,6 +525,15 @@ via secretKeyRef at runtime, so there is no fresh-install double generation.
 {{- end -}}
 {{- end -}}
 
+{{- define "cube.artifactDownloadSigningKey" -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}
+{{- if and $existing $existing.data (index $existing.data "cube-artifact-download-signing-key") -}}
+{{- index $existing.data "cube-artifact-download-signing-key" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 48 -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cube.masterStoragePVCName" -}}
 {{- if .Values.controlPlane.master.persistence.existingClaim -}}
 {{- .Values.controlPlane.master.persistence.existingClaim -}}
@@ -800,6 +809,10 @@ kubelet keeps the last one).
 {{- if and (((.Values.controlPlane.artifactStore).s3Backed) | default false) (eq (include "cube.globalEnvS3State" .) "absent") (eq (include "cube.artifactS3Injectable" .) "true") }}
 - name: CUBE_S3_ENDPOINT
   value: {{ include "cube.volumeS3EffectiveEndpoint" . | quote }}
+{{- with ((default dict .Values.volumeS3).nodeEndpoint) }}
+- name: CUBE_S3_NODE_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
 - name: CUBE_S3_BUCKET
   value: {{ include "cube.artifactS3Bucket" . | quote }}
 - name: CUBE_S3_USE_PATH_STYLE
@@ -877,6 +890,15 @@ and a failure domain for no benefit.
 {{- end -}}
 {{- end -}}
 
+{{- define "cube.templateCenterDownloadAddress" -}}
+{{- $tc := default dict .Values.controlPlane.templateCenter -}}
+{{- if ne (($tc.downloadAddress) | default "") "" -}}
+{{- $tc.downloadAddress -}}
+{{- else -}}
+{{- include "cube.templateCenterEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- /*
 CubeMaster no longer has a templatecenter_enabled switch: every template build
 is forwarded to CubeTemplateCenter. This helper is kept only so existing chart
@@ -890,11 +912,11 @@ mode left to gate.
 {{- /*
 Claim backing TC's artifact store.
 
-Defaults to CubeMaster's claim, because the two processes MUST see the same
-directory: TC writes the ext4 and CubeMaster serves it over
-/cube/template/artifact/download (design 9.7). ReadWriteOnce means single NODE,
-not single Pod, so co-located Pods can both mount it — which is what the
-podAffinity in templatecenter.yaml enforces.
+Defaults to CubeMaster's historical artifact claim so upgrades keep existing
+files. TC owns and serves new fs-backed ext4 bytes directly to Cubelet;
+CubeMaster only issues short-lived capabilities. ReadWriteOnce means single
+NODE, not single Pod, so the legacy shared claim still requires co-location
+while both workloads mount it.
 */ -}}
 {{- define "cube.templateCenterStorageClaimName" -}}
 {{- if .Values.controlPlane.templateCenter.persistence.existingClaim -}}

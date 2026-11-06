@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -21,33 +22,22 @@ import (
 	s3driver "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/s3"
 )
 
-// This file re-signs S3/MinIO presigned artifact download URLs at the point
-// of use.
+// This file owns CubeMaster's artifact blobstore client and signing seams.
 //
-// WHY MASTER, WHY LAZY
-// --------------------
-// artifact_url is a presigned GET URL with a finite validity (7 days, the
-// SigV4 maximum), but the artifact itself lives far longer. Every consumer of
-// the URL sits on the CubeMaster/TC serving side -- the download endpoint now
-// proxies S3 through a stable CubeMaster URL rather than handing the raw URL to
-// cubelets -- so freshness is Master's concern, not CubeTemplateCenter's (TC
-// only ever WRITES the URL at build time). Re-signing lazily at each use beats
-// a periodic DB rewrite on every
-// axis: no background sweep, no concurrent-write guarding, no row churn, and
-// the handed-out URL always has its full lifetime ahead of it regardless of
-// how old the row is.
+// New Cubelets obtain a short-lived ticket immediately before each attempt.
+// For S3/MinIO, presignArtifactGetURLWithTTL creates a fresh URL whose lifetime
+// is the configured ticket TTL; bytes then flow object store -> Cubelet and
+// never through CubeMaster. The seven-day ArtifactURL persisted by older
+// builders is retained only for upgrade compatibility and legacy endpoints.
 //
 // minio-go's PresignedGetObject signs locally (no network round trip), so
 // this adds microseconds to a distribution, not an RPC.
 //
 // CREDENTIALS
 // -----------
-// The same deployment-wide CUBE_S3_* variables TC / cubelet / s3lvol read
-// (one-click exports them from .one-click.env to every unit; the chart
-// passes them via .Values.global.env). When they are absent here the stored
-// URL is returned unchanged -- correct for local-disk artifacts (empty URL)
-// and a graceful degradation for S3 ones (the stored URL keeps whatever
-// validity it has left).
+// CubeMaster needs the same deployment-wide CUBE_S3_* configuration as TC in
+// order to issue S3 tickets. The ticket path fails closed when signing is not
+// configured; it never falls back to ArtifactURL or Master byte proxying.
 
 // s3PresignExpiry matches s3store.DefaultPresignExpiry (7 days, the SigV4
 // maximum). Kept as a constant rather than an env override because every
@@ -103,6 +93,7 @@ func loadArtifactStore() *artifactStore {
 	useSSL := s3.UseSSL
 	st, err := blobstore.Open(context.Background(), s3driver.Options{
 		Endpoint:           s3.Endpoint,
+		NodeEndpoint:       s3.NodeEndpoint,
 		AccessKeyID:        s3.AccessKey,
 		SecretAccessKey:    s3.SecretKey,
 		Bucket:             s3.Bucket,
@@ -160,9 +151,30 @@ func artifactStoreColumns(artifactID string) (backend, objectKey string) {
 	return st.backend, blobstore.ArtifactExt4Key(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), artifactID)
 }
 
-// presignArtifactGetURL is the single signing seam, indirected so tests can
-// substitute a fake without a live object store.
-var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
+func artifactS3StorageRef() (string, error) {
+	cfg := configenv.ParseArtifactS3()
+	if !cfg.Enabled {
+		return "", errS3PresignNotConfigured
+	}
+	endpoint := strings.TrimSpace(cfg.NodeEndpoint)
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(cfg.Endpoint)
+	}
+	u := &url.URL{
+		Scheme: "s3",
+		Host:   cfg.Bucket,
+		Path:   "/" + strings.Trim(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), "/"),
+	}
+	query := u.Query()
+	query.Set("endpoint", endpoint)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
+
+// presignArtifactGetURLWithTTL creates a fresh, bounded capability. Download
+// tickets use this directly and never fall back to a URL persisted at build
+// time.
+var presignArtifactGetURLWithTTL = func(ctx context.Context, artifact *models.RootfsArtifact, ttl time.Duration) (string, error) {
 	if artifact == nil {
 		return "", errS3PresignNotConfigured
 	}
@@ -170,7 +182,11 @@ var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArt
 	if st == nil {
 		return "", errS3PresignNotConfigured
 	}
-	u, err := st.store.SignedGetURL(ctx, artifactStoreKey(ctx, artifact), s3PresignExpiry)
+	key, err := artifactStoreKey(ctx, artifact)
+	if err != nil {
+		return "", err
+	}
+	u, err := st.store.SignedGetURL(ctx, key, ttl)
 	if err != nil {
 		if errors.Is(err, blobstore.ErrUnsupported) {
 			return "", nil
@@ -181,6 +197,12 @@ var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArt
 		return "", nil
 	}
 	return u, nil
+}
+
+// presignArtifactGetURL is retained for migration and legacy download paths.
+// New Cubelet distribution always uses the explicit-TTL function above.
+var presignArtifactGetURL = func(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
+	return presignArtifactGetURLWithTTL(ctx, artifact, s3PresignExpiry)
 }
 
 var errS3PresignNotConfigured = fmt.Errorf("s3 presign not configured on cubemaster")
@@ -195,7 +217,11 @@ var statArtifactObjectInS3 = func(ctx context.Context, artifact *models.RootfsAr
 	if st == nil {
 		return false, errS3PresignNotConfigured
 	}
-	_, err := st.store.Stat(ctx, artifactStoreKey(ctx, artifact))
+	key, err := artifactStoreKey(ctx, artifact)
+	if err != nil {
+		return false, err
+	}
+	_, err = st.store.Stat(ctx, key)
 	if err != nil {
 		if blobstore.IsNotExist(err) {
 			return false, nil
@@ -254,12 +280,16 @@ func OpenArtifactObject(ctx context.Context, artifact *models.RootfsArtifact) (*
 	if st == nil {
 		return nil, errS3PresignNotConfigured
 	}
-	return st.store.Get(ctx, artifactStoreKey(ctx, artifact), blobstore.GetOptions{})
+	key, err := artifactStoreKey(ctx, artifact)
+	if err != nil {
+		return nil, err
+	}
+	return st.store.Get(ctx, key, blobstore.GetOptions{})
 }
 
-func artifactStoreKey(ctx context.Context, artifact *models.RootfsArtifact) string {
+func artifactStoreKey(ctx context.Context, artifact *models.RootfsArtifact) (string, error) {
 	if artifact == nil {
-		return ""
+		return "", errors.New("artifact is nil")
 	}
 	return artifactStoreKeyWithPrefix(ctx, artifact, artifactStorePrefix())
 }
@@ -268,21 +298,48 @@ func artifactStorePrefix() string {
 	return strings.Trim(configenv.EnvOr(configenv.EnvS3ArtifactPrefix), "/")
 }
 
-func artifactStoreKeyWithPrefix(ctx context.Context, artifact *models.RootfsArtifact, prefix string) string {
+func artifactStoreKeyWithPrefix(ctx context.Context, artifact *models.RootfsArtifact, prefix string) (string, error) {
 	fallback := artifactUserKey(artifact.ArtifactID)
 	stored := strings.TrimSpace(artifact.ObjectKey)
 	if stored == "" {
-		return fallback
+		return fallback, validateArtifactS3Locator(artifact)
 	}
 	key := userKeyFromStoredObjectKey(stored, prefix)
 	if prefix != "" && strings.Contains(key, "/") {
-		log.G(ctx).Warnf("artifact object_key %q does not match store prefix %q; using derived key %s", stored, prefix, fallback)
-		return fallback
+		return "", fmt.Errorf("artifact object_key %q does not match configured prefix %q", stored, prefix)
 	}
-	if blobstore.ValidateKey(key) != nil {
-		return fallback
+	if err := blobstore.ValidateKey(key); err != nil {
+		return "", fmt.Errorf("artifact object_key %q is invalid: %w", stored, err)
 	}
-	return key
+	if err := validateArtifactS3Locator(artifact); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func validateArtifactS3Locator(artifact *models.RootfsArtifact) error {
+	if artifact == nil || strings.TrimSpace(artifact.StorageRef) == "" {
+		return nil
+	}
+	u, err := url.Parse(strings.TrimSpace(artifact.StorageRef))
+	if err != nil || !strings.EqualFold(u.Scheme, "s3") || strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("artifact %s has invalid S3 storage_ref", artifact.ArtifactID)
+	}
+	cfg := configenv.ParseArtifactS3()
+	if !strings.EqualFold(strings.TrimSpace(u.Host), strings.TrimSpace(cfg.Bucket)) {
+		return fmt.Errorf("artifact %s belongs to S3 bucket %q, configured bucket is %q",
+			artifact.ArtifactID, u.Host, cfg.Bucket)
+	}
+	recordedEndpoint := strings.TrimRight(strings.ToLower(strings.TrimSpace(u.Query().Get("endpoint"))), "/")
+	configuredEndpoint := strings.TrimRight(strings.ToLower(strings.TrimSpace(cfg.NodeEndpoint)), "/")
+	if configuredEndpoint == "" {
+		configuredEndpoint = strings.TrimRight(strings.ToLower(strings.TrimSpace(cfg.Endpoint)), "/")
+	}
+	if recordedEndpoint != "" && recordedEndpoint != configuredEndpoint {
+		return fmt.Errorf("artifact %s belongs to S3 endpoint %q, configured endpoint is %q",
+			artifact.ArtifactID, recordedEndpoint, configuredEndpoint)
+	}
+	return nil
 }
 
 func userKeyFromStoredObjectKey(stored, prefix string) string {
@@ -299,8 +356,9 @@ func userKeyFromStoredObjectKey(stored, prefix string) string {
 	return stored
 }
 
-// artifactDownloadURL resolves the download URL to hand out for an artifact
-// RIGHT NOW.
+// artifactDownloadURL supports the pre-ticket compatibility endpoint only.
+// New distribution must call presignArtifactGetURLWithTTL through
+// buildArtifactDownloadTicket and must not use this fallback behavior.
 //
 //   - Local-disk artifact (no stored URL): "" so the caller falls back to the
 //     Master-served download endpoint (buildDownloadURL).

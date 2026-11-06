@@ -8,9 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -23,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandboxReq, artifactID, jobID string) ReplicaStatus {
@@ -158,21 +159,18 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 
 // ensureArtifactDistributable refuses to push a CreateImage to cubelets when
 // the artifact record is obviously incomplete. Without this guard the call
-// proceeds with ext4_size_bytes=0 / download_token=""; cubelet then tries to
-// pull with an empty token against a URL that falls back to os.Hostname()
-// (buildDownloadURL) and reports "invalid size:0", which marks the template
-// FAILED and masks the real cause (concurrent build race; see
-// artifactBuildLocks). Fail here with a clear diagnostic instead.
+// proceeds with missing integrity metadata or an unusable ticket origin,
+// which marks the template FAILED and masks the real build/publish error.
 func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArtifact) error {
 	if artifact == nil {
 		return fmt.Errorf("distributeRootfsArtifact: artifact is nil")
 	}
 	downloadBaseURL := effectiveArtifactDownloadBaseURL("", artifact)
-	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || strings.TrimSpace(artifact.DownloadToken) == "" || downloadBaseURL == "" {
+	if artifact.Status != ArtifactStatusReady || artifact.Ext4SizeBytes == 0 || strings.TrimSpace(artifact.Ext4SHA256) == "" || downloadBaseURL == "" {
 		return fmt.Errorf(
-			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t token_set=%t download_base_url=%q master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
+			"artifact %s is not ready for distribution (status=%s size_bytes=%d sha256_set=%t download_base_url=%q master_node_ip=%q); template build likely did not complete — check cubemaster logs for buildRootfsArtifact errors",
 			artifact.ArtifactID, artifact.Status, artifact.Ext4SizeBytes,
-			strings.TrimSpace(artifact.Ext4SHA256) != "", strings.TrimSpace(artifact.DownloadToken) != "", downloadBaseURL, artifact.MasterNodeIP,
+			strings.TrimSpace(artifact.Ext4SHA256) != "", downloadBaseURL, artifact.MasterNodeIP,
 		)
 	}
 	// The five checks above only read the artifact row. A row can be perfectly
@@ -184,10 +182,9 @@ func ensureArtifactDistributable(ctx context.Context, artifact *models.RootfsArt
 	// the drift spelled out instead of collecting N identical per-node sha256
 	// mismatches.
 	//
-	// Where the file lives depends on the topology: in the standalone-TC
-	// architecture it is ALWAYS in the CubeTemplateCenter tier (CubeMaster's
-	// disk holds nothing), so verifyArtifactServability probes the download
-	// URL a cubelet would use rather than this process's disk.
+	// Where the bytes live depends on the artifact backend: TC for fs/local
+	// media, or the object store for S3. verifyArtifactServability probes the
+	// same short-lived direct destination a Cubelet uses.
 	return verifyArtifactServability(ctx, artifact)
 }
 
@@ -209,23 +206,17 @@ func distributionWorkerCount() int {
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
 func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
-	// Always give Cubelets the CubeMaster download endpoint. That keeps the
-	// node-facing address uniform across local-disk and S3-backed artifacts and
-	// avoids per-node dependence on the object-store endpoint's reachability.
-	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
+	annotations, err := artifactDownloadAnnotations(ctx, artifact, "")
+	if err != nil {
+		return nil, int32(len(targets)), 0, int32(len(targets)), err
+	}
+	annotations[constants.CubeAnnotationWritableLayerSize] = req.WritableLayerSize
+	annotations[constants.CubeAnnotationTemplateSpecFingerprint] = artifact.TemplateSpecFingerprint
+	annotations[constants.CubeAnnotationsInsType] = req.InstanceType
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
 		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
-		Annotations: map[string]string{
-			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
-			constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
-			constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
-			constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
-			constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
-			constants.CubeAnnotationTemplateSpecFingerprint: artifact.TemplateSpecFingerprint,
-			constants.CubeAnnotationsInsType:                req.InstanceType,
-		},
+		Annotations:  annotations,
 	}
 	expected := int32(len(targets))
 	ready := int32(0)
@@ -244,9 +235,55 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 			defer func() { <-sem }()
 
 			replica := buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
+			if templateID == "" || generatedReq == nil {
+				err := errors.New("artifact distribution requires a persisted template replica before download")
+				lock.Lock()
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+				lock.Unlock()
+				return
+			}
+			// Persist authorization before CreateImage. Cubelet asks Master for a
+			// ticket during this RPC, so writing the replica afterwards creates a
+			// deterministic 403 race.
+			if err := UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica); err != nil {
+				lock.Lock()
+				failed++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("authorize artifact download on node %s: %w", target.ID(), err)
+				}
+				lock.Unlock()
+				return
+			}
+			var err error
+			refreshToken := ""
+			if spec.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL] != "" {
+				refreshToken, err = BuildArtifactDownloadRefreshToken(ctx, artifact, target.ID(), time.Now())
+			}
+			if err != nil {
+				lock.Lock()
+				failed++
+				replica.Phase = ReplicaPhaseFailed
+				replica.ErrorMessage = err.Error()
+				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				if firstErr == nil {
+					firstErr = err
+				}
+				lock.Unlock()
+				return
+			}
+			nodeSpec := proto.Clone(spec).(*imagev1.ImageSpec)
+			if nodeSpec.Annotations == nil {
+				nodeSpec.Annotations = make(map[string]string)
+			}
+			if refreshToken != "" {
+				nodeSpec.Annotations[constants.CubeAnnotationRootfsArtifactRefreshToken] = refreshToken
+			}
 			rsp, err := cubelet.CreateImage(ctx, cubelet.GetCubeletAddr(target.HostIP()), &imagev1.CreateImageRequest{
 				RequestID: uuid.New().String(),
-				Spec:      spec,
+				Spec:      nodeSpec,
 			})
 			lock.Lock()
 			defer lock.Unlock()
@@ -257,9 +294,7 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 				if firstErr == nil {
 					firstErr = err
 				}
-				if templateID != "" && generatedReq != nil {
-					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
-				}
+				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
 				return
 			}
 			if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
@@ -277,8 +312,19 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 				} else {
 					replica.ErrorMessage = "empty create image response"
 				}
-				if templateID != "" && generatedReq != nil {
-					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				return
+			}
+			// Record physical placement independently of the replica lifecycle so
+			// last-owner-cleanup / GC can later reach this node even after the
+			// replica row is removed (FIX-1).
+			if err := upsertArtifactNodePlacement(ctx, artifact.ArtifactID, target.ID(), target.HostIP()); err != nil {
+				failed++
+				replica.Phase = ReplicaPhaseFailed
+				replica.ErrorMessage = fmt.Sprintf("record artifact placement: %v", err)
+				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				if firstErr == nil {
+					firstErr = errors.New(replica.ErrorMessage)
 				}
 				return
 			}
@@ -286,19 +332,18 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 			replica.CleanupRequired = false
 			replica.LastErrorPhase = ""
 			replica.ErrorMessage = ""
+			if err := UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica); err != nil {
+				failed++
+				replica.Phase = ReplicaPhaseFailed
+				replica.CleanupRequired = true
+				replica.ErrorMessage = fmt.Sprintf("persist distributed replica: %v", err)
+				if firstErr == nil {
+					firstErr = errors.New(replica.ErrorMessage)
+				}
+				return
+			}
 			ready++
 			readyTargets = append(readyTargets, target)
-			if templateID != "" && generatedReq != nil {
-				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
-			}
-			// Record physical placement independently of the replica lifecycle so
-			// last-owner-cleanup / GC can later reach this node even after the
-			// replica row is removed (FIX-1).
-			if err := upsertArtifactNodePlacement(ctx, artifact.ArtifactID, target.ID(), target.HostIP()); err != nil {
-				// Non-fatal: placement is a cleanup optimisation, not a
-				// correctness gate for distribution. Backfill/GC reconcile later.
-				log.G(ctx).Warnf("record artifact placement %s on node %s failed: %v", artifact.ArtifactID, target.ID(), err)
-			}
 		}()
 	}
 	wg.Wait()
