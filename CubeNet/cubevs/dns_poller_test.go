@@ -85,6 +85,42 @@ func TestPollerLearnsThenInjects(t *testing.T) {
 	requireAllowRow(t, ifindex, "1.2.3.4", 0)
 }
 
+// TestPollerLearnsCatchAllPorts is the userspace half of the catch-all E2E
+// cases: a "*" rule opens 80/http and 443/https for a name that is not itself
+// in the policy, and does not open any other port.
+func TestPollerLearnsCatchAllPorts(t *testing.T) {
+	const ifindex = uint32(823)
+	newPolicyManagerTest(t, ifindex)
+	allowInternet := false
+	mustUpdatePolicy(t, ifindex, MVMOptions{
+		AllowInternetAccess: &allowInternet,
+		DNSCatchAll: &DNSCatchAll{Ports: []DNSCatchAllPort{
+			{Port: 80, Scheme: L7SchemeHTTP},
+			{Port: 443, Scheme: L7SchemeHTTPS},
+		}},
+	})
+
+	injector := &recordingInjector{}
+	p := newTestPoller(injector)
+	frame := buildDNSReplyFrame(t, dnsReplyOptions{
+		qname: "github.com", id: 0x2222, qtype: dns.TypeA, rcode: dns.RcodeSuccess,
+		response: true, questions: 1, answers: []string{"1.1.1.1"},
+	})
+	p.handleFrame(dnsEventRecord(ifindex, frame))
+
+	http, ok := allowRow(t, ifindex, "1.1.1.1", 80)
+	if !ok || http.Scheme != L7SchemeHTTP {
+		t.Fatalf("github.com:80 row=%+v present=%v, want L7 http", http, ok)
+	}
+	https, ok := allowRow(t, ifindex, "1.1.1.1", 443)
+	if !ok || https.Scheme != L7SchemeHTTPS {
+		t.Fatalf("github.com:443 row=%+v present=%v, want L7 https", https, ok)
+	}
+	if _, ok := allowRow(t, ifindex, "1.1.1.1", 22); ok {
+		t.Fatal("catch-all learned port 22")
+	}
+}
+
 // TestPollerInjectsFrameVerbatim: the datapath uploads the frame *after*
 // reverse NAT, so user space must not touch it — it is already byte-for-byte
 // what bpf_redirect would have delivered.

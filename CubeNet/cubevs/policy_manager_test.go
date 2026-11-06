@@ -1234,6 +1234,73 @@ func TestCatchAllIsWrittenAndLearned(t *testing.T) {
 	}
 }
 
+func TestCatchAllPolicyInstallsTrieAndLearns(t *testing.T) {
+	const ifindex = uint32(880)
+	newPolicyManagerTest(t, ifindex)
+
+	allowInternet := false
+	opts := MVMOptions{
+		AllowInternetAccess: &allowInternet,
+		DNSCatchAll: &DNSCatchAll{Ports: []DNSCatchAllPort{
+			{Port: 80, Scheme: L7SchemeHTTP},
+			{Port: 443, Scheme: L7SchemeHTTPS},
+		}},
+		L7AllowOut: &[]L7Target{{
+			Host: "httpbun.com", Port: 443, Scheme: L7SchemeHTTPS,
+		}},
+	}
+	mustUpdatePolicy(t, ifindex, opts)
+
+	question, _, err := makeDNSAllowRule("example.com", 0)
+	if err != nil {
+		t.Fatalf("question key: %v", err)
+	}
+	var matched dnsAllowValue
+	if err := mustInner(t, MapNameDNSAllowV2, ifindex).Lookup(&question, &matched); err != nil {
+		t.Fatalf("LPM lookup example.com = %v, want the prefixlen-0 catch-all", err)
+	}
+	if matched.NameLen != 1 || matched.Flags != uint8(netPolicyFlagL7Required) || matched.PortCount != 2 {
+		t.Fatalf("matched value=%+v, want name_len 1, L7, two ports", matched)
+	}
+
+	specific, _, err := makeDNSAllowRule("httpbun.com", 0)
+	if err != nil {
+		t.Fatalf("specific key: %v", err)
+	}
+	var specificVal dnsAllowValue
+	if err := mustInner(t, MapNameDNSAllowV2, ifindex).Lookup(&specific, &specificVal); err != nil {
+		t.Fatalf("LPM lookup httpbun.com = %v, want the exact rule", err)
+	}
+	if specificVal.NameLen == 1 {
+		t.Fatalf("httpbun.com matched the catch-all, want the longer exact rule")
+	}
+
+	learn(t, ifindex, "example.com", "9.9.9.9")
+	learn(t, ifindex, "httpbun.com", "1.2.3.4")
+
+	http, ok := allowRow(t, ifindex, "9.9.9.9", 80)
+	if !ok || http.Scheme != L7SchemeHTTP || http.Flags&uint8(netPolicyFlagL7Required) == 0 {
+		t.Fatalf("example.com:80 row=%+v present=%v, want L7 http", http, ok)
+	}
+	https, ok := allowRow(t, ifindex, "9.9.9.9", 443)
+	if !ok || https.Scheme != L7SchemeHTTPS {
+		t.Fatalf("example.com:443 row=%+v present=%v, want L7 https", https, ok)
+	}
+	if _, ok := allowRow(t, ifindex, "9.9.9.9", 22); ok {
+		t.Fatal("catch-all learned port 22")
+	}
+	if _, ok := allowRow(t, ifindex, "9.9.9.9", 0); ok {
+		t.Fatal("catch-all learned a /32 any-port row")
+	}
+	if _, ok := allowRow(t, ifindex, "1.2.3.4", 80); ok {
+		t.Fatal("exact https rule also opened port 80")
+	}
+	bun, ok := allowRow(t, ifindex, "1.2.3.4", 443)
+	if !ok || bun.Scheme != L7SchemeHTTPS {
+		t.Fatalf("httpbun.com:443 row=%+v present=%v, want L7 https", bun, ok)
+	}
+}
+
 func samePorts(got, want []uint16) bool {
 	if len(got) != len(want) {
 		return false

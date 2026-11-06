@@ -565,7 +565,7 @@ int dns_handle_response_prog(struct __sk_buff *skb)
 		return TC_ACT_OK;
 
 	rstate->upload = dns_response_parse_and_track(skb, rstate->dns_off, rstate->ifindex,
-						   rstate->server_ip, rstate->source_port) ? 1 : 0;
+						   rstate->server_ip, rstate->source_port);
 
 	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_RESPONSE_FINISH);
 	/* Tail call failed (slot unpopulated): drop, the sandbox will retry. */
@@ -626,10 +626,15 @@ int dns_response_finish_prog(struct __sk_buff *skb)
 	if (!udp_nat_rewrite(skb, l2, l3, l4, sess))
 		return TC_ACT_OK;
 
-	if (upload) {
+	if (upload == DNS_RESP_UPLOAD) {
+		/* Perf output failure still drops the frame. Redirecting it
+		 * would publish addresses user space never learned.
+		 */
 		dns_forward_response_to_user(skb, vm_ifindex);
 		return TC_ACT_SHOT;
 	}
+	if (upload == DNS_RESP_DROP)
+		return TC_ACT_SHOT;
 	return bpf_redirect(vm_ifindex, 0);
 }
 

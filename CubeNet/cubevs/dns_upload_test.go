@@ -393,9 +393,12 @@ func TestDNSUploadEmitsNothingWhenForwarding(t *testing.T) {
 	}
 }
 
-// TestDNSUploadForwardsWhenNotLearnable pins the cases that must keep taking
-// the ordinary reverse-NAT path: the sandbox still gets its reply, it is just
-// not learned from.
+// TestDNSUploadForwardsWhenNotLearnable pins delivery of replies that were
+// never a tracked query: the sandbox still gets them, and nothing is learned.
+//
+// A reply that DID retire a tracked query but cannot be learned (expired,
+// failed, truncated, oversized) is dropped instead. Delivering it would let
+// the guest cache addresses the policy will deny.
 func TestDNSUploadForwardsWhenNotLearnable(t *testing.T) {
 	const srcPort, id = uint16(40000), uint16(0x1234)
 
@@ -407,11 +410,12 @@ func TestDNSUploadForwardsWhenNotLearnable(t *testing.T) {
 		// trackQName seeds the pending query under a different name to force a
 		// qname_hash mismatch.
 		trackQName string
+		drop       bool
 		opts       func(o *dnsReplyOptions)
 	}{
 		{name: "untracked", learning: true, track: false},
 		{name: "learning disabled", learning: false, track: true},
-		{name: "expired track entry", learning: true, track: true, expired: true},
+		{name: "expired track entry", learning: true, track: true, expired: true, drop: true},
 		{name: "qname mismatch", learning: true, track: true, trackQName: "other.com"},
 		{
 			name: "non-A question", learning: true, track: true,
@@ -422,11 +426,11 @@ func TestDNSUploadForwardsWhenNotLearnable(t *testing.T) {
 			opts: func(o *dnsReplyOptions) { o.questions = 2 },
 		},
 		{
-			name: "servfail", learning: true, track: true,
+			name: "servfail", learning: true, track: true, drop: true,
 			opts: func(o *dnsReplyOptions) { o.rcode = dns.RcodeServerFailure },
 		},
 		{
-			name: "truncated", learning: true, track: true,
+			name: "truncated", learning: true, track: true, drop: true,
 			opts: func(o *dnsReplyOptions) { o.truncated = true },
 		},
 		{
@@ -434,7 +438,7 @@ func TestDNSUploadForwardsWhenNotLearnable(t *testing.T) {
 			opts: func(o *dnsReplyOptions) { o.response = false },
 		},
 		{
-			name: "oversized frame", learning: true, track: true,
+			name: "oversized frame", learning: true, track: true, drop: true,
 			opts: func(o *dnsReplyOptions) { o.padTo = dnsEventMaxFrame + 64 },
 		},
 	}
@@ -459,8 +463,12 @@ func TestDNSUploadForwardsWhenNotLearnable(t *testing.T) {
 				tc.opts(&opts)
 			}
 			got := env.run(t, buildDNSReplyFrame(t, opts))
-			if got != uploadVerdictForward {
-				t.Fatalf("verdict = %d, want forward (%d)", got, uploadVerdictForward)
+			want := uploadVerdictForward
+			if tc.drop {
+				want = uploadVerdictUpload
+			}
+			if got != want {
+				t.Fatalf("verdict = %d, want %d", got, want)
 			}
 		})
 	}

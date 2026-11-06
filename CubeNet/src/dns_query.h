@@ -225,8 +225,13 @@ static __always_inline bool dns_track_rate_allow(__u32 ifindex)
  * its own domain index, so it always uses the *current* rule rather than the
  * one that was in force when the query left. That is what makes a policy
  * update take effect on replies already in flight.
+ *
+ * Returns false when the query matched a rule but was not tracked. The caller
+ * must drop it. Forwarding an unmatched query is fine — nothing was going to
+ * learn from it — but forwarding a matched query we refused to track lets the
+ * guest cache an address the policy will deny.
  */
-static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
+static __always_inline bool dns_track_allowed_query(struct __sk_buff *skb,
 						    const struct dns_query_state *state,
 						    const struct dns_allow_value *matched,
 						    __u64 qname_hash)
@@ -239,12 +244,12 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	struct udphdr *udp;
 
 	if (!dns_track_rate_allow(state->ifindex))
-		return;
+		return false;
 
 	if (!__pull_headers_udp(skb, &l2, &l3, &udp))
-		return;
+		return false;
 	if (bpf_skb_load_bytes(skb, state->dns_off, &hdr, sizeof(hdr)))
-		return;
+		return false;
 
 	track_key.ifindex = state->ifindex;
 	track_key.server_ip = l3->daddr;
@@ -254,7 +259,9 @@ static __always_inline void dns_track_allowed_query(struct __sk_buff *skb,
 	track_value.flags = matched->flags;
 	track_value.expires_at_ns = bpf_ktime_get_ns() + DNS_QUERY_TRACK_TTL_NS;
 
-	bpf_map_update_elem(&dns_query_track, &track_key, &track_value, BPF_ANY);
+	if (bpf_map_update_elem(&dns_query_track, &track_key, &track_value, BPF_ANY))
+		return false;
+	return true;
 }
 
 /* Query entry ------------------------------------------------------------ */

@@ -181,8 +181,11 @@ type dnsQueryTrackValue struct {
 
 // dnsTrackRLState mirrors struct dns_track_rl_state in src/cubevs.h. Installed
 // per sandbox at AddTAPDevice time; the BPF side then enforces
-// DNS_TRACK_QPS_LIMIT tracked queries per second via a fixed window. The Lock
-// field is a bpf_spin_lock placeholder whose contents the kernel owns.
+// DNS_TRACK_QPS_LIMIT tracked queries per second via a fixed window. A
+// catch-all rule matches every name, so the whole resolver burst shares this
+// budget. Over budget the matched query is dropped rather than answered: an
+// answered-but-untracked lookup is cached by the guest and then denied. The
+// Lock field is a bpf_spin_lock placeholder whose contents the kernel owns.
 // Zero-initialising everything is safe: the first BPF access sees
 // window_end_ns == 0 and opens a fresh window.
 type dnsTrackRLState struct {

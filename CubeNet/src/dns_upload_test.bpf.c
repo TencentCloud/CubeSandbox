@@ -46,13 +46,16 @@ int test_dns_upload(struct __sk_buff *skb)
 	if (!tc)
 		return TC_ACT_SHOT + 1; /* distinct from both verdicts */
 
-	if (dns_response_parse_and_track(skb, tc->dns_off, tc->ifindex,
-				       tc->server_ip, tc->source_port)) {
+	switch (dns_response_parse_and_track(skb, tc->dns_off, tc->ifindex,
+					   tc->server_ip, tc->source_port)) {
+	case DNS_RESP_UPLOAD:
 		dns_forward_response_to_user(skb, tc->ifindex);
 		return TC_ACT_SHOT;
+	case DNS_RESP_DROP:
+		return TC_ACT_SHOT;
+	default:
+		return TC_ACT_OK;
 	}
-
-	return TC_ACT_OK;
 }
 
 char __license[] SEC("license") = "Dual BSD/GPL";

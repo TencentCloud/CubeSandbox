@@ -84,20 +84,25 @@ const volatile __u32 cube_l7_mark_https = 0xCE020000u;
 #define DNS_QUERY_TRACK_TTL_NS		(10ULL * NSEC_PER_SEC)
 
 /* Per-sandbox ceiling on tracked DNS queries. Only queries that matched a
- * dns_allow_v2 rule consume budget, so ordinary DNS traffic is unaffected.
- * Over budget the query is forwarded but not tracked, so its response is not
- * uploaded and nothing is learned — the sandbox cannot reach the address it
- * just resolved, which is fail-closed and self-inflicted.
+ * dns_allow_v2 rule consume budget, so a sandbox with no domain rule is
+ * unaffected. A catch-all rule matches every name, so the whole resolver
+ * burst shares this budget.
+ *
+ * Over budget the matched query is dropped, not forwarded. Forwarding it
+ * would hand the guest an address that will never be learned; with
+ * allow_internet_access off that is a cached connect failure, and the stub
+ * resolver will not ask again until the TTL expires. Dropping it makes the
+ * resolver retry, and the next window can track the retry.
  */
 #define DNS_TRACK_QPS_LIMIT		100
 #define DNS_TRACK_WINDOW_NS		(1ULL * NSEC_PER_SEC)
 
 /* Upper bound on a frame handed to user space on dns_events.
  *
- * Large enough for a typical EDNS0 reply. A response bigger than this is not
- * uploaded at all and takes the ordinary reverse-NAT path: truncating it would
- * make the user-space parse fail, and since an uploaded frame is dropped from
- * the datapath the sandbox would lose the reply entirely.
+ * Large enough for a typical EDNS0 reply. A tracked response bigger than
+ * this is dropped rather than delivered: truncating it would make the
+ * user-space parse fail, and handing the guest the original would cache
+ * addresses that were never learned. The resolver retries.
  */
 #define DNS_EVENT_MAX_FRAME		2048
 /* Positive cache lifetime for a fib-learned neighbor MAC. Must be well below
@@ -436,10 +441,10 @@ struct dns_response_state {
 	__u32 ifindex;		/* sandbox tap ifindex (sess->vm_ifindex) */
 	__u32 server_ip;	/* DNS server IP (l3->saddr in network byte order) */
 	__u16 source_port;	/* sandbox-side UDP port (sess->vm_port in nbo) */
-	/* Set by dns_handle_response_prog when this reply answers a tracked
-	 * query, i.e. when user space owns both the allow_out_v3 write and the
-	 * delivery of this frame. dns_response_finish_prog reads it after the
-	 * reverse NAT to choose between uploading the frame and redirecting it.
+	/* dns_handle_response_prog writes one of DNS_RESP_FORWARD / _DROP /
+	 * _UPLOAD. Finish reads it after reverse NAT: forward an unrelated
+	 * reply, drop a tracked reply we could not learn from, or upload a
+	 * tracked reply and let user space inject it after the allow write.
 	 */
 	__u16 upload;
 };

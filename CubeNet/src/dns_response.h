@@ -78,24 +78,34 @@ static __always_inline struct dns_query_track_value *dns_lookup_response_query(
 	return bpf_map_lookup_elem(&dns_query_track, track_key);
 }
 
+/* What dns_response_finish_prog should do with a reply. */
+#define DNS_RESP_FORWARD	0 /* not a query we tracked; deliver it */
+#define DNS_RESP_DROP		1 /* tracked, but we will not learn; do not deliver */
+#define DNS_RESP_UPLOAD		2 /* tracked and learnable; user space injects it */
+
 /* Parse a DNS reply far enough to find the pending query it answers, retire
- * that query, and report whether the reply must be handed to user space for
- * learning.
+ * that query, and report how the caller should deliver the frame.
  *
- * Returns true when the reply answers a query we tracked and is small enough
- * to upload; the caller then owns delivering the frame (user space re-injects
- * it after the allow_out_v3 write, so the sandbox cannot observe a resolved
- * address before it is permitted). Everything else — untracked, malformed,
- * non-A, oversized, learning disabled — returns false and takes the ordinary
- * reverse-NAT path, so an unrelated DNS reply is never delayed.
+ * DNS_RESP_UPLOAD means the reply answers a query we tracked and is small
+ * enough to learn from. User space re-injects it after the allow_out_v3
+ * write, so the sandbox cannot observe a resolved address before it is
+ * permitted.
+ *
+ * DNS_RESP_DROP means the reply DID answer a tracked query, but we cannot
+ * learn from it (expired, truncated, failed, oversized). Delivering it would
+ * let the guest cache addresses the policy will deny. Dropping it makes the
+ * resolver retry.
+ *
+ * DNS_RESP_FORWARD is everything else — untracked, non-A, malformed, learning
+ * disabled — and takes the ordinary reverse-NAT path.
  *
  * Marked __always_inline (and using the *_inline QNAME helper above) so the
  * calling SEC("tc") program contains no bpf-to-bpf calls and can issue
  * bpf_tail_call on kernel 5.4.
  */
-static __always_inline bool dns_response_parse_and_track(struct __sk_buff *skb, __u32 dns_off,
-							 __u32 ifindex, __u32 server_ip,
-							 __u16 source_port)
+static __always_inline int dns_response_parse_and_track(struct __sk_buff *skb, __u32 dns_off,
+							__u32 ifindex, __u32 server_ip,
+							__u16 source_port)
 {
 	struct dns_query_track_value *query;
 	struct dns_query_track_key track_key = {};
@@ -108,22 +118,22 @@ static __always_inline bool dns_response_parse_and_track(struct __sk_buff *skb, 
 	__u16 flags;
 
 	if (!dns_response_learning_enabled(ifindex))
-		return false;
+		return DNS_RESP_FORWARD;
 
 	if (!dns_read_response_header(skb, dns_off, &hdr, &flags))
-		return false;
+		return DNS_RESP_FORWARD;
 
 	if (bpf_ntohs(hdr.qdcount) != 1)
-		return false;
+		return DNS_RESP_FORWARD;
 	if (!dns_hash_qname_inline(skb, &cursor, &question, &qname_hash))
-		return false;
+		return DNS_RESP_FORWARD;
 	if (!dns_question_footer_is_ipv4_a(&question))
-		return false;
+		return DNS_RESP_FORWARD;
 
 	query = dns_lookup_response_query(ifindex, server_ip, source_port, hdr.id,
 					  qname_hash, &track_key);
 	if (!query)
-		return false;
+		return DNS_RESP_FORWARD;
 
 	/* From here on the query is spent whatever we decide. This keeps the
 	 * pre-existing behaviour of the handler this replaced, which retired the
@@ -135,16 +145,17 @@ static __always_inline bool dns_response_parse_and_track(struct __sk_buff *skb, 
 
 	now = bpf_ktime_get_ns();
 	if (query->expires_at_ns <= now)
-		return false;
+		return DNS_RESP_DROP;
 	if (!dns_response_header_is_supported(&hdr, flags, &ancount))
-		return false;
-	/* Oversized replies stay on the datapath rather than being truncated
-	 * into an unparseable upload; see DNS_EVENT_MAX_FRAME.
+		return DNS_RESP_DROP;
+	/* An oversized reply cannot be uploaded without truncating it into
+	 * something user space would reject. Delivering it anyway lets the
+	 * guest cache addresses we did not learn. Drop it; the resolver retries.
 	 */
 	if (skb->len > DNS_EVENT_MAX_FRAME)
-		return false;
+		return DNS_RESP_DROP;
 
-	return true;
+	return DNS_RESP_UPLOAD;
 }
 
 /* Hand the (already reverse-NATed) frame to user space on dns_events.
