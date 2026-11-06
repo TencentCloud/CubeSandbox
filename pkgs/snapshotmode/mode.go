@@ -81,7 +81,6 @@ const (
 	ErrFilesystemOnlyNodeUnknown       = "snapshot_filesystem_only_node_capability_unknown"
 	ErrFilesystemOnlyNotReady          = "snapshot_filesystem_only_not_ready"
 	ErrFilesystemOnlyRollback          = "snapshot_filesystem_only_rollback_unsupported"
-	ErrFilesystemOnlyExternalMount     = "snapshot_filesystem_only_external_mount_unsupported"
 	ErrFilesystemOnlyCatalog           = "snapshot_filesystem_only_catalog_missing"
 	ErrFilesystemOnlyGuestRuntime      = "snapshot_filesystem_only_guest_runtime_mismatch"
 	ErrFilesystemOnlyFreezeUnsupported = "snapshot_filesystem_only_freeze_unsupported"
@@ -130,7 +129,6 @@ var identifierKinds = []struct {
 	{ErrSnapshotModeInvalid, KindClientError},
 	{ErrSnapshotModeConflict, KindClientError},
 	{ErrFilesystemOnlyRollback, KindClientError},
-	{ErrFilesystemOnlyExternalMount, KindClientError},
 	{ErrFilesystemOnlyUnsupported, KindPrecondition},
 	{ErrFilesystemOnlyNotReady, KindPrecondition},
 	{ErrFilesystemOnlyCatalog, KindPrecondition},

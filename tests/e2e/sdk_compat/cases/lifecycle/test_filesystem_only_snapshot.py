@@ -59,10 +59,10 @@ pytestmark = [
 FS_ONLY = "fs-only"
 FULL = "full"
 ROLLBACK_UNSUPPORTED = "snapshot_filesystem_only_rollback_unsupported"
-EXTERNAL_MOUNT_UNSUPPORTED = "snapshot_filesystem_only_external_mount_unsupported"
 
-# External mounts an fs-only package never carries: a plugin volume and a raw
-# host directory. Both are node-scoped, so a cold-booted guest cannot mount them.
+# External mounts an fs-only package never carries. A cold boot re-mounts only
+# what the caller declares on the create request, so a package that recorded
+# them must not hand them to a child that stays silent about them.
 _PLUGIN_RO = "/mnt/sdk-fs-only-plugin-ro"
 _HOST_MOUNT = "/mnt/sdk-fs-only-host"
 _HOST_BACKING = "sdk-fs-only-host"
@@ -843,73 +843,5 @@ def test_fs_only_snapshot_drops_external_mounts(sdk_backend, sdk_sandbox, sdk_e2
             [child] if child is not None else [],
             sdk_sandbox,
             snapshot_ids,
-        )
-    assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"
-
-
-@pytest.mark.requires_capability(VOLUME_PLUGIN)
-@pytest.mark.requires_capability(HOST_MOUNT)
-def test_fs_only_create_rejects_external_mounts(sdk_backend, sdk_sandbox, sdk_e2e_config):
-    """A cold-booted guest mounts no external volume.
-
-    Asking for one must fail instead of handing back an empty directory the
-    caller believes holds its data.
-    """
-    from cubesandbox import VolumeMount
-
-    from framework.host_mount import (
-        expect_create_rejected,
-        host_mount_metadata,
-        mount_option,
-        provision_host_dirs,
-        skip_if_host_mount_unavailable,
-        under_prefix,
-    )
-    from framework.volume import managed_volume
-
-    skip_if_host_mount_unavailable(sdk_backend, sdk_e2e_config)
-    provision_host_dirs(sdk_backend, sdk_e2e_config, [_HOST_BACKING])
-
-    api = ApiClient(sdk_e2e_config)
-    snapshot_id = None
-    try:
-        snapshot = _create_snapshot(api, sdk_sandbox.sandbox_id, mode=FS_ONLY)
-        snapshot_id = snapshot["snapshotID"]
-
-        host_message = expect_create_rejected(
-            sdk_backend,
-            sdk_e2e_config,
-            {
-                "test_suite": "sdk_compat",
-                **host_mount_metadata(
-                    [mount_option(under_prefix(_HOST_BACKING), _HOST_MOUNT)]
-                ),
-            },
-            role="fs_only_reject_host_mount",
-            create_options={"template": snapshot_id},
-        )
-        assert EXTERNAL_MOUNT_UNSUPPORTED in host_message
-
-        with managed_volume(sdk_e2e_config) as (volume_id, _volume_api):
-            plugin_message = expect_create_rejected(
-                sdk_backend,
-                sdk_e2e_config,
-                {"test_suite": "sdk_compat"},
-                role="fs_only_reject_plugin_volume",
-                create_options={
-                    "template": snapshot_id,
-                    "volume_mounts": {
-                        _PLUGIN_RO: VolumeMount(volume_id, read_only=True)
-                    },
-                },
-            )
-        assert EXTERNAL_MOUNT_UNSUPPORTED in plugin_message
-    finally:
-        api.close()
-        cleanup_errors = _release(
-            sdk_e2e_config,
-            [],
-            sdk_sandbox,
-            [snapshot_id] if snapshot_id else [],
         )
     assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"

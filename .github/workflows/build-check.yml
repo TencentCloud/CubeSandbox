@@ -246,6 +246,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Six images build on one runner and the docker-container driver keeps
+      # every layer in /var/lib/docker, which overruns the default disk.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

@@ -57,6 +57,7 @@ from adapters import create_adapter_with_capacity_retry  # noqa: E402
 from framework.capabilities import (  # noqa: E402
     CODE_INTERPRETER,
     capabilities_for_backend,
+    require_capabilities,
 )
 from framework.cleanup import safe_kill  # noqa: E402
 from framework.config import SdkE2EConfig, volume_plugin_enabled_from_env  # noqa: E402
@@ -411,10 +412,10 @@ def sdk_sandbox(
     sdk_e2e_reporter: JsonlReporter,
     sdk_e2e_trace: TraceCollector,
 ):
-    for marker in request.node.iter_markers("requires_capability"):
-        capability = marker.args[0]
-        if capability not in capabilities_for_backend(sdk_backend):
-            pytest.skip(f"backend {sdk_backend!r} does not support capability {capability!r}")
+    require_capabilities(
+        sdk_backend,
+        *[marker.args[0] for marker in request.node.iter_markers("requires_capability")],
+    )
 
     if request.node.get_closest_marker("requires_code_interpreter"):
         if CODE_INTERPRETER not in capabilities_for_backend(sdk_backend):

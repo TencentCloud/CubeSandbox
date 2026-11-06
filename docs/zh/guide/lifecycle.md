@@ -302,7 +302,7 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 ### 退避与重启上限
 
-重启会保留磁盘、网络和沙箱 ID，再冷启动一次；内存不保留。
+重启会保留磁盘、网络、卷与宿主目录挂载，以及沙箱 ID，再冷启动一次；内存不保留。
 
 连续失败从 10 秒开始退避，每次加倍，最长 300 秒；运行满 10 分钟视为稳定，重启计数清零。重启次数上限由 `restartBackoff.maxRestarts` 控制，默认 `0` 表示不限；集群可以用 `cubelet_conf.max_restarts_cap` 设全局上限，配置后，`0`（不限）也会被收紧到该值。达到上限后不再重启，沙箱不再自动拉起，但仍计入节点 `MvmNum` 配额，直到空闲超时或被显式销毁。
 

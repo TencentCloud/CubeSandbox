@@ -68,7 +68,6 @@ func TestClassify(t *testing.T) {
 	}{
 		{ErrSnapshotModeInvalid + ": bad", KindClientError},
 		{ErrFilesystemOnlyRollback + ": snap-1", KindClientError},
-		{ErrFilesystemOnlyExternalMount + ": data", KindClientError},
 		{ErrFilesystemOnlyFreezeUnsupported + ": no agent", KindPrecondition},
 		{ErrFilesystemOnlyRootfsUnsupported + ": no disk", KindPrecondition},
 		{ErrFilesystemOnlySharedVolume + ": data", KindPrecondition},
