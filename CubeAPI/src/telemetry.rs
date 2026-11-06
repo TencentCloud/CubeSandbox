@@ -20,6 +20,7 @@ use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::SdkTracerProvider, Resource};
 
 const ENV_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+const ENV_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 const ENV_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
 
 const DEFAULT_SERVICE_NAME: &str = "cube-api";
@@ -67,18 +68,18 @@ impl Guard {
 }
 
 pub fn init() -> Guard {
-    let endpoint = std::env::var(ENV_ENDPOINT).unwrap_or_default();
-    let endpoint = endpoint.trim().to_string();
-    if endpoint.is_empty() {
+    let generic = std::env::var(ENV_ENDPOINT).unwrap_or_default();
+    let traces = std::env::var(ENV_TRACES_ENDPOINT).unwrap_or_default();
+    let Some(endpoint) = select_endpoint(&traces, &generic) else {
         return Guard { provider: None };
-    }
+    };
 
     let service = std::env::var(ENV_SERVICE_NAME)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_SERVICE_NAME.to_string());
 
-    match build_provider(&endpoint, &service) {
+    match build_provider(endpoint, &service) {
         Ok(provider) => {
             global::set_text_map_propagator(TraceContextPropagator::new());
             global::set_tracer_provider(provider.clone());
@@ -91,6 +92,14 @@ pub fn init() -> Guard {
             Guard { provider: None }
         }
     }
+}
+
+fn select_endpoint<'a>(traces: &'a str, generic: &'a str) -> Option<&'a str> {
+    let traces = traces.trim();
+    let generic = generic.trim();
+    (!traces.is_empty())
+        .then_some(traces)
+        .or_else(|| (!generic.is_empty()).then_some(generic))
 }
 
 fn build_provider(
@@ -203,6 +212,23 @@ mod tests {
     };
     use opentelemetry_sdk::trace::InMemorySpanExporter;
     use tower::ServiceExt;
+
+    #[test]
+    fn traces_endpoint_takes_precedence_and_generic_is_a_fallback() {
+        assert_eq!(select_endpoint("", ""), None);
+        assert_eq!(
+            select_endpoint("", " http://generic:4317 "),
+            Some("http://generic:4317")
+        );
+        assert_eq!(
+            select_endpoint(" http://traces:4317 ", ""),
+            Some("http://traces:4317")
+        );
+        assert_eq!(
+            select_endpoint("http://traces:4317", "http://generic:4317"),
+            Some("http://traces:4317")
+        );
+    }
 
     const TRACEPARENT_HEADER: &str = "traceparent";
     const INBOUND_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";

@@ -25,8 +25,9 @@ import (
 const Scope = "github.com/tencentcloud/CubeSandbox/CubeMaster"
 
 const (
-	EnvEndpoint    = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	EnvServiceName = "OTEL_SERVICE_NAME"
+	EnvEndpoint       = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	EnvTracesEndpoint = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	EnvServiceName    = "OTEL_SERVICE_NAME"
 
 	defaultServiceName = "cubemaster"
 )
@@ -136,8 +137,7 @@ const (
 type Shutdown func(context.Context) error
 
 func Setup(ctx context.Context, service string) (Shutdown, error) {
-	endpoint := strings.TrimSpace(os.Getenv(EnvEndpoint))
-	if endpoint == "" {
+	if strings.TrimSpace(os.Getenv(EnvEndpoint)) == "" && strings.TrimSpace(os.Getenv(EnvTracesEndpoint)) == "" {
 		return noopShutdown, nil
 	}
 	if service == "" {
@@ -146,11 +146,8 @@ func Setup(ctx context.Context, service string) (Shutdown, error) {
 	if v := strings.TrimSpace(os.Getenv(EnvServiceName)); v != "" {
 		service = v
 	}
-	var opts []otlptracegrpc.Option
-	if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
-		opts = append(opts, otlptracegrpc.WithInsecure())
-	}
-	exp, err := otlptracegrpc.New(ctx, opts...)
+	// The exporter reads both endpoint variables and gives the traces-specific one precedence.
+	exp, err := otlptracegrpc.New(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -204,8 +201,8 @@ func EndWithCode(span trace.Span, code int) {
 	if span == nil {
 		return
 	}
+	span.SetAttributes(attribute.Int(AttrRetCode, code))
 	if code != SuccessCode {
-		span.SetAttributes(attribute.Int(AttrRetCode, code))
 		span.SetStatus(codes.Error, statusError)
 	}
 	span.End()

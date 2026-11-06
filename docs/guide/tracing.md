@@ -38,11 +38,13 @@ A few boundaries are worth knowing:
 
 - When CubeAPI is bypassed, a trace can start at CubeMaster; the entry span is then CubeMaster's own HTTP `POST /cube/...` span, which may not carry a named `cubemaster.*` business name.
 - Propagation is W3C Trace Context. A request from an SDK that does not propagate context is still traced server-side — you get the server-side trace, just without the client's own spans.
-- Clone and other SDK-composed operations are not merged into a single trace, and the guest agent and hypervisor are not instrumented directly; their work appears as the duration of the `cube-shim` spans that wrap them.
+- Clone and other SDK-composed operations are not merged into a single trace. The guest agent has separate tracing code, but this integration does not connect its spans to the trace backend; guest work and hypervisor work appear in the duration of the surrounding `cube-shim` spans.
 
 ## Enabling tracing
 
 Tracing is off by default. Point each component's `OTEL_EXPORTER_OTLP_ENDPOINT` at an externally supplied OTLP/**gRPC** receiver — an OpenTelemetry Collector or a Tempo OTLP/gRPC endpoint — using `http://<receiver-host>:<OTLP-gRPC-port>`.
+
+Alternatively set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`; it takes precedence when both are set. Tracing is off only when both are empty.
 
 Deploy the receiver and query backend separately. Each component exports under its own service name (`cube-api`, `cubemaster`, `cubetemplatecenter`, `cubelet`, `cube-shim`), so do not set a shared `OTEL_SERVICE_NAME`.
 

@@ -114,8 +114,8 @@ func TestReplicaNodeSpanRecordsSuccessAndBusinessFailureRetCode(t *testing.T) {
 	if got := byNode["node-ok"].Status().Code; got != codes.Unset {
 		t.Errorf("healthy node span status = %v, want Unset", got)
 	}
-	if _, present := attrOf(byNode["node-ok"], telemetry.AttrRetCode); present {
-		t.Error("healthy node span must not carry a ret code")
+	if kv, present := attrOf(byNode["node-ok"], telemetry.AttrRetCode); !present || kv.Value.AsInt64() != int64(errorcodev1.ErrorCode_Success) {
+		t.Errorf("healthy node span ret code = %v, want %d", kv.Value.AsInt64(), errorcodev1.ErrorCode_Success)
 	}
 	badSpan := byNode["node-bad"]
 	if badSpan.Status().Code != codes.Error {

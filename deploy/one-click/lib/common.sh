@@ -526,6 +526,7 @@ ONE_CLICK_TOGGLE_KEYS=(
   CUBE_SANDBOX_MINIO_ENABLED
   CUBE_PVM_ENABLE
   OTEL_EXPORTER_OTLP_ENDPOINT
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 )
 
 # snapshot_one_click_toggles: capture this-run operator intent for

@@ -2278,15 +2278,15 @@ mod tests {
     use super::Log;
     use super::RestoreConfig;
     use super::SandBox;
+    use super::SandBoxState;
+    use super::Trace;
     use super::{
         freeze_rpc_context, SnapshotFreezeState, SnapshotHold, SnapshotMode,
         ERR_FREEZE_UNSUPPORTED, ERR_ROOTFS_UNSUPPORTED, FREEZE_CALL_BACKSTOP, FREEZE_RPC_TIMEOUT,
     };
-    use cube_hypervisor::SnapshotType;
-    use super::SandBoxState;
-    use super::Trace;
     use crate::hypervisor::config::HypConfig;
     use crate::hypervisor::cube_hypervisor::CubeHypervisor;
+    use cube_hypervisor::SnapshotType;
 
     fn new_ut_sandbox() -> SandBox {
         let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);

@@ -99,3 +99,9 @@ web/tsconfig.tsbuildinfo
 
 # Local Helm runtime values (passwords / advertiseIP / TLS). Example is tracked.
 runtime-values.yaml
+
+# Local community PR and OTel build/test artifacts
+/.tmp-community-release/
+/.tmp-ghcr/
+/.tmp-otel-024f2acfe949/
+/.tmp-otel-20261105-7eb4ae6f/

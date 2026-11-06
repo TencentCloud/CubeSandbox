@@ -38,11 +38,13 @@ containerd 插桩还会记录 Task、RPC 和传输等 span，并使用调用方�
 
 - 绕过 CubeAPI 时，trace 可以从 CubeMaster 开始；此时入口 span 是 CubeMaster 自己的 HTTP `POST /cube/...` span，未必带有具名的 `cubemaster.*` 业务名称。
 - 传播协议是 W3C Trace Context。未传播上下文的 SDK 发来的请求仍会在服务端被追踪——你拿到的是服务端 trace，只是缺少客户端自身的 span。
-- 克隆等由 SDK 组合的多种操作不会合并成同一条 trace，客户机 agent 与 hypervisor 也没有被直接插桩；它们的工作体现为包裹它们的 `cube-shim` span 的耗时。
+- 克隆等由 SDK 组合的多种操作不会合并成同一条 trace。Guest agent 有独立的追踪代码，但当前集成尚未将其 span 接入追踪后端；Guest 与 hypervisor 的工作目前主要体现为外层 `cube-shim` span 的耗时。
 
 ## 启用追踪
 
 追踪默认关闭。把各组件各自的 `OTEL_EXPORTER_OTLP_ENDPOINT` 指向外部自备的 OTLP/**gRPC** 接收端——OpenTelemetry Collector 或 Tempo 的 OTLP/gRPC 接收端——取值为 `http://<receiver-host>:<OTLP-gRPC-port>`。
+
+也可以设置 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`；同时设置时 traces 专用地址优先。仅当两个值都为空时关闭追踪。
 
 接收端和查询后端需要单独部署。各组件以各自的服务名上报（`cube-api`、`cubemaster`、`cubetemplatecenter`、`cubelet`、`cube-shim`），因此不要设置共享的 `OTEL_SERVICE_NAME`。
 

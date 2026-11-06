@@ -146,6 +146,9 @@ func TestEndWithCodeMarksBusinessFailure(t *testing.T) {
 		if span.Status().Code != codes.Unset {
 			t.Errorf("success rsp status = %v, want Unset", span.Status().Code)
 		}
+		if got := attr(t, span, AttrRetCode).AsInt64(); got != int64(SuccessCode) {
+			t.Errorf("successful %s = %d, want %d", AttrRetCode, got, SuccessCode)
+		}
 	}
 	if failed != 1 || passed != 1 {
 		t.Fatalf("want 1 failed and 1 successful span, got %d and %d", failed, passed)
@@ -176,6 +179,7 @@ func TestEndMarksFailureWithoutLeakingErrorText(t *testing.T) {
 
 func TestSetupDisabledKeepsTracingOff(t *testing.T) {
 	t.Setenv(EnvEndpoint, "")
+	t.Setenv(EnvTracesEndpoint, "")
 	otel.SetTracerProvider(trace.NewNoopTracerProvider())
 
 	shutdown, err := Setup(context.Background(), "cubelet-test")
@@ -188,6 +192,26 @@ func TestSetupDisabledKeepsTracingOff(t *testing.T) {
 
 	if _, span := Start(context.Background(), SpanCreate); span.IsRecording() {
 		t.Fatal("tracing must stay off when OTEL_EXPORTER_OTLP_ENDPOINT is unset")
+	}
+}
+
+func TestSetupTracesEndpointOnlyEnablesTracing(t *testing.T) {
+	t.Setenv(EnvEndpoint, "")
+	t.Setenv(EnvTracesEndpoint, "http://127.0.0.1:4317")
+	otel.SetTracerProvider(trace.NewNoopTracerProvider())
+
+	shutdown, err := Setup(context.Background(), "cubelet-test")
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	}()
+	_, span := Start(context.Background(), SpanCreate)
+	if !span.IsRecording() {
+		t.Fatal("traces-specific endpoint must enable tracing")
 	}
 }
 

@@ -80,7 +80,7 @@ func stubSnapshotCreateRun(t *testing.T, s snapshotCreateStubs) {
 		return &cubeboxv1.CleanupTemplateResponse{Ret: &errorcodev1.Ret{RetCode: s.cleanupRet}}, nil
 	})
 	patches.ApplyFunc(getSnapshotRecord, func(_ context.Context, _ string) (*models.SnapshotRecord, error) {
-		return nil, ErrSnapshotNotFound
+		return &models.SnapshotRecord{Mode: snapshotmode.Full.String()}, nil
 	})
 	patches.ApplyFunc(UpsertReplica, func(_ context.Context, _ string, _ string, _ ReplicaStatus) error {
 		return s.upsertErr
@@ -455,7 +455,7 @@ func submitSnapshotReplayStubs(t *testing.T, status string) {
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
 		return &models.TemplateImageJob{JobID: "job-existing", Operation: JobOperationSnapshotCreate, TemplateID: "snap-existing"}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(_ context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -522,7 +522,7 @@ func TestSubmitSandboxSnapshotPrepareIsSiblingOfCaptureAndRegister(t *testing.T)
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
 		return &models.TemplateImageJob{JobID: "job-pending", Operation: JobOperationSnapshotCreate, TemplateID: "snap-existing"}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	infoCalls := 0
@@ -593,7 +593,7 @@ func stubSnapshotCreateSubmitResolution(t *testing.T, infoFn func(call int) (*sa
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
 		return &models.TemplateImageJob{JobID: "job-pending", Operation: JobOperationSnapshotCreate, TemplateID: "snap-existing"}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	calls := 0
@@ -656,7 +656,7 @@ func TestPrepareSpanCoversPreCapturePreparationAndEndsBeforeCapture(t *testing.T
 
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(buildSnapshotRequests, func(_ *sandboxtypes.CreateCubeSandboxReq, snapshotID string) (*sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq, error) {
+	patches.ApplyFunc(buildSnapshotRequests, func(_ *sandboxtypes.CreateCubeSandboxReq, snapshotID, _ string) (*sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq, error) {
 		assembledAt = time.Now()
 		clone := &sandboxtypes.CreateCubeSandboxReq{
 			InstanceType: "cubebox",

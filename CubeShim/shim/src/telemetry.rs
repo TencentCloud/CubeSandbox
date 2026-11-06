@@ -16,6 +16,7 @@ use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::SdkTracerProvider, Resource};
 
 const ENV_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+const ENV_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
 // The shim inherits Cubelet's environment, which may name the service "cubelet".
 const SERVICE_NAME: &str = "cube-shim";
@@ -57,9 +58,11 @@ impl Guard {
 
     /// Containerd runs `start` and `delete` in short-lived processes that never serve a request.
     pub fn for_action(action: &str) -> Guard {
+        let generic = std::env::var(ENV_ENDPOINT).unwrap_or_default();
+        let traces = std::env::var(ENV_TRACES_ENDPOINT).unwrap_or_default();
         Guard::from_endpoint(
             action,
-            std::env::var(ENV_ENDPOINT).unwrap_or_default().trim(),
+            select_endpoint(&traces, &generic).unwrap_or_default(),
         )
     }
 
@@ -82,6 +85,14 @@ impl Guard {
             }
         }
     }
+}
+
+fn select_endpoint<'a>(traces: &'a str, generic: &'a str) -> Option<&'a str> {
+    let traces = traces.trim();
+    let generic = generic.trim();
+    (!traces.is_empty())
+        .then_some(traces)
+        .or_else(|| (!generic.is_empty()).then_some(generic))
 }
 
 fn build_provider(
@@ -241,6 +252,23 @@ mod tests {
 
     use opentelemetry::propagation::TextMapPropagator;
     use opentelemetry::trace::noop::NoopTextMapPropagator;
+
+    #[test]
+    fn traces_endpoint_takes_precedence_and_generic_is_a_fallback() {
+        assert_eq!(select_endpoint("", ""), None);
+        assert_eq!(
+            select_endpoint("", " http://generic:4317 "),
+            Some("http://generic:4317")
+        );
+        assert_eq!(
+            select_endpoint(" http://traces:4317 ", ""),
+            Some("http://traces:4317")
+        );
+        assert_eq!(
+            select_endpoint("http://traces:4317", "http://generic:4317"),
+            Some("http://traces:4317")
+        );
+    }
 
     const ENDPOINT: &str = "http://127.0.0.1:4317";
 
