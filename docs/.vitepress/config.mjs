@@ -196,6 +196,7 @@ export default withMermaid(defineConfig({
                   ]
                 },
                 { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
+                { text: 'Offline Deployment', link: '/guide/offline-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' },
                 { text: 'Downloads & Releases', link: '/guide/downloads' }
               ]
@@ -438,6 +439,7 @@ export default withMermaid(defineConfig({
                   ]
                 },
                 { text: '腾讯云集群（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
+                { text: '离线部署', link: '/zh/guide/offline-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' },
                 { text: '下载与 Release 说明', link: '/zh/guide/downloads' }
               ]
