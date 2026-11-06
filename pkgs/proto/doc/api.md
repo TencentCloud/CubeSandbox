@@ -601,6 +601,7 @@ ContainerStateValue is the wrapper of ContainerState.
 | numa_node | [int32](#int32) |  |  |
 | paused_at | [int64](#int64) |  |  |
 | private_cubebox_storage_data | [bytes](#bytes) |  | cubebox_storage_data is the private data of the cubebox store. It is used to store the data of the cubebox store. this field only used with with_cubebox_store option for cubecli command. |
+| error_reason | [string](#string) |  | Stored primary-container status or exit reason for sandbox Info. Kept here instead of Container to match the sandbox detail response; Status.Message is deliberately not exposed. |
 
 
 

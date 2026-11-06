@@ -739,6 +739,10 @@ message CubeSandbox {
   // It is used to store the data of the cubebox store.
   // this field only used with with_cubebox_store option for cubecli command.
   bytes private_cubebox_storage_data = 9;
+  // Stored primary-container status or exit reason for sandbox Info. Kept here
+  // instead of Container to match the sandbox detail response; Status.Message
+  // is deliberately not exposed.
+  string error_reason = 10;
 }
 
 message Container {

@@ -3800,8 +3800,12 @@ type CubeSandbox struct {
 	// It is used to store the data of the cubebox store.
 	// this field only used with with_cubebox_store option for cubecli command.
 	PrivateCubeboxStorageData []byte `protobuf:"bytes,9,opt,name=private_cubebox_storage_data,json=privateCubeboxStorageData,proto3" json:"private_cubebox_storage_data,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+	// Stored primary-container status or exit reason for sandbox Info. Kept here
+	// instead of Container to match the sandbox detail response; Status.Message
+	// is deliberately not exposed.
+	ErrorReason   string `protobuf:"bytes,10,opt,name=error_reason,json=errorReason,proto3" json:"error_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CubeSandbox) Reset() {
@@ -3895,6 +3899,13 @@ func (x *CubeSandbox) GetPrivateCubeboxStorageData() []byte {
 		return x.PrivateCubeboxStorageData
 	}
 	return nil
+}
+
+func (x *CubeSandbox) GetErrorReason() string {
+	if x != nil {
+		return x.ErrorReason
+	}
+	return ""
 }
 
 type Container struct {
@@ -7445,7 +7456,7 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\bext_info\x18\x04 \x03(\v2D.cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntryR\aextInfo\x1a:\n" +
 	"\fExtInfoEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xf5\x03\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x98\x04\n" +
 	"\vCubeSandbox\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1d\n" +
@@ -7458,7 +7469,9 @@ const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\x06labels\x18\x06 \x03(\v24.cubelet.services.cubebox.v1.CubeSandbox.LabelsEntryR\x06labels\x12\x1b\n" +
 	"\tnuma_node\x18\a \x01(\x05R\bnumaNode\x12\x1b\n" +
 	"\tpaused_at\x18\b \x01(\x03R\bpausedAt\x12?\n" +
-	"\x1cprivate_cubebox_storage_data\x18\t \x01(\fR\x19privateCubeboxStorageData\x1a9\n" +
+	"\x1cprivate_cubebox_storage_data\x18\t \x01(\fR\x19privateCubeboxStorageData\x12!\n" +
+	"\ferror_reason\x18\n" +
+	" \x01(\tR\verrorReason\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd1\x04\n" +
