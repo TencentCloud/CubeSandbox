@@ -9,6 +9,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestQuarantineTapChecksIdentityAndPropagatesFailure(t *testing.T) {
+	oldLookup, oldDown := netlinkLinkByIndex, netlinkLinkSetDown
+	t.Cleanup(func() { netlinkLinkByIndex, netlinkLinkSetDown = oldLookup, oldDown })
+	tap := &tapDevice{Name: "10.30.0.9", Index: 9}
+	device := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: tap.Name, Index: tap.Index}, Mode: netlink.TUNTAP_MODE_TAP}
+	netlinkLinkByIndex = func(int) (netlink.Link, error) { return device, nil }
+	calls := 0
+	failure := errors.New("link down denied")
+	netlinkLinkSetDown = func(netlink.Link) error { calls++; return failure }
+	adapter := realTapDeviceAdapter{}
+	device.Name = "another-tap"
+	if err := adapter.Quarantine(tap); err == nil || calls != 0 {
+		t.Fatal("quarantine touched a replacement device")
+	}
+	device.Name = tap.Name
+	device.Mode = netlink.TUNTAP_MODE_TUN
+	if err := adapter.Quarantine(tap); err == nil || calls != 0 {
+		t.Fatal("quarantine accepted a TUN device")
+	}
+	device.Mode = netlink.TUNTAP_MODE_TAP
+	if err := adapter.Quarantine(tap); !errors.Is(err, failure) || calls != 1 {
+		t.Fatalf("quarantine failure was lost: %v", err)
+	}
+	netlinkLinkSetDown = func(netlink.Link) error { calls++; return nil }
+	if err := adapter.Quarantine(tap); err != nil || calls != 2 {
+		t.Fatalf("quarantine retry failed: %v", err)
+	}
+}
+
 func TestConfigureTapFDAppliesVnetHeaderOffloadsAndOptionalFeature(t *testing.T) {
 	oldSetVnetHeader := unixIoctlSetPointerInt
 	oldSetOffload := unixIoctlSetTunOffload

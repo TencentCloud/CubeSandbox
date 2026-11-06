@@ -153,12 +153,32 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
+	// The ext4 artifact is pre-cached on EVERY in-scope node, jfs included.
+	// templateBuildTargets narrows only the BUILD set — a jfs template is
+	// built once on one node (createTemplateReplicasOnNodes applies it) and
+	// shared over the JuiceFS volume — but every node still maps the
+	// read-only ext4 as its own pmem lower layer, so a node that was never
+	// handed the artifact pays a full ext4 download inside its first
+	// sandbox-create request.
 	backend := req.Backend
 	if strings.TrimSpace(backend) == "" {
 		backend = storageBackendFromCreate(generatedReq)
 	}
-	targets = templateBuildTargets(backend, targets)
-	return distributeRootfsArtifactToTargets(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+	// jfs replica rows mean "built the shared package". Non-builder nodes
+	// never build, so distribution must not leave them replica rows: redo
+	// scope, the locality caches, and the UI all read those rows. Artifact
+	// placement rows are still recorded for every node so cleanup reaches
+	// all ext4 copies and the backfill sweep can tell coverage from gaps.
+	trackReplicas := distributionTracksReplicas(backend)
+	return distributeRootfsArtifactToNodesCore(ctx, req, generatedReq, artifact, templateID, jobID, targets, trackReplicas)
+}
+
+// distributionTracksReplicas reports whether a distribution should write
+// per-node replica rows. On jfs a replica row means "built the shared
+// package", which only the build step does; every other backend equates
+// "holds the ext4 artifact" with "has the replica" and keeps both rows.
+func distributionTracksReplicas(backend string) bool {
+	return !constants.IsJFSBackend(backend)
 }
 
 func distributeSpanAttrs(artifact *models.RootfsArtifact, templateID, jobID string) []attribute.KeyValue {
@@ -224,14 +244,19 @@ func distributionWorkerCount() int {
 // explicit target set, so the replica-backfill sweep can push an artifact to
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
-func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
+//
+// trackReplicas=false (jfs) skips the per-node replica bookkeeping: on jfs a
+// replica row means "built the shared package", which only the build step
+// writes. Artifact placement rows are still recorded for every node either
+// way, so cleanup and the backfill sweep see the true ext4 coverage.
+func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
 	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateDistribute, trace.WithAttributes(distributeSpanAttrs(artifact, templateID, jobID)...))
-	readyTargets, expected, ready, failed, err := distributeRootfsArtifactToTargets(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+	readyTargets, expected, ready, failed, err := distributeRootfsArtifactToNodesCore(ctx, req, generatedReq, artifact, templateID, jobID, targets, trackReplicas)
 	telemetry.End(span, err)
 	return readyTargets, expected, ready, failed, err
 }
 
-func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
+func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
 	// Always give Cubelets the CubeMaster download endpoint. That keeps the
 	// node-facing address uniform across local-disk and S3-backed artifacts and
 	// avoids per-node dependence on the object-store endpoint's reachability.
@@ -273,7 +298,6 @@ func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTem
 			telemetry.End(slotSpan, nil)
 			defer func() { <-sem }()
 
-			replica := buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
 			rpcCtx, rpcSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateNodeImage,
 				trace.WithAttributes(
 					attribute.String(telemetry.AttrNodeID, target.ID()),
@@ -281,6 +305,10 @@ func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTem
 					attribute.String(telemetry.AttrJobID, jobID),
 					attribute.String(telemetry.AttrTemplateID, templateID),
 				))
+			var replica ReplicaStatus
+			if trackReplicas {
+				replica = buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
+			}
 			rsp, err := cubelet.CreateImage(rpcCtx, cubelet.GetCubeletAddr(target.HostIP()), &imagev1.CreateImageRequest{
 				RequestID: uuid.New().String(),
 				Spec:      spec,
@@ -299,7 +327,7 @@ func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTem
 				if firstErr == nil {
 					firstErr = err
 				}
-				if templateID != "" && generatedReq != nil {
+				if trackReplicas && templateID != "" && generatedReq != nil {
 					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
 				}
 				return
@@ -319,7 +347,7 @@ func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTem
 				} else {
 					replica.ErrorMessage = "empty create image response"
 				}
-				if templateID != "" && generatedReq != nil {
+				if trackReplicas && templateID != "" && generatedReq != nil {
 					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
 				}
 				return
@@ -330,7 +358,7 @@ func distributeRootfsArtifactToTargets(ctx context.Context, req *types.CreateTem
 			replica.ErrorMessage = ""
 			ready++
 			readyTargets = append(readyTargets, target)
-			if templateID != "" && generatedReq != nil {
+			if trackReplicas && templateID != "" && generatedReq != nil {
 				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
 			}
 			// Record physical placement independently of the replica lifecycle so

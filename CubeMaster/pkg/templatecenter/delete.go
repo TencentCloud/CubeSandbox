@@ -143,13 +143,42 @@ func activeWorkBlocker(targets *templateCleanupTargets, templateID string) error
 	return nil
 }
 
+func hasActiveJFSJob(targets *templateCleanupTargets) bool {
+	if targets == nil || !targets.hasActiveJob() {
+		return false
+	}
+	if targets.Definition != nil && constants.IsJFSBackend(targets.Definition.StorageBackend) {
+		return true
+	}
+	for _, job := range targets.Jobs {
+		if !strings.EqualFold(job.Status, JobStatusPending) &&
+			!strings.EqualFold(job.Status, JobStatusRunning) &&
+			!strings.EqualFold(job.Status, JobStatusBuilt) {
+			continue
+		}
+		var req struct {
+			Backend string `json:"backend"`
+		}
+		if err := json.Unmarshal([]byte(job.RequestJSON), &req); err == nil && constants.IsJFSBackend(req.Backend) {
+			return true
+		}
+	}
+	return false
+}
+
 func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *templateCleanupTargets, opts DeleteTemplateOptions) error {
 	if !targets.hasCleanupState() {
 		return ErrTemplateNotFound
 	}
 	blocker := activeWorkBlocker(targets, templateID)
-	if blocker != nil && !opts.Force {
-		return blocker
+	backend := cleanupBackendFromTargets(targets)
+	if blocker != nil {
+		if !opts.Force {
+			return blocker
+		}
+		if hasActiveJFSJob(targets) {
+			return fmt.Errorf("%w: force delete is not supported while a JFS template job is active", blocker)
+		}
 	}
 	if targets.requiresCleanupLocator() {
 		if !opts.Force {
@@ -182,7 +211,6 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 			return err
 		}
 	}
-	backend := cleanupBackendFromTargets(targets)
 	if constants.IsJFSBackend(backend) && targets.Snapshot == nil {
 		// Nodes that adopted the shared package hold their own references
 		// to it, and no replica row names them.

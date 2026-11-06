@@ -164,9 +164,6 @@ func finishTemplateImageJobAfterArtifact(
 		ArtifactID: artifact.ArtifactID,
 		JobID:      jobID,
 	})
-	// claimWarning is populated by finalizeTemplateReplicas, which claims the
-	// alias *before* publishing the READY status so a client that sees READY
-	// can always resolve the alias.
 	claimWarning := ""
 	var finalizeSpan trace.Span
 	finalizeCtx := ctx
@@ -196,8 +193,6 @@ func finishTemplateImageJobAfterArtifact(
 		})
 		return err
 	}
-	// Alias was already claimed by finalizeTemplateReplicas (before the READY
-	// status was published) to avoid the create/claim publish-ordering race.
 	resultPayload, _ := json.Marshal(info)
 	// Keep TC's BUILT report if this job was built remotely: writing the
 	// template payload straight over result_json used to erase the only durable
@@ -217,6 +212,9 @@ func finishTemplateImageJobAfterArtifact(
 	errorMessage := info.LastError
 	if errorMessage == "" && claimWarning != "" {
 		errorMessage = claimWarning
+	}
+	if jobStatus == JobStatusReady && eagerAdoptJFSBackend(req, generatedReq) {
+		eagerAdoptJFSTemplate(ctx, req, generatedReq, req.TemplateID)
 	}
 	writeErr := updateTemplateImageJob(finalizeCtx, jobID, map[string]any{
 		"status":          jobStatus,

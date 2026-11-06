@@ -781,9 +781,52 @@ func (l *local) prepareContainerFiles(ctx context.Context, sandBox *cubeboxstore
 		return err
 	}
 	mountsConfig.Mounts = append(mountsConfig.Mounts, cubeMounts...)
+	hostMounts, err := hostDirRootfsMounts(ctx, flowOpts, containerReq)
+	if err != nil {
+		return ret.Errorf(errorcode.ErrorCode_CreateVolumeFailed, "plan host-dir mounts failed: %v", err)
+	}
+	mountsConfig.Mounts = append(mountsConfig.Mounts, hostMounts...)
 
 	ci.CubeRootfsInfo = mountsConfig
 	return nil
+}
+
+// hostDirRootfsMounts renders the plan as container rootfs mounts, for creates
+// that build new containers; memory restore and template builds use other
+// transports. The source is the volume's channel name, resolved by the shim.
+func hostDirRootfsMounts(ctx context.Context, flowOpts *workflow.CreateContext, containerReq *cubebox.ContainerConfig) ([]virtiofs.CubeRootfsMount, error) {
+	if flowOpts == nil || flowOpts.StorageInfo == nil {
+		return nil, nil
+	}
+	if flowOpts.WantsSnapshotRestore() || flowOpts.IsCreateSnapshot() {
+		return nil, nil
+	}
+	storageInfo, ok := flowOpts.StorageInfo.(*storage.StorageInfo)
+	if !ok || storageInfo == nil {
+		return nil, nil
+	}
+	plan, err := storageInfo.PlanHostDirMounts(ctx, containerReq.GetVolumeMounts())
+	if err != nil {
+		return nil, err
+	}
+	if len(plan) == 0 {
+		return nil, nil
+	}
+	mounts := make([]virtiofs.CubeRootfsMount, 0, len(plan))
+	for _, mount := range plan {
+		options := []string{constants.MountOptBindRO}
+		if mount.ReadOnly {
+			options = append(options, constants.MountOptReadOnly)
+		}
+		mounts = append(mounts, virtiofs.CubeRootfsMount{
+			VirtiofsID:     virtiofs.Channel(mount.ReadOnly),
+			VirtiofsSource: mount.SourceSubdir,
+			ContainerDest:  mount.ContainerPath,
+			Type:           constants.MountTypeBind,
+			Options:        options,
+		})
+	}
+	return mounts, nil
 }
 
 func appendExt4NetfileMounts(

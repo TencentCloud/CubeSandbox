@@ -85,6 +85,16 @@ func handleSandboxCommitAction(c *gin.Context) {
 		})
 		return
 	}
+	if err := rejectCallerSuppliedQos(req.CreateRequest); err != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		common.WriteAPI(c, &commitTemplateResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  err.Error(),
+			}},
+		})
+		return
+	}
 	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
 		retCode = ret.RetCode
 		common.WriteAPI(c, &commitTemplateResponse{Res: &types.Res{Ret: ret}})

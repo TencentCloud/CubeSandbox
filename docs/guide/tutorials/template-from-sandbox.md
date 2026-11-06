@@ -40,6 +40,10 @@ cubemastercli tpl commit \
 
 Here, `--file` does **not** copy a file into the template, nor does it modify only the fields present in the JSON document. The request in the file **completely replaces** the original create request restored by CubeMaster; the two requests are not merged. For example, if the file omits the original containers, startup command, environment variables, or exposed ports, those settings are not preserved automatically and the resulting template may not start as expected.
 
+CubeMaster still reads the source sandbox's persisted create request when `--file` is used, so template-managed QoS settings can be carried over. If that record cannot be read, the commit fails instead of producing a template without its QoS ceilings.
+
+Do not set the internal `cube.master.net` or `cube.master.blk.qos` annotations in the file. They are template-managed and caller-supplied values are rejected; configure QoS through the template `qos` field instead.
+
 The following `template-request.json` is a simplified example that only illustrates the field structure:
 
 ```json

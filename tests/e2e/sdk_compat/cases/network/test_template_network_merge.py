@@ -12,7 +12,11 @@ import pytest
 
 from adapters import create_adapter
 from framework.build_throttle import template_build_slot
-from framework.capabilities import NETWORK_TEMPLATE_MERGE, capabilities_for_backend
+from framework.capabilities import (
+    NETWORK_TEMPLATE_MERGE,
+    capabilities_for_backend,
+    require_capabilities,
+)
 from framework.cleanup import safe_kill
 from framework.config import SdkE2EConfig
 from framework.parallel import scale_timeout_for_xdist
@@ -59,11 +63,7 @@ pytestmark = [
 # Mirrors cases/volume/conftest.py: markers alone only gate sdk_sandbox.
 @pytest.fixture(autouse=True)
 def _gate_template_merge_case(sdk_backend: str) -> None:
-    if NETWORK_TEMPLATE_MERGE not in capabilities_for_backend(sdk_backend):
-        pytest.skip(
-            f"backend {sdk_backend!r} does not support capability "
-            f"{NETWORK_TEMPLATE_MERGE!r}"
-        )
+    require_capabilities(sdk_backend, NETWORK_TEMPLATE_MERGE)
     if _env_true("SDK_E2E_SKIP_INTERNET_TESTS"):
         pytest.skip(
             "internet-dependent SDK E2E tests disabled by SDK_E2E_SKIP_INTERNET_TESTS"

@@ -145,6 +145,15 @@ const (
 	CubeAnnotationComponentCubeImageVersion  = "cube.master.components.cube-image.version"
 	CubeAnnotationComponentCubeAgentVersion  = "cube.master.components.cube-agent.version"
 )
+
+// TemplateManagedQosAnnotationKeys lists the internal annotations owned by the
+// template QoS contract. Public request paths reject them and response surfaces
+// strip them; keep this as the single source of truth.
+var TemplateManagedQosAnnotationKeys = []string{
+	CubeAnnotationsNetWork,
+	CubeAnnotationsBlkQos,
+}
+
 const (
 	CubeAnnotationsUseNetFileCache = "cube.instance.use_netfile_cache"
 	CubeAnnotationCollectMemOnExit = "cube.instance.collect_memory"

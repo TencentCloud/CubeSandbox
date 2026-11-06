@@ -1332,6 +1332,8 @@ pub struct GetSandboxDataItem {
     #[serde(default)]
     pub labels: HashMap<String, String>,
     #[serde(default)]
+    pub configured_qos: Option<CubeQosConfig>,
+    #[serde(default)]
     pub containers: Vec<GetSandboxContainerItem>,
     #[serde(default)]
     pub namespace: String,
@@ -1403,6 +1405,7 @@ pub struct SandboxDetail {
     pub labels: HashMap<String, String>,
     pub volume_mounts: Vec<CubeVolumeMount>,
     pub restart_status: Option<CubeRestartStatus>,
+    pub configured_qos: Option<CubeQosConfig>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1640,6 +1643,7 @@ impl GetSandboxResponse {
             labels: item.labels,
             volume_mounts: item.volume_mounts,
             restart_status: item.restart_status,
+            configured_qos: item.configured_qos,
         })
     }
 }
@@ -2213,6 +2217,8 @@ pub struct TemplateResponse {
     pub replicas: Vec<serde_json::Value>,
     #[serde(default)]
     pub create_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub configured_qos: Option<CubeQosConfig>,
 }
 
 /// Body for DELETE /cube/template.
@@ -2356,12 +2362,53 @@ pub struct CreateTemplateFromImageReq {
     /// Whether the template build sandbox should include ivshmem.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_ivshmem: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qos: Option<CubeQosConfig>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
     /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeQosConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<CubeNetworkQosConfig>,
+    #[serde(rename = "blockIo", default, skip_serializing_if = "Option::is_none")]
+    pub block_io: Option<CubeBlockIoQosConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeNetworkQosConfig {
+    #[serde(
+        rename = "bandwidthMbps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bandwidth_mbps: Option<u32>,
+    #[serde(
+        rename = "packetsPerSecond",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub packets_per_second: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeBlockIoQosConfig {
+    #[serde(
+        rename = "throughputMiBps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub throughput_mibps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u32>,
 }
 
 /// Minimal container overrides for template creation.
@@ -2747,6 +2794,9 @@ mod tests {
                 "host_id": "host-1",
                 "status": 1,
                 "template_id": "tpl-1",
+                "configured_qos": {
+                    "network": { "bandwidthMbps": 100 }
+                },
                 "containers": [
                     {
                         "container_id": "workload-1",
@@ -2776,6 +2826,14 @@ mod tests {
         assert_eq!(detail.cpu_count, 2);
         assert_eq!(detail.cpu_milli, 2000);
         assert_eq!(detail.memory_mb, 2048);
+        assert_eq!(
+            detail
+                .configured_qos
+                .as_ref()
+                .and_then(|qos| qos.network.as_ref())
+                .and_then(|network| network.bandwidth_mbps),
+            Some(100)
+        );
         assert_eq!(
             detail
                 .started_at

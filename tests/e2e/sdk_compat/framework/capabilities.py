@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 LIFECYCLE = "lifecycle"
 COMMANDS = "commands"
 FILESYSTEM = "filesystem"
@@ -109,3 +111,18 @@ BACKEND_CAPABILITIES = {
 def capabilities_for_backend(backend: str) -> frozenset[str]:
     """Return the capability set a backend supports (empty for unknown)."""
     return BACKEND_CAPABILITIES.get(backend, frozenset())
+
+
+def require_capabilities(backend: str, *capabilities: str) -> None:
+    """Skip when ``backend`` lacks any of ``capabilities``; tests that create
+    the sandbox themselves must call this first."""
+    missing = [
+        capability
+        for capability in capabilities
+        if capability not in capabilities_for_backend(backend)
+    ]
+    if missing:
+        pytest.skip(
+            f"backend {backend!r} does not support capability "
+            f"{', '.join(repr(capability) for capability in missing)}"
+        )

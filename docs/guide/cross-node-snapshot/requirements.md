@@ -39,7 +39,7 @@ The scheduler always prefers the origin:
 
 External storage adds placement constraints:
 
-- A **host mount** has no cluster-wide identity and pins the sandbox to its origin.
+- A **host mount** has no cluster-wide identity and pins the sandbox to its origin. A sandbox created from a filesystem-only snapshot records no mounts, so re-declare them on the create request and it is scheduled like any other new sandbox.
 - A **Plugin Volume** can move with the sandbox only when every eligible node has its driver and backend access. A missing Volume or driver, or a failed `Attach`, aborts restore.
 - FromSnap may attach the same read-write Volume while the source still runs. Stop the source or use read-only access unless the backend safely supports that sharing pattern.
 

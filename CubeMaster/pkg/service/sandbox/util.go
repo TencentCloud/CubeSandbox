@@ -1030,6 +1030,8 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 		out.Annotations[constants.CubeAnnotationsVIPs] = v
 	}
 
+	// Seed the legacy instance-type defaults. Template-managed annotations on
+	// the request overwrite these values in the copy loop below.
 	out.Annotations[constants.CubeAnnotationsBlkQos] = getBlkQosAnnotation(req)
 	out.Annotations[constants.CubeAnnotationsFSQos] = getFsQosAnnotation(req)
 	for k, v := range req.Annotations {

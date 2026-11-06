@@ -204,6 +204,7 @@ export default withMermaid(defineConfig({
               text: 'Core Concepts',
               items: [
                 { text: 'Sandbox Lifecycle', link: '/guide/lifecycle' },
+                { text: 'Sandbox QoS', link: '/guide/qos' },
                 { text: 'Templates Overview', link: '/guide/templates' },
                 { text: 'Snapshot, Rollback & Clone', link: '/guide/snapshot-rollback-clone' },
                 {
@@ -309,7 +310,8 @@ export default withMermaid(defineConfig({
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
-                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' }
+                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' },
+                { text: 'HeartbeatExpired (Clock Skew)', link: '/guide/troubleshooting/node-heartbeat-expired-clock-skew' }
               ]
             },
             {
@@ -344,7 +346,10 @@ export default withMermaid(defineConfig({
                     { text: 'Huajiao', link: '/guide/usecases/huajiao' },
                     { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' },
                     { text: 'Galxe Alva', link: '/guide/usecases/galxe-alva' },
-                    { text: 'LambChat', link: '/guide/usecases/lambchat' }
+                    { text: 'LambChat', link: '/guide/usecases/lambchat' },
+                    { text: 'ouc-online', link: '/guide/usecases/ouc-online' },
+                    { text: 'KakuriZai', link: '/guide/usecases/kakurizai' },
+                    { text: 'OMA', link: '/guide/usecases/oma' }
                   ]
                 }
               ]
@@ -441,6 +446,7 @@ export default withMermaid(defineConfig({
               text: '核心概念',
               items: [
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
+                { text: '沙箱 QoS', link: '/zh/guide/qos' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
                 {
@@ -546,7 +552,8 @@ export default withMermaid(defineConfig({
                 { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
-                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' }
+                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' },
+                { text: 'HeartbeatExpired（时钟偏移）', link: '/zh/guide/troubleshooting/node-heartbeat-expired-clock-skew' }
               ]
             },
             {
@@ -581,7 +588,10 @@ export default withMermaid(defineConfig({
                     { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
                     { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' },
                     { text: 'Galxe Alva', link: '/zh/guide/usecases/galxe-alva' },
-                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' }
+                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' },
+                    { text: 'ouc-online', link: '/zh/guide/usecases/ouc-online' },
+                    { text: 'KakuriZai', link: '/zh/guide/usecases/kakurizai' },
+                    { text: 'OMA', link: '/zh/guide/usecases/oma' }
                   ]
                 }
               ]

@@ -60,3 +60,6 @@ lang: zh-CN
 | [openFuyao：Kubernetes 中运行 CubeSandbox 的落地实践](./openfuyao.md) | 王文涛、李爱华 | 2026-09-17 | kubernetes, deployment, ebpf, production |
 | [Alva：CubeSandbox 落地 GKE 的选型与排障实践](./galxe-alva.md) | RuiPeng Zhang | 2026-10-15 | agent, gke, kubernetes, security |
 | [LambChat：Agent 平台沙箱迁移到 CubeSandbox 的选型与实录](./lambchat.md) | Clivia | 2026-10-15 | agent, e2b-compat, pause-resume, multi-tenant |
+| [国开在线：Agent 代码执行层的会话隔离与生命周期实践](./ouc-online.md) | 陆昊洋 | 2026-11-06 | agent, session-isolation, lifecycle, pause-resume |
+| [KakuriZai：多 Agent 并行编辑的轻量隔离工作区](./kakurizai.md) | 佐藤 良（mizuamedesu） | 2026-11-06 | agent, overlayfs, snapshot, host-mount |
+| [OMA：云端托管智能体平台的架构与安全执行面](./oma.md) | 张师傅的博客 | 2026-11-06 | agent, managed-agents, security, architecture |

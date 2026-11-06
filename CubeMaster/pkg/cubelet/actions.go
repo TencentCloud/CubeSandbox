@@ -27,6 +27,23 @@ func Destroy(ctx context.Context, calleeEp string,
 		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
 }
 
+// AdoptJFSTemplate asks one cubelet to clone a jfs template built by another
+// node into its own tree on the shared volume. Idempotent: a node already
+// holding the template answers success with adopted=false.
+func AdoptJFSTemplate(ctx context.Context, calleeEp string,
+	req *cubebox.AdoptJFSTemplateRequest) (*cubebox.AdoptJFSTemplateResponse, error) {
+	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+	}
+	defer conn.Close()
+	c := cubebox.NewCubeboxMgrClient(conn.Value())
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec)*time.Second)
+	defer cancel()
+	return c.AdoptJFSTemplate(ctx, req)
+}
+
 // DestroyWithTimeout is Destroy with an explicit RPC deadline. Pause post-
 // snapshot cleanup uses a longer budget under concurrent load.
 func DestroyWithTimeout(ctx context.Context, calleeEp string,

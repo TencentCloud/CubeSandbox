@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"gorm.io/gorm"
@@ -616,6 +617,12 @@ func TestGenerateTemplateCreateRequestInjectsImmutableRootfsMetadata(t *testing.
 	if _, ok := got.Annotations[constants.CubeAnnotationStorageBackend]; ok {
 		t.Fatal("omitted backend must not inject cube.master.storage.backend")
 	}
+	if _, ok := got.Annotations[constants.CubeAnnotationsNetWork]; ok {
+		t.Fatalf("opt-out template unexpectedly has network qos annotation: %q", got.Annotations[constants.CubeAnnotationsNetWork])
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationsBlkQos]; ok {
+		t.Fatalf("opt-out template unexpectedly has block io qos annotation: %q", got.Annotations[constants.CubeAnnotationsBlkQos])
+	}
 }
 
 func TestGenerateTemplateCreateRequestMergesEnvOverridesWithImageEnv(t *testing.T) {
@@ -813,6 +820,63 @@ func TestGenerateTemplateCreateRequestFallsBackToArtifactRowForS3WhenNoExplicitB
 	want := "http://master-from-row:8089/cube/template/artifact/download?artifact_id=artifact-s3-row&token=token-s3-row"
 	if got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL] != want {
 		t.Fatalf("artifact download url=%q, want %q", got.Containers[0].Image.Annotations[constants.CubeAnnotationRootfsArtifactURL], want)
+	}
+}
+
+func TestGenerateTemplateCreateRequestInjectsBlockIOQos(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-qos"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-qos",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		Qos:               &qos.Config{BlockIO: &qos.BlockIOConfig{ThroughputMiBps: 64, IOPS: 1000}},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-qos",
+		TemplateSpecFingerprint: "fingerprint-qos",
+		Ext4SHA256:              "sha256-qos",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-qos",
+	}
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	want := `{"bandwidth":{"size":67108864,"refill_time":1000},"ops":{"size":1000,"refill_time":1000}}`
+	if got.Annotations[constants.CubeAnnotationsBlkQos] != want {
+		t.Fatalf("block io qos annotation=%q, want %q", got.Annotations[constants.CubeAnnotationsBlkQos], want)
+	}
+	if _, ok := got.Annotations[constants.CubeAnnotationsNetWork]; ok {
+		t.Fatal("block-io-only qos unexpectedly emitted network annotation")
+	}
+}
+
+func TestGenerateTemplateCreateRequestInjectsNetworkQos(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-qos"},
+		SourceImageRef:    "docker.io/library/nginx:latest",
+		TemplateID:        "template-qos",
+		WritableLayerSize: "20Gi",
+		InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+		NetworkType:       cubeboxv1.NetworkType_tap.String(),
+		Qos:               &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000}},
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID:              "artifact-qos",
+		TemplateSpecFingerprint: "fingerprint-qos",
+		Ext4SHA256:              "sha256-qos",
+		Ext4SizeBytes:           1024,
+		DownloadToken:           "token-qos",
+	}
+	got, err := generateTemplateCreateRequest(context.Background(), req, artifact, DockerImageConfig{}, "http://master.example")
+	if err != nil {
+		t.Fatalf("generateTemplateCreateRequest failed: %v", err)
+	}
+	want := `{"Qos":{"BandWidth":{"Size":1250000,"OneTimeBurst":0,"RefillTime":100},"OPS":{"Size":5000,"OneTimeBurst":0,"RefillTime":1000}},"Version":1}`
+	if got.Annotations[constants.CubeAnnotationsNetWork] != want {
+		t.Fatalf("network qos annotation=%q, want %q", got.Annotations[constants.CubeAnnotationsNetWork], want)
 	}
 }
 
@@ -1202,6 +1266,81 @@ func TestTemplateInfoFromJobIncludesLatestJobID(t *testing.T) {
 	}
 }
 
+func TestTemplateInfoFromCommitJobIncludesConfiguredQos(t *testing.T) {
+	network, err := qos.MarshalNetworkAnnotation(&qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000})
+	if err != nil {
+		t.Fatalf("MarshalNetworkAnnotation failed: %v", err)
+	}
+	blockIO, err := qos.MarshalBlockIOAnnotation(&qos.BlockIOConfig{
+		ThroughputMiBps: 64,
+		IOPS:            1000,
+	})
+	if err != nil {
+		t.Fatalf("MarshalBlockIOAnnotation failed: %v", err)
+	}
+	requestJSON, err := json.Marshal(&types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			constants.CubeAnnotationsNetWork: network,
+			constants.CubeAnnotationsBlkQos:  blockIO,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal commit request failed: %v", err)
+	}
+
+	info := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID:  "tpl-commit-qos",
+		Operation:   JobOperationCommit,
+		RequestJSON: string(requestJSON),
+	})
+	if info.ConfiguredQos == nil || info.ConfiguredQos.Network == nil {
+		t.Fatalf("configured qos=%+v, want network qos", info.ConfiguredQos)
+	}
+	if info.ConfiguredQos.Network.BandwidthMbps != 100 || info.ConfiguredQos.Network.PacketsPerSecond != 5000 {
+		t.Fatalf("network qos=%+v, want 100 Mbps and 5000 packets/s", info.ConfiguredQos.Network)
+	}
+	if info.ConfiguredQos.BlockIO == nil || info.ConfiguredQos.BlockIO.ThroughputMiBps != 64 || info.ConfiguredQos.BlockIO.IOPS != 1000 {
+		t.Fatalf("block io qos=%+v, want 64 MiB/s and 1000 IOPS", info.ConfiguredQos.BlockIO)
+	}
+}
+
+func TestTemplateInfoFromCreateRedoJobIncludesConfiguredQos(t *testing.T) {
+	requestJSON, err := json.Marshal(&types.CreateTemplateFromImageReq{
+		Qos: &qos.Config{Network: &qos.NetworkConfig{BandwidthMbps: 100}},
+	})
+	if err != nil {
+		t.Fatalf("marshal template create request failed: %v", err)
+	}
+
+	for _, operation := range []string{JobOperationCreate, JobOperationRedo} {
+		t.Run(operation, func(t *testing.T) {
+			info := templateInfoFromJob(&models.TemplateImageJob{
+				TemplateID:  "tpl-" + strings.ToLower(operation),
+				Operation:   operation,
+				RequestJSON: string(requestJSON),
+			})
+			if info.ConfiguredQos == nil || info.ConfiguredQos.Network == nil || info.ConfiguredQos.Network.BandwidthMbps != 100 {
+				t.Fatalf("configured qos=%+v, want 100 Mbps network qos", info.ConfiguredQos)
+			}
+		})
+	}
+}
+
+func TestTemplateInfoFromLegacyJobHasNoConfiguredQos(t *testing.T) {
+	requestJSON, err := json.Marshal(&types.CreateTemplateFromImageReq{})
+	if err != nil {
+		t.Fatalf("marshal legacy template request failed: %v", err)
+	}
+	info := templateInfoFromJob(&models.TemplateImageJob{
+		TemplateID:  "tpl-legacy",
+		Operation:   JobOperationLegacy,
+		RequestJSON: string(requestJSON),
+	})
+	if info.ConfiguredQos != nil {
+		t.Fatalf("configured qos=%+v, want nil for a legacy job", info.ConfiguredQos)
+	}
+}
+
 func TestTemplateInfoFromJobPrefersTemplateStatus(t *testing.T) {
 	info := templateInfoFromJob(&models.TemplateImageJob{
 		TemplateID:     "tpl-a",
@@ -1425,6 +1564,26 @@ func TestNormalizeRedoTemplateImageRequest(t *testing.T) {
 	}
 	if !got.FailedOnly {
 		t.Fatal("expected failed_only to be preserved")
+	}
+}
+
+func TestIsJFSTemplateRedo(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		definition *models.TemplateDefinition
+		sourceReq  *types.CreateTemplateFromImageReq
+		want       bool
+	}{
+		{name: "request backend", sourceReq: &types.CreateTemplateFromImageReq{Backend: "jfs"}, want: true},
+		{name: "definition fallback", definition: &models.TemplateDefinition{StorageBackend: "juicefs"}, sourceReq: &types.CreateTemplateFromImageReq{}, want: true},
+		{name: "request takes precedence", definition: &models.TemplateDefinition{StorageBackend: "jfs"}, sourceReq: &types.CreateTemplateFromImageReq{Backend: "xfs"}},
+		{name: "xfs", definition: &models.TemplateDefinition{StorageBackend: "xfs"}, sourceReq: &types.CreateTemplateFromImageReq{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isJFSTemplateRedo(tc.definition, tc.sourceReq); got != tc.want {
+				t.Fatalf("isJFSTemplateRedo() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

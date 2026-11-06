@@ -248,7 +248,7 @@ func TestDistributeSpanOnExplicitTargetEntry(t *testing.T) {
 		&types.CreateTemplateFromImageReq{InstanceType: "cubebox"},
 		&types.CreateCubeSandboxReq{InstanceType: "cubebox"},
 		readyDistributeArtifact("rfs-bf"), "tpl-bf", "job-bf",
-		[]*node.Node{{InsID: "n1", IP: "10.0.0.1"}})
+		[]*node.Node{{InsID: "n1", IP: "10.0.0.1"}}, false)
 	if err != nil || ready != 1 || failed != 0 {
 		t.Fatalf("explicit-target distribution = ready=%d failed=%d err=%v, want 1/0/nil", ready, failed, err)
 	}
@@ -305,7 +305,7 @@ func TestDistributeSpanAbsentWithoutTraceContext(t *testing.T) {
 			var err error
 			if tc.explicitEntry {
 				targets, expected, ready, failed, err = distributeRootfsArtifactToNodes(context.Background(),
-					req, generatedReq, artifact, "tpl-untraced", "job-untraced", tc.targets)
+					req, generatedReq, artifact, "tpl-untraced", "job-untraced", tc.targets, false)
 			} else {
 				targets, expected, ready, failed, err = distributeRootfsArtifact(context.Background(),
 					req, generatedReq, artifact, "tpl-untraced", "job-untraced")

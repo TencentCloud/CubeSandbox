@@ -357,6 +357,7 @@ impl SandboxService {
             state: sandbox_state_from_status(d.status),
             volume_mounts: map_volume_mounts(&d.volume_mounts),
             restart_status: map_restart_status(d.restart_status),
+            configured_qos: d.configured_qos.map(Into::into),
         })
     }
 
