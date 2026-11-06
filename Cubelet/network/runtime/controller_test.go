@@ -73,6 +73,10 @@ func (f *createTestTapDeviceAdapter) Open(_ string) (*os.File, error) {
 	return os.CreateTemp("", "cube-test-tap-*")
 }
 
+func (f *createTestTapDeviceAdapter) Quarantine(_ *tapDevice) error {
+	return nil
+}
+
 func (f *createTestTapDeviceAdapter) Close(file *os.File) {
 	if file != nil {
 		f.closeCount++

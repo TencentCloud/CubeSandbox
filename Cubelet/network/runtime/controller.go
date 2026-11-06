@@ -43,9 +43,9 @@ type managedState struct {
 	// with legacyStatePath. Cleanup retires legacy first and this record second.
 	migrationStateRecord *StateRecord
 
-	// restoreBeforeCleanup asks TapCleaner to re-run TAP restore before removing
+	// restoreAfterCleanup asks TapCleaner to restore the link after removing
 	// residue. Startup recovery uses it for no-state TAPs from smooth upgrades.
-	restoreBeforeCleanup bool
+	restoreAfterCleanup bool
 }
 
 // NetworkController coordinates the embedded runtime's durable state, host
@@ -886,7 +886,7 @@ func (s *NetworkController) releaseAcquiredTap(owner string, tap *tapDevice, ent
 					TapName:    tap.Name,
 					TapIfIndex: tap.Index,
 					SandboxIP:  tap.IP.String(),
-				}, tap: tap, restoreBeforeCleanup: true}
+				}, tap: tap, restoreAfterCleanup: true}
 				_ = s.cleanupTapOnce(state, "", "pre_create_reservation_rollback")
 			}
 			return
