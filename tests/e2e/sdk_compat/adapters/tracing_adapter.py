@@ -35,6 +35,13 @@ class TracingSandboxAdapter(SandboxAdapter):
             },
         )
 
+    def is_running(self) -> bool:
+        return self._trace.capture(
+            "is_running",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id},
+            self._wrapped.is_running,
+        )
+
     def run_command(
         self,
         command: str,

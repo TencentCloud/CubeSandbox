@@ -473,6 +473,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 |---|---|
 | `sb.runCode(code, options?)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.getInfo()` | `GET /sandboxes/:id` — get sandbox state and metadata |
+| `sb.isRunning(options?)` | Report if the sandbox is running — checks control-plane state first, probes envd `/health` only when running/unknown; returns `boolean` (`false` on unreachable/transport errors) |
 | `sb.pause(options?)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout?)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.setTimeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |

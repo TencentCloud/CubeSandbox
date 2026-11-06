@@ -271,6 +271,21 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 })
 ```
 
+## Is Running
+
+`Sandbox.IsRunning` checks the control-plane `state` first: `paused`/`pausing`
+return `false` without touching the data plane (so a probe never auto-resumes
+the sandbox). For `running`/`unknown` it probes envd `GET /health` on port
+49983, returning `false` on 404/502/503/410 and on transport errors, raising
+only on server errors such as 403/500.
+
+```go
+ok, err := sb.IsRunning(ctx)
+if err != nil {
+	panic(err)
+}
+```
+
 ## Pause And Connect
 
 ```go

@@ -104,6 +104,9 @@ class CubeSandboxAdapter(SandboxAdapter):
             raw=raw,
         )
 
+    def is_running(self) -> bool:
+        return bool(self._sandbox.is_running())
+
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
         result = self._sandbox.commands.run(command, user=user, timeout=timeout)
         return CommandResult(
