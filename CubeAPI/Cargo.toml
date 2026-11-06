@@ -47,8 +47,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # ── OpenTelemetry (optional tracing for the sandbox create chain) ─────────
-# Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set. OTLP/gRPC so the one endpoint
-# the Go services read works for cube-api too.
+# Off unless OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT
+# is set. Both use OTLP/gRPC, as do the Go services.
 # Held at 0.30: 0.31 pulls tonic 0.14 + tonic-prost 0.14, which need
 # rustc >= 1.88 and this toolchain is 1.85. 0.30 uses tonic 0.13 / rustc 1.75.
 opentelemetry = "0.30"

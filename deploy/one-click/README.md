@@ -185,6 +185,10 @@ Tracing is off by default. Configure it **before install** by setting
 `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and (re-)running `install.sh` — it
 applies to both a fresh install and an upgrade.
 
+You can instead set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. If both are set,
+the traces-specific address takes precedence. Both values must be empty to
+disable tracing.
+
 The receiver is an externally supplied OTLP/**gRPC** receiver — an OpenTelemetry
 Collector or a Tempo OTLP/gRPC receiver. The value is
 `http://<receiver-host>:<OTLP-gRPC-port>` for plaintext, where `receiver-host`
@@ -211,8 +215,9 @@ sandbox and inherits Cubelet's environment only when a new shim process starts,
 so an already-running shim keeps its previous setting and only CubeShim spans
 wait on a new sandbox being started.
 
-Because the endpoint is a toggle-style key, to turn tracing back off set
-`OTEL_EXPORTER_OTLP_ENDPOINT=` (empty) in `.env` and re-run install — see the
+Because both endpoints are toggle-style keys, to turn tracing back off set
+`OTEL_EXPORTER_OTLP_ENDPOINT=` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=`
+(both empty) in `.env` and re-run install — see the
 `ONE_CLICK_ENABLE_S3LVOL` note in
 [CubeS3lvol stop/upgrade semantics](#cubes3lvol-stopupgrade-semantics) for the
 `cp env.example .env` caveat.

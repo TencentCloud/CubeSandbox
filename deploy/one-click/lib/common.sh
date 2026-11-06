@@ -523,6 +523,7 @@ ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_JFS
   CUBE_PVM_ENABLE
   OTEL_EXPORTER_OTLP_ENDPOINT
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 )
 
 # Records this-run toggle intent from the process environment and from .env key

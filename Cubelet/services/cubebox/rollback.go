@@ -235,6 +235,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
 			return rsp, nil
+		}
 	}
 	restored := false
 	defer func() { deactivateRollbackPackageObjects(ctx, backend, refs, restored) }()

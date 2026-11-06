@@ -172,6 +172,8 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 
 链路追踪默认关闭。请在**安装前**在 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT`，然后（重新）执行 `install.sh` 生效——全新安装与升级同样适用。
 
+也可设置 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`。两者同时设置时，traces 专用地址优先；两个值都为空时才关闭追踪。
+
 接收端是外部自备的 OTLP/**gRPC** 接收器——OpenTelemetry Collector 或 Tempo 的 OTLP/gRPC 接收端。明文场景下取值为 `http://<receiver-host>:<OTLP-gRPC-port>`，其中 `receiver-host` 与 `OTLP-gRPC-port` 是接收端实际的 IP 或 DNS 名以及 gRPC 监听端口。请填接收端的 OTLP/gRPC 地址，而不是 Grafana/Tempo 的查询地址。例如：
 
 ```bash
@@ -184,7 +186,7 @@ Span 来自沙箱生命周期各服务——CubeAPI、CubeMaster、CubeTemplateC
 
 CubeShim 是例外：它是 Cubelet 为每个沙箱单独启动的进程，只有在新的 shim 进程启动时才继承 Cubelet 的环境变量，因此已在运行的 shim 会保留旧设置，只有新启动沙箱后 CubeShim 的 span 才生效。
 
-由于该 endpoint 是开关式配置项，若要关闭追踪，在 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT=`（空值）并重新执行安装即可——`cp env.example .env` 的注意事项见 [CubeS3lvol 的停止与升级语义](#cubes3lvol-的停止与升级语义) 中的 `ONE_CLICK_ENABLE_S3LVOL` 说明。
+由于这两个 endpoint 是开关式配置项，若要关闭追踪，在 `.env` 中将 `OTEL_EXPORTER_OTLP_ENDPOINT=` 和 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=` 都设为空值并重新执行安装——`cp env.example .env` 的注意事项见 [CubeS3lvol 的停止与升级语义](#cubes3lvol-的停止与升级语义) 中的 `ONE_CLICK_ENABLE_S3LVOL` 说明。
 
 one-click 不会安装任何接收端。
 

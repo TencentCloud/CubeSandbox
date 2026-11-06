@@ -42,7 +42,7 @@ assert_toggle_keys() {
 # Reset the toggle variables so leftovers from a previous scenario cannot
 # leak into the next snapshot as process-env intent.
 reset_toggle_vars() {
-  unset ONE_CLICK_ENABLE_S3LVOL ONE_CLICK_ENABLE_JFS CUBE_PVM_ENABLE OTEL_EXPORTER_OTLP_ENDPOINT
+  unset ONE_CLICK_ENABLE_S3LVOL ONE_CLICK_ENABLE_JFS CUBE_PVM_ENABLE OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 }
 
 # Simulate what install.sh does around the upgrade merge for the toggle keys:
@@ -59,11 +59,12 @@ run_toggle_roundtrip() {
   ONE_CLICK_ENABLE_S3LVOL="${MERGED_S3LVOL:-}"
   CUBE_PVM_ENABLE="${MERGED_PVM:-}"
   OTEL_EXPORTER_OTLP_ENDPOINT="${MERGED_OTEL:-}"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="${MERGED_TRACES_OTEL:-}"
   apply_one_click_toggles 2>/dev/null
 }
 
 test_toggle_keys_registry() {
-  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL ONE_CLICK_ENABLE_JFS CUBE_PVM_ENABLE OTEL_EXPORTER_OTLP_ENDPOINT
+  assert_toggle_keys ONE_CLICK_ENABLE_S3LVOL ONE_CLICK_ENABLE_JFS CUBE_PVM_ENABLE OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 }
 
 # Core regression: a .env value that equals the env.example default (0) must
@@ -216,6 +217,28 @@ EOF
     || fail "expected quoted .env OTEL endpoint to expand its variable reference"
 }
 
+# The traces-specific endpoint is also persisted across upgrades; clearing it
+# must override an older value so the generic endpoint can be used again.
+test_traces_endpoint_can_be_cleared_on_upgrade() {
+  local dotenv="${TMP_DIR}/traces.env"
+  echo "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=" > "${dotenv}"
+  reset_toggle_vars
+  MERGED_TRACES_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ -z "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}" ]] \
+    || fail "empty traces endpoint must clear the merged value"
+}
+
+test_traces_endpoint_dotenv_value_wins() {
+  local dotenv="${TMP_DIR}/traces-value.env"
+  echo "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://10.0.0.9:4317" > "${dotenv}"
+  reset_toggle_vars
+  MERGED_TRACES_OTEL="http://10.0.0.5:4317"
+  run_toggle_roundtrip "${dotenv}"
+  [[ "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}" == "http://10.0.0.9:4317" ]] \
+    || fail "traces endpoint in .env must win over the merged value"
+}
+
 test_toggle_keys_registry
 test_dotenv_default_value_is_explicit
 test_process_env_is_explicit
@@ -228,5 +251,7 @@ test_otel_endpoint_process_env_is_explicit
 test_otel_endpoint_absent_key_keeps_merged_value
 test_otel_endpoint_quoted_dotenv_is_unquoted
 test_otel_endpoint_quoted_variable_expansion
+test_traces_endpoint_can_be_cleared_on_upgrade
+test_traces_endpoint_dotenv_value_wins
 
 echo "test_toggle_inputs: all tests passed"

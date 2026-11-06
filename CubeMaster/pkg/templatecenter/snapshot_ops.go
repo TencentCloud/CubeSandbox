@@ -143,25 +143,14 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	if err != nil {
 		return nil, err
 	}
-	if mode.IsFsOnly() {
-		writable, err := sandbox.WritablePluginVolumeMounts(originReq)
-		if err != nil {
-			return nil, err
-		}
-		if len(writable) > 0 {
-			return nil, fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
-				ErrFilesystemOnlySharedVolume, strings.Join(writable, ", "))
-		}
-	}
-
 	info, err = GetTemplateImageJobInfo(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
 	if reusedExistingJob {
-		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP)
+		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
 	}
-	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP)
+	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
 }
 
 // r must come from a recover() called directly by the deferred closure, never via a helper.
@@ -249,6 +238,16 @@ func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID,
 	originReq, err = loadSandboxCreateRequestFn(ctx, sandboxID)
 	if err != nil {
 		return "", false, nil, err
+	}
+	if mode.IsFsOnly() {
+		writable, err := sandbox.WritablePluginVolumeMounts(originReq)
+		if err != nil {
+			return "", false, nil, err
+		}
+		if len(writable) > 0 {
+			return "", false, nil, fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
+				ErrFilesystemOnlySharedVolume, strings.Join(writable, ", "))
+		}
 	}
 	// Client-supplied backend is ignored. Ordinary snapshot follows the
 	// sandbox spec Master persisted at create (itself inherited from the
