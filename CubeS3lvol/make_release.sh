@@ -31,6 +31,7 @@
 #    │   ├── rcow_cpumask.sh      default SPDK -m (last two allowed CPUs)
 #    │   ├── rcow_upgrade.sh      stop without breaking a live host's I/O
 #    │   ├── rcow_purge.sh        delete an lvstore outright (irreversible)
+#    │   ├── prune_restart_logs.py  optional restart archive retention
 #    │   ├── s3lvol_rpc.py        this repo's raw JSON-RPC client
 #    │   ├── s3_prefix_rm.py      bucket cleanup, what rcow_purge.sh deletes with
 #    │   ├── s3_bucket.py         ensure-bucket, what the one-click supervisor uses
@@ -269,9 +270,9 @@ mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/scripts" || die "cannot create ${PKG_DIR}"
 log "bin/s3lvol_tgt"
 install -m 0755 "${TGT_BIN}" "${PKG_DIR}/bin/s3lvol_tgt" || die "install failed"
 
-log "scripts/ (start, stop, hot stop, recovery, purge, common, cpumask)"
+log "scripts/ (start, stop, hot stop, recovery, purge, common, cpumask, log retention)"
 for f in rcow_common.sh rcow_cpumask.sh rcow_start.sh rcow_stop.sh rcow_upgrade.sh \
-	rcow_recovery.sh rcow_purge.sh; do
+	rcow_recovery.sh rcow_purge.sh prune_restart_logs.py; do
 	[ -f "${REPO_ROOT}/scripts/${f}" ] || die "missing scripts/${f}"
 	install -m 0755 "${REPO_ROOT}/scripts/${f}" "${PKG_DIR}/scripts/${f}" ||
 		die "install failed for ${f}"
