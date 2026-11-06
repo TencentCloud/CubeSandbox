@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +46,8 @@ type fakeControllerPlugin struct {
 	createErr error
 	// privateData is returned from Create when non-empty.
 	privateData string
+	// destroyErr, when set, makes Destroy fail.
+	destroyErr error
 
 	mu        sync.Mutex
 	created   map[string]string // volumeID → name
@@ -80,6 +83,9 @@ func (f *fakeControllerPlugin) Create(_ context.Context, volumeID, name string) 
 func (f *fakeControllerPlugin) Destroy(_ context.Context, volumeID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.destroyErr != nil {
+		return f.destroyErr
+	}
 	f.destroyed[volumeID] = true
 	delete(f.created, volumeID)
 	return nil
@@ -98,11 +104,17 @@ func (f *fakeControllerPlugin) wasDestroyed(volumeID string) bool {
 	return f.destroyed[volumeID]
 }
 
+var volumeTestDBSeq atomic.Int64
+
 func newVolumeTestEngine(t *testing.T) (*gin.Engine, *gorm.DB, *fakeControllerPlugin) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	dbName := fmt.Sprintf("file:volume_test_%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	// The name must be unique per call: a shared-cache in-memory database lives
+	// as long as a connection to it does, so a fixed name would leak rows from
+	// one run of a test into the next one under -count>1.
+	dbName := fmt.Sprintf("file:volume_test_%s_%d?mode=memory&cache=shared",
+		strings.ReplaceAll(t.Name(), "/", "_"), volumeTestDBSeq.Add(1))
 	db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})

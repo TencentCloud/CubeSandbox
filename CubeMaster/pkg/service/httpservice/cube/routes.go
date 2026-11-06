@@ -143,6 +143,11 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(VolumeAction, handleCreateVolume)
 	g.GET(VolumeAction+"/:volume_id", handleGetVolume)
 	g.DELETE(VolumeAction+"/:volume_id", handleDeleteVolume)
+
+	// Direct /volumecontent access takes a reference like a sandbox does
+	// (Cubelet -> CubeMaster).
+	g.POST(VolumeAction+"/:volume_id/ref", handleAcquireVolumeRef)
+	g.DELETE(VolumeAction+"/:volume_id/ref", handleReleaseVolumeRef)
 }
 
 // RegisterTemplateRoutes registers ONLY the template-related routes onto g.

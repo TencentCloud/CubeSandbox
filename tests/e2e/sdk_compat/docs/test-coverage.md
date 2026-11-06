@@ -226,7 +226,7 @@ resource contention test or multi-worker safety validation.
 
 ### 2.8 Volume
 
-`cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only, default to the S3 driver, and run with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`.
+`cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. `test_direct_content.py` covers direct volume access through the `/volumecontent` service: file operations without a sandbox, nothing pinned after the last request, a running request making `DELETE /volumes` return 409, a deleted volume's token getting 404 without the volume being recreated, and two sandboxes plus direct access sharing one volume; it skips when the content service is not enabled. These cases are CubeSandbox-only, default to the S3 driver, and run with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`.
 
 ### 2.9 Host Mount
 

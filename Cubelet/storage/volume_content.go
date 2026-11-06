@@ -88,12 +88,14 @@ func startVolumeContentServer(cfg *Config) {
 			return
 		}
 
+		refs := volcontent.NewMasterRefs(cubeMasterHTTPAddr)
+		refs.Logf = CubeLog.Errorf
 		handler, err := volcontent.NewHandler(volcontent.Options{
 			Tokens: tokens,
 			Leaser: &volcontent.ManagerLeaser{
 				Mgr: volpkg.Global(), Namespace: constants.CubeDefaultNamespace, BaseDir: baseDir,
 			},
-			Volumes:   volcontent.NewMasterChecker(cubeMasterHTTPAddr),
+			Refs:      refs,
 			MaxUpload: maxUpload,
 			Logf:      CubeLog.Errorf,
 		})

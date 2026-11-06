@@ -320,14 +320,15 @@ sequenceDiagram
     alt token rejected
         C-->>SDK: 401 / 403 (no CubeMaster call, no Attach)
     end
-    C->>M: GET /cube/volume/{id} (cached: found 30s, missing 5s)
+    C->>M: POST /cube/volume/{id}/ref (first concurrent request only)
     alt volume deleted
+        M-->>C: not found
         C-->>SDK: 404 (plugin NOT attached)
-    else CubeMaster unreachable or bad answer
+    else CubeMaster unreachable or answer unknown
         C-->>SDK: 503 + Retry-After (plugin NOT attached)
-    else volume exists
+    else reference taken (t_cube_volume.refcount + 1)
+        Note right of M: DELETE /volumes now returns 409
         C->>R: Acquire holder "volcontent-xxxx"
-        Note right of R: pins the mount, but never reports a<br/>node 0->1 / 1->0 transition to CubeMaster
         C->>P: Attach
         P-->>C: hostPath (must be inside the volume base dir)
         C->>FS: read / write / list / stat / chmod / remove (confined)
@@ -335,6 +336,8 @@ sequenceDiagram
         C->>P: Detach (even if the client disconnected)
         C->>R: Release holder
         C-->>SDK: 200 / 201 / 204 or 404 (path)
+        C->>M: DELETE /cube/volume/{id}/ref (last concurrent request only)
+        Note right of M: refcount - 1; DELETE /volumes allowed again at 0
     end
     end
 ```
@@ -343,26 +346,29 @@ The three failure answers mean different things to the SDK: 401/403 are
 authentication errors, a content 404 is "path not found" (and also what a deleted
 volume returns), and 503 is retryable.
 
-The Cubelet side of this flow is covered end to end by
-`TestDirectVolumeAccessEndToEnd` in
-`Cubelet/plugins/volume/content/e2e_test.go`. It wires the real handler, token
-verification, `MasterChecker`, `ManagerLeaser`, `volume.Manager` with a bbolt
-ref-count and a local "mount" plugin against a fake CubeMaster, and checks:
-read/write without a sandbox, content holders reporting no node transitions, a
-deleted volume (readable only inside the cache window, then `404` with zero
-plugin `Attach` calls), and CubeMaster outage (`503`, no `Attach`, recovers
-without caching the error). Run it with:
+How this is tested:
 
-```sh
-cd Cubelet && go test -race -count=1 -run TestDirectVolumeAccessEndToEnd ./plugins/volume/content/
-```
+- `tests/e2e/sdk_compat/cases/volume/test_direct_content.py` runs against a real
+  deployment (CubeAPI, CubeMaster, Cubelet and the S3 plugin): files without a
+  sandbox, nothing pinned after the last request, a running request blocking
+  `DELETE /volumes` with 409, a deleted volume's token getting 404 without
+  recreating anything, and two sandboxes plus direct access sharing one volume.
+  It skips when the content service is not enabled. Run it with
+  `pytest --run-e2e -m volume cases/volume/test_direct_content.py` from
+  `tests/e2e/sdk_compat`.
+- `Cubelet/plugins/volume/content/integration_test.go` and `refs_test.go` run the
+  Cubelet side in-process against a stateful CubeMaster stand-in, including
+  outages, lost responses and overlapping requests. They run in CI without a
+  cluster: `cd Cubelet && go test -race ./plugins/volume/...`.
+- `CubeMaster/pkg/service/httpservice/cube/volume_ref_test.go` covers the
+  reference endpoints and delete against a real database engine.
 
 Management calls go through CubeAPI. File bytes go straight to Cubelet and never
 pass through CubeAPI or CubeMaster. The token carries the plugin private data,
 sealed with AES-GCM, so Cubelet needs no lookup to attach a volume. Cubelet does
-make one small existence check against CubeMaster per volume (see
-[Deleted volumes](#deleted-volumes)); it uses `cubemaster_http_addr` from the
-node config (default `127.0.0.1:8089`).
+register each request's use of the volume with CubeMaster before attaching it
+(see [Volume references](#volume-references)); it uses `cubemaster_http_addr`
+from the node config (default `127.0.0.1:8089`).
 
 | Variable | Where | Required | Meaning |
 |---|---|:---:|---|
@@ -387,10 +393,10 @@ Behavior and limits:
 - Each request takes a short-lived attachment lease through the node's volume
   reference accounting, so the host mount cannot be torn down mid-request. Leases
   are released when the request ends and reclaimed on Cubelet restart.
-- As in E2B, the content service is independent of sandbox accounting. A lease is
-  not a sandbox reference: it never changes the cross-node `refCount` that
-  CubeMaster uses to refuse `DELETE /volumes/{id}`. Deleting a volume is
-  therefore not blocked by in-flight content requests.
+- A content request counts as a use of the volume, like a sandbox mount: it
+  holds one reference in `t_cube_volume.refcount` while it runs, and
+  `DELETE /volumes/{id}` is refused with 409 until it is done. See
+  [Volume references](#volume-references).
 - Paths are confined with `os.Root`, so `..` and symlinks cannot leave the volume.
   Uploads go to a temp file and are renamed atomically; setuid/setgid modes are
   rejected.
@@ -400,27 +406,41 @@ Behavior and limits:
   and optional symlink target. `ctime` retains filesystem metadata semantics,
   not a promise of original creation time.
 
-#### Deleted volumes
+#### Volume references
 
 A token stays cryptographically valid until it expires, even after its volume is
-deleted. Using it must not touch the backend, so before any plugin `Attach`
-Cubelet asks CubeMaster (`GET /cube/volume/{id}`) whether the volume still exists:
+deleted. So before any plugin `Attach`, Cubelet takes a reference on the volume
+from CubeMaster (`POST /cube/volume/{id}/ref`). The reference is the same
+`t_cube_volume.refcount` that sandbox mounts use:
 
 | CubeMaster answer | Result |
 |---|---|
-| volume exists | request proceeds |
+| reference taken | request proceeds; `DELETE /volumes/{id}` returns `409` until it is given back |
 | volume not found | `404`, and the plugin is **not** attached |
 | unreachable, error, or unexpected response | `503` with `Retry-After`, and the plugin is **not** attached (fail closed) |
 
 Attaching for a deleted volume is unexpected behavior and is never attempted:
 depending on the plugin it could mount or recreate an empty backend location.
-The check only runs after the token has been verified, so unauthenticated
-requests cost nothing.
+The reference is taken only after the token has been verified, so unauthenticated
+requests cost nothing. `DELETE /volumes/{id}` checks the count and removes the
+volume under one row lock, so a reference is either seen by the delete or finds
+the volume gone; the backend is never destroyed under a request.
 
-- "Exists" answers are cached for 30 seconds and "not found" for 5 seconds, per
-  volume. Errors are never cached. So a deleted volume stays reachable for at
-  most 30 seconds after deletion, and a CubeMaster outage only affects volumes
-  that have not been used in the last 30 seconds.
+- Concurrent requests for one volume share a single reference: the first takes
+  it, the last gives it back. While it is held, new requests need no CubeMaster
+  call, so a CubeMaster outage does not disturb volumes already in use.
+- Nothing is held between requests. The reference is returned as soon as the last
+  request ends, so `write_file(...)` followed by `Volume.destroy(...)` works.
+- A "not found" or "unavailable" answer is remembered for 5 s and 2 s to absorb
+  bursts; a successful answer is not cached.
+- The count is anonymous (it records no holder), so Cubelet never repeats a call
+  whose outcome is unknown. A release that CubeMaster refused is retried until it
+  is applied; a release whose response was lost is not repeated, because a second
+  release could take away a reference that belongs to a sandbox. If a Cubelet
+  stops or loses a response in the wrong moment, the count can stay too high and
+  the volume then cannot be deleted until it is repaired (the same limitation as
+  sandbox references, which are reported on create/destroy responses). It never
+  leaves the count too low through retries.
 - The check is by volume ID only. A volume that is deleted and then **re-created
   with the same name** has the same ID, so an old token would be accepted for the
   new volume until it expires. Do not reuse a volume name that earlier tokens may

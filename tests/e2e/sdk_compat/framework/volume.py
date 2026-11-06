@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from contextlib import contextmanager
 from typing import Iterator
+
+import requests
 
 from adapters.api_adapter import ApiClient
 from framework.config import SdkE2EConfig
@@ -27,6 +30,9 @@ __all__ = [
     "wait_delete_volume_status",
     "safe_delete_volume",
     "managed_volume",
+    "volume_content_url_override",
+    "direct_content_endpoint",
+    "content_request",
 ]
 
 
@@ -121,3 +127,50 @@ def managed_volume(
         if created is not None:
             safe_delete_volume(api, created)
         api.close()
+
+
+def volume_content_url_override() -> str | None:
+    """Origin of the /volumecontent service when it differs from the advertised one.
+
+    ``SDK_E2E_VOLUME_CONTENT_URL`` is for deployments where the endpoint CubeMaster
+    advertises (``CUBE_VOLUME_CONTENT_AUDIENCE``) is not reachable from the test
+    runner, for example a public name that only resolves inside the cluster.
+    """
+    value = os.environ.get("SDK_E2E_VOLUME_CONTENT_URL", "").strip().rstrip("/")
+    return value or None
+
+
+def direct_content_endpoint(payload: dict) -> str | None:
+    """Content-service origin for a create/get volume response, or None when the
+    deployment has no direct content access (``CUBE_VOLUME_CONTENT_*`` unset)."""
+    override = volume_content_url_override()
+    if override:
+        return override
+    endpoint = payload.get("endpoint")
+    if isinstance(endpoint, str) and endpoint.strip():
+        return endpoint.strip().rstrip("/")
+    return None
+
+
+def content_request(
+    endpoint: str,
+    volume_id: str,
+    token: str,
+    method: str,
+    route: str,
+    path: str,
+    *,
+    data: bytes | None = None,
+    timeout: float = 30,
+) -> requests.Response:
+    """One raw /volumecontent request, to assert on status codes the SDK maps away
+    (it turns every 404 into path-not-found)."""
+    return requests.request(
+        method,
+        f"{endpoint}/volumecontent/{volume_id}/{route}",
+        params={"path": path},
+        headers={"Authorization": f"Bearer {token}"},
+        data=data,
+        timeout=timeout,
+        allow_redirects=False,
+    )

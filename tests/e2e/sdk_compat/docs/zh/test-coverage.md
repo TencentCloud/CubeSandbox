@@ -177,7 +177,7 @@ Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 Cube
 
 ### 2.8 Volume
 
-`cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，默认使用 S3 driver，随 `--run-e2e` 执行，除非设置 `SDK_E2E_VOLUME_PLUGIN=false`。
+`cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。`test_direct_content.py` 覆盖通过 `/volumecontent` 服务的直通访问：无沙箱的文件操作、最后一个请求结束后卷不被占用、请求进行中 `DELETE /volumes` 返回 409、卷删除后旧 token 返回 404 且不会重建卷，以及两个沙箱与直通共用同一个卷；未启用内容服务时自动跳过。这些用例仅适用于 CubeSandbox，默认使用 S3 driver，随 `--run-e2e` 执行，除非设置 `SDK_E2E_VOLUME_PLUGIN=false`。
 
 ## 3. 覆盖边界
 

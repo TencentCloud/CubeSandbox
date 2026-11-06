@@ -42,8 +42,9 @@ const (
 type Options struct {
 	Tokens *volumecontent.Config
 	Leaser Leaser
-	// Volumes confirms the volume still exists before anything is attached.
-	Volumes   VolumeChecker
+	// Refs registers each request's use of its volume with the control plane
+	// before anything is attached, like a sandbox mount does.
+	Refs      VolumeRefs
 	MaxUpload int64
 	Now       func() time.Time
 	Logf      func(format string, args ...any)
@@ -55,10 +56,10 @@ type Handler struct {
 	mux  *http.ServeMux
 }
 
-// NewHandler builds the handler. Tokens, Leaser and Volumes are required.
+// NewHandler builds the handler. Tokens, Leaser and Refs are required.
 func NewHandler(opts Options) (*Handler, error) {
-	if opts.Tokens == nil || opts.Leaser == nil || opts.Volumes == nil {
-		return nil, errors.New("volume content handler requires a token config, a leaser and a volume checker")
+	if opts.Tokens == nil || opts.Leaser == nil || opts.Refs == nil {
+		return nil, errors.New("volume content handler requires a token config, a leaser and a volume reference holder")
 	}
 	if opts.MaxUpload <= 0 {
 		opts.MaxUpload = DefaultMaxUpload
@@ -124,20 +125,25 @@ func (h *Handler) route(write bool, fn func(*request)) http.HandlerFunc {
 			return
 		}
 
-		// A token outlives the volume it was issued for. Ask the control plane
-		// first and never Attach for a deleted volume: attaching is a plugin
-		// side effect that could recreate it. If the answer is unknown, refuse.
-		switch err := h.opts.Volumes.Exists(r.Context(), claims.VolumeID); {
+		// A token outlives the volume it was issued for, and a request is a use
+		// of the volume just like a sandbox mount. Take the control-plane
+		// reference first: it fails for a deleted volume, so the plugin is never
+		// asked to attach (which could recreate it), and while it is held the
+		// volume cannot be deleted. If the answer is unknown, refuse. It is
+		// released last, after the lease below has detached.
+		releaseRef, err := h.opts.Refs.Hold(r.Context(), claims.VolumeID)
+		switch {
 		case err == nil:
 		case errors.Is(err, ErrVolumeNotFound):
 			writeError(w, http.StatusNotFound, "not_found", "volume does not exist")
 			return
 		default:
-			h.opts.Logf("volume content: check %q: %v", claims.VolumeID, err)
+			h.opts.Logf("volume content: hold %q: %v", claims.VolumeID, err)
 			w.Header().Set("Retry-After", "5")
-			writeError(w, http.StatusServiceUnavailable, "unavailable", "volume existence could not be confirmed")
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "volume use could not be registered")
 			return
 		}
+		defer releaseRef()
 
 		hostPath, release, err := h.opts.Leaser.Acquire(r.Context(), claims.VolumeID, claims.Driver, claims.PrivateData)
 		if err != nil {

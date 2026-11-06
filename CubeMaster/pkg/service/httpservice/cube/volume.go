@@ -18,6 +18,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // volumeDB returns the GORM handle used by volume handlers.
@@ -282,51 +283,66 @@ func handleDeleteVolume(c *gin.Context) {
 		return
 	}
 
-	var record models.VolumeRecord
-	err := volumeDB().
-		WithContext(c.Request.Context()).
-		Where("volume_id = ?", volumeID).
-		First(&record).Error
+	// The check, the backend destroy and the row delete run under one row lock.
+	// A reference taken through POST /cube/volume/{id}/ref (or any other writer
+	// of refcount) waits for the lock, so it either is counted below or finds
+	// the volume gone; the backend is never destroyed under a new user.
+	err := volumeDB().WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		var record models.VolumeRecord
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("volume_id = ?", volumeID).
+			First(&record).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return &volumeOpError{errorcode.ErrorCode_NotFound, "volume not found: " + volumeID}
+			}
+			return &volumeOpError{errorcode.ErrorCode_DBError, "db error: " + err.Error()}
+		}
+
+		// Refuse to delete a volume that is still referenced. RefCount counts
+		// the nodes that hold a reference: sandboxes (reported on sandbox
+		// create/destroy) and direct content access (POST/DELETE .../ref).
+		if record.RefCount != 0 {
+			return &volumeOpError{errorcode.ErrorCode_Conflict, fmt.Sprintf(
+				"volume %s is in use by %d node(s); destroy the sandboxes using it and wait for direct content requests to finish before deleting",
+				volumeID, record.RefCount,
+			)}
+		}
+
+		p, ok := plugin.Get(record.Driver)
+		if !ok {
+			return &volumeOpError{errorcode.ErrorCode_MasterParamsError, "unknown driver: " + record.Driver}
+		}
+		if destroyErr := p.Destroy(c.Request.Context(), volumeID); destroyErr != nil {
+			return &volumeOpError{errorcode.ErrorCode_MasterInternalError, "plugin destroy error: " + destroyErr.Error()}
+		}
+
+		// Hard-delete: remove the row so volume_id / name can be reused.
+		if dbErr := tx.Delete(&record).Error; dbErr != nil {
+			return &volumeOpError{errorcode.ErrorCode_DBError, "db delete error: " + dbErr.Error()}
+		}
+		return nil
+	})
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_NotFound, "volume not found: "+volumeID)})
+		var opErr *volumeOpError
+		if errors.As(err, &opErr) {
+			common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, opErr.code, opErr.msg)})
 			return
 		}
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db error: "+err.Error())})
 		return
 	}
 
-	// Refuse to delete a volume that is still attached on one or more nodes.
-	// RefCount is maintained from the node-level transitions Cubelet reports on
-	// sandbox create/destroy; a non-zero value means live sandboxes still use it.
-	if record.RefCount != 0 {
-		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_Conflict, fmt.Sprintf(
-			"volume %s is in use by %d node(s); destroy the sandboxes using it before deleting",
-			volumeID, record.RefCount,
-		))})
-		return
-	}
-
-	p, ok := plugin.Get(record.Driver)
-	if !ok {
-		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "unknown driver: "+record.Driver)})
-		return
-	}
-
-	if destroyErr := p.Destroy(c.Request.Context(), volumeID); destroyErr != nil {
-		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, "plugin destroy error: "+destroyErr.Error())})
-		return
-	}
-
-	// Hard-delete: remove the row so volume_id / name can be reused.
-	if dbErr := volumeDB().WithContext(c.Request.Context()).Delete(&record).Error; dbErr != nil {
-		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db delete error: "+dbErr.Error())})
-		return
-	}
-
 	rt.RetCode = 0
 	common.WriteAPI(c, &deleteVolumeRes{Ret: retOK(), VolumeID: volumeID})
 }
+
+// volumeOpError carries the ret code a failed volume operation reports.
+type volumeOpError struct {
+	code errorcode.ErrorCode
+	msg  string
+}
+
+func (e *volumeOpError) Error() string { return e.msg }
 
 // isValidVolumeName matches CubeAPI's NewVolume::name_is_valid:
 // non-empty names must be ^[a-zA-Z0-9_-]+$ (length checked separately).

@@ -424,6 +424,10 @@ Optional:
 - `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `s3`.
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`: seconds to wait for delete-while-bound `409`
   and post-unbind `204`. Defaults to `60`.
+- `SDK_E2E_VOLUME_CONTENT_URL`: origin of the `/volumecontent` service for the
+  direct volume access cases, when the endpoint CubeMaster advertises is not
+  reachable from the runner. Unset by default; the cases use the `endpoint` from
+  `POST /volumes` and skip when there is none.
 - `SDK_E2E_RESTART_POLICY_WAIT`: seconds to wait for one restart-status
   transition. Defaults to `300`.
 
@@ -528,7 +532,7 @@ Current capability domains:
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
   validation, runtime bind-mount failures, cross-sandbox sharing boundaries, and
   multi-generation snapshot restore, rollback, and clone external-reference semantics.
-- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind and per-sandbox read-only attachment enforcement (CubeSandbox only; default driver `s3`). Runs with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Requires the default-install S3 plugin + MinIO and `cubesandbox` >= 0.6.0.
+- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind and per-sandbox read-only attachment enforcement (CubeSandbox only; default driver `s3`). Runs with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Requires the default-install S3 plugin + MinIO and `cubesandbox` >= 0.6.0. `test_direct_content.py` covers direct volume access (files read and written without a sandbox, a running request blocking delete, a deleted volume's token returning 404, direct access sharing a volume with sandboxes) and additionally needs the `/volumecontent` service (`CUBE_VOLUME_CONTENT_*`); it skips when the service is not enabled.
 - `cases/auth/`: `CUBE_API_KEY` simple-key authentication against the CubeAPI
   control plane — `X-API-Key`/`Bearer` accept, wrong/missing 401, `/health`
   exempt (CubeSandbox only). Skipped unless the server was started with

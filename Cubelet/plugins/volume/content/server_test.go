@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -30,46 +31,64 @@ const (
 
 type dirLeaser struct {
 	dir      string
+	refs     *fakeRefs // when set, records how many references are held around the lease
 	acquired atomic.Int64
 	released atomic.Int64
 	gotDrv   atomic.Value
 	gotPD    atomic.Value
+
+	heldAtAcquire atomic.Int64
+	heldAtRelease atomic.Int64
 }
 
 func (l *dirLeaser) Acquire(_ context.Context, _, driver, privateData string) (string, func(), error) {
 	l.acquired.Add(1)
 	l.gotDrv.Store(driver)
 	l.gotPD.Store(privateData)
-	return l.dir, func() { l.released.Add(1) }, nil
+	if l.refs != nil {
+		l.heldAtAcquire.Store(l.refs.held())
+	}
+	return l.dir, func() {
+		if l.refs != nil {
+			l.heldAtRelease.Store(l.refs.held())
+		}
+		l.released.Add(1)
+	}, nil
 }
 
-// fakeVolumes is a VolumeChecker whose answer tests can change.
-type fakeVolumes struct {
-	err   atomic.Value // error; nil means the volume exists
-	calls atomic.Int64
+// fakeRefs is a VolumeRefs whose answer tests can change.
+type fakeRefs struct {
+	err      atomic.Value // errBox; a nil error means the volume can be held
+	attempts atomic.Int64 // Hold calls, successful or not
+	holds    atomic.Int64 // successful Hold calls
+	releases atomic.Int64
 }
 
 type errBox struct{ err error }
 
-func (v *fakeVolumes) set(err error) { v.err.Store(errBox{err}) }
+func (v *fakeRefs) set(err error) { v.err.Store(errBox{err}) }
 
-func (v *fakeVolumes) Exists(context.Context, string) error {
-	v.calls.Add(1)
-	if b, ok := v.err.Load().(errBox); ok {
-		return b.err
+func (v *fakeRefs) held() int64 { return v.holds.Load() - v.releases.Load() }
+
+func (v *fakeRefs) Hold(context.Context, string) (func(), error) {
+	v.attempts.Add(1)
+	if b, ok := v.err.Load().(errBox); ok && b.err != nil {
+		return nil, b.err
 	}
-	return nil
+	v.holds.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { v.releases.Add(1) }) }, nil
 }
 
 type fixture struct {
-	t       *testing.T
-	srv     *httptest.Server
-	dir     string
-	outer   string // sibling directory outside the volume
-	cfg     *volumecontent.Config
-	leaser  *dirLeaser
-	volumes *fakeVolumes
-	rw, ro  string
+	t      *testing.T
+	srv    *httptest.Server
+	dir    string
+	outer  string // sibling directory outside the volume
+	cfg    *volumecontent.Config
+	leaser *dirLeaser
+	refs   *fakeRefs
+	rw, ro string
 }
 
 func newFixture(t *testing.T, maxUpload int64) *fixture {
@@ -86,15 +105,15 @@ func newFixture(t *testing.T, maxUpload int64) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaser := &dirLeaser{dir: dir}
-	volumes := &fakeVolumes{}
-	h, err := NewHandler(Options{Tokens: cfg, Leaser: leaser, Volumes: volumes, MaxUpload: maxUpload, Logf: t.Logf})
+	refs := &fakeRefs{}
+	leaser := &dirLeaser{dir: dir, refs: refs}
+	h, err := NewHandler(Options{Tokens: cfg, Leaser: leaser, Refs: refs, MaxUpload: maxUpload, Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	f := &fixture{t: t, srv: srv, dir: dir, outer: outer, cfg: cfg, leaser: leaser, volumes: volumes}
+	f := &fixture{t: t, srv: srv, dir: dir, outer: outer, cfg: cfg, leaser: leaser, refs: refs}
 	f.rw = f.token(testVolume, volumecontent.PermReadWrite)
 	f.ro = f.token(testVolume, volumecontent.PermRead)
 	return f
@@ -182,9 +201,9 @@ func TestAuthentication(t *testing.T) {
 	}
 }
 
-// A token outlives its volume. Deleted or unconfirmable volumes must be refused
-// before the plugin is ever asked to attach (which could recreate the volume),
-// on every route and for both read and write tokens.
+// A request holds the volume before the plugin is ever asked to attach (which
+// could recreate a deleted volume), on every route and for both read and write
+// tokens, and a failed hold never leaves a reference behind.
 func TestDeletedOrUnconfirmedVolumeNeverAttaches(t *testing.T) {
 	routes := []struct{ method, route string }{
 		{"GET", "file"}, {"PUT", "file"}, {"GET", "dir"}, {"POST", "dir"},
@@ -201,7 +220,7 @@ func TestDeletedOrUnconfirmedVolumeNeverAttaches(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, 0)
-			f.volumes.set(c.err)
+			f.refs.set(c.err)
 			for _, r := range routes {
 				resp, body := f.do(r.method, r.route, f.rw, q("path", "/x"), []byte("{}"))
 				if resp.StatusCode != c.want {
@@ -212,14 +231,17 @@ func TestDeletedOrUnconfirmedVolumeNeverAttaches(t *testing.T) {
 				}
 			}
 			if f.leaser.acquired.Load() != 0 {
-				t.Fatalf("plugin Attach was reached %d times for a volume that could not be confirmed", f.leaser.acquired.Load())
+				t.Fatalf("plugin Attach was reached %d times for a volume that could not be held", f.leaser.acquired.Load())
 			}
-			if f.volumes.calls.Load() != int64(len(routes)) {
-				t.Fatalf("checker calls = %d, want %d", f.volumes.calls.Load(), len(routes))
+			if f.refs.attempts.Load() != int64(len(routes)) {
+				t.Fatalf("hold attempts = %d, want %d", f.refs.attempts.Load(), len(routes))
+			}
+			if f.refs.held() != 0 {
+				t.Fatalf("%d references leaked", f.refs.held())
 			}
 
-			// Once the volume is confirmed again the same token works.
-			f.volumes.set(nil)
+			// Once the volume can be held again the same token works.
+			f.refs.set(nil)
 			resp, body := f.do("GET", "path", f.rw, q("path", "/"), nil)
 			f.expect(resp, http.StatusOK, body)
 			if f.leaser.acquired.Load() != 1 {
@@ -229,7 +251,25 @@ func TestDeletedOrUnconfirmedVolumeNeverAttaches(t *testing.T) {
 	}
 }
 
-// Unauthenticated and malformed requests must not cost a CubeMaster lookup.
+// The reference spans the whole lease: taken before the plugin attaches and
+// given back only after it has detached, so the volume cannot be deleted while
+// any part of a request still touches it.
+func TestReferenceSpansTheLease(t *testing.T) {
+	f := newFixture(t, 0)
+	resp, body := f.do("PUT", "file", f.rw, q("path", "/a.txt"), []byte("x"))
+	f.expect(resp, http.StatusCreated, body)
+	if f.leaser.heldAtAcquire.Load() != 1 {
+		t.Fatalf("references held when the lease was taken = %d, want 1", f.leaser.heldAtAcquire.Load())
+	}
+	if f.leaser.heldAtRelease.Load() != 1 {
+		t.Fatalf("references held when the lease was released = %d, want 1", f.leaser.heldAtRelease.Load())
+	}
+	if f.refs.held() != 0 {
+		t.Fatalf("%d references leaked after the request", f.refs.held())
+	}
+}
+
+// Unauthenticated and malformed requests must not cost a control-plane call.
 func TestRejectedRequestsDoNotQueryTheControlPlane(t *testing.T) {
 	f := newFixture(t, 0)
 	f.do("GET", "path", "", q("path", "/x"), nil)
@@ -237,18 +277,18 @@ func TestRejectedRequestsDoNotQueryTheControlPlane(t *testing.T) {
 	f.do("GET", "path", f.token("vol-2", volumecontent.PermReadWrite), q("path", "/x"), nil)
 	f.do("PUT", "file", f.ro, q("path", "/x"), nil)
 	f.do("GET", "path", f.rw, q("path", "relative"), nil)
-	if f.volumes.calls.Load() != 0 {
-		t.Fatalf("control plane queried %d times for rejected requests", f.volumes.calls.Load())
+	if f.refs.attempts.Load() != 0 {
+		t.Fatalf("control plane queried %d times for rejected requests", f.refs.attempts.Load())
 	}
 }
 
-func TestNewHandlerRequiresVolumeChecker(t *testing.T) {
+func TestNewHandlerRequiresVolumeRefs(t *testing.T) {
 	cfg, err := volumecontent.NewConfig(testSecret, "", "https://vol.example.com", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := NewHandler(Options{Tokens: cfg, Leaser: &dirLeaser{dir: t.TempDir()}}); err == nil {
-		t.Fatal("a handler without a volume checker must not be constructible")
+		t.Fatal("a handler without a volume reference holder must not be constructible")
 	}
 }
 

@@ -304,6 +304,8 @@ flowchart LR
 
 **当某 node 本地计数 0→1 或 1→0 时，Cubelet 通知 CubeMaster 更新 `t_cube_volume.refcount`；该计数非零时，管理面拒绝 `DELETE /volumes`。**
 
+直通内容访问（`/volumecontent`，无沙箱）使用同一个计数：Cubelet 对有在途请求的卷，向 CubeMaster 取得一个引用（`POST /cube/volume/{id}/ref`），最后一个请求结束时归还，因此直通请求进行中同样会拒绝 `DELETE /volumes`。详见 [Python SDK 卷文档](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/python/docs/volume.md#volume-references)。
+
 ```mermaid
 flowchart TD
     A["Attach(refCount)"] --> B{"refCount == 0 ?"}
