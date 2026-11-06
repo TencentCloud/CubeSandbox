@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
@@ -64,11 +65,19 @@ func (c *Config) jfsNodeName() string {
 			return n
 		}
 	}
-	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
-		return strings.TrimSpace(h)
+	// The directory name must be unique cluster-wide. Hostnames can collide
+	// (containerized nodes, cloned VMs), and every other node identity in the
+	// cluster is already IP-first (node.ID() falls back to the IP), so the
+	// node's primary IPv4 is the default.
+	if ip, err := localNodeIPv4(); err == nil && strings.TrimSpace(ip) != "" {
+		return strings.TrimSpace(ip)
 	}
 	return "localhost"
 }
+
+// localNodeIPv4 is the seam behind jfsNodeName's default so tests can pin
+// the address without depending on the process-wide host identity cache.
+var localNodeIPv4 = utils.GetLocalIpv4
 
 // jfsCacheDirs are the juicefs --cache-dir entries (colon separated).
 func (c *Config) jfsCacheDirs() []string {

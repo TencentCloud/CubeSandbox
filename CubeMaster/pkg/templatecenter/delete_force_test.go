@@ -234,6 +234,32 @@ func TestDeleteTemplateWithTargetsForceClearsActiveJob(t *testing.T) {
 	}
 }
 
+func TestDeleteTemplateWithTargetsForceRejectsActiveJFSJob(t *testing.T) {
+	rec := stubDeleteFlow(t, false)
+
+	err := deleteTemplateWithTargets(context.Background(), "tpl-jfs-active", &templateCleanupTargets{
+		Jobs: []models.TemplateImageJob{{
+			TemplateID:  "tpl-jfs-active",
+			Status:      JobStatusBuilt,
+			RequestJSON: `{"backend":"jfs"}`,
+			NodeIP:      "10.0.0.9",
+		}},
+		Locators:     []templateCleanupLocator{{NodeIP: "10.0.0.9"}},
+		ArtifactIDs:  map[string]struct{}{},
+		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
+	}, DeleteTemplateOptions{Force: true})
+
+	if !errors.Is(err, ErrTemplateAttemptInProgress) {
+		t.Fatalf("active JFS force delete must be rejected, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "force delete is not supported") {
+		t.Fatalf("unexpected active JFS force-delete error: %v", err)
+	}
+	if len(rec.failedWork) != 0 || len(rec.stages) != 0 {
+		t.Fatalf("rejected JFS delete must not mutate state, failedWork=%v stages=%v", rec.failedWork, rec.stages)
+	}
+}
+
 // The critical safety property: force must NOT delete a template a live sandbox
 // still uses, and must not have rewritten any status before finding that out.
 func TestDeleteTemplateWithTargetsForceStillHonoursInUse(t *testing.T) {

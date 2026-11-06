@@ -44,6 +44,30 @@ func TestJFSStorageRootDefaults(t *testing.T) {
 	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "n1"), cfg.jfsStorageRoot())
 }
 
+func TestJFSNodeNameDefaultsToNodeIPv4(t *testing.T) {
+	orig := localNodeIPv4
+	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
+	t.Cleanup(func() { localNodeIPv4 = orig })
+	require.Equal(t, "10.0.0.9", (&Config{}).jfsNodeName())
+	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "10.0.0.9"), (&Config{}).jfsStorageRoot())
+}
+
+func TestJFSNodeNameConfiguredValueWinsOverIP(t *testing.T) {
+	orig := localNodeIPv4
+	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
+	t.Cleanup(func() { localNodeIPv4 = orig })
+	cfg := &Config{}
+	cfg.Cow.JFS = CowJFSUserConfig{NodeName: "explicit-name"}
+	require.Equal(t, "explicit-name", cfg.jfsNodeName())
+}
+
+func TestJFSNodeNameIPFailureFallsBackToLocalhost(t *testing.T) {
+	orig := localNodeIPv4
+	localNodeIPv4 = func() (string, error) { return "", errors.New("no address") }
+	t.Cleanup(func() { localNodeIPv4 = orig })
+	require.Equal(t, "localhost", (&Config{}).jfsNodeName())
+}
+
 func TestBuildJFSCowInitJSONUsesCopyFileRange(t *testing.T) {
 	cfg := &Config{}
 	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs", NodeName: "n1"}

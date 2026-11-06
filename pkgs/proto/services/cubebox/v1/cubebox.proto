@@ -30,6 +30,13 @@ service CubeboxMgr {
   rpc RollbackSandbox(RollbackSandboxRequest) returns (RollbackSandboxResponse);
   // CleanupTemplate removes local template snapshot/base data from this node.
   rpc CleanupTemplate(CleanupTemplateRequest) returns (CleanupTemplateResponse);
+  // AdoptJFSTemplate makes a jfs template built by another node usable on
+  // this node: it clones the shared package (rootfs/memory, metadata-only
+  // via copy_file_range) into this node's tree on the shared volume.
+  // Idempotent: a template already present locally is a success without
+  // adopted=true. Used by Master for eager adoption right after the build
+  // node published the template; first-use adoption remains the fallback.
+  rpc AdoptJFSTemplate(AdoptJFSTemplateRequest) returns (AdoptJFSTemplateResponse);
   // ListSandboxSnapshots inspects the requested snapshot objects on this node.
   rpc ListSandboxSnapshots(ListSandboxSnapshotsRequest) returns (ListSandboxSnapshotsResponse);
   // ListLocalSnapshots returns the full catalog of snapshots known to this node.
@@ -1070,6 +1077,25 @@ message CleanupTemplateResponse {
   // Deprecated: unused. Pause/Resume volume refcounts follow normal
   // Create/Destroy ExtInfo events; CleanupTemplate does not adjust them.
   repeated string plugin_volume_ids = 4;
+}
+
+message AdoptJFSTemplateRequest {
+  // requestID reqID
+  string requestID = 1;
+  // Logical template ID of the jfs template to adopt.
+  string templateID = 2;
+}
+
+message AdoptJFSTemplateResponse {
+  // requestID reqID
+  string requestID = 1;
+  // Ret.
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  // Logical template ID.
+  string templateID = 3;
+  // adopted is true when this call cloned the shared package into this
+  // node's tree; false means the template was already local (idempotent).
+  bool adopted = 4;
 }
 
 message ListSandboxSnapshotsRequest {
