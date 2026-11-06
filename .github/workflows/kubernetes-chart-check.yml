@@ -6,6 +6,8 @@ on:
     paths:
       - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
+      - 'CubeObservability/Dockerfile'
+      - 'CubeObservability/grafana/dashboards/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
@@ -13,6 +15,8 @@ on:
     paths:
       - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
+      - 'CubeObservability/Dockerfile'
+      - 'CubeObservability/grafana/dashboards/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
@@ -46,6 +50,87 @@ jobs:
             --set-string mysql.password=test \
             --set-string mysql.rootPassword=test \
             --set-string redis.password=test >/dev/null
+      - name: Render observability combinations
+        shell: bash
+        run: |
+          set -euo pipefail
+          chart=deploy/kubernetes/chart
+          common=(
+            --set observability.enabled=true
+            --set-string mysql.password=test
+            --set-string mysql.rootPassword=test
+            --set-string redis.password=test
+          )
+          for backend in loki elasticsearch; do
+            helm lint "${chart}" "${common[@]}" \
+              --set "observability.logs.backend=${backend}"
+            helm template "observability-${backend}" "${chart}" "${common[@]}" \
+              --set "observability.logs.backend=${backend}" \
+              -s templates/observability.yaml >/dev/null
+          done
+          helm template observability-external-loki "${chart}" "${common[@]}" \
+            --set observability.backend.enabled=false \
+            --set observability.metrics.otlpEndpoint=http://prometheus.example/api/v1/otlp \
+            --set observability.logs.backend=loki \
+            --set observability.logs.otlpEndpoint=http://loki.example/otlp \
+            -s templates/observability.yaml >/dev/null
+          helm template observability-external-es "${chart}" "${common[@]}" \
+            --set observability.backend.enabled=false \
+            --set observability.metrics.remoteWriteUrl=http://prometheus.example/api/v1/write \
+            --set observability.logs.backend=elasticsearch \
+            --set observability.logs.esEndpoint=http://elasticsearch.example:9200 \
+            -s templates/observability.yaml >/dev/null
+          helm template observability-metrics-only "${chart}" "${common[@]}" \
+            --set observability.logs.enabled=false \
+            -s templates/observability.yaml >/dev/null
+          auth_render="$(mktemp)"
+          trap 'rm -f "${auth_render}"' EXIT
+          helm template observability-auth "${chart}" "${common[@]}" \
+            --set observability.logs.backend=loki \
+            --set observability.metrics.auth.existingSecret=observability-auth \
+            --set observability.metrics.auth.tenantIdKey=metrics-tenant \
+            --set observability.logs.auth.existingSecret=observability-auth \
+            --set observability.logs.auth.tenantIdKey=logs-tenant \
+            --set observability.backend.grafana.existingSecret=grafana-admin \
+            -s templates/observability.yaml >"${auth_render}"
+          grep -q 'CUBE_METRICS_AUTHORIZATION' "${auth_render}"
+          grep -q 'CUBE_LOGS_AUTHORIZATION' "${auth_render}"
+          grep -q 'checksum/grafana-admin-secret' "${auth_render}"
+          helm template observability-ephemeral "${chart}" "${common[@]}" \
+            --set observability.backend.prometheus.persistence.enabled=false \
+            --set observability.backend.loki.persistence.enabled=false \
+            --set observability.backend.grafana.persistence.enabled=false \
+            -s templates/observability.yaml >/dev/null
+          helm template observability-existing-claims "${chart}" "${common[@]}" \
+            --set observability.backend.prometheus.persistence.existingClaim=prometheus-data \
+            --set observability.backend.loki.persistence.existingClaim=loki-data \
+            --set observability.backend.grafana.persistence.existingClaim=grafana-data \
+            -s templates/observability.yaml >/dev/null
+          if helm template observability-invalid "${chart}" "${common[@]}" \
+            --set observability.logs.backend=loki \
+            --set observability.logs.esEndpoint=http://elasticsearch.example:9200 \
+            -s templates/observability.yaml >/dev/null 2>&1; then
+            echo "::error::conflicting Loki/Elasticsearch settings were accepted"
+            exit 1
+          fi
+          if helm template observability-invalid-host-network "${chart}" "${common[@]}" \
+            --set cubeNode.hostNetwork=false \
+            -s templates/observability.yaml >/dev/null 2>&1; then
+            echo "::error::loopback Cubelet metrics target was accepted with cubeNode.hostNetwork=false"
+            exit 1
+          fi
+      - name: Check observability dashboards
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dashboard in deploy/kubernetes/chart/files/cube-observability/grafana/dashboards/*.json; do
+            python3 -m json.tool "${dashboard}" >/dev/null
+          done
+          for dashboard in cubesandbox-host-sandbox.json cubesandbox-logs.json cubesandbox-logs-elasticsearch.json; do
+            cmp \
+              "CubeObservability/grafana/dashboards/${dashboard}" \
+              "deploy/kubernetes/chart/files/cube-observability/grafana/dashboards/${dashboard}"
+          done
       - name: Check startup-gate shell syntax
         run: |
           sh -n deploy/kubernetes/images/scripts/node-prep-lib.sh

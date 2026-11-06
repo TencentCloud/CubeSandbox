@@ -118,6 +118,10 @@ func TestPrometheusHandlerExportsAvailableGuestAndHostSnapshotsWithoutCollecting
 		"cubesandbox_host_sandbox_cpu_limit_cores",
 		"cubesandbox_host_sandbox_memory_current_bytes",
 		"cubesandbox_host_sandbox_memory_failures_total",
+		"# TYPE cubesandbox_node_sandbox_count gauge",
+		"cubesandbox_node_sandbox_count 1",
+		"# TYPE cubesandbox_node_sandbox_available_count gauge",
+		"cubesandbox_node_sandbox_available_count 1",
 		`sandbox_id="sandbox"`,
 		`container_id="sandbox"`,
 	} {
@@ -126,7 +130,7 @@ func TestPrometheusHandlerExportsAvailableGuestAndHostSnapshotsWithoutCollecting
 	require.NotContains(t, body, "baseline_id")
 	require.NotContains(t, body, "last_error")
 	require.NotContains(t, body, "container_cpu")
-	require.Equal(t, 22, countPrometheusSamples(body))
+	require.Equal(t, 24, countPrometheusSamples(body))
 	require.Equal(t, 0, guestReader.calls)
 	require.Equal(t, 0, hostReader.calls)
 	require.True(t, strings.HasPrefix(recorder.Header().Get("Content-Type"), "text/plain"))
@@ -179,6 +183,8 @@ func TestPrometheusHandlerExportsPendingPointGaugesButOmitsCumulativeAndUnavaila
 	require.NotContains(t, body, `cubesandbox_guest_workload_cpu_usage_seconds_total{container_id="pending"`)
 	require.NotContains(t, body, `sandbox_id="paused"`)
 	require.NotContains(t, body, `sandbox_id="stale"`)
+	require.Contains(t, body, "cubesandbox_node_sandbox_count 1")
+	require.Contains(t, body, "cubesandbox_node_sandbox_available_count 0")
 }
 
 func TestPrometheusHandlerKeepsHostScopeWhenGuestCapabilityIsUnavailable(t *testing.T) {
@@ -253,6 +259,8 @@ func TestPrometheusHandlerUsesTypedGuestMemoryLimitSemantics(t *testing.T) {
 	require.Contains(t, body, `cubesandbox_guest_workload_memory_limit_bytes{container_id="finite",sandbox_id="finite"} 1.152921504606847e+18`)
 	require.Contains(t, body, `cubesandbox_guest_workload_memory_limit_bytes{container_id="zero",sandbox_id="zero"} 0`)
 	require.NotContains(t, body, `cubesandbox_guest_workload_memory_limit_bytes{container_id="unlimited"`)
+	require.Contains(t, body, "cubesandbox_node_sandbox_count 0")
+	require.Contains(t, body, "cubesandbox_node_sandbox_available_count 0")
 }
 
 func TestPrometheusHandlerAppliesConfiguredExportScopes(t *testing.T) {
@@ -263,6 +271,7 @@ func TestPrometheusHandlerAppliesConfiguredExportScopes(t *testing.T) {
 
 	require.Contains(t, recorder.Body.String(), "cubesandbox_guest_workload_cpu_usage_seconds_total")
 	require.NotContains(t, recorder.Body.String(), "cubesandbox_host_sandbox_")
+	require.NotContains(t, recorder.Body.String(), "cubesandbox_node_sandbox_")
 }
 
 func TestPrometheusHandlerLimitsConcurrentScrapes(t *testing.T) {

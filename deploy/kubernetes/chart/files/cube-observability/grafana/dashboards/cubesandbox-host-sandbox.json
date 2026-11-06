@@ -1,0 +1,1095 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "CubeSandbox sandbox resource dashboard (Prometheus). Data comes only from the Cubelet sandbox resource endpoint.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "doc",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Open the CubeSandbox sandbox logs dashboard",
+      "tooltip": "Open the CubeSandbox sandbox stdout/stderr logs dashboard",
+      "type": "link",
+      "url": "/d/cubesandbox-logs/cubesandbox-logs"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "content": "## CubeSandbox sandbox resources (Prometheus)\nFilter by **Cluster / Node / Sandbox**. Metrics come only from Cubelet `127.0.0.1:9998/v1/metrics/resource`; host and control-plane resources are not collected. **Sampled sandboxes** counts current resource samples and is not a complete business-state running count.\n> Logs: **[CubeSandbox sandbox logs](/d/cubesandbox-logs/cubesandbox-logs)**",
+        "mode": "markdown"
+      },
+      "pluginVersion": "10.4.0",
+      "title": "About",
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "id": 2,
+      "panels": [],
+      "title": "Sandbox overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Uses cubesandbox_node_sandbox_count on a newer Cubelet and falls back to the number of currently exported sandbox resource series on older versions.",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(cubesandbox_node_sandbox_count{cluster=~\"$cluster\",node=~\"$node\"} or on (cluster, node) count by (cluster, node) (cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\"}))",
+          "instant": true,
+          "legendFormat": "sandboxes",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Total sandboxes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Uses the sampled-sandbox count on a newer Cubelet and falls back to current resource series on older versions. This is not a complete business-state running count.",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(cubesandbox_node_sandbox_available_count{cluster=~\"$cluster\",node=~\"$node\"} or on (cluster, node) count by (cluster, node) (cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\"}))",
+          "instant": true,
+          "legendFormat": "sampled sandboxes",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Sampled sandboxes",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 14,
+      "panels": [],
+      "title": "Sandbox resource details",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 9
+      },
+      "id": 15,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "count(cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"})",
+          "instant": true,
+          "legendFormat": "sandboxes",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Selected sandboxes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 9
+      },
+      "id": 16,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval]))",
+          "instant": true,
+          "legendFormat": "CPU",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox CPU usage",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 9
+      },
+      "id": 17,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"})",
+          "instant": true,
+          "legendFormat": "usage",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox memory usage",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 9
+      },
+      "id": 18,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"})",
+          "instant": true,
+          "legendFormat": "limit",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox memory limit",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} usage",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} limit",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Sandbox CPU usage and limit",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "100 * rate(cubesandbox_host_sandbox_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval]) / clamp_min(cubesandbox_host_sandbox_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}, 0.001)",
+          "legendFormat": "{{node}} / {{sandbox_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox CPU limit utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_cpu_user_seconds_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} user",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_cpu_system_seconds_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} system",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Sandbox CPU user / system",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "100 * rate(cubesandbox_host_sandbox_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval]) / clamp_min(rate(cubesandbox_host_sandbox_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval]), 0.001)",
+          "legendFormat": "{{node}} / {{sandbox_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox CPU throttling ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} periods/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} throttled/s",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Sandbox CPU scheduling event rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_cpu_throttled_seconds_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} throttled seconds/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox CPU throttled-time rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} current",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} limit",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Sandbox memory current / limit",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "100 * cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"} / clamp_min(cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}, 1)",
+          "legendFormat": "{{node}} / {{sandbox_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox memory limit utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "increase(cubesandbox_host_sandbox_memory_failures_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox memory-limit failure increase",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} current",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} limit",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Sandbox memory comparison",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 53
+      },
+      "id": 29,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(cubesandbox_host_sandbox_memory_failures_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}[$__rate_interval])",
+          "legendFormat": "{{node}} / {{sandbox_id}} failures/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox memory-limit failure rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 53
+      },
+      "id": 30,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} periods",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "cubesandbox_host_sandbox_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"$cluster\",node=~\"$node\",sandbox_id=~\"$sandbox_id\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} throttled periods",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Sandbox cumulative CPU scheduling periods",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "cubesandbox",
+    "otel",
+    "prometheus",
+    "metrics",
+    "sandbox"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "definition": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes\"}, cluster)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Cluster",
+        "multi": true,
+        "name": "cluster",
+        "options": [],
+        "query": {
+          "query": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes\"}, cluster)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "definition": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes\",cluster=~\"$cluster\"}, node)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Node",
+        "multi": true,
+        "name": "node",
+        "options": [],
+        "query": {
+          "query": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes\",cluster=~\"$cluster\"}, node)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "definition": "label_values(cubesandbox_host_sandbox_memory_current_bytes{cluster=~\"$cluster\",node=~\"$node\"}, sandbox_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Sandbox",
+        "multi": true,
+        "name": "sandbox_id",
+        "options": [],
+        "query": {
+          "query": "label_values(cubesandbox_host_sandbox_memory_current_bytes{cluster=~\"$cluster\",node=~\"$node\"}, sandbox_id)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "CubeSandbox sandbox resources",
+  "uid": "cubesandbox-host-sandbox",
+  "version": 1,
+  "weekStart": ""
+}

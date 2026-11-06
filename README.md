@@ -393,6 +393,7 @@ See the full [WebUI console guide](./docs/guide/webui.md).
 | **Cubelet** | Compute node local scheduling component. Manages the complete lifecycle of all sandbox instances on the node. |
 | **CubeVS** | eBPF-based virtual switch, providing kernel-level network isolation and security policy enforcement. |
 | **CubeEgress** | OpenResty-based egress security gateway: L7 domain filtering, credential injection, and access auditing; works with CubeVS kernel policies so sandbox traffic cannot bypass inspection. |
+| **[CubeObservability](./docs/guide/observability.md)** | Sandbox observability component for Cubelet CPU/memory/count metrics and `stdout`/`stderr` logs, with Prometheus, Loki/Elasticsearch, and Grafana support. |
 | **CubeHypervisor & CubeShim** | Virtualization layer — CubeHypervisor manages KVM MicroVMs, CubeShim implements the containerd Shim v2 API to integrate sandboxes into the container runtime. |
 
 👉 For more details, please read the [Architecture Design Document](./docs/architecture/overview.md) and [CubeVS Network Model](./docs/architecture/network.md).

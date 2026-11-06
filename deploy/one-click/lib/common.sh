@@ -505,9 +505,10 @@ load_env_file() {
   fi
 }
 
-# Installer toggle keys: on/off switches whose this-run value must survive the
-# upgrade env merge. The merge treats a bundle-.env value as an explicit
-# operator override only when it differs from the new env.example default
+# Installer desired-state keys: on/off switches and selectors whose this-run
+# value must survive the upgrade env merge. The merge treats a bundle-.env
+# value as an explicit operator override only when it differs from the new
+# env.example default
 # (the `cp env.example .env` safeguard), so flipping one of these keys BACK to
 # the template default via .env would otherwise be inexpressible on upgrade.
 # For the keys listed here, presence in the bundle .env or in install.sh's
@@ -520,6 +521,9 @@ load_env_file() {
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   ONE_CLICK_ENABLE_JFS
+  ONE_CLICK_ENABLE_OBSERVABILITY
+  CUBE_LOGS_BACKEND
+  CUBE_SANDBOX_MINIO_ENABLED
   CUBE_PVM_ENABLE
 )
 
@@ -555,11 +559,10 @@ snapshot_one_click_toggles() {
 
 # apply_one_click_toggles: re-apply the snapshotted operator intent after the
 # env files (including the upgrade merge output) have been sourced. Same
-# snapshot/replay shape as apply_one_click_database_intent (change both together). Precedence
-# mirrors install.sh's documented channel order (CLI flags > .env > process
-# environment > defaults): .env key > process environment > merged/loaded
-# value. The final value is persisted by install.sh's upsert_env_kv, so this
-# is the single place toggle intent is resolved.
+# snapshot/replay shape as apply_one_click_database_intent (change both together).
+# Toggle precedence is .env key > process environment > merged/loaded value.
+# The final value is persisted by install.sh's upsert_env_kv, so this is the
+# single place toggle intent is resolved.
 apply_one_click_toggles() {
   local key
   for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
@@ -569,6 +572,121 @@ apply_one_click_toggles() {
     elif [[ -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" ]]; then
       printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]}"
       log "toggle ${key}=${!key} (explicit in process environment)"
+    fi
+  done
+  return 0
+}
+
+# Resolve the log backend after the upgrade env merge. New templates contribute
+# the default "loki" value even when an older runtime never had a selector, so
+# a legacy ES endpoint/service must win unless this run explicitly selected a
+# backend.
+resolve_one_click_logs_backend_selection() {
+  local selected="${1:-}"
+  local legacy_es_endpoint="${2:-}"
+  local legacy_es_service="${3:-0}"
+  local explicit_selection="${4:-0}"
+
+  if [[ "${explicit_selection}" == "0" &&
+        ( -n "${legacy_es_endpoint}" || "${legacy_es_service}" == "1" ) ]]; then
+    selected="elasticsearch"
+  fi
+
+  case "${selected:-loki}" in
+    loki) printf 'loki\n' ;;
+    elasticsearch|es) printf 'elasticsearch\n' ;;
+    *) die "CUBE_LOGS_BACKEND must be loki or elasticsearch (got: '${selected}')" ;;
+  esac
+}
+
+# Observability settings may be commented out in env.example and therefore look
+# like custom runtime keys to the three-way upgrade merge. Snapshot values named
+# by this run so endpoint/password rotation and explicit KEY= clearing win over
+# the previous .one-click.env without logging secret values.
+ONE_CLICK_OBSERVABILITY_INTENT_KEYS=(
+  CUBE_LOGS_BACKEND
+  ONE_CLICK_OBSERVABILITY_ROLE
+  CUBE_OBSERVABILITY_CLUSTER_ID
+  CUBE_METRICS_OTLP_HTTP_ENDPOINT
+  CUBE_METRICS_REMOTE_WRITE_URL
+  CUBE_METRICS_AUTHORIZATION
+  CUBE_METRICS_REMOTE_WRITE_TOKEN
+  CUBE_METRICS_TENANT_ID
+  CUBE_LOGS_ES_ENDPOINT
+  CUBE_LOGS_ELASTICSEARCH_ENDPOINT
+  CUBE_LOGS_ES_INDEX
+  CUBE_LOGS_ES_USER
+  CUBE_LOGS_ES_PASSWORD
+  CUBE_LOGS_ES_API_KEY
+  CUBE_LOGS_ES_TLS_INSECURE_SKIP_VERIFY
+  CUBE_LOGS_OTLP_HTTP_ENDPOINT
+  CUBE_LOGS_AUTHORIZATION
+  CUBE_LOGS_TOKEN
+  CUBE_LOGS_TENANT_ID
+  CUBE_LOGS_SANDBOX_ID
+  CUBE_LOGS_FILE_START_AT
+  CUBE_PROMETHEUS_LISTEN_ADDRESS
+  CUBE_PROMETHEUS_RETENTION_TIME
+  CUBE_PROMETHEUS_RETENTION_SIZE
+  CUBE_LOKI_LISTEN_ADDRESS
+  CUBE_LOKI_RETENTION_PERIOD
+  CUBE_LOKI_DATA_DIR
+  CUBE_ES_LISTEN_ADDRESS
+  CUBE_ES_HEAP_SIZE
+  CUBE_ES_DATA_DIR
+  CUBE_ES_LOG_DIR
+  CUBE_GRAFANA_LISTEN_ADDRESS
+  CUBE_GRAFANA_ADMIN_USER
+  CUBE_GRAFANA_ADMIN_PASSWORD
+  CUBE_GRAFANA_PROMETHEUS_URL
+  CUBE_GRAFANA_LOKI_URL
+  CUBE_GRAFANA_ES_URL
+  CUBE_GRAFANA_ES_INDEX
+)
+
+snapshot_one_click_observability_intent() {
+  local env_file="$1"
+  local key
+  declare -gA ONE_CLICK_OBS_ENV_SNAPSHOT
+  declare -gA ONE_CLICK_OBS_DOTENV_SNAPSHOT
+  declare -gA ONE_CLICK_OBS_DOTENV_PRESENT
+  ONE_CLICK_OBS_ENV_SNAPSHOT=()
+  ONE_CLICK_OBS_DOTENV_SNAPSHOT=()
+  ONE_CLICK_OBS_DOTENV_PRESENT=()
+  for key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_OBS_ENV_SNAPSHOT["${key}"]="${!key}"
+    fi
+    if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+      ONE_CLICK_OBS_DOTENV_PRESENT["${key}"]=1
+    fi
+  done
+  return 0
+}
+
+capture_one_click_observability_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_OBS_DOTENV_PRESENT[${key}]+x}" ]]; then
+      ONE_CLICK_OBS_DOTENV_SNAPSHOT["${key}"]="${!key-}"
+    fi
+  done
+  return 0
+}
+
+one_click_observability_intent_declared() {
+  local key="$1"
+  [[ -n "${ONE_CLICK_OBS_DOTENV_PRESENT[${key}]+x}" ||
+     -n "${ONE_CLICK_OBS_ENV_SNAPSHOT[${key}]+x}" ]]
+}
+
+apply_one_click_observability_intent() {
+  local key
+  for key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_OBS_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_OBS_DOTENV_SNAPSHOT[${key}]}"
+    elif [[ -n "${ONE_CLICK_OBS_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_OBS_ENV_SNAPSHOT[${key}]}"
     fi
   done
   return 0
@@ -3603,7 +3721,7 @@ check_compute_control_plane_preflight() {
 ║      ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<host>:<port>       ║
 ║                                                                  ║
 ║  Or pass as environment variables:                               ║
-║    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 ./install-compute.sh     ║
+║    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10 ./install-compute.sh     ║
 ║                                                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
 

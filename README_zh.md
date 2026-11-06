@@ -393,6 +393,7 @@ http://<控制节点 IP>:12088
 | **Cubelet** | 计算节点本地调度组件，管理单节点所有沙箱实例的完整生命周期。 |
 | **CubeVS** | 基于 eBPF 内核态转发的虚拟交换机，提供网络隔离与安全策略支持。 |
 | **CubeEgress** | 基于 OpenResty 的出站安全网关：L7 域名过滤、凭证注入、访问审计；与 CubeVS 内核策略配合，沙箱流量不可绕过。 |
+| **[CubeObservability](./docs/zh/guide/observability.md)** | 沙箱可观测性组件：采集 Cubelet 沙箱 CPU/内存/实例指标与标准输出/标准错误日志，支持 Prometheus、Loki/Elasticsearch 和 Grafana。 |
 | **CubeHypervisor & CubeShim** | 虚拟化层 —— CubeHypervisor 负责管理 KVM MicroVM，CubeShim 实现 containerd Shim v2 接口，将沙箱集成到容器运行时。 |
 
 详见[架构概览](./docs/zh/architecture/overview.md)和 [CubeVS 网络模型](./docs/zh/architecture/network.md)。
