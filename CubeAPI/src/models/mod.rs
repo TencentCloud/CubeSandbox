@@ -1823,6 +1823,10 @@ pub struct ListTemplatesQuery {
     /// Optional CubeMaster instance_type filter (currently no server-side filter;
     /// reserved for future use).
     pub instance_type: Option<String>,
+    /// Max templates to return (capped at 200). Omitted and 0 return all templates.
+    pub limit: Option<i32>,
+    /// Number of templates to skip.
+    pub offset: Option<i32>,
 }
 
 /// Summary row returned by GET /templates.

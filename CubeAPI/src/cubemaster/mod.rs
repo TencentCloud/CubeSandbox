@@ -370,6 +370,8 @@ impl CubeMasterClient {
         &self,
         template_id: Option<&str>,
         include_request: bool,
+        limit: Option<i32>,
+        offset: Option<i32>,
     ) -> Result<TemplateListResponse, CubeMasterError> {
         let url = format!("{}/cube/template", self.base_url);
         let mut req = self.inner.get(&url);
@@ -378,6 +380,12 @@ impl CubeMasterClient {
         }
         if include_request {
             req = req.query(&[("include_request", "true")]);
+        }
+        if let Some(limit) = limit {
+            req = req.query(&[("limit", limit.to_string())]);
+        }
+        if let Some(offset) = offset {
+            req = req.query(&[("offset", offset.to_string())]);
         }
         let resp = req.send().await.map_err(CubeMasterError::Http)?;
         parse_response(resp).await
@@ -2169,6 +2177,14 @@ pub struct TemplateListResponse {
     pub request_id: String,
     #[serde(default)]
     pub data: Vec<TemplateSummaryItem>,
+    #[serde(default)]
+    pub total: i64,
+    #[serde(default)]
+    pub limit: i32,
+    #[serde(default)]
+    pub offset: i32,
+    #[serde(default)]
+    pub has_more: bool,
     pub ret: RetCode,
 }
 

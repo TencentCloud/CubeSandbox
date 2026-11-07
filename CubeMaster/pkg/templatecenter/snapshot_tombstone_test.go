@@ -6,20 +6,17 @@ package templatecenter
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -554,40 +551,24 @@ func TestGetTemplateInfoHidesTombstoneDespiteDefinition(t *testing.T) {
 }
 
 func TestListTemplatesHidesTombstonedDefinition(t *testing.T) {
-	oldDB := store.db
-	defer func() { store.db = oldDB }()
-
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(hiddenSnapshotIDs, func(ctx context.Context) (map[string]struct{}, error) {
-		return map[string]struct{}{"snap-tomb": {}}, nil
-	})
-
-	store.db = stubListTemplatesDB(t,
-		[]models.TemplateDefinition{
-			{TemplateID: "snap-tomb", Kind: TemplateKindSnapshot, Status: StatusReady},
-			{TemplateID: "tpl-live", Status: StatusReady},
-		},
-		nil,
-	)
-
-	out, listErr := ListTemplates(context.Background())
-	if listErr != nil {
-		t.Fatalf("ListTemplates: %v", listErr)
+	db := newTemplateListSQLiteDB(t)
+	defs := []models.TemplateDefinition{
+		{TemplateID: "snap-tomb", Kind: TemplateKindSnapshot, Status: StatusReady},
+		{TemplateID: "tpl-live", Status: StatusReady},
 	}
-	ids := make([]string, 0, len(out))
-	foundLive := false
-	for _, item := range out {
-		ids = append(ids, item.TemplateID)
-		if item.TemplateID == "snap-tomb" {
-			t.Fatalf("tombstoned definition leaked into ListTemplates: %v", ids)
-		}
-		if item.TemplateID == "tpl-live" {
-			foundLive = true
-		}
+	if err := db.Create(&defs).Error; err != nil {
+		t.Fatal(err)
 	}
-	if !foundLive {
-		t.Fatalf("live template missing from ListTemplates: %v", ids)
+	if err := db.Create(&models.SnapshotRecord{SnapshotID: "snap-tomb", Status: StatusDeleted}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := ListTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(out) != 1 || out[0].TemplateID != "tpl-live" {
+		t.Fatalf("ListTemplates = %+v, want only tpl-live", out)
 	}
 }
 
@@ -665,32 +646,6 @@ func TestHiddenSnapshotIDsIncludesDeletedAndDeleting(t *testing.T) {
 	if _, ok := ids["snap-ready"]; ok {
 		t.Fatal("READY snapshot must not be hidden from job fallback")
 	}
-}
-
-func stubListTemplatesDB(t *testing.T, defs []models.TemplateDefinition, jobs []models.TemplateImageJob) *gorm.DB {
-	t.Helper()
-	sqlDB, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:3306)/unused?parseTime=true")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := gorm.Open(gormmysql.New(gormmysql.Config{
-		Conn:                      sqlDB,
-		SkipInitializeWithVersion: true,
-	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Callback().Query().Replace("gorm:query", func(tx *gorm.DB) {
-		switch dest := tx.Statement.Dest.(type) {
-		case *[]models.TemplateDefinition:
-			*dest = append([]models.TemplateDefinition(nil), defs...)
-		case *[]models.TemplateImageJob:
-			*dest = append([]models.TemplateImageJob(nil), jobs...)
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return db
 }
 
 func TestRollbackSandboxToSnapshotRejectsFilesystemOnlyTarget(t *testing.T) {

@@ -15,9 +15,10 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        CreateTemplateRequest, RebuildTemplateRequest, TemplateAliasLookupResponse,
-        TemplateBuildJob, TemplateBuildStatus, TemplateCompatMatrixView, TemplateCompatRowView,
-        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
+        CreateTemplateRequest, ListTemplatesQuery, RebuildTemplateRequest,
+        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
+        TemplateCompatMatrixView, TemplateCompatRowView, TemplateCompatSummaryView, TemplateDetail,
+        TemplateNodeCompatView, TemplateSummary,
     },
 };
 
@@ -37,10 +38,13 @@ impl TemplateService {
         }
     }
 
-    pub async fn list_templates(&self) -> AppResult<Vec<TemplateSummary>> {
+    pub async fn list_templates(
+        &self,
+        query: ListTemplatesQuery,
+    ) -> AppResult<Vec<TemplateSummary>> {
         let resp = self
             .cubemaster
-            .list_templates(None, false)
+            .list_templates(None, false, query.limit, query.offset)
             .await
             .map_err(map_err)?;
 
