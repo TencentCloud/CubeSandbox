@@ -76,6 +76,7 @@ const (
 	ErrorCode_TaskPauseFailed                   ErrorCode = 130588
 	ErrorCode_TaskResumeFailed                  ErrorCode = 130589
 	ErrorCode_UpdateNetworkFailed               ErrorCode = 130590
+	ErrorCode_HostResourcesNotEnough            ErrorCode = 130591
 	ErrorCode_InitCommandPathError              ErrorCode = 130445
 	ErrorCode_ContainerStateExitedByUser        ErrorCode = 130451
 	ErrorCode_PullImageFailed                   ErrorCode = 130456
@@ -146,6 +147,7 @@ var (
 		130588: "TaskPauseFailed",
 		130589: "TaskResumeFailed",
 		130590: "UpdateNetworkFailed",
+		130591: "HostResourcesNotEnough",
 		130445: "InitCommandPathError",
 		130451: "ContainerStateExitedByUser",
 		130456: "PullImageFailed",
@@ -211,6 +213,7 @@ var (
 		"TaskPauseFailed":                   130588,
 		"TaskResumeFailed":                  130589,
 		"UpdateNetworkFailed":               130590,
+		"HostResourcesNotEnough":            130591,
 		"InitCommandPathError":              130445,
 		"ContainerStateExitedByUser":        130451,
 		"PullImageFailed":                   130456,
@@ -315,7 +318,7 @@ const file_services_errorcode_v1_errorcode_proto_rawDesc = "" +
 	"%services/errorcode/v1/errorcode.proto\x12\x1dcubelet.services.errorcode.v1\"c\n" +
 	"\x03Ret\x12C\n" +
 	"\bret_code\x18\x01 \x01(\x0e2(.cubelet.services.errorcode.v1.ErrorCodeR\aretCode\x12\x17\n" +
-	"\aret_msg\x18\x02 \x01(\tR\x06retMsg*\xff\f\n" +
+	"\aret_msg\x18\x02 \x01(\tR\x06retMsg*\x9d\r\n" +
 	"\tErrorCode\x12\x06\n" +
 	"\x02OK\x10\x00\x12\x14\n" +
 	"\aUnknown\x10\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\x12\f\n" +
@@ -364,7 +367,8 @@ const file_services_errorcode_v1_errorcode_proto_rawDesc = "" +
 	"\x12DestroyImageFailed\x10\x89\xfc\a\x12\x15\n" +
 	"\x0fTaskPauseFailed\x10\x9c\xfc\a\x12\x16\n" +
 	"\x10TaskResumeFailed\x10\x9d\xfc\a\x12\x19\n" +
-	"\x13UpdateNetworkFailed\x10\x9e\xfc\a\x12\x1a\n" +
+	"\x13UpdateNetworkFailed\x10\x9e\xfc\a\x12\x1c\n" +
+	"\x16HostResourcesNotEnough\x10\x9f\xfc\a\x12\x1a\n" +
 	"\x14InitCommandPathError\x10\x8d\xfb\a\x12 \n" +
 	"\x1aContainerStateExitedByUser\x10\x93\xfb\a\x12\x15\n" +
 	"\x0fPullImageFailed\x10\x98\xfb\a\x12\x16\n" +

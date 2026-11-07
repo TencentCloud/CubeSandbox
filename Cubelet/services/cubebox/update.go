@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"time"
 
@@ -14,11 +15,11 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
 	"google.golang.org/protobuf/proto"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/hostquota"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -260,7 +261,7 @@ func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resume
 // The check is best-effort, not a hard reservation: concurrent resumes of
 // different sandboxes each read their own snapshot of aggregateAllocated, so a
 // burst can momentarily admit past the quota (the OS/cgroup remains the hard
-// backstop). This matches how create scheduling is optimistic too; operators
+// backstop). Create admission is serialized separately; operators
 // who want more headroom can lower the release ratio so the reserved fraction
 // absorbs concurrent-resume overshoot.
 func (s *service) admitResume(
@@ -291,9 +292,13 @@ func (s *service) admitResume(
 	// allocation to avoid overcommit, and resume is far rarer than its VM-wake
 	// cost, so this O(n) scan is acceptable on this path.
 	alloc := s.cubeboxMgr.aggregateAllocated()
-	memQuotaMB := int64(0)
-	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
-		memQuotaMB = bytesToMB(memQuota.Value())
+	cpuQuota := hostquota.CPU(hostConf, runtime.NumCPU())
+	memQuotaMB, err := hostquota.Memory(hostConf, hostquota.DetectMemoryTotalMB)
+	if err != nil || cpuQuota <= 0 || memQuotaMB <= 0 {
+		return &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_Conflict,
+			RetMsg:  fmt.Sprintf("resume cannot determine host quota: cpu=%d memory=%d error=%v", cpuQuota, memQuotaMB, err),
+		}
 	}
 	// Only the released fraction is the incremental demand of resuming.
 	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
@@ -304,7 +309,7 @@ func (s *service) admitResume(
 		memQuotaMB:    memQuotaMB,
 		usedCPUMilli:  alloc.MilliCPU,
 		needCPUMilli:  needCPU,
-		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
+		cpuQuotaMilli: cpuQuota,
 	}); reason != "" {
 		ret := &errorcode.Ret{
 			RetCode: errorcode.ErrorCode_Conflict,
