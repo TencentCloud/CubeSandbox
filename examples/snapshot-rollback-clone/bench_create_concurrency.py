@@ -19,6 +19,7 @@ import argparse
 import math
 import statistics
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -42,25 +43,43 @@ def parse_args():
 
 def prepare_snapshot() -> str:
     sb = Sandbox.create(template=TEMPLATE_ID)
-    snap = sb.create_snapshot()
-    sb.kill()
-    return snap.snapshot_id
+    try:
+        snap = sb.create_snapshot()
+        snap_id = snap.snapshot_id
+    finally:
+        try:
+            sb.kill()
+        except Exception:
+            pass
+    return snap_id
 
 
 def run_round(snap_id: str, concurrency: int) -> dict:
-    t0 = time.monotonic()
     sandboxes = []
-    if concurrency == 1:
-        sandboxes.append(Sandbox.create(template=snap_id))
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(Sandbox.create, template=snap_id) for _ in range(concurrency)]
-            for fut in as_completed(futures):
-                sandboxes.append(fut.result())
-    wall_ms = (time.monotonic() - t0) * 1000
+    lock = threading.Lock()
 
-    for sb in sandboxes:
-        sb.kill()
+    def _create_one():
+        sb = Sandbox.create(template=snap_id)
+        with lock:
+            sandboxes.append(sb)
+        return sb
+
+    try:
+        t0 = time.monotonic()
+        if concurrency == 1:
+            _create_one()
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_create_one) for _ in range(concurrency)]
+                for fut in as_completed(futures):
+                    fut.result()
+        wall_ms = (time.monotonic() - t0) * 1000
+    finally:
+        for sb in sandboxes:
+            try:
+                sb.kill()
+            except Exception:
+                pass
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
 
@@ -79,20 +98,26 @@ def main():
         print("-" * 95)
 
     snap_id = prepare_snapshot()
-
-    # warm-up: first restore eliminates page-cache cold-miss (~150 ms spike)
-    wb = Sandbox.create(template=snap_id)
-    wb.kill()
-    time.sleep(args.settle_secs)
-
-    walls, pers = [], []
-    for _ in range(args.rounds):
-        r = run_round(snap_id, args.concurrency)
-        walls.append(r["wall_ms"])
-        pers.append(r["per_ms"])
+    try:
+        # warm-up: first restore eliminates page-cache cold-miss (~150 ms spike)
+        wb = Sandbox.create(template=snap_id)
+        try:
+            wb.kill()
+        except Exception:
+            pass
         time.sleep(args.settle_secs)
 
-    Sandbox.delete_snapshot(snap_id)
+        walls, pers = [], []
+        for _ in range(args.rounds):
+            r = run_round(snap_id, args.concurrency)
+            walls.append(r["wall_ms"])
+            pers.append(r["per_ms"])
+            time.sleep(args.settle_secs)
+    finally:
+        try:
+            Sandbox.delete_snapshot(snap_id)
+        except Exception:
+            pass
 
     print(
         f"{args.concurrency:>11}  {args.concurrency:>7}  {args.rounds:>6}  "

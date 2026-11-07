@@ -18,6 +18,7 @@ import argparse
 import math
 import statistics
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -40,23 +41,40 @@ def parse_args():
 
 
 def run_round(concurrency: int) -> dict:
-    sandboxes = [Sandbox.create(template=TEMPLATE_ID) for _ in range(concurrency)]
-
-    t0 = time.monotonic()
+    sandboxes = []
     snap_ids = []
-    if concurrency == 1:
-        snap_ids.append(sandboxes[0].create_snapshot().snapshot_id)
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {pool.submit(sb.create_snapshot): sb for sb in sandboxes}
-            for fut in as_completed(futures):
-                snap_ids.append(fut.result().snapshot_id)
-    wall_ms = (time.monotonic() - t0) * 1000
+    lock = threading.Lock()
 
-    for sb in sandboxes:
-        sb.kill()
-    for sid in snap_ids:
-        Sandbox.delete_snapshot(sid)
+    def _snap_one(sb):
+        sid = sb.create_snapshot().snapshot_id
+        with lock:
+            snap_ids.append(sid)
+        return sid
+
+    try:
+        for _ in range(concurrency):
+            sandboxes.append(Sandbox.create(template=TEMPLATE_ID))
+
+        t0 = time.monotonic()
+        if concurrency == 1:
+            _snap_one(sandboxes[0])
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_snap_one, sb) for sb in sandboxes]
+                for fut in as_completed(futures):
+                    fut.result()
+        wall_ms = (time.monotonic() - t0) * 1000
+    finally:
+        for sb in sandboxes:
+            try:
+                sb.kill()
+            except Exception:
+                pass
+        for sid in snap_ids:
+            try:
+                Sandbox.delete_snapshot(sid)
+            except Exception:
+                pass
 
     return {"wall_ms": wall_ms, "per_ms": wall_ms / concurrency}
 
