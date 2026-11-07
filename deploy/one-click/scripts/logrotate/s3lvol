@@ -1,0 +1,19 @@
+# Installed only when ONE_CLICK_ENABLE_S3LVOL=1.
+@LOG@ {
+    size 256M
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su root root
+    olddir @ARCHIVE@
+    # Archive compression/renaming can happen before prerotate.
+    firstaction
+        @SPACE_CHECK@
+    endscript
+    prerotate
+        @SPACE_CHECK@
+    endscript
+}
