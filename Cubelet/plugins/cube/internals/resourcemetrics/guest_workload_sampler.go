@@ -72,6 +72,34 @@ type GuestWorkloadLatest struct {
 	LastError            string
 }
 
+// guestEpochID is the identity of one metrics epoch. Generation alone is not
+// unique across a sandbox's life: a resumed sandbox starts a fresh incarnation
+// that may reuse generation 1 with a newer StartedAt, so every comparison must
+// include the start time.
+type guestEpochID struct {
+	Generation uint64
+	StartedAt  time.Time
+}
+
+func guestEpochIDOf(epoch *cubeboxstore.GuestMetricsEpoch) guestEpochID {
+	if epoch == nil {
+		return guestEpochID{}
+	}
+	return guestEpochID{Generation: epoch.Generation, StartedAt: epoch.StartedAt}
+}
+
+func (latest GuestWorkloadLatest) epochID() guestEpochID {
+	return guestEpochID{Generation: latest.EpochGeneration, StartedAt: latest.EpochStartedAt}
+}
+
+func (id guestEpochID) equal(other guestEpochID) bool {
+	return id.Generation == other.Generation && id.StartedAt.Equal(other.StartedAt)
+}
+
+func (id guestEpochID) isZero() bool {
+	return id.Generation == 0 && id.StartedAt.IsZero()
+}
+
 type GuestWorkloadSampler struct {
 	config GuestWorkloadSamplerConfig
 	store  guestWorkloadCubeboxStore
@@ -252,10 +280,11 @@ func (s *GuestWorkloadSampler) CollectOnce(ctx context.Context) bool {
 			var err error
 			epoch, err = s.ensureFreshEpoch(ctx, cb)
 			if err != nil {
-				s.recordError(workload, 0, 0, err)
+				s.recordError(workload, guestEpochID{}, 0, err)
 				s.nextIndex++
 				continue
 			}
+			s.invalidateIfEpochChanged(workload, epoch)
 		}
 		if epoch.State == cubeboxstore.GuestMetricsEpochPrepared {
 			s.markUnavailable(workload)
@@ -271,16 +300,17 @@ func (s *GuestWorkloadSampler) CollectOnce(ctx context.Context) bool {
 		if namespace == "" {
 			namespace = namespaces.Default
 		}
+		epochID := guestEpochIDOf(epoch)
 		cpuLimitMillicores, err := guestWorkloadCPULimitMillicores(cb)
 		if err != nil {
-			s.recordError(workload, epoch.Generation, token, err)
+			s.recordError(workload, epochID, token, err)
 			s.finish(workload, token)
 			s.nextIndex++
 			continue
 		}
 		select {
 		case s.requests <- struct{}{}:
-			go s.collect(ctx, cb, workload, namespace, cpuLimitMillicores, epoch.Generation, token)
+			go s.collect(ctx, cb, workload, namespace, cpuLimitMillicores, epochID, token)
 			s.nextIndex++
 		default:
 			s.finish(workload, token)
@@ -341,23 +371,28 @@ func (s *GuestWorkloadSampler) ListLatest(now time.Time) []GuestWorkloadLatest {
 	return latest
 }
 
+// invalidateIfEpochChanged resets the cached window whenever the store epoch
+// identity differs, including a generation reset after pause/resume. Generation
+// is not monotonic across a fresh incarnation, so the full identity decides.
 func (s *GuestWorkloadSampler) invalidateIfEpochChanged(workload WorkloadRef, epoch *cubeboxstore.GuestMetricsEpoch) {
+	if epoch == nil {
+		return
+	}
+	id := guestEpochIDOf(epoch)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := guestWorkloadKey(workload)
-	latest, ok := s.latest[key]
-	if epoch == nil || (ok && latest.EpochGeneration >= epoch.Generation) {
+	if current, found := s.latest[key]; found && current.epochID().equal(id) {
 		return
 	}
-	latest.Workload = workload
-	latest.EpochGeneration = epoch.Generation
-	latest.EpochStartedAt = epoch.StartedAt
-	latest.EpochReadyAt = epoch.ReadyAt
-	latest.Availability = GuestWorkloadUnavailable
-	latest.CumulativeAvailable = false
-	latest.Snapshot = nil
-	latest.LastError = "guest workload metrics epoch changed; awaiting baseline"
-	s.latest[key] = latest
+	s.latest[key] = GuestWorkloadLatest{
+		Workload:        workload,
+		EpochGeneration: id.Generation,
+		EpochStartedAt:  id.StartedAt,
+		EpochReadyAt:    epoch.ReadyAt,
+		Availability:    GuestWorkloadUnavailable,
+		LastError:       "guest workload metrics epoch changed; awaiting baseline",
+	}
 }
 
 func (s *GuestWorkloadSampler) collect(
@@ -366,7 +401,7 @@ func (s *GuestWorkloadSampler) collect(
 	workload WorkloadRef,
 	namespace string,
 	cpuLimitMillicores *int64,
-	scheduledGeneration uint64,
+	scheduledEpoch guestEpochID,
 	token uint64,
 ) {
 	defer func() {
@@ -382,15 +417,15 @@ func (s *GuestWorkloadSampler) collect(
 	metric, err := s.reader.Metrics(ctx, workload.SandboxID)
 	if err != nil {
 		if errdefs.IsFailedPrecondition(err) {
-			s.recordFatalError(workload, scheduledGeneration, token, err)
+			s.recordFatalError(workload, scheduledEpoch, token, err)
 		} else {
-			s.recordError(workload, scheduledGeneration, token, err)
+			s.recordError(workload, scheduledEpoch, token, err)
 		}
 		return
 	}
 	raw, err := DecodeGuestWorkloadMetric(metric, workload)
 	if err != nil {
-		s.recordError(workload, scheduledGeneration, token, err)
+		s.recordError(workload, scheduledEpoch, token, err)
 		return
 	}
 	raw.CPULimitMillicores = cloneInt64(cpuLimitMillicores)
@@ -399,7 +434,7 @@ func (s *GuestWorkloadSampler) collect(
 		s.delete(workload)
 		return
 	}
-	if epoch.Generation != scheduledGeneration {
+	if !guestEpochIDOf(epoch).equal(scheduledEpoch) {
 		s.invalidateIfEpochChanged(workload, epoch)
 		return
 	}
@@ -414,7 +449,7 @@ func (s *GuestWorkloadSampler) collect(
 	case cubeboxstore.GuestMetricsEpochDegraded:
 		s.recordUnavailable(workload, epoch, raw, token, "guest workload epoch is degraded")
 	default:
-		s.recordError(workload, epoch.Generation, token, fmt.Errorf("guest workload epoch generation %d has unsupported state %q", epoch.Generation, epoch.State))
+		s.recordError(workload, guestEpochIDOf(epoch), token, fmt.Errorf("guest workload epoch generation %d has unsupported state %q", epoch.Generation, epoch.State))
 	}
 }
 
@@ -430,7 +465,7 @@ func (s *GuestWorkloadSampler) readyPendingEpoch(
 	previous := epoch.DeepCopy()
 	readyAt := s.now().UTC()
 	if err := cb.ReadyGuestMetricsEpoch(epoch.Generation, baseline, readyAt); err != nil {
-		s.recordError(workload, epoch.Generation, token, err)
+		s.recordError(workload, guestEpochIDOf(epoch), token, err)
 		return
 	}
 	if err := s.store.SyncByID(ctx, cb.ID); err != nil {
@@ -443,7 +478,7 @@ func (s *GuestWorkloadSampler) readyPendingEpoch(
 		return
 	}
 	ready := cb.GuestMetricsEpochCopy()
-	if ready == nil || ready.Generation != epoch.Generation || ready.State != cubeboxstore.GuestMetricsEpochReady {
+	if ready == nil || !guestEpochIDOf(ready).equal(guestEpochIDOf(epoch)) || ready.State != cubeboxstore.GuestMetricsEpochReady {
 		s.invalidateIfEpochChanged(workload, ready)
 		return
 	}
@@ -459,14 +494,14 @@ func (s *GuestWorkloadSampler) recordReadyEpoch(
 	token uint64,
 ) {
 	if epoch.Baseline == nil || epoch.Baseline.ContainerID != workload.ContainerID {
-		s.recordError(workload, epoch.Generation, token, fmt.Errorf("guest workload epoch generation %d has no baseline for %s", epoch.Generation, workload.ContainerID))
+		s.recordError(workload, guestEpochIDOf(epoch), token, fmt.Errorf("guest workload epoch generation %d has no baseline for %s", epoch.Generation, workload.ContainerID))
 		return
 	}
 	snapshot, err := NormalizeGuestWorkloadMetrics(raw, baselineForEpoch(workload, *epoch.Baseline, epoch.Generation))
 	if err != nil {
 		previous := epoch.DeepCopy()
 		if degradeErr := cb.DegradeGuestMetricsEpoch(epoch.Generation); degradeErr != nil {
-			s.recordError(workload, epoch.Generation, token, fmt.Errorf("normalize guest workload metrics: %w", err))
+			s.recordError(workload, guestEpochIDOf(epoch), token, fmt.Errorf("normalize guest workload metrics: %w", err))
 			return
 		}
 		if persistErr := s.store.SyncByID(ctx, cb.ID); persistErr != nil {
@@ -475,11 +510,11 @@ func (s *GuestWorkloadSampler) recordReadyEpoch(
 				cubeboxstore.GuestMetricsEpochDegraded,
 				previous,
 			)
-			s.recordError(workload, epoch.Generation, token, fmt.Errorf("persist degraded guest workload epoch: %w", persistErr))
+			s.recordError(workload, guestEpochIDOf(epoch), token, fmt.Errorf("persist degraded guest workload epoch: %w", persistErr))
 			return
 		}
 		degraded := cb.GuestMetricsEpochCopy()
-		if degraded == nil || degraded.Generation != epoch.Generation || degraded.State != cubeboxstore.GuestMetricsEpochDegraded {
+		if degraded == nil || !guestEpochIDOf(degraded).equal(guestEpochIDOf(epoch)) || degraded.State != cubeboxstore.GuestMetricsEpochDegraded {
 			s.invalidateIfEpochChanged(workload, degraded)
 			return
 		}
@@ -487,7 +522,7 @@ func (s *GuestWorkloadSampler) recordReadyEpoch(
 		return
 	}
 	current := cb.GuestMetricsEpochCopy()
-	if current == nil || current.Generation != epoch.Generation || current.State != cubeboxstore.GuestMetricsEpochReady {
+	if current == nil || !guestEpochIDOf(current).equal(guestEpochIDOf(epoch)) || current.State != cubeboxstore.GuestMetricsEpochReady {
 		s.invalidateIfEpochChanged(workload, current)
 		return
 	}
@@ -542,22 +577,28 @@ func (s *GuestWorkloadSampler) recordUnavailable(workload WorkloadRef, epoch *cu
 	s.record(token, latest)
 }
 
-func (s *GuestWorkloadSampler) recordError(workload WorkloadRef, generation, token uint64, err error) {
+// recordError keeps the cached window when epoch is zero, which means the
+// epoch could not be determined (for example, ensureFreshEpoch failed).
+func (s *GuestWorkloadSampler) recordError(workload WorkloadRef, epoch guestEpochID, token uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := guestWorkloadKey(workload)
 	if token != 0 && s.tokens[key] != token {
 		return
 	}
-	latest := s.latest[key]
-	if latest.EpochGeneration > generation {
+	latest, found := s.latest[key]
+	if found && !epoch.isZero() && !latest.epochID().equal(epoch) {
 		return
 	}
-	retainLastSuccess := latest.EpochGeneration == generation &&
+	retainLastSuccess := found &&
 		latest.Availability == GuestWorkloadAvailable &&
-		!latest.CollectedAt.IsZero()
+		!latest.CollectedAt.IsZero() &&
+		(epoch.isZero() || latest.epochID().equal(epoch))
 	latest.Workload = workload
-	latest.EpochGeneration = generation
+	if !epoch.isZero() {
+		latest.EpochGeneration = epoch.Generation
+		latest.EpochStartedAt = epoch.StartedAt
+	}
 	if !retainLastSuccess || s.blocked[key] {
 		latest.Availability = GuestWorkloadUnavailable
 		latest.CumulativeAvailable = false
@@ -566,19 +607,22 @@ func (s *GuestWorkloadSampler) recordError(workload WorkloadRef, generation, tok
 	s.latest[key] = latest
 }
 
-func (s *GuestWorkloadSampler) recordFatalError(workload WorkloadRef, generation, token uint64, err error) {
+func (s *GuestWorkloadSampler) recordFatalError(workload WorkloadRef, epoch guestEpochID, token uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := guestWorkloadKey(workload)
 	if token != 0 && s.tokens[key] != token {
 		return
 	}
-	latest := s.latest[key]
-	if latest.EpochGeneration > generation {
+	latest, found := s.latest[key]
+	if found && !epoch.isZero() && !latest.epochID().equal(epoch) {
 		return
 	}
 	latest.Workload = workload
-	latest.EpochGeneration = generation
+	if !epoch.isZero() {
+		latest.EpochGeneration = epoch.Generation
+		latest.EpochStartedAt = epoch.StartedAt
+	}
 	latest.Availability = GuestWorkloadUnavailable
 	latest.CumulativeAvailable = false
 	latest.LastError = err.Error()
@@ -596,7 +640,7 @@ func (s *GuestWorkloadSampler) record(token uint64, latest GuestWorkloadLatest) 
 	if token != 0 && s.tokens[key] != token {
 		return
 	}
-	if current, ok := s.latest[key]; ok && current.EpochGeneration > latest.EpochGeneration {
+	if current, ok := s.latest[key]; ok && !current.epochID().equal(latest.epochID()) {
 		return
 	}
 	if s.blocked[key] {
