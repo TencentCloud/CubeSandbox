@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -234,6 +235,10 @@ func updateSandboxNetworkOnNode(ctx context.Context, req *types.UpdateNetworkReq
 		return result
 	}
 	persistSandboxNetworkSpec(ctx, req, hostIP)
+	if lifecyclePublisher.Enabled() {
+		fields := webhook.LifecycleFields{Network: &webhook.NetworkFields{AllowOut: req.CubeNetworkConfig.AllowOut, DenyOut: req.CubeNetworkConfig.DenyOut, DenyInternet: req.CubeNetworkConfig.AllowInternetAccess != nil && !*req.CubeNetworkConfig.AllowInternetAccess}}
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, req.SandboxID, "", fields)
+	}
 	return result
 }
 

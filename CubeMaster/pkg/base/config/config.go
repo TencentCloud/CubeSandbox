@@ -32,6 +32,7 @@ import (
 var cfg *Config
 
 type Config struct {
+	Webhooks         WebhookConf           `yaml:"webhooks"`
 	Common           *CommonConf           `yaml:"common"`
 	AuthConf         *AuthConf             `yaml:"auth"`
 	Log              *log.Conf             `yaml:"log"`
