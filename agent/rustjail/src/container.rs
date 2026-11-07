@@ -1183,6 +1183,26 @@ where
 }
 
 fn do_exec(args: &[String]) -> ! {
+    // Close every inherited descriptor above stdin/stdout/stderr so passfd
+    // log-forwarding pipes and dups do not leak into the container init.
+    // Android zygote aborts with "Unsupported st_mode for FD ... FIFO" when
+    // forking system_server if extra pipe fds are inherited.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let rc = libc::syscall(libc::SYS_close_range, 3usize, u32::MAX as usize, 0usize);
+        if rc < 0 {
+            // fallback for kernels without close_range: scan /proc/self/fd
+            if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+                for e in entries.flatten() {
+                    if let Ok(n) = e.file_name().to_string_lossy().parse::<i32>() {
+                        if n > 2 {
+                            let _ = libc::close(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
     let path = &args[0];
     let p = CString::new(path.to_string()).unwrap();
     let sa: Vec<CString> = args
