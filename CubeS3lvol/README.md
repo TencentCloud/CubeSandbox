@@ -245,6 +245,7 @@ scripts/s3lvol_rpc.py rcow_create_clone    '{"snapshot_name":"snap0","clone_name
 scripts/s3lvol_rpc.py rcow_resize_lvol     '{"lvol_name":"vol0","size_gib":200}'
 scripts/s3lvol_rpc.py rcow_delete_lvol     '{"lvol_name":"clone0"}'
 scripts/s3lvol_rpc.py rcow_get_lvstores    # list all lvstores and lvols
+scripts/s3lvol_rpc.py rcow_lvstore_attached '{"lvs_name":"vs0"}'  # true once attached
 ```
 
 (`rcow_pending_load_hold` exists only so tests can park pending-delete registry

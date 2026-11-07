@@ -335,7 +335,7 @@ spec:
               command:
                 - /bin/bash
                 - -ec
-                - {{ include "cube.s3lvolProbeCommand" . | replace "\r" "" | quote }}
+                - {{ include "cube.s3lvolStartupProbeCommand" . | replace "\r" "" | quote }}
             timeoutSeconds: {{ .Values.cubeS3lvol.probes.startup.timeoutSeconds }}
             periodSeconds: {{ .Values.cubeS3lvol.probes.startup.periodSeconds }}
             failureThreshold: {{ .Values.cubeS3lvol.probes.startup.failureThreshold }}
@@ -346,7 +346,7 @@ spec:
               command:
                 - /bin/bash
                 - -ec
-                - {{ include "cube.s3lvolProbeCommand" . | replace "\r" "" | quote }}
+                - {{ include "cube.s3lvolReadinessProbeCommand" . | replace "\r" "" | quote }}
             timeoutSeconds: {{ .Values.cubeS3lvol.probes.readiness.timeoutSeconds }}
             initialDelaySeconds: {{ .Values.cubeS3lvol.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.cubeS3lvol.probes.readiness.periodSeconds }}
