@@ -40,3 +40,6 @@ home = { workspace = true }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
+opentelemetry = { version = "=0.28.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.28.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "=0.28.0", default-features = false, features = ["grpc-tonic", "trace"] }

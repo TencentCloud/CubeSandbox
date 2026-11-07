@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
@@ -25,6 +26,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -164,7 +168,16 @@ type snapshotStorageResource struct {
 func createSnapshotGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	extendSnapshotWriteDeadline(c.Writer)
-	common.WriteAPI(c, createSnapshot(c.Request, rt))
+	resp := createSnapshot(c.Request, rt)
+	// Snapshot create returns HTTP 200 on business failures, so flag the real ret_code.
+	if sr, ok := resp.(*snapshotResponse); ok && sr.Res != nil && sr.Res.Ret != nil {
+		span := trace.SpanFromContext(c.Request.Context())
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, sr.Res.Ret.RetCode))
+		if sr.Res.Ret.RetCode != telemetry.SuccessCode {
+			span.SetStatus(codes.Error, "")
+		}
+	}
+	common.WriteAPI(c, resp)
 }
 
 func getSnapshotGinHandler(c *gin.Context) {
@@ -388,6 +401,14 @@ func handleSnapshotStorageAction(c *gin.Context) {
 func handleSandboxRollbackAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	extendSnapshotWriteDeadline(c.Writer)
+	span := trace.SpanFromContext(c.Request.Context())
+	retCode := int(errorcode.ErrorCode_MasterParamsError)
+	defer func() {
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, retCode))
+		if retCode != telemetry.SuccessCode {
+			span.SetStatus(codes.Error, "")
+		}
+	}()
 	req := &snapshotRollbackRequest{}
 	if err := common.GetBodyReq(c.Request, req); err != nil {
 		common.WriteAPI(c, &operationResponse{
@@ -396,6 +417,9 @@ func handleSandboxRollbackAction(c *gin.Context) {
 		return
 	}
 	requestID := firstNonEmptyTrimmed(req.RequestID, req.LegacyRequestID)
+	if requestID != "" {
+		span.SetAttributes(attribute.String(telemetry.AttrRequestID, requestID))
+	}
 	pathSandboxID := c.Param("sandbox_id")
 	if req.SandboxID == "" {
 		req.SandboxID = pathSandboxID
@@ -412,6 +436,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	// Resolve short/full IDs before comparing path vs body so a short prefix
 	// and the matching full ID are not treated as a mismatch.
 	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
+		retCode = ret.RetCode
 		common.WriteAPI(c, &operationResponse{Res: &types.Res{Ret: ret}})
 		return
 	} else {
@@ -420,6 +445,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	if pathSandboxID != "" {
 		resolvedPath, pathRet := sandbox.NormalizeSandboxIDParam(c.Request.Context(), pathSandboxID)
 		if pathRet != nil {
+			retCode = pathRet.RetCode
 			common.WriteAPI(c, &operationResponse{Res: &types.Res{Ret: pathRet}})
 			return
 		}
@@ -433,6 +459,10 @@ func handleSandboxRollbackAction(c *gin.Context) {
 			return
 		}
 	}
+	span.SetAttributes(
+		attribute.String(telemetry.AttrSandboxID, req.SandboxID),
+		attribute.String(telemetry.AttrSnapshotID, strings.TrimSpace(req.SnapshotID)),
+	)
 	ctx, cancel := snapshotExecutionContext(c.Request.Context(), map[string]any{
 		"RequestId":  requestID,
 		"Action":     "RollbackSnapshot",
@@ -443,6 +473,7 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	info, err := rollbackSnapshotFn(ctx, requestID, req.SandboxID, req.SnapshotID, req.InstanceType, req.Backend)
 	if err != nil {
 		code := snapshotErrorCode(err)
+		retCode = code
 		rt.RetCode = int64(code)
 		common.WriteAPI(c, &operationResponse{
 			Res: &types.Res{
@@ -454,6 +485,8 @@ func handleSandboxRollbackAction(c *gin.Context) {
 	}
 	rt.RequestID = requestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	retCode = int(errorcode.ErrorCode_Success)
+	span.SetAttributes(attribute.String(telemetry.AttrJobID, info.JobID))
 	common.WriteAPI(c, &operationResponse{
 		Res: &types.Res{
 			RequestID: requestID,
@@ -479,6 +512,7 @@ func snapshotExecutionContext(parent context.Context, fields map[string]any) (co
 	if rt := CubeLog.GetTraceInfo(parent); rt != nil {
 		base = CubeLog.WithRequestTrace(base, rt.DeepCopy())
 	}
+	base = telemetry.DetachTrace(base, parent)
 	return context.WithTimeout(log.WithLogger(base, log.G(parent).WithFields(fields)), templatecenter.SnapshotOperationTimeout())
 }
 
@@ -519,7 +553,13 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			Res: &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_MasterParamsError), RetMsg: err.Error()}},
 		}
 	}
-	if strings.TrimSpace(req.SandboxID) == "" {
+	requestID := firstNonEmptyTrimmed(req.RequestID, req.LegacyRequestID)
+	span := trace.SpanFromContext(r.Context())
+	if requestID != "" {
+		span.SetAttributes(attribute.String(telemetry.AttrRequestID, requestID))
+	}
+	sandboxID := strings.TrimSpace(req.SandboxID)
+	if sandboxID == "" {
 		return &snapshotResponse{
 			Res: &types.Res{Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
@@ -527,10 +567,12 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			}},
 		}
 	}
+	span.SetAttributes(attribute.String(telemetry.AttrSandboxID, sandboxID))
 	if resolved, ret := sandbox.NormalizeSandboxIDParam(r.Context(), req.SandboxID); ret != nil {
 		return &snapshotResponse{Res: &types.Res{Ret: ret}}
 	} else {
 		req.SandboxID = resolved
+		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, resolved))
 	}
 	mode := snapshotmode.Full
 	if req.Mode != nil {
@@ -545,7 +587,6 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		}
 		mode = parsed
 	}
-	requestID := firstNonEmptyTrimmed(req.RequestID, req.LegacyRequestID)
 	if requestID == "" {
 		return &snapshotResponse{
 			Res: &types.Res{Ret: &types.Ret{
@@ -599,6 +640,10 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}
 	rt.RequestID = requestID
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String(telemetry.AttrSnapshotID, info.TemplateID),
+		attribute.String(telemetry.AttrJobID, info.JobID),
+	)
 	return &snapshotResponse{
 		Res: &types.Res{
 			RequestID: requestID,

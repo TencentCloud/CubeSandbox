@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -26,6 +27,9 @@ import (
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -110,7 +114,7 @@ type snapshotRollbackResult struct {
 // existed). This removes the historical requirement that callers re-supply the
 // original CreateCubeSandboxReq, which was the original motivation for this
 // refactor.
-func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode) (*sandboxtypes.TemplateImageJobInfo, error) {
+func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode) (info *sandboxtypes.TemplateImageJobInfo, err error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
@@ -129,17 +133,119 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	nodeIP := strings.TrimSpace(hostIP)
 	mode = snapshotmode.Normalize(mode.String())
 
-	originReq, err := loadSandboxCreateRequestFn(ctx, sandboxID)
+	stage := &snapshotPrepareStage{}
+	ctx = withSnapshotPrepareStage(ctx, stage)
+	defer func() {
+		endSnapshotStageSpan(stage.span, err, recover())
+	}()
+
+	jobID, reusedExistingJob, originReq, err := prepareSnapshotCreateJob(ctx, requestID, sandboxID, nodeID, nodeIP, displayName, backend, mode)
 	if err != nil {
 		return nil, err
+	}
+	info, err = GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if reusedExistingJob {
+		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
+	}
+	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
+}
+
+// r must come from a recover() called directly by the deferred closure, never via a helper.
+func endSnapshotStageSpan(span trace.Span, err error, r any) {
+	if r != nil {
+		telemetry.End(span, errors.Join(err, fmt.Errorf("snapshot stage panicked: %v", r)))
+		panic(r)
+	}
+	telemetry.End(span, err)
+}
+
+type snapshotPrepareStageKey struct{}
+
+type snapshotPrepareStage struct {
+	span trace.Span
+}
+
+func withSnapshotPrepareStage(ctx context.Context, stage *snapshotPrepareStage) context.Context {
+	return context.WithValue(ctx, snapshotPrepareStageKey{}, stage)
+}
+
+func snapshotPrepareStageFrom(ctx context.Context) *snapshotPrepareStage {
+	stage, _ := ctx.Value(snapshotPrepareStageKey{}).(*snapshotPrepareStage)
+	return stage
+}
+
+func (s *snapshotPrepareStage) end(err error) {
+	if s == nil || s.span == nil {
+		return
+	}
+	telemetry.End(s.span, err)
+	s.span = nil
+}
+
+type snapshotRegisterStageKey struct{}
+
+type snapshotRegisterStage struct {
+	span trace.Span
+}
+
+func withSnapshotRegisterStage(ctx context.Context, stage *snapshotRegisterStage) context.Context {
+	return context.WithValue(ctx, snapshotRegisterStageKey{}, stage)
+}
+
+func snapshotRegisterStageFrom(ctx context.Context) *snapshotRegisterStage {
+	stage, _ := ctx.Value(snapshotRegisterStageKey{}).(*snapshotRegisterStage)
+	return stage
+}
+
+func (s *snapshotRegisterStage) end(err error) {
+	if s == nil || s.span == nil {
+		return
+	}
+	telemetry.End(s.span, err)
+	s.span = nil
+}
+
+func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, mode snapshotmode.Mode) (jobID string, reusedExistingJob bool, originReq *sandboxtypes.CreateCubeSandboxReq, err error) {
+	stage := snapshotPrepareStageFrom(ctx)
+	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotCreatePrepare,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, requestID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	var snapshotID string
+	defer func() {
+		r := recover()
+		attrs := []attribute.KeyValue{attribute.Bool(telemetry.AttrReused, reusedExistingJob)}
+		if jobID != "" {
+			attrs = append(attrs, attribute.String(telemetry.AttrJobID, jobID))
+		}
+		if snapshotID != "" {
+			attrs = append(attrs, attribute.String(telemetry.AttrSnapshotID, snapshotID))
+		}
+		span.SetAttributes(attrs...)
+		if stage != nil && err == nil && r == nil {
+			stage.span = span
+			return
+		}
+		endSnapshotStageSpan(span, err, r)
+	}()
+
+	originReq, err = loadSandboxCreateRequestFn(ctx, sandboxID)
+	if err != nil {
+		return "", false, nil, err
 	}
 	if mode.IsFsOnly() {
 		writable, err := sandbox.WritablePluginVolumeMounts(originReq)
 		if err != nil {
-			return nil, err
+			return "", false, nil, err
 		}
 		if len(writable) > 0 {
-			return nil, fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
+			return "", false, nil, fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
 				ErrFilesystemOnlySharedVolume, strings.Join(writable, ", "))
 		}
 	}
@@ -148,8 +254,9 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	// template).
 	normalizedBackend, err := resolvePersistedCreateBackend(originReq)
 	if err != nil {
-		return nil, err
+		return "", false, nil, err
 	}
+	span.SetAttributes(attribute.String(telemetry.AttrBackend, normalizedBackend))
 	if client := strings.TrimSpace(backend); client != "" && !strings.EqualFold(client, normalizedBackend) {
 		log.G(ctx).Infof("snapshot create ignores client backend=%s; using persisted backend=%s sandbox=%s", client, normalizedBackend, sandboxID)
 	}
@@ -159,8 +266,6 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 		originReq.Request.RequestID = requestID
 	}
 
-	var jobID string
-	reusedExistingJob := false
 	if err := withSnapshotWriteLocks([]string{
 		snapshotSandboxLockKey(sandboxID),
 		snapshotRequestLockKey(requestID),
@@ -179,6 +284,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
 			}
 			jobID = existing.JobID
+			snapshotID = existing.TemplateID
 			reusedExistingJob = true
 			return nil
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -195,7 +301,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			return err
 		}
 
-		snapshotID := generateSnapshotID()
+		snapshotID = generateSnapshotID()
 		createReq, storedReq, err := buildSnapshotRequests(originReq, snapshotID, displayName)
 		if err != nil {
 			return err
@@ -259,17 +365,9 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			return tx.Table(constants.TemplateImageJobTableName).Create(record).Error
 		})
 	}); err != nil {
-		return nil, err
+		return "", false, nil, err
 	}
-
-	info, err := GetTemplateImageJobInfo(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	if reusedExistingJob {
-		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
-	}
-	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
+	return jobID, reusedExistingJob, originReq, nil
 }
 
 // loadSandboxCreateRequestFn is the indirection point used by
@@ -329,7 +427,28 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"sandbox_id":  sandboxID,
 		"node_id":     nodeID,
 	})
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	// A failed stage must stay open while its cleanup child runs; a panic ends both Error.
+	var captureSpan, registerSpan trace.Span
+	var captureErr, registerErr error
+	defer func() {
+		if r := recover(); r != nil {
+			panicErr := fmt.Errorf("snapshot create panicked: %v", r)
+			telemetry.End(captureSpan, panicErr)
+			telemetry.End(registerSpan, panicErr)
+			panic(r)
+		}
+		telemetry.End(captureSpan, captureErr)
+		telemetry.End(registerSpan, registerErr)
+	}()
+	captureCtx, captureSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotCreateCapture,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrSnapshotID, snapshotID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	_ = updateTemplateImageJob(captureCtx, jobID, map[string]any{
 		"status":   JobStatusRunning,
 		"phase":    JobPhaseSnapshotting,
 		"progress": 10,
@@ -339,19 +458,20 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	// The snapshot record is written in the same transaction as this job, so a
 	// read failure or a missing row is a real error. Defaulting to full here
 	// would silently capture memory for a filesystem-only request.
-	rec, recErr := getSnapshotRecord(ctx, snapshotID)
+	rec, recErr := getSnapshotRecord(captureCtx, snapshotID)
 	if recErr == nil && rec == nil {
 		recErr = fmt.Errorf("snapshot %s has no record", snapshotID)
 	}
 	if recErr != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil,
+		return failSnapshotCreateJob(captureCtx, jobID, snapshotID, nodeIP, "", nil,
 			fmt.Errorf("load snapshot record for %s: %w", snapshotID, recErr), commitBackend)
 	}
 	if backend := strings.TrimSpace(rec.Backend); backend != "" {
 		commitBackend = backend
 	}
 	mode := snapshotmode.Normalize(rec.Mode)
-	commitRsp, err := cubelet.CommitSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
+	captureSpan.SetAttributes(attribute.String(telemetry.AttrBackend, commitBackend))
+	commitRsp, err := cubelet.CommitSandbox(captureCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
 		RequestID:    uuid.NewString(),
 		SandboxID:    sandboxID,
 		TemplateID:   snapshotID,
@@ -360,15 +480,19 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		SnapshotMode: mode.String(),
 	})
 	if err != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil, err, commitBackend)
+		captureErr = err
+		return failSnapshotCreateJob(captureCtx, jobID, snapshotID, nodeIP, "", nil, err, commitBackend)
 	}
 	if commitRsp.GetRet() == nil || int(commitRsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
 		msg := "commit sandbox failed"
 		if commitRsp.GetRet() != nil && strings.TrimSpace(commitRsp.GetRet().GetRetMsg()) != "" {
 			msg = commitRsp.GetRet().GetRetMsg()
 		}
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp, errors.New(msg), commitBackend)
+		captureErr = errors.New(msg)
+		return failSnapshotCreateJob(captureCtx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp, captureErr, commitBackend)
 	}
+	telemetry.End(captureSpan, nil)
+	captureSpan = nil
 
 	// The artifact must match the request in both directions: a full request
 	// answered with a filesystem-only artifact would be recorded as "has
@@ -380,7 +504,15 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 
 	snapshotPath := commitRsp.GetSnapshotPath()
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	registerCtx, registerSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotCreateRegister,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrSnapshotID, snapshotID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	_ = updateTemplateImageJob(registerCtx, jobID, map[string]any{
 		"phase":         JobPhaseRegistering,
 		"progress":      70,
 		"node_id":       nodeID,
@@ -402,12 +534,13 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		LastJobID:    jobID,
 	}
 	bindGuestVersionToReplica(&replica, commitRsp.GetGuestImageVersion(), commitRsp.GetAgentVersion(), commitRsp.GetKernelVersion(), commitRsp.GetShimVersion())
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	_ = updateTemplateImageJob(registerCtx, jobID, map[string]any{
 		"phase":    JobPhaseRegistering,
 		"progress": 85,
 	})
-	if err := UpsertReplica(ctx, snapshotID, createReq.InstanceType, replica); err != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
+	if err := UpsertReplica(registerCtx, snapshotID, createReq.InstanceType, replica); err != nil {
+		registerErr = err
+		return failSnapshotCreateJob(registerCtx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	setTemplateLocalityCache(snapshotID, []ReplicaStatus{replica})
 	registerTemplateReplicaForSnapshot(snapshotID, nodeID, 1)
@@ -434,8 +567,9 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 			snapUpdates["remote_status"] = constants.RemoteStatusFailed
 		}
 	}
-	if err := updateSnapshotFields(ctx, snapshotID, snapUpdates); err != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
+	if err := updateSnapshotFields(registerCtx, snapshotID, snapUpdates); err != nil {
+		registerErr = err
+		return failSnapshotCreateJob(registerCtx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	if snapUpdates["remote_status"] == constants.RemoteStatusInProgress {
 		remotestatus.WatchSnapshot(ctx, snapshotID, nodeIP, commitBackend, exportUUIDs, mode)
@@ -443,7 +577,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	// Commit yields a single authoritative envd version; persist it (best-effort)
 	// to the snapshot definition annotation so created sandboxes inherit it.
 	if envdVersion := sanitizeEnvdVersion(commitRsp.GetEnvdVersion()); envdVersion != "" {
-		if err := persistTemplateEnvdVersion(ctx, snapshotID, envdVersion); err != nil {
+		if err := persistTemplateEnvdVersion(registerCtx, snapshotID, envdVersion); err != nil {
 			logger.Warnf("persist snapshot envd version fail, snapshot=%s err=%v", snapshotID, err)
 		}
 	}
@@ -462,7 +596,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"origin_node_id":    nodeID,
 		"display_name":      "",
 	})
-	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+	if err := updateTemplateImageJob(registerCtx, jobID, map[string]any{
 		"status":          JobStatusReady,
 		"phase":           JobPhaseRegistering,
 		"progress":        100,
@@ -470,6 +604,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"result_json":     string(resultPayload),
 		"error_message":   "",
 	}); err != nil {
+		registerErr = err
 		return err
 	}
 	success = true
@@ -477,13 +612,25 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	return nil
 }
 
-func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapshotID, instanceType, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
+func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapshotID, instanceType, backend string) (info *sandboxtypes.TemplateImageJobInfo, err error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
 	if strings.TrimSpace(requestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
+	stage := &snapshotPrepareStage{}
+	prepareCtx, prepareSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotRollbackPrepare,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, requestID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrSnapshotID, snapshotID),
+		))
+	stage.span = prepareSpan
+	ctx = withSnapshotPrepareStage(ctx, stage)
+	defer func() {
+		endSnapshotStageSpan(stage.span, err, recover())
+	}()
 	var jobID string
 	reusedExistingJob := false
 	var existingRequest snapshotRollbackJobRequest
@@ -496,7 +643,21 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		snapshotSandboxLockKey(sandboxID),
 		snapshotResourceLockKey(snapshotID),
 		snapshotRequestLockKey(requestID),
-	}, func() error {
+	}, func() (err error) {
+		ctx := prepareCtx
+		defer func() {
+			attrs := []attribute.KeyValue{attribute.Bool(telemetry.AttrReused, reusedExistingJob)}
+			if jobID != "" {
+				attrs = append(attrs, attribute.String(telemetry.AttrJobID, jobID))
+			}
+			if nodeID != "" {
+				attrs = append(attrs, attribute.String(telemetry.AttrNodeID, nodeID))
+			}
+			if nodeIP != "" {
+				attrs = append(attrs, attribute.String(telemetry.AttrNodeIP, nodeIP))
+			}
+			prepareSpan.SetAttributes(attrs...)
+		}()
 		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
 			if existing.Operation != JobOperationSnapshotRollback {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
@@ -581,6 +742,7 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		if clientBackend != "" && !strings.EqualFold(clientBackend, backend) {
 			log.G(ctx).Infof("snapshot rollback ignores client backend=%s; using persisted backend=%s snapshot=%s", clientBackend, backend, snapshotID)
 		}
+		prepareSpan.SetAttributes(attribute.String(telemetry.AttrBackend, backend))
 		payload, err := marshalSnapshotRollbackRequest(requestID, sandboxID, snapshotID, nodeID, nodeIP, newGen, desiredSize, backend)
 		if err != nil {
 			return err
@@ -612,7 +774,7 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	}); err != nil {
 		return nil, err
 	}
-	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	info, err = GetTemplateImageJobInfo(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -626,12 +788,26 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	return executeSnapshotRollbackJob(ctx, info, sandboxID, snapshotID, nodeID, nodeIP, replica, newGen, desiredSize, backend)
 }
 
-func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) error {
+func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) (err error) {
 	success := false
+	var activeSpan trace.Span
 	defer func() {
 		recordSnapshotRollbackResult(success)
 	}()
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	defer func() {
+		endSnapshotStageSpan(activeSpan, err, recover())
+	}()
+	restoreCtx, restoreSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotRollbackRestore,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrSnapshotID, snapshotID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+			attribute.String(telemetry.AttrBackend, backend),
+		))
+	activeSpan = restoreSpan
+	_ = updateTemplateImageJob(restoreCtx, jobID, map[string]any{
 		"status":   JobStatusRunning,
 		"phase":    JobPhaseRollbackDriving,
 		"progress": 25,
@@ -639,7 +815,7 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 	// Master no longer persists physical refs on snapshot replicas. Cubelet
 	// resolves rootfs_vol/memory_vol/meta_dir from its local catalog keyed by
 	// snapshot_id (the all-empty branch in resolveRollbackTargets).
-	rsp, err := cubelet.RollbackSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.RollbackSandboxRequest{
+	rsp, rpcErr := cubelet.RollbackSandbox(restoreCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.RollbackSandboxRequest{
 		RequestID:   uuid.NewString(),
 		SandboxID:   sandboxID,
 		SnapshotID:  snapshotID,
@@ -647,20 +823,37 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 		DesiredSize: desiredSize,
 		Backend:     backend,
 	})
-	if err != nil {
-		return failSnapshotRollbackJob(ctx, jobID, JobPhaseRollbackDriving, nil, err)
+	if rpcErr != nil {
+		restoreSpan.SetStatus(codes.Error, "")
+		return failSnapshotRollbackJob(restoreCtx, jobID, JobPhaseRollbackDriving, nil, rpcErr)
 	}
-	if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
+	if ret := rsp.GetRet(); ret == nil || int(ret.GetRetCode()) != int(errorcode.ErrorCode_Success) {
 		msg := "rollback sandbox failed"
-		if rsp.GetRet() != nil && strings.TrimSpace(rsp.GetRet().GetRetMsg()) != "" {
-			msg = rsp.GetRet().GetRetMsg()
+		if ret != nil && strings.TrimSpace(ret.GetRetMsg()) != "" {
+			msg = ret.GetRetMsg()
 		}
-		return failSnapshotRollbackJob(ctx, jobID, JobPhaseRollbackDriving, nil, errors.New(msg))
+		if ret != nil {
+			restoreSpan.SetAttributes(attribute.Int(telemetry.AttrRetCode, int(ret.GetRetCode())))
+		}
+		restoreSpan.SetStatus(codes.Error, "")
+		return failSnapshotRollbackJob(restoreCtx, jobID, JobPhaseRollbackDriving, nil, errors.New(msg))
 	}
+	telemetry.End(restoreSpan, nil)
+	activeSpan = nil
+
+	registerCtx, registerSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotRollbackRegister,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrSnapshotID, snapshotID),
+			attribute.String(telemetry.AttrSandboxID, sandboxID),
+			attribute.String(telemetry.AttrNodeID, nodeID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	activeSpan = registerSpan
 	resultPayload, _ := json.Marshal(rsp)
 	// v5: replica rows no longer carry physical refs; the rollback RPC
 	// response (driven from cubelet's catalog) is the only source.
-	if err := AcquireSnapshotRuntimeRef(ctx, SnapshotRuntimeRefInfo{
+	if err := AcquireSnapshotRuntimeRef(registerCtx, SnapshotRuntimeRefInfo{
 		SnapshotID: snapshotID,
 		SandboxID:  sandboxID,
 		NodeID:     nodeID,
@@ -669,22 +862,30 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 		RootfsVol:  rsp.GetRootfsVol(),
 		SandboxGen: rsp.GetNewGen(),
 	}); err != nil {
-		return failSnapshotRollbackJob(ctx, jobID, JobPhaseRollbackRecovering, resultPayload, err)
+		registerSpan.SetStatus(codes.Error, "")
+		return failSnapshotRollbackJob(registerCtx, jobID, JobPhaseRollbackRecovering, resultPayload, err)
 	}
 	message := ""
 	if rsp.GetRet() != nil {
 		message = rsp.GetRet().GetRetMsg()
 	}
-	if err := updateTemplateImageJob(ctx, jobID, map[string]any{
+	if err := updateTemplateImageJob(registerCtx, jobID, map[string]any{
 		"status":        JobStatusReady,
 		"phase":         JobPhaseReady,
 		"progress":      100,
 		"result_json":   string(resultPayload),
 		"error_message": message,
 	}); err != nil {
+		registerSpan.SetStatus(codes.Error, "")
 		return err
 	}
 	success = true
+	if stage := snapshotRegisterStageFrom(ctx); stage != nil {
+		stage.span = registerSpan
+	} else {
+		telemetry.End(registerSpan, nil)
+	}
+	activeSpan = nil
 	return nil
 }
 
@@ -891,19 +1092,41 @@ func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snaps
 	// in this signature solely for logging/diagnostic continuity.
 	_ = snapshotPath
 	_ = commitRsp
+	// Cleanup nests under the failed stage and reports cleanup failures only.
+	cleanupCtx, cleanupSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotCreateCleanup,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrSnapshotID, snapshotID),
+			attribute.String(telemetry.AttrNodeIP, nodeIP),
+		))
+	var spanErr error
+	defer func() {
+		endSnapshotStageSpan(cleanupSpan, spanErr, recover())
+	}()
 	if strings.TrimSpace(nodeIP) != "" && strings.TrimSpace(snapshotID) != "" {
-		_, _ = cubelet.CleanupTemplate(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
+		rsp, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
 			TemplateID: snapshotID,
 			Backend:    pinnedCleanupBackend(backend),
 		})
+		if cleanupErr != nil {
+			spanErr = errors.Join(spanErr, fmt.Errorf("cleanup template: %w", cleanupErr))
+		} else if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
+			msg := "cleanup template failed"
+			if rsp.GetRet() != nil && strings.TrimSpace(rsp.GetRet().GetRetMsg()) != "" {
+				msg = rsp.GetRet().GetRetMsg()
+			}
+			spanErr = errors.Join(spanErr, errors.New(msg))
+		}
 	}
-	_ = deleteReplicasByTemplateID(ctx, snapshotID)
-	defErr := updateSnapshotFields(ctx, snapshotID, map[string]any{
+	if delErr := deleteReplicasByTemplateID(cleanupCtx, snapshotID); delErr != nil {
+		spanErr = errors.Join(spanErr, delErr)
+	}
+	defErr := updateSnapshotFields(cleanupCtx, snapshotID, map[string]any{
 		"status":     StatusFailed,
 		"last_error": cause.Error(),
 	})
-	jobErr := updateTemplateImageJob(ctx, jobID, map[string]any{
+	jobErr := updateTemplateImageJob(cleanupCtx, jobID, map[string]any{
 		"status":          JobStatusFailed,
 		"phase":           JobPhaseRegistering,
 		"progress":        100,
@@ -911,6 +1134,7 @@ func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snaps
 		"error_message":   cause.Error(),
 	})
 	invalidateTemplateCaches(snapshotID)
+	spanErr = errors.Join(spanErr, defErr, jobErr)
 	return errors.Join(defErr, jobErr)
 }
 
@@ -1403,10 +1627,12 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 		"node_ip":     nodeIP,
 	})
 	defer cancel()
+	jobCtx = telemetry.DetachTrace(jobCtx, ctx)
 	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID, displayName)
 	if err != nil {
 		return nil, err
 	}
+	snapshotPrepareStageFrom(ctx).end(nil)
 	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq); err != nil {
 		return nil, err
 	}
@@ -1445,10 +1671,24 @@ func executeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.Template
 		"node_ip":     nodeIP,
 	})
 	defer cancel()
+	jobCtx = telemetry.DetachTrace(jobCtx, ctx)
+	registerStage := &snapshotRegisterStage{}
+	jobCtx = withSnapshotRegisterStage(jobCtx, registerStage)
+	defer func() {
+		endSnapshotStageSpan(registerStage.span, nil, recover())
+	}()
+	snapshotPrepareStageFrom(ctx).end(nil)
 	if err := runSnapshotRollbackJob(jobCtx, info.JobID, sandboxID, snapshotID, nodeID, nodeIP, replica, newGen, desiredSize, backend); err != nil {
+		registerStage.end(err)
 		return nil, err
 	}
-	return finalizeSnapshotJobByID(ctx, info.JobID)
+	finalCtx := ctx
+	if registerStage.span != nil {
+		finalCtx = trace.ContextWithSpan(ctx, registerStage.span)
+	}
+	finalInfo, finalErr := finalizeSnapshotJobByID(finalCtx, info.JobID)
+	registerStage.end(finalErr)
+	return finalInfo, finalErr
 }
 
 func resumeSnapshotDeleteJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, payload snapshotDeleteJobRequest) (*sandboxtypes.TemplateImageJobInfo, error) {

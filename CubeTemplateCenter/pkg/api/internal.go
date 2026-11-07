@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/build"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
@@ -63,7 +64,8 @@ func handleBuildSubmit(c *gin.Context) {
 		return
 	}
 
-	err := buildExecutor.Submit(req.JobID, req.Request, req.DownloadBaseURL, req.EnvdSHA256, req.EnvdData)
+	submitCtx := telemetry.ExtractHTTP(c.Request.Context(), c.Request.Header)
+	err := buildExecutor.SubmitContext(submitCtx, req.JobID, req.Request, req.DownloadBaseURL, req.EnvdSHA256, req.EnvdData)
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch {
