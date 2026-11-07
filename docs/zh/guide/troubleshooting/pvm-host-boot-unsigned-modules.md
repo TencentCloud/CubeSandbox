@@ -49,10 +49,12 @@ BusyBox v1.37.0 (Debian 1:1.37.0-6+b9) built-in shell (ash)
    `CONFIG_SYSTEM_TRUSTED_KEYS=""`，构建产物中的 `.ko` 文件全部没有签名
    （`modinfo -F signer` 对 `dm-mod.ko`、`kvm.ko`、`scsi_mod.ko`、
    `mptspi.ko`、`vmw_pvscsi.ko` 等均返回空）。
-2. `host_grub_config.sh` 按设计在内核启动参数中启用
+2. 早期版本的 `host_grub_config.sh` 会在内核启动参数中启用
    `module.sig_enforce=1`。签名强制开启后，内核拒绝加载**所有**未签名
    模块，存储驱动（如 VMware 上的 `mptspi`、LVM 的 `dm-mod`）无法加载，
-   根分区设备自然找不到。
+   根分区设备自然找不到。如果根盘驱动是编译进内核的，系统能继续启动，但
+   `virtio_net`、`kvm`、`kvm_pvm` 仍会被拒绝加载，主机没有网络，也没有
+   `/dev/kvm`。现在脚本已不再追加该参数。
 
 ## 实测案例：VMware 上的 Debian 13 (trixie)
 
@@ -152,11 +154,19 @@ $ modinfo -F signer /lib/modules/6.6.117-...pvm.host/kernel/drivers/md/dm-mod.ko
 参照上方实测案例中的恢复步骤：从 GRUB 启动发行版旧内核，然后从
 `/etc/default/grub` 中移除 `module.sig_enforce=1` 并重新生成 grub 配置。
 
-### 2. 在内核构建侧修复，grub 脚本保持启用
+### 2. grub 脚本不再强制签名
 
-[PR #2053](https://github.com/TencentCloud/CubeSandbox/pull/2053) 不会弱化
-`host_grub_config.sh`：它继续无条件追加 `module.sig_enforce=1`。根因改为在
-内核构建侧修复——在 `deploy/pvm/configs/pvm_host` 中开启模块签名：
+`host_grub_config.sh` 不再追加 `module.sig_enforce=1`。已发布的所有
+`kernel-release-*` PVM 宿主内核（截至并包括 `kernel-release-261012-1`）
+模块都没有签名，无条件开启强制签名会让全新安装的主机无法启动。重新执行
+新版脚本不会删除旧版脚本已经写入的 `module.sig_enforce=1`，因此在此之前
+配置过的主机仍需按上面的恢复步骤处理。
+
+### 3. 只在模块已签名的内核上开启强制签名
+
+[PR #2053](https://github.com/TencentCloud/CubeSandbox/pull/2053) 已在
+`deploy/pvm/configs/pvm_host` 中开启模块签名，用当前配置构建的内核会为
+自带的模块签名：
 
 ```text
 CONFIG_MODULE_SIG=y
@@ -168,25 +178,24 @@ CONFIG_SYSTEM_TRUSTED_KEYS=""                  # 签名密钥的公钥证书会�
 启用 `CONFIG_MODULE_SIG_ALL=y` 后，`make modules_install` 会用
 `CONFIG_MODULE_SIG_KEY` 为所有内核内置模块签名；构建过程还会提取匹配的
 公钥证书（`certs/signing_key.x509`）并嵌入内核的 trusted keyring，因此
-内核只信任它自己发布的模块——这正是让无条件的
-`module.sig_enforce=1` 变得安全的原因。
+内核只信任它自己发布的模块。
 
-用该配置重新构建并发布 `kernel-release-*` 产物。仍在运行旧（未签名）发布
-内核的主机，必须先安装重新构建的签名内核，再重新执行
-`host_grub_config.sh`，否则强制签名仍会拒绝其模块。该方向已用自建内核
-验证：用更新后配置构建的 Debian 13 `deb` 与 openEuler 24.03 `rpm` 均可在
+在运行这类内核的主机上，可以手动开启强制签名：在 `/etc/default/grub` 的
+`GRUB_CMDLINE_LINUX` 中加入 `module.sig_enforce=1`，然后重新生成 grub
+配置。开启前请先执行下面的风险检查：只有所有已安装的 PVM 内核模块都已
+签名时，开启强制签名才安全。该方向已用自建内核验证：用更新后配置构建的 Debian 13 `deb` 与 openEuler 24.03 `rpm` 均可在
 `module.sig_enforce=1` 下启动，`kvm_pvm`/`/dev/kvm` 正常，未签名模块被拒、
 用构建密钥签名的模块可加载。
 
-上线时还有两个注意点：
+开启强制签名时还有两个注意点：
 
-- 安装新内核后，移除旧的未签名 PVM 内核包（或至少不要选择其 GRUB 入口）。
+- 先移除旧的未签名 PVM 内核包（或至少不要选择其 GRUB 入口）。
   `module.sig_enforce=1` 是全局生效的，选中旧入口仍会掉进 initramfs。
-- 用新的 `kernel-release-*` tag 发布重建后的产物，并提升包版本。该配置
-  改动不会改变内核 release 字符串，所以相同版本的 RPM 不会被自动升级；
-  给 `LOCALVERSION` 加后缀或显式提升包版本，才能让签名内核成为真正的升级。
+- 用该配置构建的签名内核与未签名的发布内核 release 字符串相同，所以相同
+  版本的 RPM 不会被自动升级；给 `LOCALVERSION` 加后缀或显式提升包版本，
+  才能让签名内核成为真正的升级。
 
-### 3. 任意主机上的快速风险检查
+### 4. 任意主机上的快速风险检查
 
 要检查**所有已安装的 PVM 内核**，而不只是当前运行的内核：恢复路径会启动
 发行版内核，此时 `uname -r` 不一定就是 grub 脚本要配置的内核。
@@ -214,15 +223,11 @@ signer 为空或 `modinfo` 无法读取。此时下一次启动就会再次掉�
 密钥：用内核不信任的密钥签名的模块在强制模式下同样会被拒绝，而这种情况
 无法在启动前从用户态检出。
 
-### 4. 树外与 DKMS 模块
+### 5. 树外与 DKMS 模块
 
-主机上必须加载的任何树外/DKMS 模块，必须用内核信任的同一密钥签名
-（`scripts/sign-file`），否则会被强制模式拒绝。无法用发布签名密钥签名的
-模块，应改为编译进内核。
-
-> 注意：本次修改之前发布的 `kernel-release-*` 产物模块仍未签名。必须先
-> 用更新后的 `deploy/pvm/configs/pvm_host` 重新构建，才能在运行这些旧内核
-> 的主机上安全使用无条件的 `module.sig_enforce=1`。
+如果开启了强制签名，主机上必须加载的任何树外/DKMS 模块，必须用内核信任
+的同一密钥签名（`scripts/sign-file`），否则会被强制模式拒绝。无法用发布
+签名密钥签名的模块，应改为编译进内核。
 
 ## 参考
 
