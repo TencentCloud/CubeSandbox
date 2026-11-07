@@ -51,11 +51,14 @@ Two facts combine into the failure:
    so the build never signs the shipped `.ko` files
    (`modinfo -F signer` returns empty for `dm-mod.ko`, `kvm.ko`,
    `scsi_mod.ko`, `mptspi.ko`, `vmw_pvscsi.ko`, ...).
-2. `host_grub_config.sh` enables `module.sig_enforce=1` on the kernel
-   command line (by design). With signature enforcement on, the kernel
+2. Earlier versions of `host_grub_config.sh` enabled `module.sig_enforce=1`
+   on the kernel command line. With signature enforcement on, the kernel
    refuses to load **every** unsigned module, so storage drivers (e.g.
    `mptspi` on VMware, `dm-mod` for LVM) never come up and the root device
-   cannot be found.
+   cannot be found. On hosts whose root disk driver is built in, the boot
+   gets further but `virtio_net`, `kvm` and `kvm_pvm` are still rejected,
+   leaving the host without network or `/dev/kvm`. The script no longer
+   appends this parameter.
 
 ## Verified case: Debian 13 (trixie) on VMware
 
@@ -156,12 +159,21 @@ Follow the recovery steps in the verified case above: boot the previous
 distribution kernel from GRUB, then remove `module.sig_enforce=1` from
 `/etc/default/grub` and regenerate the grub config.
 
-### 2. Fix the kernel build, keep the grub script enforcing
+### 2. The grub script no longer enforces signatures
 
-[PR #2053](https://github.com/TencentCloud/CubeSandbox/pull/2053) does not
-weaken `host_grub_config.sh`: it keeps appending `module.sig_enforce=1`
-unconditionally. The root cause is fixed in the kernel build instead, by
-enabling module signing in `deploy/pvm/configs/pvm_host`:
+`host_grub_config.sh` no longer appends `module.sig_enforce=1`. Every
+published `kernel-release-*` PVM host kernel (up to and including
+`kernel-release-261012-1`) ships unsigned modules, so unconditional
+enforcement made a fresh install unbootable. Re-running the updated script
+does not remove a `module.sig_enforce=1` that an earlier version already
+wrote, so hosts configured before this change still need the recovery step
+above.
+
+### 3. Enable enforcement only on a kernel with signed modules
+
+[PR #2053](https://github.com/TencentCloud/CubeSandbox/pull/2053) enabled
+module signing in `deploy/pvm/configs/pvm_host`, so kernels built from the
+current config sign the modules they ship:
 
 ```text
 CONFIG_MODULE_SIG=y
@@ -173,29 +185,28 @@ CONFIG_SYSTEM_TRUSTED_KEYS=""                  # the signing key's public cert i
 With `CONFIG_MODULE_SIG_ALL=y`, `make modules_install` signs every in-tree
 module with `CONFIG_MODULE_SIG_KEY`. The build also extracts the matching
 public certificate (`certs/signing_key.x509`) and embeds it in the kernel's
-built-in trusted keyring, so the kernel trusts exactly the modules it ships —
-that is what makes the unconditional `module.sig_enforce=1` safe.
+built-in trusted keyring, so the kernel trusts exactly the modules it ships.
 
-Rebuild and publish the `kernel-release-*` artifacts from this config. A host
-that still runs an older (unsigned) release kernel must install the rebuilt
-signed kernel **before** re-running `host_grub_config.sh`, otherwise
-enforcement rejects its modules again. This was validated with self-built
+On a host that runs such a kernel, signature enforcement can be turned on
+explicitly by adding `module.sig_enforce=1` to `GRUB_CMDLINE_LINUX` in
+`/etc/default/grub` and regenerating the grub config. Run the risk check below
+first: enforcement is only safe when every installed PVM kernel ships signed
+modules. This was validated with self-built
 kernels from the updated config: both a Debian 13 `deb` and an openEuler 24.03
 `rpm` boot with `module.sig_enforce=1`, load `kvm_pvm`/`/dev/kvm`, and reject
 unsigned modules while accepting modules signed with the build key.
 
-Two operational notes when rolling this out:
+Two operational notes when enabling enforcement:
 
-- After installing the rebuilt kernel, remove the old unsigned PVM kernel
-  package (or never select its GRUB entry). `module.sig_enforce=1` is global,
-  so booting the old entry would drop to the initramfs again.
-- Publish the rebuilt artifacts under a new `kernel-release-*` tag and bump
-  the package version. This config change does not alter the kernel release
-  string, so RPM will not upgrade an installed package with the same version
-  automatically; a localversion suffix or an explicit package version bump
-  makes the signed kernel an actual upgrade.
+- Remove any old unsigned PVM kernel package first (or never select its GRUB
+  entry). `module.sig_enforce=1` is global, so booting the old entry would
+  drop to the initramfs again.
+- A signed kernel built from this config keeps the same kernel release
+  string as the unsigned releases, so RPM will not upgrade an installed
+  package with the same version automatically; a localversion suffix or an
+  explicit package version bump makes the signed kernel an actual upgrade.
 
-### 3. Quick risk check for any host
+### 4. Quick risk check for any host
 
 Check every installed PVM kernel, not only the running one: the recovery path
 boots the distribution kernel, so `uname -r` is not necessarily the kernel the
@@ -225,17 +236,12 @@ that a signature is present, not that the kernel trusts the signing key:
 modules signed by an untrusted key are still rejected under enforcement, and
 that case cannot be detected from userspace before boot.
 
-### 4. Out-of-tree and DKMS modules
+### 5. Out-of-tree and DKMS modules
 
-Any out-of-tree/DKMS module that has to load on the host must be signed with
-the same key the kernel trusts (`scripts/sign-file`), or enforcement rejects
-it. Modules that cannot be signed with the release signing key should be built
-into the kernel instead.
-
-> Note: `kernel-release-*` artifacts published before this change still ship
-> unsigned modules. They have to be rebuilt from the updated
-> `deploy/pvm/configs/pvm_host` before the unconditional
-> `module.sig_enforce=1` is safe on hosts running them.
+If you enable enforcement, any out-of-tree/DKMS module that has to load on
+the host must be signed with the same key the kernel trusts
+(`scripts/sign-file`), or enforcement rejects it. Modules that cannot be
+signed with the release signing key should be built into the kernel instead.
 
 ## References
 
