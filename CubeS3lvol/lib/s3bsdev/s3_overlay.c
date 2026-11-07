@@ -42,10 +42,10 @@
  *
  *   So chunks are kept in two queues instead: ripe_q for the ones the policy is
  *   done with, aging_q in dirty-time order for the rest. next_dirty drains
- *   ripe_q first and only then considers the age of aging_q's head. Both are
- *   still O(1) and nothing scans -- a chunk moves between them at the moment its
- *   dirty count crosses the threshold, which is already a place doing per-chunk
- *   bookkeeping.
+ *   an older forced or expired aging chunk before younger ripe chunks. Selection
+ *   skips chunks in failure cooldown; without failures it examines only the
+ *   queue heads. A chunk moves between queues as its dirty count crosses the
+ *   threshold.
  */
 
 #include "spdk/stdinc.h"
@@ -111,6 +111,11 @@ struct overlay_chunk {
 	 * reset before the age ever elapsed, and would sit in RAM until the high
 	 * water mark forced it out. */
 	uint64_t         dirty_since_tsc;
+
+	/* Failure cooldown belongs to this chunk, never to healthy uploads. */
+	uint64_t         retry_after;
+	uint64_t         retry_delay_us;
+	uint64_t         last_failure_tsc;
 
 	bool             queued;
 	/* Which of the two dirty queues, meaningful only while queued. */
@@ -893,6 +898,9 @@ s3_overlay_drop_chunk(struct s3_overlay *ov, uint64_t chunk_index)
 	/* Invalidate any flush that already collected this chunk: publishing it
 	 * afterwards would resurrect data the caller just unmapped. */
 	c->epoch++;
+	c->retry_after = 0;
+	c->retry_delay_us = 0;
+	c->last_failure_tsc = 0;
 
 	overlay_chunk_dequeue(ov, c);
 	overlay_chunk_maybe_free(ov, c);
@@ -1121,9 +1129,9 @@ s3_overlay_chunk_is_flushing(struct s3_overlay *ov, uint64_t chunk_index)
 
 /* Whether the oldest chunk still being held back should be let go anyway.
  *
- * Only ever asked about aging_q's head. Fullness is not considered here: a chunk
- * that filled up was moved to ripe_q when it did, and next_dirty drains that
- * queue first, so anything still on aging_q is by definition not full. */
+ * Asked about the oldest chunk outside its retry cooldown. Fullness is not
+ * considered here: a full chunk moved to ripe_q, so anything still on aging_q
+ * is by definition not full. */
 static bool
 overlay_aging_head_expired(struct s3_overlay *ov, struct overlay_chunk *c)
 {
@@ -1197,13 +1205,23 @@ s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
 		      uint64_t *out_chunk_index)
 {
 	struct overlay_chunk *ripe, *aging, *c;
+	uint64_t now = spdk_get_ticks();
 
 	if (!ov || !out_chunk_index) {
 		return -EINVAL;
 	}
 
-	ripe = TAILQ_FIRST(&ov->ripe_q);
-	aging = TAILQ_FIRST(&ov->aging_q);
+	/* Preserve queue priority among chunks whose retry delay has elapsed. */
+	TAILQ_FOREACH(ripe, &ov->ripe_q, dirty_link) {
+		if (now >= ripe->retry_after) {
+			break;
+		}
+	}
+	TAILQ_FOREACH(aging, &ov->aging_q, dirty_link) {
+		if (now >= aging->retry_after) {
+			break;
+		}
+	}
 
 	/* When a partial chunk at the head of aging_q is older than the head of
 	 * ripe_q and is already forced or expired, flush it ahead of younger
@@ -1234,7 +1252,7 @@ s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
 	}
 
 	if (!aging) {
-		return -ENOENT;
+		return s3_overlay_has_dirty(ov) ? -EAGAIN : -ENOENT;
 	}
 
 	if (force) {
@@ -1289,6 +1307,11 @@ s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 	}
 	if (c->n_dirty == 0) {
 		return -ENOENT;
+	}
+
+	/* Ring-head scheduling calls this directly, bypassing next_dirty. */
+	if (spdk_get_ticks() < c->retry_after) {
+		return -EAGAIN;
 	}
 
 	/* The flusher takes chunks off the queue itself, but do not rely on it:
@@ -1383,6 +1406,43 @@ s3_overlay_flush_merge(struct s3_overlay *ov,
 	}
 }
 
+uint64_t
+s3_overlay_backoff_flush(struct s3_overlay *ov, uint64_t chunk_index,
+			 uint64_t epoch, uint64_t max_delay_us)
+{
+	struct overlay_chunk *c = ov ? overlay_chunk_get(ov, chunk_index) : NULL;
+	uint64_t now = spdk_get_ticks();
+	uint64_t hz = spdk_get_ticks_hz();
+
+	/* A completion for data dropped by unmap must not delay its replacement. */
+	if (!c || !c->n_present || c->epoch != epoch) {
+		return 0;
+	}
+	if (c->last_failure_tsc && now - c->last_failure_tsc > 60 * hz) {
+		c->retry_delay_us = 0;
+	}
+	c->last_failure_tsc = now;
+	c->retry_delay_us = c->retry_delay_us ? c->retry_delay_us * 2 : 100000;
+	c->retry_delay_us = spdk_min(c->retry_delay_us, max_delay_us);
+	c->retry_after = now + c->retry_delay_us * hz / 1000000;
+	return c->retry_delay_us;
+}
+
+void
+s3_overlay_reset_flush_backoff(struct s3_overlay *ov)
+{
+	struct overlay_chunk *c;
+
+	if (!ov) {
+		return;
+	}
+	TAILQ_FOREACH(c, &ov->live_q, live_link) {
+		c->retry_after = 0;
+		c->retry_delay_us = 0;
+		c->last_failure_tsc = 0;
+	}
+}
+
 void
 s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index, bool success)
 {
@@ -1403,6 +1463,11 @@ s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index, bool success)
 
 	assert(c->flush_active);
 	assert(ov->flushes_active > 0);
+	if (success) {
+		c->retry_after = 0;
+		c->retry_delay_us = 0;
+		c->last_failure_tsc = 0;
+	}
 
 	for (uint32_t i = 0; i < ov->blocks_per_chunk; i++) {
 		struct overlay_block *b = &c->blocks[i];
