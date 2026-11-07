@@ -310,6 +310,52 @@ Repeated failures wait 10 seconds, then double, capped at 300 seconds; after 10 
 
 Put a liveness probe on the create request. When the request has none and the image has envd (port `49983` exposed), the node probes `GET /health`. Images without envd are not probed, so they are not restarted by mistake. `Never` combined with a probe is rejected with HTTP 400: a probe that can never restart would only kill the sandbox.
 
+The following create-request excerpt checks `GET /health` on port `8080`. After
+three consecutive failures, CubeSandbox cold-restarts the whole sandbox under
+the `OnFailure` policy:
+
+```json
+{
+  "restartPolicy": "OnFailure",
+  "restartBackoff": {
+    "initialIntervalSecond": 10,
+    "multiplier": 2,
+    "maxIntervalSecond": 300,
+    "maxRestarts": 5
+  },
+  "livenessProbe": {
+    "httpGet": {
+      "path": "/health",
+      "port": 8080
+    },
+    "initialDelaySecond": 30,
+    "periodSecond": 10,
+    "probeTimeoutSecond": 1,
+    "failureThreshold": 3
+  }
+}
+```
+
+For a TCP check, replace `httpGet` with `tcpSocket`; exactly one check type may
+be set:
+
+```json
+{
+  "restartPolicy": "Always",
+  "livenessProbe": {
+    "tcpSocket": {
+      "port": 8080
+    },
+    "periodSecond": 10,
+    "failureThreshold": 3
+  }
+}
+```
+
+Probe durations are in seconds. Omitted or non-positive timing values use these
+defaults: 30 seconds initial delay, 10 seconds between checks, 1 second timeout,
+and 3 consecutive failures.
+
 ### Restart status
 
 `GET /sandboxes/<id>` and the list endpoint return `restartStatus`, a separate object from `state`: `state` answers "where is the sandbox in its lifecycle", while `restartStatus` answers "where is the restart state machine, and why did it stop". Once the container exits on its own, `state` only reports `unknown`; this object is what distinguishes a clean exit, a crash, and a give-up.

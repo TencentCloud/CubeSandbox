@@ -310,6 +310,49 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 存活探针写在创建请求里。没有探针、且镜像带 envd（暴露 `49983`）时，节点会默认请求 `GET /health`。没有 envd 的镜像不会被探测，避免误重启。`Never` 配存活探针会被拒绝，返回 HTTP 400：探测永远不可能触发重启，只会把沙箱杀掉。
 
+下面的创建请求片段会检查 `8080` 端口上的 `GET /health`。连续失败三次后，
+CubeSandbox 会按照 `OnFailure` 策略冷重启整个沙箱：
+
+```json
+{
+  "restartPolicy": "OnFailure",
+  "restartBackoff": {
+    "initialIntervalSecond": 10,
+    "multiplier": 2,
+    "maxIntervalSecond": 300,
+    "maxRestarts": 5
+  },
+  "livenessProbe": {
+    "httpGet": {
+      "path": "/health",
+      "port": 8080
+    },
+    "initialDelaySecond": 30,
+    "periodSecond": 10,
+    "probeTimeoutSecond": 1,
+    "failureThreshold": 3
+  }
+}
+```
+
+如需 TCP 探测，可将 `httpGet` 替换为 `tcpSocket`；两种探测类型只能配置一种：
+
+```json
+{
+  "restartPolicy": "Always",
+  "livenessProbe": {
+    "tcpSocket": {
+      "port": 8080
+    },
+    "periodSecond": 10,
+    "failureThreshold": 3
+  }
+}
+```
+
+探针时间的单位均为秒。未填写或填写非正数时，默认启动延迟为 30 秒、检查周期为
+10 秒、单次超时为 1 秒、连续失败阈值为 3 次。
+
 ### 查询重启状态
 
 `GET /sandboxes/<id>` 和列表接口会返回 `restartStatus`，它是 `state` 之外的独立对象：`state` 回答"沙箱在生命周期哪一站"，`restartStatus` 回答"重启状态机走到哪、为什么停下"。容器自行退出后，`state` 只会报 `unknown`，只有靠这个对象才能分清正常退出、崩溃和放弃重启。
