@@ -3,8 +3,9 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # Behavioral tests for cube-egress-net-start.sh (issue #2141): the wrapper
-# must block until the ingress interface (cube-dev) exists and only then
-# exec the init script, passing its exit status through to systemd.
+# must wait (bounded) for the ingress interface (cube-dev), fail explicitly
+# on timeout, and only then exec the init script, passing its exit status
+# through to systemd.
 #
 # Fully offline: the real wrapper is copied into a throwaway layout with a
 # stub common.sh (bypasses require_root, points TOOLBOX_ROOT at the
@@ -56,8 +57,8 @@ INIT_LOG="${TMP}/init.log"
 # Runs the wrapper against the fixture. Extra CUBE_* variables can be
 # passed as command-scoped assignments (bash puts them in the environment).
 run_wrapper() {
-    timeout 10 env PATH="${TMP}/bin:/usr/bin:/bin" \
-        CUBE_EGRESS_NET_POLL_INTERVAL=0.05 \
+    timeout 20 env PATH="${TMP}/bin:/usr/bin:/bin" \
+        CUBE_EGRESS_NET_POLL_INTERVAL=1 \
         "${LAYOUT}/scripts/systemd/cube-egress-net-start.sh"
 }
 
@@ -72,9 +73,17 @@ fi
 grep -q "no egress iptables init script" "${TMP}/err" \
     || fail "missing-init error does not mention the init script"
 
-# --- 3: explicit CUBE_EGRESS_NET_INIT pointing at a missing file → error ----
+# --- 3: explicit CUBE_EGRESS_NET_INIT pointing at a missing file → the
+# ensure_executable error, distinct from the auto-detect miss above
 if CUBE_EGRESS_NET_INIT="${TMP}/no-such-init.sh" run_wrapper 2>"${TMP}/err"; then
     fail "wrapper exited 0 with a nonexistent CUBE_EGRESS_NET_INIT"
+fi
+grep -q "required executable not found" "${TMP}/err" \
+    || fail "explicit-path miss did not hit ensure_executable"
+
+# --- 3b: non-numeric wait/interval values are rejected up front -------------
+if CUBE_EGRESS_NET_WAIT_TIMEOUT=abc run_wrapper 2>/dev/null; then
+    fail "wrapper accepted a non-numeric CUBE_EGRESS_NET_WAIT_TIMEOUT"
 fi
 
 # Now place the fake init script (records the action, exit code from file).
@@ -98,8 +107,9 @@ grep -q '^ip link show dev cube-dev$' "${IP_LOG}" \
     || fail "wrapper never probed for cube-dev"
 
 # --- 5: core #2141 scenario — absent then present ----------------------------
-# The interface appears 0.3s in; the wrapper must keep polling (several
-# probes), call the init script only after the interface exists, and exit 0.
+# The interface appears 0.3s in; with a 1s poll the wrapper must probe at
+# least twice (i.e. actually waited), call the init script only after the
+# interface exists, and exit 0.
 : > "${INIT_LOG}"
 rm -f "${TMP}/present"
 ( sleep 0.3; touch "${TMP}/present" ) &
@@ -107,13 +117,30 @@ TIMER_PID=$!
 run_wrapper 2>"${TMP}/out" || fail "wrapper failed on absent→present interface"
 wait "${TIMER_PID}"
 PROBES="$(grep -c '^ip link show dev cube-dev$' "${IP_LOG}")"
-[[ "${PROBES}" -ge 3 ]] \
-    || fail "expected several probes while waiting, got ${PROBES}"
+[[ "${PROBES}" -ge 2 ]] \
+    || fail "expected the wrapper to re-probe while waiting, got ${PROBES}"
 [[ "$(cat "${INIT_LOG}")" == "init up" ]] \
     || fail "init script not called after interface appeared"
 
-# --- 6: init failure is propagated (systemd must see it and retry) -----------
+# --- 6: interface never appears → explicit timeout failure -------------------
+# The core #2141 behavior: never exit 0 while the interface is missing (the
+# pre-fix wrapper gave up after 30 attempts and "succeeded"). With a 1s
+# budget and no `present` flag the wrapper must die loudly; the pre-fix
+# "poll 30 times then exit 0" mutant turns this red.
 : > "${INIT_LOG}"
+rm -f "${TMP}/present"
+set +e
+CUBE_EGRESS_NET_WAIT_TIMEOUT=1 run_wrapper 2>"${TMP}/out"
+STATUS=$?
+set -e
+[[ "${STATUS}" -ne 0 ]] || fail "wrapper exited 0 although the interface never appeared"
+grep -q "timed out after 1s" "${TMP}/out" \
+    || fail "timeout failure does not state the deadline"
+[[ ! -s "${INIT_LOG}" ]] || fail "init script ran although the interface never appeared"
+
+# --- 7: init failure is propagated (systemd must see it and retry) -----------
+: > "${INIT_LOG}"
+touch "${TMP}/present"
 echo 7 > "${TMP}/init.exit"
 set +e
 run_wrapper 2>"${TMP}/out"
@@ -123,12 +150,18 @@ set -e
     || fail "init exit status not propagated (got ${STATUS}, want 7)"
 rm -f "${TMP}/init.exit"
 
-# --- 7: unit file shape -------------------------------------------------------
+# --- 8: unit file shape -------------------------------------------------------
 grep -q '^Type=oneshot$' "${UNIT_SRC}" || fail "unit is not Type=oneshot"
-grep -q '^TimeoutStartSec=infinity$' "${UNIT_SRC}" \
-    || fail "unit lacks TimeoutStartSec=infinity (default 90s would kill the wait)"
+# Type=oneshot disables the start timeout by default; an explicit
+# TimeoutStartSec would only invite a wrong "90s kills the wait" reading.
+grep -q '^TimeoutStartSec' "${UNIT_SRC}" \
+    && fail "unit sets TimeoutStartSec — redundant for oneshot and misleading"
 grep -q '^Restart=on-failure$' "${UNIT_SRC}" \
     || fail "unit lacks Restart=on-failure (a failed init would stay dead)"
+grep -q '^StartLimitIntervalSec=60s$' "${UNIT_SRC}" \
+    || fail "unit lacks StartLimitIntervalSec (default limit never triggers with RestartSec=5s)"
+grep -q '^StartLimitBurst=3$' "${UNIT_SRC}" \
+    || fail "unit lacks StartLimitBurst"
 grep -q '^ExecStart=.*cube-egress-net-start\.sh$' "${UNIT_SRC}" \
     || fail "unit ExecStart does not point at the start wrapper"
 grep -q '^ExecStop=.*cube-egress-net-stop\.sh$' "${UNIT_SRC}" \
