@@ -200,11 +200,12 @@ install_routing() {
     done
 
     # ip route show normalises 0.0.0.0/0 to "default"; match both forms.
-    if ! ip route add local 0.0.0.0/0 dev lo table "${ROUTE_TABLE}" 2>/dev/null; then
+    local route_err=""
+    if ! route_err="$(ip route add local 0.0.0.0/0 dev lo table "${ROUTE_TABLE}" 2>&1)"; then
         ip route show table "${ROUTE_TABLE}" | grep -qF \
             -e "local 0.0.0.0/0 dev lo" \
             -e "local default dev lo" \
-            || fatal "ip route add local 0.0.0.0/0 dev lo table ${ROUTE_TABLE} failed"
+            || fatal "ip route add local 0.0.0.0/0 dev lo table ${ROUTE_TABLE} failed: ${route_err}"
     fi
 }
 
