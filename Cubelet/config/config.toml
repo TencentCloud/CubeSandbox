@@ -189,6 +189,16 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
       detection_interval = "1m"
       max_deletion_per_cycle = 10
       free_disk_threshold_percent = 10
+    # Independent of containerd image GC. Opt in on a canary first.
+    [plugins."io.cubelet.images-service.v1.images-service".artifact_cache_gc]
+      enabled = false
+      dry_run = true
+      interval = "1m"
+      high_percent = 80
+      low_percent = 70
+      idle_time = "1h"
+      max_bytes_per_cycle = 107374182400 # 100 GiB
+      source_manifest = "" # Optional owner-readable bootstrap manifest.
   [plugins."io.cubelet.cubebox-service.v1.gc-service"]
     cleanup_interval = "5s"
     # Failed cleanups before a sandbox is quarantined: alerted once, and
