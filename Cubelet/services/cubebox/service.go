@@ -324,6 +324,24 @@ func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSan
 		// touched; the create step rejects both as already exists.
 		return nil
 	}
+	// Finish an unfinished pause teardown before waiting on the pids: the
+	// teardown is what kills the shim, so waiting first would block on a
+	// process that never exits. The resume form of Create already holds this
+	// lock; an ordinary create does not.
+	op := "replace"
+	if resumeFromPauseSandboxID(req) != "" {
+		op = "resume"
+	}
+	if resumeFromPauseSandboxID(req) == "" {
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, desired)
+		if lockErr != nil {
+			return fmt.Errorf("sandbox lifecycle operation is in progress; retry after 2 seconds")
+		}
+		defer unlock()
+	}
+	if err := s.ensurePauseCleanupFinished(ctx, desired, op); err != nil {
+		return err
+	}
 	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
 }
 
@@ -364,8 +382,9 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
-		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, sid)
+	resumeFromPause := resumeFromPauseSandboxID(req)
+	if resumeFromPause != "" {
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, resumeFromPause)
 		if lockErr != nil {
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
@@ -469,6 +488,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	rt.Namespace = ns
 	ctx = namespaces.WithNamespace(ctx, ns)
+	// Finish an unfinished pause teardown: it releases the names this Create
+	// reuses. engine.Destroy needs a RequestTrace, so this must run after the
+	// trace setup.
+	if resumeFromPause != "" {
+		if err := s.ensurePauseCleanupFinished(ctx, resumeFromPause, "resume"); err != nil {
+			rsp.Ret.RetMsg = err.Error()
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+	}
 	// The gate has to run before the create flow allocates anything, and it
 	// needs the same namespace the flow would have used to resolve the old
 	// sandbox's shim.
@@ -838,6 +867,16 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			return rsp, nil
 		}
 		defer unlock()
+
+		// delete_tombstone only drops the row, so an unfinished pause teardown
+		// must finish first; a normal delete reaps the paused runtime itself.
+		if isPauseDeleteTombstone(req) {
+			if err := s.ensurePauseCleanupFinished(ctx, req.SandboxID, "delete"); err != nil {
+				rsp.Ret.RetMsg = err.Error()
+				rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+				return rsp, nil
+			}
+		}
 
 		sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
 		ctx = log.WithLogger(ctx, stepLog)
