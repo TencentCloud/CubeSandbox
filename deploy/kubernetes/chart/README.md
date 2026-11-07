@@ -22,7 +22,13 @@ deploy/kubernetes/chart/
 
 ## Documentation
 
-Official docs (source of truth; do not keep a parallel copy under this chart):
+Chart notes for the optional local-veth EgressProxy:
+
+- [EgressProxy Upgrade Guide](./docs/UPGRADE_EN.md) / [EgressProxy 升级指南](./docs/UPGRADE.md)
+- [Local-veth EgressProxy Design](./docs/EGRESS_VETH_EN.md) / [EgressProxy 本地 veth 方案](./docs/EGRESS_VETH.md)
+- [Local-veth EgressProxy Test Report](./docs/EGRESS_TEST_EN.md) / [EgressProxy 本地 veth 测试报告](./docs/EGRESS_TEST.md)
+
+Official docs (source of truth for the published guides):
 
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
@@ -50,7 +56,8 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cubemastercli` | Operational CLI for exec-based ops. |
 | `cube-proxy` | Data-plane proxy (control-plane placement when enabled). |
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
-| `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
+| `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). `cube-egress-net` is omitted when `egressProxy.enabled=true`. |
+| `cube-egress-configurer` / `cube-egress-proxy` | Optional node-local veth EgressProxy (`egressProxy.enabled`). Primary and standby proxies plus a host-network configurer. |
 | `cube-webui` | WebUI static assets and OpenResty. |
 
 ## Node selection

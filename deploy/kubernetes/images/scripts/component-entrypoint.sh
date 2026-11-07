@@ -1124,6 +1124,21 @@ run_cubelet() {
     egress_admin_url_esc="$(sed_escape_replacement "${egress_admin_url}")"
     sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${egress_admin_url_esc}\"|" "${cfg}"
   fi
+  if [[ -n "${CUBE_ROUTER_ENABLE:-}" ]]; then
+    local router_enable="false"
+    [[ "${CUBE_ROUTER_ENABLE}" == "1" || "${CUBE_ROUTER_ENABLE}" == "true" ]] \
+      && router_enable="true"
+    sed -i -E \
+      "s/^([[:space:]]*)cube_router_enable = .*/\\1cube_router_enable = ${router_enable}/" \
+      "${cfg}"
+  fi
+  if [[ -n "${CUBE_ROUTER_CIDR:-}" ]]; then
+    local router_cidr_esc
+    router_cidr_esc="$(sed_escape_replacement "${CUBE_ROUTER_CIDR}")"
+    sed -i -E \
+      "s|^([[:space:]]*)cube_router_cidr = \"[^\"]*\"|\\1cube_router_cidr = \"${router_cidr_esc}\"|" \
+      "${cfg}"
+  fi
   if [[ -n "${CUBE_S3LVOL_SOCKET:-}" ]]; then
     patch_cow_s3_opt_in "${cfg}" "${CUBE_S3LVOL_SOCKET}"
   fi
