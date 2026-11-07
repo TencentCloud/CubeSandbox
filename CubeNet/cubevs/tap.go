@@ -3,6 +3,7 @@ package cubevs
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/cilium/ebpf"
@@ -91,11 +92,16 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 }
 
 // UpsertTAPDeviceMetadata registers or refreshes TAP metadata without touching
-// per-sandbox policy maps. Recovery paths use this to repair metadata while
-// preserving allow_out_v3, deny_out and dns_allow_v2 contents.
+// per-sandbox policy maps. It resets traffic metrics before publishing metadata.
+// Recovery paths use this to repair metadata while preserving allow_out_v3,
+// deny_out and dns_allow_v2 contents.
 func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint32) error {
 	if len(id) > maxIDLength {
 		return ErrTooLong
+	}
+	if err := EnsureSandboxTrafficMetrics(ip); err != nil {
+		log.Printf("cubevs tap: ensure sandbox traffic metrics failed; continuing with best-effort counters: sandbox_id=%s ifindex=%d sandbox_ip=%s err=%v",
+			id, ifindex, ip.String(), err)
 	}
 
 	mvmIP := ipToUint32(ip)
@@ -235,9 +241,9 @@ func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
 	return DeleteTAPDeviceMetadata(ifindex, ip)
 }
 
-// DeleteTAPDeviceMetadata removes TAP identity metadata from CubeVS without touching
-// policy maps. Missing keys are treated as already-clean so cleanup paths remain
-// idempotent.
+// DeleteTAPDeviceMetadata removes TAP identity metadata and traffic metrics
+// without touching policy maps. Missing keys are treated as already-clean so
+// cleanup paths remain idempotent.
 func DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error {
 	mvmIP := ipToUint32(ip)
 
@@ -255,7 +261,14 @@ func DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error {
 	}
 	defer ipMap.Close()
 
-	return deleteTAPDeviceMetadataEntries(ifindexMap, ipMap, ifindex, mvmIP)
+	if err := deleteTAPDeviceMetadataEntries(ifindexMap, ipMap, ifindex, mvmIP); err != nil {
+		return err
+	}
+	if err := DeleteSandboxTrafficMetrics(ip); err != nil {
+		log.Printf("cubevs tap: delete sandbox traffic metrics failed; continuing after TAP metadata deletion: ifindex=%d sandbox_ip=%s err=%v",
+			ifindex, ip.String(), err)
+	}
+	return nil
 }
 
 func deleteTAPDeviceMetadataEntries(ifindexMap, ipMap tapMetadataMapOps, ifindex, mvmIP uint32) error {
