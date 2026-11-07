@@ -613,5 +613,6 @@ func initVolumePlugins(ctx context.Context, cfg *Config) error {
 			CubeLog.Infof("[plugin_volume] initialized rpc plugin %q at %s", pc.Name, pc.SocketPath)
 		}
 	}
+	startVolumeContentServer(cfg)
 	return nil
 }

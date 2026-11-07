@@ -59,7 +59,31 @@ const (
 
 	// keySep separates namespace from volumeID inside the bbolt key.
 	keySep = "\x00"
+
+	// TransientHolderPrefix marks holders that only pin a volume for the
+	// duration of one data-plane request (the /volumecontent service). They
+	// count towards the node-local ref-count, so the host mount stays up while
+	// a request runs, but they are not sandboxes: they never produce the
+	// cross-node 0→1 / 1→0 events that drive CubeMaster's delete protection.
+	TransientHolderPrefix = "volcontent-"
 )
+
+// IsTransientHolder reports whether id is a request-scoped holder rather than
+// a sandbox.
+func IsTransientHolder(id string) bool {
+	return strings.HasPrefix(id, TransientHolderPrefix)
+}
+
+// countSandboxes returns the number of holders that are real sandboxes.
+func countSandboxes(ids map[string]struct{}) int64 {
+	var n int64
+	for id := range ids {
+		if !IsTransientHolder(id) {
+			n++
+		}
+	}
+	return n
+}
 
 // RefCountRecord is the value stored per volume.
 type RefCountRecord struct {
@@ -131,6 +155,9 @@ type AcquireResult struct {
 	After int64
 	// AlreadyHeld is true when sandboxID was already in the set (idempotent call).
 	AlreadyHeld bool
+	// SandboxBefore is the number of real sandbox holders BEFORE this call,
+	// excluding transient request holders. Used for CubeMaster 0→1 events.
+	SandboxBefore int64
 }
 
 // Acquire registers sandboxID as a holder of (namespace, volumeID).
@@ -151,6 +178,7 @@ func (s *Store) Acquire(namespace, volumeID, sandboxID, driver string) (AcquireR
 		}
 
 		res.Before = rec.Count
+		res.SandboxBefore = countSandboxes(rec.SandboxIDs)
 
 		// Idempotent: already registered.
 		if _, already := rec.SandboxIDs[sandboxID]; already {
@@ -175,6 +203,9 @@ type ReleaseResult struct {
 	After int64
 	// NotHeld is true when sandboxID was not in the set (idempotent call).
 	NotHeld bool
+	// SandboxAfter is the number of real sandbox holders AFTER this call,
+	// excluding transient request holders. Used for CubeMaster 1→0 events.
+	SandboxAfter int64
 }
 
 // Release removes sandboxID from the holder set of (namespace, volumeID).
@@ -198,6 +229,7 @@ func (s *Store) Release(namespace, volumeID, sandboxID string) (ReleaseResult, e
 		// Idempotent: not a current holder.
 		if _, present := rec.SandboxIDs[sandboxID]; !present {
 			res.After = rec.Count
+			res.SandboxAfter = countSandboxes(rec.SandboxIDs)
 			res.NotHeld = true
 			return nil
 		}
@@ -205,6 +237,7 @@ func (s *Store) Release(namespace, volumeID, sandboxID string) (ReleaseResult, e
 		delete(rec.SandboxIDs, sandboxID)
 		rec.Count = int64(len(rec.SandboxIDs))
 		res.After = rec.Count
+		res.SandboxAfter = countSandboxes(rec.SandboxIDs)
 
 		if rec.Count == 0 {
 			return b.Delete(k)

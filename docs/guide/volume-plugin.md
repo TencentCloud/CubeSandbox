@@ -304,6 +304,8 @@ One Volume may be shared by multiple sandboxes. Cubelet maintains a **per-node**
 
 **When a node's local count flips 0→1 or 1→0, Cubelet notifies CubeMaster, which updates `t_cube_volume.refcount`; control-plane `DELETE /volumes` is rejected while that count is non-zero.**
 
+Direct content access (`/volumecontent`, no sandbox) takes part in the same count: Cubelet takes one reference on the volume from CubeMaster (`POST /cube/volume/{id}/ref`) while it has requests in flight for it and returns it when the last one ends, so `DELETE /volumes` is also rejected while a direct request is running. See [Python SDK volume docs](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/python/docs/volume.md#volume-references).
+
 ```mermaid
 flowchart TD
     A["Attach(refCount)"] --> B{"refCount == 0 ?"}
