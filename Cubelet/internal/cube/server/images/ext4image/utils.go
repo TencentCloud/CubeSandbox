@@ -96,12 +96,23 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		return err
 	}
 	tmpPath := imagePath + ".download"
-	if err := os.RemoveAll(tmpPath); err != nil { // NOCC:Path Traversal()
-		return err
+	// Resume support: a previous attempt may have left a partial .download
+	// behind. tmpPath is derived from imagePath (artifact fingerprint), so
+	// any leftover partial belongs to this same artifact and can be safely
+	// resumed instead of restarting the transfer from zero, which is
+	// expensive on slow or metered links.
+	resumeFrom := int64(0)
+	havePartial := false
+	if st, err := os.Stat(tmpPath); err == nil && st.Size() > 0 {
+		resumeFrom = st.Size()
+		havePartial = true
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return err
+	}
+	if havePartial {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
 	if token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]); token != "" {
 		req.Header.Set("X-Cube-Artifact-Token", token)
@@ -111,22 +122,76 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+
+	verifyOnly := false
+	appendMode := false
+	switch {
+	case havePartial && resp.StatusCode == http.StatusPartialContent:
+		// Server honored the range request; append to the partial file.
+		appendMode = true
+	case havePartial && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		// The partial file already reaches EOF: the previous attempt most
+		// likely died between download completion and rename. Skip the
+		// transfer and validate what is already on disk.
+		verifyOnly = true
+	case resp.StatusCode == http.StatusOK:
+		// Full-body response: the normal no-partial path, or the fallback
+		// when the server ignores Range. Discard any partial and restart.
+	default:
 		return fmt.Errorf("download status code %d", resp.StatusCode)
 	}
-	f, err := os.Create(tmpPath) // NOCC:Path Traversal()
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+
 	hasher := sha256.New()
-	const sparseBufSize = 1024 * 1024 // 1 MiB
-	if _, err := sparseCopy(f, hasher, resp.Body, sparseBufSize); err != nil {
-		return err
+	if !verifyOnly {
+		flag := os.O_WRONLY | os.O_CREATE
+		if !appendMode {
+			// Full-body path (fresh download, or the fallback when the
+			// server ignores Range): discard any stale partial first.
+			flag |= os.O_TRUNC
+		}
+		f, err := os.OpenFile(tmpPath, flag, 0o666) // NOCC:Path Traversal()
+		if err != nil {
+			return err
+		}
+		startOffset := int64(0)
+		if appendMode {
+			// Continue writing at the partial's end; sparseCopy seeks
+			// relative to the current position for zero runs.
+			if _, err := f.Seek(resumeFrom, io.SeekStart); err != nil {
+				_ = f.Close()
+				return err
+			}
+			startOffset = resumeFrom
+		}
+		const sparseBufSize = 1024 * 1024 // 1 MiB
+		if _, err := sparseCopy(f, hasher, resp.Body, sparseBufSize, startOffset); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
 	}
+	if appendMode || verifyOnly {
+		// The streaming hash state cannot span the resume boundary;
+		// re-hash the complete file from disk instead.
+		pf, err := os.Open(tmpPath) // NOCC:Path Traversal()
+		if err != nil {
+			return err
+		}
+		hasher.Reset()
+		_, err = io.Copy(hasher, pf)
+		_ = pf.Close()
+		if err != nil {
+			return err
+		}
+	}
+	gotSHA := hex.EncodeToString(hasher.Sum(nil))
 	if expectedSHA != "" {
-		gotSHA := hex.EncodeToString(hasher.Sum(nil))
 		if !strings.EqualFold(gotSHA, expectedSHA) {
+			// A corrupt partial has no salvage value; drop it so the next
+			// attempt starts clean.
+			_ = os.Remove(tmpPath)
 			return fmt.Errorf("artifact sha256 mismatch, got %s want %s", gotSHA, expectedSHA)
 		}
 	}
@@ -159,9 +224,14 @@ const sparseHoleThreshold = int64(1024 * 1024)
 // It simultaneously feeds all read bytes into hasher (if non-nil) to preserve
 // hash integrity. dst.Truncate is called at the end to guarantee the file's
 // apparent size matches total bytes read.
-func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int64, error) {
+func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int, startOffset int64) (int64, error) {
 	if bufSize <= 0 {
 		bufSize = 1024 * 1024
+	}
+	if startOffset > 0 {
+		if _, err := dst.Seek(startOffset, io.SeekStart); err != nil {
+			return 0, err
+		}
 	}
 	buf := make([]byte, bufSize)
 	zeroBuf := make([]byte, min(bufSize, int(sparseHoleThreshold)))
@@ -236,7 +306,7 @@ func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int
 	if err := flushZeros(); err != nil {
 		return totalBytes, err
 	}
-	if err := dst.Truncate(totalBytes); err != nil {
+	if err := dst.Truncate(startOffset + totalBytes); err != nil {
 		return totalBytes, err
 	}
 	return totalBytes, nil
