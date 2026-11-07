@@ -55,8 +55,11 @@ type templateResponse struct {
 type templateListResponse struct {
 	*types.Res
 	Data []templateSummary `json:"data,omitempty"`
-	// Total is the pre-pagination entry count; equals len(Data) when unpaged.
-	Total int `json:"total,omitempty"`
+	// Total is the pre-pagination entry count of the visible set.
+	Total   int  `json:"total,omitempty"`
+	Limit   int  `json:"limit,omitempty"`
+	Offset  int  `json:"offset,omitempty"`
+	HasMore bool `json:"has_more"`
 }
 
 type templateSummary struct {
@@ -471,7 +474,12 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			}},
 		}
 	}
-	result, err := listTemplatesFn(r.Context(), opts)
+	var result *templatecenter.TemplateListResult
+	if opts.Limit == 0 {
+		result, err = listTemplatePages(r.Context(), opts)
+	} else {
+		result, err = listTemplatesFn(r.Context(), opts)
+	}
 	if err != nil {
 		code := int(errorcode.ErrorCode_MasterInternalError)
 		if errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
@@ -485,13 +493,20 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			}},
 		}
 	}
+	page := opts
+	if opts.Limit > 0 {
+		page = templatecenter.NormalizeTemplateListOptions(opts)
+	}
 	rsp := &templateListResponse{
 		Res: &types.Res{Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  "success",
 		}},
-		Data:  make([]templateSummary, 0, len(result.Templates)),
-		Total: result.Total,
+		Data:    make([]templateSummary, 0, len(result.Templates)),
+		Total:   result.Total,
+		Limit:   page.Limit,
+		Offset:  page.Offset,
+		HasMore: result.HasMore || page.Offset+len(result.Templates) < result.Total,
 	}
 	replicasByTemplate, batchErr := batchReadyReplicaOrigins(r.Context(), result.Templates)
 	if batchErr != nil {
@@ -527,11 +542,47 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	return rsp
 }
 
-// parseTemplateListOptions reads optional limit/offset query params; limit=0
-// means "no limit" per the CLI's "0 = all" contract, other invalids are 400s.
+func listAllTemplatePages(ctx context.Context) (*templatecenter.TemplateListResult, error) {
+	return listTemplatePages(ctx, templatecenter.TemplateListOptions{})
+}
+
+func listTemplatePages(ctx context.Context, opts templatecenter.TemplateListOptions) (*templatecenter.TemplateListResult, error) {
+	out := &templatecenter.TemplateListResult{Templates: []templatecenter.TemplateInfo{}}
+	for offset := opts.Offset; ; {
+		page, err := listTemplatesFn(ctx, templatecenter.TemplateListOptions{
+			Limit:     templatecenter.MaxTemplateListLimit,
+			Offset:    offset,
+			SkipTotal: opts.SkipTotal,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if page == nil {
+			return nil, errors.New("template list returned an empty page response")
+		}
+		out.Total = page.Total
+		out.Templates = append(out.Templates, page.Templates...)
+		offset += len(page.Templates)
+		if len(page.Templates) == 0 ||
+			(!opts.SkipTotal && offset >= page.Total) ||
+			(opts.SkipTotal && !page.HasMore) {
+			return out, nil
+		}
+	}
+}
+
+// parseTemplateListOptions reads optional limit/offset query params. A missing
+// or zero limit preserves the historical all-rows response.
 func parseTemplateListOptions(r *http.Request) (templatecenter.TemplateListOptions, error) {
 	opts := templatecenter.TemplateListOptions{}
 	query := r.URL.Query()
+	if raw := strings.TrimSpace(query.Get("skip_total")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return opts, fmt.Errorf("invalid skip_total %q: want a boolean", raw)
+		}
+		opts.SkipTotal = value
+	}
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil || limit < 0 {
