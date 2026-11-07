@@ -59,5 +59,4 @@ lang: zh-CN
 | [Host Mount 写入时报 Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | [如何查看 CubeSandbox 各组件日志（含 cubecli logs 与 guest kernel log）](./component-log-locations.md) | ls-ggg | 2026-07-15 | logging, cubelet, cubeshim, operations |
 | [计算节点在线却被判 HeartbeatExpired（时钟偏移）](./node-heartbeat-expired-clock-skew.md) | Cold-E | 2026-10-22 | heartbeat, clock, chrony, cube-ops |
-| [module.sig_enforce=1 导致 PVM 宿主内核启动掉进 initramfs](./pvm-host-boot-unsigned-modules.md) | zhengzongwei | 2026-10-26 | pvm, boot, kernel, modules |
 | _在这里补充你的文章_ | - | - | - |

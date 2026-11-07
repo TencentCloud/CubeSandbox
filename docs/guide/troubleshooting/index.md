@@ -59,5 +59,4 @@ lang: en-US
 | [Host Mounts Fail with Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | [How to Find CubeSandbox Component Logs (cubecli logs and the Guest Kernel Log)](./component-log-locations.md) | ls-ggg | 2026-07-15 | logging, cubelet, cubeshim, operations |
 | [Compute Nodes Report HeartbeatExpired While Still Online (Clock Skew)](./node-heartbeat-expired-clock-skew.md) | Cold-E | 2026-10-22 | heartbeat, clock, chrony, cube-ops |
-| [PVM Host Kernel Boots into Initramfs with module.sig_enforce=1](./pvm-host-boot-unsigned-modules.md) | zhengzongwei | 2026-10-26 | pvm, boot, kernel, modules |
 | _Add your article here_ | - | - | - |
