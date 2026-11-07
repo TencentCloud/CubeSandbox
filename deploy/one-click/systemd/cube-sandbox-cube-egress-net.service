@@ -9,6 +9,24 @@ PartOf=cube-sandbox-control.target cube-sandbox-compute.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# cubelet writes its PIDFile before its network plugin creates cube-dev, so
+# After=cubelet does not imply the interface exists. The start script waits
+# for it, bounded by CUBE_EGRESS_NET_WAIT_TIMEOUT (default 300s, the k8s
+# entrypoint's figure) and fails explicitly on timeout — install.sh's
+# `systemctl enable --now` must not hang forever (#2141). Note Type=oneshot
+# disables the start timeout by default; no TimeoutStartSec is set.
+# If the init run does fail (e.g. a lost race against a cubelet restart,
+# or cubelet failing and dragging this unit down via Requires=), retry
+# instead of staying dead until the next reboot — the same silent egress
+# loss #2141 describes.
+Restart=on-failure
+RestartSec=5s
+# Bound the retry loop: with RestartSec=5s the default 5-per-10s start
+# limit can never trigger, so a broken init would spin (and flood the
+# journal) forever. Three attempts per minute, then the unit stays failed
+# and visible for an operator.
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env

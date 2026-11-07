@@ -182,6 +182,14 @@ install_routing() {
     # rule set stays independent of the original destination port; user rules
     # may attach L7 handling to arbitrary ports (e.g. tcp/3000) and mvmtap
     # writes the same mark for all of them.
+    #
+    # Idempotency: the kernel does NOT deduplicate ip rules — re-adding an
+    # identical fwmark rule succeeds and piles up duplicates — so rules must
+    # be pre-checked (case-insensitively: iproute2 prints fwmark hex in
+    # lowercase while our constants are uppercase). Routes behave the other
+    # way: `ip route add` fails with EEXIST when the route is already there,
+    # so try the add first and only abort when a follow-up check proves the
+    # route is actually missing.
     local mark
     for mark in "${CUBE_L7_MARK_HTTP}" "${CUBE_L7_MARK_HTTPS}"; do
         if ! ip rule show \
@@ -191,11 +199,13 @@ install_routing() {
         fi
     done
 
-    # ip route show normalises 0.0.0.0/0 to "default"; match both forms for safety.
-    if ! ip route show table "${ROUTE_TABLE}" | grep -qF \
+    # ip route show normalises 0.0.0.0/0 to "default"; match both forms.
+    local route_err=""
+    if ! route_err="$(ip route add local 0.0.0.0/0 dev lo table "${ROUTE_TABLE}" 2>&1)"; then
+        ip route show table "${ROUTE_TABLE}" | grep -qF \
             -e "local 0.0.0.0/0 dev lo" \
-            -e "local default dev lo"; then
-        ip route add local 0.0.0.0/0 dev lo table "${ROUTE_TABLE}"
+            -e "local default dev lo" \
+            || fatal "ip route add local 0.0.0.0/0 dev lo table ${ROUTE_TABLE} failed: ${route_err}"
     fi
 }
 

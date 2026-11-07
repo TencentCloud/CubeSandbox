@@ -58,8 +58,11 @@ ip() {
             return 0
             ;;
         "rule add")
-            # $3=fwmark $4=mark/mask $5=table $6=<id>; store iproute2-style
-            # lowercase show output, as the real `ip rule show` would print.
+            # Real kernel semantics: ip rule add does NOT deduplicate — it
+            # succeeds and appends. $3=fwmark $4=mark/mask $5=table $6=<id>;
+            # store iproute2-style lowercase show output, as the real
+            # `ip rule show` would print. The pre-add grep guard above is
+            # what keeps re-runs from piling up duplicates.
             printf 'from all fwmark %s lookup %s\n' "$4" "$6" \
                 | tr '[:upper:]' '[:lower:]' >> "${RULES_STATE}"
             return 0
@@ -78,8 +81,8 @@ ip() {
     return 0
 }
 
-# Re-running install must not duplicate rules: the grep matches the lowercase
-# `ip rule show` output, so the second run is a no-op.
+# Re-running install must not duplicate rules: the guard matches the
+# lowercase `ip rule show` output, so the second run is a no-op.
 install_routing
 install_routing
 [[ "$(grep -c 'rule add fwmark' "${CALLS}" || true)" -eq 2 ]]
@@ -92,35 +95,56 @@ remove_routing
 
 # --- install_routing: route-existence check handles both iproute2 output forms --
 # ip route show normalises 0.0.0.0/0 to "default"; keep both forms for safety.
+# install_routing tries `ip route add` first; when the route already exists
+# the add fails with EEXIST and the follow-up check must accept either form.
 ROUTE_SHOW_OUTPUT=""
+ROUTE_ADD_FAIL=""
 ip() {
     printf '%s\n' "$*" >> "${CALLS}"
     case "$1 $2" in
         "rule show")  : ;;
         "rule add")   : ;;
         "route show") printf '%s\n' "${ROUTE_SHOW_OUTPUT}" ;;
-        "route add")  : ;;
+        "route add")
+            [[ -z "${ROUTE_ADD_FAIL}" ]] || return 1
+            if grep -qF -e "local 0.0.0.0/0 dev lo" \
+                        -e "local default dev lo" <<<"${ROUTE_SHOW_OUTPUT}"; then
+                echo "RTNETLINK answers: File exists" >&2
+                return 1
+            fi
+            return 0 ;;
     esac
     return 0
 }
 
-# Empty table: route add must be called exactly once.
+# Empty table: route add is attempted and succeeds.
 ROUTE_SHOW_OUTPUT=""
 : > "${CALLS}"
 install_routing
 [[ "$(grep -c '^route add' "${CALLS}")" -eq 1 ]]
 
-# 0.0.0.0/0 form present: route add must NOT be called.
+# 0.0.0.0/0 form present: the add attempt fails with EEXIST, the follow-up
+# check accepts the route, and install_routing completes.
 ROUTE_SHOW_OUTPUT="local 0.0.0.0/0 dev lo scope host"
 : > "${CALLS}"
 install_routing
-[[ "$(grep -c '^route add' "${CALLS}")" -eq 0 ]]
+[[ "$(grep -c '^route add' "${CALLS}")" -eq 1 ]]
 
-# "default" form present: route add must NOT be called.
+# "default" form present: same, with the normalised spelling.
 ROUTE_SHOW_OUTPUT="local default dev lo scope host"
 : > "${CALLS}"
 install_routing
-[[ "$(grep -c '^route add' "${CALLS}")" -eq 0 ]]
+[[ "$(grep -c '^route add' "${CALLS}")" -eq 1 ]]
+
+# A route add that fails while the route is genuinely absent is a real error
+# and must abort the setup.
+ROUTE_SHOW_OUTPUT=""
+ROUTE_ADD_FAIL=1
+: > "${CALLS}"
+if ( install_routing ); then
+    echo "install_routing succeeded despite route-add failure" >&2
+    exit 1
+fi
 unset -f ip
 
 # --- install_chain builds into a scratch chain and swaps atomically ----------
