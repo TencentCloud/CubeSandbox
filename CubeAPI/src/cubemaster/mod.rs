@@ -2932,6 +2932,9 @@ pub struct CreateVolumeRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+    /// Opaque caller input for the Controller Create hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_data: Option<String>,
 }
 
 /// POST /cube/volume — response.

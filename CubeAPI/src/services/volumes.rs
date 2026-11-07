@@ -78,10 +78,21 @@ impl VolumeService {
     /// Create a new volume. Returns `VolumeAndToken` so the caller can
     /// hand the token to the volume-content service immediately.
     pub async fn create(&self, name: String, driver: Option<String>) -> AppResult<VolumeAndToken> {
+        self.create_with_private_data(name, driver, None).await
+    }
+
+    /// Create with opaque plugin input supplied by the versioned API.
+    pub async fn create_with_private_data(
+        &self,
+        name: String,
+        driver: Option<String>,
+        private_data: Option<String>,
+    ) -> AppResult<VolumeAndToken> {
         let req = CreateVolumeRequest {
             request_id: new_request_id(),
             name,
             driver,
+            private_data,
         };
 
         let resp = self

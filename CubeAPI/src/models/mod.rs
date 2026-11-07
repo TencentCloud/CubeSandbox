@@ -2303,6 +2303,9 @@ pub struct VersionMatrixView {
 /// Maximum length of a customer-supplied volume `name` (matches `t_cube_volume.name`).
 pub const MAX_VOLUME_NAME_LEN: usize = 128;
 
+/// Maximum UTF-8 byte length of volume plugin private data (matches CubeMaster).
+pub const MAX_VOLUME_PRIVATE_DATA_LEN: usize = 1024;
+
 /// Request body for POST /volumes.
 ///
 /// `name` must match `^[a-zA-Z0-9_-]+$` and be at most [`MAX_VOLUME_NAME_LEN`] characters
@@ -2319,6 +2322,20 @@ pub struct NewVolume {
     /// Omit to use CubeMaster's default plugin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+}
+
+/// Request body for POST /v2/volumes, extending the legacy creation request
+/// with opaque plugin input. Existing /volumes callers keep using NewVolume.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct NewVolumeV2 {
+    #[serde(flatten)]
+    pub base: NewVolume,
+    /// Opaque input forwarded unchanged to the volume plugin's Create hook.
+    /// Valid UTF-8, at most 1024 bytes, with no NUL or characters outside the
+    /// Basic Multilingual Plane. Use credential references, never plaintext
+    /// credentials. This field is not included in volume responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_data: Option<String>,
 }
 
 impl NewVolume {

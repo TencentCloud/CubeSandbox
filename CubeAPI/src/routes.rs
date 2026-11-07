@@ -220,6 +220,7 @@ fn build_long_template_routes(state: &AppState, auth_configured: bool) -> Router
 
 fn build_volume_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
+        .route("/v2/volumes", post(volumes::create_volume_v2))
         .route(
             "/volumes",
             get(volumes::list_volumes).post(volumes::create_volume),
