@@ -91,7 +91,7 @@ active in a deployment, and logs are not duplicated.
 | Prometheus | one-click `3.13.4`; Helm `v3.2.1` | Prometheus `3.x` with OTLP and Remote Write receivers | `9092` | Sandbox metrics backend. `--web.enable-otlp-receiver`, `--web.enable-remote-write-receiver`, and the documented `otlp` configuration are required. |
 | Loki (default log backend; choose one) | `3.7.9` | Loki `3.x` with native OTLP and structured metadata enabled | `3100` | Default sandbox logs backend. The Collector writes to `/otlp`; Grafana queries it with LogQL. |
 | Elasticsearch (optional log backend; choose one) | `8.17.3` | Elasticsearch `8.x` | `9200` | Replaces Loki when explicitly selected; uses raw mapping and the Bulk API. Validate other major releases separately. |
-| Grafana OSS | `10.4.18` | `>= 10.4` with dashboard schema `39` support | `3001` | Metrics and logs UI. Validate the selected log data source and both dashboards before upgrading. |
+| Grafana OSS | `10.4.18` | `>= 10.4` with dashboard schema `39` support | `3001` | Metrics and logs UI. Validate the selected log data source, three metrics dashboards, and logs dashboard before upgrading. |
 
 Pinned versions keep bundled installs reproducible. An external baseline is not
 a guarantee for every future release.
@@ -292,6 +292,11 @@ Replace `10.0.0.10` with the first node's reachable private IP, and use the
 same cluster ID and log backend on every node. These commands reconcile the
 one-click stack and observability components from the original `.env`; back up
 the configuration through the normal operations process before running them.
+On upgrade, a wholesale copy of `env.example` with its default
+`ONE_CLICK_ENABLE_OBSERVABILITY=0` does not disable an already enabled stack.
+To explicitly disable it, run
+`sudo env ONE_CLICK_ENABLE_OBSERVABILITY=0 ./install.sh --mode=upgrade --yes`
+(or use `./install-compute.sh` on a compute node).
 
 #### D. Online installation
 
@@ -1028,15 +1033,24 @@ Constraints for any extension:
 ## 5. Backends and dashboards
 
 The bundled backend is Prometheus, Grafana, and one log backend. Grafana
-provisions two dashboards:
+provisions three separate metrics dashboards plus one logs dashboard:
 
-- `cubesandbox-host-sandbox.json`: sandbox CPU, memory, limits, throttling, and
-  sandbox counts.
+- `cubesandbox-cluster.json`: sandbox resource totals for one cluster.
+- `cubesandbox-node.json`: sandbox resource totals for one node in that cluster.
+- `cubesandbox-sandbox.json`: one sandbox's Host Sandbox and Guest Workload metrics,
+  with an optional guest-container filter.
 - `cubesandbox-logs.json` (Loki, default) or
   `cubesandbox-logs-elasticsearch.json` (Elasticsearch), both under the UID
-  `cubesandbox-logs`: stderr share, top sandboxes by volume, volume by stream
-  and node, the sandbox log query, and a collapsed **Component logs** row
-  (populated only with Helm component logs enabled).
+  `cubesandbox-logs`: stdout/stderr volume, log query, and a collapsed
+  **Component logs** row (Helm opt-in).
+
+Metrics selectors cascade from `cluster` to `node`, `sandbox_id`, and `container_id`.
+All 24 currently exported metric families are covered; aggregate CPU rates are
+cores, and memory limits are sums of exported finite limits, not physical host
+capacity. Host and Guest measurements must not be added together. Missing data
+is not zero, and guest rates omit windows with observed epoch changes. The Loki
+sandbox filter remains a regex text input for historical IDs; Elasticsearch
+selectors cascade from cluster to node to sandbox.
 
 See [1.2](#12-installer-versions-and-external-compatibility-baselines) for
 backend versions, default ports, and external-component baselines.

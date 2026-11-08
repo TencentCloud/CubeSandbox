@@ -6,8 +6,7 @@ on:
     paths:
       - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
-      - 'CubeObservability/Dockerfile'
-      - 'CubeObservability/grafana/dashboards/**'
+      - 'CubeObservability/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
@@ -15,8 +14,7 @@ on:
     paths:
       - 'Cubelet/Dockerfile'
       - 'deploy/kubernetes/chart/**'
-      - 'CubeObservability/Dockerfile'
-      - 'CubeObservability/grafana/dashboards/**'
+      - 'CubeObservability/**'
       - 'deploy/kubernetes/images/scripts/**'
       - 'scripts/bump-image.sh'
       - '.github/workflows/kubernetes-chart-check.yml'
@@ -126,10 +124,50 @@ jobs:
           for dashboard in deploy/kubernetes/chart/files/cube-observability/grafana/dashboards/*.json; do
             python3 -m json.tool "${dashboard}" >/dev/null
           done
-          for dashboard in cubesandbox-host-sandbox.json cubesandbox-logs.json cubesandbox-logs-elasticsearch.json; do
+          for dashboard in cubesandbox-cluster.json cubesandbox-node.json cubesandbox-sandbox.json cubesandbox-logs.json cubesandbox-logs-elasticsearch.json; do
             cmp \
               "CubeObservability/grafana/dashboards/${dashboard}" \
               "deploy/kubernetes/chart/files/cube-observability/grafana/dashboards/${dashboard}"
+          done
+          python3 CubeObservability/grafana/generate_dashboards.py --check
+          python3 CubeObservability/grafana/test_dashboards.py
+      - name: Validate Helm Collector configs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "${tmp}"' EXIT
+          common=(
+            --set observability.enabled=true
+            --set observability.logs.components.enabled=true
+            --set-string mysql.password=test
+            --set-string mysql.rootPassword=test
+            --set-string redis.password=test
+          )
+          for backend in loki elasticsearch; do
+            helm template "validate-${backend}" deploy/kubernetes/chart "${common[@]}" \
+              --set "observability.logs.backend=${backend}" \
+              -s templates/observability.yaml > "${tmp}/${backend}-rendered.yaml"
+          done
+          helm template validate-external deploy/kubernetes/chart "${common[@]}" \
+            --set observability.backend.enabled=false \
+            --set observability.metrics.remoteWriteUrl=http://prometheus.example/api/v1/write \
+            --set observability.logs.otlpEndpoint=http://loki.example/otlp \
+            --set observability.metrics.auth.existingSecret=ci-auth \
+            --set observability.logs.auth.existingSecret=ci-auth \
+            -s templates/observability.yaml > "${tmp}/external-rendered.yaml"
+          python3 -c 'import pathlib,re,sys; root=pathlib.Path(sys.argv[1]); configs=[(p.stem,doc) for p in root.glob("*-rendered.yaml") for doc in p.read_text().split("---") if "  otelcol.yaml: |\n" in doc]; assert len(configs)==6, "expected node and component configs for three combinations"; [(root/(name+"-"+re.search(r"^  name: (.+)$",doc,re.M)[1]+"-config.yaml")).write_text("\n".join(line[4:] if line.startswith("    ") else line for line in doc.split("  otelcol.yaml: |\n",1)[1].splitlines())+"\n") for name,doc in configs]' "${tmp}"
+          chmod 0755 "${tmp}"
+          chmod 0644 "${tmp}"/*-config.yaml
+          for config in "${tmp}"/*-config.yaml; do
+            docker run --rm \
+              -e CUBE_NODE_NAME=ci-node \
+              -e POD_IP=127.0.0.1 \
+              -e CUBE_METRICS_AUTHORIZATION="Bearer ci-metrics-token" \
+              -e CUBE_LOGS_AUTHORIZATION="Bearer ci-logs-token" \
+              -v "${tmp}:/work:ro" \
+              otel/opentelemetry-collector-contrib:0.162.0 \
+              validate --config="file:/work/$(basename "${config}")"
           done
       - name: Check startup-gate shell syntax
         run: |

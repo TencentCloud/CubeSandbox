@@ -1003,7 +1003,9 @@ for _mf in \
 done
 for _asset in \
   Dockerfile \
-  grafana/dashboards/cubesandbox-host-sandbox.json \
+  grafana/dashboards/cubesandbox-cluster.json \
+  grafana/dashboards/cubesandbox-node.json \
+  grafana/dashboards/cubesandbox-sandbox.json \
   grafana/dashboards/cubesandbox-logs.json \
   grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
   ensure_file "${PACKAGE_ROOT}/CubeObservability/${_asset}"
@@ -1092,7 +1094,9 @@ for _mf in \
 done
 for _asset in \
   Dockerfile \
-  grafana/dashboards/cubesandbox-host-sandbox.json \
+  grafana/dashboards/cubesandbox-cluster.json \
+  grafana/dashboards/cubesandbox-node.json \
+  grafana/dashboards/cubesandbox-sandbox.json \
   grafana/dashboards/cubesandbox-logs.json \
   grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
   ensure_file "${DIST_ROOT}/CubeObservability/${_asset}"

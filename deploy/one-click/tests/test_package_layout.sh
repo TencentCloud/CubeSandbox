@@ -148,7 +148,9 @@ test_component_build_inputs_exist() {
   done
   for observability_file in \
     Dockerfile \
-    grafana/dashboards/cubesandbox-host-sandbox.json \
+    grafana/dashboards/cubesandbox-cluster.json \
+    grafana/dashboards/cubesandbox-node.json \
+    grafana/dashboards/cubesandbox-sandbox.json \
     grafana/dashboards/cubesandbox-logs.json \
     grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
     require_file "${ROOT_DIR}/CubeObservability/${observability_file}" \

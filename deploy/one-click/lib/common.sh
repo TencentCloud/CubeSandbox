@@ -515,9 +515,9 @@ load_env_file() {
 # process environment counts as explicit operator intent and is re-applied
 # after the merge (snapshot_one_click_toggles / apply_one_click_toggles).
 #
-# Opting a key in gives it presence-implies-explicit semantics: a wholesale
-# `cp env.example .env` carried into an upgrade resets the key to the template
-# default (documented caveat in the one-click README).
+# MinIO, the logs backend, and observability retain the merge's
+# template-default safeguard. Their defaults copied from env.example are not
+# intent; use the process environment to explicitly switch back to them.
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
   ONE_CLICK_ENABLE_JFS
@@ -533,11 +533,12 @@ ONE_CLICK_TOGGLE_KEYS=(
 # merged old-runtime env, which would otherwise clobber both channels.
 #   ONE_CLICK_TOGGLE_ENV_SNAPSHOT     key -> value from the process environment
 #   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT  key -> value from the bundle .env
-# (presence in .env is enough — a value equal to the env.example default still
-# counts, which is exactly what makes "flip back to default" expressible)
+# Most toggles accept presence as intent, including their default value.
+# MinIO, the logs backend, and observability only accept non-default dotenv values as intent.
 snapshot_one_click_toggles() {
   local env_file="$1"
-  local key
+  local key value default_value
+  local template="$(dirname "${BASH_SOURCE[0]}")/../env.example"
   # -g: these are process-wide state read later by apply_one_click_toggles;
   # -A: keys are env-var names, not numeric indexes. NOTE: the declaration and
   # the empty-assignment must be separate statements — bash 4.2 (CentOS 7)
@@ -551,7 +552,14 @@ snapshot_one_click_toggles() {
       ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
     fi
     if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
-      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="$(read_env_key "${env_file}" "${key}")"
+      value="$(read_env_key "${env_file}" "${key}")"
+      case "${key}" in
+        CUBE_SANDBOX_MINIO_ENABLED|CUBE_LOGS_BACKEND|ONE_CLICK_ENABLE_OBSERVABILITY)
+          default_value="$(read_env_key "${template}" "${key}")"
+          [[ "${value}" == "${default_value}" ]] && continue
+          ;;
+      esac
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${value}"
     fi
   done
   return 0
@@ -604,7 +612,6 @@ resolve_one_click_logs_backend_selection() {
 # by this run so endpoint/password rotation and explicit KEY= clearing win over
 # the previous .one-click.env without logging secret values.
 ONE_CLICK_OBSERVABILITY_INTENT_KEYS=(
-  CUBE_LOGS_BACKEND
   ONE_CLICK_OBSERVABILITY_ROLE
   CUBE_OBSERVABILITY_CLUSTER_ID
   CUBE_METRICS_OTLP_HTTP_ENDPOINT

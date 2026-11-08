@@ -81,7 +81,7 @@ Loki 与 Elasticsearch 是二选一的沙箱日志后端：默认安装 Loki；�
 | Prometheus | one-click `3.13.4`；Helm `v3.2.1` | 支持 OTLP receiver 与 Remote Write receiver 的 Prometheus `3.x` | `9092` | 沙箱指标后端。必须支持 `--web.enable-otlp-receiver`、`--web.enable-remote-write-receiver` 和本文的 `otlp` 配置。 |
 | Loki（日志后端二选一，默认） | `3.7.9` | Loki `3.x`，且启用原生 OTLP 与 structured metadata | `3100` | 默认沙箱日志后端；Collector 写入 `/otlp`，Grafana 使用 LogQL 查询。 |
 | Elasticsearch（日志后端二选一，可选） | `8.17.3` | Elasticsearch `8.x` | `9200` | 显式选择后替代 Loki，使用 `raw` mapping 和 Bulk API；其他大版本需要单独验证。 |
-| Grafana OSS | `10.4.18` | `>= 10.4`，并兼容 dashboard schema `39` | `3001` | 指标与日志展示。更高版本通常可导入，但升级前仍需验证所选日志数据源和两张看板。 |
+| Grafana OSS | `10.4.18` | `>= 10.4`，并兼容 dashboard schema `39` | `3001` | 指标与日志展示。更高版本通常可导入，但升级前仍需验证所选日志数据源、三张指标看板和日志看板。 |
 
 固定版本用于一键安装的可重复性；“兼容基线”只适用于自行维护的外部组件，不等于对
 所有未来版本的无条件兼容承诺。
@@ -266,7 +266,10 @@ sudo ./install-compute.sh --mode=upgrade --yes
 
 将 `10.0.0.10` 替换为第一台节点的可达内网 IP，并确保所有节点使用相同的集群 ID
 和日志后端。上述命令会按原 `.env` 协调 one-click 主组件和可观测性组件，执行前应按
-现有运维流程备份配置。
+现有运维流程备份配置。升级时，复制整份 `env.example` 带入的默认
+`ONE_CLICK_ENABLE_OBSERVABILITY=0` 不会关闭已启用的监控；如需明确关闭，请使用
+`sudo env ONE_CLICK_ENABLE_OBSERVABILITY=0 ./install.sh --mode=upgrade --yes`（计算节点使用
+`./install-compute.sh`）。
 
 #### D. 在线安装
 
@@ -956,13 +959,22 @@ Elasticsearch 扁平字段：
 后端固定版本、默认端口与外部组件兼容基线见
 [1.2](#12-安装器版本与兼容基线)。
 
-Grafana 自动加载两张看板：
+一个 Grafana 实例自动加载三张独立指标看板和一张日志看板：
 
-- `cubesandbox-host-sandbox.json`：沙箱 CPU、内存、限额、节流与沙箱数量。
+- `cubesandbox-cluster.json`：所选集群内的沙箱资源汇总。
+- `cubesandbox-node.json`：所选集群、单机内的沙箱资源汇总。
+- `cubesandbox-sandbox.json`：单个沙箱的 Host Sandbox 和 Guest Workload 详情，
+  可继续筛选 Guest 容器。
 - `cubesandbox-logs.json`（默认 Loki）或 `cubesandbox-logs-elasticsearch.json`
-  （Elasticsearch），两者使用统一 UID `cubesandbox-logs`：stderr 占比、日志量
-  Top 沙箱、按 stdout/stderr 与节点的日志量、沙箱日志查询，以及默认折叠的
-  **Component logs** 分组（仅在 Helm 开启组件日志后有数据）。
+  （Elasticsearch），统一 UID 为 `cubesandbox-logs`：stdout/stderr 日志量趋势、
+  日志查询，以及默认折叠的 **Component logs** 分组（Helm 按需开启）。
+
+指标下拉按 `cluster → node → sandbox_id → container_id` 逐级联动，覆盖现有全部
+24 个指标族。CPU 速率单位为使用核数；内存限额为已导出有限限额之和，不能当作
+整机或集群物理容量。Host 与 Guest 记账口径不同，不能相加；缺样本不等于零。
+Guest 速率排除已观察到 epoch 变化的窗口，但不代表精确回滚事件记账。
+Loki 的沙箱 ID 保留正则文本筛选，方便检索历史日志且避免高基数索引；
+Elasticsearch 下拉按集群、节点、沙箱联动。
 
 one-click/systemd 安装后可用
 `sudo ./deploy/one-click/observability/install.sh status` 检查 Collector 与后端，并用

@@ -3,9 +3,9 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # Install Grafana OSS (default :3001) and automatically provision Prometheus +
-# Loki datasources and the two CubeSandbox dashboards:
-#   - cubesandbox-host-sandbox.json (Metrics Dashboard)
-#   - cubesandbox-logs.json         (Logs Dashboard)
+# Loki or Elasticsearch datasources and the CubeSandbox dashboards:
+#   - cubesandbox-cluster.json / cubesandbox-node.json / cubesandbox-sandbox.json
+#   - cubesandbox-logs.json (selected log backend)
 # Also supports importing datasources & dashboards into an existing Grafana
 # instance via HTTP API (`./install.sh dashboards`).
 set -euo pipefail
@@ -323,7 +323,10 @@ require_config() {
         ( -n "${CUBE_LOGS_ES_USER:-}" || -n "${CUBE_LOGS_ES_API_KEY:-}" ) ]]; then
     die "set either generic logs authorization or Elasticsearch-specific credentials, not both"
   fi
-  [[ -f "${DASHBOARD_DIR}/cubesandbox-host-sandbox.json" ]] || die "missing ${DASHBOARD_DIR}/cubesandbox-host-sandbox.json"
+  local dashboard
+  for dashboard in cubesandbox-cluster cubesandbox-node cubesandbox-sandbox; do
+    [[ -f "${DASHBOARD_DIR}/${dashboard}.json" ]] || die "missing ${DASHBOARD_DIR}/${dashboard}.json"
+  done
   [[ -f "${DASHBOARD_DIR}/cubesandbox-logs.json" ]] || die "missing ${DASHBOARD_DIR}/cubesandbox-logs.json"
   [[ -f "${DASHBOARD_DIR}/cubesandbox-logs-elasticsearch.json" ]] || die "missing ${DASHBOARD_DIR}/cubesandbox-logs-elasticsearch.json"
 }
@@ -530,7 +533,11 @@ providers:
       foldersFromFilesStructure: false
 EOF
 
-  cp -f "${DASHBOARD_DIR}/cubesandbox-host-sandbox.json" "${PROVISIONED_DASHBOARDS_DIR}/cubesandbox-host-sandbox.json"
+  local dashboard
+  for dashboard in cubesandbox-cluster cubesandbox-node cubesandbox-sandbox; do
+    cp -f "${DASHBOARD_DIR}/${dashboard}.json" "${PROVISIONED_DASHBOARDS_DIR}/${dashboard}.json"
+  done
+  rm -f "${PROVISIONED_DASHBOARDS_DIR}/cubesandbox-host-sandbox.json"
   cp -f "$(logs_dashboard_file)" "${PROVISIONED_DASHBOARDS_DIR}/cubesandbox-logs.json"
 }
 
@@ -591,7 +598,9 @@ install_service() {
   [[ "${ready}" == "true" ]] || die "Grafana failed to start; inspect journalctl -u ${UNIT_NAME}"
 
   log "Grafana ${GRAFANA_VERSION} is ready at $(health_url)"
-  log "Metrics dashboard: $(health_url)/d/cubesandbox-host-sandbox/cubesandbox-host-sandbox"
+  log "Cluster metrics: $(health_url)/d/cubesandbox-cluster"
+  log "Node metrics:    $(health_url)/d/cubesandbox-node"
+  log "Sandbox metrics: $(health_url)/d/cubesandbox-sandbox"
   log "Logs dashboard:    $(health_url)/d/cubesandbox-logs/cubesandbox-logs"
 }
 
@@ -703,7 +712,7 @@ EOF
   fi
 
   local dash_file payload
-  for dash_file in "${DASHBOARD_DIR}/cubesandbox-host-sandbox.json" "$(logs_dashboard_file)"; do
+  for dash_file in "${DASHBOARD_DIR}/cubesandbox-cluster.json" "${DASHBOARD_DIR}/cubesandbox-node.json" "${DASHBOARD_DIR}/cubesandbox-sandbox.json" "$(logs_dashboard_file)"; do
     payload="$(mktemp)"
     printf '{"dashboard":' > "${payload}"
     cat "${dash_file}" >> "${payload}"
@@ -715,7 +724,9 @@ EOF
     log "imported $(basename "${dash_file}") into ${target_url}"
   done
 
-  log "Metrics dashboard: ${target_url}/d/cubesandbox-host-sandbox/cubesandbox-host-sandbox"
+  log "Cluster metrics: ${target_url}/d/cubesandbox-cluster"
+  log "Node metrics:    ${target_url}/d/cubesandbox-node"
+  log "Sandbox metrics: ${target_url}/d/cubesandbox-sandbox"
   log "Logs dashboard:    ${target_url}/d/cubesandbox-logs/cubesandbox-logs"
   rm -f "${datasource_payload}"
 }

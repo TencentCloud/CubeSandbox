@@ -87,6 +87,11 @@ else
 fi
 [[ "${mode}" == "600" ]] || fail "rendered Grafana config mode is ${mode}, expected 600"
 echo "OK Grafana requires a long password and renders secret config privately"
+for dashboard in cubesandbox-cluster cubesandbox-node cubesandbox-sandbox; do
+  [[ -s "${grafana_output}/dashboards/${dashboard}.json" ]] || fail "missing provisioned ${dashboard}"
+done
+[[ ! -e "${grafana_output}/dashboards/cubesandbox-host-sandbox.json" ]] || fail "legacy metrics dashboard was retained"
+echo "OK cluster, node, and sandbox metrics dashboards are provisioned"
 
 # INI treats unquoted '#'/';' as inline comments; an emptied admin_password
 # silently falls back to Grafana's default "admin". The password must reach

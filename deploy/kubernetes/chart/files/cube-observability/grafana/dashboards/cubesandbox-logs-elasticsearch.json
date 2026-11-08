@@ -22,16 +22,28 @@
   "id": null,
   "links": [
     {
-      "asDropdown": false,
-      "icon": "graph-bar",
+      "title": "Cluster metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-cluster",
       "includeVars": false,
       "keepTime": true,
-      "tags": [],
-      "targetBlank": false,
-      "title": "Open the CubeSandbox sandbox resources dashboard",
-      "tooltip": "Open the CubeSandbox sandbox resource dashboard (Prometheus)",
+      "targetBlank": false
+    },
+    {
+      "title": "Node metrics",
       "type": "link",
-      "url": "/d/cubesandbox-host-sandbox/cubesandbox-host-sandbox"
+      "url": "/d/cubesandbox-node",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Sandbox metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-sandbox",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
     }
   ],
   "liveNow": false,
@@ -49,7 +61,7 @@
       },
       "id": 1,
       "options": {
-        "content": "## CubeSandbox logs (Elasticsearch)\nSandbox `stdout`/`stderr` from `/data/cubelet/log/<sandbox-id>/`. Filter by **Cluster / Node / Sandbox ID / Log Stream** with an optional **Log Filter (Lucene)** expression. The **Component logs** row needs `observability.logs.components.enabled=true` (Helm only) and is empty otherwise.",
+        "content": "## CubeSandbox logs\nSelect cluster and node, then filter sandbox stdout/stderr. Sandbox dropdowns follow cluster → node. The text filter uses Lucene syntax. The collapsed component log row requires observability.logs.components.enabled=true (Helm only).",
         "mode": "markdown"
       },
       "pluginVersion": "10.4.0",
@@ -74,124 +86,6 @@
         "type": "elasticsearch",
         "uid": "$es_datasource"
       },
-      "description": "stderr lines in the dashboard time range (ignores Log Stream).",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 8,
-        "x": 0,
-        "y": 4
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "sum"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "bucketAggs": [],
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "$es_datasource"
-          },
-          "metrics": [
-            {
-              "id": "1",
-              "type": "count"
-            }
-          ],
-          "query": "service_name.keyword:\"cubesandbox-sandbox\" AND cubesandbox_cluster_id.keyword:$cluster AND host_name.keyword:$node AND cubesandbox_sandbox_id.keyword:$sandbox_id AND log_iostream.keyword:\"stderr\" AND ($log_query)",
-          "refId": "A",
-          "timeField": "@timestamp"
-        }
-      ],
-      "title": "Sandbox stderr lines",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "elasticsearch",
-        "uid": "$es_datasource"
-      },
-      "description": "Sandboxes with the most log lines in the dashboard time range.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 16,
-        "x": 8,
-        "y": 4
-      },
-      "id": 11,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "bucketAggs": [
-            {
-              "field": "cubesandbox_sandbox_id.keyword",
-              "id": "2",
-              "settings": {
-                "min_doc_count": "1",
-                "order": "desc",
-                "orderBy": "_count",
-                "size": "10"
-              },
-              "type": "terms"
-            }
-          ],
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "$es_datasource"
-          },
-          "metrics": [
-            {
-              "id": "1",
-              "type": "count"
-            }
-          ],
-          "query": "service_name.keyword:\"cubesandbox-sandbox\" AND cubesandbox_cluster_id.keyword:$cluster AND host_name.keyword:$node AND cubesandbox_sandbox_id.keyword:$sandbox_id AND log_iostream.keyword:$log_stream AND ($log_query)",
-          "refId": "A",
-          "timeField": "@timestamp"
-        }
-      ],
-      "title": "Top sandboxes by log volume",
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "elasticsearch",
-        "uid": "$es_datasource"
-      },
       "description": "Counts sandbox stdout/stderr logs by Cluster, Node, Sandbox ID, Log Stream, and Lucene expression.",
       "fieldConfig": {
         "defaults": {
@@ -210,9 +104,9 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 9
+        "y": 4
       },
       "id": 2,
       "options": {
@@ -278,98 +172,12 @@
         "type": "elasticsearch",
         "uid": "$es_datasource"
       },
-      "description": "Sandbox log lines per node.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 60,
-            "lineWidth": 1,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
-            }
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 9
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "calcs": [
-            "sum",
-            "lastNotNull"
-          ],
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "bucketAggs": [
-            {
-              "field": "host_name.keyword",
-              "id": "3",
-              "settings": {
-                "min_doc_count": "1",
-                "order": "desc",
-                "orderBy": "_count",
-                "size": "10"
-              },
-              "type": "terms"
-            },
-            {
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "auto",
-                "min_doc_count": "0",
-                "trimEdges": "0"
-              },
-              "type": "date_histogram"
-            }
-          ],
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "$es_datasource"
-          },
-          "metrics": [
-            {
-              "id": "1",
-              "type": "count"
-            }
-          ],
-          "query": "service_name.keyword:\"cubesandbox-sandbox\" AND cubesandbox_cluster_id.keyword:$cluster AND host_name.keyword:$node AND cubesandbox_sandbox_id.keyword:$sandbox_id AND log_iostream.keyword:$log_stream AND ($log_query)",
-          "refId": "A",
-          "timeField": "@timestamp"
-        }
-      ],
-      "title": "Sandbox log volume by node",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "elasticsearch",
-        "uid": "$es_datasource"
-      },
       "description": "Queries sandbox stdout/stderr with the selected variables and Lucene expression.",
       "gridPos": {
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 11
       },
       "id": 3,
       "options": {
@@ -421,7 +229,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 23
       },
       "id": 5,
       "panels": [
@@ -450,7 +258,7 @@
             "h": 7,
             "w": 12,
             "x": 0,
-            "y": 29
+            "y": 24
           },
           "id": 20,
           "options": {
@@ -532,7 +340,7 @@
             "h": 7,
             "w": 12,
             "x": 12,
-            "y": 29
+            "y": 24
           },
           "id": 21,
           "options": {
@@ -603,7 +411,7 @@
             "h": 12,
             "w": 24,
             "x": 0,
-            "y": 36
+            "y": 31
           },
           "id": 22,
           "options": {
@@ -723,14 +531,14 @@
           "type": "elasticsearch",
           "uid": "$es_datasource"
         },
-        "definition": "{\"find\": \"terms\", \"field\": \"host_name.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox\"}",
+        "definition": "{\"find\": \"terms\", \"field\": \"host_name.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox AND cubesandbox_cluster_id.keyword:${cluster:lucene}\"}",
         "hide": 0,
         "includeAll": true,
         "label": "Node",
         "multi": true,
         "name": "node",
         "options": [],
-        "query": "{\"find\": \"terms\", \"field\": \"host_name.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox\"}",
+        "query": "{\"find\": \"terms\", \"field\": \"host_name.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox AND cubesandbox_cluster_id.keyword:${cluster:lucene}\"}",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
@@ -752,14 +560,14 @@
           "type": "elasticsearch",
           "uid": "$es_datasource"
         },
-        "definition": "{\"find\": \"terms\", \"field\": \"cubesandbox_sandbox_id.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox\"}",
+        "definition": "{\"find\": \"terms\", \"field\": \"cubesandbox_sandbox_id.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox AND cubesandbox_cluster_id.keyword:${cluster:lucene} AND host_name.keyword:${node:lucene}\"}",
         "hide": 0,
         "includeAll": true,
         "label": "Sandbox ID",
         "multi": true,
         "name": "sandbox_id",
         "options": [],
-        "query": "{\"find\": \"terms\", \"field\": \"cubesandbox_sandbox_id.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox\"}",
+        "query": "{\"find\": \"terms\", \"field\": \"cubesandbox_sandbox_id.keyword\", \"query\": \"service_name.keyword:cubesandbox-sandbox AND cubesandbox_cluster_id.keyword:${cluster:lucene} AND host_name.keyword:${node:lucene}\"}",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,

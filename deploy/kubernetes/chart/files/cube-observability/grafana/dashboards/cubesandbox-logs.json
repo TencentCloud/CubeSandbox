@@ -22,16 +22,28 @@
   "id": null,
   "links": [
     {
-      "asDropdown": false,
-      "icon": "graph-bar",
+      "title": "Cluster metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-cluster",
       "includeVars": false,
       "keepTime": true,
-      "tags": [],
-      "targetBlank": false,
-      "title": "Open the CubeSandbox sandbox resources dashboard",
-      "tooltip": "Open the CubeSandbox sandbox resource dashboard (Prometheus)",
+      "targetBlank": false
+    },
+    {
+      "title": "Node metrics",
       "type": "link",
-      "url": "/d/cubesandbox-host-sandbox/cubesandbox-host-sandbox"
+      "url": "/d/cubesandbox-node",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Sandbox metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-sandbox",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
     }
   ],
   "liveNow": false,
@@ -49,7 +61,7 @@
       },
       "id": 1,
       "options": {
-        "content": "## CubeSandbox logs (Loki)\nSandbox `stdout`/`stderr` from `/data/cubelet/log/<sandbox-id>/`. Filter by **Cluster / Node / Sandbox ID / Log Stream**; **Log Filter (Regex)** is RE2 and `.*` matches everything. Sandbox ID and component name are structured metadata, not index labels. The **Component logs** row needs `observability.logs.components.enabled=true` (Helm only) and is empty otherwise.",
+        "content": "## CubeSandbox logs\nSelect cluster and node, then filter sandbox stdout/stderr. Sandbox ID is a regex text filter so historical IDs remain searchable without high-cardinality index labels. The text filter uses RE2. The collapsed component log row requires observability.logs.components.enabled=true (Helm only).",
         "mode": "markdown"
       },
       "pluginVersion": "10.4.0",
@@ -74,144 +86,6 @@
         "type": "loki",
         "uid": "$loki_datasource"
       },
-      "description": "Share of stderr lines over the dashboard time range (ignores Log Stream).",
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 20
-              },
-              {
-                "color": "red",
-                "value": 50
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 8,
-        "x": 0,
-        "y": 4
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$loki_datasource"
-          },
-          "editorMode": "code",
-          "expr": "100 * sum(count_over_time({service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} | cubesandbox_sandbox_id=~`${sandbox_id:raw}` | log_iostream=`stderr` |~ `${log_query:raw}` [$__range])) / clamp_min(sum(count_over_time({service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} | cubesandbox_sandbox_id=~`${sandbox_id:raw}` |~ `${log_query:raw}` [$__range])), 1)",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ],
-      "title": "Sandbox stderr share",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$loki_datasource"
-      },
-      "description": "Sandboxes with the most log lines over the dashboard time range.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 16,
-        "x": 8,
-        "y": 4
-      },
-      "id": 11,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "Lines"
-          }
-        ]
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$loki_datasource"
-          },
-          "editorMode": "code",
-          "expr": "topk(10, sum by (cubesandbox_sandbox_id) (count_over_time({service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} | cubesandbox_sandbox_id=~`${sandbox_id:raw}` | log_iostream=~`${log_stream:regex}` |~ `${log_query:raw}` [$__range])))",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ],
-      "title": "Top sandboxes by log volume",
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {},
-            "renameByName": {
-              "Value": "Lines",
-              "cubesandbox_sandbox_id": "Sandbox ID"
-            }
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$loki_datasource"
-      },
       "description": "Counts sandbox stdout/stderr logs by Cluster, Node, Sandbox ID, Log Stream, and body regex.",
       "fieldConfig": {
         "defaults": {
@@ -230,9 +104,9 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 9
+        "y": 4
       },
       "id": 2,
       "options": {
@@ -271,71 +145,12 @@
         "type": "loki",
         "uid": "$loki_datasource"
       },
-      "description": "Sandbox log lines per node.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 60,
-            "lineWidth": 1,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
-            }
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 9
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "calcs": [
-            "sum",
-            "lastNotNull"
-          ],
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$loki_datasource"
-          },
-          "editorMode": "code",
-          "expr": "sum by (host_name) (count_over_time({service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} | cubesandbox_sandbox_id=~`${sandbox_id:raw}` | log_iostream=~`${log_stream:regex}` |~ `${log_query:raw}` [$__interval]))",
-          "legendFormat": "{{host_name}}",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Sandbox log volume by node",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$loki_datasource"
-      },
       "description": "Queries sandbox stdout/stderr with the selected variables and RE2 regex.",
       "gridPos": {
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 11
       },
       "id": 3,
       "options": {
@@ -371,7 +186,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 23
       },
       "id": 5,
       "panels": [
@@ -400,7 +215,7 @@
             "h": 7,
             "w": 12,
             "x": 0,
-            "y": 29
+            "y": 24
           },
           "id": 20,
           "options": {
@@ -455,7 +270,7 @@
             "h": 7,
             "w": 12,
             "x": 12,
-            "y": 29
+            "y": 24
           },
           "id": 21,
           "options": {
@@ -499,7 +314,7 @@
             "h": 12,
             "w": 24,
             "x": 0,
-            "y": 36
+            "y": 31
           },
           "id": 22,
           "options": {

@@ -7,7 +7,9 @@ FROM ${GRAFANA_IMAGE}
 
 USER root
 COPY --chown=472:0 grafana/dashboards/ /usr/share/cubesandbox/dashboards/
-RUN test -s /usr/share/cubesandbox/dashboards/cubesandbox-host-sandbox.json \
+RUN test -s /usr/share/cubesandbox/dashboards/cubesandbox-cluster.json \
+    && test -s /usr/share/cubesandbox/dashboards/cubesandbox-node.json \
+    && test -s /usr/share/cubesandbox/dashboards/cubesandbox-sandbox.json \
     && test -s /usr/share/cubesandbox/dashboards/cubesandbox-logs.json \
     && test -s /usr/share/cubesandbox/dashboards/cubesandbox-logs-elasticsearch.json
 

@@ -1241,8 +1241,10 @@ metadata:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: grafana
 data:
-  cubesandbox-host-sandbox.json: |-
-{{ .Files.Get "files/cube-observability/grafana/dashboards/cubesandbox-host-sandbox.json" | indent 4 }}
+{{- range $dashboard := list "cubesandbox-cluster" "cubesandbox-node" "cubesandbox-sandbox" }}
+  {{ $dashboard }}.json: |-
+{{ $.Files.Get (printf "files/cube-observability/grafana/dashboards/%s.json" $dashboard) | indent 4 }}
+{{- end }}
 {{- if $obs.logs.enabled }}
   cubesandbox-logs.json: |-
 {{- if $useLoki }}
@@ -1285,7 +1287,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/observability-grafana-config: {{ printf "%s\n%s\n%s\n%s" (toJson $obs) (.Files.Get "files/cube-observability/grafana/dashboards/cubesandbox-host-sandbox.json") (.Files.Get "files/cube-observability/grafana/dashboards/cubesandbox-logs.json") (.Files.Get "files/cube-observability/grafana/dashboards/cubesandbox-logs-elasticsearch.json") | sha256sum | quote }}
+        checksum/observability-grafana-config: {{ printf "%s\n%s" (toJson $obs) ((.Files.Glob "files/cube-observability/grafana/dashboards/*.json").AsConfig) | sha256sum | quote }}
 {{- if ne $metricsAuthSecret "" }}
         checksum/metrics-auth-secret: {{ $metricsAuthSecretData | toJson | sha256sum | quote }}
 {{- end }}

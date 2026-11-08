@@ -187,8 +187,10 @@ CubeSandbox Observability Suite — Component Versions:
   - Elasticsearch (optional)         : v${ELASTICSEARCH_VERSION} (default :9200)
   - Grafana OSS                     : v${GRAFANA_VERSION} (default :3001, schemaVersion: 39)
   - Dashboards                      :
-      1) cubesandbox-host-sandbox.json (UID: cubesandbox-host-sandbox, Prometheus)
-      2) cubesandbox-logs*.json        (UID: cubesandbox-logs, selected backend)
+      1) cubesandbox-cluster.json     (cluster metrics, Prometheus)
+      2) cubesandbox-node.json        (node metrics, Prometheus)
+      3) cubesandbox-sandbox.json     (sandbox metrics, Prometheus)
+      4) cubesandbox-logs*.json        (selected log backend)
 EOF
 }
 
@@ -394,7 +396,9 @@ check_status() {
 
   if curl -fsS --max-time 2 "${graf_url%/}/api/health" >/dev/null 2>&1; then
     echo " [OK]   Grafana Server           (${graf_url%/})"
-    echo "        -> Metrics Dashboard : ${graf_url%/}/d/cubesandbox-host-sandbox/cubesandbox-host-sandbox"
+    echo "        -> Cluster Metrics   : ${graf_url%/}/d/cubesandbox-cluster"
+    echo "        -> Node Metrics      : ${graf_url%/}/d/cubesandbox-node"
+    echo "        -> Sandbox Metrics   : ${graf_url%/}/d/cubesandbox-sandbox"
     echo "        -> Logs Dashboard    : ${graf_url%/}/d/cubesandbox-logs/cubesandbox-logs"
   else
     echo " [DOWN] Grafana Server           (${graf_url%/})"

@@ -131,7 +131,7 @@ echo "OK unsafe component log host path rejected"
 
 # Grafana reads dashboards from the chart copy; CubeObservability owns the source.
 REPO_ROOT="$(dirname "$(dirname "$(dirname "$CHART_DIR")")")"
-for dashboard in cubesandbox-host-sandbox cubesandbox-logs cubesandbox-logs-elasticsearch; do
+for dashboard in cubesandbox-cluster cubesandbox-node cubesandbox-sandbox cubesandbox-logs cubesandbox-logs-elasticsearch; do
   src="$REPO_ROOT/CubeObservability/grafana/dashboards/$dashboard.json"
   chart="$CHART_DIR/files/cube-observability/grafana/dashboards/$dashboard.json"
   if ! cmp -s "$src" "$chart"; then
