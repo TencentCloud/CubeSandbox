@@ -160,6 +160,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
+- `CUBE_SET_<n>_{FILE,PATH,VALUE}`（环境变量） -> 白名单组件配置里的一个标量（`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`CubeTemplateCenter/conf.yaml`；后两个仅控制面）。只在 `install.sh` 的 install/upgrade 时落地，光 restart 不会重写。`PATH` 里若有双引号，请用单引号包起来：`CUBE_SET_1_PATH='plugins."io.cubelet.internal.v1.images".image_base_path'`。本次 `.env` 里只要出现任一组 `CUBE_SET_*`，upgrade 就整组替换旧值。只在命令行传 `CUBE_SET_*` 时是叠加，不会清掉已持久化的其它组。若字段已被一等 `CUBE_*` 键管理，一等键获胜。详见 `env.example`。
 - `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-egress-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
