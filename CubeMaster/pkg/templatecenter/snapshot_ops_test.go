@@ -143,7 +143,7 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 			Status:     JobStatusReady,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 
@@ -245,7 +245,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -303,7 +303,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -563,6 +563,9 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
 		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendXFS}, nil
 	})
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
 
 	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
 		InstanceType: "cubebox",
@@ -603,6 +606,9 @@ func TestRunSnapshotCreateJobPersistsS3RemoteUUIDs(t *testing.T) {
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
 	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
 		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendS3}, nil
+	})
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
 	})
 	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
 		return nil
@@ -652,6 +658,9 @@ func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T
 	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
 		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendS3}, nil
 	})
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
 	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
 		return nil
 	})
@@ -686,6 +695,80 @@ func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T
 	}
 	if v, ok := persisted["export_uuids"]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
 		t.Fatalf("export_uuids must be empty, got %v", v)
+	}
+}
+
+// A snapshot's TTL means "usable for N seconds": expires_at must anchor to
+// the CREATING→READY transition (here: the runSnapshotCreateJob finalize),
+// not to the request submission. A TTL shorter than the commit time would
+// otherwise hand back a snapshot that expires the moment it becomes READY.
+func TestRunSnapshotCreateJobAnchorsTTLExpiryAtReady(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	const ttlSeconds = 3600
+	requestJSON, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
+		RequestID:  "req-1",
+		SandboxID:  "sb-1",
+		SnapshotID: "snap-1",
+		TTLSeconds: ttlSeconds,
+	})
+	if err != nil {
+		t.Fatalf("marshalSnapshotCreateRequest: %v", err)
+	}
+
+	var persisted map[string]any
+	patches.ApplyFunc(cubelet.CommitSandbox, func(ctx context.Context, calleeEp string, req *cubeboxv1.CommitSandboxRequest) (*cubeboxv1.CommitSandboxResponse, error) {
+		return &cubeboxv1.CommitSandboxResponse{
+			Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+		}, nil
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendXFS}, nil
+	})
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, RequestJSON: requestJSON}, nil
+	})
+	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
+		return nil
+	})
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, templateID string, fields map[string]any) error {
+		persisted = fields
+		return nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
+	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
+
+	finalizeStart := time.Now()
+	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
+		InstanceType: "cubebox",
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateID: "snap-1",
+		},
+	}, &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+	}); err != nil {
+		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
+	}
+	finalizeEnd := time.Now()
+
+	if persisted == nil {
+		t.Fatal("expected updateSnapshotFields")
+	}
+	if persisted["status"] != StatusReady {
+		t.Fatalf("status=%v, want READY", persisted["status"])
+	}
+	expiresAt, ok := persisted["expires_at"].(time.Time)
+	if !ok {
+		t.Fatalf("expires_at missing or not time.Time: %T %v", persisted["expires_at"], persisted["expires_at"])
+	}
+	wantEarliest := finalizeStart.Add(ttlSeconds * time.Second)
+	wantLatest := finalizeEnd.Add(ttlSeconds * time.Second)
+	if expiresAt.Before(wantEarliest) || expiresAt.After(wantLatest) {
+		t.Fatalf("expires_at=%v, want within [%v, %v] (finalize time + TTL)", expiresAt, wantEarliest, wantLatest)
 	}
 }
 

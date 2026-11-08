@@ -84,12 +84,15 @@ var (
 	// ErrTemplateImageJobNotFound is the domain-level "no such build job".
 	// Handlers must be able to answer NotFound without importing gorm, so the
 	// repository translates gorm.ErrRecordNotFound into this.
-	ErrTemplateImageJobNotFound     = errors.New("template image job not found")
-	ErrTemplateIDRequired           = errors.New("template id is required")
-	ErrTemplateHasNoReadyReplica    = errors.New("template has no ready replica")
-	ErrNoTemplateNodes              = errors.New("no healthy nodes available for template creation")
-	ErrDuplicateTemplate            = errors.New("template already exists")
-	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
+	ErrTemplateImageJobNotFound  = errors.New("template image job not found")
+	ErrTemplateIDRequired        = errors.New("template id is required")
+	ErrTemplateHasNoReadyReplica = errors.New("template has no ready replica")
+	ErrNoTemplateNodes           = errors.New("no healthy nodes available for template creation")
+	ErrDuplicateTemplate         = errors.New("template already exists")
+	ErrTemplateAttemptInProgress = errors.New("template attempt is already in progress")
+	// ErrSnapshotExpired rejects new use (fork/rollback) of a TTL-expired
+	// snapshot before the reconciler tombstones it.
+	ErrSnapshotExpired              = errors.New("snapshot has expired")
 	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
 	ErrInvalidAlias                 = errors.New("alias is invalid")
 	ErrInvalidSnapshotName          = errors.New("snapshot name is invalid")
@@ -1251,6 +1254,13 @@ func formatUTCRFC3339(ts time.Time) string {
 		return ""
 	}
 	return ts.UTC().Format(time.RFC3339)
+}
+
+func formatUTCRFC3339Ptr(ts *time.Time) string {
+	if ts == nil || ts.IsZero() {
+		return ""
+	}
+	return formatUTCRFC3339(*ts)
 }
 
 func composeImageInfo(ref, digest string) string {

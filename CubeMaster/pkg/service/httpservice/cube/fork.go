@@ -322,7 +322,7 @@ func forkSandboxFromSource(
 		return err
 	}
 	alias := resolveSourceAliasFn(ctx, sandboxID)
-	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "", mode)
+	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "", mode, 0)
 	if err != nil {
 		return err
 	}

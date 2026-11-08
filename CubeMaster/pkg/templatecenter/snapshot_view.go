@@ -38,6 +38,7 @@ type SnapshotInfo struct {
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                             `json:"last_error,omitempty"`
 	CreatedAt                 string                             `json:"created_at,omitempty"`
+	ExpiresAt                 string                             `json:"expires_at,omitempty"`
 	RuntimeRefCount           int64                              `json:"runtime_ref_count,omitempty"`
 	RuntimeRefSandboxes       []string                           `json:"runtime_ref_sandboxes,omitempty"`
 	Replicas                  []ReplicaStatus                    `json:"replicas,omitempty"`

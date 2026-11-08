@@ -128,6 +128,9 @@ func runSnapshotReconcilerPass(ctx context.Context) {
 		return
 	}
 	logger := log.G(ctx).WithFields(map[string]any{"component": "snapshot_reconciler"})
+	if err := reconcileExpiredSnapshots(ctx); err != nil {
+		logger.Warnf("reconcile expired snapshots failed: %v", err)
+	}
 	if err := reconcileSnapshotDefinitionTimeouts(ctx); err != nil {
 		logger.Warnf("reconcile snapshot definition timeouts failed: %v", err)
 	}
@@ -143,6 +146,45 @@ func runSnapshotReconcilerPass(ctx context.Context) {
 	if err := refreshSnapshotStorageMetrics(ctx); err != nil {
 		logger.Warnf("refresh snapshot storage metrics failed: %v", err)
 	}
+}
+
+// reconcileExpiredSnapshots retires expired snapshots without deleting bytes
+// directly. The tombstone reconciler owns physical cleanup and waits for any
+// active runtime references before reclaiming the snapshot.
+func reconcileExpiredSnapshots(ctx context.Context) error {
+	now := time.Now()
+	var rows []models.SnapshotRecord
+	if err := store.db.WithContext(ctx).Table(constants.SnapshotTableName).
+		Where("status IN ? AND expires_at IS NOT NULL AND expires_at <= ?", []string{StatusReady, StatusFailed}, now).
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	var expireErr error
+	for _, rec := range rows {
+		if err := expireSnapshotRecord(ctx, rec.SnapshotID, now); err != nil {
+			expireErr = errors.Join(expireErr, err)
+		}
+	}
+	return expireErr
+}
+
+func expireSnapshotRecord(ctx context.Context, snapshotID string, now time.Time) error {
+	return withTemplateWriteLock(snapshotResourceLockKey(snapshotID), func() error {
+		rec, err := getSnapshotRecord(ctx, snapshotID)
+		if err != nil {
+			if errors.Is(err, ErrSnapshotNotFound) {
+				return nil
+			}
+			return err
+		}
+		if rec.ExpiresAt == nil || rec.ExpiresAt.After(now) {
+			return nil
+		}
+		if !strings.EqualFold(rec.Status, StatusReady) && !strings.EqualFold(rec.Status, StatusFailed) {
+			return nil
+		}
+		return tombstoneSnapshotRecord(ctx, snapshotID)
+	})
 }
 
 func ensureSnapshotNodeWritable(ctx context.Context, nodeID, nodeIP string, allowDelete bool) error {

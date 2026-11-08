@@ -57,6 +57,10 @@ func EnsureSnapshotReadyForNewUse(ctx context.Context, snapshotID string) error 
 		if err != nil {
 			return err
 		}
+		if rec.ExpiresAt != nil && !rec.ExpiresAt.After(time.Now()) {
+			return fmt.Errorf("%w: %s expired at %s",
+				ErrSnapshotExpired, snapshotID, rec.ExpiresAt.UTC().Format(time.RFC3339))
+		}
 		if snapshotRejectsNewUse(rec.Status) {
 			return wrapSnapshotNotFound(snapshotID)
 		}

@@ -38,6 +38,54 @@ func TestMatchesSnapshotRecordListOptionsHidesTombstone(t *testing.T) {
 	}
 }
 
+func TestExpireSnapshotRecordTombstonesExpiredSnapshot(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	now := time.Now()
+	expiredAt := now.Add(-time.Second)
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: "snap-expired", Status: StatusReady, ExpiresAt: &expiredAt}, nil
+	})
+	tombstoned := false
+	patches.ApplyFunc(tombstoneSnapshotRecord, func(_ context.Context, snapshotID string) error {
+		tombstoned = snapshotID == "snap-expired"
+		return nil
+	})
+
+	if err := expireSnapshotRecord(context.Background(), "snap-expired", now); err != nil {
+		t.Fatalf("expireSnapshotRecord: %v", err)
+	}
+	if !tombstoned {
+		t.Fatal("expired snapshot must be tombstoned instead of physically deleted")
+	}
+}
+
+func TestExpireSnapshotRecordKeepsUnexpiredSnapshot(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	now := time.Now()
+	expiresAt := now.Add(time.Second)
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: "snap-live", Status: StatusReady, ExpiresAt: &expiresAt}, nil
+	})
+	patches.ApplyFunc(tombstoneSnapshotRecord, func(context.Context, string) error {
+		t.Fatal("unexpired snapshot must not be tombstoned")
+		return nil
+	})
+
+	if err := expireSnapshotRecord(context.Background(), "snap-live", now); err != nil {
+		t.Fatalf("expireSnapshotRecord: %v", err)
+	}
+}
+
 func TestMatchesSnapshotRecordListOptionsNameMatchesNameOrID(t *testing.T) {
 	ready := &models.SnapshotRecord{SnapshotID: "snap-1", DisplayName: "prod", Status: StatusReady}
 
@@ -122,6 +170,27 @@ func TestRollbackSandboxToSnapshotRejectsTombstone(t *testing.T) {
 	}
 }
 
+func TestRollbackSandboxToSnapshotRejectsExpired(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	past := time.Now().Add(-time.Minute)
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Status: StatusReady, OriginSandboxID: "sb-1", ExpiresAt: &past}, nil
+	})
+
+	_, err := RollbackSandboxToSnapshot(context.Background(), "req-rb", "sb-1", "snap-expired", "cubebox", "")
+	if !errors.Is(err, ErrSnapshotExpired) || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("RollbackSandboxToSnapshot error = %v, want expired ErrSnapshotExpired", err)
+	}
+}
+
 func TestEnsureSnapshotReadyForNewUseRejectsTombstone(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}
@@ -136,6 +205,47 @@ func TestEnsureSnapshotReadyForNewUseRejectsTombstone(t *testing.T) {
 	err := EnsureSnapshotReadyForNewUse(context.Background(), "snap-gone")
 	if !errors.Is(err, ErrSnapshotNotFound) {
 		t.Fatalf("EnsureSnapshotReadyForNewUse error = %v, want ErrSnapshotNotFound", err)
+	}
+}
+
+func TestEnsureSnapshotReadyForNewUseEnforcesTTL(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	expired := time.Now().Add(-time.Minute)
+	unexpired := time.Now().Add(time.Hour)
+	var rec *models.SnapshotRecord
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return rec, nil
+	})
+
+	cases := []struct {
+		name    string
+		rec     *models.SnapshotRecord
+		wantErr string // "" means the call must succeed
+	}{
+		{"ready unexpired passes", &models.SnapshotRecord{SnapshotID: "snap-live", Status: StatusReady, ExpiresAt: &unexpired}, ""},
+		{"ready expired rejected", &models.SnapshotRecord{SnapshotID: "snap-expired", Status: StatusReady, ExpiresAt: &expired}, "expired"},
+		{"nil expiry passes", &models.SnapshotRecord{SnapshotID: "snap-forever", Status: StatusReady}, ""},
+		{"failed expired rejected", &models.SnapshotRecord{SnapshotID: "snap-failed", Status: StatusFailed, ExpiresAt: &expired}, "expired"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec = tc.rec
+			err := EnsureSnapshotReadyForNewUse(context.Background(), tc.rec.SnapshotID)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("EnsureSnapshotReadyForNewUse: %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("EnsureSnapshotReadyForNewUse error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
