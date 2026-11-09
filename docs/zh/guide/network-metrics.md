@@ -163,15 +163,17 @@ entry 所有权有意放在用户态。如果允许残留报文在数据面自�
 | Metadata 修复、幂等 upsert 或 legacy TAP 替换 | `UpsertTAPDeviceMetadata` 在写 metadata 前执行同样的重置 | 更新成功时 Counter 清零；失败时保持原有 map 状态 |
 | 网络策略更新 | 只更新策略 map，不操作 `sandbox_metrics` | Counter 连续累加 |
 | 使用同一 TAP/IP 的沙箱回滚 | 只更新 TAP/session 代际，不操作 `sandbox_metrics` | Counter 不随快照回滚或清零 |
-| CubeVS 初始化重建 `sandbox_metrics` | map 中所有 entry 被删除；启动恢复在校验 metadata 后独立为每个活跃 TAP 执行 ensure | ensure 成功的 entry 从零重新开始；失败的 `sandbox_ip` 不导出时间序列 |
+| CubeVS 初始化 | 复用已有的 pinned map，`Init` 不删除、也不重建它 | map 里已有的 Counter 在进程重启后仍然保留 |
 
 ensure 使用 `UpdateAny` 写入全零 value，并覆盖该 IP 已存在的 entry。用户态会在
 TAP metadata 发布前尝试更新 entry；ensure 失败只记录告警，不会阻止后续 TAP
 metadata 和网络策略写入。若旧 entry 已存在，更新失败时其 Counter 保持不变；
 若原本没有 entry，则该沙箱继续缺少指标。
 
-启动恢复会独立于 metadata 修复执行同一个 ensure。即使 pinned TAP metadata
-已经与恢复中的沙箱完全匹配、不需要 upsert，重建后的 map 也会重新补建 entry。
+启动恢复在核对 pinned TAP metadata 之后仍会执行同一个 ensure，metadata
+已经匹配、不需要 upsert 时也一样。ensure 成功会用全零覆盖还在 map 里的
+entry，这个被恢复的沙箱从零重新计数；ensure 失败则留下原来的 entry。
+恢复过程没有访问到的沙箱，保留 map 里已有的 Counter。
 
 新 TAP 注册的顺序为：
 
@@ -196,13 +198,11 @@ metadata 和网络策略写入。若旧 entry 已存在，更新失败时其 Cou
   也不影响当前报文后续处理。该沙箱的所有流量 Counter 都不会增长，Prometheus
   响应中不会出现这个 `sandbox_ip`，因此网络指标实际不可用。
 
-::: info 重启后的空数据
-CubeVS 初始化会主动重建 `sandbox_metrics`，原有 Counter 不持久化。重启后，
-启动恢复会独立为每个活跃 TAP ensure entry，因此即使 metadata 已经完整，成功
-补建的 IP 也会从零恢复导出。如果 ensure 失败，该沙箱不会导出 Counter 序列，
-直到后续恢复、metadata upsert、TAP re-registration 或新建沙箱再次触发 ensure
-并成功。这里使用“无序列/空数据”表示数据缺失，不能把它解释为 Counter 为零或
-沙箱没有网络流量。
+::: info Counter 在 CubeVS 初始化后仍然保留
+`Init` 不会重建 `sandbox_metrics`，pinned map 里的 Counter 会跨进程重启保留。
+启动恢复随后为每个被恢复的 TAP ensure entry：成功则把该沙箱清零，失败则继续
+使用原来的 Counter。恢复过程没有访问到的 IP 保持不变。仍然没有时间序列表示
+这个 key 不存在，不能把它解释为 Counter 为零或沙箱没有网络流量。
 :::
 
 `cubesandbox_network_exporter_up{source="sandbox"} == 1` 只表示本次抓取成功
@@ -217,7 +217,7 @@ CubeVS 初始化会主动重建 `sandbox_metrics`，原有 Counter 不持久化�
 | 删除一个不存在的 entry | 按幂等成功处理 |
 | metrics entry 删除失败 | 记录告警，但不阻塞 TAP、IP 和端口回收 |
 | IP 被后续沙箱复用 | 发布新 metadata 前，`EnsureSandboxTrafficMetrics` 使用全零 value 覆盖 entry |
-| CubeVS 初始化 | 直接重建整个 `sandbox_metrics` map；所有旧 Counter 消失，未补建的沙箱表现为空数据 |
+| CubeVS 初始化 | pinned map 保持原样。恢复过程不会删除它没有访问到的 entry |
 
 网络策略更新和使用同一网络分配的回滚不会删除或重置 entry；metadata 刷新会
 重置但不会删除 entry。删除动作与 TAP/IP 所有权释放绑定，而不是与单次连接或
@@ -271,11 +271,12 @@ Prometheus 抓取不会扫描运行中的沙箱，不会调用 CubeShim 或 gues
 | 保持同一网络分配的沙箱回滚 | 计数继续，不跟随快照回滚 | 陈旧 session 被删除，后续快照收敛 |
 | 删除沙箱 | TAP 清理后移除时间序列 | session 删除或回收后消失 |
 | 沙箱 IP 复用 | 注册前用全零 value 覆盖 entry；失败时残留 Counter 可能进入新生命周期 | session 使用独立生命周期 |
-| CubeVS/Cubelet 网络初始化 | 重建 `sandbox_metrics`，旧 Counter 消失；恢复路径独立从零补建每个活跃沙箱，ensure 失败的沙箱仍以空表示数据缺失 | 进程内 cache 初始为空，再由 reaper 发布 |
+| CubeVS/Cubelet 网络初始化 | pinned map 和其中的 Counter 在 `Init` 之后仍然保留。恢复 ensure 成功时把该沙箱清零，失败时留下原来的 Counter | 进程内 cache 初始为空，再由 reaper 发布 |
 
-这些 Counter 的范围是当前 CubeVS runtime 和当前沙箱 IP 分配。Prometheus
-应把 CubeVS 重启、metadata upsert 或 IP 重新分配视为 Counter reset 边界。
-出现 ensure 告警时，该边界不可靠，时间序列可能仍包含旧 entry 的值。
+这些 Counter 的范围是 pinned `sandbox_metrics` 和当前沙箱 IP 分配。CubeVS
+进程重启本身不会把它们清零。Prometheus 应把一次成功的恢复 ensure、metadata
+upsert 或 IP 重新分配视为 Counter reset 边界。出现 ensure 告警时，该沙箱继续
+使用这个 IP 上已经存着的 Counter。
 
 label 使用 `sandbox_ip` 而不是 `sandbox_id`，因为数据面稳定且随时可用的所有权
 key 是沙箱 IPv4。需要沙箱 ID 时，应在该端点之外与控制面 inventory 做关联。
