@@ -19,8 +19,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
-var ErrJFSRedoUnsupported = errors.New("jfs template redo is temporarily unsupported")
-
 func normalizeRedoTemplateImageRequest(req *types.RedoTemplateFromImageReq) (*types.RedoTemplateFromImageReq, error) {
 	if req == nil {
 		return nil, errors.New("request is nil")

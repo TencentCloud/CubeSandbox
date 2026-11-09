@@ -67,6 +67,10 @@ const (
 
 	CubeAnnotationsAppSnapshotCreate    = "cube.master.appsnapshot.create"
 	CubeAnnotationAppSnapshotTemplateID = "cube.master.appsnapshot.template.id"
+	// CubeAnnotationJFSTemplateSourceNode is the JFS namespace key of the
+	// node that materialized the shared template package. Cubelet tries this
+	// node directly before falling back to the cross-node catalog scan.
+	CubeAnnotationJFSTemplateSourceNode = "cube.master.jfs.template.source_node"
 	// CubeAnnotationAppSnapshotTemplateAlias carries the template display_name
 	// (the alias) onto the sandbox so CubeAPI can echo it without a lookup.
 	CubeAnnotationAppSnapshotTemplateAlias   = "cube.master.appsnapshot.template.alias"

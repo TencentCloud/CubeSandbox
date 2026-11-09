@@ -1848,6 +1848,12 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 		return nil, err
 	} else if hit {
 		reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
+		if needsJFSTemplateSourceNode(req) {
+			attachJFSTemplateSourceNode(ctx, templateID, req)
+			if err = setTemplateRequestCache(templateID, req); err != nil {
+				log.G(ctx).Warnf("refresh cached jfs template source node fail, template=%s err=%v", templateID, err)
+			}
+		}
 		ensureRuntimeTemplateRequest(req)
 		return req, nil
 	}
@@ -1878,6 +1884,7 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 				if err = applyStoredCreateBackend(req, rec.Backend); err != nil {
 					return err
 				}
+				attachJFSTemplateSourceNode(ctx, templateID, req)
 				if err = setTemplateRequestCache(templateID, req); err != nil {
 					log.G(ctx).Warnf("set snapshot request cache fail, snapshot=%s err=%v", templateID, err)
 				}
@@ -1908,6 +1915,7 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 			if err = applyStoredCreateBackend(req, def.StorageBackend); err != nil {
 				return err
 			}
+			attachJFSTemplateSourceNode(ctx, templateID, req)
 			if err = setTemplateRequestCache(templateID, req); err != nil {
 				log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, err)
 			}
@@ -1931,6 +1939,51 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 	}
 	ensureRuntimeTemplateRequest(cloned)
 	return cloned, nil
+}
+
+// attachJFSTemplateSourceNode adds a direct JFS namespace hint to the runtime
+// request. The ready builder replica is authoritative for the first lookup;
+// Cubelet still falls back to scanning node catalogs when this hint is stale
+// or when a legacy deployment used a different node_name.
+func attachJFSTemplateSourceNode(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq) {
+	if !needsJFSTemplateSourceNode(req) {
+		return
+	}
+	replicas, err := ListReplicas(ctx, templateID)
+	if err != nil {
+		log.G(ctx).Warnf("resolve jfs template source node fail, template=%s err=%v", templateID, err)
+		return
+	}
+	sourceNode := jfsTemplateSourceNode(replicas)
+	if sourceNode == "" {
+		return
+	}
+	if req.Annotations == nil {
+		req.Annotations = make(map[string]string)
+	}
+	req.Annotations[constants.CubeAnnotationJFSTemplateSourceNode] = sourceNode
+}
+
+func needsJFSTemplateSourceNode(req *sandboxtypes.CreateCubeSandboxReq) bool {
+	if req == nil || !constants.IsJFSBackend(storageBackendFromCreate(req)) {
+		return false
+	}
+	return strings.TrimSpace(req.Annotations[constants.CubeAnnotationJFSTemplateSourceNode]) == ""
+}
+
+func jfsTemplateSourceNode(replicas []models.TemplateReplica) string {
+	for _, replica := range replicas {
+		if !strings.EqualFold(strings.TrimSpace(replica.Status), ReplicaStatusReady) {
+			continue
+		}
+		if nodeID := strings.TrimSpace(replica.NodeID); nodeID != "" {
+			return nodeID
+		}
+		if nodeIP := strings.TrimSpace(replica.NodeIP); nodeIP != "" {
+			return nodeIP
+		}
+	}
+	return ""
 }
 
 func ListReplicas(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {

@@ -26,9 +26,11 @@ import (
 var jfsTemplateLocks sync.Map
 
 // AdoptJFSTemplate makes templateID usable on this node when another node
-// built it. It reports whether it adopted anything: false means the template
-// is already local, or no node has built it.
-func AdoptJFSTemplate(ctx context.Context, templateID string) (bool, error) {
+// built it. sourceNode is an optional JFS namespace hint from Master; a stale
+// or legacy hint falls back to scanning all node catalogs. It reports whether
+// it adopted anything: false means the template is already local, or no node
+// has built it.
+func AdoptJFSTemplate(ctx context.Context, templateID, sourceNode string) (bool, error) {
 	id := strings.TrimSpace(templateID)
 	if id == "" || filepath.Base(id) != id || id == "." || id == ".." {
 		return false, fmt.Errorf("invalid template id %q", templateID)
@@ -42,7 +44,7 @@ func AdoptJFSTemplate(ctx context.Context, templateID string) (bool, error) {
 	} else if !errors.Is(err, ErrSnapshotCatalogNotFound) {
 		return false, err
 	}
-	src, srcHome, err := findJFSTemplate(id)
+	src, srcHome, err := findJFSTemplate(id, sourceNode)
 	if err != nil || src == nil {
 		return false, err
 	}
@@ -81,13 +83,23 @@ func AdoptJFSTemplate(ctx context.Context, templateID string) (bool, error) {
 }
 
 // findJFSTemplate returns the catalog and home of templateID as some other
-// node built it, or nil when no node has.
-func findJFSTemplate(id string) (*SnapshotCatalogEntry, string, error) {
+// node built it, or nil when no node has. The preferred node is checked by
+// exact path first; the glob is retained for stale locators and legacy data.
+func findJFSTemplate(id, preferredNode string) (*SnapshotCatalogEntry, string, error) {
 	var cfg *Config
 	if localStorage != nil {
 		cfg = localStorage.config
 	}
 	own := cfg.jfsStorageRoot()
+	if isSafeJFSNodeName(preferredNode) {
+		home := filepath.Join(cfg.jfsNodesRoot(), strings.TrimSpace(preferredNode), SnapshotKindNormal, id)
+		if filepath.Dir(filepath.Dir(home)) != own {
+			catalogPath := filepath.Join(home, SnapshotMetadataDir, snapshotCatalogFileName)
+			if entry := readJFSTemplateCatalog(catalogPath, id); entry != nil {
+				return entry, home, nil
+			}
+		}
+	}
 	pattern := filepath.Join(cfg.jfsNodesRoot(), "*", SnapshotKindNormal, id, SnapshotMetadataDir, snapshotCatalogFileName)
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -98,13 +110,21 @@ func findJFSTemplate(id string) (*SnapshotCatalogEntry, string, error) {
 		if filepath.Dir(filepath.Dir(home)) == own {
 			continue
 		}
-		entry, err := readSnapshotCatalogFile(m)
-		if err != nil || entry.SnapshotID != id || entry.Kind != CatalogKindTemplate {
+		entry := readJFSTemplateCatalog(m, id)
+		if entry == nil {
 			continue
 		}
 		return entry, home, nil
 	}
 	return nil, "", nil
+}
+
+func readJFSTemplateCatalog(path, templateID string) *SnapshotCatalogEntry {
+	entry, err := readSnapshotCatalogFile(path)
+	if err != nil || entry.SnapshotID != templateID || entry.Kind != CatalogKindTemplate {
+		return nil
+	}
+	return entry
 }
 
 // jfsObjectFile is where the reflink engine of the node rooted at nodeDir

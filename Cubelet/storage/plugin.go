@@ -147,8 +147,8 @@ type CowJFSUserConfig struct {
 	MountPath string `toml:"mount_path"`
 	Root      string `toml:"root"`
 	// NodeName names this node's directory on the shared volume. Defaults
-	// to the node's primary IPv4; it must be unique per node and stable
-	// across restarts.
+	// to the stable InstanceID (CUBE_SANDBOX_NODE_ID, then the legacy node
+	// IP fallback); it must be unique per node and stable across restarts.
 	NodeName string `toml:"node_name"`
 	// CacheDir is the juicefs mount --cache-dir. A package counts as
 	// uploaded, and so restorable on another node, once none of its blocks

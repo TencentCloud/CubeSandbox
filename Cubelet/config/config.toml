@@ -142,7 +142,7 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     enable = false
     mount_path = "/data/cubelet/jfs"
     root = "cube"
-    # node_name defaults to the node's primary IPv4; it must be unique and stable per node.
+    # node_name defaults to the stable InstanceID; it must be unique and stable per node.
     # node_name = ""
     # The JuiceFS client's cache dir (CUBE_JFS_CACHE_DIR, colon-separated). A
     # package is ready for cross-node restore once none of its blocks is in

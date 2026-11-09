@@ -18,10 +18,10 @@ import (
 )
 
 func TestPrepareSharedTemplateAdoptsOnlyJFSTemplateCreates(t *testing.T) {
-	var adopted []string
+	var adopted [][2]string
 	previous := adoptJFSTemplate
-	adoptJFSTemplate = func(_ context.Context, id string) (bool, error) {
-		adopted = append(adopted, id)
+	adoptJFSTemplate = func(_ context.Context, id, sourceNode string) (bool, error) {
+		adopted = append(adopted, [2]string{id, sourceNode})
 		return true, nil
 	}
 	t.Cleanup(func() { adoptJFSTemplate = previous })
@@ -30,6 +30,7 @@ func TestPrepareSharedTemplateAdoptsOnlyJFSTemplateCreates(t *testing.T) {
 		ann := map[string]string{
 			constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
 			constants.MasterAnnotationStorageBackend:        cow.BackendJFS,
+			constants.MasterAnnotationJFSTemplateSourceNode: "node-a",
 		}
 		for k, v := range extra {
 			ann[k] = v
@@ -42,7 +43,7 @@ func TestPrepareSharedTemplateAdoptsOnlyJFSTemplateCreates(t *testing.T) {
 	create(map[string]string{constants.MasterAnnotationRuntimeSnapshotID: "snap-1"})
 	create(map[string]string{constants.MasterAnnotationSnapshotCrossNode: "true"})
 	create(map[string]string{constants.MasterAnnotationAppSnapshotTemplateID: ""})
-	require.Equal(t, []string{"tpl-1"}, adopted)
+	require.Equal(t, [][2]string{{"tpl-1", "node-a"}}, adopted)
 }
 
 func TestWaitJFSTemplateUpload(t *testing.T) {

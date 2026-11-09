@@ -28,6 +28,29 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestJFSTemplateSourceNodePrefersReadyNodeID(t *testing.T) {
+	replicas := []models.TemplateReplica{
+		{Status: ReplicaStatusFailed, NodeID: "failed-node", NodeIP: "10.0.0.1"},
+		{Status: ReplicaStatusReady, NodeID: "node-a", NodeIP: "10.0.0.2"},
+		{Status: ReplicaStatusReady, NodeIP: "10.0.0.3"},
+	}
+	require.Equal(t, "node-a", jfsTemplateSourceNode(replicas))
+	require.Equal(t, "10.0.0.3", jfsTemplateSourceNode(replicas[2:]))
+	require.Empty(t, jfsTemplateSourceNode(replicas[:1]))
+}
+
+func TestNeedsJFSTemplateSourceNode(t *testing.T) {
+	req := &sandboxtypes.CreateCubeSandboxReq{Annotations: map[string]string{
+		constants.CubeAnnotationStorageBackend: "jfs",
+	}}
+	require.True(t, needsJFSTemplateSourceNode(req))
+	req.Annotations[constants.CubeAnnotationJFSTemplateSourceNode] = "node-a"
+	require.False(t, needsJFSTemplateSourceNode(req))
+	req.Annotations[constants.CubeAnnotationStorageBackend] = "xfs"
+	delete(req.Annotations, constants.CubeAnnotationJFSTemplateSourceNode)
+	require.False(t, needsJFSTemplateSourceNode(req))
+}
+
 // TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations verifies the
 // v4+ contract for stored template requests: per-invocation runtime-snapshot
 // binding annotations are scrubbed so they cannot leak into later

@@ -192,6 +192,9 @@ const (
 	MasterAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	MasterAnnotationsAppSnapshotCreate        = "cube.master.appsnapshot.create"
 	MasterAnnotationAppSnapshotTemplateID     = "cube.master.appsnapshot.template.id"
+	// MasterAnnotationJFSTemplateSourceNode is the JFS namespace key Master
+	// resolved from the template's ready builder replica.
+	MasterAnnotationJFSTemplateSourceNode     = "cube.master.jfs.template.source_node"
 	MasterAnnotationRuntimeSnapshotID         = "cube.master.runtime.snapshot.id"
 	MasterAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
 	// MasterAnnotationRuntimeRestoreSnapshotID tracks the snapshot id whose

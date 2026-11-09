@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -44,28 +45,53 @@ func TestJFSStorageRootDefaults(t *testing.T) {
 	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "n1"), cfg.jfsStorageRoot())
 }
 
-func TestJFSNodeNameDefaultsToNodeIPv4(t *testing.T) {
-	orig := localNodeIPv4
-	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
-	t.Cleanup(func() { localNodeIPv4 = orig })
-	require.Equal(t, "10.0.0.9", (&Config{}).jfsNodeName())
-	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "10.0.0.9"), (&Config{}).jfsStorageRoot())
+func TestJFSNodeNameDefaultsToInstanceID(t *testing.T) {
+	orig := localNodeIdentity
+	localNodeIdentity = func() (string, error) { return "node-a", nil }
+	t.Cleanup(func() { localNodeIdentity = orig })
+	require.Equal(t, "node-a", (&Config{}).jfsNodeName())
+	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "node-a"), (&Config{}).jfsStorageRoot())
 }
 
-func TestJFSNodeNameConfiguredValueWinsOverIP(t *testing.T) {
-	orig := localNodeIPv4
-	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
-	t.Cleanup(func() { localNodeIPv4 = orig })
+func TestJFSNodeNameConfiguredValueWinsOverInstanceID(t *testing.T) {
+	orig := localNodeIdentity
+	localNodeIdentity = func() (string, error) { return "node-a", nil }
+	t.Cleanup(func() { localNodeIdentity = orig })
 	cfg := &Config{}
 	cfg.Cow.JFS = CowJFSUserConfig{NodeName: "explicit-name"}
 	require.Equal(t, "explicit-name", cfg.jfsNodeName())
 }
 
-func TestJFSNodeNameIPFailureFallsBackToLocalhost(t *testing.T) {
-	orig := localNodeIPv4
-	localNodeIPv4 = func() (string, error) { return "", errors.New("no address") }
-	t.Cleanup(func() { localNodeIPv4 = orig })
+func TestJFSNodeNameIdentityFailureFallsBackToLocalhost(t *testing.T) {
+	orig := localNodeIdentity
+	localNodeIdentity = func() (string, error) { return "", errors.New("no identity") }
+	t.Cleanup(func() { localNodeIdentity = orig })
 	require.Equal(t, "localhost", (&Config{}).jfsNodeName())
+}
+
+func TestJFSNodeNameKeepsExistingLegacyIPDirectory(t *testing.T) {
+	origIdentity, origIPv4 := localNodeIdentity, localNodeIPv4
+	localNodeIdentity = func() (string, error) { return "node-a", nil }
+	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
+	t.Cleanup(func() {
+		localNodeIdentity, localNodeIPv4 = origIdentity, origIPv4
+	})
+
+	cfg := &Config{}
+	cfg.Cow.JFS.MountPath = t.TempDir()
+	legacyPath := filepath.Join(cfg.jfsNodesRoot(), "10.0.0.9")
+	require.NoError(t, os.MkdirAll(legacyPath, 0o755))
+	require.Equal(t, "10.0.0.9", cfg.jfsNodeName())
+
+	require.NoError(t, os.MkdirAll(filepath.Join(cfg.jfsNodesRoot(), "node-a"), 0o755))
+	require.Equal(t, "node-a", cfg.jfsNodeName())
+}
+
+func TestBuildJFSCowInitJSONRejectsUnsafeNodeName(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, NodeName: "../escape"}
+	_, err := cfg.BuildJFSCowInitJSON()
+	require.ErrorContains(t, err, "invalid jfs node_name")
 }
 
 func TestBuildJFSCowInitJSONUsesCopyFileRange(t *testing.T) {

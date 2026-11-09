@@ -60,23 +60,72 @@ func (c *Config) jfsMountPath() string {
 }
 
 func (c *Config) jfsNodeName() string {
-	if c != nil {
-		if n := strings.TrimSpace(c.Cow.JFS.NodeName); n != "" {
-			return n
-		}
+	name, err := c.resolveJFSNodeName()
+	if err != nil {
+		return "localhost"
 	}
-	// The directory name must be unique cluster-wide. Hostnames can collide
-	// (containerized nodes, cloned VMs), and every other node identity in the
-	// cluster is already IP-first (node.ID() falls back to the IP), so the
-	// node's primary IPv4 is the default.
-	if ip, err := localNodeIPv4(); err == nil && strings.TrimSpace(ip) != "" {
-		return strings.TrimSpace(ip)
-	}
-	return "localhost"
+	return name
 }
 
-// localNodeIPv4 is the seam behind jfsNodeName's default so tests can pin
-// the address without depending on the process-wide host identity cache.
+func (c *Config) resolveJFSNodeName() (string, error) {
+	name := ""
+	explicit := false
+	if c != nil {
+		if n := strings.TrimSpace(c.Cow.JFS.NodeName); n != "" {
+			name = n
+			explicit = true
+		}
+	}
+	if name == "" {
+		// The directory name is a persistent node identity, not a dialable
+		// endpoint. In Kubernetes the endpoint may be a replaceable PodIP while
+		// InstanceID remains the Kubernetes node name; on legacy deployments the
+		// InstanceID still falls back to CUBE_SANDBOX_NODE_IP.
+		if id, err := localNodeIdentity(); err == nil {
+			name = strings.TrimSpace(id)
+		}
+	}
+	if name == "" {
+		name = "localhost"
+	}
+	if !isSafeJFSNodeName(name) {
+		return "", fmt.Errorf("invalid jfs node_name %q: must be one path component", name)
+	}
+	// Upgrade compatibility: older unconfigured deployments used LocalIPv4
+	// as the namespace. Keep using that namespace when it already exists and
+	// the new InstanceID namespace does not, so local pause/runtime state does
+	// not disappear on upgrade. Explicit node_name always wins.
+	if !explicit {
+		if legacyIP, err := localNodeIPv4(); err == nil {
+			legacyIP = strings.TrimSpace(legacyIP)
+			if legacyIP != "" && legacyIP != name && isSafeJFSNodeName(legacyIP) {
+				nodesRoot := c.jfsNodesRoot()
+				identityPath := filepath.Join(nodesRoot, name)
+				legacyPath := filepath.Join(nodesRoot, legacyIP)
+				if _, identityErr := os.Stat(identityPath); errors.Is(identityErr, os.ErrNotExist) {
+					if info, legacyErr := os.Stat(legacyPath); legacyErr == nil && info.IsDir() {
+						return legacyIP, nil
+					}
+				}
+			}
+		}
+	}
+	return name, nil
+}
+
+func isSafeJFSNodeName(name string) bool {
+	name = strings.TrimSpace(name)
+	return name != "" &&
+		name != "." &&
+		name != ".." &&
+		!filepath.IsAbs(name) &&
+		!strings.ContainsAny(name, `/\`) &&
+		filepath.Base(name) == name
+}
+
+// localNodeIdentity is the seam behind jfsNodeName's default so tests can pin
+// the identity without depending on the process-wide host identity cache.
+var localNodeIdentity = utils.GetInstanceID
 var localNodeIPv4 = utils.GetLocalIpv4
 
 // jfsCacheDirs are the juicefs --cache-dir entries (colon separated).
@@ -148,6 +197,9 @@ func (c *Config) jfsBackendConfig() CowBackendConfig {
 func (c *Config) BuildJFSCowInitJSON() ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("nil storage config")
+	}
+	if _, err := c.resolveJFSNodeName(); err != nil {
+		return nil, err
 	}
 	return c.buildCowInitJSON(c.jfsBackendConfig())
 }
