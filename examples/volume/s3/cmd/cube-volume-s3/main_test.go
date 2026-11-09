@@ -4,16 +4,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/binding"
 )
@@ -143,5 +147,83 @@ func TestPasswdFileFromMetadata(t *testing.T) {
 		if got := passwdFileFromMetadata(raw); got != "" {
 			t.Errorf("passwdFileFromMetadata(%q) = %q, want empty", raw, got)
 		}
+	}
+}
+
+// Exercise the shipped entry point so its JSON envelope and exit status are
+// checked together rather than inferred from doCreate's returned error.
+func TestBinaryCreateErrorKinds(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "cube-volume-s3")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build plugin: %v\n%s", err, output)
+	}
+
+	missingConfig := filepath.Join(t.TempDir(), "missing.conf")
+	for _, tc := range []struct {
+		name      string
+		op        string
+		raw       string
+		wantKind  string
+		wantError string
+	}{
+		{"bucket only", "create", `{"bucket":"user-bucket"}`, "invalid_argument", "create: dynamic private_data requires cred_ref: credential reference must be 1 to 64 characters"},
+		{"prefix only", "create", `{"prefix":"workspaces/user-a/"}`, "invalid_argument", "create: dynamic private_data requires cred_ref: credential reference must be 1 to 64 characters"},
+		{"bucket and prefix", "create", `{"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "invalid_argument", "create: dynamic private_data requires cred_ref: credential reference must be 1 to 64 characters"},
+		{"empty reference", "create", `{"bucket":"user-bucket","cred_ref":""}`, "invalid_argument", "create: dynamic private_data requires cred_ref: credential reference must be 1 to 64 characters"},
+		{"null reference", "create", `{"bucket":"user-bucket","cred_ref":null}`, "invalid_argument", "create: dynamic private_data requires cred_ref: credential reference must be 1 to 64 characters"},
+		{"invalid reference", "create", `{"bucket":"user-bucket","cred_ref":"../x"}`, "", "must not contain .."},
+		{"malformed JSON", "create", `{"bucket":`, "", "JSON object"},
+		{"configuration failure", "create", `{"bucket":"user-bucket","cred_ref":"user"}`, "", missingConfig},
+		{"legacy configuration failure", "create", "", "", missingConfig},
+		{"destroy state failure", "destroy", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "", "requires cred_ref"},
+		{"attach state failure", "attach", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "", "requires cred_ref"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary, "--op", tc.op, "--volume-id", "vol-1", "--private-data", tc.raw)
+			cmd.Env = append(os.Environ(), "CUBE_S3_CONFIG="+missingConfig)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("exit = %v, want status 1; stderr=%s", err, stderr.String())
+			}
+			var response map[string]json.RawMessage
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatalf("stdout is not one JSON object: %v; stdout=%q", err, stdout.String())
+			}
+			var message string
+			if err := json.Unmarshal(response["error"], &message); err != nil || message == "" {
+				t.Fatalf("error field = %s, decode error = %v", response["error"], err)
+			}
+			if tc.wantKind != "" && message != tc.wantError {
+				t.Errorf("error = %q, want unchanged public message %q", message, tc.wantError)
+			} else if !strings.Contains(message, tc.wantError) {
+				t.Errorf("error = %q, want it to contain %q", message, tc.wantError)
+			}
+			kind, present := response["error_kind"]
+			if tc.wantKind == "" {
+				if present {
+					t.Errorf("generic failure includes error_kind=%s", kind)
+				}
+				return
+			}
+			var gotKind string
+			if err := json.Unmarshal(kind, &gotKind); err != nil || gotKind != tc.wantKind {
+				t.Errorf("error_kind=%s, decode error=%v, want %q", kind, err, tc.wantKind)
+			}
+		})
+	}
+}
+
+func TestCreateMissingCredRefPreservesSentinel(t *testing.T) {
+	t.Setenv("CUBE_S3_CONFIG", filepath.Join(t.TempDir(), "missing.conf"))
+	err := doCreate(t.Context(), &options{volumeID: "vol-1", privateData: `{"bucket":"user-bucket"}`})
+	if !errors.Is(err, binding.ErrMissingCredRef) {
+		t.Fatalf("doCreate error = %v, want wrapped ErrMissingCredRef before config loading", err)
 	}
 }

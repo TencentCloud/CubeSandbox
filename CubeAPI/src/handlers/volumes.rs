@@ -351,6 +351,49 @@ mod tests {
         }
     }
 
+    // The plugin kind is interpreted by Master; the public API only consumes
+    // its business code and safe message from an HTTP-200 response envelope.
+    #[tokio::test]
+    async fn v2_create_maps_master_plugin_error_codes() {
+        let private_data = r#"{"bucket":"tenant-bucket","prefix":"tenant/"}"#;
+        for (ret_code, message, expected_status) in [
+            (
+                130400,
+                "dynamic private_data requires cred_ref",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                130593,
+                "plugin create error: backend unavailable",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let (server, requests) = volume_server_with_master_response(
+                None,
+                StatusCode::OK,
+                json!({"ret": {"ret_code": ret_code, "ret_msg": message}}),
+            )
+            .await;
+            let response = server
+                .post("/v2/volumes")
+                .json(&json!({
+                    "name": "vol-plugin-error",
+                    "driver": "s3",
+                    "private_data": private_data,
+                }))
+                .await;
+            assert_eq!(response.status_code(), expected_status);
+            let error: ApiError = response.json();
+            assert_eq!(error.code, expected_status.as_u16() as i32);
+            assert_eq!(
+                error.message,
+                format!("CubeMaster returned error code {ret_code}: {message}")
+            );
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0]["private_data"], private_data);
+        }
+    }
     #[tokio::test]
     async fn both_create_routes_use_existing_auth() {
         let (server, requests) = volume_server_with_key(Some("test-key".into())).await;

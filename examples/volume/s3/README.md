@@ -373,7 +373,7 @@ python3 verify_volume.py
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | Key pair wrong, lacks bucket permission, or `REGION` doesn't match what the endpoint expects for SigV4 |
 | `bucket "..." does not exist` on a dynamic create | Dynamic buckets are never auto-created: create the bucket first, or fix `bucket` in `private_data` |
 | `credential reference "x" is unreadable` | `<x>.conf` must exist in `CREDENTIALS_DIR` on **both** the CubeMaster and Cubelet hosts, root-owned and mode `0600` |
-| `dynamic private_data requires cred_ref` | Every non-empty dynamic descriptor needs a valid `cred_ref`; global credentials are for legacy volumes only |
+| `dynamic private_data requires cred_ref` | Every dynamic descriptor needs a valid `cred_ref`; global credentials are for legacy volumes only. Missing or empty references in a dynamic Create return 400 when CubeMaster and the plugin support `error_kind`; older deployments may report 500. |
 | `prefix "..." already contains objects` | Dynamic volumes require an empty prefix, because a rolled-back create would otherwise delete the existing data. Choose an empty prefix, or import the data after the volume exists |
 | Prefixes overlap or a prefix is reused during deletion | The plugin does not coordinate prefixes across volumes. The platform must assign non-overlapping, non-nested prefixes and delay reuse until Destroy finishes |
 | Dynamic volume attaches the wrong bucket/prefix | Cubelet is older than the plugin and does not forward `private_data` to Attach; upgrade Cubelet first |
@@ -414,6 +414,10 @@ Dynamic volumes use the same basic S3 operations as legacy volumes—`HeadBucket
 ```
 
 CubeMaster stores that value; Attach and Destroy receive it. The caller's original descriptor is never used again, and neither the descriptor nor the state is returned by the Volume API.
+
+**Create error classification.** A dynamic descriptor that selects a bucket or prefix but omits `cred_ref` or sets it to an empty value is rejected before any object-storage request. The plugin writes `{"error":"...","error_kind":"invalid_argument"}` and exits 1. With a CubeMaster that supports this kind, the internal response is HTTP 200 with `ret_code=130400`, and CubeAPI returns HTTP 400. Other descriptor validation errors, host configuration or credential-file failures, storage failures and untyped plugin errors retain their current generic failure behavior (CubeMaster `130593`, CubeAPI 500). This change does not classify Destroy/Attach/Detach errors. Empty input and existing legacy-default objects keep their previous behavior.
+
+The protocol defines a closed set of kinds, but only `invalid_argument` is enabled in this implementation; `not_found` and `conflict` are reserved definitions and currently fall back to 500. See [binary Create errors](../../../docs/guide/volume-plugin.md#create). The missing-reference error uses a fixed public message. The typed response does not append stderr or credential paths. Upgrade both CubeMaster and the plugin to obtain the new 400 mapping: an old Master still safely rejects the exit-1 response but normally returns 500; a new Master keeps old untyped plugins compatible.
 
 **Credential references.** Put one file per user at `/etc/cube/s3-credentials/<cred_ref>.conf` on every CubeMaster and Cubelet node (override the directory with `CREDENTIALS_DIR` or `CUBE_S3_CREDENTIALS_DIR`). Keep it root-owned, mode `0600`:
 

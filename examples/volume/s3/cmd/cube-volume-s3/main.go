@@ -63,6 +63,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -103,7 +104,8 @@ type attachResponse struct {
 
 // statusResponse is the reply for destroy / detach and for every failure.
 type statusResponse struct {
-	Error string `json:"error"`
+	Error     string `json:"error"`
+	ErrorKind string `json:"error_kind,omitempty"`
 }
 
 func main() {
@@ -114,7 +116,11 @@ func main() {
 
 	if err := run(context.Background(), opts); err != nil {
 		log.Printf("ERROR: %v", err)
-		emit(statusResponse{Error: err.Error()})
+		response := statusResponse{Error: err.Error()}
+		if opts.op == "create" && errors.Is(err, binding.ErrMissingCredRef) {
+			response.ErrorKind = "invalid_argument"
+		}
+		emit(response)
 		os.Exit(1)
 	}
 }
