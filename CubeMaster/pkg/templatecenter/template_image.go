@@ -249,6 +249,17 @@ func RedoNeedsFullRebuild(ctx context.Context, jobID string) bool {
 	return !artifactStatusReusableForRedo(artifact.Status)
 }
 
+func isJFSTemplateRedo(definition *models.TemplateDefinition, sourceReq *types.CreateTemplateFromImageReq) bool {
+	backend := ""
+	if sourceReq != nil {
+		backend = sourceReq.Backend
+	}
+	if strings.TrimSpace(backend) == "" && definition != nil {
+		backend = definition.StorageBackend
+	}
+	return constants.IsJFSBackend(backend)
+}
+
 func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -261,7 +272,8 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	var redoJob *models.TemplateImageJob
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if _, err := lockTemplateDefinitionTx(tx, normalized.TemplateID); err != nil {
+			definition, err := lockTemplateDefinitionTx(tx, normalized.TemplateID)
+			if err != nil {
 				return err
 			}
 			if _, err := getActiveTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID); err == nil {
@@ -295,6 +307,9 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 			sourceReq.TemplateID = normalized.TemplateID
 			if !isCreateRedoJobOperation(sourceJob.Operation) {
 				sourceReq.Alias = ""
+			}
+			if isJFSTemplateRedo(definition, sourceReq) {
+				return fmt.Errorf("%w; create a new template ID instead", ErrJFSRedoUnsupported)
 			}
 			replicas, err := ListReplicas(ctx, normalized.TemplateID)
 			if err != nil {

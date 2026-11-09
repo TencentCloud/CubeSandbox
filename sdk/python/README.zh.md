@@ -349,6 +349,7 @@ with Sandbox.create(config=cfg) as sb:
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — 执行代码，返回 `Execution` |
 | `sb.get_info()` | `GET /sandboxes/:id` — 获取沙箱状态和元数据 |
+| `sb.is_running(request_timeout=None)` | 判断沙箱是否运行中 — 先查控制面状态，仅 running/unknown 时才探测 envd `/health`，返回 `bool`（不可达/传输错误返回 `False`） |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — 暂停沙箱 |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — 恢复（已弃用，请用 `connect`） |
 | `sb.kill()` | `DELETE /sandboxes/:id` — 销毁沙箱 |

@@ -76,6 +76,7 @@ var (
 	backfillReplicas     = ListReplicas
 	backfillResolveNodes = resolveTemplateNodes
 	backfillDistribute   = distributeRootfsArtifactToNodes
+	backfillPlacements   = listArtifactNodePlacements
 )
 
 // reconcileTemplateReplicaBackfill pushes READY templates to healthy nodes
@@ -131,10 +132,46 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil {
 		return fmt.Errorf("decode job request snapshot: %w", err)
 	}
-	// A jfs template is one package on the shared volume; nodes without a
-	// replica adopt it on first use instead of building their own.
+	// A jfs template is one package on the shared volume: nodes never build
+	// their own replica, so replica rows say nothing about ext4 coverage and
+	// nodesWithoutReadyReplica would flag every non-builder node forever.
+	// The sweep still warms the ext4 cache for nodes that joined or
+	// recovered after create: create-time distribution recorded an artifact
+	// placement row per node, and only the in-scope nodes without one are
+	// pushed here.
 	if constants.IsJFSBackend(req.Backend) {
-		return nil
+		if strings.TrimSpace(req.WritableLayerSize) == "" {
+			req.WritableLayerSize = artifact.WritableLayerSize
+		}
+		instanceType := def.InstanceType
+		if instanceType == "" {
+			instanceType = req.InstanceType
+		}
+		targets, err := backfillResolveNodes(instanceType, req.DistributionScope)
+		if err != nil {
+			return err
+		}
+		placements, err := backfillPlacements(ctx, artifact.ArtifactID)
+		if err != nil {
+			return fmt.Errorf("list artifact placements: %w", err)
+		}
+		missing := nodesWithoutArtifactPlacement(placements, targets)
+		if len(missing) == 0 {
+			return nil
+		}
+		release := acquireResumeArtifactLock(artifact.ArtifactID)
+		defer release()
+		logger := log.G(ctx).WithFields(map[string]any{
+			"component":   "image_job_reconcile",
+			"template_id": def.TemplateID,
+			"artifact_id": artifact.ArtifactID,
+		})
+		// trackReplicas=false: a placement push must not fabricate replica
+		// rows on nodes that only hold the ext4 cache.
+		_, _, ready, failed, distErr := backfillDistribute(ctx, &req, nil, artifact, def.TemplateID, job.JobID, missing, false)
+		logger.Infof("jfs artifact backfill: %d node(s) missing the ext4 artifact, distributed ready=%d failed=%d err=%v",
+			len(missing), ready, failed, distErr)
+		return distErr
 	}
 	// The generated create request and the writable layer size are persisted
 	// on the ARTIFACT row (finalizeRemoteArtifact), not on the job.
@@ -176,7 +213,7 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		"template_id": def.TemplateID,
 		"artifact_id": artifact.ArtifactID,
 	})
-	_, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing)
+	_, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing, true)
 	logger.Infof("template replica backfill: %d node(s) missing a READY replica, distributed ready=%d failed=%d err=%v",
 		len(missing), ready, failed, distErr)
 	return distErr
@@ -208,6 +245,36 @@ func nodesWithoutReadyReplica(replicas []models.TemplateReplica, targets []*node
 			continue
 		}
 		if _, ok := ready[target.HostIP()]; ok {
+			continue
+		}
+		missing = append(missing, target)
+	}
+	return missing
+}
+
+// nodesWithoutArtifactPlacement returns the in-scope targets without a
+// recorded ext4 placement for the artifact. jfs uses this instead of
+// nodesWithoutReadyReplica: replica rows mean "built the shared package"
+// there, so coverage is tracked by the placement rows distribution writes.
+func nodesWithoutArtifactPlacement(placements []models.ArtifactNodePlacement, targets []*node.Node) []*node.Node {
+	have := make(map[string]struct{}, len(placements)*2)
+	for _, placement := range placements {
+		if id := strings.TrimSpace(placement.NodeID); id != "" {
+			have[id] = struct{}{}
+		}
+		if ip := strings.TrimSpace(placement.NodeIP); ip != "" {
+			have[ip] = struct{}{}
+		}
+	}
+	missing := make([]*node.Node, 0, len(targets))
+	for _, target := range targets {
+		if target == nil {
+			continue
+		}
+		if _, ok := have[target.ID()]; ok {
+			continue
+		}
+		if _, ok := have[target.HostIP()]; ok {
 			continue
 		}
 		missing = append(missing, target)

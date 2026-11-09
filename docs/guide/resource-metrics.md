@@ -202,7 +202,7 @@ Cumulative metrics are scoped to the current metrics epoch and exclude history i
 | `cubesandbox_guest_workload_memory_current_bytes` | Gauge | Current bytes charged to the workload cgroup. |
 | `cubesandbox_guest_workload_memory_limit_bytes` | Gauge | Finite workload memory limit in bytes. |
 | `cubesandbox_guest_workload_memory_failures_total` | Counter | Memory-limit failures during the current metrics epoch. |
-| `cubesandbox_guest_workload_metrics_epoch` | Gauge | Current metrics epoch generation. |
+| `cubesandbox_guest_workload_metrics_epoch` | Gauge | Current metrics epoch generation. It can repeat across a resume; use the epoch start time as the window identity. |
 | `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` | Gauge | Metrics epoch start time as Unix seconds. |
 
 ## PromQL examples
@@ -293,10 +293,10 @@ increase(cubesandbox_guest_workload_memory_failures_total[5m])
 
 ### Detect metrics epoch changes
 
-This query returns the number of epoch changes for existing series during the last five minutes and can mark rollback or other accounting-window changes:
+This query returns the number of new metrics windows for existing series during the last five minutes and can mark rollback, pause/resume, or other accounting-window changes. The epoch start time changes on every new window, while the generation can repeat after a resume:
 
 ```promql
-changes(cubesandbox_guest_workload_metrics_epoch[5m])
+changes(cubesandbox_guest_workload_metrics_epoch_start_time_seconds[5m])
 ```
 
 ## Lifecycle semantics
@@ -325,15 +325,17 @@ This removes inherited history and represents post-rollback data as a new accoun
 | Snapshot creation or template commit | Keeps the current metrics epoch. |
 | Rollback | Stops exporting during rollback, then creates a new metrics epoch whose cumulative metrics restart from `0`. If runtime restore fails after dispatch, the new epoch stays prepared and `guest_workload` remains unavailable until a later rollback succeeds or the sandbox is deleted and recreated. |
 | Pause | Keeps the current metrics epoch but stops exporting instead of emitting `0`. |
-| Resume | Continues the metrics epoch that existed before pause. |
+| Resume | Creates a new metrics epoch; cumulative metrics restart from `0` and `guest_workload` stays unavailable until the first successful sample establishes the new baseline. |
 | Delete | Removes cached samples and metric series. |
 | Cubelet restart | Restores the persisted metrics epoch and baseline instead of recalculating the existing window. |
 
+`guest_workload` cumulative metrics are scoped to one metrics epoch. Resume creates a new epoch even when guest memory is restored, so these counters do not represent a sandbox-lifetime total. `host_sandbox` follows a different window; see its lifecycle below. The epoch generation can decrease across a resume. Use `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` as the window identity and do not order windows by generation.
+
 If a lifecycle metadata failure temporarily leaves a running sandbox without a persisted fresh metrics epoch, the `guest_workload` sampler recreates and persists the missing pending epoch before collecting it. A failed recovery remains unavailable and is retried on a later collection cycle.
 
-Prometheus does not understand Cubelet's metrics epoch semantics. `rate()` and `increase()` treat an epoch transition as a counter reset only when the cumulative value actually decreases.
+Prometheus does not understand Cubelet's metrics epoch semantics. `rate()` and `increase()` treat an epoch transition as a counter reset only when the cumulative value actually decreases. Use a query range that covers the desired window, and use the epoch metrics to annotate the resets.
 
-Use these metrics when an application must reliably identify rollback or another accounting-window change:
+Use these metrics to identify a rollback or another accounting-window change. Compare the start time rather than the generation:
 
 - `cubesandbox_guest_workload_metrics_epoch`
 - `cubesandbox_guest_workload_metrics_epoch_start_time_seconds`

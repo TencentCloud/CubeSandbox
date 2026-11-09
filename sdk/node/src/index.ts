@@ -46,6 +46,7 @@ export {
   VolumeInfo,
   VolumeMount,
   MAX_VOLUME_NAME_LEN,
+  MAX_VOLUME_PRIVATE_DATA_LEN,
   type VolumeMountsArg,
 } from "./volume.js";
 

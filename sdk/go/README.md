@@ -238,6 +238,35 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 err = client.DeleteVolume(ctx, "my-data") // DELETE /volumes/:id
 ```
 
+For opaque plugin input, use the separate creation method (requires support in
+CubeAPI, every serving CubeMaster, and the plugin; existing `CreateVolume` calls are unchanged):
+
+```go
+volume, err := client.CreateVolumeWithPrivateData(ctx, cubesandbox.CreateVolumeWithPrivateDataOptions{
+	Name:        "my-data",
+	Driver:      "my-storage",
+	PrivateData: `{"bucket":"my-bucket","prefix":"work/","cred_ref":"account-7"}`,
+}) // POST /v2/volumes
+```
+
+The `private_data` create API requires CubeAPI, every serving CubeMaster, and
+Cubelet at **0.8.0 or newer**, a plugin that supports this protocol, and the Go
+SDK at **0.8.0 or newer**.
+`PrivateData` must be valid UTF-8, limited to 1024 bytes, contain no NUL, and
+contain no characters outside the BMP. Invalid input is rejected before any
+HTTP request. Valid input is passed unchanged.
+Use credential references, never plaintext credentials. Empty strings are
+forwarded; API versions without `/v2/volumes` return an error without a legacy fallback.
+The returned `VolumeInfo` works with the existing query, delete and mount APIs.
+
+Upgrade order: check or upgrade the Controller/Node plugins for Create input A
+and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,
+then deploy the new CubeAPI and begin using this method. A new API connected to
+an old Master can return 201 while silently dropping A; the old Master also omits
+B on Destroy. The SDK does not detect this mixed-version deployment. Keep compatible
+Masters serving existing A/B-dependent volumes during any rollback. See the
+[plugin upgrade guide](../../docs/guide/volume-plugin.md#private_data-upgrade-order).
+
 Deleting a volume does not auto-detach it: destroy the sandboxes using it first, otherwise the server refuses with an error matching `ErrVolumeInUse`. A delete of a missing volume matches `ErrVolumeNotFound`, so idempotent cleanup can ignore that case:
 
 ```go
@@ -269,6 +298,21 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 		}},
 	},
 })
+```
+
+## Is Running
+
+`Sandbox.IsRunning` checks the control-plane `state` first: `paused`/`pausing`
+return `false` without touching the data plane (so a probe never auto-resumes
+the sandbox). For `running`/`unknown` it probes envd `GET /health` on port
+49983, returning `false` on 404/502/503/410 and on transport errors, raising
+only on server errors such as 403/500.
+
+```go
+ok, err := sb.IsRunning(ctx)
+if err != nil {
+	panic(err)
+}
 ```
 
 ## Pause And Connect

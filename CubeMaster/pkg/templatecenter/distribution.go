@@ -24,6 +24,7 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"google.golang.org/protobuf/proto"
+	"gorm.io/gorm"
 )
 
 func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandboxReq, artifactID, jobID string) ReplicaStatus {
@@ -149,12 +150,32 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
+	// The ext4 artifact is pre-cached on EVERY in-scope node, jfs included.
+	// templateBuildTargets narrows only the BUILD set — a jfs template is
+	// built once on one node (createTemplateReplicasOnNodes applies it) and
+	// shared over the JuiceFS volume — but every node still maps the
+	// read-only ext4 as its own pmem lower layer, so a node that was never
+	// handed the artifact pays a full ext4 download inside its first
+	// sandbox-create request.
 	backend := req.Backend
 	if strings.TrimSpace(backend) == "" {
 		backend = storageBackendFromCreate(generatedReq)
 	}
-	targets = templateBuildTargets(backend, targets)
-	return distributeRootfsArtifactToNodes(ctx, req, generatedReq, artifact, templateID, jobID, targets)
+	// jfs replica rows mean "built the shared package". Non-builder nodes
+	// never build, so distribution must not leave them replica rows: redo
+	// scope, the locality caches, and the UI all read those rows. Artifact
+	// placement rows are still recorded for every node so cleanup reaches
+	// all ext4 copies and the backfill sweep can tell coverage from gaps.
+	trackReplicas := distributionTracksReplicas(backend)
+	return distributeRootfsArtifactToNodes(ctx, req, generatedReq, artifact, templateID, jobID, targets, trackReplicas)
+}
+
+// distributionTracksReplicas reports whether a distribution should write
+// per-node replica rows. On jfs a replica row means "built the shared
+// package", which only the build step does; every other backend equates
+// "holds the ext4 artifact" with "has the replica" and keeps both rows.
+func distributionTracksReplicas(backend string) bool {
+	return !constants.IsJFSBackend(backend)
 }
 
 // ensureArtifactDistributable refuses to push a CreateImage to cubelets when
@@ -205,7 +226,11 @@ func distributionWorkerCount() int {
 // explicit target set, so the replica-backfill sweep can push an artifact to
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
-func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node) ([]*node.Node, int32, int32, int32, error) {
+//
+// trackReplicas=false (jfs) does not retain per-node replica rows: only the
+// node that builds the shared package has a replica. Artifact placements track
+// ext4 coverage on every node.
+func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
 	annotations, err := artifactDownloadAnnotations(ctx, artifact, "")
 	if err != nil {
 		return nil, int32(len(targets)), 0, int32(len(targets)), err
@@ -235,8 +260,8 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 			defer func() { <-sem }()
 
 			replica := buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
-			if templateID == "" || generatedReq == nil {
-				err := errors.New("artifact distribution requires a persisted template replica before download")
+			if templateID == "" || (trackReplicas && generatedReq == nil) {
+				err := errors.New("artifact distribution requires a template identity and a generated request for replica tracking")
 				lock.Lock()
 				failed++
 				if firstErr == nil {
@@ -245,18 +270,66 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 				lock.Unlock()
 				return
 			}
-			// Persist authorization before CreateImage. Cubelet asks Master for a
-			// ticket during this RPC, so writing the replica afterwards creates a
-			// deterministic 403 race.
-			if err := UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica); err != nil {
-				lock.Lock()
-				failed++
-				if firstErr == nil {
-					firstErr = fmt.Errorf("authorize artifact download on node %s: %w", target.ID(), err)
-				}
-				lock.Unlock()
-				return
+			// A JFS node needs a grant only while CreateImage downloads the ext4.
+			// Its permanent coverage is recorded as a placement, not a replica.
+			revokeGrant := func() error {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+				return store.db.WithContext(cleanupCtx).Unscoped().
+					Where("template_id = ? AND node_id = ? AND artifact_id = ? AND last_job_id = ? AND phase = ?",
+						templateID, target.ID(), artifact.ArtifactID, jobID, ReplicaPhaseDistributing).
+					Delete(&models.TemplateReplica{}).Error
 			}
+			grantActive := false
+			needsGrant := true
+			if !trackReplicas {
+				replica.CleanupRequired = false
+				var existing models.TemplateReplica
+				query := store.db.WithContext(ctx).
+					Where("template_id = ? AND node_id = ?", templateID, target.ID()).Take(&existing)
+				if query.Error != nil && !errors.Is(query.Error, gorm.ErrRecordNotFound) {
+					lock.Lock()
+					failed++
+					if firstErr == nil {
+						firstErr = fmt.Errorf("check JFS replica on node %s: %w", target.ID(), query.Error)
+					}
+					lock.Unlock()
+					return
+				}
+				if query.Error == nil {
+					if existing.ArtifactID != artifact.ArtifactID ||
+						(existing.Phase != ReplicaPhaseDistributing && existing.Phase != ReplicaPhaseDistributed && existing.Phase != ReplicaPhaseSnapshotting) {
+						lock.Lock()
+						failed++
+						if firstErr == nil {
+							firstErr = fmt.Errorf("existing JFS replica on node %s cannot authorize artifact %s", target.ID(), artifact.ArtifactID)
+						}
+						lock.Unlock()
+						return
+					}
+					needsGrant = false
+				}
+			}
+			// Persist authorization before CreateImage asks Master for a ticket.
+			if needsGrant {
+				if err := UpsertReplica(ctx, templateID, req.InstanceType, replica); err != nil {
+					lock.Lock()
+					failed++
+					if firstErr == nil {
+						firstErr = fmt.Errorf("authorize artifact download on node %s: %w", target.ID(), err)
+					}
+					lock.Unlock()
+					return
+				}
+				grantActive = !trackReplicas
+			}
+			defer func() {
+				if grantActive {
+					if err := revokeGrant(); err != nil {
+						log.G(ctx).Warnf("revoke JFS artifact grant on node %s: %v", target.ID(), err)
+					}
+				}
+			}()
 			var err error
 			refreshToken := ""
 			if spec.Annotations[constants.CubeAnnotationRootfsArtifactTicketURL] != "" {
@@ -265,9 +338,11 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 			if err != nil {
 				lock.Lock()
 				failed++
-				replica.Phase = ReplicaPhaseFailed
-				replica.ErrorMessage = err.Error()
-				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				if trackReplicas {
+					replica.Phase = ReplicaPhaseFailed
+					replica.ErrorMessage = err.Error()
+					_ = UpsertReplica(ctx, templateID, req.InstanceType, replica)
+				}
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -294,7 +369,9 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 				if firstErr == nil {
 					firstErr = err
 				}
-				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				if trackReplicas {
+					_ = UpsertReplica(ctx, templateID, req.InstanceType, replica)
+				}
 				return
 			}
 			if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
@@ -312,35 +389,46 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 				} else {
 					replica.ErrorMessage = "empty create image response"
 				}
-				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				if trackReplicas {
+					_ = UpsertReplica(ctx, templateID, req.InstanceType, replica)
+				}
 				return
 			}
-			// Record physical placement independently of the replica lifecycle so
-			// last-owner-cleanup / GC can later reach this node even after the
-			// replica row is removed (FIX-1).
+			// Placement is the cleanup and backfill source of truth even when a
+			// shared JFS template has no replica on this node.
 			if err := upsertArtifactNodePlacement(ctx, artifact.ArtifactID, target.ID(), target.HostIP()); err != nil {
 				failed++
-				replica.Phase = ReplicaPhaseFailed
-				replica.ErrorMessage = fmt.Sprintf("record artifact placement: %v", err)
-				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
 				if firstErr == nil {
-					firstErr = errors.New(replica.ErrorMessage)
+					firstErr = fmt.Errorf("record artifact placement on node %s: %w", target.ID(), err)
+				}
+				if trackReplicas {
+					replica.Phase = ReplicaPhaseFailed
+					replica.ErrorMessage = err.Error()
+					_ = UpsertReplica(ctx, templateID, req.InstanceType, replica)
 				}
 				return
 			}
-			replica.Phase = ReplicaPhaseDistributed
-			replica.CleanupRequired = false
-			replica.LastErrorPhase = ""
-			replica.ErrorMessage = ""
-			if err := UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica); err != nil {
-				failed++
-				replica.Phase = ReplicaPhaseFailed
-				replica.CleanupRequired = true
-				replica.ErrorMessage = fmt.Sprintf("persist distributed replica: %v", err)
-				if firstErr == nil {
-					firstErr = errors.New(replica.ErrorMessage)
+			if trackReplicas {
+				replica.Phase = ReplicaPhaseDistributed
+				replica.CleanupRequired = false
+				replica.LastErrorPhase = ""
+				replica.ErrorMessage = ""
+				if err := UpsertReplica(ctx, templateID, req.InstanceType, replica); err != nil {
+					failed++
+					if firstErr == nil {
+						firstErr = fmt.Errorf("persist distributed replica on node %s: %w", target.ID(), err)
+					}
+					return
 				}
-				return
+			} else if grantActive {
+				if err := revokeGrant(); err != nil {
+					failed++
+					if firstErr == nil {
+						firstErr = fmt.Errorf("revoke JFS download grant on node %s: %w", target.ID(), err)
+					}
+					return
+				}
+				grantActive = false
 			}
 			ready++
 			readyTargets = append(readyTargets, target)

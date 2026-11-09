@@ -40,22 +40,26 @@ cubemastercli tpl create-from-image \
 
 > 已创建的模板不支持在已有的 `xfs`、`jfs` 和 `s3` 产物之间转换。
 
-### CPU、kernel 和 KVM 兼容
+### CPU、kernel 兼容
 
-为了保证跨机后的沙箱能够正常恢复，需要保证源节点和目的节点 CPU、kernel 和 KVM 兼容。
+为了保证跨机后的沙箱能够正常恢复，需要保证源节点和目的节点 CPU、kernel 兼容。
 
-可以使用 `cubeopscli node list --json` 查看节点的 `HostFacts` 信息。
+若想直接查看整个集群的兼容类别，可以运行 `cubeopscli node groups`：该命令按上述两个相等门禁（`cpuid_hash` + `host_kernel_release`）对所有节点分组，展示集群混用了几种节点类型、每个类别的成员节点有哪些
+
+```bash
+$ cubeopscli node groups
+GROUP    CPU_VENDOR     CPU_MODEL             COUNT  NODES
+type-1   GenuineIntel   Intel(R) Xeon(R) ...  3      node-1,node-2,node-3
+type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5
+```
+
+也可以使用 `cubeopscli node list --json` 查看每个节点的 `HostFacts` 信息。
 
 | 字段 | 含义 | 当前门禁 |
 |---|---|---|
 | `cpuid_hash` | CPU 身份与特性哈希 | 相等匹配 |
 | `host_kernel_release` | `uname -r` | 相等匹配 |
 | `kvm_module_taint` | 强制、树外或未签名 KVM 模块标记 | 目标侧非空则拒绝 |
-| `host_kernel_fingerprint` | kernel release 与规范化 cmdline 指纹 | 仅展示 |
-| `cpu_vendor` | CPU 厂商 | 仅展示 |
-| `kvm_api_version` | KVM API 版本 | 仅展示 |
-
-`cpuid_hash` 是 Cubelet 对 `/proc/cpuinfo` 第一颗逻辑 CPU 的身份字段和排序后特性集计算的 SHA-256：x86 使用 `vendor_id`、family、model、stepping、flags；ARM 使用 implementer、architecture、variant、part、revision、Features。混合核心机器仍建议人工核对完整 `HostFacts`。
 
 ### 源节点不可调度
 

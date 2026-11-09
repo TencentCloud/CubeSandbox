@@ -91,6 +91,7 @@ func TestReapSessionMapsDeletesExpiredWithoutRevisiting(t *testing.T) {
 		sess := natSession{
 			AccessTime: now,
 			NodeIP:     0x0a000003,
+			VMIP:       0x0a000001,
 			NodePort:   uint16(40000 + i),
 			State:      uint8(tcpCTEstablished),
 		}
@@ -135,6 +136,24 @@ func TestReapSessionMapsDeletesExpiredWithoutRevisiting(t *testing.T) {
 	}
 	if count != n {
 		t.Fatalf("visited %d sessions, want %d", count, n)
+	}
+	snatPortUsageByNodeIP, err := readCachedSNATPortUsage(time.Now())
+	if err != nil {
+		t.Fatalf("readCachedSNATPortUsage: %v", err)
+	}
+	wantUsage := snatPortUsage{
+		portsInUse: n - uint64(len(expired)),
+	}
+	if got := snatPortUsageByNodeIP[0x0a000003]; got != wantUsage {
+		t.Fatalf("SNAT usage = %+v, want %+v", got, wantUsage)
+	}
+	sessionsBySandboxIPAndPacketClass, err := readCachedSessionUsage(time.Now())
+	if err != nil {
+		t.Fatalf("readCachedSessionUsage: %v", err)
+	}
+	sessionKey := sessionUsageKey{sandboxIP: 0x0a000001, packetClass: packetClassSNAT}
+	if got, want := sessionsBySandboxIPAndPacketClass[sessionKey], uint64(n-len(expired)); got != want {
+		t.Fatalf("SNAT sessions = %d, want %d", got, want)
 	}
 
 	for _, key := range order {

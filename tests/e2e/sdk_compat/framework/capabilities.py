@@ -6,6 +6,8 @@ from __future__ import annotations
 import pytest
 
 LIFECYCLE = "lifecycle"
+# Data-plane liveness probe (Sandbox.is_running / isRunning).
+IS_RUNNING = "is_running"
 COMMANDS = "commands"
 FILESYSTEM = "filesystem"
 FILESYSTEM_EXTENDED = "filesystem_extended"
@@ -63,6 +65,7 @@ E2B_CAPABILITIES = frozenset(
         CODE_INTERPRETER,
         PAUSE_RESUME,
         SET_TIMEOUT,
+        IS_RUNNING,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,
@@ -76,6 +79,7 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         CODE_INTERPRETER,
         PAUSE_RESUME,
         SET_TIMEOUT,
+        IS_RUNNING,
         ROLLBACK_CLONE,
         FORK,
         NETWORK_ALLOW_DENY,

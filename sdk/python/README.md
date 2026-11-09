@@ -376,6 +376,7 @@ with Sandbox.create(config=cfg) as sb:
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.get_info()` | `GET /sandboxes/:id` — get sandbox state and metadata as a `SandboxInfo` |
+| `sb.is_running(request_timeout=None)` | Report if the sandbox is running — checks control-plane state first, probes envd `/health` only when running/unknown; returns `bool` (`False` on unreachable/transport errors) |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.set_timeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |

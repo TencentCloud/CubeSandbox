@@ -13,7 +13,7 @@ from urllib.parse import quote
 import httpx
 import requests
 
-from ._commands import CommandResult, Commands
+from ._commands import ENVD_PORT, CommandResult, Commands
 from ._config import (
     PAUSE_RESUME_REQUEST_TIMEOUT_S,
     SNAPSHOT_REQUEST_TIMEOUT_S,
@@ -791,6 +791,39 @@ class Sandbox:
         )
         _check_response(resp)
         return SandboxInfo.from_dict(resp.json())
+
+
+    def is_running(self, request_timeout: float | None = None) -> bool:
+        """Report whether the sandbox is currently running (matches E2B's API).
+
+        Checks the control-plane state first so a paused sandbox is answered
+        without a data-plane probe (which would trigger CLM auto-resume). The
+        envd /health probe runs only for running/unknown states.
+        """
+        try:
+            state = self.get_info().state
+        except SandboxNotFoundError:
+            return False
+        if state in ("paused", "pausing"):
+            return False
+
+        if self._client is None:
+            self._client = self._build_data_client()
+        timeout = request_timeout if request_timeout is not None else self._config.request_timeout
+        # envd /health is unauthenticated, so no X-Access-Token is sent.
+        try:
+            resp = self._client.get(
+                f"http://{self.get_host(ENVD_PORT)}/health",
+                timeout=timeout,
+            )
+        except httpx.TransportError:
+            # Unreachable proxy / stale socket / timeout — sandbox not reachable.
+            return False
+        if resp.status_code in (404, 502, 503, 410):
+            return False
+        if resp.status_code >= 400:
+            raise ApiError(f"is_running failed: HTTP {resp.status_code}", resp.status_code)
+        return True
 
 
     def __enter__(self) -> "Sandbox":

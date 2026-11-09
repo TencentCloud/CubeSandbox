@@ -210,7 +210,7 @@ CPU 和内存上限仅在 cgroup 配置了有限值时导出。未配置上限�
 | `cubesandbox_guest_workload_memory_current_bytes`            | Gauge   | 当前计入工作负载 cgroup 的内存字节数。             |
 | `cubesandbox_guest_workload_memory_limit_bytes`              | Gauge   | 配置的有限内存上限，单位为字节。                   |
 | `cubesandbox_guest_workload_memory_failures_total`           | Counter | 当前统计周期内发生的内存限制失败次数。             |
-| `cubesandbox_guest_workload_metrics_epoch`                   | Gauge   | 当前统计周期的序号。                               |
+| `cubesandbox_guest_workload_metrics_epoch`                   | Gauge   | 当前统计周期的序号。恢复运行后可能重复，应使用开始时间作为窗口身份。 |
 | `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` | Gauge   | 当前统计周期的开始时间，使用 Unix 时间戳秒数表示。 |
 
 ## PromQL 示例
@@ -301,10 +301,10 @@ increase(cubesandbox_guest_workload_memory_failures_total[5m])
 
 ### 识别统计周期变化
 
-以下查询返回最近 5 分钟内已有时间序列的统计周期变化次数，可用于标记回滚等统计窗口切换：
+以下查询返回最近 5 分钟内已有时间序列的新统计窗口次数，可用于标记回滚、暂停/恢复运行等统计窗口切换。统计周期开始时间在每个新窗口都会变化，而序号在恢复运行后可能重复：
 
 ```promql
-changes(cubesandbox_guest_workload_metrics_epoch[5m])
+changes(cubesandbox_guest_workload_metrics_epoch_start_time_seconds[5m])
 ```
 
 ## 生命周期语义
@@ -336,15 +336,17 @@ CPU 使用时间和内存限制失败次数来自 cgroup 累计计数器。制�
 | 创建快照或提交模板               | 保持当前统计周期。                                           |
 | 回滚                             | 回滚期间停止导出；完成后创建新的统计周期，累计指标重新从 `0` 开始。如果运行时恢复请求发出后失败，新统计周期会保持准备状态，`guest_workload` 将继续不可用，直到后续回滚成功，或删除并重建沙箱。 |
 | 暂停                             | 保持当前统计周期，但停止导出指标，而不是导出 `0`。           |
-| 恢复运行                         | 继续暂停前的统计周期。                                       |
+| 恢复运行                         | 创建新的统计周期，累计指标重新从 `0` 开始；在首次成功采样建立新基线前保持不可用。 |
 | 删除                             | 删除缓存和对应指标序列。                                     |
 | Cubelet 重启                     | 从持久化状态恢复统计周期和基线，不重新计算已有窗口。         |
 
+`guest_workload` 的累计指标只在一个统计周期内有效。从暂停恢复时即使还原了沙箱内存，也会创建新的统计周期，因此这些计数不是沙箱生命周期总量。`host_sandbox` 的窗口不同，见下文宿主机侧生命周期。统计周期序号在恢复运行后可能回退，例如从 2 回退到 1。应使用 `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` 识别窗口，不要按序号排序。
+
 如果生命周期元数据发生瞬时故障，导致运行中的沙箱暂时没有持久化 fresh 统计周期，`guest_workload` 采集器会先重新建立并持久化 pending 统计周期，再继续采集。恢复失败时仍保持不可用，并在后续采集周期重试。
 
-Prometheus 不理解 Cubelet 的统计周期语义。只有累计值实际下降时，`rate()` 和 `increase()` 才会按照计数器重置处理。
+Prometheus 不理解 Cubelet 的统计周期语义。只有累计值实际下降时，`rate()` 和 `increase()` 才会按照计数器重置处理。查询时应覆盖所需时间范围，并用统计周期指标标注重置点。
 
-需要可靠识别回滚或新统计窗口时，应查询：
+需要识别回滚或新的统计窗口时，应查询以下指标，并以开始时间判断窗口，而不是比较序号：
 
 - `cubesandbox_guest_workload_metrics_epoch`
 - `cubesandbox_guest_workload_metrics_epoch_start_time_seconds`

@@ -534,6 +534,137 @@ func TestRunCodeUsesConfiguredProxyScheme(t *testing.T) {
 	}
 }
 
+// isRunningHandler routes control-plane GET /sandboxes/:id to a state JSON and
+// data-plane GET /health to a fixed status. Returns the data-plane host seen.
+func isRunningHandler(t *testing.T, state string, healthStatus int) (roundTripFunc, *string, *int) {
+	t.Helper()
+	var dataHost string
+	var dataHits int
+	f := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/health" {
+			dataHost = req.URL.Host
+			dataHits++
+			return &http.Response{
+				StatusCode: healthStatus,
+				Body:       http.NoBody,
+				Request:    req,
+			}, nil
+		}
+		body := fmt.Sprintf(`{"sandboxID":"%s","templateID":"tpl-test","state":%q}`, req.URL.Path, state)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	return f, &dataHost, &dataHits
+}
+
+func TestIsRunningTrueWhenRunningAndHealthy(t *testing.T) {
+	handler, dataHost, dataHits := isRunningHandler(t, "running", http.StatusNoContent)
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-run", Domain: "cube.test"}
+
+	ok, err := sb.IsRunning(context.Background())
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if !ok {
+		t.Fatalf("IsRunning() = false, want true")
+	}
+	if *dataHits != 1 {
+		t.Fatalf("data-plane hits = %d, want 1", *dataHits)
+	}
+	if *dataHost != "49983-sb-run.cube.test" {
+		t.Fatalf("data host = %q, want 49983-sb-run.cube.test", *dataHost)
+	}
+}
+
+func TestIsRunningPausedSkipsDataPlane(t *testing.T) {
+	for _, state := range []string{"paused", "pausing"} {
+		t.Run(state, func(t *testing.T) {
+			handler, _, dataHits := isRunningHandler(t, state, http.StatusInternalServerError)
+			client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+			sb := &Sandbox{client: client, SandboxID: "sb-paused", Domain: "cube.test"}
+
+			ok, err := sb.IsRunning(context.Background())
+			if err != nil {
+				t.Fatalf("IsRunning: %v", err)
+			}
+			if ok {
+				t.Fatalf("IsRunning() = true, want false for %s", state)
+			}
+			if *dataHits != 0 {
+				t.Fatalf("data-plane hits = %d, want 0 for %s", *dataHits, state)
+			}
+		})
+	}
+}
+
+func TestIsRunningReturnsFalseOnUnavailableStatuses(t *testing.T) {
+	for _, status := range []int{
+		http.StatusNotFound,           // 404 deleted
+		http.StatusBadGateway,         // 502 envd down
+		http.StatusServiceUnavailable, // 503 pausing/paused
+		http.StatusGone,               // 410 killing/killed
+	} {
+		status := status
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			handler, _, _ := isRunningHandler(t, "running", status)
+			client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+			sb := &Sandbox{client: client, SandboxID: "sb-unavail", Domain: "cube.test"}
+
+			ok, err := sb.IsRunning(context.Background())
+			if err != nil {
+				t.Fatalf("IsRunning: %v", err)
+			}
+			if ok {
+				t.Fatalf("IsRunning() = true, want false on %d", status)
+			}
+		})
+	}
+}
+
+func TestIsRunningRaisesOnServerError(t *testing.T) {
+	handler, _, _ := isRunningHandler(t, "running", http.StatusInternalServerError)
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-err", Domain: "cube.test"}
+
+	if _, err := sb.IsRunning(context.Background()); err == nil {
+		t.Fatalf("IsRunning() = nil error, want error on 500")
+	}
+}
+
+func TestIsRunningRaisesOnForbidden(t *testing.T) {
+	handler, _, _ := isRunningHandler(t, "running", http.StatusForbidden)
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-403", Domain: "cube.test"}
+
+	if _, err := sb.IsRunning(context.Background()); err == nil {
+		t.Fatalf("IsRunning() = nil error, want error on 403")
+	}
+}
+
+func TestIsRunningTransportErrorReturnsFalse(t *testing.T) {
+	handler := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/health" {
+			body := fmt.Sprintf(`{"sandboxID":"%s","templateID":"tpl-test","state":"running"}`, req.URL.Path)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		return nil, errors.New("connection refused")
+	})
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-conn", Domain: "cube.test"}
+
+	ok, err := sb.IsRunning(context.Background())
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v, want nil (transport error maps to false)", err)
+	}
+	if ok {
+		t.Fatalf("IsRunning() = true, want false on transport error")
+	}
+}
+
 func TestCommandsRun(t *testing.T) {
 	starter := &fakeProcessStarter{
 		result: &processStartResult{

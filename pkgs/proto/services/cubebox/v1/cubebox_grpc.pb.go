@@ -32,6 +32,7 @@ const (
 	CubeboxMgr_CommitSandbox_FullMethodName             = "/cubelet.services.cubebox.v1.CubeboxMgr/CommitSandbox"
 	CubeboxMgr_RollbackSandbox_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/RollbackSandbox"
 	CubeboxMgr_CleanupTemplate_FullMethodName           = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupTemplate"
+	CubeboxMgr_AdoptJFSTemplate_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/AdoptJFSTemplate"
 	CubeboxMgr_ListSandboxSnapshots_FullMethodName      = "/cubelet.services.cubebox.v1.CubeboxMgr/ListSandboxSnapshots"
 	CubeboxMgr_ListLocalSnapshots_FullMethodName        = "/cubelet.services.cubebox.v1.CubeboxMgr/ListLocalSnapshots"
 	CubeboxMgr_GetLocalSnapshot_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/GetLocalSnapshot"
@@ -62,6 +63,13 @@ type CubeboxMgrClient interface {
 	RollbackSandbox(ctx context.Context, in *RollbackSandboxRequest, opts ...grpc.CallOption) (*RollbackSandboxResponse, error)
 	// CleanupTemplate removes local template snapshot/base data from this node.
 	CleanupTemplate(ctx context.Context, in *CleanupTemplateRequest, opts ...grpc.CallOption) (*CleanupTemplateResponse, error)
+	// AdoptJFSTemplate makes a jfs template built by another node usable on
+	// this node: it clones the shared package (rootfs/memory, metadata-only
+	// via copy_file_range) into this node's tree on the shared volume.
+	// Idempotent: a template already present locally is a success without
+	// adopted=true. Used by Master for eager adoption right after the build
+	// node published the template; first-use adoption remains the fallback.
+	AdoptJFSTemplate(ctx context.Context, in *AdoptJFSTemplateRequest, opts ...grpc.CallOption) (*AdoptJFSTemplateResponse, error)
 	// ListSandboxSnapshots inspects the requested snapshot objects on this node.
 	ListSandboxSnapshots(ctx context.Context, in *ListSandboxSnapshotsRequest, opts ...grpc.CallOption) (*ListSandboxSnapshotsResponse, error)
 	// ListLocalSnapshots returns the full catalog of snapshots known to this node.
@@ -180,6 +188,16 @@ func (c *cubeboxMgrClient) CleanupTemplate(ctx context.Context, in *CleanupTempl
 	return out, nil
 }
 
+func (c *cubeboxMgrClient) AdoptJFSTemplate(ctx context.Context, in *AdoptJFSTemplateRequest, opts ...grpc.CallOption) (*AdoptJFSTemplateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdoptJFSTemplateResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_AdoptJFSTemplate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cubeboxMgrClient) ListSandboxSnapshots(ctx context.Context, in *ListSandboxSnapshotsRequest, opts ...grpc.CallOption) (*ListSandboxSnapshotsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListSandboxSnapshotsResponse)
@@ -262,6 +280,13 @@ type CubeboxMgrServer interface {
 	RollbackSandbox(context.Context, *RollbackSandboxRequest) (*RollbackSandboxResponse, error)
 	// CleanupTemplate removes local template snapshot/base data from this node.
 	CleanupTemplate(context.Context, *CleanupTemplateRequest) (*CleanupTemplateResponse, error)
+	// AdoptJFSTemplate makes a jfs template built by another node usable on
+	// this node: it clones the shared package (rootfs/memory, metadata-only
+	// via copy_file_range) into this node's tree on the shared volume.
+	// Idempotent: a template already present locally is a success without
+	// adopted=true. Used by Master for eager adoption right after the build
+	// node published the template; first-use adoption remains the fallback.
+	AdoptJFSTemplate(context.Context, *AdoptJFSTemplateRequest) (*AdoptJFSTemplateResponse, error)
 	// ListSandboxSnapshots inspects the requested snapshot objects on this node.
 	ListSandboxSnapshots(context.Context, *ListSandboxSnapshotsRequest) (*ListSandboxSnapshotsResponse, error)
 	// ListLocalSnapshots returns the full catalog of snapshots known to this node.
@@ -316,6 +341,9 @@ func (UnimplementedCubeboxMgrServer) RollbackSandbox(context.Context, *RollbackS
 }
 func (UnimplementedCubeboxMgrServer) CleanupTemplate(context.Context, *CleanupTemplateRequest) (*CleanupTemplateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CleanupTemplate not implemented")
+}
+func (UnimplementedCubeboxMgrServer) AdoptJFSTemplate(context.Context, *AdoptJFSTemplateRequest) (*AdoptJFSTemplateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdoptJFSTemplate not implemented")
 }
 func (UnimplementedCubeboxMgrServer) ListSandboxSnapshots(context.Context, *ListSandboxSnapshotsRequest) (*ListSandboxSnapshotsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListSandboxSnapshots not implemented")
@@ -518,6 +546,24 @@ func _CubeboxMgr_CleanupTemplate_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CubeboxMgr_AdoptJFSTemplate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdoptJFSTemplateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).AdoptJFSTemplate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_AdoptJFSTemplate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).AdoptJFSTemplate(ctx, req.(*AdoptJFSTemplateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _CubeboxMgr_ListSandboxSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListSandboxSnapshotsRequest)
 	if err := dec(in); err != nil {
@@ -668,6 +714,10 @@ var CubeboxMgr_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CleanupTemplate",
 			Handler:    _CubeboxMgr_CleanupTemplate_Handler,
+		},
+		{
+			MethodName: "AdoptJFSTemplate",
+			Handler:    _CubeboxMgr_AdoptJFSTemplate_Handler,
 		},
 		{
 			MethodName: "ListSandboxSnapshots",

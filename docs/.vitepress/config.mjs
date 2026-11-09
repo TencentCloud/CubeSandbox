@@ -196,6 +196,7 @@ export default withMermaid(defineConfig({
                   ]
                 },
                 { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
+                { text: 'Offline Deployment', link: '/guide/offline-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' },
                 { text: 'Downloads & Releases', link: '/guide/downloads' }
               ]
@@ -296,6 +297,7 @@ export default withMermaid(defineConfig({
               text: 'Observability & Performance',
               items: [
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
+                { text: 'Sandbox Network Metrics', link: '/guide/network-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
@@ -306,11 +308,11 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Overview', link: '/guide/troubleshooting/' },
                 { text: 'Deployment', link: '/guide/troubleshooting/deployment' },
-                { text: 'PVM Host Initramfs (Unsigned Modules)', link: '/guide/troubleshooting/pvm-host-boot-unsigned-modules' },
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
-                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' }
+                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' },
+                { text: 'HeartbeatExpired (Clock Skew)', link: '/guide/troubleshooting/node-heartbeat-expired-clock-skew' }
               ]
             },
             {
@@ -345,7 +347,10 @@ export default withMermaid(defineConfig({
                     { text: 'Huajiao', link: '/guide/usecases/huajiao' },
                     { text: 'OpenFuyao', link: '/guide/usecases/openfuyao' },
                     { text: 'Galxe Alva', link: '/guide/usecases/galxe-alva' },
-                    { text: 'LambChat', link: '/guide/usecases/lambchat' }
+                    { text: 'LambChat', link: '/guide/usecases/lambchat' },
+                    { text: 'ouc-online', link: '/guide/usecases/ouc-online' },
+                    { text: 'KakuriZai', link: '/guide/usecases/kakurizai' },
+                    { text: 'OMA', link: '/guide/usecases/oma' }
                   ]
                 }
               ]
@@ -434,6 +439,7 @@ export default withMermaid(defineConfig({
                   ]
                 },
                 { text: '腾讯云集群（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
+                { text: '离线部署', link: '/zh/guide/offline-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' },
                 { text: '下载与 Release 说明', link: '/zh/guide/downloads' }
               ]
@@ -534,6 +540,7 @@ export default withMermaid(defineConfig({
               text: '可观测性与性能',
               items: [
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
+                { text: '沙箱网络指标', link: '/zh/guide/network-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
                 { text: '性能基准', link: '/zh/guide/performance-benchmark' }
               ]
@@ -544,11 +551,11 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '排障概览', link: '/zh/guide/troubleshooting/' },
                 { text: '部署问题', link: '/zh/guide/troubleshooting/deployment' },
-                { text: 'PVM 宿主内核 initramfs（模块未签名）', link: '/zh/guide/troubleshooting/pvm-host-boot-unsigned-modules' },
                 { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
-                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' }
+                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' },
+                { text: 'HeartbeatExpired（时钟偏移）', link: '/zh/guide/troubleshooting/node-heartbeat-expired-clock-skew' }
               ]
             },
             {
@@ -583,7 +590,10 @@ export default withMermaid(defineConfig({
                     { text: 'Huajiao', link: '/zh/guide/usecases/huajiao' },
                     { text: 'OpenFuyao', link: '/zh/guide/usecases/openfuyao' },
                     { text: 'Galxe Alva', link: '/zh/guide/usecases/galxe-alva' },
-                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' }
+                    { text: 'LambChat', link: '/zh/guide/usecases/lambchat' },
+                    { text: 'ouc-online', link: '/zh/guide/usecases/ouc-online' },
+                    { text: 'KakuriZai', link: '/zh/guide/usecases/kakurizai' },
+                    { text: 'OMA', link: '/zh/guide/usecases/oma' }
                   ]
                 }
               ]
