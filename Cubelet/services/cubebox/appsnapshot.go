@@ -306,10 +306,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	// collectEnvdVersion uses containerd Exec, which must run before
-	// the shim marks the guest as app-snapshotting and disables exec.
-	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
-
 	stepLog.Info("Step 4: Capturing sandbox snapshot through shim...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is
 	// no base memory blob to overlay onto, so we always ask for a full memory
@@ -432,6 +428,12 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resume sandbox after snapshot: %v", resumeErr)
 		return rsp, nil
 	}
+
+	// Collect the envd version after the snapshot rather than before. The
+	// probe exec carries the shim's internal probe exec-ID, which bypasses
+	// the app-snapshot exec gate, and both capture paths resume the guest
+	// before returning here, so the probe can still run.
+	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
 	stepLog.Infof("Step 5: Destroying temporary cubebox (templateID=%s)...", templateID)
 	destroyCtx, destroyCancel := context.WithTimeout(context.Background(), 30*time.Second)
