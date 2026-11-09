@@ -60,6 +60,10 @@ type Store interface {
 	// dropped afterwards. XFS restore (template / resume / FromSnap)
 	// does not: CH mmap's the original snapshot MAP_PRIVATE.
 	CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*Object, error)
+	// PromoteVolumeToSnapshot turns an existing volume into a snapshot of
+	// originVolume in place; no data is copied. XFS pauses use it to keep the
+	// reflink clone off the pause critical path.
+	PromoteVolumeToSnapshot(ctx context.Context, volumeName, snapshotName, originVolume string) (*Object, error)
 	DeleteByKind(ctx context.Context, name, kind string) error
 	DeactivateByKind(ctx context.Context, name, kind string) error
 	ResolveDevPath(ctx context.Context, name, kind string) (string, error)

@@ -1158,6 +1158,50 @@ pub extern "C" fn cubecow_create_volume_from_snapshot(
     }
 }
 
+/// Promote an existing volume into a snapshot of `origin_volume` in place:
+/// the file is renamed, no data is copied, and the volume name leaves the
+/// namespace. `out_device_path` is optional (free with `cubecow_free_string`).
+/// Returns 0 on success, a negative error code on failure.
+#[no_mangle]
+pub extern "C" fn cubecow_promote_volume_to_snapshot(
+    engine: *mut std::ffi::c_void,
+    volume_name: *const c_char,
+    snapshot_name: *const c_char,
+    origin_volume: *const c_char,
+    out_device_path: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // SAFETY: `engine` was created by `cubecow_init` and is valid.
+        let eng = unsafe { engine_ref(engine) }?;
+        // SAFETY: `volume_name` is a valid C string provided by the caller.
+        let vol = unsafe { c_str_to_str(volume_name) }?;
+        // SAFETY: `snapshot_name` is a valid C string provided by the caller.
+        let snap = unsafe { c_str_to_str(snapshot_name) }?;
+        // SAFETY: `origin_volume` is a valid C string provided by the caller.
+        let origin = unsafe { c_str_to_str(origin_volume) }?;
+
+        match eng.promote_volume_to_snapshot(vol, snap, origin) {
+            Ok(snapshot) => {
+                if !out_device_path.is_null() {
+                    // SAFETY: `out_device_path` is non-null and writable.
+                    unsafe { *out_device_path = rust_string_to_c(&snapshot.device_path) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_promote_volume_to_snapshot");
+            COW_ERR_PANIC
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
