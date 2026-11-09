@@ -121,7 +121,7 @@ images:
 
   # JuiceFS client image used by the format Job and per-node mount DaemonSet.
   juicefs:
-    repository: juicedata/mount
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs
     tag: ce-v1.4.1
     pullPolicy: IfNotPresent
 
@@ -1343,7 +1343,7 @@ cubeJuiceFS:
     password: ""
     redis:
       image:
-        repository: redis
+        repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/redis
         tag: "7-alpine"
         pullPolicy: IfNotPresent
       port: 6379

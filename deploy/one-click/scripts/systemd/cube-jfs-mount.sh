@@ -12,8 +12,9 @@
 # scripts/cube-jfs/mount.sh wrapper enables this local mount on each node.
 #
 # Environment (from .one-click.env):
-#   CUBE_JFS_IMAGE          JuiceFS mount image (default
-#                           juicedata/mount:ce-v1.4.1)
+#   CUBE_JFS_IMAGE          JuiceFS mount image. Empty selects by MIRROR=cn|int
+#                           (default cube-sandbox-int.tencentcloudcr.com/
+#                           cube-sandbox/juicefs:ce-v1.4.1)
 #   CUBE_JFS_CONTAINER_NAME container name (default cube-sandbox-jfs)
 #   CUBE_JFS_META_URL       optional metadata engine override. When empty, use
 #                           ONE_CLICK_CONTROL_PLANE_IP on compute nodes or
@@ -46,7 +47,15 @@
 
 set -euo pipefail
 
-JFS_IMAGE="${CUBE_JFS_IMAGE:-juicedata/mount:ce-v1.4.1}"
+JFS_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+JFS_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+if [[ -n "${CUBE_JFS_IMAGE:-}" ]]; then
+  JFS_IMAGE="${CUBE_JFS_IMAGE}"
+elif [[ "${MIRROR:-}" == "cn" ]]; then
+  JFS_IMAGE="${JFS_IMAGE_CN_DEFAULT}"
+else
+  JFS_IMAGE="${JFS_IMAGE_INT_DEFAULT}"
+fi
 CONTAINER_NAME="${CUBE_JFS_CONTAINER_NAME:-cube-sandbox-jfs}"
 MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
 CACHE_DIR="${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"

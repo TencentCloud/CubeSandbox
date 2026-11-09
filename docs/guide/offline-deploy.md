@@ -118,7 +118,7 @@ docker load -i cube-images-control.tar
 | Image | Default reference | Notes |
 | --- | --- | --- |
 | cube-egress | same as above | mandatory — the egress MITM proxy runs on every node |
-| JuiceFS mount | `juicedata/mount:ce-v1.4.1` | only if `ONE_CLICK_ENABLE_JFS=1` |
+| JuiceFS mount | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1` | only if `ONE_CLICK_ENABLE_JFS=1`; `MIRROR=cn` selects the `-cn` host |
 
 The `<tag>` / `<release>` placeholders for cube-proxy / cube-lifecycle-manager / cube-egress / MinIO resolve with this command, run from the extracted bundle root:
 

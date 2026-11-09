@@ -27,7 +27,15 @@ if [[ -n "${CUBE_JFS_META_PASSWORD:-}" \
   die "do not set both CUBE_JFS_META_PASSWORD and a password in CUBE_JFS_META_URL"
 fi
 
-image="${CUBE_JFS_IMAGE:-juicedata/mount:ce-v1.4.1}"
+jfs_image_int_default="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+jfs_image_cn_default="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+if [[ -n "${CUBE_JFS_IMAGE:-}" ]]; then
+  image="${CUBE_JFS_IMAGE}"
+elif [[ "${MIRROR:-}" == "cn" ]]; then
+  image="${jfs_image_cn_default}"
+else
+  image="${jfs_image_int_default}"
+fi
 mount_path="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
 systemctl is-active --quiet cube-sandbox-jfs.service \
   || die "local cube-sandbox-jfs.service is not active"

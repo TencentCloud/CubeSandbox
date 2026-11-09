@@ -298,7 +298,7 @@ Place the cache directory on a dedicated fast data disk and keep `CUBE_JFS_CACHE
 
 ## Image distribution
 
-By default, each target node pulls `juicedata/mount:ce-v1.4.1` from the image registry.
+By default, each target node pulls the JuiceFS client image `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1` from Cube's own registry. Set `MIRROR=cn` in `.env` to pull the `-cn` mirror instead, exactly like the other component images.
 
 For an offline environment, load the image in advance with `docker load`, then set `CUBE_JFS_IMAGE` in the configuration file to the local image name. Kubernetes deployments set `images.juicefs.repository` / `tag` in the values instead.
 

@@ -1970,7 +1970,22 @@ CUBE_JFS_STORAGE="${CUBE_JFS_STORAGE:-s3}"
 CUBE_JFS_BUCKET="${CUBE_JFS_BUCKET:-}"
 CUBE_JFS_ACCESS_KEY="${CUBE_JFS_ACCESS_KEY:-}"
 CUBE_JFS_SECRET_KEY="${CUBE_JFS_SECRET_KEY:-}"
-CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE:-juicedata/mount:ce-v1.4.1}"
+# JuiceFS client image. Resolution priority mirrors up-cube-proxy.sh /
+# up-cube-lifecycle-manager.sh:
+#   1. CUBE_JFS_IMAGE (explicit operator override)
+#   2. MIRROR=cn  -> cube-sandbox-cn.tencentcloudcr.com
+#   3. default    -> cube-sandbox-int.tencentcloudcr.com
+# MIRROR is validated further down; use the tolerant form here so a bad value
+# still reaches that check instead of silently selecting int.
+CUBE_JFS_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+CUBE_JFS_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+if [[ -n "${CUBE_JFS_IMAGE:-}" ]]; then
+  :
+elif [[ "${MIRROR:-}" == "cn" ]]; then
+  CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE_CN_DEFAULT}"
+else
+  CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE_INT_DEFAULT}"
+fi
 CUBE_JFS_CONTAINER_NAME="${CUBE_JFS_CONTAINER_NAME:-cube-sandbox-jfs}"
 CUBE_JFS_MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
 CUBE_JFS_ROOT="${CUBE_JFS_ROOT:-cube}"
