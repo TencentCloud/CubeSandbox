@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from dataclasses import replace
 from unittest.mock import Mock
 
@@ -16,6 +17,18 @@ from cases.volume import test_private_data as volume_cases
 from framework.config import SdkE2EConfig
 
 pytestmark = pytest.mark.framework
+
+
+class _TimeoutWithoutNotes(requests.Timeout):
+    @property
+    def add_note(self):
+        raise AttributeError("add_note")
+
+
+class _AssertionErrorWithoutNotes(AssertionError):
+    @property
+    def add_note(self):
+        raise AttributeError("add_note")
 
 
 @pytest.fixture
@@ -105,6 +118,25 @@ def test_create_volume_keeps_success_body_validation(volume_api, body):
         api.create_volume("test-volume")
 
 
+@pytest.mark.parametrize(
+    ("raw_prefix", "expected"),
+    [
+        (None, "sdk-e2e/"),
+        ("", "sdk-e2e/"),
+        (" \t ", "sdk-e2e/"),
+        ("ws/sdk-e2e/", "ws/sdk-e2e/"),
+        (" \t ws/sdk-e2e/ \n", "ws/sdk-e2e/"),
+    ],
+    ids=["unset", "empty", "whitespace", "custom", "trimmed-custom"],
+)
+def test_volume_prefix_uses_default_for_blank_values(monkeypatch, raw_prefix, expected):
+    if raw_prefix is None:
+        monkeypatch.delenv("SDK_E2E_VOLUME_PREFIX", raising=False)
+    else:
+        monkeypatch.setenv("SDK_E2E_VOLUME_PREFIX", raw_prefix)
+    assert SdkE2EConfig.from_env().volume_prefix == expected
+
+
 @pytest.mark.parametrize("cred_ref", [None, "", " \t "])
 def test_dynamic_credential_gate_skips_only_missing_reference(cred_ref):
     config = replace(SdkE2EConfig.from_env(), volume_cred_ref=cred_ref)
@@ -125,8 +157,12 @@ def test_dynamic_credential_gate_does_not_validate_or_skip_bad_reference():
     ).parameters
 
 
-@pytest.mark.parametrize("has_primary_failure", [False, True])
-def test_cleanup_orders_resources_and_reports_errors(monkeypatch, has_primary_failure):
+@pytest.mark.parametrize(
+    "failure_type",
+    [None, AssertionError, _AssertionErrorWithoutNotes],
+    ids=["no-primary-failure", "native", "without-notes"],
+)
+def test_cleanup_orders_resources_and_reports_errors(monkeypatch, failure_type):
     calls = []
     api = Mock()
     api.close.side_effect = lambda: calls.append("close")
@@ -142,15 +178,36 @@ def test_cleanup_orders_resources_and_reports_errors(monkeypatch, has_primary_fa
 
     monkeypatch.setattr(volume_cases, "safe_kill", kill)
     monkeypatch.setattr(volume_cases, "safe_delete_volume", delete)
-    failure = AssertionError("original failure") if has_primary_failure else None
-    if failure is not None:
-        volume_cases._cleanup(api, None, ["writer", "reader"], ["a", "b"], failure)
-        assert str(failure) == "original failure"
-        assert "reader kill error" in " ".join(failure.__notes__)
-        assert "a delete error" in " ".join(failure.__notes__)
-    else:
-        with pytest.raises(pytest.fail.Exception, match="volume cleanup failed"):
-            volume_cases._cleanup(api, None, ["writer", "reader"], ["a", "b"], None)
+    failure = failure_type("original failure") if failure_type is not None else None
+    if failure_type is _AssertionErrorWithoutNotes:
+        assert not hasattr(failure, "add_note")
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("error", RuntimeWarning)
+        outer_filters = list(warnings.filters)
+        if failure is not None:
+            with pytest.raises(AssertionError) as raised:
+                try:
+                    raise failure
+                finally:
+                    volume_cases._cleanup(
+                        api, None, ["writer", "reader"], ["a", "b"], failure
+                    )
+            assert raised.value is failure
+            assert str(failure) == "original failure"
+            if hasattr(failure, "add_note"):
+                assert not captured
+                diagnostic = " ".join(failure.__notes__)
+            else:
+                assert len(captured) == 1
+                assert captured[0].category is RuntimeWarning
+                diagnostic = str(captured[0].message)
+            assert "reader kill error" in diagnostic
+            assert "a delete error" in diagnostic
+        else:
+            with pytest.raises(pytest.fail.Exception, match="volume cleanup failed"):
+                volume_cases._cleanup(api, None, ["writer", "reader"], ["a", "b"], None)
+            assert not captured
+        assert warnings.filters == outer_filters
     assert calls == ["kill:reader", "kill:writer", "delete:b", "delete:a", "close"]
 
 
@@ -161,18 +218,34 @@ def test_known_created_volume_is_registered_before_parsing():
     assert volumes == ["own-name"]
 
 
-def test_unknown_create_result_is_diagnostic_and_does_not_delete(volume_api):
+@pytest.mark.parametrize(
+    "failure_type", [requests.Timeout, _TimeoutWithoutNotes], ids=["native", "without-notes"]
+)
+def test_unknown_create_result_is_diagnostic_and_does_not_delete(volume_api, failure_type):
     api, session, config = volume_api
-    failure = requests.Timeout("create timed out")
+    failure = failure_type("create timed out")
+    if failure_type is _TimeoutWithoutNotes:
+        assert not hasattr(failure, "add_note")
     session.post.side_effect = failure
-    with pytest.raises(requests.Timeout) as raised:
-        volume_cases._post_volume(
-            api, config, "own-name", "opaque", prefix="sdk-e2e/own-prefix/"
-        )
-    assert raised.value is failure
-    assert "own-name" in " ".join(failure.__notes__)
-    assert "own-prefix" in " ".join(failure.__notes__)
-    assert "outcome is unknown" in " ".join(failure.__notes__)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("error", RuntimeWarning)
+        outer_filters = list(warnings.filters)
+        with pytest.raises(requests.Timeout) as raised:
+            volume_cases._post_volume(
+                api, config, "own-name", "opaque", prefix="sdk-e2e/own-prefix/"
+            )
+        assert raised.value is failure
+        if hasattr(failure, "add_note"):
+            assert not captured
+            diagnostic = " ".join(failure.__notes__)
+        else:
+            assert len(captured) == 1
+            assert captured[0].category is RuntimeWarning
+            diagnostic = str(captured[0].message)
+        assert warnings.filters == outer_filters
+    assert "own-name" in diagnostic
+    assert "own-prefix" in diagnostic
+    assert "outcome is unknown" in diagnostic
     session.delete.assert_not_called()
 
 

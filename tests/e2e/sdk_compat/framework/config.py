@@ -104,7 +104,10 @@ class SdkE2EConfig:
             volume_plugin_enabled=volume_plugin_enabled_from_env(),
             volume_driver=os.environ.get("SDK_E2E_VOLUME_DRIVER", "s3").strip() or "s3",
             volume_cred_ref=os.environ.get("SDK_E2E_VOLUME_CRED_REF", "").strip() or None,
-            volume_prefix=os.environ.get("SDK_E2E_VOLUME_PREFIX", "sdk-e2e/").strip(),
+            volume_prefix=(
+                os.environ.get("SDK_E2E_VOLUME_PREFIX", "sdk-e2e/").strip()
+                or "sdk-e2e/"
+            ),
             volume_refcount_wait=int(os.environ.get("SDK_E2E_VOLUME_REFCOUNT_WAIT", "60")),
             restart_policy_wait=int(os.environ.get("SDK_E2E_RESTART_POLICY_WAIT", "300")),
             create_capacity_retries=int(

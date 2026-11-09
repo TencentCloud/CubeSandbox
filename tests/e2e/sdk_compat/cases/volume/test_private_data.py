@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+import warnings
 
 import pytest
 import requests
@@ -39,13 +40,24 @@ def dynamic_volume_cred_ref(sdk_e2e_config):
     return cred_ref
 
 
+def _add_failure_note(error, message):
+    if hasattr(error, "add_note"):
+        error.add_note(message)
+    else:
+        # Diagnostics must not replace the original failure under -W error.
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
 def _post_volume(api, config, name, private_data, *, prefix=None):
     try:
         return api.create_volume_raw(
             name, driver=config.volume_driver, private_data=private_data
         )
     except requests.RequestException as exc:
-        exc.add_note(
+        _add_failure_note(
+            exc,
             f"Volume create outcome is unknown: name={name!r}, prefix={prefix!r}. "
             "No DELETE was issued for this request; inspect its result before cleanup."
         )
@@ -123,7 +135,7 @@ def _cleanup(api, config, sandboxes, volumes, failure):
     if errors:
         message = "volume cleanup failed: " + "; ".join(errors)
         if failure is not None:
-            failure.add_note(message)
+            _add_failure_note(failure, message)
         else:
             pytest.fail(message)
 
