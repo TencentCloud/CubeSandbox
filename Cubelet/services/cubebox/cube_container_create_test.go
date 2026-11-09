@@ -1322,6 +1322,46 @@ func TestTaskWaitContextKeepsOnlyTheNamespace(t *testing.T) {
 		"the wait must not carry the create's request log fields")
 }
 
+type fakeExitTask struct {
+	exited  chan containerd.ExitStatus
+	started bool
+}
+
+func (task *fakeExitTask) Wait(ctx context.Context) (<-chan containerd.ExitStatus, error) {
+	out := make(chan containerd.ExitStatus, 1)
+	go func() {
+		select {
+		case status := <-task.exited:
+			out <- status
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
+}
+
+func (task *fakeExitTask) Start(context.Context) error {
+	task.started = true
+	return nil
+}
+
+func TestTaskExitWaitSurvivesCreateCancellationAfterStart(t *testing.T) {
+	createCtx, cancelCreate := context.WithCancel(namespaces.WithNamespace(context.Background(), "test-ns"))
+	defer cancelCreate()
+	task := &fakeExitTask{exited: make(chan containerd.ExitStatus, 1)}
+	exitCh, cancelWait, err := registerTaskExitWait(createCtx, task)
+	require.NoError(t, err)
+	defer cancelWait()
+	require.NoError(t, task.Start(createCtx))
+	cancelCreate()
+	task.exited <- containerd.ExitStatus{}
+	select {
+	case <-exitCh:
+		assert.True(t, task.started)
+	case <-time.After(time.Second):
+		t.Fatal("task exit was lost after the create context was cancelled")
+	}
+}
+
 func TestReadShimStartTimeReturnsLiveProcessIdentity(t *testing.T) {
 	got, err := readShimStartTime(context.Background(), "shim-self", os.Getpid())
 	require.NoError(t, err)

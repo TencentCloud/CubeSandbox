@@ -2964,6 +2964,7 @@ mod tests {
             sandbox_id: "sb-1".to_string(),
             display_name: None,
             backend: None,
+            mode: None,
         };
         let call = client.create_snapshot(&snapshot_request);
         let _ = tokio::time::timeout(

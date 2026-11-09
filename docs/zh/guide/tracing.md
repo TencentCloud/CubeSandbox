@@ -46,6 +46,8 @@ containerd 插桩还会记录 Task、RPC 和传输等 span，并使用调用方�
 
 也可以设置 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`；同时设置时 traces 专用地址优先。仅当两个值都为空时关闭追踪。
 
+启用追踪后，本次集成使用 SDK 默认的基于父级、始终采样的策略：根请求和本地启动的生命周期 Trace 以 100% 采样，已采样的父级会跨服务继续采样。本 PR 尚不支持配置采样率，请据此规划 Collector 和后端容量。试点中的一次沙箱创建产生了 52 个 Span；按相似流程估算，1,000 次创建约产生 52,000 个 Span，尚未计入暂停、恢复、快照和模板流量。实际数量取决于流程与部署。当前若需降低流量，可关闭相关组件的追踪；调整采样策略需要另行实现并完成跨服务验证。
+
 接收端和查询后端需要单独部署。各组件以各自的服务名上报（`cube-api`、`cubemaster`、`cubetemplatecenter`、`cubelet`、`cube-shim`），因此不要设置共享的 `OTEL_SERVICE_NAME`。
 
 配置走环境变量，随安装方式而异：
@@ -54,6 +56,8 @@ containerd 插桩还会记录 Task、RPC 和传输等 span，并使用调用方�
 - **Kubernetes**：加到各组件的 `env` 数组中，参见 [Helm 安装 · 链路追踪配置](./kubernetes/install.md)中的「8.4 链路追踪配置」。
 
 Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启动时继承 Cubelet 的环境变量，因此已在运行的 shim 会保留旧设置。
+
+Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后，等待会有意持续到任务退出；创建请求取消或超时不会丢失退出事件。等待上下文只保留 containerd 命名空间，不继承请求取消、日志字段或已结束的创建 Span。若任务启动失败，则取消等待。
 
 ## 查询与解读耗时
 

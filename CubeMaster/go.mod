@@ -5,7 +5,6 @@ go 1.25.7
 // toolchain go1.22.9
 
 require (
-	github.com/tencentcloud/CubeSandbox/pkgs/redisx v0.0.0
 	github.com/agiledragon/gomonkey/v2 v2.9.0
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/charmbracelet/bubbles v1.0.0
@@ -37,6 +36,7 @@ require (
 	github.com/tencentcloud/CubeSandbox/pkgs/blobstore v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/cubedb v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
+	github.com/tencentcloud/CubeSandbox/pkgs/redisx v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode v0.0.0
 	github.com/urfave/cli v1.22.15
@@ -57,10 +57,11 @@ require (
 require (
 	cel.dev/expr v0.25.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.1 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.35.0 // indirect
-	go.opentelemetry.io/proto/otlp v1.5.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260120221211-b8f7ae30c516 // indirect
+	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
+	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9 // indirect
 )
 
 require (
@@ -169,7 +170,7 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0 // indirect
 	go.opentelemetry.io/otel v1.43.0
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.35.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0

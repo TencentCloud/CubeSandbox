@@ -1451,13 +1451,29 @@ func updateCgroup(ctx context.Context, ci *cubeboxstore.Container) error {
 }
 
 // taskWaitContext lets containerd's asynchronous Wait outlive the workflow step.
-// Keep its namespace, but not the step's cancellation or create trace.
+// Keep its namespace, but not the step's cancellation or create trace. Other
+// request-scoped values are deliberately dropped as well: this wait can last
+// for the task's whole lifetime, long after the creation request and span end.
 func taskWaitContext(ctx context.Context) context.Context {
 	ns, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
 		return context.Background()
 	}
 	return namespaces.WithNamespace(context.Background(), ns)
+}
+
+// registerTaskExitWait gives containerd a context that survives the create step.
+// The caller cancels it only when task startup fails; after Start, task exit
+// itself completes the wait and delivers the exit status.
+func registerTaskExitWait(ctx context.Context, task interface {
+	Wait(context.Context) (<-chan containerd.ExitStatus, error)
+}) (<-chan containerd.ExitStatus, context.CancelFunc, error) {
+	waitCtx, cancelWait := context.WithCancel(taskWaitContext(ctx))
+	exitCh, err := task.Wait(waitCtx)
+	if err != nil {
+		cancelWait()
+	}
+	return exitCh, cancelWait, err
 }
 
 func (l *local) runContainer(
@@ -1605,14 +1621,13 @@ func (l *local) runContainer(
 	}
 
 	// A successful task ends this wait itself; cancel it if startup fails.
-	waitCtx, cancelWait := context.WithCancel(taskWaitContext(ctx))
 	taskStarted := false
+	exitCh, cancelWait, err := registerTaskExitWait(ctx, task)
 	defer func() {
 		if !taskStarted {
 			cancelWait()
 		}
 	}()
-	exitCh, err := task.Wait(waitCtx)
 	if err != nil {
 		return ret.Err(errorcode.ErrorCode_WaitTaskFailed, err.Error())
 	}

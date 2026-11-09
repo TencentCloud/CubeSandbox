@@ -46,6 +46,8 @@ Tracing is off by default. Point each component's `OTEL_EXPORTER_OTLP_ENDPOINT` 
 
 Alternatively set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`; it takes precedence when both are set. Tracing is off only when both are empty.
 
+When tracing is enabled, this integration currently uses the SDK default parent-based, always-on sampler. Root requests and locally started lifecycle traces are sampled at 100%, and sampled parents remain sampled across services. There is no supported sampling-rate setting in this PR. Plan collector and backend capacity accordingly: a canary sandbox creation produced 52 spans, so 1,000 similar creations would produce roughly 52,000 spans before pause, resume, snapshot, and template traffic. Actual counts depend on the workflow and deployment. To reduce volume today, disable tracing on the relevant components; changing the sampling policy requires a separate implementation and cross-service validation.
+
 Deploy the receiver and query backend separately. Each component exports under its own service name (`cube-api`, `cubemaster`, `cubetemplatecenter`, `cubelet`, `cube-shim`), so do not set a shared `OTEL_SERVICE_NAME`.
 
 Configuration is environment-based and follows the install method:
@@ -54,6 +56,8 @@ Configuration is environment-based and follows the install method:
 - **Kubernetes**: add it to the per-component `env` arrays — see [Helm Install · Tracing configuration](./kubernetes/install.md#_8-4-tracing-configuration).
 
 Cubelet launches a fresh CubeShim process per sandbox; the process lives alongside its sandbox and inherits Cubelet's environment at process start, so an already-running shim keeps its previous setting.
+
+Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
 
 ## Querying and interpreting durations
 

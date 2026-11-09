@@ -65,7 +65,7 @@ func TestArtifactBuiltCallbackSendsItsOwnSpanAsParent(t *testing.T) {
 
 	result, source := builtReportArgs()
 	if err := reportArtifactBuilt(rootCtx, "job-cb", result, "rfs-1", "fp-1", source,
-		NewReporter(), cube_egress_ca.Result{}, "", false, nil, "", log.G(rootCtx)); err != nil {
+		NewReporter(), cube_egress_ca.Result{}, "", false, nil, "", nil, log.G(rootCtx)); err != nil {
 		t.Fatalf("reportArtifactBuilt: %v", err)
 	}
 	tp := <-traceparents
@@ -110,7 +110,7 @@ func TestArtifactBuiltReportTracesAttemptsAndBackoff(t *testing.T) {
 
 	result, source := builtReportArgs()
 	if err := reportArtifactBuilt(rootCtx, "job-retry", result, "rfs-2", "fp-2", source,
-		NewReporter(), cube_egress_ca.Result{}, "", false, nil, "", log.G(rootCtx)); err != nil {
+		NewReporter(), cube_egress_ca.Result{}, "", false, nil, "", nil, log.G(rootCtx)); err != nil {
 		t.Fatalf("reportArtifactBuilt: %v", err)
 	}
 	tp1 := <-traceparents
