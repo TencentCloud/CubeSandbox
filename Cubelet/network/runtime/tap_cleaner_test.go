@@ -37,6 +37,7 @@ func TestCleanupTapForReuseDeletesStateBeforeMarkReady(t *testing.T) {
 		"cubevs_policy_cleaned",
 		"cubevs_default_deny",
 		"cubevs_tap_metadata_deleted",
+		"cubevs_metrics_deleted",
 		"cubeegress_delete",
 		"cubeegress_verify",
 		"runtime_cleaned",
@@ -155,7 +156,7 @@ func TestCleanupStateOnlyResidueDeletesStateAndReleasesOwnership(t *testing.T) {
 	if err := controller.cleanupStateOnlyResidue(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"cubevs_port_mapping_deleted", "cubevs_policy_cleaned", "cubevs_tap_metadata_deleted", "cubeegress_delete", "cubeegress_verify"}
+	want := []string{"cubevs_port_mapping_deleted", "cubevs_policy_cleaned", "cubevs_tap_metadata_deleted", "cubevs_metrics_deleted", "cubeegress_delete", "cubeegress_verify"}
 	if !reflect.DeepEqual(recorder.events, want) {
 		t.Fatalf("events = %#v, want %#v", recorder.events, want)
 	}
