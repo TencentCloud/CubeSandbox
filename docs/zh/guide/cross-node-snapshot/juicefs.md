@@ -309,7 +309,7 @@ cubeopscli node delete <node-id>
 
 ## 镜像分发
 
-目标节点默认从镜像仓库拉取 `juicedata/mount:ce-v1.4.1`。
+目标节点默认从 Cube 自己的镜像仓库拉取 JuiceFS 客户端镜像 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1`。在 `.env` 里设置 `MIRROR=cn` 可改用 `-cn` 镜像，与其它组件镜像的规则一致。
 
 如果是离线环境，可以提前 `docker load` 下载镜像，并通过修改配置文件中的 `CUBE_JFS_IMAGE` 指向本地镜像名。Kubernetes 部署中改为在 values 里设置 `images.juicefs.repository` / `tag`。
 

@@ -118,7 +118,7 @@ docker load -i cube-images-control.tar
 | 镜像 | 默认引用 | 说明 |
 | --- | --- | --- |
 | cube-egress | 同上 | 必需——出口 MITM 代理跑在每个节点上 |
-| JuiceFS mount | `juicedata/mount:ce-v1.4.1` | 仅当 `ONE_CLICK_ENABLE_JFS=1` |
+| JuiceFS mount | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1` | 仅当 `ONE_CLICK_ENABLE_JFS=1`；`MIRROR=cn` 时走 `-cn` 域名 |
 
 cube-proxy / cube-lifecycle-manager / cube-egress / MinIO 四个镜像的 `<tag>` / `<release>` 占位符，在解压后的部署包根目录执行以下命令查询：
 
