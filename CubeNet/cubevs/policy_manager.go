@@ -49,6 +49,12 @@ const policySnapshotSchemaV1 uint32 = 1
 
 var errNetPolicyManagerRemoved = errors.New("net policy manager was removed")
 
+// errDNSNoMatchingRule is returned when a positive answer's QName is not
+// covered by the domain index. No allow row was written. The poller must not
+// inject that reply: the datapath uploaded it because some dns_allow rule
+// matched, and delivering it would cache an address the policy does not allow.
+var errDNSNoMatchingRule = errors.New("dns qname matches no domain rule")
+
 // policySnapshotDir is the parent directory holding per-sandbox JSON
 // snapshots. Overridable in tests via SetPolicySnapshotDir.
 var (
@@ -355,11 +361,13 @@ func liveManagers() []*NetPolicyManager {
 // allow_out_v3 at the next apply. Called from the dns_events poller; safe to
 // call concurrently across ifindices (each manager has its own mutex).
 //
-// Returns nil for a benign no-op (no matching rule or empty answer set). The
-// domain lookup is repeated inside apply's mutex so a concurrent applyUpdate
-// that revoked the rule cannot be raced: either the learn happens first and
-// the update's diff removes its rows, or the update happens first and the
-// rule is already gone. Both orders are correct, which is why no datapath
+// Returns nil when the answers were recorded. errDNSNoMatchingRule means the
+// QName is not covered by any domain rule, including the "*" catch-all, so
+// no allow row was written. An empty answer set is a nil no-op. The domain
+// lookup is repeated inside apply's mutex so a concurrent applyUpdate that
+// revoked the rule cannot be raced: either the learn happens first and the
+// update's diff removes its rows, or the update happens first and the rule
+// is already gone. Both orders are correct, which is why no datapath
 // generation latch is needed to close the in-flight window.
 func (m *NetPolicyManager) LearnDNS(qname string, answers []DNSAnswer) error {
 	if len(answers) == 0 {
@@ -368,7 +376,7 @@ func (m *NetPolicyManager) LearnDNS(qname string, answers []DNSAnswer) error {
 	// Cheap pre-check outside apply, so an unmatched QName costs no diff and
 	// no persist. The mutate closure re-looks up under m.mu.
 	if m.lookupDomainRule(qname) == nil {
-		return nil
+		return errDNSNoMatchingRule
 	}
 	nowNs, err := currentNS()
 	if err != nil {
@@ -377,7 +385,7 @@ func (m *NetPolicyManager) LearnDNS(qname string, answers []DNSAnswer) error {
 	name := normalizeQName(qname)
 	return m.apply(func(s *PolicySnapshot) error {
 		if m.domainRules.lookup(name) == nil {
-			return nil
+			return errDNSNoMatchingRule
 		}
 		if s.DynamicLearned == nil {
 			s.DynamicLearned = map[string]*DNSEntry{}

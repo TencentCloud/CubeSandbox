@@ -2,6 +2,7 @@ package cubevs
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -74,6 +75,18 @@ func mvmOptions(allowOut []string, l7 []L7Target, denyOut []string) MVMOptions {
 		opts.DenyOut = &denyOut
 	}
 	return opts
+}
+
+func learnUnmatched(t *testing.T, ifindex uint32, qname, ip string) {
+	t.Helper()
+	mgr, err := GetNetPolicyManager(ifindex)
+	if err != nil {
+		t.Fatalf("GetNetPolicyManager: %v", err)
+	}
+	err = mgr.LearnDNS(qname, []DNSAnswer{{IP: net.ParseIP(ip), TTLSeconds: 600}})
+	if !errors.Is(err, errDNSNoMatchingRule) {
+		t.Fatalf("LearnDNS(%q) = %v, want no matching rule", qname, err)
+	}
 }
 
 // learn drives one DNS response into the manager for ifindex.
@@ -326,7 +339,7 @@ func TestLearnRejectsUnmatchedQName(t *testing.T) {
 	newPolicyManagerTest(t, ifindex)
 
 	mustUpdatePolicy(t, ifindex, mvmOptions([]string{"qq.com"}, nil, nil))
-	learn(t, ifindex, "evil.com", "9.9.9.9")
+	learnUnmatched(t, ifindex, "evil.com", "9.9.9.9")
 
 	requireNoAllowRow(t, ifindex, "9.9.9.9", 0)
 
@@ -349,7 +362,7 @@ func TestLearnRejectsApexUnderWildcardOnly(t *testing.T) {
 	newPolicyManagerTest(t, ifindex)
 
 	mustUpdatePolicy(t, ifindex, mvmOptions([]string{"*.qq.com"}, nil, nil))
-	learn(t, ifindex, "qq.com", "1.2.3.4")
+	learnUnmatched(t, ifindex, "qq.com", "1.2.3.4")
 	requireNoAllowRow(t, ifindex, "1.2.3.4", 0)
 
 	learn(t, ifindex, "a.qq.com", "5.6.7.8")

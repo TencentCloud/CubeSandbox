@@ -345,6 +345,9 @@ func TestDNSUploadRecordCarriesTheWholeFrame(t *testing.T) {
 
 	// Drive the real record through the poller: this is what proves the split
 	// honours frame_len instead of handing the padding on to the injector.
+	// The name has to be covered by a rule, or the poller keeps the reply.
+	newPolicyManagerTest(t, ifindex)
+	mustUpdatePolicy(t, ifindex, mvmOptions([]string{"qq.com"}, nil, nil))
 	injector := &recordingInjector{}
 	p := newTestPoller(injector)
 	p.handleRecord(record.RawSample)

@@ -124,11 +124,19 @@ static __always_inline bool dns_reverse_query_name_chunk(struct dns_query_state 
 
 /* Allow-list matching ---------------------------------------------------- */
 
-/* Match the reversed DNS question against the per-sandbox DNS allow trie. */
+/* Match the reversed DNS question against the per-sandbox DNS allow trie.
+ *
+ * A "*" rule is stored at prefixlen 0 with name_len 1. Longest-match lookup
+ * of a real name should return it when nothing longer hits, but a miss must
+ * not be treated as "no rule": the catch-all is probed on its own key. An
+ * exact or wildcard hit is unchanged, because a usable longer match is
+ * returned before that probe.
+ */
 static __noinline struct dns_allow_value *dns_allow_match_value(void *inner_map,
 								const struct dns_allow_key *question)
 {
 	struct dns_allow_value *value;
+	struct dns_allow_key star = {};
 	__u32 name_len = question->prefixlen >> 3;
 
 	if (question->prefixlen == 0 || question->prefixlen > DNS_MAX_NAME_LEN * 8 ||
@@ -136,9 +144,12 @@ static __noinline struct dns_allow_value *dns_allow_match_value(void *inner_map,
 		return NULL;
 
 	value = bpf_map_lookup_elem(inner_map, question);
-	if (!value || value->name_len == 0 || value->name_len > name_len)
-		return NULL;
+	if (value && value->name_len != 0 && value->name_len <= name_len)
+		return value;
 
+	value = bpf_map_lookup_elem(inner_map, &star);
+	if (!value || value->name_len != 1)
+		return NULL;
 	return value;
 }
 

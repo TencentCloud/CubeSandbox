@@ -221,10 +221,11 @@ func TestPollerInjectsFrameVerbatim(t *testing.T) {
 	}
 }
 
-// TestPollerInjectsUnlearnableFrames: NODATA and an unmatched name carry no
-// allow update, so the reply is still injected. NXDOMAIN is not a learnable
-// upload — the datapath forwards it itself — and a copy that reaches the
-// poller is not injected again.
+// TestPollerInjectsUnlearnableFrames: NODATA has no address to learn, so the
+// reply is injected. A positive answer whose QName matches no rule, including
+// the catch-all, must not be injected. NXDOMAIN is not a learnable upload —
+// the datapath forwards it itself — and a copy that reaches the poller is not
+// injected again.
 func TestPollerInjectsUnlearnableFrames(t *testing.T) {
 	const ifindex = uint32(822)
 	newPolicyManagerTest(t, ifindex)
@@ -241,7 +242,7 @@ func TestPollerInjectsUnlearnableFrames(t *testing.T) {
 				qname: "evil.com", id: 1, qtype: dns.TypeA, rcode: dns.RcodeSuccess,
 				response: true, questions: 1, answers: []string{"9.9.9.9"},
 			},
-			injectCnt: 1,
+			injectCnt: 0,
 		},
 		{
 			name: "nxdomain",

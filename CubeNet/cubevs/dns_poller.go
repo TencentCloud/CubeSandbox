@@ -232,7 +232,9 @@ func (p *DNSPoller) handleFrame(prefix, frame []byte) {
 
 	// Answers require an allow_out_v3 update before the guest may see them.
 	// A snapshot-only failure still counts: the BPF maps were updated.
-	// Negative replies have no answers and are injected as-is.
+	// No matching domain rule is not that case: nothing was written, so the
+	// reply stays dropped. Negative replies have no answers and are injected
+	// as-is.
 	if ifindex != 0 && len(resp.Answers) > 0 {
 		mgr, mgrErr := GetNetPolicyManager(ifindex)
 		switch {
