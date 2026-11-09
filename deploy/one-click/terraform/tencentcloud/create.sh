@@ -4977,6 +4977,11 @@ print_cluster_operator_help() {
 	fi
 	echo -e "    Jumpserver SSH 443 lives on cubesandbox-sg-jumpserver, not the CLB group."
 	echo ""
+
+	# 5) Observability is intentionally not managed by this Terraform deployment.
+	echo -e "${CYAN}▶ 5. Observability${NC}"
+	echo -e "    Not installed by the Terraform deployment. Use the one-click CVM installer or Kubernetes/Helm workflow."
+	echo ""
 }
 
 # ---------------------------------------------------------------

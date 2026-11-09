@@ -190,6 +190,46 @@ cp env.example .env
 sudo ./install.sh
 ```
 
+### Online Install and Optional Components
+
+`online-install.sh` is only the delivery wrapper for the one-click release. It
+downloads and extracts the bundle, then executes the same bundled `install.sh`;
+it is not a separate deployment topology. For a piped install, pass optional
+component switches through the process environment, matching bundled MinIO:
+
+```bash
+# Control node: keep bundled MinIO enabled and enable the full observability stack
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      CUBE_SANDBOX_MINIO_ENABLED=1 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+
+# Compute node: never installs MinIO; installs only OTel Collector
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      ONE_CLICK_DEPLOY_ROLE=compute \
+      ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+```
+
+`CUBE_SANDBOX_MINIO_ENABLED` and `ONE_CLICK_ENABLE_OBSERVABILITY` are desired
+state switches persisted to `.one-click.env`. Prometheus, Loki, and
+Elasticsearch endpoint variables configure destinations but do not enable
+monitoring on their own. For
+extracted local installs, edit the switch directly in `.env`; for piped online
+installs, pass it through `sudo env` as shown above. The node Collector only
+collects Cubelet sandbox resource metrics and `stdout`/`stderr` logs from
+`/data/cubelet/log/<sandbox-id>/{stdout,stderr}`.
+
+Select the log backend with `CUBE_LOGS_BACKEND=loki|elasticsearch`. Loki is the
+current and forward-looking default; choose Elasticsearch for an existing ES
+platform or richer full-text search. The installer activates one log backend
+at a time and does not duplicate logs by default.
+See the [observability guide](../../docs/guide/observability.md) for component
+versions, Collector configuration, external backends, and operations.
+
 The one-click installation path is fixed at `/usr/local/services/cubetoolbox`.
 
 New one-click installations are managed by systemd only:
@@ -325,7 +365,7 @@ Set at minimum the following in `.env`:
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
 ```
 
 If the control node runs bundled MinIO (or any S3 backend), copy `CUBE_S3_*` from
@@ -501,8 +541,8 @@ TCP 9000 from compute to the control node if using bundled MinIO:
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
-CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
+CUBE_S3_ENDPOINT=http://10.0.0.10:9000
 CUBE_S3_ACCESS_KEY_ID=cubeminio
 CUBE_S3_SECRET_ACCESS_KEY=<from control .one-click.env>
 CUBE_S3_BUCKET=cube-volumes

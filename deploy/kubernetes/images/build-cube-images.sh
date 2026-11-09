@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Build and optionally push CubeSandbox images for the Kubernetes/TKE chart.
 #
-# Component images are built from repository source and/or pre-built Release
-# artifacts (kernel/guest). cube-node intentionally uses
-# deploy/kubernetes/images/cube-node/Dockerfile because it is a Kubernetes delivery image
-# that bundles node-side runtime components.
+# Runtime images are built per component from repository source and/or pre-built
+# Release artifacts (kernel/guest). The legacy monolithic cube-node image is not
+# in the build list; node runtime pieces are built as cubelet/shim/kernel/guest/agent.
 #
 # Development shortcuts:
 #   Pass one or more image names to build only those images.
@@ -103,6 +102,7 @@ ALL_IMAGES=(
   cube-egress-net
   cube-s3lvol
   cube-webui
+  cube-observability
   cubelet
   cube-shim
   cube-kernel
@@ -657,6 +657,15 @@ build_cube_lifecycle_manager_image() {
     --build-arg "CUBE_COMMIT=${CUBE_COMMIT}" \
     --build-arg "CUBE_BUILD_TIME=${CUBE_BUILD_TIME}"
   record_built cube-lifecycle-manager
+}
+
+build_cube_observability_image() {
+  local src="${WORKTREE_ROOT}/CubeObservability"
+  local dockerfile="${src}/Dockerfile"
+  [[ -f "${dockerfile}" ]] || fail "missing CubeObservability Dockerfile: ${dockerfile}"
+  [[ -d "${src}/grafana/dashboards" ]] || fail "missing CubeObservability dashboards: ${src}/grafana/dashboards"
+  build_image cube-observability "${src}" "${dockerfile}"
+  record_built cube-observability
 }
 
 # Same as .github/workflows/release-docker-images.yml for component "webui":
@@ -1266,6 +1275,10 @@ run_selected_builds() {
   if should_build cube-webui; then
     ensure_source_tree
     build_cube_webui_image
+  fi
+
+  if should_build cube-observability; then
+    build_cube_observability_image
   fi
 
   if should_build cubelet; then

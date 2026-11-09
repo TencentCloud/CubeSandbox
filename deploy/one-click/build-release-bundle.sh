@@ -1009,6 +1009,29 @@ for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh 
   ensure_file "${PACKAGE_ROOT}/terraform/tencentcloud/${_tf}"
 done
 
+# Ship the one-click/systemd deployment scripts and the separately owned
+# CubeObservability dashboard assets inside sandbox-package.
+copy_dir_contents "${SCRIPT_DIR}/observability" "${PACKAGE_ROOT}/observability"
+copy_dir_contents "${ROOT_DIR}/CubeObservability" "${PACKAGE_ROOT}/CubeObservability"
+for _mf in \
+  install.sh \
+  otelcol/install.sh \
+  prometheus/install.sh \
+  loki/install.sh \
+  elasticsearch/install.sh \
+  grafana/install.sh; do
+  ensure_file "${PACKAGE_ROOT}/observability/${_mf}"
+done
+for _asset in \
+  Dockerfile \
+  grafana/dashboards/cubesandbox-cluster.json \
+  grafana/dashboards/cubesandbox-node.json \
+  grafana/dashboards/cubesandbox-sandbox.json \
+  grafana/dashboards/cubesandbox-logs.json \
+  grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
+  ensure_file "${PACKAGE_ROOT}/CubeObservability/${_asset}"
+done
+
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
@@ -1018,6 +1041,7 @@ find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/observability" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar_czf "${PACKAGE_TAR}" "${WORK_ROOT}" "sandbox-package"
@@ -1075,6 +1099,30 @@ for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh 
   ensure_file "${DIST_ROOT}/terraform/tencentcloud/${_tf}"
 done
 find "${DIST_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
+
+# Surface the deployment scripts and CubeObservability assets at the bundle
+# top level beside ./install.sh and ./terraform/tencentcloud/create.sh.
+copy_dir_contents "${SCRIPT_DIR}/observability" "${DIST_ROOT}/observability"
+copy_dir_contents "${ROOT_DIR}/CubeObservability" "${DIST_ROOT}/CubeObservability"
+for _mf in \
+  install.sh \
+  otelcol/install.sh \
+  prometheus/install.sh \
+  loki/install.sh \
+  elasticsearch/install.sh \
+  grafana/install.sh; do
+  ensure_file "${DIST_ROOT}/observability/${_mf}"
+done
+for _asset in \
+  Dockerfile \
+  grafana/dashboards/cubesandbox-cluster.json \
+  grafana/dashboards/cubesandbox-node.json \
+  grafana/dashboards/cubesandbox-sandbox.json \
+  grafana/dashboards/cubesandbox-logs.json \
+  grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
+  ensure_file "${DIST_ROOT}/CubeObservability/${_asset}"
+done
+find "${DIST_ROOT}/observability" -type f -name "*.sh" -exec chmod +x {} \;
 
 chmod +x \
   "${DIST_ROOT}/install.sh" \

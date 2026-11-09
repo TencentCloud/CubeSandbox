@@ -296,6 +296,7 @@ export default withMermaid(defineConfig({
             {
               text: 'Observability & Performance',
               items: [
+                { text: 'Sandbox Observability Deployment', link: '/guide/observability' },
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Network Metrics', link: '/guide/network-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
@@ -377,7 +378,8 @@ export default withMermaid(defineConfig({
               text: 'Developer Docs',
               items: [
                 { text: 'Overview', link: '/dev/' },
-                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' }
+                { text: 'Redis Key Convention', link: '/dev/redis-key-spec' },
+                { text: 'Sandbox Observability Design', link: '/dev/sandbox-otel-recommendation' }
               ]
             }
           ]
@@ -539,6 +541,7 @@ export default withMermaid(defineConfig({
             {
               text: '可观测性与性能',
               items: [
+                { text: '沙箱可观测性部署', link: '/zh/guide/observability' },
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱网络指标', link: '/zh/guide/network-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
@@ -620,7 +623,8 @@ export default withMermaid(defineConfig({
               text: '开发者文档',
               items: [
                 { text: '概览', link: '/zh/dev/' },
-                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
+                { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' },
+                { text: '沙箱可观测性设计', link: '/zh/dev/sandbox-otel-recommendation' }
               ]
             }
           ]
