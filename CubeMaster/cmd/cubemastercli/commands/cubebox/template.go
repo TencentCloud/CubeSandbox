@@ -909,7 +909,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "registry-username", Usage: "registry username"},
 		cli.StringFlag{Name: "registry-password", Usage: "registry password"},
 		cli.BoolFlag{Name: "enable-ivshmem", Usage: "boot the template build sandbox with ivshmem enabled"},
-		cli.StringFlag{Name: "cgroup-mode", Usage: "cgroup hierarchy for the template build sandbox guest: empty (default) = unified v2; legacy = guest mounts cgroup v1 itself (e.g. Android)"},
+		cli.StringFlag{Name: "cgroup-mode", Usage: "cgroup hierarchy for the template and every sandbox created from it: empty (default) = unified v2; legacy = guest mounts cgroup v1 itself (e.g. Android)"},
 
 		cli.StringSliceFlag{Name: "cmd", Usage: "override container ENTRYPOINT (command); repeat for multiple elements, e.g. --cmd /bin/sh --cmd -c"},
 		cli.StringSliceFlag{Name: "arg", Usage: "override container CMD (args); repeat for multiple elements"},

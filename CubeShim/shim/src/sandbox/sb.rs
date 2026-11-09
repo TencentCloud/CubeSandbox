@@ -52,7 +52,7 @@ use crate::{debugf, errf, infof, warnf};
 
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
-const ANNO_CGROUP_MODE: &str = "cube.master.cgroup-mode";
+const ANNO_CGROUP_MODE: &str = "cube.master.cgroup_mode";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
 /// Bounded reconnects for the restore-thaw window: a freshly restored guest
@@ -2454,11 +2454,8 @@ mod tests {
         let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
         let mut sb = SandBox::new("ut".to_string(), log, false, tx);
         let mut annos = HashMap::new();
-        annos.insert("cube.master.cgroup-mode".to_string(), "legacy".to_string());
+        annos.insert("cube.master.cgroup_mode".to_string(), "legacy".to_string());
         sb.spec = SpecBuilder::default().annotations(annos).build().unwrap();
-        // Use a real (non-ELF) placeholder file rather than a bare name so
-        // the test keeps passing once from_spec validates the kernel image
-        // format: a missing file must not fail kernel-format validation.
         let kernel = std::env::temp_dir().join("ut_cgroup_legacy_kernel_img");
         std::fs::write(&kernel, b"placeholder-non-elf-kernel-image").unwrap();
         sb.conf.kernel = kernel.to_string_lossy().to_string();

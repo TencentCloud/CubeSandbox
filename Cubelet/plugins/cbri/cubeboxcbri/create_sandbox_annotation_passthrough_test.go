@@ -16,7 +16,8 @@ import (
 )
 
 // Guest-affecting cube.master.* request annotations must reach the shim's
-// OCI spec annotations; platform-internal cube.master.* keys must not.
+// OCI spec annotations; platform-internal cube.master.* keys and incomplete
+// experimental features must not.
 func TestCreateSandboxGuestAnnotationPassthrough(t *testing.T) {
 	t.Parallel()
 
@@ -26,9 +27,11 @@ func TestCreateSandboxGuestAnnotationPassthrough(t *testing.T) {
 			InstanceType: cubebox.InstanceType_cubebox.String(),
 			Annotations: map[string]string{
 				constants.MasterAnnotationCgroupMode:           "legacy",
-				constants.MasterAnnotationEnableIvshmem:        "true",
 				constants.MasterAnnotationInstanceType:         "cubebox",
 				constants.MasterAnnotationComponentEnvdVersion: "0.0.1",
+				// cube.master.enable_ivshmem is an incomplete experimental
+				// feature and must stay dropped at this seam.
+				"cube.master.enable_ivshmem": "true",
 			},
 		},
 	}
@@ -38,7 +41,7 @@ func TestCreateSandboxGuestAnnotationPassthrough(t *testing.T) {
 
 	spec := applySpecOpts(t, context.Background(), specOpts)
 	require.Equal(t, "legacy", spec.Annotations[constants.MasterAnnotationCgroupMode])
-	require.Equal(t, "true", spec.Annotations[constants.MasterAnnotationEnableIvshmem])
+	require.NotContains(t, spec.Annotations, "cube.master.enable_ivshmem")
 	require.NotContains(t, spec.Annotations, constants.MasterAnnotationInstanceType)
 	require.NotContains(t, spec.Annotations, constants.MasterAnnotationComponentEnvdVersion)
 }

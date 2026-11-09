@@ -251,12 +251,10 @@ const (
 	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
 	MasterAnnotationInstanceType            = "cube.master.instance.type"
 	// MasterAnnotationCgroupMode is the guest cgroup hierarchy selector for
-	// the sandbox: empty = default unified v2 hierarchy; "legacy" lets the
-	// guest mount cgroup v1 controllers itself (required by Android init).
-	MasterAnnotationCgroupMode = "cube.master.cgroup-mode"
-	// MasterAnnotationEnableIvshmem asks the shim to attach an ivshmem
-	// device to the guest (see CubeShim ANNO_ENABLE_IVSHMEM).
-	MasterAnnotationEnableIvshmem = "cube.master.enable_ivshmem"
+	// the template and every sandbox created from it: empty = default unified
+	// v2 hierarchy; "legacy" lets the guest mount cgroup v1 controllers itself
+	// (required by Android init).
+	MasterAnnotationCgroupMode = "cube.master.cgroup_mode"
 )
 
 // GuestAffectingMasterAnnotations lists the cube.master.* request-level
@@ -267,7 +265,6 @@ const (
 // silently dropped before the shim can see them.
 var GuestAffectingMasterAnnotations = []string{
 	MasterAnnotationCgroupMode,
-	MasterAnnotationEnableIvshmem,
 }
 
 // Inventory version annotations used by Ensure

@@ -747,9 +747,10 @@ type CreateTemplateFromImageReq struct {
 	// device topology.
 	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
 
-	// CgroupMode selects the cgroup hierarchy for the template build sandbox
-	// guest. Empty keeps the default unified (v2) hierarchy; "legacy" lets the
-	// guest mount cgroup v1 controllers itself (required by Android init).
+	// CgroupMode selects the cgroup hierarchy for the template and every
+	// sandbox created from it. Empty keeps the default unified (v2)
+	// hierarchy; "legacy" lets the guest mount cgroup v1 controllers itself
+	// (required by Android init).
 	CgroupMode *string `json:"cgroup_mode,omitempty"`
 
 	// Backend is the CoW store (xfs｜s3) for this template and every
