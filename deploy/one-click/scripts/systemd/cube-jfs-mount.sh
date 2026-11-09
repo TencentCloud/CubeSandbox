@@ -22,7 +22,7 @@
 #   CUBE_JFS_META_PASSWORD  optional metadata password; passed to JuiceFS as
 #                           META_PASSWORD instead of exposing it in the URL.
 #   CUBE_JFS_MOUNT_PATH     mount point, must match [cow.jfs] mount_path
-#                           (default /data/cubelet/jfs)
+#                           (default /data/cubelet/storage/jfs)
 #   CUBE_JFS_CACHE_DIR      local block cache; put it on the node's NVMe
 #                           (default /data/cubelet/jfs-cache)
 #   CUBE_JFS_CACHE_SIZE_MB  cache size limit (default 102400)
@@ -57,7 +57,7 @@ else
   JFS_IMAGE="${JFS_IMAGE_INT_DEFAULT}"
 fi
 CONTAINER_NAME="${CUBE_JFS_CONTAINER_NAME:-cube-sandbox-jfs}"
-MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
+MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs}"
 CACHE_DIR="${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
 CACHE_SIZE_MB="${CUBE_JFS_CACHE_SIZE_MB:-102400}"
 EXTRA_OPTS="${CUBE_JFS_MOUNT_OPTS:-}"

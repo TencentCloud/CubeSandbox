@@ -87,7 +87,7 @@ flowchart TB
 | 项目 | 配置 |
 |---|---|
 | JuiceFS 客户端 | `juicedata/mount:ce-v1.4.1` |
-| 挂载点 | `/data/cubelet/jfs` |
+| 挂载点 | `/data/cubelet/storage/jfs` |
 | 元数据引擎 | c1 上的 Redis 7，`redis://c1:6380/0` |
 | 对象存储 | c1 上的 MinIO，`http://c1:9000/cube-jfs` |
 | 本地缓存目录 | `/data/cubelet/jfs-cache` |

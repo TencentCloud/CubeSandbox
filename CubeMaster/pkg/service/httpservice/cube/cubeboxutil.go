@@ -938,7 +938,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 	if b := strings.TrimSpace(src.Backend); b != "" {
 		reqInOut.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	if constants.IsRemoteTrackedBackend(src.Backend) {
+	if constants.IsS3Backend(src.Backend) {
 		if raw := strings.TrimSpace(src.ExportUUIDs); raw != "" {
 			reqInOut.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
@@ -946,7 +946,9 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 
 	if placement.CrossNode {
 		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
-		reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		if constants.IsS3Backend(src.Backend) {
+			reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		}
 		if resolved := templateResolveResultFromContext(ctx); resolved != nil {
 			resolved.ChosenReplica = templatecenter.ReplicaStatus{
 				NodeID:       placement.NodeID,

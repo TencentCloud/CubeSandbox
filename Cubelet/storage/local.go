@@ -196,12 +196,9 @@ func (l *local) resetCowNodeStorage() error {
 			return fmt.Errorf("reset cubecow s3 storage: %w", err)
 		}
 	}
-	jfsEngine, _ := l.loadJFSCowState()
-	if jfsEngine != nil {
-		if err := cowResetNodeStorage(jfsEngine); err != nil {
-			return fmt.Errorf("reset cubecow jfs storage: %w", err)
-		}
-	}
+	// JFS is a cluster-wide namespace. A node reset must never call
+	// reset_node_storage on that handle because it would erase objects owned
+	// by every other node. Normal object lifecycle cleanup is driven by Cube.
 	l.Close()
 	return nil
 }
@@ -1034,19 +1031,6 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	// package NVMe cannot yank the live disk; the package catalog is
 	// still kept for Snapshot last-restore, like XFS.
 	if imp := CrossNodeSandboxImport(annotations); imp != nil {
-		if imp.SharedJFSRuntimeSnapshot {
-			devPath, err := imp.SharedJFSMemoryPath(ctx)
-			if err != nil {
-				return "", "", err
-			}
-			if devPath == "" {
-				return "", "", nil
-			}
-			// The runtime maps this immutable package image MAP_PRIVATE.
-			// Empty imported name is intentional: sandbox destroy must never
-			// delete the globally shared source.
-			return cowFileURLFromPath(devPath), "", nil
-		}
 		name, devPath, err := imp.Memory(ctx)
 		if err != nil {
 			return "", "", err

@@ -473,12 +473,14 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if or (eq $jfs.mountPath $jfs.cacheDir) (hasPrefix (printf "%s/" (trimSuffix "/" $jfs.mountPath)) $jfs.cacheDir) (hasPrefix (printf "%s/" (trimSuffix "/" $jfs.cacheDir)) $jfs.mountPath) }}
 {{- fail "cubeJuiceFS.mountPath and cubeJuiceFS.cacheDir must not overlap" }}
 {{- end }}
-{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._/-]*$" $jfs.root) }}
+{{- if and (ne $jfs.root ".") (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._/-]*$" $jfs.root)) }}
 {{- fail "cubeJuiceFS.root must be a clean relative path" }}
 {{- end }}
+{{- if ne $jfs.root "." }}
 {{- range $component := splitList "/" $jfs.root }}
 {{- if or (eq $component "") (eq $component ".") (eq $component "..") }}
 {{- fail "cubeJuiceFS.root must not contain empty, . or .. components" }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if or (contains "\"" $jfs.volumeName) (contains "\n" $jfs.volumeName) }}

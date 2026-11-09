@@ -90,9 +90,9 @@ JuiceFS volume
 Active client sessions
   SID  CLIENT HOST   REPORTED ADDRESSES  MOUNT PATH         MOUNT TIME
   ---  ------------  ------------------  -----------------  ------------------------------
-  2    a26a3780ac6f  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:46:15.482143729Z
-  1    c9af1d5570f4  172.17.0.3          /data/cubelet/jfs  2026-10-28T08:43:29.693002719Z
-  3    30e38b8072fe  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:49:31.946778689Z
+  2    a26a3780ac6f  172.17.0.2          /data/cubelet/storage/jfs  2026-10-28T08:46:15.482143729Z
+  1    c9af1d5570f4  172.17.0.3          /data/cubelet/storage/jfs  2026-10-28T08:43:29.693002719Z
+  3    30e38b8072fe  172.17.0.2          /data/cubelet/storage/jfs  2026-10-28T08:49:31.946778689Z
 ```
 
 ### Storage migration
@@ -181,10 +181,10 @@ For later changes to the JuiceFS image, storage endpoints, or mount options, see
 kubectl get job,daemonset,pod -n cube-system
 
 kubectl exec -n cube-system daemonset/cube-juicefs -c juicefs -- \
-  findmnt -T /data/cubelet/jfs
+  findmnt -T /data/cubelet/storage/jfs
 
 kubectl exec -n cube-system daemonset/cube-node -c cubelet -- \
-  findmnt -T /data/cubelet/jfs
+  findmnt -T /data/cubelet/storage/jfs
 ```
 
 Both mount checks must report `fuse.juicefs`. Then create a template with `--backend jfs`; existing XFS templates are not converted automatically.
@@ -265,7 +265,7 @@ Then delete the node record on the control node:
 cubeopscli node delete <node-id>
 ```
 
-Unmounting a node does not delete data in the shared JuiceFS filesystem. Do not directly delete `CUBE_JFS_ROOT/nodes/<node-name>`; the cluster may still reference templates, snapshots, or paused sandbox data stored there.
+Unmounting a node does not delete data in the shared JuiceFS filesystem. The shared namespace under `CUBE_JFS_ROOT` (`objects/`, `snapshots/`, and `pause-snapshots/`) is cluster-wide: templates, snapshots, and paused sandbox data stored there may still be referenced by other nodes, so do not delete these directories directly.
 
 ## JFS configuration notes
 
@@ -273,9 +273,12 @@ The `CUBE_JFS_*` variables can be adjusted in `.env` / `.one-click.env`. Most of
 
 | Variable | Default | Description |
 |---|---|---|
-| `CUBE_JFS_MOUNT_PATH` | `/data/cubelet/jfs` | Mount point |
+| `CUBE_JFS_MOUNT_PATH` | `/data/cubelet/storage/jfs` | Mount point |
+| `CUBE_JFS_ROOT` | `.` | Store the shared namespace directly at the mount point |
 | `CUBE_JFS_CACHE_DIR` | `/data/cubelet/jfs-cache` | Local cache directory holding both the read cache and write staging; put it on the node's NVMe/SSD data disk |
 | `CUBE_JFS_CACHE_SIZE_MB` | `102400` (100 GiB) | Upper bound for the read cache |
+
+> **All nodes must use the same `CUBE_JFS_MOUNT_PATH` (and `CUBE_JFS_ROOT`).** Snapshot catalog entries record absolute paths under the mount point, so a node mounted at a different path cannot resolve packages created by other nodes.
 
 ### Cache directory and sizing
 
@@ -326,7 +329,7 @@ Common causes include:
 ### The container runs but the host has no mount
 
 ```bash
-findmnt -T /data/cubelet/jfs
+findmnt -T /data/cubelet/storage/jfs
 docker inspect cube-sandbox-jfs --format '{{.State.Status}}'
 ```
 

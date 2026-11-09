@@ -26,9 +26,9 @@ The JuiceFS solution keeps this overall file-operation model while adding cross-
 
 <JuiceFSArchitecture mode="architecture" />
 
-The diagram above shows Cube's JuiceFS architecture. The Redis metadata engine and MinIO object storage are on the control node, although their configuration can point to other machines. A JuiceFS client runs on every node, and every node mounts the same JuiceFS volume. All nodes see the same file view on that volume: for example, a file created by node A under `/data/cubelet/jfs` is also visible to node B under `/data/cubelet/jfs`.
+The diagram above shows Cube's JuiceFS architecture. The Redis metadata engine and MinIO object storage are on the control node, although their configuration can point to other machines. A JuiceFS client runs on every node, and every node mounts the same JuiceFS volume. All nodes see the same file view on that volume: for example, a file created by node A under `/data/cubelet/storage/jfs` is also visible to node B under `/data/cubelet/storage/jfs`.
 
-Each node has separate `raw` read caches and `rawstaging` write caches for performance. The cache directories can use any filesystem; only `/data/cubelet/jfs` uses the JuiceFS volume (JuiceFS filesystem) as its backend.
+Each node has separate `raw` read caches and `rawstaging` write caches for performance. The cache directories can use any filesystem; only `/data/cubelet/storage/jfs` uses the JuiceFS volume (JuiceFS filesystem) as its backend.
 
 ## Design flows
 

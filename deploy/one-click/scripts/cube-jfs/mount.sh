@@ -32,8 +32,8 @@ if [[ "${action}" == "mount" ]]; then
   : "${CUBE_JFS_META_URL:?set CUBE_JFS_META_URL in ${ENV_FILE}}"
 fi
 
-mount_path="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
-root="${CUBE_JFS_ROOT:-cube}"
+mount_path="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs}"
+root="${CUBE_JFS_ROOT:-.}"
 cache_dir="${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
 mount_wait_seconds="${CUBE_JFS_MOUNT_WAIT_SECONDS:-30}"
 [[ "${mount_wait_seconds}" =~ ^[0-9]+$ ]] \

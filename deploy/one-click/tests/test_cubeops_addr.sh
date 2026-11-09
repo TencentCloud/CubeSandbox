@@ -214,8 +214,8 @@ test_cubelet_start_restores_jfs_config() {
   local path="${ONE_CLICK_DIR}/scripts/systemd/cubelet-start.sh"
   assert_contains "${path}" "write_cubelet_jfs_config"
   assert_contains "${path}" 'ONE_CLICK_ENABLE_JFS:-0'
-  assert_contains "${path}" 'CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs'
-  assert_contains "${path}" 'CUBE_JFS_ROOT:-cube'
+  assert_contains "${path}" 'CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs'
+  assert_contains "${path}" 'CUBE_JFS_ROOT:-.}'
   assert_contains "${path}" 'CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache'
 }
 
@@ -230,10 +230,10 @@ test_jfs_config_restore_uses_runtime_values() {
   [plugins."io.cubelet.internal.v1.images"]
     runtime_type = "io.containerd.cube.v2"
 EOF
-  write_cubelet_jfs_config "${cfg}" "/data/cubelet/jfs" "cube" "/data/cubelet/jfs-cache" 1
+  write_cubelet_jfs_config "${cfg}" "/data/cubelet/storage/jfs" "." "/data/cubelet/jfs-cache" 1
   assert_contains "${cfg}" 'enable = true'
-  assert_contains "${cfg}" 'mount_path = "/data/cubelet/jfs"'
-  assert_contains "${cfg}" 'root = "cube"'
+  assert_contains "${cfg}" 'mount_path = "/data/cubelet/storage/jfs"'
+  assert_contains "${cfg}" 'root = "."'
   assert_contains "${cfg}" 'cache_dir = "/data/cubelet/jfs-cache"'
 }
 

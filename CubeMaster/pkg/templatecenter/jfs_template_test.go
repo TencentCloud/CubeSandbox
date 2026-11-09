@@ -53,22 +53,19 @@ func TestTemplateBuildTargetsBuildsJFSOnOneSchedulableNode(t *testing.T) {
 	}
 }
 
-func TestDeleteJFSTemplateCleansUpEveryHealthyNode(t *testing.T) {
+func TestDeleteJFSTemplateCleansUpOwningLocatorOnly(t *testing.T) {
 	origReplicaCleanup, origArtifactCleanup := runReplicaCleanup, runArtifactCleanup
 	origMetadataCleanup, origJobCleanup := runMetadataCleanup, runTemplateJobCleanup
-	origInUse, origNodes := runInUseCheck, sharedTemplateNodes
+	origInUse := runInUseCheck
 	t.Cleanup(func() {
 		runReplicaCleanup, runArtifactCleanup = origReplicaCleanup, origArtifactCleanup
 		runMetadataCleanup, runTemplateJobCleanup = origMetadataCleanup, origJobCleanup
-		runInUseCheck, sharedTemplateNodes = origInUse, origNodes
+		runInUseCheck = origInUse
 	})
 	noop := func(context.Context, string) error { return nil }
 	runArtifactCleanup = func(context.Context, string, *templateCleanupTargets) error { return nil }
 	runMetadataCleanup, runTemplateJobCleanup = noop, noop
 	runInUseCheck = func(context.Context, string, string) (bool, error) { return false, nil }
-	sharedTemplateNodes = func(string) []*node.Node {
-		return []*node.Node{testNode("a", "10.0.0.1"), testNode("b", "10.0.0.2")}
-	}
 
 	run := func(backend string) []templateCleanupLocator {
 		var got []templateCleanupLocator
@@ -90,7 +87,7 @@ func TestDeleteJFSTemplateCleansUpEveryHealthyNode(t *testing.T) {
 		t.Fatalf("xfs cleanup locators = %+v, want the replica only", got)
 	}
 	got := run("jfs")
-	if len(got) != 2 || got[1].NodeID != "b" {
-		t.Fatalf("jfs cleanup locators = %+v, want the replica plus node b", got)
+	if len(got) != 1 || got[0].NodeID != "a" {
+		t.Fatalf("jfs cleanup locators = %+v, want only the owning locator", got)
 	}
 }
