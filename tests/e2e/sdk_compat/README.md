@@ -46,6 +46,45 @@ Documentation:
 Shared timeout, reporting, tracing, and lifecycle variables are listed in the
 [Environment](#environment) section.
 
+## Dynamic S3 Volume E2E
+
+`cases/volume/test_private_data.py` adds two mount cases for v2 S3 bindings:
+a writer sandbox syncs data before a new sandbox reads the same volume ID,
+and deleting volume A leaves data readable from sibling-prefix volume B in a
+new sandbox. Create, GET and list responses must omit `private_data`. Four raw
+HTTP checks reject input over 1024 UTF-8 bytes (ASCII and multibyte), NUL and
+real non-BMP characters under the current API contract.
+
+The mount cases require a valid `CUBE_TEMPLATE_ID` and
+`SDK_E2E_VOLUME_CRED_REF`, a reference name configured on the Controller and
+every Cubelet host that may run these sandboxes. The plugin default bucket must
+already exist, and the referenced credentials must permit access to the test
+prefix. The runner uses its normal CubeAPI authorization and this reference
+name; it receives no object storage keys or extra MinIO credentials.
+
+```bash
+export SDK_E2E_VOLUME_CRED_REF=e2e-test
+# Optional relative root; defaults to sdk-e2e/. Each case appends a UUID/a/ or UUID/b/.
+export SDK_E2E_VOLUME_PREFIX=ws/sdk-e2e/
+pytest --run-e2e -q cases/volume/test_private_data.py --sdk-e2e-backends=cubesandbox
+
+# Legacy Volume regressions use no dynamic credential reference.
+pytest --run-e2e -q cases/volume/test_crud.py cases/volume/test_bind_unbind.py \
+  cases/volume/test_read_only.py --sdk-e2e-backends=cubesandbox
+```
+
+An unset or blank reference skips only the two dynamic mount cases; legacy
+Volume cases and the raw input checks retain their existing gates. A configured
+bad reference, v2 endpoint error or mount failure fails the test. The driver
+name may be a deployment alias; it defaults to `s3`.
+
+Cleanup kills all sandboxes before deleting their volumes and reports failures.
+A create transport failure has an unknown result: diagnostics identify its
+unique name and prefix for inspection rather than racing it with a DELETE.
+These mount assertions do not establish cold host FUSE caches, cross-node
+placement, direct object counts or compatibility with other S3 providers.
+Collection and skipped cases are offline checks, not live E2E results.
+
 ## Prepare Template
 
 Create a Code Interpreter capable template before running live E2E tests. The
@@ -421,7 +460,11 @@ Optional:
   is skipped when the template does not exist.
 - `SDK_E2E_VOLUME_PLUGIN`: run Volume Plugin cases (CRUD and sandbox
   `volumeMounts` bind/unbind). Defaults to `true`; set `false` to skip.
-- `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `s3`.
+- `SDK_E2E_VOLUME_DRIVER`: driver/plugin name for legacy and v2 volume creates. Defaults to `s3`.
+- `SDK_E2E_VOLUME_CRED_REF`: server-side credential reference for the two dynamic
+  S3 mount cases. Missing or blank skips only those two cases.
+- `SDK_E2E_VOLUME_PREFIX`: optional relative root for UUID-isolated dynamic test
+  prefixes. Defaults to `sdk-e2e/`; use a permitted root such as `ws/sdk-e2e/`.
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`: seconds to wait for delete-while-bound `409`
   and post-unbind `204`. Defaults to `60`.
 - `SDK_E2E_RESTART_POLICY_WAIT`: seconds to wait for one restart-status
@@ -528,7 +571,7 @@ Current capability domains:
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
   validation, runtime bind-mount failures, cross-sandbox sharing boundaries, and
   multi-generation snapshot restore, rollback, and clone external-reference semantics.
-- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind and per-sandbox read-only attachment enforcement (CubeSandbox only; default driver `s3`). Runs with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Requires the default-install S3 plugin + MinIO and `cubesandbox` >= 0.6.0.
+- `cases/volume/`: Volume Plugin CRUD, bind/unbind, read-only attachments, v2 same-volume data readback, sibling-prefix deletion isolation and raw private-data input rejection (CubeSandbox only; default driver `s3`). Runs with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Dynamic mount cases also require `SDK_E2E_VOLUME_CRED_REF`. Requires the S3 plugin and `cubesandbox` >= 0.6.0.
 - `cases/auth/`: `CUBE_API_KEY` simple-key authentication against the CubeAPI
   control plane — `X-API-Key`/`Bearer` accept, wrong/missing 401, `/health`
   exempt (CubeSandbox only). Skipped unless the server was started with
