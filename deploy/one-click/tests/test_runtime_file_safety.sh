@@ -1043,8 +1043,19 @@ test_external_redis_sentinel_wiring() {
   if ! grep -Fq 'return "volumes/" + volumeID + "/"' "${volume_s3_config}"; then
     fail "VolumePrefix must be the trailing-slash directory object key"
   fi
-  if ! grep -Fq 'config.VolumePrefix(volumeID)' "${volume_s3_api}"; then
-    fail "CreateVolumeDir must PUT the trailing-slash directory object"
+  if grep -Fq 'func (c *Client) CreateVolumeDir(' "${volume_s3_api}"; then
+    if ! grep -Fq 'key := config.VolumePrefix(volumeID)' "${volume_s3_api}" || \
+       ! grep -Fq 'c.inner.PutObject(ctx, c.bucket, key,' "${volume_s3_api}"; then
+      fail "CreateVolumeDir must PUT the trailing-slash directory object"
+    fi
+  else
+    # Newer S3 plugins pass the resolved prefix into a shared CreatePrefix API.
+    if ! grep -Fq 'client.CreatePrefix(ctx, volume.state.Prefix)' "${volume_s3_main}" || \
+       ! grep -Fq 'if err := checkPrefix(prefix); err != nil {' "${volume_s3_api}" || \
+       ! grep -Fq 'strings.HasSuffix(prefix, "/")' "${volume_s3_api}" || \
+       ! grep -Fq 'c.inner.PutObject(ctx, c.bucket, prefix,' "${volume_s3_api}"; then
+      fail "CreatePrefix must validate and PUT the trailing-slash directory object"
+    fi
   fi
   if grep -Fq -- '-ocompat_dir' "${volume_s3_mount}"; then
     fail "s3fs mount must not hardcode -ocompat_dir (unknown on s3fs 1.90; create writes dir/ instead)"
