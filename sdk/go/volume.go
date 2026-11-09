@@ -10,12 +10,16 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxVolumeNameLen mirrors CubeAPI's `MAX_VOLUME_NAME_LEN` enforced in
 // `CubeAPI/src/handlers/volumes.rs`. Validating client-side turns an opaque
 // HTTP 400 into a clean error at the call site.
 const MaxVolumeNameLen = 128
+
+// MaxVolumePrivateDataLen is the UTF-8 byte limit for opaque plugin input.
+const MaxVolumePrivateDataLen = 1024
 
 // volumeNameRe mirrors the `^[a-zA-Z0-9_-]+$` rule enforced by CubeAPI for
 // volume names. Volume IDs use the same character class (named volumes have
@@ -65,17 +69,61 @@ type CreateVolumeOptions struct {
 	Driver string
 }
 
+// CreateVolumeWithPrivateDataOptions configures the versioned create API.
+// PrivateData is opaque plugin input, never plaintext credentials. It is not
+// returned in VolumeInfo. It must be valid UTF-8, at most 1024 bytes, contain
+// no NUL or characters outside the BMP. An empty string is forwarded explicitly.
+type CreateVolumeWithPrivateDataOptions struct {
+	Name        string
+	Driver      string
+	PrivateData string
+}
+
 // CreateVolume creates a new persistent volume via POST /volumes.
 func (c *Client) CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeInfo, error) {
-	if err := validateVolumeName(opts.Name); err != nil {
+	return c.createVolume(ctx, opts.Name, opts.Driver, nil)
+}
+
+// CreateVolumeWithPrivateData creates via POST /v2/volumes. Existing get,
+// list, delete and sandbox mount APIs work with the returned volume ID.
+// Requires CubeAPI, every serving CubeMaster, and Cubelet at version 0.8.0 or
+// newer, a plugin that supports this protocol, and this SDK at version 0.8.0
+// or newer. Upgrade all serving CubeMasters
+// before using this method: an older Master can silently ignore the input even
+// when the API reports success. This method never falls back to /volumes.
+func (c *Client) CreateVolumeWithPrivateData(ctx context.Context, opts CreateVolumeWithPrivateDataOptions) (*VolumeInfo, error) {
+	if !utf8.ValidString(opts.PrivateData) {
+		return nil, fmt.Errorf("private_data must be valid UTF-8")
+	}
+	if len(opts.PrivateData) > MaxVolumePrivateDataLen {
+		return nil, fmt.Errorf("private_data exceeds max length %d", MaxVolumePrivateDataLen)
+	}
+	if strings.ContainsRune(opts.PrivateData, '\x00') {
+		return nil, fmt.Errorf("private_data must not contain NUL")
+	}
+	for _, r := range opts.PrivateData {
+		if r > 0xffff {
+			return nil, fmt.Errorf("private_data must not contain characters outside the BMP")
+		}
+	}
+	return c.createVolume(ctx, opts.Name, opts.Driver, &opts.PrivateData)
+}
+
+func (c *Client) createVolume(ctx context.Context, name, driver string, privateData *string) (*VolumeInfo, error) {
+	if err := validateVolumeName(name); err != nil {
 		return nil, err
 	}
-	payload := map[string]any{"name": opts.Name}
-	if opts.Driver != "" {
-		payload["driver"] = opts.Driver
+	payload := map[string]any{"name": name}
+	if driver != "" {
+		payload["driver"] = driver
+	}
+	path := "/volumes"
+	if privateData != nil {
+		path = "/v2/volumes"
+		payload["private_data"] = *privateData
 	}
 	var volume VolumeInfo
-	if err := c.doJSON(ctx, http.MethodPost, "/volumes", payload, &volume, http.StatusOK, http.StatusCreated); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, path, payload, &volume, http.StatusOK, http.StatusCreated); err != nil {
 		return nil, err
 	}
 	return &volume, nil

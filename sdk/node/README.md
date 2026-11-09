@@ -381,6 +381,35 @@ try {
 `VolumeInfo`'s `toString`/`console.log` output masks `token` (a data-plane
 credential) — read the field directly when the actual value is needed.
 
+To pass opaque plugin input, use the explicit new creation method. The API and
+selected plugin must support this feature; existing `Volume.create` calls remain
+on `/volumes`.
+
+```ts
+const volume = await Volume.createWithPrivateData({
+  name: "my-data",
+  driver: "my-storage",
+  privateData: JSON.stringify({ bucket: "my-bucket", prefix: "work/", cred_ref: "account-7" }),
+}); // POST /v2/volumes
+```
+
+This method requires CubeAPI, every serving CubeMaster, and Cubelet at
+**0.8.0 or newer**, a plugin that supports this protocol, and the Node SDK at
+**0.8.0 or newer**. `privateData` must be valid
+UTF-8 of at most 1024 bytes, contain no NUL, and contain no characters outside
+the BMP. Invalid surrogate pairs and supplementary-plane characters are
+rejected before any request. Empty strings are forwarded. API versions without
+`/v2/volumes` return an error without a legacy fallback. The returned `Volume`
+uses the existing query, delete and sandbox mount APIs.
+
+Upgrade order: check or upgrade the Controller/Node plugins for Create input A
+and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,
+then deploy the new CubeAPI and begin using this method. A new API connected to
+an old Master can return 201 while silently dropping A; the old Master also omits
+B on Destroy. The SDK does not detect this mixed-version deployment. Keep compatible
+Masters serving existing A/B-dependent volumes during any rollback. See the
+[plugin upgrade guide](../../docs/guide/volume-plugin.md#private_data-upgrade-order).
+
 ### List & health check
 
 ```ts
@@ -462,6 +491,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | Method | Description |
 |---|---|
 | `Volume.create(options?)` | `POST /volumes` — create a volume (`name`/`driver` optional) |
+| `Volume.createWithPrivateData(options)` | `POST /v2/volumes` — create with required `privateData` string |
 | `Volume.list(options?)` | `GET /volumes` — list volumes (no tokens) |
 | `Volume.getInfo(volumeId, options?)` | `GET /volumes/:id` — get one volume, includes `token` |
 | `Volume.connect(volumeId, options?)` | e2b-compatible connect (wraps `getInfo`) |
