@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/autoscale"
 	nmhandler "github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/nodemetric"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/opsagent"
@@ -41,6 +42,7 @@ type Server struct {
 	importer *warehouse.Importer
 	blobs    warehouse.BlobStore
 	cancel   context.CancelFunc
+	scaler   *autoscale.Reconciler
 }
 
 // New creates a new CubeOps server. blobs may be nil; warehouse routes then
@@ -97,6 +99,7 @@ func (s *Server) Start() error {
 	impCtx, impCancel := context.WithCancel(context.Background())
 	s.cancel = impCancel
 	go s.importer.Run(impCtx)
+	s.startAutoscale(impCtx)
 
 	s.httpSrv = &http.Server{
 		Addr:              s.cfg.Bind,
@@ -113,6 +116,28 @@ func (s *Server) Start() error {
 
 	logging.G(context.Background()).Infof("CubeOps starting on %s", s.cfg.Bind)
 	return s.httpSrv.ListenAndServe()
+}
+
+// startAutoscale launches the compute-node autoscaler when enabled. A bad
+// configuration or a missing in-cluster identity disables it with an error
+// log rather than failing CubeOps startup.
+func (s *Server) startAutoscale(ctx context.Context) {
+	cfg := s.cfg.Autoscale
+	if !cfg.Enable {
+		return
+	}
+	log := logging.G(ctx)
+	if err := cfg.Validate(); err != nil {
+		log.Errorf("autoscale disabled: %v", err)
+		return
+	}
+	kube, err := autoscale.NewInClusterClient(cfg)
+	if err != nil {
+		log.Errorf("autoscale disabled: %v", err)
+		return
+	}
+	s.scaler = autoscale.New(cfg, s.nodeSvc, s.cm, kube, s.store.WithAdvisoryLock)
+	go s.scaler.Run(ctx)
 }
 
 // Shutdown gracefully stops the server.
@@ -189,7 +214,9 @@ func (s *Server) buildRouter() *gin.Engine {
 
 	// Internal routes — no auth. These endpoints must not be exposed through
 	// nginx or a public Bind address. Callers: CubeMaster, cubeopscli.
-	internalH.Register(r.Group("/internal/v1"))
+	internalV1 := r.Group("/internal/v1")
+	internalH.Register(internalV1)
+	internalV1.GET("/autoscale/status", s.autoscaleStatus)
 
 	// Internal routes — no auth. These endpoints must not be exposed through
 	// nginx or a public Bind address. Callers: Cubelet (register + heartbeat).
@@ -299,4 +326,13 @@ func callerFromHeader(c *gin.Context) string {
 		return caller
 	}
 	return "cubeops-client"
+}
+
+// autoscaleStatus reports the compute-node autoscaler's last pass.
+func (s *Server) autoscaleStatus(c *gin.Context) {
+	if s.scaler == nil {
+		c.JSON(http.StatusOK, gin.H{"enabled": false})
+		return
+	}
+	c.JSON(http.StatusOK, s.scaler.Status())
 }
