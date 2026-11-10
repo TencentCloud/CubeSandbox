@@ -9,13 +9,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/moby/sys/mountinfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -188,14 +191,11 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 	// not on the per-sandbox leaf component. The kernel records fully resolved
 	// mountpoints in /proc/self/mountinfo, so when any ancestor of
 	// hostDirBasePath is a symlink (e.g. /data -> /mnt/ssd/data),
-	// IsMountPoint's string comparison would otherwise miss the mounts, leaking
-	// them and letting os.RemoveAll wipe the real backing directory.
+	// mountinfo prefix matching would otherwise miss the mounts.
 	//
 	// We deliberately do NOT EvalSymlinks the leaf <sandboxID>: if that
-	// component were ever replaced by a symlink, resolving it would make
-	// os.RemoveAll follow the link and delete the target's contents (a
-	// link-following deletion hazard). Keeping the leaf unresolved means
-	// RemoveAll only unlinks the symlink itself.
+	// component were ever replaced by a symlink, we only unlink the symlink
+	// itself without traversing into the target.
 	resolvedBase, err := filepath.EvalSymlinks(hostDirBasePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -205,43 +205,206 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 	}
 	sandboxDir := filepath.Join(resolvedBase, info.SandboxID)
 
-	if _, err := os.Lstat(sandboxDir); err != nil {
+	fi, err := os.Lstat(sandboxDir)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("cleanupHostDirVolumes: stat %s: %w", sandboxDir, err)
 	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		if err := os.Remove(sandboxDir); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cleanupHostDirVolumes: remove %s: %w", sandboxDir, err)
+		}
+		return nil
+	}
 
-	if err := filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
+	if err := unmountHostDirTree(sandboxDir); err != nil {
+		log.G(ctx).Warnf("cleanupHostDirVolumes: unmount %s: %v", sandboxDir, err)
+		return err
+	}
+
+	if err := removeEmptyHostDirTree(sandboxDir); err != nil {
+		log.G(ctx).Warnf("cleanupHostDirVolumes: remove %s: %v", sandboxDir, err)
+		return err
+	}
+	return nil
+}
+
+// unmountHostDirTree detaches all mounts at or under sandboxDir in deepest-first
+// order (including stacked mounts on the same mountpoint).
+func unmountHostDirTree(sandboxDir string) error {
+	mounts, err := mountinfo.GetMounts(mountinfo.PrefixFilter(sandboxDir))
+	if err != nil {
+		return fmt.Errorf("list mounts under %s: %w", sandboxDir, err)
+	}
+
+	seen := make(map[string]struct{}, len(mounts))
+	targets := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		if m == nil || m.Mountpoint == "" {
+			continue
+		}
+		if _, ok := seen[m.Mountpoint]; ok {
+			continue
+		}
+		seen[m.Mountpoint] = struct{}{}
+		targets = append(targets, m.Mountpoint)
+	}
+
+	sort.SliceStable(targets, func(i, j int) bool {
+		return len(targets[i]) > len(targets[j])
+	})
+
+	for _, target := range targets {
+		if err := detachAllMountsAt(target); err != nil {
 			return err
 		}
-		if !d.IsDir() || path == sandboxDir {
-			return nil
+	}
+
+	// Also walk the directory tree to catch any mountpoint not returned by the
+	// mountinfo prefix pass (e.g. kernel-level mount root detected via
+	// openat2(RESOLVE_NO_XDEV) / statx(STATX_ATTR_MOUNT_ROOT) / st_dev).
+	return filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
+			return walkErr
 		}
-		mounted, err := utils.IsMountPoint(path)
+		mounted, err := isActiveMountPoint(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
 			return fmt.Errorf("check mount point %s: %w", path, err)
 		}
-		if mounted {
-			if err := unix.Unmount(path, unix.MNT_DETACH); err != nil &&
-				!errors.Is(err, unix.EINVAL) && !os.IsNotExist(err) {
-				return fmt.Errorf("unmount %s: %w", path, err)
-			}
+		if !mounted {
+			return nil
+		}
+		if err := detachAllMountsAt(path); err != nil {
+			return err
+		}
+		if d.IsDir() && path != sandboxDir {
 			return filepath.SkipDir
 		}
 		return nil
-	}); err != nil {
-		log.G(ctx).Warnf("cleanupHostDirVolumes: skip removeAll %s: %v", sandboxDir, err)
+	})
+}
+
+func detachAllMountsAt(target string) error {
+	const maxStackedMounts = 64
+	for i := 0; i < maxStackedMounts; i++ {
+		err := unix.Unmount(target, unix.MNT_DETACH)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) || os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("unmount %s: %w", target, err)
+	}
+	return fmt.Errorf("unmount %s: exceeded %d stacked mounts", target, maxStackedMounts)
+}
+
+// isActiveMountPoint combines kernel-level mount boundary detection
+// (openat2 RESOLVE_NO_XDEV, statx STATX_ATTR_MOUNT_ROOT, st_dev comparison)
+// with mountinfo lookup so neither bind mounts nor cross-device mounts can slip
+// through undetected.
+func isActiveMountPoint(path string) (bool, error) {
+	mounted, sure, err := mountinfo.MountedFast(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if sure {
+		return mounted, nil
+	}
+
+	likelyNot, err := utils.IsLikelyNotMountPoint(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !likelyNot {
+		return true, nil
+	}
+
+	mounted, err = utils.IsMountPoint(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return mounted, nil
+}
+
+// removeEmptyHostDirTree removes the staging directory hierarchy bottom-up using
+// os.Remove only (never os.RemoveAll). Before removing any directory, it
+// verifies that the directory is neither a remaining mount point nor on a
+// different device from its parent. If a mount remains or a directory is
+// non-empty, removal fails closed without deleting user data.
+func removeEmptyHostDirTree(sandboxDir string) error {
+	parentDir := filepath.Dir(sandboxDir)
+	var parentStat unix.Stat_t
+	if err := unix.Lstat(parentDir, &parentStat); err != nil {
+		return fmt.Errorf("stat parent %s: %w", parentDir, err)
+	}
+	expectedDev := parentStat.Dev
+
+	var dirs []string
+	err := filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
+			return walkErr
+		}
+		var st unix.Stat_t
+		if err := unix.Lstat(path, &st); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("lstat %s: %w", path, err)
+		}
+		if st.Dev != expectedDev {
+			return fmt.Errorf("refusing to remove %s: device id (%d) differs from parent (%d), mount still active",
+				path, st.Dev, expectedDev)
+		}
+		mounted, err := isActiveMountPoint(path)
+		if err != nil {
+			return fmt.Errorf("verify mount status %s: %w", path, err)
+		}
+		if mounted {
+			return fmt.Errorf("refusing to remove active mount point %s", path)
+		}
+		if !d.IsDir() {
+			return fmt.Errorf("refusing to remove unexpected non-directory entry %s in hostdir staging tree", path)
+		}
+		dirs = append(dirs, path)
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
-	if err := os.RemoveAll(sandboxDir); err != nil {
-		log.G(ctx).Warnf("cleanupHostDirVolumes: removeAll %s: %v", sandboxDir, err)
-		return err
+	for i := len(dirs) - 1; i >= 0; i-- {
+		dir := dirs[i]
+		mounted, err := isActiveMountPoint(dir)
+		if err != nil {
+			return fmt.Errorf("re-verify mount status %s: %w", dir, err)
+		}
+		if mounted {
+			return fmt.Errorf("refusing to remove active mount point %s", dir)
+		}
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("rmdir %s: %w", dir, err)
+		}
 	}
 	return nil
 }
