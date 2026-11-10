@@ -525,6 +525,8 @@ ONE_CLICK_TOGGLE_KEYS=(
   CUBE_LOGS_BACKEND
   CUBE_SANDBOX_MINIO_ENABLED
   CUBE_PVM_ENABLE
+  OTEL_EXPORTER_OTLP_ENDPOINT
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 )
 
 # snapshot_one_click_toggles: capture this-run operator intent for
@@ -560,6 +562,19 @@ snapshot_one_click_toggles() {
           ;;
       esac
       ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${value}"
+    fi
+  done
+  return 0
+}
+
+# Replace raw dotenv values with shell-interpreted values after load_env_file.
+# Only keys accepted by snapshot_one_click_toggles are captured, so copied
+# template defaults for MinIO, logs, and observability stay non-explicit.
+capture_one_click_toggle_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${!key-}"
     fi
   done
   return 0

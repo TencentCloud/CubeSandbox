@@ -15,6 +15,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -43,7 +46,14 @@ func cleanupFailedRootfsArtifact(ctx context.Context, artifact *models.RootfsArt
 	if artifact == nil {
 		return nil
 	}
-	return cleanupArtifactFully(ctx, artifact.ArtifactID, instanceType, templateID)
+	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageCleanupMaster,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrArtifactID, artifact.ArtifactID),
+			attribute.String(telemetry.AttrTemplateID, templateID),
+		))
+	err := cleanupArtifactFully(ctx, artifact.ArtifactID, instanceType, templateID)
+	telemetry.End(span, err)
+	return err
 }
 
 func cleanupLocalRootfsArtifact(artifactID, ext4Path string) error {

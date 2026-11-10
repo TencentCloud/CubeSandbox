@@ -40,9 +40,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestIsImageStorageMediaType(t *testing.T) {
@@ -1285,6 +1287,78 @@ func TestTransformError(t *testing.T) {
 				assert.Error(t, result)
 			}
 		})
+	}
+}
+
+func TestTaskWaitContextKeepsOnlyTheNamespace(t *testing.T) {
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{1},
+		SpanID:     trace.SpanID{1},
+		TraceFlags: trace.FlagsSampled,
+	})
+	stepCtx, cancelStep := context.WithCancel(CubeLog.WithRequestTrace(
+		namespaces.WithNamespace(trace.ContextWithSpanContext(context.Background(), sc), "test-ns"),
+		&CubeLog.RequestTrace{RequestID: "req-1"},
+	))
+	defer cancelStep()
+	stepCtx, cancelDeadline := context.WithTimeout(stepCtx, time.Hour)
+	defer cancelDeadline()
+
+	waitCtx := taskWaitContext(stepCtx)
+	cancelStep()
+
+	require.ErrorIs(t, stepCtx.Err(), context.Canceled,
+		"test setup: the step context must be cancelled like the engine cancels it")
+	assert.NoError(t, waitCtx.Err(), "the wait must outlive the step that started it")
+	if _, ok := waitCtx.Deadline(); ok {
+		t.Error("the wait must not inherit the step's deadline")
+	}
+	ns, err := namespaces.NamespaceRequired(waitCtx)
+	require.NoError(t, err, "the wait still needs its namespace")
+	assert.Equal(t, "test-ns", ns)
+	assert.False(t, trace.SpanContextFromContext(waitCtx).IsValid(),
+		"the wait must not stay parented into the create trace")
+	assert.Nil(t, CubeLog.GetTraceInfo(waitCtx),
+		"the wait must not carry the create's request log fields")
+}
+
+type fakeExitTask struct {
+	exited  chan containerd.ExitStatus
+	started bool
+}
+
+func (task *fakeExitTask) Wait(ctx context.Context) (<-chan containerd.ExitStatus, error) {
+	out := make(chan containerd.ExitStatus, 1)
+	go func() {
+		select {
+		case status := <-task.exited:
+			out <- status
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
+}
+
+func (task *fakeExitTask) Start(context.Context) error {
+	task.started = true
+	return nil
+}
+
+func TestTaskExitWaitSurvivesCreateCancellationAfterStart(t *testing.T) {
+	createCtx, cancelCreate := context.WithCancel(namespaces.WithNamespace(context.Background(), "test-ns"))
+	defer cancelCreate()
+	task := &fakeExitTask{exited: make(chan containerd.ExitStatus, 1)}
+	exitCh, cancelWait, err := registerTaskExitWait(createCtx, task)
+	require.NoError(t, err)
+	defer cancelWait()
+	require.NoError(t, task.Start(createCtx))
+	cancelCreate()
+	task.exited <- containerd.ExitStatus{}
+	select {
+	case <-exitCh:
+		assert.True(t, task.started)
+	case <-time.After(time.Second):
+		t.Fatal("task exit was lost after the create context was cancelled")
 	}
 }
 

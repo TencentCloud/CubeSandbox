@@ -20,12 +20,16 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxRequest) (*cubebox.CommitSandboxResponse, error) {
@@ -35,6 +39,34 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		TemplateID: strings.TrimSpace(req.GetTemplateID()),
 		Ret:        &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
+	ctx = telemetry.ExtractGRPC(ctx)
+	ctx, span := telemetry.Start(ctx, telemetry.SpanTemplateCommit,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, req.GetRequestID()),
+			attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()),
+			attribute.String(telemetry.AttrTemplateID, rsp.TemplateID),
+		))
+	// Defer before recovery so it records the recovered response code.
+	defer func() {
+		telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode()))
+	}()
+
+	var phaseSpan trace.Span
+	endPhase := func() {
+		if phaseSpan != nil {
+			telemetry.EndWithCode(phaseSpan, int(rsp.GetRet().GetRetCode()))
+			phaseSpan = nil
+		}
+	}
+	startPhase := func(name string, attrs ...attribute.KeyValue) context.Context {
+		endPhase()
+		phaseCtx, active := telemetry.StartIfTraced(ctx, name, trace.WithAttributes(attrs...))
+		phaseSpan = active
+		return phaseCtx
+	}
+	defer endPhase()
+
 	if rsp.TemplateID == "" {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = "templateID is required"
@@ -84,11 +116,17 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
+	span.SetAttributes(attribute.String(telemetry.AttrBackend, backend))
 
+	startPhase(telemetry.SpanTemplateCommitLock, attribute.String(telemetry.AttrSandboxID, rsp.SandboxID))
 	unlock := s.sandboxLifecycleLocks.Lock(rsp.SandboxID)
 	defer unlock()
+	prepareCtx := startPhase(telemetry.SpanTemplateCommitPrepare,
+		attribute.String(telemetry.AttrSandboxID, rsp.SandboxID),
+		attribute.String(telemetry.AttrTemplateID, rsp.TemplateID),
+	)
 
-	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, rsp.SandboxID)
+	cb, err := s.cubeboxMgr.cubeboxManger.Get(prepareCtx, rsp.SandboxID)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("sandbox is not found: %v", err)
@@ -101,7 +139,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 
-	spec, err := s.getCubeboxSnapshotSpec(ctx, rsp.SandboxID)
+	spec, err := s.getCubeboxSnapshotSpec(prepareCtx, rsp.SandboxID)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to get cubebox spec: %v", err)
@@ -146,7 +184,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 	shimCapability := resolveShimSnapshotCapability(cb)
 
-	sourceRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, rsp.SandboxID, rootVolumeName)
+	sourceRootfs, err := storage.GetSandboxRootfsFor(prepareCtx, backend, rsp.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
@@ -162,7 +200,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	// Reject existing packages before preparing writable memory or metadata.
-	if err := checkCommitSnapshotDestination(ctx, backend, rsp.TemplateID, storage.InspectObjectsFor); err != nil {
+	if err := checkCommitSnapshotDestination(prepareCtx, backend, rsp.TemplateID, storage.InspectObjectsFor); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -193,7 +231,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// the sandbox's memory lineage allows it and falls back to a full capture
 	// otherwise.
 	payload, snapshotTypeForCmd, err := prepareCommitPayload(
-		ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend, mode,
+		prepareCtx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend, mode,
 	)
 	layoutErr := <-layoutReady
 	if err != nil {
@@ -233,10 +271,17 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// when degrading because no base could be resolved. AppSnapshot keeps
 	// using the default full type via its own call site.
 	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd, "snapshotMode": mode})
+	span.SetAttributes(attribute.String(telemetry.AttrSnapshotType, snapshotTypeForCmd))
+	endPhase()
 	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
 	defer frozenCancel()
 	var bindingErr error
 	var snapshotErr, rootfsErr, resumeErr error
+	phaseAttrs := []attribute.KeyValue{
+		attribute.String(telemetry.AttrSandboxID, rsp.SandboxID),
+		attribute.String(telemetry.AttrTemplateID, rsp.TemplateID),
+	}
+	captureAttrs := append(phaseAttrs, attribute.String(telemetry.AttrSnapshotType, snapshotTypeForCmd))
 
 	// The legacy sequence: commit rootfs first, then capture memory, which is
 	// v0.7.1 behaviour for this entry point and deliberately differs from
@@ -251,22 +296,28 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		}
 		rootfsErr, snapshotErr = runLegacySnapshot(
 			func() (err error) {
-				rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+				rootfsCtx, span := telemetry.StartIfTraced(frozenCtx, telemetry.SpanTemplateCommitRootfs,
+					trace.WithAttributes(phaseAttrs...))
+				defer endCommitPhase(span, &err)
+				rootfsObject, err = storage.CommitRootfsFor(rootfsCtx, backend, sourceRootfs, rsp.TemplateID)
 				return err
 			},
-			func() error {
+			func() (err error) {
+				captureCtx, span := telemetry.StartIfTraced(frozenCtx, telemetry.SpanTemplateCommitCapture,
+					trace.WithAttributes(captureAttrs...))
+				defer endCommitPhase(span, &err)
 				return captureLegacyCommitMemory(cb, rsp.TemplateID, func() error {
 					// Legacy cube-runtime clears soft-dirty state as soon as
 					// memory capture succeeds. Durably invalidate the old
 					// baseline before starting so metadata-fixup failures
 					// force the next commit to take a full snapshot.
 					bindingErr = persistRuntimeSnapshotBinding(
-						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, "",
+						captureCtx, s.cubeboxMgr.cubeboxManger, cb, "",
 					)
 					return bindingErr
 				}, func() error {
 					return s.captureLegacyMemory(
-						frozenCtx, cb, rsp.SandboxID, spec, layout.MetaWork, payload.MemoryDevPath(), snapshotTypeForCmd,
+						captureCtx, cb, rsp.SandboxID, spec, layout.MetaWork, payload.MemoryDevPath(), snapshotTypeForCmd,
 					)
 				})
 			},
@@ -277,7 +328,10 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	if useCoordinatedSnapshotPath(shimCapability, mode) {
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
-		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
+		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() (err error) {
+			captureCtx, captureSpan := telemetry.StartIfTraced(frozenCtx, telemetry.SpanTemplateCommitCapture,
+				trace.WithAttributes(captureAttrs...))
+			defer endCommitPhase(captureSpan, &err)
 			// A filesystem-only capture only reads the rootfs: it must not
 			// touch the memory lineage, because it cannot become the base of
 			// the next incremental commit.
@@ -286,7 +340,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 				// Invalidate only once memory capture is about to start.
 				previousLineage = cb.MemoryLineageCopy()
 				bindingErr = persistRuntimeSnapshotBinding(
-					frozenCtx, s.cubeboxMgr.cubeboxManger, cb, "",
+					captureCtx, s.cubeboxMgr.cubeboxManger, cb, "",
 				)
 				if bindingErr != nil {
 					return bindingErr
@@ -294,7 +348,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			}
 			captureStarted = true
 			captureErr := s.captureSnapshotWithShim(
-				frozenCtx, cb, rsp.TemplateID, layout.MetaWork,
+				captureCtx, cb, rsp.TemplateID, layout.MetaWork,
 				payload.MemoryDevPath(), snapshotTypeForCmd, sourceRootfs.DevPath, mode,
 			)
 			if captureErr == nil && mode.IsFsOnly() {
@@ -309,7 +363,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 				// so its previous incremental baseline is still valid.
 				if payload.HasMemory() {
 					cb.RestoreMemoryLineage(previousLineage)
-					if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
+					if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(captureCtx, cb.ID); restoreErr != nil {
 						cb.ClearRuntimeBase()
 						return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
 					}
@@ -319,13 +373,16 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, rsp.TemplateID, frozenCancel)
 			}
 			return snapshotCaptureError(captureErr)
-		}, func() error {
-			rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
+		}, func() (err error) {
+			rootfsCtx, span := telemetry.StartIfTraced(frozenCtx, telemetry.SpanTemplateCommitRootfs,
+				trace.WithAttributes(phaseAttrs...))
+			defer endCommitPhase(span, &err)
+			rootfsObject, err = storage.CommitRootfsFor(rootfsCtx, backend, sourceRootfs, rsp.TemplateID)
 			if err != nil {
 				return err
 			}
 			return frozenCtx.Err()
-		}, func() error {
+		}, func() (err error) {
 			var leaseErr error
 			if freezeLease != nil {
 				leaseErr = freezeLease.Stop()
@@ -335,7 +392,13 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			}
 			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
 			defer cancel()
-			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, rsp.TemplateID))
+			resumeSpanCtx, span := telemetry.StartIfTraced(resumeCtx, telemetry.SpanTemplateCommitResume,
+				trace.WithAttributes(
+					attribute.String(telemetry.AttrSandboxID, rsp.SandboxID),
+					attribute.String(telemetry.AttrTemplateID, rsp.TemplateID),
+				))
+			defer endCommitPhase(span, &err)
+			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeSpanCtx, cb, rsp.TemplateID))
 		})
 		// A shim whose recorded pin is at or above the boundary but which rejects
 		// the action means the version gate guessed wrong about it. The shim
@@ -392,8 +455,17 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resume sandbox after snapshot: %v", resumeErr)
 		return rsp, nil
 	}
+	publishPhaseCtx := startPhase(telemetry.SpanTemplateCommitPublish,
+		attribute.String(telemetry.AttrSandboxID, rsp.SandboxID),
+		attribute.String(telemetry.AttrTemplateID, rsp.TemplateID),
+	)
+	markPublishIncomplete := func() {
+		if phaseSpan != nil {
+			phaseSpan.SetStatus(codes.Error, "publish incomplete")
+		}
+	}
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
-	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject); err != nil {
+	if err := deactivateCowSnapshotObjectsOn(publishPhaseCtx, stepLog, backend, payload.memory, rootfsObject); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
@@ -463,23 +535,31 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		// path keeps the legacy fallback. Log loudly so operators notice
 		// drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
+		markPublishIncomplete()
 	}
 	// S3: seal memory／metadata work volumes to RO snapshots, then Upload.
-	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, rsp.TemplateID); err != nil {
+	if err := storage.FinalizeS3PackageSnapshots(publishPhaseCtx, backend, rsp.TemplateID); err != nil {
 		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
+		markPublishIncomplete()
 	}
-	if raw := uploadRemoteUUIDs(ctx, backend, rsp.TemplateID); raw != "" {
+	raw := uploadRemoteUUIDs(publishPhaseCtx, backend, rsp.TemplateID)
+	if raw != "" {
 		rsp.RemoteUuids = raw
+	}
+	if s3ExportIncomplete(backend, raw) {
+		stepLog.Warnf("s3 package export produced no remote uuids for %s", rsp.TemplateID)
+		markPublishIncomplete()
 	}
 	// Publish the completed package and component versions together. On a
 	// sync failure the baseline remains invalid, so future commits degrade
 	// safely. The completed snapshot still succeeds and remains managed by
 	// Master; publishing the incremental baseline is only an optimization.
-	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
+	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(publishPhaseCtx), snapshotResumeTimeout)
 	defer publishCancel()
 	if payload.HasMemory() {
 		if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID); err != nil {
 			stepLog.Warnf("snapshot %s completed but baseline/component version sync failed; future commits will use a safe fallback: %v", rsp.TemplateID, err)
+			markPublishIncomplete()
 		}
 	}
 	stepLog.Infof("CommitSandbox completed successfully: snapshotPath=%s", snapshotPath)
@@ -499,6 +579,20 @@ func validateFilesystemOnlyCapture(cb *cubeboxstore.CubeBox, mode snapshotmode.M
 			snapshotmode.ErrFilesystemOnlyMultiContainer, n)
 	}
 	return nil
+}
+
+// Re-panic after marking the phase so the existing recovery handles the response.
+func endCommitPhase(span trace.Span, errp *error) {
+	if r := recover(); r != nil {
+		telemetry.End(span, errors.New("commit phase panicked"))
+		panic(r)
+	}
+	telemetry.End(span, *errp)
+}
+
+func s3ExportIncomplete(backend, raw string) bool {
+	normalized, err := cow.NormalizeBackend(backend)
+	return err == nil && normalized == cow.BackendS3 && strings.TrimSpace(raw) == ""
 }
 
 func validateCommitSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {

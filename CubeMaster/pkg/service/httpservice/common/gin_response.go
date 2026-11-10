@@ -8,7 +8,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WriteAPI writes a standard API response onto a gin.Context: HTTP 200 with the JSON
@@ -21,6 +25,24 @@ import (
 // (rt.RetCode) is still set by the caller, since some handlers record a sentinel value
 // for metrics.
 func WriteAPI(c *gin.Context, data interface{}) {
+	var ret *types.Ret
+	switch response := data.(type) {
+	case *types.Res:
+		if response != nil {
+			ret = response.Ret
+		}
+	case *types.CreateTemplateFromImageRes:
+		if response != nil {
+			ret = response.Ret
+		}
+	}
+	if ret != nil {
+		span := trace.SpanFromContext(c.Request.Context())
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, ret.RetCode))
+		if ret.RetCode != telemetry.SuccessCode {
+			span.SetStatus(codes.Error, "")
+		}
+	}
 	WriteResponse(c.Writer, http.StatusOK, data)
 }
 
