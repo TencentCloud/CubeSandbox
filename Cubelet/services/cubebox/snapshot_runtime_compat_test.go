@@ -554,8 +554,15 @@ func TestCommitSnapshotDestinationRejectsExistingPackage(t *testing.T) {
 			return nil, dbErr
 		})
 	require.ErrorIs(t, err, dbErr)
-	require.NoError(t, checkCommitSnapshotDestination(context.Background(), "xfs", "new",
-		func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error) {
-			return nil, nil
-		}))
+	for _, backend := range []string{"", "xfs", "jfs", "juicefs"} {
+		t.Run("skip_"+backend, func(t *testing.T) {
+			inspected := false
+			require.NoError(t, checkCommitSnapshotDestination(context.Background(), backend, "new",
+				func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error) {
+					inspected = true
+					return nil, nil
+				}))
+			require.False(t, inspected)
+		})
+	}
 }

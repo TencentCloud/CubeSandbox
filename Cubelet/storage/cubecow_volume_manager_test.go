@@ -33,6 +33,7 @@ type fakeCowEngine struct {
 	deactivateErr               error
 	volumeInfos                 map[string]*cubecow.Volume
 	volumeInfoErrs              map[string]error
+	objectInfoCalls             []string
 	listSnapshots               map[string][]cubecow.Snapshot
 	listSnapshotsErr            error
 	deletedVolumes              []string
@@ -217,6 +218,11 @@ func (f *fakeCowEngine) GetVolumeInfo(name string) (*cubecow.Volume, error) {
 	return f.volumeInfos[name], nil
 }
 
+func (f *fakeCowEngine) GetObjectInfo(name string) (*cubecow.Volume, error) {
+	f.objectInfoCalls = append(f.objectInfoCalls, name)
+	return f.GetVolumeInfo(name)
+}
+
 func (f *fakeCowEngine) ListSnapshots(volumeName string, pageSize uint64, pageToken string) (*cubecow.ListSnapshotsResult, error) {
 	_ = pageSize
 	_ = pageToken
@@ -372,6 +378,15 @@ func TestCommitTemplateMemoryProducesActivatedSnapshot(t *testing.T) {
 	assert.Equal(t, "tpl-snap-memory", volume.VolumeName)
 	assert.Equal(t, cowKindSnapshot, volume.Kind)
 	assert.Equal(t, "/dev/mapper/tpl-snap-memory", volume.FilePath)
+	assert.Equal(t, uint64(4096), volume.SizeBytes)
+	assert.Equal(t, []string{"tpl-snap-memory"}, engine.objectInfoCalls)
+
+	object, err := cubecowVolumeToSnapshotObject(context.Background(), manager, volume)
+	require.NoError(t, err)
+	assert.Equal(t, "/dev/mapper/tpl-snap-memory", object.DevPath)
+	assert.Equal(t, uint64(4096), object.SizeBytes)
+	assert.Equal(t, []string{"tpl-snap-memory"}, engine.objectInfoCalls,
+		"conversion should reuse the resolved path and size")
 }
 
 func TestCommitTemplateMemoryRejectsAlreadyExists(t *testing.T) {

@@ -63,6 +63,7 @@ type cowEngine interface {
 	DeleteVolume(name string) error
 	DeleteSnapshot(name string) error
 	ResizeVolume(name string, newSizeBytes uint64) (uint64, uint64, error)
+	GetObjectInfo(name string) (*cubecow.Volume, error)
 	GetVolumeInfo(name string) (*cubecow.Volume, error)
 	ListSnapshots(volumeName string, pageSize uint64, pageToken string) (*cubecow.ListSnapshotsResult, error)
 	GetMetrics() (map[string]uint64, error)
@@ -234,34 +235,32 @@ func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateI
 		}
 		return nil, err
 	}
-	if sizeBytes > 0 {
-		info, infoErr := m.engine.GetVolumeInfo(snapshotName)
-		if infoErr != nil {
-			if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
-				return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
-			}
-			return nil, infoErr
+	info, infoErr := m.engine.GetObjectInfo(snapshotName)
+	if infoErr != nil {
+		if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 		}
-		actual := uint64(0)
-		if info != nil {
-			actual = info.SizeBytes
+		return nil, infoErr
+	}
+	if info == nil {
+		infoErr = fmt.Errorf("cubecow object %q has empty info", snapshotName)
+		if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 		}
-		if actual < sizeBytes {
-			sizeErr := fmt.Errorf("cloned memory snapshot %s size %d is smaller than requested %d", snapshotName, actual, sizeBytes)
-			if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
-				return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
-			}
-			return nil, sizeErr
+		return nil, infoErr
+	}
+	actual := info.SizeBytes
+	if info.DevicePath != "" {
+		devPath = info.DevicePath
+	}
+	if actual < sizeBytes {
+		sizeErr := fmt.Errorf("cloned memory snapshot %s size %d is smaller than requested %d", snapshotName, actual, sizeBytes)
+		if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
 		}
+		return nil, sizeErr
 	}
-	resolvedPath, err := m.ResolveDevPath(ctx, snapshotName, cowKindSnapshot)
-	if err != nil {
-		return nil, err
-	}
-	if resolvedPath != "" {
-		devPath = resolvedPath
-	}
-	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
+	return newCowVolumeWithSize(snapshotName, cowKindSnapshot, 0, devPath, actual), nil
 }
 
 // CloneSandboxMemory is kept on the Store interface. XFS restore no
@@ -374,6 +373,12 @@ func newCowVolume(name, kind string, gen uint32, devPath string) *cowVolume {
 	}
 }
 
+func newCowVolumeWithSize(name, kind string, gen uint32, devPath string, sizeBytes uint64) *cowVolume {
+	volume := newCowVolume(name, kind, gen, devPath)
+	volume.SizeBytes = sizeBytes
+	return volume
+}
+
 func (m *XfsCow) createOrResolveSnapshotPathFromSource(ctx context.Context, sourceName, snapshotName string) (string, error) {
 	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, snapshotName, true)
 	if err != nil {
@@ -456,7 +461,7 @@ func (m *XfsCow) ResolveDevPath(ctx context.Context, name, kind string) (string,
 	if _, err := m.deleteFunc(kind); err != nil {
 		return "", err
 	}
-	info, err := m.engine.GetVolumeInfo(name)
+	info, err := m.engine.GetObjectInfo(name)
 	if err != nil {
 		return "", err
 	}
@@ -478,7 +483,7 @@ func (m *XfsCow) ResolveDevPath(ctx context.Context, name, kind string) (string,
 
 func (m *XfsCow) GetSizeBytes(ctx context.Context, name string) (uint64, error) {
 	_ = ctx
-	info, err := m.engine.GetVolumeInfo(name)
+	info, err := m.engine.GetObjectInfo(name)
 	if err != nil {
 		return 0, err
 	}

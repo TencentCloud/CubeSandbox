@@ -909,6 +909,12 @@ func deactivateCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperL
 }
 
 func deactivateCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) error {
+	// Reflink objects are ordinary files and have no activation lifecycle.
+	// They were just created successfully, so calling Deactivate would only
+	// revalidate each file. S3 must still flush and release its active lvols.
+	if cow.IsReflinkBackend(backend) {
+		return nil
+	}
 	if err := deactivateCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject); err != nil {
 		return err
 	}

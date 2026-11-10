@@ -184,25 +184,27 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 	if err != nil {
 		return nil, err
 	}
-	if sizeBytes > 0 {
-		info, infoErr := m.engine.GetVolumeInfo(volumeName)
-		if infoErr != nil {
-			if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
-				return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
-			}
-			return nil, infoErr
+	info, infoErr := m.engine.GetVolumeInfo(volumeName)
+	if infoErr != nil {
+		if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 		}
-		actual := uint64(0)
-		if info != nil {
-			actual = info.SizeBytes
+		return nil, infoErr
+	}
+	if info == nil {
+		infoErr = fmt.Errorf("cubecow object %q has empty info", volumeName)
+		if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 		}
-		if actual < sizeBytes {
-			sizeErr := fmt.Errorf("cloned memory volume %s size %d is smaller than requested %d", volumeName, actual, sizeBytes)
-			if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
-				return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
-			}
-			return nil, sizeErr
+		return nil, infoErr
+	}
+	actual := info.SizeBytes
+	if actual < sizeBytes {
+		sizeErr := fmt.Errorf("cloned memory volume %s size %d is smaller than requested %d", volumeName, actual, sizeBytes)
+		if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
 		}
+		return nil, sizeErr
 	}
 	resolvedPath, err := m.ResolveDevPath(ctx, volumeName, cowKindVolume)
 	if err != nil {
@@ -211,7 +213,7 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 	if resolvedPath != "" {
 		devPath = resolvedPath
 	}
-	return newCowVolume(volumeName, cowKindVolume, 0, devPath), nil
+	return newCowVolumeWithSize(volumeName, cowKindVolume, 0, devPath, actual), nil
 }
 
 func (m *S3Cow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
