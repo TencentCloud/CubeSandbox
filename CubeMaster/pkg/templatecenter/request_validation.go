@@ -147,6 +147,25 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 	if err := validateTemplateContainerUser(cloned.ContainerOverrides); err != nil {
 		return nil, err
 	}
+	for _, hook := range []struct {
+		name string
+		argv []string
+	}{
+		{"post_start", cloned.Lifecycle.GetPostStart()},
+		{"pre_stop", cloned.Lifecycle.GetPreStop()},
+	} {
+		if len(hook.argv) > 0 && strings.TrimSpace(hook.argv[0]) == "" {
+			return nil, fmt.Errorf("lifecycle.%s requires a non-blank executable", hook.name)
+		}
+		for _, arg := range hook.argv {
+			if strings.ContainsRune(arg, 0) {
+				return nil, fmt.Errorf("lifecycle.%s arguments must not contain NUL", hook.name)
+			}
+		}
+	}
+	if len(cloned.Lifecycle.GetPostStart()) == 0 && len(cloned.Lifecycle.GetPreStop()) == 0 {
+		cloned.Lifecycle = nil
+	}
 	return &cloned, nil
 }
 

@@ -152,6 +152,7 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		SecurityContext: securityContext,
 		Probe:           probeOrNil(req.ContainerOverrides),
 		Annotations:     containerAnnotations,
+		Lifecycle:       req.Lifecycle,
 	}
 	out := &types.CreateCubeSandboxReq{
 		Request:           &types.Request{RequestID: req.RequestID},
