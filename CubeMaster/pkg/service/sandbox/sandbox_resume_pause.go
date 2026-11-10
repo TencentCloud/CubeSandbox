@@ -137,11 +137,18 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		rsp.Ret.RetMsg = fmt.Sprintf("pause ok on cubelet but master meta failed: %v", err)
 		return rsp
 	}
-	if exportUUIDs != "" {
+	if pauseNeedsRemoteStatusWatch(req.Backend) {
 		remotestatus.WatchPause(ctx, snapID, hostIP, req.Backend)
 	}
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID)
 	return rsp
+}
+
+// pauseNeedsRemoteStatusWatch is independent of remote_uuids: JFS publishes
+// through its shared namespace and therefore has no UUIDs, but still needs its
+// JuiceFS writeback readiness tracked.
+func pauseNeedsRemoteStatusWatch(backend string) bool {
+	return constants.IsRemoteTrackedBackend(backend)
 }
 
 func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
@@ -387,7 +394,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		cubeletReq.Backend = b
 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	if constants.IsRemoteTrackedBackend(rec.Backend) {
+	if constants.IsS3Backend(rec.Backend) {
 		if raw := strings.TrimSpace(rec.ExportUUIDs); raw != "" {
 			cubeletReq.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
@@ -396,7 +403,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		// Only Master knows the target holds no replica. Saying so lets
 		// Cubelet import the package up front instead of inferring it from a
 		// catalog miss, and lets it reject a restore it cannot serve.
-		cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		if constants.IsS3Backend(rec.Backend) {
+			cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		}
 	}
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
 
@@ -450,14 +459,13 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// describes a sandbox that is by now running whatever the proxy thinks.
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
-	// After Create the sandbox runs on private disks. The origin's PAUSED
-	// tombstone goes synchronously: a quick Pause and Resume back onto
-	// origin would otherwise meet it. The pause package goes in the
-	// background (deleting a jfs package costs a round of metadata calls the
-	// caller should not wait for); Cubelet no-ops while a live sandbox still
-	// restores from that catalog (XFS mmap; S3 Snapshot last-restore) and
-	// GCs on the next Pause or Destroy.
-	origin, packageNode := pausePackageNodes(rec.NodeIP, targetIP)
+	// After Create the sandbox has a private rootfs, while reflink memory
+	// restore may still use the pause package. The origin's PAUSED tombstone
+	// goes synchronously: a quick Pause and Resume back onto origin would
+	// otherwise meet it. Package cleanup runs in the background; Cubelet
+	// no-ops while a live sandbox still restores from that catalog and GCs it
+	// on the next Pause or Destroy.
+	origin, packageNode := pausePackageNodes(rec.NodeIP, targetIP, rec.Backend)
 	if origin != "" {
 		if err := pausesnap.DropPausedTombstone(ctx, req.RequestID, req.SandboxID, origin); err != nil {
 			log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still holds its PAUSED tombstone: %v",
@@ -483,13 +491,16 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 }
 
 // pausePackageNodes returns the origin to drop a PAUSED tombstone on (empty
-// for same-node) and the node that holds the pause package. Do not key this
-// off CrossNode — a cross-node placement with a blank origin would otherwise
-// skip cleanup and leak the package.
-func pausePackageNodes(recordNodeIP, targetIP string) (origin, packageNode string) {
+// for same-node) and the node that should evaluate pause-package cleanup.
+// Cross-node JFS cleanup goes to the target so its live-sandbox keep gate
+// retains the shared package until the next Pause or Destroy.
+func pausePackageNodes(recordNodeIP, targetIP, backend string) (origin, packageNode string) {
 	origin = strings.TrimSpace(recordNodeIP)
 	if origin == "" || origin == targetIP {
 		return "", targetIP
+	}
+	if constants.IsJFSBackend(backend) {
+		return origin, targetIP
 	}
 	return origin, origin
 }

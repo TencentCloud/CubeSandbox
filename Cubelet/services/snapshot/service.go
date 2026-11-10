@@ -60,7 +60,7 @@ const (
 func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.StatusResponse, error) {
 	rsp := s.statusOne(ctx, req.GetRequestId(), req.GetSnapshotId(), req.GetBackend())
 	wait := min(time.Duration(req.GetWaitReadyMs())*time.Millisecond, statusWaitMax)
-	if wait <= 0 || !storage.CrossNodeImportBackend(rsp.GetBackend()) {
+	if wait <= 0 || !storage.RemoteSnapshotBackend(rsp.GetBackend()) {
 		return rsp, nil
 	}
 	deadline := time.NewTimer(wait)
@@ -119,7 +119,7 @@ func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBacke
 		Backend:    backend,
 		State:      cow.RemoteStatePending,
 	}
-	if !storage.CrossNodeImportBackend(backend) {
+	if !storage.RemoteSnapshotBackend(backend) {
 		rsp.Message = backend + " has no remote upload"
 		return rsp
 	}

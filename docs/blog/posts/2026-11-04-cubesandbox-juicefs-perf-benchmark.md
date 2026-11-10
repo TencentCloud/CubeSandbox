@@ -85,7 +85,7 @@ Each node mounted the same JuiceFS volume named `cube`. See [JuiceFS service con
 | Item | Value |
 |---|---|
 | JuiceFS client | `juicedata/mount:ce-v1.4.1` |
-| Mount point | `/data/cubelet/jfs` |
+| Mount point | `/data/cubelet/storage/jfs` |
 | Metadata engine | Redis 7 on c1, `redis://c1:6380/0` |
 | Object storage | MinIO on c1, `http://c1:9000/cube-jfs` |
 | Local cache directory | `/data/cubelet/jfs-cache` |

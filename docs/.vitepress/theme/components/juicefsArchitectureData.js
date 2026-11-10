@@ -5,12 +5,12 @@
 const BOX = {
   Avm:   { c: "vm", x: 40,  y: 56,  w: 190, h: 74,  t: "沙箱 VM", s: "guest 内存 · rootfs" },
   Acl:   { c: "cl", x: 250, y: 56,  w: 180, h: 74,  t: "Cubelet / VMM", s: "含 shim · 暂停 / 恢复 / 克隆" },
-  Ajfs:  { c: "jfs", x: 250, y: 146, w: 180, h: 136, t: "JuiceFS 挂载", s: "/data/cubelet/jfs" },
+  Ajfs:  { c: "jfs", x: 250, y: 146, w: 180, h: 136, t: "JuiceFS 挂载", s: "/data/cubelet/storage/jfs" },
   Aread: { c: "xfs", x: 32,  y: 146, w: 206, h: 64,  t: "读缓存 · xfs", s: "jfs-cache/*/raw", small: true },
   Awrite:{ c: "xfs", x: 32,  y: 218, w: 206, h: 64,  t: "写 staging · xfs", s: "jfs-cache/*/rawstaging", small: true },
   Bvm:   { c: "vm", x: 750, y: 56,  w: 190, h: 74,  t: "沙箱 VM", s: "guest 内存 · rootfs" },
   Bcl:   { c: "cl", x: 550, y: 56,  w: 180, h: 74,  t: "Cubelet / VMM", s: "含 shim · 导入 / 恢复" },
-  Bjfs:  { c: "jfs", x: 550, y: 146, w: 180, h: 136, t: "JuiceFS 挂载", s: "/data/cubelet/jfs" },
+  Bjfs:  { c: "jfs", x: 550, y: 146, w: 180, h: 136, t: "JuiceFS 挂载", s: "/data/cubelet/storage/jfs" },
   Bread: { c: "xfs", x: 742, y: 146, w: 198, h: 64,  t: "读缓存 · xfs", s: "jfs-cache/*/raw", small: true },
   Bwrite:{ c: "xfs", x: 742, y: 218, w: 198, h: 64,  t: "写 staging · xfs", s: "jfs-cache/*/rawstaging", small: true },
   redis: { c: "redis", x: 32,  y: 396, w: 190, h: 96, t: "Redis", s: "元数据 · slice / 引用计数", small: true },
@@ -201,11 +201,11 @@ function jfsFileCol(i, id, t, s, node, clone) {
   return { id, t, s, c: "jfs", clone: !!clone, x: node === "B" ? 560 : 260, y: 154 + i * 64, w: 160, h: 56, small: true };
 }
 const cubefsTplWrite = {
-  k: "写两个文件", time: "/data/cubelet/jfs", on: ["Acl", "Avm", "Ajfs", "Awrite", "redis", "f-root", "f-mem"],
+  k: "写两个文件", time: "/data/cubelet/storage/jfs", on: ["Acl", "Avm", "Ajfs", "Awrite", "redis", "f-root", "f-mem"],
   files: [jfsFileCol(0, "f-root", "模板 rootfs", "tpl-*-rootfs"), jfsFileCol(1, "f-mem", "模板内存", "tpl-*-memory")],
   arrows: [["Acl", "b", .5, "f-root", "t", .5, "写 rootfs", 46, -6], ["Avm", "b", .93, "f-mem", "l", .1, "写内存", -36, -28], ["Ajfs", "l", .84, "Awrite", "r", .78, "staging", 0, 26], ["Ajfs", "b", .42, "redis", "t", .42, "元数据"]],
   d: [
-    "A 拉起临时沙箱做 AppSnapshot，在挂载点 /data/cubelet/jfs 上创建模板 rootfs 和模板内存。文件在该节点的 cube/nodes/<node> 目录下。",
+    "A 拉起临时沙箱做 AppSnapshot，在挂载点 /data/cubelet/storage/jfs 下创建共享 objects、snapshots 和 pause-snapshots。",
     "创建空文件只在 Redis 增加 inode。写入数据时，新块进入本机 staging jfs-cache/*/rawstaging，对应 slice 同时写入 Redis，这次写即可返回。",
     "JuiceFS 在后台把 staging 里的块上传到对象存储。上传完成前，其他节点已经能看到这两个文件，还不能安全读取其中的块。",
   ],

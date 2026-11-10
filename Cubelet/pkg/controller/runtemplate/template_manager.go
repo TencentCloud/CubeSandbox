@@ -35,10 +35,7 @@ const (
 
 // Recovery lookups are replaceable so tests can verify backend isolation
 // without accessing host mounts.
-var (
-	recoverySnapshotKindRoot     = storage.SnapshotKindRoot
-	findGlobalJFSRuntimeSnapshot = storage.FindJFSGlobalRuntimeSnapshot
-)
+var recoverySnapshotKindRoot = storage.SnapshotKindRoot
 
 type RunTemplateManager interface {
 	SetInstanceType(instanceType string)
@@ -238,13 +235,6 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 		reportRecoveryError(h.recoverBackendMetadataHomes(ctx, backend, "cubebox", templateID))
 		if cloned, err := h.cloneAndHydrate(templateID); err != nil || cloned != nil {
 			return cloned, err
-		}
-		// Cross-node runtime snapshots use Master's registered home; older
-		// JFS callers may locate the immutable package in another node's tree.
-		if home, ok := storage.RegisteredJFSRuntimeSnapshotHome(ctx, templateID); ok {
-			reportRecoveryError(h.recoverMetadataHomes(ctx, filepath.Dir(home), "cubebox", templateID))
-		} else if global, err := findGlobalJFSRuntimeSnapshot(templateID); err == nil {
-			reportRecoveryError(h.recoverMetadataHomes(ctx, filepath.Dir(global.Home), "cubebox", templateID))
 		}
 	}
 	cloned, err = h.cloneAndHydrate(templateID)

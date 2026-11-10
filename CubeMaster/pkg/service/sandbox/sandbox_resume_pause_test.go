@@ -23,16 +23,28 @@ func TestValidatePauseResumeVolumesEmptyOK(t *testing.T) {
 	require.NoError(t, validatePauseResumeVolumes([]string{"", "  "}))
 }
 
+func TestPauseNeedsRemoteStatusWatch(t *testing.T) {
+	t.Parallel()
+	require.True(t, pauseNeedsRemoteStatusWatch("jfs"))
+	require.True(t, pauseNeedsRemoteStatusWatch("juicefs"))
+	require.True(t, pauseNeedsRemoteStatusWatch("s3"))
+	require.False(t, pauseNeedsRemoteStatusWatch("xfs"))
+	require.False(t, pauseNeedsRemoteStatusWatch(""))
+}
+
 func TestPausePackageNodes(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, record, target, origin, pkg string
+		name, record, target, backend, origin, pkg string
 	}{
-		{"same node", "10.0.0.1", "10.0.0.1", "", "10.0.0.1"},
-		{"blank origin", " ", "10.0.0.1", "", "10.0.0.1"},
-		{"cross node", " 10.0.0.2 ", "10.0.0.1", "10.0.0.2", "10.0.0.2"},
+		{"same node", "10.0.0.1", "10.0.0.1", "jfs", "", "10.0.0.1"},
+		{"blank origin", " ", "10.0.0.1", "jfs", "", "10.0.0.1"},
+		{"cross node xfs", " 10.0.0.2 ", "10.0.0.1", "xfs", "10.0.0.2", "10.0.0.2"},
+		{"cross node s3", "10.0.0.2", "10.0.0.1", "s3", "10.0.0.2", "10.0.0.2"},
+		{"cross node jfs", "10.0.0.2", "10.0.0.1", "jfs", "10.0.0.2", "10.0.0.1"},
+		{"cross node juicefs", "10.0.0.2", "10.0.0.1", "juicefs", "10.0.0.2", "10.0.0.1"},
 	} {
-		origin, pkg := pausePackageNodes(tc.record, tc.target)
+		origin, pkg := pausePackageNodes(tc.record, tc.target, tc.backend)
 		require.Equal(t, tc.origin, origin, tc.name)
 		require.Equal(t, tc.pkg, pkg, tc.name)
 	}

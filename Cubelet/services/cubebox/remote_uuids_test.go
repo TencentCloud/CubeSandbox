@@ -13,7 +13,7 @@ import (
 
 func TestUploadRemoteUUIDsSkipsXFS(t *testing.T) {
 	t.Parallel()
-	for _, backend := range []string{"", cow.BackendXFS, "cubecow"} {
+	for _, backend := range []string{"", cow.BackendXFS, "cubecow", cow.BackendJFS} {
 		if raw := uploadRemoteUUIDs(context.Background(), backend, "snap-1"); raw != "" {
 			t.Fatalf("backend %q: unexpected uuids %s", backend, raw)
 		}

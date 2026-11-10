@@ -1315,8 +1315,9 @@ cubeJuiceFS:
   # or mount options). Drain every compute node first, then remove it.
   lifecycleChangeAck: false
   volumeName: cube
-  mountPath: /data/cubelet/jfs
-  root: cube
+  mountPath: /data/cubelet/storage/jfs
+  # "." stores objects/, snapshots/, and pause-snapshots/ directly at mountPath.
+  root: "."
   cacheDir: /data/cubelet/jfs-cache
   cacheSizeMB: 102400
   terminationGracePeriodSeconds: 120

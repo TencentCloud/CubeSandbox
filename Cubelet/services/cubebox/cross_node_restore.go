@@ -63,7 +63,7 @@ func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxReq
 		return ctx, fmt.Errorf("cross-node restore backend: %w", err)
 	}
 	if !storage.CrossNodeImportBackend(backend) {
-		return ctx, fmt.Errorf("cross-node restore needs the s3 or jfs backend, got %s", backend)
+		return ctx, fmt.Errorf("cross-node restore needs the s3 backend, got %s", backend)
 	}
 	if cow.ParseRemoteUUIDs(ann[constants.MasterAnnotationSnapshotRemoteUUIDs]).Empty() {
 		return ctx, fmt.Errorf("cross-node restore carries no remote_uuids")
@@ -75,12 +75,6 @@ func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxReq
 	imp := storage.CrossNodeSandboxImport(req.GetAnnotations())
 	if imp == nil {
 		return ctx, fmt.Errorf("cross-node restore of %s is incomplete", sandboxID)
-	}
-	if imp.SharedJFSRuntimeSnapshot {
-		ctx, err = storage.WithRegisteredSharedJFSRuntimeSnapshot(ctx, imp)
-		if err != nil {
-			return ctx, fmt.Errorf("load registered shared jfs snapshot for cross-node restore of %s: %w", sandboxID, err)
-		}
 	}
 	dir, err := imp.EnsureMetadata(ctx)
 	if err != nil {

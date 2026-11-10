@@ -142,7 +142,7 @@ expect_fail jfs-bad-path "absolute child of hostPaths.dataCubelet" \
   --set-string cubeJuiceFS.mountPath=/mnt/jfs
 expect_fail jfs-overlap "must not overlap" \
   --set cubeJuiceFS.enabled=true \
-  --set-string cubeJuiceFS.cacheDir=/data/cubelet/jfs/cache
+  --set-string cubeJuiceFS.cacheDir=/data/cubelet/storage/jfs/cache
 expect_fail jfs-bad-root "clean relative path" \
   --set cubeJuiceFS.enabled=true \
   --set-string cubeJuiceFS.root=..

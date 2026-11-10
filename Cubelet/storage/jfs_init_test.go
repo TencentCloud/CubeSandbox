@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -28,49 +27,24 @@ func withJFSTestStorage(t *testing.T, l *local) {
 
 func TestJFSStorageRootLayout(t *testing.T) {
 	cfg := &Config{DataPath: "/data/cubelet/storage", StorageBackend: StorageBackendCow}
-	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs/", Root: "/cube/", NodeName: "node-a"}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs/", Root: "/cube/"}
 	withJFSTestStorage(t, &local{config: cfg})
 
-	require.Equal(t, "/mnt/jfs/cube/nodes/node-a", JFSStorageRoot())
-	require.Equal(t, "/mnt/jfs/cube/nodes/node-a", BackendStorageRoot(cow.BackendJFS))
-	require.Equal(t, "/mnt/jfs/cube/nodes/node-a/pause-snapshots",
+	require.Equal(t, "/mnt/jfs/cube", JFSStorageRoot())
+	require.Equal(t, "/mnt/jfs/cube", BackendStorageRoot(cow.BackendJFS))
+	require.Equal(t, "/mnt/jfs/cube/pause-snapshots",
 		SnapshotKindRoot("juicefs", SnapshotKindPause))
 	require.Equal(t, "/data/cubelet/storage/xfs", BackendStorageRoot(cow.BackendXFS))
 }
 
 func TestJFSStorageRootDefaults(t *testing.T) {
 	cfg := &Config{}
-	cfg.Cow.JFS = CowJFSUserConfig{NodeName: "n1"}
-	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "n1"), cfg.jfsStorageRoot())
-}
-
-func TestJFSNodeNameDefaultsToNodeIPv4(t *testing.T) {
-	orig := localNodeIPv4
-	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
-	t.Cleanup(func() { localNodeIPv4 = orig })
-	require.Equal(t, "10.0.0.9", (&Config{}).jfsNodeName())
-	require.Equal(t, filepath.Join(defaultJFSMountPath, defaultJFSRoot, jfsNodesDir, "10.0.0.9"), (&Config{}).jfsStorageRoot())
-}
-
-func TestJFSNodeNameConfiguredValueWinsOverIP(t *testing.T) {
-	orig := localNodeIPv4
-	localNodeIPv4 = func() (string, error) { return "10.0.0.9", nil }
-	t.Cleanup(func() { localNodeIPv4 = orig })
-	cfg := &Config{}
-	cfg.Cow.JFS = CowJFSUserConfig{NodeName: "explicit-name"}
-	require.Equal(t, "explicit-name", cfg.jfsNodeName())
-}
-
-func TestJFSNodeNameIPFailureFallsBackToLocalhost(t *testing.T) {
-	orig := localNodeIPv4
-	localNodeIPv4 = func() (string, error) { return "", errors.New("no address") }
-	t.Cleanup(func() { localNodeIPv4 = orig })
-	require.Equal(t, "localhost", (&Config{}).jfsNodeName())
+	require.Equal(t, "/data/cubelet/storage/jfs", cfg.jfsStorageRoot())
 }
 
 func TestBuildJFSCowInitJSONUsesCopyFileRange(t *testing.T) {
 	cfg := &Config{}
-	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs", NodeName: "n1"}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs"}
 	raw, err := cfg.BuildJFSCowInitJSON()
 	require.NoError(t, err)
 	var payload struct {
@@ -84,7 +58,7 @@ func TestBuildJFSCowInitJSONUsesCopyFileRange(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(raw, &payload))
 	require.Equal(t, cowBackendReflink, payload.Backend.Kind)
-	require.Equal(t, "/mnt/jfs/cube/nodes/n1/objects", payload.Backend.Reflink.RootDir)
+	require.Equal(t, "/mnt/jfs/objects", payload.Backend.Reflink.RootDir)
 	require.Equal(t, cowCloneCFR, payload.Backend.Reflink.CloneMethod)
 }
 
@@ -110,9 +84,29 @@ func TestStoreForBackendJFS(t *testing.T) {
 	require.NotSame(t, jfsStore, xfs)
 }
 
+func TestResetCowNodeStorageNeverResetsSharedJFS(t *testing.T) {
+	xfsEngine := &cubecow.Engine{}
+	jfsEngine := &cubecow.Engine{}
+	l := &local{
+		config:       &Config{StorageBackend: StorageBackendCow},
+		cowEngine:    xfsEngine,
+		jfsCowEngine: jfsEngine,
+	}
+	previous := cowResetNodeStorage
+	t.Cleanup(func() { cowResetNodeStorage = previous })
+	var reset []*cubecow.Engine
+	cowResetNodeStorage = func(engine *cubecow.Engine) error {
+		reset = append(reset, engine)
+		return nil
+	}
+
+	require.NoError(t, l.resetCowNodeStorage())
+	require.Equal(t, []*cubecow.Engine{xfsEngine}, reset)
+}
+
 func TestTryJFSCowInitOnceRequiresJuiceFSMount(t *testing.T) {
 	cfg := &Config{StorageBackend: StorageBackendCow}
-	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs", NodeName: "n1"}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs"}
 	l := &local{config: cfg}
 
 	prevCheck, prevInit := checkJFSMount, initJFSCowEngine
@@ -139,7 +133,7 @@ func TestTryJFSCowInitOnceRequiresJuiceFSMount(t *testing.T) {
 
 func TestJFSCowInitCancellationDoesNotPublishHandle(t *testing.T) {
 	cfg := &Config{StorageBackend: StorageBackendCow}
-	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs", NodeName: "n1"}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs"}
 	l := &local{config: cfg}
 
 	prevCheck, prevInit := checkJFSMount, initJFSCowEngine
@@ -166,7 +160,7 @@ func TestJFSCowInitCancellationDoesNotPublishHandle(t *testing.T) {
 
 func TestJFSCowConcurrentReadersObserveOnlyPublishedHandle(t *testing.T) {
 	cfg := &Config{StorageBackend: StorageBackendCow}
-	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs", NodeName: "n1"}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs"}
 	l := &local{config: cfg, cowManager: &XfsCow{engine: &cubecow.Engine{}}}
 
 	prevCheck, prevInit := checkJFSMount, initJFSCowEngine
@@ -211,7 +205,7 @@ func TestJFSCowConcurrentReadersObserveOnlyPublishedHandle(t *testing.T) {
 
 func TestCloseJFSCowWaitsForInitializationAndClearsPublishedHandle(t *testing.T) {
 	cfg := &Config{StorageBackend: StorageBackendCow}
-	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs", NodeName: "n1"}
+	cfg.Cow.JFS = CowJFSUserConfig{Enable: true, MountPath: "/mnt/jfs"}
 	l := &local{config: cfg}
 
 	prevCheck, prevInit := checkJFSMount, initJFSCowEngine

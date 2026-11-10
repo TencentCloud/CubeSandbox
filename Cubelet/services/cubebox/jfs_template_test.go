@@ -12,38 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
-	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
-
-func TestPrepareSharedTemplateAdoptsOnlyJFSTemplateCreates(t *testing.T) {
-	var adopted []string
-	previous := adoptJFSTemplate
-	adoptJFSTemplate = func(_ context.Context, id string) (bool, error) {
-		adopted = append(adopted, id)
-		return true, nil
-	}
-	t.Cleanup(func() { adoptJFSTemplate = previous })
-
-	create := func(extra map[string]string) {
-		ann := map[string]string{
-			constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
-			constants.MasterAnnotationStorageBackend:        cow.BackendJFS,
-		}
-		for k, v := range extra {
-			ann[k] = v
-		}
-		require.NoError(t, prepareSharedTemplate(context.Background(), &cubebox.RunCubeSandboxRequest{Annotations: ann}))
-	}
-	create(nil)
-	create(map[string]string{constants.MasterAnnotationStorageBackend: cow.BackendXFS})
-	create(map[string]string{constants.MasterAnnotationsAppSnapshotCreate: "true"})
-	create(map[string]string{constants.MasterAnnotationRuntimeSnapshotID: "snap-1"})
-	create(map[string]string{constants.MasterAnnotationSnapshotCrossNode: "true"})
-	create(map[string]string{constants.MasterAnnotationAppSnapshotTemplateID: ""})
-	require.Equal(t, []string{"tpl-1"}, adopted)
-}
 
 func TestWaitJFSTemplateUpload(t *testing.T) {
 	previous := jfsTemplateUploadStatus

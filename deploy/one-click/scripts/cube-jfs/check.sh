@@ -36,7 +36,7 @@ elif [[ "${MIRROR:-}" == "cn" ]]; then
 else
   image="${jfs_image_int_default}"
 fi
-mount_path="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
+mount_path="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs}"
 systemctl is-active --quiet cube-sandbox-jfs.service \
   || die "local cube-sandbox-jfs.service is not active"
 findmnt -rn -T "${mount_path}" -o FSTYPE | grep -q '^fuse\.juicefs$' \

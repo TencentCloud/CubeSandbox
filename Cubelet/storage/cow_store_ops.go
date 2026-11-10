@@ -301,27 +301,6 @@ func CommitMemoryFromBaseFor(ctx context.Context, backend string, source *CowSna
 	if source == nil || strings.TrimSpace(source.Name) == "" {
 		return nil, fmt.Errorf("source memory object is required")
 	}
-	normalizedBackend, err := cow.NormalizeBackend(backend)
-	if err != nil {
-		return nil, err
-	}
-	if normalizedBackend == cow.BackendJFS && source.SharedSource {
-		path := strings.TrimSpace(source.DevPath)
-		if path == "" {
-			return nil, fmt.Errorf("shared jfs memory source %s has no path", source.Name)
-		}
-		name := cowTemplateMemoryName(id)
-		devPath, importErr := importJFSVolume(ctx, name, "shared memory base", path)
-		if importErr != nil {
-			return nil, importErr
-		}
-		return &CowSnapshotObject{
-			Name:      name,
-			Kind:      cowKindVolume,
-			DevPath:   devPath,
-			SizeBytes: sizeBytes,
-		}, nil
-	}
 	volume, err := store.CommitTemplateMemory(ctx, source.Name, id, sizeBytes)
 	if err != nil {
 		return nil, err

@@ -90,9 +90,9 @@ JuiceFS volume
 Active client sessions
   SID  CLIENT HOST   REPORTED ADDRESSES  MOUNT PATH         MOUNT TIME
   ---  ------------  ------------------  -----------------  ------------------------------
-  2    a26a3780ac6f  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:46:15.482143729Z
-  1    c9af1d5570f4  172.17.0.3          /data/cubelet/jfs  2026-10-28T08:43:29.693002719Z
-  3    30e38b8072fe  172.17.0.2          /data/cubelet/jfs  2026-10-28T08:49:31.946778689Z
+  2    a26a3780ac6f  172.17.0.2          /data/cubelet/storage/jfs  2026-10-28T08:46:15.482143729Z
+  1    c9af1d5570f4  172.17.0.3          /data/cubelet/storage/jfs  2026-10-28T08:43:29.693002719Z
+  3    30e38b8072fe  172.17.0.2          /data/cubelet/storage/jfs  2026-10-28T08:49:31.946778689Z
 ```
 
 
@@ -186,10 +186,10 @@ cubeJuiceFS:
 kubectl get job,daemonset,pod -n cube-system
 
 kubectl exec -n cube-system daemonset/cube-juicefs -c juicefs -- \
-  findmnt -T /data/cubelet/jfs
+  findmnt -T /data/cubelet/storage/jfs
 
 kubectl exec -n cube-system daemonset/cube-node -c cubelet -- \
-  findmnt -T /data/cubelet/jfs
+  findmnt -T /data/cubelet/storage/jfs
 ```
 
 两次检查都必须显示 `fuse.juicefs`。之后创建模板时指定 `--backend jfs`；
@@ -276,7 +276,7 @@ sudo /usr/local/services/cubetoolbox/scripts/cube-jfs/mount.sh unmount
 cubeopscli node delete <node-id>
 ```
 
-卸载节点不会删除共享 JuiceFS 中的数据。不要直接删除 `CUBE_JFS_ROOT/nodes/<node-name>`；其中可能仍有模板、快照或暂停数据被集群引用。
+卸载节点不会删除共享 JuiceFS 中的数据。`CUBE_JFS_ROOT` 下的共享命名空间（`objects/`、`snapshots/`、`pause-snapshots/`）是全集群共享的，其中可能仍有模板、快照或暂停数据被其他节点引用，不要直接删除这些目录。
 
 ## JFS 相关配置说明
 
@@ -284,9 +284,12 @@ cubeopscli node delete <node-id>
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `CUBE_JFS_MOUNT_PATH` | `/data/cubelet/jfs` | 挂载点|
+| `CUBE_JFS_MOUNT_PATH` | `/data/cubelet/storage/jfs` | 挂载点|
+| `CUBE_JFS_ROOT` | `.` | 直接在挂载点保存共享命名空间 |
 | `CUBE_JFS_CACHE_DIR` | `/data/cubelet/jfs-cache` | 本地缓存目录，读缓存与写 staging 都放在其中，建议放在节点的 NVMe/SSD 数据盘上 |
 | `CUBE_JFS_CACHE_SIZE_MB` | `102400`（100 GiB） | 读缓存大小上限 |
+
+> **集群内所有节点必须使用相同的 `CUBE_JFS_MOUNT_PATH`（以及 `CUBE_JFS_ROOT`）。** 快照 catalog 记录的是挂载点下的绝对路径，挂载点不一致的节点无法解析其他节点创建的包。
 
 ### 缓存目录与容量建议
 
@@ -337,7 +340,7 @@ docker logs cube-sandbox-jfs-redis
 ### 容器运行但宿主机看不到挂载
 
 ```bash
-findmnt -T /data/cubelet/jfs
+findmnt -T /data/cubelet/storage/jfs
 docker inspect cube-sandbox-jfs --format '{{.State.Status}}'
 ```
 
