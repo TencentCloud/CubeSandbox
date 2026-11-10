@@ -36,6 +36,9 @@ class IPOverrideTransport(httpx.HTTPTransport):
                 for k, v in request.headers.raw
             ],
             content=request.content,
+            # httpx carries per-request timeouts in extensions; without this
+            # the rebuilt request has none and proxied calls can block forever.
+            extensions=request.extensions,
         )
         return super().handle_request(proxied)
 
