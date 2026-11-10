@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/affinity"
@@ -43,6 +44,17 @@ import (
 
 var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
 var getSandboxProxyMapFn = localcache.GetSandboxProxyMap
+
+// JFSTemplateVariantResolver verifies that the variant selected for a
+// target host-fact class was built successfully. Templatecenter wires the DB
+// lookup during CubeMaster initialization.
+type JFSTemplateVariantResolver func(ctx context.Context, templateID, variantID string) (string, error)
+
+var jfsTemplateVariantResolver JFSTemplateVariantResolver
+
+func SetJFSTemplateVariantResolver(resolver JFSTemplateVariantResolver) {
+	jfsTemplateVariantResolver = resolver
+}
 
 type createSandboxContext struct {
 	selctx           *selctx.SelectorCtx
@@ -241,6 +253,18 @@ func (c *createSandboxContext) handleCubelet() {
 				c.selectHost.ID(), err)
 			continue
 		}
+		if err := c.bindJFSTemplateVariant(); err != nil {
+			if c.directHost {
+				status, _ := ret.FromError(err)
+				c.setMasterRsp(int(status.Code()), status.Message())
+				return
+			}
+			c.selctx.AddLastBadNode(c.selectHost)
+			c.reschedule = true
+			log.G(c.ctx).Warnf("selected host cannot resolve JFS template variant, reschedule host=%s err=%v",
+				c.selectHost.ID(), err)
+			continue
+		}
 
 		retry := c.callCubelet()
 		if retry {
@@ -259,6 +283,59 @@ func (c *createSandboxContext) handleCubelet() {
 		c.dealSuccResult()
 		return
 	}
+}
+
+// bindJFSTemplateVariant resolves a template ID to the JFS package built for
+// the selected node's restore-compatibility class. Legacy
+// JFS templates carry no variant policy and keep their original ID.
+func (c *createSandboxContext) bindJFSTemplateVariant() error {
+	if c == nil || c.cubeletReq == nil || c.selectHost == nil {
+		return nil
+	}
+	annotations := c.cubeletReq.GetAnnotations()
+	if annotations == nil {
+		return nil
+	}
+	delete(annotations, constants.CubeAnnotationJFSTemplateVariantID)
+	if !constants.IsJFSBackend(annotations[constants.CubeAnnotationStorageBackend]) ||
+		annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] != hostcompat.VariantPolicyV1 {
+		return nil
+	}
+	logicalID := strings.TrimSpace(annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	if logicalID == "" {
+		return nil
+	}
+	if c.selectHost.HostFacts == nil {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"node %s has no host facts for JFS template %s", c.selectHost.ID(), logicalID)
+	}
+	variantID, _, ok := hostcompat.TemplateVariantID(
+		logicalID,
+		c.selectHost.HostFacts.CPUIDHash,
+		c.selectHost.HostFacts.HostKernelRelease,
+	)
+	if !ok {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"node %s has incomplete cpuid_hash/host_kernel_release for JFS template %s",
+			c.selectHost.ID(), logicalID)
+	}
+	if jfsTemplateVariantResolver == nil {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"JFS template variant resolver is not initialized")
+	}
+	resolved, err := jfsTemplateVariantResolver(c.ctx, logicalID, variantID)
+	if err != nil {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"JFS template %s has no ready variant for node %s: %v",
+			logicalID, c.selectHost.ID(), err)
+	}
+	if strings.TrimSpace(resolved) != variantID {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"JFS template %s variant mapping mismatch for node %s",
+			logicalID, c.selectHost.ID())
+	}
+	annotations[constants.CubeAnnotationJFSTemplateVariantID] = variantID
+	return nil
 }
 
 func (c *createSandboxContext) refreshAndAdmitHost() error {

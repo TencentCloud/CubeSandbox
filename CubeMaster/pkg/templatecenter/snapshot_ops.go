@@ -981,7 +981,7 @@ func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID, s
 	if constants.GetAppSnapshotVersion(createReq.Annotations) == "" {
 		constants.SetAppSnapshotVersion(createReq.Annotations, DefaultTemplateVersion)
 	}
-	storedReq, err := normalizeStoredTemplateRequest(createReq)
+	storedReq, err := normalizeStoredTemplateRequest(createReq, false)
 	if err != nil {
 		return nil, nil, err
 	}

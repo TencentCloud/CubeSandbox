@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
@@ -121,6 +122,7 @@ var (
 type ReplicaStatus struct {
 	NodeID            string `json:"node_id"`
 	NodeIP            string `json:"node_ip"`
+	TemplateVariantID string `json:"template_variant_id,omitempty"`
 	InstanceType      string `json:"instance_type,omitempty"`
 	Spec              string `json:"spec,omitempty"`
 	Status            string `json:"status"`
@@ -429,6 +431,7 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 			}
 			configureSnapshotRuntimeRefHooks()
 			configureSandboxSpecHooks()
+			sandbox.SetJFSTemplateVariantResolver(resolveReadyJFSTemplateVariant)
 		}
 		if includeSnapshotSide {
 			pausesnap.Init(store.db)
@@ -458,6 +461,22 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 		scheduleInitialCompatScan(ctx)
 	})
 	return initErr
+}
+
+func resolveReadyJFSTemplateVariant(ctx context.Context, templateID, variantID string) (string, error) {
+	var replica models.TemplateReplica
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Select("template_variant_id").
+		Where("template_id = ? AND template_variant_id = ? AND status = ?",
+			strings.TrimSpace(templateID), strings.TrimSpace(variantID), ReplicaStatusReady).
+		First(&replica).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", ErrTemplateHasNoReadyReplica
+		}
+		return "", err
+	}
+	return strings.TrimSpace(replica.TemplateVariantID), nil
 }
 
 func configureSnapshotRuntimeRefHooks() {
@@ -599,12 +618,14 @@ func GenerateTemplateID() string {
 	return generateTemplateID()
 }
 
-func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
+func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq, enableJFSVariants bool) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cloned, templateID, err := NormalizeRequest(req)
 	if err != nil {
 		return nil, err
 	}
+	jfsVariantTemplate := enableJFSVariants && constants.IsJFSBackend(storageBackendFromCreate(cloned))
 	delete(cloned.Annotations, constants.CubeAnnotationsAppSnapshotCreate)
+	delete(cloned.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
 	// Runtime plugin metadata may contain opaque provider state. Persist only
 	// the stable volume IDs/mount declarations and resolve current metadata
 	// from t_cube_volume for every restore.
@@ -623,6 +644,11 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
+	if jfsVariantTemplate {
+		cloned.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = hostcompat.VariantPolicyV1
+	} else {
+		delete(cloned.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+	}
 	return cloned, nil
 }
 
@@ -634,7 +660,7 @@ func CreateTemplate(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq)
 	if err != nil {
 		return nil, err
 	}
-	storedReq, err := normalizeStoredTemplateRequest(req)
+	storedReq, err := normalizeStoredTemplateRequest(req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -692,7 +718,10 @@ func healthyTemplateNodes(instanceType string) []*node.Node {
 }
 
 func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
-	targets = templateBuildTargets(storageBackendFromCreate(req), targets)
+	variantBuild := strings.EqualFold(
+		strings.TrimSpace(req.Annotations[constants.CubeAnnotationsAppSnapshotCreate]), "true",
+	)
+	targets = templateBuildTargets(storageBackendFromCreate(req), variantBuild, targets)
 	replicas := make([]ReplicaStatus, 0, len(targets))
 	envdVersions := make([]nodeEnvdVersion, 0, len(targets))
 	var lock sync.Mutex
@@ -721,6 +750,24 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 			lock.Unlock()
 
 			if upsertErr := UpsertReplica(ctx, templateID, req.InstanceType, replica); upsertErr != nil {
+				if replica.TemplateVariantID != "" {
+					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					cleanupErr := cleanupTemplateReplicasWithLocators(
+						cleanupCtx,
+						templateID,
+						[]templateCleanupLocator{{
+							NodeID:            target.ID(),
+							NodeIP:            target.HostIP(),
+							TemplateVariantID: replica.TemplateVariantID,
+						}},
+						storageBackendFromCreate(req),
+					)
+					cancel()
+					if cleanupErr != nil {
+						upsertErr = errors.Join(upsertErr,
+							fmt.Errorf("cleanup untracked template variant %s: %w", replica.TemplateVariantID, cleanupErr))
+					}
+				}
 				lock.Lock()
 				persistErr = errors.Join(persistErr, fmt.Errorf("upsert template replica fail, template=%s node=%s: %w", templateID, target.ID(), upsertErr))
 				lock.Unlock()
@@ -848,6 +895,26 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
 		return replica, ""
+	}
+	if constants.IsJFSBackend(storageBackendFromCreate(nodeReq)) &&
+		strings.EqualFold(strings.TrimSpace(nodeReq.Annotations[constants.CubeAnnotationsAppSnapshotCreate]), "true") {
+		logicalID := strings.TrimSpace(nodeReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+		if target.HostFacts == nil {
+			replica.Phase = ReplicaPhaseFailed
+			replica.ErrorMessage = "jfs template variant requires node host facts"
+			return replica, ""
+		}
+		variantID, _, ok := hostcompat.TemplateVariantID(
+			logicalID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
+		)
+		if !ok {
+			replica.Phase = ReplicaPhaseFailed
+			replica.ErrorMessage = "jfs template variant requires cpuid_hash and host_kernel_release"
+			return replica, ""
+		}
+		nodeReq.Annotations[constants.CubeAnnotationJFSTemplateVariantID] = variantID
+		nodeReq.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = hostcompat.VariantPolicyV1
+		replica.TemplateVariantID = variantID
 	}
 	ensureRuntimeTemplateRequest(nodeReq)
 	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
@@ -2081,6 +2148,7 @@ func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 	return ReplicaStatus{
 		NodeID:            replica.NodeID,
 		NodeIP:            replica.NodeIP,
+		TemplateVariantID: replica.TemplateVariantID,
 		InstanceType:      replica.InstanceType,
 		Spec:              replica.Spec,
 		Status:            replica.Status,
@@ -2105,6 +2173,7 @@ func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus
 		TemplateID:        templateID,
 		NodeID:            replica.NodeID,
 		NodeIP:            replica.NodeIP,
+		TemplateVariantID: replica.TemplateVariantID,
 		InstanceType:      instanceType,
 		Spec:              replica.Spec,
 		Status:            replica.Status,
@@ -2126,17 +2195,18 @@ func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus
 
 func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[string]any {
 	fields := map[string]any{
-		"node_ip":          replica.NodeIP,
-		"instance_type":    instanceType,
-		"spec":             replica.Spec,
-		"status":           replica.Status,
-		"phase":            replica.Phase,
-		"artifact_id":      replica.ArtifactID,
-		"last_job_id":      replica.LastJobID,
-		"last_error_phase": replica.LastErrorPhase,
-		"cleanup_required": replica.CleanupRequired,
-		"error_message":    replica.ErrorMessage,
-		"updated_at":       time.Now(),
+		"node_ip":             replica.NodeIP,
+		"template_variant_id": replica.TemplateVariantID,
+		"instance_type":       instanceType,
+		"spec":                replica.Spec,
+		"status":              replica.Status,
+		"phase":               replica.Phase,
+		"artifact_id":         replica.ArtifactID,
+		"last_job_id":         replica.LastJobID,
+		"last_error_phase":    replica.LastErrorPhase,
+		"cleanup_required":    replica.CleanupRequired,
+		"error_message":       replica.ErrorMessage,
+		"updated_at":          time.Now(),
 	}
 	if normalizeCompatStatus(replica.CompatStatus) != CompatStatusUnknown ||
 		normalizeComponentVersion(replica.GuestImageVersion) != "" ||

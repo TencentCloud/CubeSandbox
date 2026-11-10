@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
@@ -112,6 +113,13 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 	if len(replicas) == 0 || len(targets) == 0 {
 		return nil
 	}
+	if constants.IsJFSBackend(backend) {
+		locators := jfsRedoCleanupLocators(templateID, replicas, targets)
+		if len(locators) == 0 {
+			return nil
+		}
+		return cleanupTemplateReplicasWithLocators(ctx, templateID, locators, backend)
+	}
 	allowed := make(map[string]struct{}, len(targets)*2)
 	for _, target := range targets {
 		if target == nil {
@@ -138,6 +146,41 @@ func cleanupTemplateReplicasOnNodes(ctx context.Context, templateID string, repl
 		return nil
 	}
 	return cleanupTemplateReplicasWithLocators(ctx, templateID, locators, backend)
+}
+
+func jfsRedoCleanupLocators(templateID string, replicas []models.TemplateReplica, targets []*node.Node) []templateCleanupLocator {
+	existing := make(map[string]struct{}, len(replicas))
+	for _, replica := range replicas {
+		if variantID := strings.TrimSpace(replica.TemplateVariantID); variantID != "" {
+			existing[variantID] = struct{}{}
+		}
+	}
+	locators := make([]templateCleanupLocator, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if target == nil || target.HostFacts == nil {
+			continue
+		}
+		variantID, _, ok := hostcompat.TemplateVariantID(
+			templateID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
+		)
+		if !ok {
+			continue
+		}
+		if _, ok := existing[variantID]; !ok {
+			continue
+		}
+		if _, ok := seen[variantID]; ok {
+			continue
+		}
+		seen[variantID] = struct{}{}
+		locators = append(locators, templateCleanupLocator{
+			NodeID:            target.ID(),
+			NodeIP:            target.HostIP(),
+			TemplateVariantID: variantID,
+		})
+	}
+	return locators
 }
 
 func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {

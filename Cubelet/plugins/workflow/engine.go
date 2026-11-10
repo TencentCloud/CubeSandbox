@@ -263,21 +263,16 @@ func (b *CreateContext) GetSnapshotTemplateID() (string, bool) {
 		return "", false
 	}
 	ann := b.ReqInfo.GetAnnotations()
-	// Pause resume: Master sets pause.snapshot.id + runtime.snapshot.id=snap-*.
-	// Prefer runtime id so restore uses the pause catalog, not the original tpl-*.
-	if strings.TrimSpace(ann[constants.MasterAnnotationPauseSnapshotID]) != "" {
-		if v := strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID]); v != "" {
+	if v := strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID]); v != "" {
+		return v, true
+	}
+	if ann[constants.MasterAnnotationJFSTemplateVariantPolicy] == constants.MasterJFSTemplateVariantPolicyV1 {
+		if v := strings.TrimSpace(ann[constants.MasterAnnotationJFSTemplateVariantID]); v != "" {
 			return v, true
 		}
 	}
 	v, ok := ann[constants.MasterAnnotationAppSnapshotTemplateID]
 	if ok && v != "" {
-		return v, true
-	}
-	// Runtime / pause snapshots restore from the local catalog via
-	// cube.master.runtime.snapshot.id (pause uses Master-allocated snap-*).
-	v = ann[constants.MasterAnnotationRuntimeSnapshotID]
-	if v != "" {
 		return v, true
 	}
 	return "", false

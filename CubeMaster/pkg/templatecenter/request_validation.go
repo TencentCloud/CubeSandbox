@@ -15,6 +15,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -69,23 +70,44 @@ func resolveTemplateNodes(instanceType string, scope []string) ([]*node.Node, er
 	return selected, nil
 }
 
-// templateBuildTargets narrows the nodes a template is built on. A jfs
-// template lives on the JuiceFS volume every node mounts, so it is built on
-// one schedulable node and the others adopt that package on first use.
-func templateBuildTargets(backend string, nodes []*node.Node) []*node.Node {
-	if !constants.IsJFSBackend(backend) || len(nodes) <= 1 {
+// templateBuildTargets narrows the nodes a template is built on. JFS shares
+// files but not CPU/kernel restore compatibility, so one representative of
+// every known host-fact class builds a physical template variant.
+func templateBuildTargets(backend string, variants bool, nodes []*node.Node) []*node.Node {
+	if !constants.IsJFSBackend(backend) || !variants {
 		return nodes
 	}
-	candidates := make([]*node.Node, 0, len(nodes))
+	groups := make(map[string][]*node.Node)
 	for _, n := range nodes {
-		if n != nil && n.SchedulingAllowed() {
-			candidates = append(candidates, n)
+		if n == nil || n.HostFacts == nil {
+			continue
 		}
+		key, ok := hostcompat.VariantKey(n.HostFacts.CPUIDHash, n.HostFacts.HostKernelRelease)
+		if !ok {
+			continue
+		}
+		groups[key] = append(groups[key], n)
 	}
-	if len(candidates) == 0 {
-		candidates = nodes
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
-	return []*node.Node{candidates[rand.Intn(len(candidates))]}
+	sort.Strings(keys)
+	targets := make([]*node.Node, 0, len(keys))
+	for _, key := range keys {
+		members := groups[key]
+		candidates := make([]*node.Node, 0, len(members))
+		for _, n := range members {
+			if n.SchedulingAllowed() {
+				candidates = append(candidates, n)
+			}
+		}
+		if len(candidates) == 0 {
+			candidates = members
+		}
+		targets = append(targets, candidates[rand.Intn(len(candidates))])
+	}
+	return targets
 }
 
 func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*types.CreateTemplateFromImageReq, error) {

@@ -541,6 +541,14 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	} else {
 		applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
 	}
+	if reqInOut.Annotations == nil {
+		reqInOut.Annotations = make(map[string]string)
+	}
+	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
+	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+	if policy := strings.TrimSpace(templateReq.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy]); policy != "" {
+		reqInOut.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = policy
+	}
 	if err := templatecenter.InheritCreateBackendFromTemplate(reqInOut, templateReq); err != nil {
 		return err
 	}

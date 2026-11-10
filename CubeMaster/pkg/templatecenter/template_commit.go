@@ -56,7 +56,7 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 	if err != nil {
 		return nil, err
 	}
-	storedReq, err := normalizeStoredTemplateRequest(req)
+	storedReq, err := normalizeStoredTemplateRequest(req, false)
 	if err != nil {
 		return nil, err
 	}

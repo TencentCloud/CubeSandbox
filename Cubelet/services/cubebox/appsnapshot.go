@@ -89,9 +89,9 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	templateID := createReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]
-	rsp.TemplateID = templateID
-	if err := pathutil.ValidateSafeID(templateID); err != nil {
+	logicalTemplateID := createReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]
+	rsp.TemplateID = logicalTemplateID
+	if err := pathutil.ValidateSafeID(logicalTemplateID); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid templateID: %v", err)
 		return rsp, nil
@@ -112,6 +112,26 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	templateID := logicalTemplateID
+	if backend == cow.BackendJFS &&
+		createReq.GetAnnotations()[constants.MasterAnnotationJFSTemplateVariantPolicy] == constants.MasterJFSTemplateVariantPolicyV1 {
+		templateID = strings.TrimSpace(createReq.GetAnnotations()[constants.MasterAnnotationJFSTemplateVariantID])
+		if templateID == "" {
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			rsp.Ret.RetMsg = fmt.Sprintf("annotation %s is required for a variant JFS template",
+				constants.MasterAnnotationJFSTemplateVariantID)
+			return rsp, nil
+		}
+		if err := pathutil.ValidateSafeID(templateID); err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			rsp.Ret.RetMsg = fmt.Sprintf("invalid JFS template variant ID: %v", err)
+			return rsp, nil
+		}
+		// Storage workflow plugins still read the established template-id
+		// annotation. AppSnapshot is an internal one-shot request, so point its
+		// temporary sandbox at the selected JFS template variant.
+		createReq.Annotations[constants.MasterAnnotationAppSnapshotTemplateID] = templateID
+	}
 
 	rt := &CubeLog.RequestTrace{
 		Action:       "AppSnapshot",
@@ -125,8 +145,9 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
-		"step":       "appSnapshot",
-		"templateID": templateID,
+		"step":              "appSnapshot",
+		"templateID":        logicalTemplateID,
+		"templateVariantID": templateID,
 	})
 
 	stepLog.Infof("AppSnapshotRequest: templateID=%s", templateID)

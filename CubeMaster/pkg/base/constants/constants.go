@@ -65,8 +65,10 @@ const (
 	CubeAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	CubeAnnotationsSystemDiskSize           = "cube.master.system_disk_size"
 
-	CubeAnnotationsAppSnapshotCreate    = "cube.master.appsnapshot.create"
-	CubeAnnotationAppSnapshotTemplateID = "cube.master.appsnapshot.template.id"
+	CubeAnnotationsAppSnapshotCreate       = "cube.master.appsnapshot.create"
+	CubeAnnotationAppSnapshotTemplateID    = "cube.master.appsnapshot.template.id"
+	CubeAnnotationJFSTemplateVariantID     = "cube.master.jfs.template.variant.id"
+	CubeAnnotationJFSTemplateVariantPolicy = "cube.master.jfs.template.variant.policy"
 	// CubeAnnotationAppSnapshotTemplateAlias carries the template display_name
 	// (the alias) onto the sandbox so CubeAPI can echo it without a lookup.
 	CubeAnnotationAppSnapshotTemplateAlias   = "cube.master.appsnapshot.template.alias"

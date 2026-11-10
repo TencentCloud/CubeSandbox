@@ -1171,22 +1171,26 @@ func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, in
 //     template), so memory prefetch is correctly a no-op.
 //   - Logical id present, catalog hit with memory_vol -> normal restore.
 func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, backend string, annotations map[string]string) (string, string, error) {
-	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
-	if logicalID == "" {
-		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+	storageID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
+	if storageID == "" &&
+		annotations[constants.MasterAnnotationJFSTemplateVariantPolicy] == constants.MasterJFSTemplateVariantPolicyV1 {
+		storageID = strings.TrimSpace(annotations[constants.MasterAnnotationJFSTemplateVariantID])
 	}
-	if logicalID == "" {
+	if storageID == "" {
+		storageID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+	}
+	if storageID == "" {
 		return "", "", nil
 	}
 	if strings.TrimSpace(backend) == "" {
 		backend = annotations[constants.MasterAnnotationStorageBackend]
 	}
-	entry, err := GetLocalSnapshotFor(ctx, backend, logicalID)
+	entry, err := GetLocalSnapshotFor(ctx, backend, storageID)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
+		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", storageID, err)
 	}
 	if entry == nil {
-		return "", "", fmt.Errorf("snapshot %s missing from local catalog", logicalID)
+		return "", "", fmt.Errorf("snapshot %s missing from local catalog", storageID)
 	}
 	volumeName := strings.TrimSpace(entry.MemoryVol)
 	if volumeName == "" {

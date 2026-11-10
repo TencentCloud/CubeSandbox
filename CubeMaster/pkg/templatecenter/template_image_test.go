@@ -26,6 +26,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -1567,26 +1568,6 @@ func TestNormalizeRedoTemplateImageRequest(t *testing.T) {
 	}
 }
 
-func TestIsJFSTemplateRedo(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		definition *models.TemplateDefinition
-		sourceReq  *types.CreateTemplateFromImageReq
-		want       bool
-	}{
-		{name: "request backend", sourceReq: &types.CreateTemplateFromImageReq{Backend: "jfs"}, want: true},
-		{name: "definition fallback", definition: &models.TemplateDefinition{StorageBackend: "juicefs"}, sourceReq: &types.CreateTemplateFromImageReq{}, want: true},
-		{name: "request takes precedence", definition: &models.TemplateDefinition{StorageBackend: "jfs"}, sourceReq: &types.CreateTemplateFromImageReq{Backend: "xfs"}},
-		{name: "xfs", definition: &models.TemplateDefinition{StorageBackend: "xfs"}, sourceReq: &types.CreateTemplateFromImageReq{}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isJFSTemplateRedo(tc.definition, tc.sourceReq); got != tc.want {
-				t.Fatalf("isJFSTemplateRedo() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestDetermineRedoModeSupportsScopedFailures(t *testing.T) {
 	if got := determineRedoMode(&types.RedoTemplateFromImageReq{
 		TemplateID:        "tpl-1",
@@ -1620,6 +1601,31 @@ func TestResolveRedoTargetsIntersectsFailedOnlyWithScope(t *testing.T) {
 	if len(targets) != 1 || targets[0].ID() != "node-a" {
 		t.Fatalf("unexpected targets: %#v", targets)
 	}
+}
+
+func TestResolveRedoTargetsMatchesFailedJFSHostFactGroup(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	facts := &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}
+	patches.ApplyFunc(healthyTemplateNodes, func(instanceType string) []*node.Node {
+		return []*node.Node{{InsID: "new-owner", IP: "10.0.0.2", Healthy: true, HostFacts: facts}}
+	})
+	variantID, _, ok := hostcompat.TemplateVariantID("tpl-a", facts.CPUIDHash, facts.HostKernelRelease)
+	require.True(t, ok)
+
+	targets, err := resolveRedoTargets(cubeboxv1.InstanceType_cubebox.String(), &types.RedoTemplateFromImageReq{
+		TemplateID:        "tpl-a",
+		DistributionScope: []string{"new-owner"},
+		FailedOnly:        true,
+	}, []models.TemplateReplica{{
+		NodeID:            "old-owner",
+		NodeIP:            "10.0.0.1",
+		TemplateVariantID: variantID,
+		Status:            ReplicaStatusFailed,
+	}})
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, "new-owner", targets[0].ID())
 }
 
 func TestResolveRedoTargetsRejectsWhenNoFailedReplicas(t *testing.T) {
