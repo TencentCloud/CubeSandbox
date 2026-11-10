@@ -90,6 +90,98 @@ remove_routing
 [[ "$(grep -c 'rule del fwmark' "${CALLS}" || true)" -eq 2 ]]
 [[ ! -s "${RULES_STATE}" ]]
 
+# --- fwmark ip-rule checks must not trust a SIGPIPE'd `ip rule show` ----------
+# iproute2 writes one rule per write(). With `ip rule show | grep -q`, grep exits
+# on the first match while ip is still writing, ip dies with SIGPIPE, and under
+# pipefail a rule that exists is reported as missing, so every reapply adds a
+# duplicate. Emulate that: print the cube rules first, then pad past the pipe
+# buffer one line at a time. `rule del` removes only the first match, like the
+# kernel.
+: > "${RULES_STATE}"
+: > "${CALLS}"
+ip() {
+    printf '%s\n' "$*" >> "${CALLS}"
+    case "$1 $2" in
+        "rule show")
+            cat "${RULES_STATE}"
+            local i
+            for ((i = 0; i < 4000; i++)); do
+                printf '%d:\tfrom all iif lo lookup 200\n' "$((i + 1000))"
+            done
+            return 0
+            ;;
+        "rule add")
+            printf 'from all fwmark %s lookup %s\n' "$4" "$6" \
+                | tr '[:upper:]' '[:lower:]' >> "${RULES_STATE}"
+            return 0
+            ;;
+        "rule del")
+            local needle
+            needle="$(printf '%s' "$4" | tr '[:upper:]' '[:lower:]')"
+            awk -v n="fwmark ${needle} " 'index($0, n) && !done { done = 1; next } 1' \
+                "${RULES_STATE}" > "${RULES_STATE}.tmp"
+            mv "${RULES_STATE}.tmp" "${RULES_STATE}"
+            return 0
+            ;;
+        "route show")
+            printf 'local default dev lo scope host\n'
+            return 0
+            ;;
+    esac
+    return 0
+}
+
+http_rule="$(printf 'from all fwmark %s/%s lookup %s' "${CUBE_L7_MARK_HTTP}" "${CUBE_L7_MARK_MASK}" "${ROUTE_TABLE}" | tr '[:upper:]' '[:lower:]')"
+https_rule="$(printf 'from all fwmark %s/%s lookup %s' "${CUBE_L7_MARK_HTTPS}" "${CUBE_L7_MARK_MASK}" "${ROUTE_TABLE}" | tr '[:upper:]' '[:lower:]')"
+
+# Both rules present: reapply must not add anything.
+printf '%s\n%s\n' "${http_rule}" "${https_rule}" > "${RULES_STATE}"
+for _ in 1 2 3; do install_routing; done
+[[ "$(grep -c '^rule add' "${CALLS}" || true)" -eq 0 ]]
+[[ "$(grep -cxF "${http_rule}" "${RULES_STATE}")" -eq 1 ]]
+[[ "$(grep -cxF "${https_rule}" "${RULES_STATE}")" -eq 1 ]]
+
+# Duplicates left behind by earlier versions collapse to one rule per mark.
+printf '%s\n%s\n%s\n%s\n' "${http_rule}" "${http_rule}" "${http_rule}" "${https_rule}" > "${RULES_STATE}"
+: > "${CALLS}"
+install_routing
+[[ "$(grep -c '^rule add' "${CALLS}" || true)" -eq 0 ]]
+[[ "$(grep -cxF "${http_rule}" "${RULES_STATE}")" -eq 1 ]]
+[[ "$(grep -cxF "${https_rule}" "${RULES_STATE}")" -eq 1 ]]
+
+# remove_routing deletes every copy despite the long listing.
+printf '%s\n%s\n%s\n' "${http_rule}" "${http_rule}" "${https_rule}" > "${RULES_STATE}"
+remove_routing
+[[ ! -s "${RULES_STATE}" ]]
+
+# A failed `ip rule show` (e.g. "Dump terminated") must abort, never add.
+ip() {
+    printf '%s\n' "$*" >> "${CALLS}"
+    [[ "$1 $2" == "rule show" ]] && return 1
+    return 0
+}
+: > "${CALLS}"
+if ( install_routing ) 2>/dev/null; then
+    echo "install_routing succeeded despite a failed ip rule show" >&2
+    exit 1
+fi
+[[ "$(grep -c '^rule add' "${CALLS}" || true)" -eq 0 ]]
+
+# A missing route table makes `ip route show table` fail; that means "no
+# route", so the route is added instead of aborting the install.
+ip() {
+    printf '%s\n' "$*" >> "${CALLS}"
+    case "$1 $2" in
+        "rule show") printf '%s\n%s\n' "${http_rule}" "${https_rule}" ;;
+        "route show") echo "Error: ipv4: FIB table does not exist." >&2; return 2 ;;
+    esac
+    return 0
+}
+: > "${CALLS}"
+install_routing
+[[ "$(grep -c '^route add' "${CALLS}")" -eq 1 ]]
+unset -f ip
+
 # --- install_routing: route-existence check handles both iproute2 output forms --
 # ip route show normalises 0.0.0.0/0 to "default"; keep both forms for safety.
 ROUTE_SHOW_OUTPUT=""
