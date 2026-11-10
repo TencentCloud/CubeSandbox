@@ -618,6 +618,37 @@ cubeOps:
       periodSeconds: 20
       failureThreshold: 6
   resources: {}
+  # Capacity-driven compute-node scaling through the Kubernetes Cluster
+  # Autoscaler (issue #2193). CubeOps keeps one placeholder Pod on every
+  # compute node it wants to keep, adds a Pending placeholder to request a
+  # node, and removes a placeholder only after the node was isolated in Cube
+  # and holds no running or paused sandbox. The node pool itself must have
+  # the Cluster Autoscaler enabled with limits at least minNodes..maxNodes.
+  # Enable this BEFORE lowering the pool minimum, so every existing node is
+  # pinned first. Disabled by default.
+  autoscale:
+    enabled: false
+    # Log decisions without changing Cube or Kubernetes.
+    dryRun: false
+    # Selects the compute-node pool (Kubernetes node labels). Required.
+    nodeSelector: {}
+    # Taints of the compute-node pool, copied onto placeholder Pods.
+    tolerations: []
+    minNodes: 1
+    maxNodes: 1
+    # Scheduler-quota fill (0,1] the pool is sized for.
+    targetUtilization: 0.7
+    headroomMilliCPU: 0
+    headroomMemoryMB: 0
+    interval: 30s
+    scaleInCooldown: 15m
+    # An isolated node still holding sandboxes after this is returned to
+    # service; the autoscaler never stops sandboxes.
+    drainTimeout: 1h
+    provisionTimeout: 15m
+    placeholderImage: registry.k8s.io/pause:3.10
+    # Optional; must not be below the Cluster Autoscaler expendable cutoff (-10).
+    priorityClassName: ""
 
 lifecycleManager:
   # Standalone sandbox auto-pause / auto-resume coordinator. Replaces the

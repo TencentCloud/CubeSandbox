@@ -1719,3 +1719,12 @@ true
 {{- printf "%s-ops-blobs" (include "cube.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{/* Comma-separated k=v selector for CUBE_OPS_AUTOSCALE_NODE_SELECTOR. */}}
+{{- define "cube.opsAutoscaleSelector" -}}
+{{- $parts := list -}}
+{{- range $k, $v := . -}}
+{{- $parts = append $parts (printf "%s=%s" $k $v) -}}
+{{- end -}}
+{{- join "," $parts -}}
+{{- end -}}

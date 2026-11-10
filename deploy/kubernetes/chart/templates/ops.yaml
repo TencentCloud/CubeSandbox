@@ -38,6 +38,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- if .Values.cubeOps.autoscale.enabled }}
+      serviceAccountName: {{ include "cube.opsName" . }}-autoscale
+      automountServiceAccountToken: true
+      {{- end }}
       containers:
         - name: cube-ops
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.ops "context" $) | quote }}
@@ -46,6 +50,44 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_OPS_BIND
               value: {{ .Values.cubeOps.bind | quote }}
+            {{- with .Values.cubeOps.autoscale }}
+            {{- if .enabled }}
+            - name: CUBE_OPS_AUTOSCALE_ENABLE
+              value: "true"
+            - name: CUBE_OPS_AUTOSCALE_DRY_RUN
+              value: {{ .dryRun | quote }}
+            - name: CUBE_OPS_AUTOSCALE_NAMESPACE
+              value: {{ $.Release.Namespace | quote }}
+            - name: CUBE_OPS_AUTOSCALE_NODE_SELECTOR
+              value: {{ include "cube.opsAutoscaleSelector" .nodeSelector | quote }}
+            - name: CUBE_OPS_AUTOSCALE_TOLERATIONS
+              value: {{ .tolerations | default list | toJson | quote }}
+            - name: CUBE_OPS_AUTOSCALE_MIN_NODES
+              value: {{ .minNodes | quote }}
+            - name: CUBE_OPS_AUTOSCALE_MAX_NODES
+              value: {{ .maxNodes | quote }}
+            - name: CUBE_OPS_AUTOSCALE_TARGET_UTILIZATION
+              value: {{ .targetUtilization | quote }}
+            - name: CUBE_OPS_AUTOSCALE_HEADROOM_MILLI_CPU
+              value: {{ .headroomMilliCPU | int64 | quote }}
+            - name: CUBE_OPS_AUTOSCALE_HEADROOM_MEMORY_MB
+              value: {{ .headroomMemoryMB | int64 | quote }}
+            - name: CUBE_OPS_AUTOSCALE_INTERVAL
+              value: {{ .interval | quote }}
+            - name: CUBE_OPS_AUTOSCALE_SCALE_IN_COOLDOWN
+              value: {{ .scaleInCooldown | quote }}
+            - name: CUBE_OPS_AUTOSCALE_DRAIN_TIMEOUT
+              value: {{ .drainTimeout | quote }}
+            - name: CUBE_OPS_AUTOSCALE_PROVISION_TIMEOUT
+              value: {{ .provisionTimeout | quote }}
+            - name: CUBE_OPS_AUTOSCALE_PLACEHOLDER_IMAGE
+              value: {{ .placeholderImage | quote }}
+            {{- with .priorityClassName }}
+            - name: CUBE_OPS_AUTOSCALE_PRIORITY_CLASS_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             # ops-agent push channel: node-local agents listen on the compute
             # nodes at .Values.opsAgent.port.
             - name: CUBE_OPS_OPSAGENT_PORT
