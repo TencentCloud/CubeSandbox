@@ -351,7 +351,8 @@ export default withMermaid(defineConfig({
                     { text: 'LambChat', link: '/guide/usecases/lambchat' },
                     { text: 'ouc-online', link: '/guide/usecases/ouc-online' },
                     { text: 'KakuriZai', link: '/guide/usecases/kakurizai' },
-                    { text: 'OMA', link: '/guide/usecases/oma' }
+                    { text: 'OMA', link: '/guide/usecases/oma' },
+                    { text: 'OpenClaw', link: '/guide/usecases/openclaw-coding-agents' }
                   ]
                 }
               ]
@@ -596,7 +597,8 @@ export default withMermaid(defineConfig({
                     { text: 'LambChat', link: '/zh/guide/usecases/lambchat' },
                     { text: 'ouc-online', link: '/zh/guide/usecases/ouc-online' },
                     { text: 'KakuriZai', link: '/zh/guide/usecases/kakurizai' },
-                    { text: 'OMA', link: '/zh/guide/usecases/oma' }
+                    { text: 'OMA', link: '/zh/guide/usecases/oma' },
+                    { text: 'OpenClaw', link: '/zh/guide/usecases/openclaw-coding-agents' }
                   ]
                 }
               ]

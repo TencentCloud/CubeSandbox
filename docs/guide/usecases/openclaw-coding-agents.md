@@ -61,9 +61,9 @@ sandbox = Sandbox.create(
 )
 ```
 
-Cube installs a `0.0.0.0/0` deny and enforces allow-over-deny in the eBPF data plane; sandbox-private and host-internal CIDRs are denied regardless of the configured policy, which closed the usual "agent reaches cluster-internal services" review finding on its own. Policy changes flow through the same reviewed configuration as the rest of the platform rather than ad-hoc manual edits — see [Network Policy](/guide/network-policy).
+Cube installs a `0.0.0.0/0` deny and enforces allow-over-deny in the eBPF data plane. Sandbox-private and host-internal CIDRs (`10.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`) sit in the deny set by default, so nothing internal is reachable through ordinary public egress — but an explicit `allow_out` entry takes precedence over the deny, which is exactly what the `10.60.0.0/16` git-mirror entry above relies on. Anything not allowlisted stays unreachable, which closed the usual "agent reaches cluster-internal services" review finding on its own. Policy changes flow through the same reviewed configuration as the rest of the platform rather than ad-hoc manual edits — see [Network Policy](/guide/network-policy).
 
-**Inbound via port mapping only.** The gateway port is mapped at sandbox creation and surfaced through the platform's URL. There is no other inbound path into the sandbox network.
+**Inbound via port mapping.** The gateway port is mapped at sandbox creation and surfaced through the platform's URL. Port mapping is the main inbound path this deployment relies on — not a hard network boundary: CubeProxy can route `<port>-<sandbox-id>.<domain>` for any sandbox port, and a sandbox URL is reachable by default unless public traffic is restricted (`network.allow_public_traffic=False`). Egress policy alone does not gate inbound access, so the ingress side got its own review too.
 
 **Session continuity.** Idle sessions are paused to release CPU/memory while keeping state; paused sessions are restored with a plain connect when the developer returns:
 
@@ -73,7 +73,7 @@ sandbox.pause()                       # checkpoint state, free CPU/memory
 sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)
 ```
 
-For maintenance windows, the workspace lives on persistent storage (host mount or the S3 volume plugin — see [Persistent Storage](/guide/persistent-storage)), and long-running work is checkpointed with snapshots so a session can be brought back after a node drain — see [Snapshot/Rollback/Clone](/guide/snapshot-rollback-clone).
+For maintenance windows, the workspace lives on persistent storage (host mount or the S3 volume plugin — see [Persistent Storage](/guide/persistent-storage)), and long-running work is checkpointed with snapshots so a session can be brought back after a node drain — see [Snapshot/Rollback/Clone](/guide/snapshot-rollback-clone). Cross-node resume additionally requires a shared snapshot backend (`jfs` or `s3`, `remote_status=ready`); a node-local `xfs` mount does not survive a drain.
 
 ## Results and Benefits
 

@@ -42,7 +42,7 @@ CubeAPI ──► CubeMaster ──► Cubelet ──► MicroVM（每会话一�
                                           └─ 出网：默认拒绝 + 白名单（eBPF）
 ```
 
-**用模板，而不是现场装环境。** OpenClaw、它的 skills、以及智能体实际会调用的工具链（git、node、构建工具）都烘焙进一个 Cube 模板。每个会话都从已知良好的镜像启动，开发者看着屏幕时没有任何安装动作。基于模板的创建把冷启动压在亚秒级，与项目自己的[性能基准](/blog/posts/2026-06-01-cubesandbox-perf-benchmark)一致。
+**用模板，而不是现场装环境。** OpenClaw、它的 skills、以及智能体实际会调用的工具链（git、node、构建工具）都烘焙进一个 Cube 模板。每个会话都从已知良好的镜像启动，开发者看着屏幕时没有任何安装动作。基于模板的创建把冷启动压在亚秒级，与项目自己的[性能基准](/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark)一致。
 
 **出网策略即代码。** 创建会话时关闭公网出网，只保留显式白名单。域名目标由 Cube 的 DNS 查询/应答学习机制处理，所以服务方更换 IP 后白名单条目依然有效：
 
@@ -61,9 +61,9 @@ sandbox = Sandbox.create(
 )
 ```
 
-Cube 会安装 `0.0.0.0/0` 拒绝规则，并在 eBPF 数据面执行"允许优先于拒绝"；沙箱私网与宿主内部网段无论怎么配置都在拒绝之列，这直接解决了安全评审里最常见的"智能体可达集群内部服务"问题。策略变更走与其他平台组件一致的评审配置，而非临时手工修改——参见[网络策略](/guide/network-policy)。
+Cube 会安装 `0.0.0.0/0` 拒绝规则，并在 eBPF 数据面执行"允许优先于拒绝"。沙箱私网与宿主内部网段（`10.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16`）默认在拒绝集合里，普通公网出网触不到任何内部服务——但显式的 `allow_out` 条目优先于拒绝，上面 `10.60.0.0/16` 的内部 git 镜像正是靠这一点打通的。凡是没有进白名单的目标一律不可达，这直接解决了安全评审里最常见的"智能体可达集群内部服务"问题。策略变更走与其他平台组件一致的评审配置，而非临时手工修改——参见[网络策略](/zh/guide/network-policy)。
 
-**入站只走端口映射。** 网关端口在创建沙箱时映射，并通过平台 URL 暴露。除此之外，沙箱网络没有任何入站通路。
+**入站走端口映射。** 网关端口在创建沙箱时映射，并通过平台 URL 暴露。端口映射是这套部署依赖的主要入站路径，但不是硬性的网络边界：CubeProxy 可按 `<port>-<sandbox-id>.<domain>` 路由沙箱的任意端口，且沙箱 URL 默认公网可达，除非显式限制公网流量（`network.allow_public_traffic=False`）。出网策略不约束入站，所以入站侧也单独过了一遍评审。
 
 **会话连续性。** 空闲会话先暂停以释放 CPU/内存、保留状态；开发者回来时一次 connect 即可恢复：
 
@@ -73,7 +73,7 @@ sandbox.pause()                       # 做检查点，释放 CPU/内存
 sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)
 ```
 
-维护窗口场景下，工作区放在持久存储上（host mount 或 S3 volume 插件——见[持久化存储](/guide/persistent-storage)），长时间运行的任务用快照做检查点，节点排空后会话可以原地恢复——见[快照/回滚/克隆](/guide/snapshot-rollback-clone)。
+维护窗口场景下，工作区放在持久存储上（host mount 或 S3 volume 插件——见[持久化存储](/zh/guide/persistent-storage)），长时间运行的任务用快照做检查点，节点排空后会话可以原地恢复——见[快照/回滚/克隆](/zh/guide/snapshot-rollback-clone)。跨节点恢复还要求共享快照后端（`jfs` 或 `s3`，且 `remote_status=ready`）；节点本地的 `xfs` 存储扛不住排空。
 
 ## 结果与收益
 
@@ -91,7 +91,7 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)
 ## 参考
 
 - OpenClaw 集成示例（skill 接线）：[examples/openclaw-integration](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration)
-- 网络策略（allow/deny、DNS 学习、条目上限）：[网络策略](/guide/network-policy)
-- 快照、回滚与克隆：[快照/回滚/克隆](/guide/snapshot-rollback-clone)
-- 暂停/恢复生命周期语义：[生命周期](/guide/lifecycle)
-- E2B 兼容性：[E2B 兼容性](/guide/e2b-compatibility)
+- 网络策略（allow/deny、DNS 学习、条目上限）：[网络策略](/zh/guide/network-policy)
+- 快照、回滚与克隆：[快照/回滚/克隆](/zh/guide/snapshot-rollback-clone)
+- 暂停/恢复生命周期语义：[生命周期](/zh/guide/lifecycle)
+- E2B 兼容性：[E2B 兼容性](/zh/guide/e2b-compatibility)
