@@ -259,12 +259,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
 	}
 
-<<<<<<< HEAD
 	if layoutErr != nil {
-=======
-	layout.resetTmpDir()
-	if err := layout.prepareWork(prepareCtx); err != nil {
->>>>>>> df89576a (feat: add distributed tracing for sandbox-to-template creation)
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", layoutErr)
