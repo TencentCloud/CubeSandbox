@@ -192,6 +192,7 @@ export default withMermaid(defineConfig({
                     { text: 'Helm Install', link: '/guide/kubernetes/install' },
                     { text: 'Architecture', link: '/guide/kubernetes/architecture' },
                     { text: 'Upgrade', link: '/guide/kubernetes/upgrade' },
+                    { text: 'Node Autoscaling', link: '/guide/kubernetes/autoscaling' },
                     { text: 'FAQ', link: '/guide/kubernetes/faq' }
                   ]
                 },
@@ -436,6 +437,7 @@ export default withMermaid(defineConfig({
                     { text: '概览', link: '/zh/guide/kubernetes/' },
                     { text: 'Helm 安装', link: '/zh/guide/kubernetes/install' },
                     { text: '架构说明', link: '/zh/guide/kubernetes/architecture' },
+                    { text: '节点自动扩缩', link: '/zh/guide/kubernetes/autoscaling' },
                     { text: '升级', link: '/zh/guide/kubernetes/upgrade' },
                     { text: '常见问题', link: '/zh/guide/kubernetes/faq' }
                   ]
