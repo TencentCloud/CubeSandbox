@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -176,15 +177,11 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	// snap into a disk this sandbox owns and read the config from there. XFS
 	// is a no-op and keeps the catalog MetaDir.
 	// Same-node only: catalog miss (no local package) already failed above.
-	globalJFS := memoryKind == globalJFSRollbackMemoryKind
-	rollbackMetaDir := ""
-	if !globalJFS {
-		rollbackMetaDir, err = storage.MountRollbackSnapshotMetadata(prepareCtx, backend, req.GetSnapshotID(), req.GetSandboxID())
-		if err != nil {
-			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
-			return rsp, nil
-		}
+	rollbackMetaDir, err := storage.MountRollbackSnapshotMetadata(prepareCtx, backend, req.GetSnapshotID(), req.GetSandboxID())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
+		return rsp, nil
 	}
 	if rollbackMetaDir != "" {
 		metaDir = rollbackMetaDir
@@ -211,39 +208,16 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 	rsp.OldRootfsVol = currentRootfs.Name
 
-	var refs *storage.CowRollbackSnapshotRefs
-	if globalJFS {
-		refs = &storage.CowRollbackSnapshotRefs{
-			Rootfs: &storage.CowSnapshotObject{
-				Name:         filepath.Base(rootfsVol),
-				Kind:         storage.CowKindSnapshot,
-				DevPath:      rootfsVol,
-				SharedSource: true,
-			},
-			Memory: &storage.CowSnapshotObject{
-				Name:         filepath.Base(memoryVol),
-				Kind:         storage.CowKindSnapshot,
-				DevPath:      memoryVol,
-				SharedSource: true,
-			},
-		}
-	} else {
-		refs, err = storage.ResolveRollbackRefsFor(prepareCtx, backend, rootfsVol, memoryVol, memoryKind)
-		if err != nil {
-			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
-			return rsp, nil
-		}
+	refs, err := storage.ResolveRollbackRefsFor(prepareCtx, backend, rootfsVol, memoryVol, memoryKind)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
+		return rsp, nil
 	}
 	restored := false
 	defer func() { deactivateRollbackPackageObjects(ctx, backend, refs, restored) }()
 
-	var newRootfs *storage.CowSnapshotObject
-	if globalJFS {
-		newRootfs, err = storage.DeriveRollbackRootfsFromSharedJFS(prepareCtx, req.GetSandboxID(), refs.Rootfs.DevPath, req.GetNewGen(), req.GetDesiredSize())
-	} else {
-		newRootfs, err = storage.DeriveRollbackRootfsFor(prepareCtx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
-	}
+	newRootfs, err := storage.DeriveRollbackRootfsFor(prepareCtx, backend, req.GetSandboxID(), refs.Rootfs.Name, req.GetNewGen(), req.GetDesiredSize())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to derive rollback rootfs: %v", err)

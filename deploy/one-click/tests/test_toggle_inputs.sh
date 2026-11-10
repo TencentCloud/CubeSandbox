@@ -310,6 +310,8 @@ EOF
   MERGED_LOGS_BACKEND=loki
   run_toggle_roundtrip "${dotenv}"
   [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "0" && "${CUBE_LOGS_BACKEND}" == "elasticsearch" ]] || fail "non-default dotenv must override process environment"
+}
+
 # An explicit empty .env endpoint CLEARS a previously set value on upgrade.
 test_otel_endpoint_can_be_cleared_on_upgrade() {
   local dotenv="${TMP_DIR}/dotenv5.env"

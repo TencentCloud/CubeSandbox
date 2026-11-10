@@ -213,9 +213,6 @@ func finishTemplateImageJobAfterArtifact(
 	if errorMessage == "" && claimWarning != "" {
 		errorMessage = claimWarning
 	}
-	if jobStatus == JobStatusReady && eagerAdoptJFSBackend(req, generatedReq) {
-		eagerAdoptJFSTemplate(ctx, req, generatedReq, req.TemplateID)
-	}
 	writeErr := updateTemplateImageJob(finalizeCtx, jobID, map[string]any{
 		"status":          jobStatus,
 		"phase":           jobPhase,
