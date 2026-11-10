@@ -177,7 +177,8 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 		req.HeartbeatTime = time.Now()
 	}
 
-	if _, err := svc.store.GetRegistration(ctx, nodeID); err != nil {
+	reg, err := svc.store.GetRegistration(ctx, nodeID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
 		}
@@ -202,6 +203,7 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	if err != nil {
 		return nil, err
 	}
+	applyRegistrationLabels(snap, reg)
 	snap.Conditions = append([]model.NodeCondition(nil), req.Conditions...)
 	snap.Images = append([]model.ContainerImage(nil), req.Images...)
 	snap.LocalTemplates = append([]model.LocalTemplate(nil), req.LocalTemplates...)
