@@ -2090,20 +2090,6 @@ impl SandBox {
             })
             .await?;
 
-        // Drain stale VmShutdown events left by the delete so the fresh
-        // monitor spawned by resume_vm_with_config does not treat the
-        // restored VM as crashed.
-        if let Some(ch_arc) = self.ch.as_ref() {
-            let ch = ch_arc.lock().await;
-            while let Ok(ev) = ch.try_wait_notify() {
-                infof!(
-                    self.log,
-                    "rollback: drained stale hypervisor event {:?}",
-                    ev
-                );
-            }
-        }
-
         self.resume_vm_with_config(Some(target_config), trace).await
     }
 
