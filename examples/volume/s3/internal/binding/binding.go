@@ -49,7 +49,11 @@ const (
 
 // ErrMissingCredRef identifies a dynamic Create request without a credential
 // reference. State validation uses ordinary errors instead.
-var ErrMissingCredRef = errors.New("credential reference must be 1 to 64 characters")
+var ErrMissingCredRef = errors.New("cred_ref is required")
+
+// ErrInvalidCredRef identifies a dynamic Create request with a non-empty
+// credential reference that is not a safe file name.
+var ErrInvalidCredRef = errors.New("cred_ref has an invalid format")
 
 // Create is the caller input A after validation.
 type Create struct {
@@ -107,10 +111,10 @@ func ParseCreate(raw, volumeID string) (Create, error) {
 		return out, nil
 	}
 	if in.CredRef == "" {
-		return Create{}, fmt.Errorf("dynamic private_data requires cred_ref: %w", ErrMissingCredRef)
+		return Create{}, ErrMissingCredRef
 	}
 	if err := ValidateCredRef(in.CredRef); err != nil {
-		return Create{}, fmt.Errorf("dynamic private_data requires cred_ref: %w", err)
+		return Create{}, ErrInvalidCredRef
 	}
 
 	if in.Bucket != "" {

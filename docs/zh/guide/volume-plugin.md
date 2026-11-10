@@ -211,19 +211,17 @@ flowchart LR
 **binary Create 错误。** 插件返回错误种类，不返回 HTTP 状态或 CubeMaster `ret_code`：
 
 ```json
-{"error":"dynamic private_data requires cred_ref","error_kind":"invalid_argument"}
+{"error":"cred_ref is required","error_kind":"invalid_argument"}
 ```
 
-`error_kind` 是封闭集合。协议定义以下映射；当前实现只启用 `invalid_argument`：
+`error_kind` 是只包含 `invalid_argument` 的封闭集合，其它值均按未知种类处理：
 
-| `error_kind` | 约定的 CubeMaster `ret_code` | 约定的 CubeAPI HTTP 状态 | 当前行为 |
+| `error_kind` | CubeMaster `ret_code` | CubeAPI HTTP 状态 | 行为 |
 | --- | --- | --- | --- |
 | `invalid_argument` | 130400 | 400 | binary Create 已支持 |
-| `not_found` | 130404 | 404 | 已定义但尚未启用；回退到 130593 / 500 |
-| `conflict` | 130409 | 409 | 已定义但尚未启用；回退到 130593 / 500 |
 | 失败响应缺少种类、种类未知或格式错误 | 130593 | 500 | 通用失败 |
 
-插件必须输出一个完整的 JSON 响应，且 `error` 非空。Create 驱动在进程正常结束时识别已启用的 kind，包括非零退出；退出 0 但 `error` 非空的既有模式也仍表示失败。进程启动失败、取消、超时或信号终止始终是执行故障，不受 stdout 影响。响应格式错误、不完整或 kind 未受支持时仍按通用失败处理。存在 `error_kind` 却没有非空 `error` 的响应属于协议失败，包括空值或 `null` kind。既有成功格式保持为退出 0、`error` 为空、不携带 `error_kind`；其它扩展字段仍被允许。
+插件必须输出一个完整的 JSON 响应，且 `error` 非空。在命令 context 仍有效时，Create 驱动会在进程正常结束后识别受支持的 kind，包括非零退出；退出 0 但 `error` 非空的既有模式也仍表示失败。进程启动失败，以及因取消、超时或信号而被中断的进程仍按执行故障处理，不受 stdout 影响。响应格式错误、不完整或 kind 未受支持时仍按通用失败处理。存在 `error_kind` 却没有非空 `error` 的响应属于协议失败，包括空值或 `null` kind。既有成功格式保持为退出 0、`error` 为空、不携带 `error_kind`；其它扩展字段仍被允许。
 
 CubeMaster 在这条插件错误响应封套中继续使用 HTTP 200，只选择业务 `ret_code`；CubeAPI 再将业务码转换为对外 HTTP 状态。当前分类仅适用于 binary Create；Destroy、RPC 插件和 Cubelet Attach/Detach 保持既有错误处理。
 

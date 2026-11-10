@@ -117,8 +117,15 @@ func main() {
 	if err := run(context.Background(), opts); err != nil {
 		log.Printf("ERROR: %v", err)
 		response := statusResponse{Error: err.Error()}
-		if opts.op == "create" && errors.Is(err, binding.ErrMissingCredRef) {
-			response.ErrorKind = "invalid_argument"
+		if opts.op == "create" {
+			switch {
+			case errors.Is(err, binding.ErrMissingCredRef):
+				response.Error = binding.ErrMissingCredRef.Error()
+				response.ErrorKind = "invalid_argument"
+			case errors.Is(err, binding.ErrInvalidCredRef):
+				response.Error = binding.ErrInvalidCredRef.Error()
+				response.ErrorKind = "invalid_argument"
+			}
 		}
 		emit(response)
 		os.Exit(1)

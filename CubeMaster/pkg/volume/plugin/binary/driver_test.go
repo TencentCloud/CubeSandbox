@@ -273,8 +273,8 @@ func TestCreateErrorKindFallback(t *testing.T) {
 	for _, tc := range []struct{ name, output string }{
 		{"legacy_error", `{"error":"backend unavailable"}`},
 		{"unknown", `{"error":"failure","error_kind":"backend_down"}`},
-		{"not_found_not_enabled", `{"error":"failure","error_kind":"not_found"}`},
-		{"conflict_not_enabled", `{"error":"failure","error_kind":"conflict"}`},
+		{"unknown_not_found", `{"error":"failure","error_kind":"not_found"}`},
+		{"unknown_conflict", `{"error":"failure","error_kind":"conflict"}`},
 		{"empty_kind", `{"error":"failure","error_kind":""}`},
 		{"null_kind", `{"error":"failure","error_kind":null}`},
 		{"numeric_kind", `{"error":"failure","error_kind":400}`},
@@ -433,6 +433,14 @@ func TestCreateExecutionFaultsAreNotCallerErrors(t *testing.T) {
 				var invalid *plugin.InvalidArgumentError
 				if err == nil || errors.As(err, &invalid) {
 					t.Fatalf("%s classified as caller error: %v", fault, err)
+				}
+				if fault == "cancel" || fault == "timeout" {
+					if !errors.Is(err, ctx.Err()) {
+						t.Fatalf("%s lost context error identity: %v", fault, err)
+					}
+					if strings.Contains(err.Error(), "private diagnostic") || strings.Contains(err.Error(), "public error") {
+						t.Fatalf("%s included plugin diagnostics: %v", fault, err)
+					}
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("interrupted plugin did not return")

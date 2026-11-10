@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -124,14 +125,25 @@ func TestVolumeHTTP_S3BinaryErrorKinds(t *testing.T) {
 		credential   bool
 		wantCode     errorcode.ErrorCode
 		wantRequests bool
+		wantMessage  string
 	}{
-		{"bucket_only", `{"bucket":"probe-bucket"}`, false, errorcode.ErrorCode_MasterParamsError, false},
-		{"prefix_only", `{"prefix":"probe/"}`, false, errorcode.ErrorCode_MasterParamsError, false},
-		{"bucket_and_prefix", `{"bucket":"probe-bucket","prefix":"probe/"}`, false, errorcode.ErrorCode_MasterParamsError, false},
-		{"empty_reference", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":""}`, false, errorcode.ErrorCode_MasterParamsError, false},
-		{"null_reference", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":null}`, false, errorcode.ErrorCode_MasterParamsError, false},
-		{"missing_file", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":"tenant"}`, false, errorcode.ErrorCode_MasterInternalError, false},
-		{"backend_denied", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":"tenant"}`, true, errorcode.ErrorCode_MasterInternalError, true},
+		{"bucket_only", `{"bucket":"probe-bucket"}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref is required"},
+		{"prefix_only", `{"prefix":"probe/"}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref is required"},
+		{"bucket_and_prefix", `{"bucket":"probe-bucket","prefix":"probe/"}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref is required"},
+		{"empty_reference", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":""}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref is required"},
+		{"null_reference", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":null}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref is required"},
+		{"invalid_traversal", `{"bucket":"probe-bucket","cred_ref":"../x"}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref has an invalid format"},
+		{"invalid_long", fmt.Sprintf(`{"bucket":"probe-bucket","cred_ref":%q}`, strings.Repeat("a", 65)), false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref has an invalid format"},
+		{"invalid_whitespace", `{"bucket":"probe-bucket","cred_ref":" "}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref has an invalid format"},
+		{"invalid_path", `{"bucket":"probe-bucket","cred_ref":"private/file"}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref has an invalid format"},
+		{"invalid_only_reference", `{"cred_ref":"../x"}`, false, errorcode.ErrorCode_MasterParamsError, false, "cred_ref has an invalid format"},
+		{"missing_file", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":"tenant"}`, false, errorcode.ErrorCode_MasterInternalError, false, ""},
+		{"max_length_missing_file", fmt.Sprintf(`{"bucket":"probe-bucket","cred_ref":%q}`, strings.Repeat("a", 64)), false, errorcode.ErrorCode_MasterInternalError, false, ""},
+		{"backend_denied", `{"bucket":"probe-bucket","prefix":"probe/","cred_ref":"tenant"}`, true, errorcode.ErrorCode_MasterInternalError, true, ""},
+		{"malformed_json", `{"bucket":`, false, errorcode.ErrorCode_MasterInternalError, false, ""},
+		{"nonstring_reference", `{"bucket":"probe-bucket","cred_ref":42}`, false, errorcode.ErrorCode_MasterInternalError, false, ""},
+		{"invalid_bucket", `{"bucket":"bad/bucket","cred_ref":"tenant"}`, false, errorcode.ErrorCode_MasterInternalError, false, ""},
+		{"invalid_prefix", `{"prefix":"a/../b","cred_ref":"tenant"}`, false, errorcode.ErrorCode_MasterInternalError, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, db, _ := newVolumeTestEngine(t)
@@ -167,12 +179,13 @@ func TestVolumeHTTP_S3BinaryErrorKinds(t *testing.T) {
 			assert.Equal(t, int(tc.wantCode), env.Ret.RetCode, "response: %s", env.Ret.RetMsg)
 			assert.Nil(t, env.Volume)
 			if tc.wantCode == errorcode.ErrorCode_MasterParamsError {
-				assert.Contains(t, env.Ret.RetMsg, "dynamic private_data requires cred_ref")
-				assert.NotContains(t, env.Ret.RetMsg, dir)
-				assert.NotContains(t, env.Ret.RetMsg, binaryPath)
+				assert.Equal(t, `plugin create error: binary plugin "real-s3-errors" create: `+tc.wantMessage, env.Ret.RetMsg)
+				for _, diagnostic := range []string{dir, binaryPath, "create: create:", "exit status", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY", "../x", "private/file", strings.Repeat("a", 65)} {
+					assert.NotContains(t, env.Ret.RetMsg, diagnostic)
+				}
 			}
-			if tc.name == "missing_file" {
-				assert.Contains(t, env.Ret.RetMsg, `credential reference "tenant" is unreadable`)
+			if tc.name == "missing_file" || tc.name == "max_length_missing_file" {
+				assert.Contains(t, env.Ret.RetMsg, "is unreadable")
 			}
 			if tc.wantRequests {
 				assert.Positive(t, requests.Load(), "backend fault must actually reach the fake store")

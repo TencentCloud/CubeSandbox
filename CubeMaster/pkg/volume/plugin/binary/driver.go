@@ -89,11 +89,12 @@ func (p *Plugin) Create(
 		args = append(args, "--private-data", privateData)
 	}
 	stdout, stderr, runErr := p.execute(ctx, args...)
-	// Execution faults take precedence over even a valid error envelope.
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("binary plugin %q create: %w", p.name, ctx.Err())
-	}
+	// Do not replace a successful exit with a later context cancellation.
 	if runErr != nil {
+		// On Windows, canceled processes can report a non-negative exit code.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("binary plugin %q create: %w", p.name, ctx.Err())
+		}
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() < 0 {
 			return nil, fmt.Errorf("binary plugin %q create: %w", p.name, executionError(runErr, stdout, stderr))

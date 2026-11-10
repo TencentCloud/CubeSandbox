@@ -211,19 +211,17 @@ Output (stdout JSON, exit 0):
 **Binary Create errors.** Plugins return an error kind, not an HTTP status or a CubeMaster `ret_code`:
 
 ```json
-{"error":"dynamic private_data requires cred_ref","error_kind":"invalid_argument"}
+{"error":"cred_ref is required","error_kind":"invalid_argument"}
 ```
 
-`error_kind` is a closed set. The protocol defines these mappings; only `invalid_argument` is enabled in this implementation:
+`error_kind` is a closed set containing only `invalid_argument`. All other values are treated as unknown:
 
-| `error_kind` | Defined CubeMaster `ret_code` | Defined CubeAPI HTTP status | Current behavior |
+| `error_kind` | CubeMaster `ret_code` | CubeAPI HTTP status | Behavior |
 | --- | --- | --- | --- |
 | `invalid_argument` | 130400 | 400 | Supported for binary Create |
-| `not_found` | 130404 | 404 | Defined but not enabled; falls back to 130593 / 500 |
-| `conflict` | 130409 | 409 | Defined but not enabled; falls back to 130593 / 500 |
 | Missing, unknown or malformed kind in a failure | 130593 | 500 | Generic failure |
 
-The plugin must write one complete JSON response with a non-empty `error`. The Create driver recognizes an enabled kind on a normal process exit, including a non-zero exit; exit 0 with a non-empty `error` also remains a failure. Process startup errors, cancellation, timeouts and signal termination remain execution failures regardless of stdout. Malformed or incomplete responses and unsupported kinds remain generic failures. A response containing `error_kind` without a non-empty `error`, including an empty or `null` kind, is a protocol failure. The existing success form remains exit 0, an empty `error`, and no `error_kind`; unrelated extension fields are still allowed.
+The plugin must write one complete JSON response with a non-empty `error`. The Create driver recognizes the supported kind on a normal process exit, including a non-zero exit, while the command context remains active; exit 0 with a non-empty `error` also remains a failure. Process startup errors and processes interrupted by cancellation, timeouts or signals remain execution failures regardless of stdout. Malformed or incomplete responses and unsupported kinds remain generic failures. A response containing `error_kind` without a non-empty `error`, including an empty or `null` kind, is a protocol failure. The existing success form remains exit 0, an empty `error`, and no `error_kind`; unrelated extension fields are still allowed.
 
 CubeMaster keeps HTTP 200 for this plugin-error response envelope and selects the business `ret_code`; CubeAPI translates that code to the public HTTP status. This classification currently applies only to binary Create. Destroy, RPC plugins and Cubelet Attach/Detach retain their existing error handling.
 

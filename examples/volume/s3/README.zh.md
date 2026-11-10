@@ -369,7 +369,7 @@ python3 verify_volume.py
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥对错误、缺少桶权限，或 `REGION` 与 Endpoint 期望的 SigV4 地域不匹配 |
 | 动态创建报 `bucket "..." does not exist` | 动态桶从不自动创建：先建桶，或修正 `private_data` 中的 `bucket` |
 | 报 `credential reference "x" is unreadable` | `<x>.conf` 必须同时存在于 CubeMaster **和** Cubelet 主机的 `CREDENTIALS_DIR` 中，由 root 所有、权限 `0600` |
-| 报 `dynamic private_data requires cred_ref` | 动态描述必须带合法 `cred_ref`；全局凭证只用于旧版 Volume。动态 Create 缺少或留空引用时，支持 `error_kind` 的 CubeMaster 与插件组合会返回 400；旧部署可能仍返回 500。 |
+| 报 `cred_ref is required` / `cred_ref has an invalid format` | 动态 Create 必须带合法 `cred_ref`；全局凭证只用于旧版 Volume。缺少、留空或格式错误的引用在支持 `error_kind` 的 CubeMaster 与插件组合中返回 400；旧部署可能仍返回 500。 |
 | 报 `prefix "..." already contains objects` | 动态卷要求空前缀，否则创建回滚会删掉已有数据。换一个空前缀，或在创建完成后再导入数据 |
 | 前缀重叠或删除期间复用前缀 | 插件不协调不同卷的前缀。平台必须分配互不重叠、互不嵌套的前缀，并等 Destroy 完成后再复用 |
 | 动态 Volume 挂载到了错误的桶/前缀 | Cubelet 版本较旧，没有把 `private_data` 转发给 Attach；先升级 Cubelet |
@@ -411,9 +411,9 @@ python3 verify_volume.py
 
 CubeMaster 只保存这个值；Attach 与 Destroy 接收的也是它。调用方最初的描述不会再被使用，且无论是描述还是状态都不会通过 Volume API 返回。
 
-**Create 错误分类。** 动态描述选择了桶或前缀却缺少 `cred_ref` 或将其留空时，插件会在对象存储请求前拒绝，输出 `{"error":"...","error_kind":"invalid_argument"}` 并退出 1。支持该 kind 的 CubeMaster 内部返回 HTTP 200、`ret_code=130400`，CubeAPI 对外返回 HTTP 400。其它描述校验错误、宿主配置或凭据文件错误、存储故障和无类型插件错误保持当前通用失败行为（CubeMaster `130593`，CubeAPI 500）。本次不分类 Destroy/Attach/Detach 错误；空输入和既有 legacy 默认对象行为保持不变。
+**Create 错误分类。** 描述选择了桶或前缀却缺少 `cred_ref` 或将其留空时，插件会在对象存储请求前拒绝。格式错误的非空字符串引用（例如 `../x` 或超过 64 字符）也会在同一阶段被拒绝。插件输出 `{"error":"...","error_kind":"invalid_argument"}` 并退出 1。支持该 kind 的 CubeMaster 内部返回 HTTP 200、`ret_code=130400`，CubeAPI 对外返回 HTTP 400。其它插件描述校验错误、宿主配置或凭据文件错误、存储故障和无类型插件错误保持当前通用失败行为（CubeMaster `130593`，CubeAPI 500）。框架已有的 `private_data` 校验不变。本次不分类 Destroy/Attach/Detach 错误；空输入和既有 legacy 默认对象行为保持不变。
 
-协议定义封闭的 kind 集合，但当前实现只启用 `invalid_argument`；`not_found` 和 `conflict` 是预定义种类，目前仍回退为 500。详见 [binary Create 错误](../../../docs/zh/guide/volume-plugin.md#create)。缺引用错误使用固定的公开提示，类型化响应不会追加 stderr 或凭据路径。要获得新的 400 映射，需要同时升级 CubeMaster 和插件：旧 Master 仍安全地拒绝退出 1 的响应，但通常仍返回 500；新 Master 继续兼容旧的无类型插件。
+协议只支持 `invalid_argument`，未知种类回退为 500。详见 [binary Create 错误](../../../docs/zh/guide/volume-plugin.md#create)。缺少引用的固定公开提示为 `cred_ref is required`，字符串引用格式错误时为 `cred_ref has an invalid format`。提示不回显调用方提供的引用，类型化响应也不会追加 stderr 或凭据路径。要获得新的 400 映射，需要同时升级 CubeMaster 和插件：旧 Master 仍安全地拒绝退出 1 的响应，但通常仍返回 500；新 Master 继续兼容旧的无类型插件。
 
 **凭证引用。** 在每台 CubeMaster 和 Cubelet 主机上，为每个用户放一个文件：`/etc/cube/s3-credentials/<cred_ref>.conf`（可用 `CREDENTIALS_DIR` 或 `CUBE_S3_CREDENTIALS_DIR` 修改目录）。文件由 root 所有、权限 `0600`：
 
