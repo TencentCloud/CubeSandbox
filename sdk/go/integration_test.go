@@ -248,14 +248,20 @@ func TestIntegrationSandboxExecutionCommandsFilesAndErrors(t *testing.T) {
 		t.Fatalf("execution error mismatch: %#v", errExec.Error)
 	}
 
+	var commandStdout, commandStderr strings.Builder
 	cmd, err := sb.Commands().Run(ctx, "printf 'cmd-out\\n'; >&2 printf 'cmd-err\\n'; exit 7", CommandOptions{
-		Timeout: 30 * time.Second,
+		Timeout:  30 * time.Second,
+		OnStdout: func(chunk string) { commandStdout.WriteString(chunk) },
+		OnStderr: func(chunk string) { commandStderr.WriteString(chunk) },
 	})
 	if err != nil {
 		t.Fatalf("Commands.Run returned error: %v", err)
 	}
 	if cmd.Stdout != "cmd-out\n" || cmd.Stderr != "cmd-err\n" || cmd.ExitCode != 7 {
 		t.Fatalf("command result mismatch: %#v", cmd)
+	}
+	if commandStdout.String() != cmd.Stdout || commandStderr.String() != cmd.Stderr {
+		t.Fatalf("command callbacks differ from result: stdout=%q stderr=%q", commandStdout.String(), commandStderr.String())
 	}
 
 	path := "/tmp/cubesandbox-go-sdk-integration.txt"
