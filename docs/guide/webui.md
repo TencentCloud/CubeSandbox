@@ -102,7 +102,7 @@ The Dashboard is keyboard-friendly. The big three:
 Open **Settings** in the left rail:
 
 - **Appearance → Theme** — Light, Dark, or follow your OS
-- **Appearance → Language** — English or 简体中文
+- **Appearance → Language** — English, 简体中文 (Simplified Chinese), or 繁體中文（台灣） (Traditional Chinese, Taiwan)
 - **Cluster** — Read-only view of the CubeAPI endpoint, sandbox domain, default instance type, rate limit, and whether auth is on
 
 The Command Palette's ⌘K input box and the topbar have quick toggles for the same.
