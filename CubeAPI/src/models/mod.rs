@@ -1949,6 +1949,9 @@ pub struct CreateTemplateRequest {
     /// Override container CMD args.
     #[serde(default)]
     pub args: Option<Vec<String>>,
+    /// Commands run inside sandboxes created from this template.
+    #[serde(default)]
+    pub lifecycle: Option<TemplateLifecycle>,
     /// Container DNS nameservers.
     #[serde(default)]
     pub dns: Option<Vec<String>>,
@@ -1978,6 +1981,31 @@ pub struct CreateTemplateRequest {
     /// Omitted keeps the default root user.
     #[serde(default)]
     pub user: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemplateLifecycle {
+    /// Runs before a newly created sandbox becomes ready. Failure or timeout
+    /// aborts creation. The command has up to 10 seconds to finish.
+    pub post_start: Option<TemplateLifecycleHook>,
+    /// Runs during graceful deletion and shares up to 5 seconds with graceful
+    /// shutdown. Failures are logged and deletion continues.
+    pub pre_stop: Option<TemplateLifecycleHook>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateLifecycleHook {
+    pub exec: TemplateLifecycleExec,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateLifecycleExec {
+    /// Executable and arguments. No shell is added implicitly.
+    #[schema(min_items = 1)]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -2355,6 +2355,8 @@ pub struct CreateTemplateFromImageReq {
     /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<TemplateLifecycleCommands>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2413,6 +2415,14 @@ pub struct CreateTemplateContainerOverrides {
     pub dns_config: Option<DnsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_context: Option<TemplateSecurityContext>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TemplateLifecycleCommands {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_start: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_stop: Option<Vec<String>>,
 }
 
 /// Numeric uid/gid wrapper expected by CubeMaster `Int64Value`.
