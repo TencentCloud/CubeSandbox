@@ -1,11 +1,16 @@
 // Locale consistency check.
 //
-// Every namespace JSON under src/locales/en must have a src/locales/zh
-// counterpart (and vice versa), and the two files must expose the same set of
-// flattened dotted keys. Asymmetry is reported in both directions:
+// Two guarantees are enforced for every namespace JSON under src/locales:
 //
-//   key only in zh -> the English UI can only render the raw key (most severe)
-//   key only in en -> the Chinese UI silently falls back to English
+//   1. every locale in LOCALES has a file for every namespace (and vice versa)
+//   2. every locale exposes exactly the same set of flattened dotted keys as the
+//      `en` baseline
+//
+// Key drift is reported in both directions, per locale:
+//
+//   extra key (in locale, absent from en) -> the English UI can only render the
+//     raw key, so locales/en is the file that is missing data
+//   missing key (in en, absent from locale) -> that UI silently falls back to en
 //
 // Exits 1 when any namespace is asymmetric so CI fails loudly; prints a clear
 // success line and exits 0 otherwise. Dependency-free Node ESM.
@@ -14,7 +19,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const LOCALES = ['en', 'zh'];
+const LOCALES = ['en', 'zh', 'zh-TW'];
+// Reference locale that every other locale is compared against.
+const BASELINE = 'en';
 const localesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'locales');
 
 /** List the JSON namespace files for a locale, sorted for stable output. */
@@ -50,41 +57,56 @@ const findings = [];
 for (const name of allNamespaces) {
   const missingIn = LOCALES.filter((locale) => !namespaces[locale].includes(name));
   if (missingIn.length > 0) {
-    findings.push({ name, missingIn, zhOnly: [], enOnly: [] });
+    findings.push({ name, missingIn, drift: [] });
     continue;
   }
 
-  const enKeys = new Set(flattenKeys(readNamespace('en', name)));
-  const zhKeys = new Set(flattenKeys(readNamespace('zh', name)));
-  const zhOnly = [...zhKeys].filter((key) => !enKeys.has(key)).sort();
-  const enOnly = [...enKeys].filter((key) => !zhKeys.has(key)).sort();
-  if (zhOnly.length > 0 || enOnly.length > 0) {
-    findings.push({ name, missingIn: [], zhOnly, enOnly });
+  const baselineKeys = new Set(flattenKeys(readNamespace(BASELINE, name)));
+  const drift = [];
+  for (const locale of LOCALES.filter((candidate) => candidate !== BASELINE)) {
+    const localeKeys = new Set(flattenKeys(readNamespace(locale, name)));
+    const missing = [...baselineKeys].filter((key) => !localeKeys.has(key)).sort();
+    const extra = [...localeKeys].filter((key) => !baselineKeys.has(key)).sort();
+    if (missing.length > 0 || extra.length > 0) {
+      drift.push({ locale, missing, extra });
+    }
+  }
+  if (drift.length > 0) {
+    findings.push({ name, missingIn: [], drift });
   }
 }
 
 if (findings.length > 0) {
   console.error('Locale consistency check failed:\n');
-  for (const { name, missingIn, zhOnly, enOnly } of findings) {
+  for (const { name, missingIn, drift } of findings) {
     console.error(`  ${name}`);
     for (const locale of missingIn) {
       console.error(`    missing a "${locale}.json" counterpart`);
     }
-    if (zhOnly.length > 0) {
-      console.error('    present in zh but missing in en (English UI shows the raw key):');
-      for (const key of zhOnly) {
-        console.error(`      - ${key}`);
+    for (const { locale, missing, extra } of drift) {
+      if (missing.length > 0) {
+        console.error(
+          `    in ${BASELINE} but missing in ${locale} (UI falls back to ${BASELINE}):`,
+        );
+        for (const key of missing) {
+          console.error(`      - ${key}`);
+        }
       }
-    }
-    if (enOnly.length > 0) {
-      console.error('    present in en but missing in zh (Chinese UI falls back to English):');
-      for (const key of enOnly) {
-        console.error(`      - ${key}`);
+      if (extra.length > 0) {
+        console.error(`    in ${locale} but missing in ${BASELINE} (raw key rendered there):`);
+        for (const key of extra) {
+          console.error(`      - ${key}`);
+        }
       }
     }
   }
-  console.error(`\nFix the namespaces above so locales/en and locales/zh stay in sync.`);
+  console.error(`\nFix the namespaces above so ${LOCALES.join(', ')} stay in sync.`);
   process.exit(1);
 }
 
-console.log(`Locale consistency check passed: ${allNamespaces.length} namespaces in sync.`);
+const compared = LOCALES.filter((locale) => locale !== BASELINE)
+  .map((locale) => `${locale} vs ${BASELINE}`)
+  .join(', ');
+console.log(
+  `Locale consistency check passed: ${allNamespaces.length} namespaces in sync (${compared}).`,
+);

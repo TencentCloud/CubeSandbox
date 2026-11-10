@@ -15,7 +15,7 @@ i18n
     resources,
     ...(forcedLanguage ? { lng: forcedLanguage } : {}),
     fallbackLng: 'en',
-    supportedLngs: ['en', 'zh'],
+    supportedLngs: ['en', 'zh', 'zh-TW'],
     defaultNS: 'common',
     ns: [
       'common',
@@ -46,7 +46,13 @@ i18n
       order: ['localStorage', 'navigator'],
       caches: ['localStorage'],
       lookupLocalStorage: 'cube.lang',
-      convertDetectedLanguage: (lng) => (lng.startsWith('zh') ? 'zh' : 'en'),
+      convertDetectedLanguage: (lng) => {
+        const lower = lng.toLowerCase();
+        // Traditional Chinese variants (TW / HK / MO, or explicit Hant) -> zh-TW.
+        // The `zh-` prefix is mandatory: bare `tw` (Twi) or `mo` are not Chinese.
+        if (/^zh-(tw|hant|hk|mo)/.test(lower)) return 'zh-TW';
+        return lower.startsWith('zh') ? 'zh' : 'en';
+      },
     },
   });
 

@@ -1,0 +1,81 @@
+{
+  "title": "範本市場",
+  "subtitle": "一鍵安裝官方預置映像，快速製作沙箱範本。",
+  "searchPlaceholder": "搜尋映像…",
+  "checkUpdates": "檢查更新",
+  "checking": "檢查中…",
+  "noResults": "沒有匹配的映像。",
+  "official": "官方",
+  "hasUpdate": "有更新",
+  "install": "一鍵安裝",
+  "installAndEnableAgentHub": "安裝並啟用到數位助手",
+  "installOnly": "僅安裝範本",
+  "enableAgentHub": "啟用到數位助手",
+  "installed": "已安裝",
+  "installedCount": "已安裝 {{count}} 個",
+  "installAdditionalHint": "使用不同引數再次安裝",
+  "installModal": {
+    "subtitle": "安裝為 Cube 範本",
+    "building": "正在製作範本，請稍候…",
+    "success": "安裝成功！",
+    "viewTemplate": "檢視範本",
+    "close": "關閉",
+    "cancel": "取消",
+    "confirm": "確認安裝",
+    "installing": "安裝中…",
+    "enablingAgentHub": "正在啟用到數位助手…",
+    "retry": "重試",
+    "failed": "安裝失敗，請重試。",
+    "buildFailed": "製作失敗",
+    "timeout": "等待超時，請在範本列表中檢視狀態。"
+  },
+  "toast": {
+    "updatesFound": "發現 {{count}} 個映像有新版本",
+    "upToDate": "所有映像已是最新",
+    "checkFailed": "檢查更新失敗，請重試",
+    "agentTemplateEnabled": "已啟用到數位助手"
+  },
+  "categories": {
+    "all": "全部",
+    "code": "程式碼執行",
+    "browser": "瀏覽器",
+    "ai": "AI · LLM",
+    "base": "基礎映像"
+  },
+  "items": {
+    "sandbox-code": {
+      "name": "程式碼執行沙箱",
+      "description": "官方程式碼執行環境，預裝 Python3 + Jupyter Kernel，相容 E2B SDK。"
+    },
+    "sandbox-browser": {
+      "name": "瀏覽器沙箱",
+      "description": "預裝 Chromium，支援網頁自動化。"
+    },
+    "openclaw-lite": {
+      "name": "龍蝦助手 · 輕量版",
+      "description": "輕量版 OpenClaw 助手映像，拉取更快、佔用磁碟更小；適合以對話為主、暫不需要完整瀏覽器工具鏈的助手。"
+    },
+    "openclaw-aio": {
+      "name": "龍蝦助手 · All-in-One",
+      "description": "全功能 OpenClaw AI Agent 平臺，內建瀏覽器自動化、程式碼執行與多模型接入。"
+    },
+    "cubesandbox-base": {
+      "name": "基礎映像",
+      "description": "最小化基礎映像，僅含 envd，適合自訂建置。"
+    }
+  },
+  "tagLabels": {
+    "python": "Python",
+    "jupyter": "Jupyter",
+    "official": "官方",
+    "browser": "瀏覽器",
+    "chromium": "Chromium",
+    "agent": "AI Agent",
+    "openclaw": "OpenClaw",
+    "lite": "輕量版",
+    "aio": "All-in-One",
+    "deepseek": "DeepSeek",
+    "base": "基礎",
+    "envd": "envd"
+  }
+}
