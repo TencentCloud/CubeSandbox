@@ -33,12 +33,13 @@ const (
 	KindSnapshot = "snapshot"
 )
 
-// Object is a named CoW volume or snapshot with an optional device path.
+// Object is a named CoW volume or snapshot with optional resolved metadata.
 type Object struct {
 	VolumeName string
 	Kind       string
 	Gen        uint32
 	FilePath   string
+	SizeBytes  uint64
 }
 
 // Store is the CoW object storage abstraction (base class).

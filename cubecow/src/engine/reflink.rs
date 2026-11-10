@@ -48,7 +48,7 @@
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::ffi::CString;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
@@ -241,12 +241,50 @@ impl ReflinkEngine {
         if self.clone_method == CloneMethod::Ficlone {
             return Ok(cached);
         }
+        Ok(self
+            .lookup_shared_name_with_metadata(name, cached)?
+            .map(|(kind, _)| kind))
+    }
+
+    /// Resolve a name together with the metadata used to validate it. This is
+    /// the path for information queries: shared JuiceFS cache validation and
+    /// object projection must use the same stat result.
+    fn lookup_existing_name_with_metadata(
+        &self,
+        name: &str,
+    ) -> CubecowResult<Option<(NameKind, Metadata)>> {
+        let cached = {
+            let index = self
+                .name_index
+                .read()
+                .expect("reflink name_index lock poisoned");
+            index.get(name).cloned()
+        };
+        if self.clone_method != CloneMethod::Ficlone {
+            return self.lookup_shared_name_with_metadata(name, cached);
+        }
+        let Some(kind) = cached else {
+            return Ok(None);
+        };
+        match std::fs::metadata(self.path_for_name_kind(name, &kind)) {
+            Ok(meta) if meta.is_file() => Ok(Some((kind, meta))),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CubecowError::IoError(e)),
+        }
+    }
+
+    fn lookup_shared_name_with_metadata(
+        &self,
+        name: &str,
+        cached: Option<NameKind>,
+    ) -> CubecowResult<Option<(NameKind, Metadata)>> {
         if let Some(kind) = cached.as_ref() {
-            if self
-                .name_kind_exists_on_disk(name, kind)
-                .map_err(CubecowError::IoError)?
-            {
-                return Ok(cached);
+            match std::fs::metadata(self.path_for_name_kind(name, kind)) {
+                Ok(meta) if meta.is_file() => return Ok(Some((kind.clone(), meta))),
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(CubecowError::IoError(e)),
             }
             let mut index = self
                 .name_index
@@ -259,7 +297,7 @@ impl ReflinkEngine {
         }
         let discovered =
             discover_name_on_disk(&self.volumes_dir, name).map_err(CubecowError::IoError)?;
-        if let Some(kind) = discovered.clone() {
+        if let Some((kind, _)) = discovered.as_ref() {
             let mut index = self
                 .name_index
                 .write()
@@ -269,7 +307,7 @@ impl ReflinkEngine {
                     NameKind::Volume => self.metrics.inc(METRIC_VOLUME_COUNT),
                     NameKind::Snapshot { .. } => self.metrics.inc(METRIC_SNAPSHOT_COUNT),
                 }
-                entry.insert(kind);
+                entry.insert(kind.clone());
             }
         }
         Ok(discovered)
@@ -304,14 +342,17 @@ impl ReflinkEngine {
     }
 
     fn name_kind_exists_on_disk(&self, name: &str, kind: &NameKind) -> std::io::Result<bool> {
-        let path = match kind {
-            NameKind::Volume => self.vol_main_file(name),
-            NameKind::Snapshot { origin_volume } => self.snap_file(origin_volume, name),
-        };
-        match std::fs::metadata(path) {
+        match std::fs::metadata(self.path_for_name_kind(name, kind)) {
             Ok(meta) => Ok(meta.is_file()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
+        }
+    }
+
+    fn path_for_name_kind(&self, name: &str, kind: &NameKind) -> PathBuf {
+        match kind {
+            NameKind::Volume => self.vol_main_file(name),
+            NameKind::Snapshot { origin_volume } => self.snap_file(origin_volume, name),
         }
     }
 
@@ -386,8 +427,21 @@ impl ReflinkEngine {
                 CubecowError::IoError(e)
             }
         })?;
+        self.project_volume_with_metadata(volume_name, meta, true)
+    }
 
-        let snapshot_count = count_snapshots_on_disk(&self.vol_dir(volume_name), volume_name)?;
+    fn project_volume_with_metadata(
+        &self,
+        volume_name: &str,
+        meta: Metadata,
+        include_snapshot_count: bool,
+    ) -> CubecowResult<Volume> {
+        let main = self.vol_main_file(volume_name);
+        let snapshot_count = if include_snapshot_count {
+            count_snapshots_on_disk(&self.vol_dir(volume_name), volume_name)?
+        } else {
+            0
+        };
 
         Ok(Volume {
             name: volume_name.to_string(),
@@ -432,17 +486,56 @@ impl ReflinkEngine {
                 CubecowError::IoError(e)
             }
         })?;
+        Ok(self.project_snapshot_with_metadata(snapshot_name, &origin, meta))
+    }
 
-        Ok(Snapshot {
+    fn project_snapshot_with_metadata(
+        &self,
+        snapshot_name: &str,
+        origin_volume: &str,
+        meta: Metadata,
+    ) -> Snapshot {
+        let path = self.snap_file(origin_volume, snapshot_name);
+        Snapshot {
             name: snapshot_name.to_string(),
             size_bytes: meta.size(),
             device_path: path.to_string_lossy().into_owned(),
-            origin_volume: origin,
+            origin_volume: origin_volume.to_string(),
             created_at: rfc3339_from_meta(&meta),
             export_uuid: String::new(),
             export_status: String::new(),
             deletable: None,
-        })
+        }
+    }
+
+    fn project_named_object(
+        &self,
+        name: &str,
+        include_snapshot_count: bool,
+    ) -> CubecowResult<Volume> {
+        let Some((kind, meta)) = self.lookup_existing_name_with_metadata(name)? else {
+            return Err(CubecowError::NotFound(format!(
+                "volume or snapshot '{name}'"
+            )));
+        };
+        match kind {
+            NameKind::Volume => {
+                self.project_volume_with_metadata(name, meta, include_snapshot_count)
+            }
+            NameKind::Snapshot { origin_volume } => {
+                let snap = self.project_snapshot_with_metadata(name, &origin_volume, meta);
+                Ok(Volume {
+                    name: snap.name,
+                    size_bytes: snap.size_bytes,
+                    device_path: snap.device_path,
+                    snapshot_count: 0,
+                    created_at: snap.created_at,
+                    export_uuid: snap.export_uuid,
+                    export_status: snap.export_status,
+                    deletable: snap.deletable,
+                })
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -726,52 +819,25 @@ impl Engine for ReflinkEngine {
 
     fn get_volume_info(&self, name: &str) -> CubecowResult<Volume> {
         // Match dm-thin's contract: `get_volume_info` is the one-shot
-        // "give me size + device path for this name" entry point that
-        // upper layers (notably Cubelet's `CubecowVolumeManager.GetSizeBytes`
-        // / `ResolveDevPath`) call regardless of whether the name refers
-        // to a volume or a snapshot.  In dm-thin both kinds are the same
-        // LV behind the scenes, so the call always succeeds; refusing
-        // snapshots here breaks every flow that touches a template
-        // rootfs (e.g. `CommitTemplateRootfs` → `GetSizeBytes`,
-        // immediately on a freshly-created `tpl-<id>-rootfs` snapshot).
+        // information entry point regardless of whether the name refers to a
+        // volume or snapshot. In dm-thin both kinds are the same LV behind the
+        // scenes, so refusing snapshots here breaks management callers. Data
+        // path callers use `get_object_info` below to skip snapshot counting.
         //
         // We therefore mirror `activate_volume` below: snapshot names
         // are projected through the snapshot view and re-shaped as a
         // `Volume`.  The origin chain is intentionally not surfaced
         // here; callers that need it should use `list_snapshots` /
         // `get_snapshot_info` directly.
-        let _ = self.lookup_existing_name(name)?;
-        let idx = self
-            .name_index
-            .read()
-            .expect("reflink name_index lock poisoned");
-        match idx.get(name) {
-            Some(NameKind::Volume) => {
-                drop(idx);
-                self.project_volume(name)
-            }
-            Some(NameKind::Snapshot { .. }) => {
-                drop(idx);
-                let snap = self.project_snapshot(name)?;
-                Ok(Volume {
-                    name: snap.name,
-                    size_bytes: snap.size_bytes,
-                    device_path: snap.device_path,
-                    snapshot_count: 0,
-                    created_at: snap.created_at,
-                    export_uuid: snap.export_uuid,
-                    export_status: snap.export_status,
-                    deletable: snap.deletable,
-                })
-            }
-            None => Err(CubecowError::NotFound(format!(
-                "volume or snapshot '{name}'"
-            ))),
-        }
+        self.project_named_object(name, true)
+    }
+
+    fn get_object_info(&self, name: &str) -> CubecowResult<Volume> {
+        self.project_named_object(name, false)
     }
 
     fn get_volume_block_info(&self, name: &str) -> CubecowResult<VolumeBlockInfo> {
-        let vol = self.get_volume_info(name)?;
+        let vol = self.get_object_info(name)?;
         Ok(VolumeBlockInfo {
             num_blocks: vol.size_bytes / REFLINK_BLOCK_SIZE as u64,
             block_size: REFLINK_BLOCK_SIZE,
@@ -1082,40 +1148,7 @@ impl Engine for ReflinkEngine {
         // call site behaves identically to dm-thin's
         // [`Engine::activate_volume`] (which returns a [`Volume`] for
         // both volume *and* snapshot names).
-        let _ = self.lookup_existing_name(name)?;
-        let idx = self
-            .name_index
-            .read()
-            .expect("reflink name_index lock poisoned");
-        match idx.get(name) {
-            Some(NameKind::Volume) => {
-                drop(idx);
-                self.project_volume(name)
-            }
-            Some(NameKind::Snapshot { .. }) => {
-                drop(idx);
-                let snap = self.project_snapshot(name)?;
-                // Surface the snapshot using the Volume shape so
-                // callers that hold a `Volume` after `activate_volume`
-                // (matching dm-thin's behaviour) see the device path
-                // and size. The origin volume is intentionally not
-                // re-exposed here: it is already available via
-                // `list_snapshots` / `Snapshot::origin_volume`.
-                Ok(Volume {
-                    name: snap.name,
-                    size_bytes: snap.size_bytes,
-                    device_path: snap.device_path,
-                    snapshot_count: 0,
-                    created_at: snap.created_at,
-                    export_uuid: snap.export_uuid,
-                    export_status: snap.export_status,
-                    deletable: snap.deletable,
-                })
-            }
-            None => Err(CubecowError::NotFound(format!(
-                "volume or snapshot '{name}'"
-            ))),
-        }
+        self.project_named_object(name, true)
     }
 
     fn deactivate_volume(&self, name: &str) -> CubecowResult<()> {
@@ -1472,10 +1505,13 @@ fn statvfs_total_used(path: &Path) -> std::io::Result<(u64, u64)> {
 //   * Zero-byte snapshot files when the
 //     origin's main file is non-zero           → orphan from a crashed FICLONE;
 //                                                 unlink.
-fn discover_name_on_disk(volumes_dir: &Path, name: &str) -> std::io::Result<Option<NameKind>> {
+fn discover_name_on_disk(
+    volumes_dir: &Path,
+    name: &str,
+) -> std::io::Result<Option<(NameKind, Metadata)>> {
     let direct_main = volumes_dir.join(name).join(name);
     match std::fs::metadata(&direct_main) {
-        Ok(meta) if meta.is_file() => return Ok(Some(NameKind::Volume)),
+        Ok(meta) if meta.is_file() => return Ok(Some((NameKind::Volume, meta))),
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e),
@@ -1498,9 +1534,12 @@ fn discover_name_on_disk(volumes_dir: &Path, name: &str) -> std::io::Result<Opti
         let candidate = entry.path().join(name);
         match std::fs::metadata(candidate) {
             Ok(meta) if meta.is_file() => {
-                return Ok(Some(NameKind::Snapshot {
-                    origin_volume: origin,
-                }));
+                return Ok(Some((
+                    NameKind::Snapshot {
+                        origin_volume: origin,
+                    },
+                    meta,
+                )));
             }
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -2183,6 +2222,28 @@ mod tests {
         // Shrink rejected.
         let bad = engine.resize_volume("v", 0);
         assert!(matches!(bad, Err(CubecowError::InvalidArg(_))));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lightweight_object_info_skips_snapshot_count() {
+        let root = unique_root("lightweight-object-info");
+        let mut engine = make_engine(&root);
+        // The projection under test (snapshot counting vs. the lightweight
+        // skip) is clone-method independent, and copy_file_range works on
+        // any local filesystem, so this needs no FICLONE.
+        engine.clone_method = CloneMethod::CopyFileRange;
+
+        engine.create_volume("vol", 4096).unwrap();
+        engine
+            .create_snapshot_from_volume("vol", "snap", false)
+            .unwrap();
+
+        assert_eq!(engine.get_volume_info("vol").unwrap().snapshot_count, 1);
+        let object = engine.get_object_info("vol").unwrap();
+        assert_eq!(object.size_bytes, 4096);
+        assert_eq!(object.snapshot_count, 0);
 
         let _ = std::fs::remove_dir_all(&root);
     }

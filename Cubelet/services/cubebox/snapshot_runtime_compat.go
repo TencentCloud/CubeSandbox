@@ -10,6 +10,7 @@ import (
 
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 // runSnapshotWithRootfs captures memory and rootfs in one frozen window.
@@ -103,6 +104,14 @@ func correctLegacySnapshotMetadataVersions(cb *cubeboxstore.CubeBox, snapshotPat
 }
 
 func checkCommitSnapshotDestination(ctx context.Context, backend, snapshotID string, inspect func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error)) error {
+	// Reflink create operations use create_new/FICLONE destination checks and
+	// roll back only artefacts created by that call. A separate preflight is
+	// redundant for XFS and turns every new JFS name into a full directory
+	// discovery. S3 retains the preflight because some create paths resolve and
+	// reuse existing writable lvols.
+	if cow.IsReflinkBackend(backend) {
+		return nil
+	}
 	// Include work and sealed objects: S3 may resolve an existing writable
 	// memory volume instead of rejecting it, so none may be reused here.
 	refs := storage.DefaultTemplateObjectRefs(snapshotID)
