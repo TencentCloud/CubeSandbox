@@ -1325,7 +1325,11 @@ func writableLayerSubdir(flowOpts *workflow.CreateContext, containerID, index st
 		return flowOpts.SnapshotWritableLayer
 	}
 	if flowOpts != nil && flowOpts.IsRestart && flowOpts.ReqInfo != nil {
-		templateID := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID])
+		annotations := flowOpts.ReqInfo.GetAnnotations()
+		templateID := strings.TrimSpace(annotations[constants.MasterAnnotationJFSTemplateVariantID])
+		if templateID == "" {
+			templateID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+		}
 		if templateID != "" {
 			if strings.TrimSpace(index) == "" {
 				index = "0"

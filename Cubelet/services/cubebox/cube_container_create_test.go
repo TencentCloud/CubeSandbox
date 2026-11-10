@@ -1230,12 +1230,25 @@ func TestWritableLayerSubdirKeepsTemplateUpperOnRestart(t *testing.T) {
 	assert.Equal(t, "disk/"+tpl+"_1", writableLayerSubdir(restart, "sandbox-id", "1"))
 	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", ""))
 
+	variant := tpl + "-hf1-deadbeef"
+	variantRestart := &workflow.CreateContext{
+		IsRestart: true,
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+				constants.MasterAnnotationJFSTemplateVariantID:  variant,
+			},
+		},
+	}
+	assert.Equal(t, "disk/"+variant+"_0", writableLayerSubdir(variantRestart, "sandbox-id", "0"))
+
 	coldBoot := &workflow.CreateContext{
 		IsRestart:             true,
 		SnapshotWritableLayer: "disk/tpl-from-the-snapshot_0",
 		ReqInfo: &cubebox.RunCubeSandboxRequest{
 			Annotations: map[string]string{
 				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+				constants.MasterAnnotationJFSTemplateVariantID:  variant,
 			},
 		},
 	}

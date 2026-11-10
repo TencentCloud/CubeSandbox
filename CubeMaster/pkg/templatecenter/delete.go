@@ -56,8 +56,9 @@ var (
 // layout and resolves both from its local catalog (with deterministic
 // fallback) keyed by templateID.
 type templateCleanupLocator struct {
-	NodeID string
-	NodeIP string
+	NodeID            string
+	NodeIP            string
+	TemplateVariantID string
 }
 
 type templateCleanupTargets struct {
@@ -77,6 +78,7 @@ func cleanupLocatorKey(locator templateCleanupLocator) string {
 	return strings.Join([]string{
 		strings.TrimSpace(locator.NodeID),
 		strings.TrimSpace(locator.NodeIP),
+		strings.TrimSpace(locator.TemplateVariantID),
 	}, "|")
 }
 
@@ -314,8 +316,9 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 			targets.ArtifactIDs[replica.ArtifactID] = struct{}{}
 		}
 		targets.addLocator(templateCleanupLocator{
-			NodeID: replica.NodeID,
-			NodeIP: replica.NodeIP,
+			NodeID:            replica.NodeID,
+			NodeIP:            replica.NodeIP,
+			TemplateVariantID: replica.TemplateVariantID,
 		})
 	}
 
@@ -481,6 +484,10 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 	backend = pinnedCleanupBackend(backend)
 	var cleanupErr error
 	for _, locator := range locators {
+		cleanupID := strings.TrimSpace(locator.TemplateVariantID)
+		if cleanupID == "" {
+			cleanupID = templateID
+		}
 		hostIP := locator.NodeIP
 		if hostIP == "" && locator.NodeID != "" {
 			if n, ok := localcache.GetNode(locator.NodeID); ok && n != nil {
@@ -496,14 +503,14 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 		// fallback) so master no longer needs to know any physical detail.
 		rsp, err := cleanupTemplateOnCubelet(ctx, getCubeletAddrForDelete(hostIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
-			TemplateID: templateID,
+			TemplateID: cleanupID,
 			Backend:    backend,
 		})
 		if err != nil {
 			if isIgnorableTemplateCleanupError(err) {
 				continue
 			}
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s on node %s: %w", templateID, locator.NodeID, err))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s on node %s: %w", cleanupID, locator.NodeID, err))
 			continue
 		}
 		if rsp.GetRet() != nil && int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {

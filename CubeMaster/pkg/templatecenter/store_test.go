@@ -52,7 +52,7 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 		},
 	}
 
-	out, err := normalizeStoredTemplateRequest(req)
+	out, err := normalizeStoredTemplateRequest(req, true)
 	require.NoError(t, err)
 
 	for _, k := range []string{
@@ -66,6 +66,74 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 	assert.Equal(t, "tpl-after-norm", out.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	assert.Equal(t, "keep-me", out.Annotations["unrelated"])
 	assert.Empty(t, out.SnapshotDir)
+}
+
+func TestNormalizeStoredTemplateRequestOptsInOnlyJFSAppSnapshotBuilds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		enable bool
+		want   bool
+	}{
+		{name: "appsnapshot build", enable: true, want: true},
+		{name: "commit", enable: false, want: false},
+		{name: "snapshot", enable: false, want: false},
+		{name: "runtime snapshot", enable: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &sandboxtypes.CreateCubeSandboxReq{Annotations: map[string]string{
+				constants.CubeAnnotationAppSnapshotTemplateID:    "tpl-a",
+				constants.CubeAnnotationStorageBackend:           "jfs",
+				constants.CubeAnnotationJFSTemplateVariantPolicy: "caller-value",
+				constants.CubeAnnotationJFSTemplateVariantID:     "caller-physical",
+			}}
+			out, err := normalizeStoredTemplateRequest(req, tc.enable)
+			require.NoError(t, err)
+			assert.NotContains(t, out.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
+			if tc.want {
+				assert.Equal(t, "hf1", out.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy])
+			} else {
+				assert.NotContains(t, out.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+			}
+		})
+	}
+}
+
+func TestCreateTemplateReplicasCleansUntrackedPhysicalVariant(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	target := &node.Node{InsID: "node-a", IP: "10.0.0.1"}
+	patches.ApplyFunc(templateBuildTargets, func(string, bool, []*node.Node) []*node.Node {
+		return []*node.Node{target}
+	})
+	patches.ApplyFunc(createReplicaOnNode, func(context.Context, *node.Node, *sandboxtypes.CreateCubeSandboxReq, replicaRunOptions) (ReplicaStatus, string) {
+		return ReplicaStatus{
+			NodeID:            target.ID(),
+			NodeIP:            target.HostIP(),
+			Status:            ReplicaStatusReady,
+			TemplateVariantID: "tpl-a-hf1-deadbeef",
+		}, ""
+	})
+	patches.ApplyFunc(UpsertReplica, func(context.Context, string, string, ReplicaStatus) error {
+		return errors.New("database unavailable")
+	})
+	cleaned := ""
+	patches.ApplyFunc(cleanupTemplateReplicasWithLocators, func(_ context.Context, _ string, locators []templateCleanupLocator, backend string) error {
+		require.Equal(t, "jfs", backend)
+		require.Len(t, locators, 1)
+		cleaned = locators[0].TemplateVariantID
+		return nil
+	})
+
+	_, err := createTemplateReplicasOnNodes(context.Background(), "tpl-a", &sandboxtypes.CreateCubeSandboxReq{
+		InstanceType: "cubebox",
+		Annotations: map[string]string{
+			constants.CubeAnnotationStorageBackend:     "jfs",
+			constants.CubeAnnotationsAppSnapshotCreate: "true",
+		},
+	}, []*node.Node{target}, replicaRunOptions{})
+	require.ErrorContains(t, err, "database unavailable")
+	require.Equal(t, "tpl-a-hf1-deadbeef", cleaned)
 }
 
 func TestConvergeEnvdVersionUsesNodeCollectionResults(t *testing.T) {

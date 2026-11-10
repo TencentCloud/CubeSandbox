@@ -250,23 +250,19 @@ func RedoNeedsFullRebuild(ctx context.Context, jobID string) bool {
 	return !artifactStatusReusableForRedo(artifact.Status)
 }
 
-func isJFSTemplateRedo(definition *models.TemplateDefinition, sourceReq *types.CreateTemplateFromImageReq) bool {
-	backend := ""
-	if sourceReq != nil {
-		backend = sourceReq.Backend
-	}
-	if strings.TrimSpace(backend) == "" && definition != nil {
-		backend = definition.StorageBackend
-	}
-	return constants.IsJFSBackend(backend)
-}
-
 func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
 	}
 	normalized, err := normalizeRedoTemplateImageRequest(req)
 	if err != nil {
+		return nil, err
+	}
+	definition, err := GetDefinition(ctx, normalized.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureRedoTemplateNotInUse(ctx, normalized.TemplateID, definition.InstanceType); err != nil {
 		return nil, err
 	}
 	jobID := uuid.NewString()
@@ -306,11 +302,11 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 				return fmt.Errorf("decode latest template image request fail: %w", err)
 			}
 			sourceReq.TemplateID = normalized.TemplateID
+			if strings.TrimSpace(sourceReq.Backend) == "" {
+				sourceReq.Backend = definition.StorageBackend
+			}
 			if !isCreateRedoJobOperation(sourceJob.Operation) {
 				sourceReq.Alias = ""
-			}
-			if isJFSTemplateRedo(definition, sourceReq) {
-				return fmt.Errorf("%w; create a new template ID instead", ErrJFSRedoUnsupported)
 			}
 			replicas, err := ListReplicas(ctx, normalized.TemplateID)
 			if err != nil {
@@ -321,6 +317,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 				return err
 			}
 			targetScope := distributionScopeFromTargets(targetNodes)
+			sourceReq.DistributionScope = append([]string(nil), targetScope...)
 			attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
 			requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
 			if err != nil {

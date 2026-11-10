@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
@@ -73,6 +74,16 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 	}
 
 	ann := opts.ReqInfo.GetAnnotations()
+	if backend, err := cow.NormalizeBackend(ann[constants.MasterAnnotationStorageBackend]); err == nil &&
+		backend == cow.BackendJFS &&
+		ann[constants.MasterAnnotationJFSTemplateVariantPolicy] == constants.MasterJFSTemplateVariantPolicyV1 {
+		variantID := strings.TrimSpace(ann[constants.MasterAnnotationJFSTemplateVariantID])
+		if variantID == "" {
+			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat,
+				"JFS template %s has no variant id", templateID)
+		}
+		templateID = variantID
+	}
 	// A restore carries the same kernel／image metadata the template would
 	// have, so whatever holds that metadata on this node can stand in for a
 	// template that was never built here.
@@ -83,14 +94,6 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 		// by the Create entry. Recovery reads whichever id owns that home.
 		fallbackID = imp.SandboxID
 	}
-	// Pause snaps are storage catalogs, not Cube run templates, so Resume
-	// asks for the original tpl-* first.
-	if opts.IsPauseResume() {
-		if orig := strings.TrimSpace(ann[constants.MasterAnnotationAppSnapshotTemplateID]); orig != "" {
-			templateID = orig
-		}
-	}
-
 	lrt, err := l.runtemplateManager.EnsureCubeRunTemplate(ctx, templateID, ann[constants.MasterAnnotationStorageBackend])
 	if err != nil && fallbackID != "" && fallbackID != templateID {
 		fallback, fallbackErr := l.runtemplateManager.EnsureCubeRunTemplate(ctx, fallbackID, ann[constants.MasterAnnotationStorageBackend])

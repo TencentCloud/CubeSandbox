@@ -192,6 +192,9 @@ const (
 	MasterAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	MasterAnnotationsAppSnapshotCreate        = "cube.master.appsnapshot.create"
 	MasterAnnotationAppSnapshotTemplateID     = "cube.master.appsnapshot.template.id"
+	MasterAnnotationJFSTemplateVariantID      = "cube.master.jfs.template.variant.id"
+	MasterAnnotationJFSTemplateVariantPolicy  = "cube.master.jfs.template.variant.policy"
+	MasterJFSTemplateVariantPolicyV1          = "hf1"
 	MasterAnnotationRuntimeSnapshotID         = "cube.master.runtime.snapshot.id"
 	MasterAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
 	// MasterAnnotationRuntimeRestoreSnapshotID tracks the snapshot id whose
