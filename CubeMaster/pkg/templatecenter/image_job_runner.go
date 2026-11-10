@@ -152,20 +152,13 @@ func finishTemplateImageJobAfterArtifact(
 		ArtifactID: artifact.ArtifactID,
 		JobID:      jobID,
 	})
-	// claimWarning is populated by finalizeTemplateReplicas, which claims the
-	// alias *before* publishing the READY status so a client that sees READY
-	// can always resolve the alias.
 	claimWarning := ""
 	if persistErr != nil {
-		err = persistErr
-		if _, _, updErr := publishTemplateStatusWithAlias(ctx, req.TemplateID, jobID, StatusFailed, persistErr.Error()); updErr != nil {
-			logger.Errorf("mark template definition failed after replica persist error fail: %v", updErr)
-			if !errors.Is(updErr, ErrTemplateNotFound) {
-				err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
-			}
-		}
-		invalidateTemplateCaches(req.TemplateID)
+		err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr, logger)
 	} else {
+		// finalizeTemplateReplicas claims the alias *before* publishing the
+		// READY status so a client that sees READY can always resolve the
+		// alias; claimWarning captures a non-fatal alias-transfer note.
 		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
 	}
 	if err != nil {
@@ -217,6 +210,40 @@ func finishTemplateImageJobAfterArtifact(
 		return fmt.Errorf("template creation failed: %s", errorMessage)
 	}
 	return nil
+}
+
+// markDefinitionFailedOnPersistErr marks the template definition as FAILED
+// after replica persistence fails. It invalidates caches and returns the
+// error to record in the job row.
+//
+// The raw persistErr is logged for operators but a sanitized message is
+// written to the definition's last_error field to avoid leaking internal
+// database details through the API.
+//
+// ErrTemplateNotFound from the publish is suppressed: a concurrent normal
+// delete must not be turned into a second failure, and the job is still
+// failed with the original persistErr.
+func markDefinitionFailedOnPersistErr(
+	ctx context.Context,
+	templateID, jobID string,
+	readyTargetCount int,
+	persistErr error,
+	logger interface{ Errorf(string, ...any) },
+) error {
+	logger.Errorf("replica persist error for template %s: %v", templateID, persistErr)
+	lastErrText := fmt.Sprintf(
+		"failed to persist template replicas (%d node(s)); see CubeMaster logs for job %s",
+		readyTargetCount, jobID,
+	)
+	err := persistErr
+	if _, _, updErr := publishTemplateStatusWithAlias(ctx, templateID, jobID, StatusFailed, lastErrText); updErr != nil {
+		logger.Errorf("mark template definition FAILED after replica persist error: %v", updErr)
+		if !errors.Is(updErr, ErrTemplateNotFound) {
+			err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
+		}
+		invalidateTemplateCaches(templateID)
+	}
+	return err
 }
 
 func errorString(err error) string {

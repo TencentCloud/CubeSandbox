@@ -472,16 +472,17 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
 	}
-	if _, err := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
+	if _, persistErr := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
 		ArtifactID: artifact.ArtifactID,
 		JobID:      jobID,
-	}); err != nil {
+	}); persistErr != nil {
+		jobErr := markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr, logger)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseSnapshotting,
 			"progress":        100,
 			"template_status": StatusFailed,
-			"error_message":   err.Error(),
+			"error_message":   jobErr.Error(),
 		})
 		return
 	}

@@ -66,6 +66,33 @@ Phase (`phase`) tracks the pipeline step (PULLING / BUILDING / UPLOADING /
 DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 (§3.5) then registers the artifact and distributes it.
 
+### 3.2a Definition states
+
+`t_cube_template_definitions.status` tracks the user-visible template
+lifecycle, independently of the build job row above.
+
+```
+PENDING ─┬─→ READY              all replicas persisted and healthy
+         ├─→ PARTIALLY_READY    some replicas persisted, at least one failed
+         ├─→ FAILED             no replicas persisted (persistErr, all nodes
+         │                      failed, or redistribution yielded zero)
+         └─→ DELETING           concurrent delete acquired the row lock
+              └─→ DELETED       purge complete
+```
+
+Invariants:
+
+- A definition in PENDING is treated as an in-progress build by
+  `hasActiveDefinitionBuild`; a normal (non-force) delete is rejected with
+  `ErrTemplateAttemptInProgress` while the definition remains PENDING.
+- FAILED is a terminal build state: the definition is available for redo
+  and a normal delete is permitted.
+- DELETING suppresses the publish path (`publishTemplateStatusWithAlias`
+  returns `ErrTemplateNotFound`) so a concurrent delete is never turned
+  into a second failure.
+- READY and PARTIALLY_READY are the only states where the alias is
+  claimed; FAILED deliberately skips the alias claim.
+
 ### 3.3 Error mapping
 
 CubeMaster also exposes `POST /cube/template/migrate` (CLI spelling: `tpl merge`) to migrate a legacy READY template artifact from CubeMaster local disk into TC-managed storage. In operational documentation, the wording should stay consistent: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** The typical case is that historical artifacts still live on local disk and the cluster later enables `s3Backed=true`, so those artifacts must be migrated from local disk into S3-backed storage. If the same maintenance window also needs to repopulate target nodes, run `tpl redo` after `tpl merge` completes.
