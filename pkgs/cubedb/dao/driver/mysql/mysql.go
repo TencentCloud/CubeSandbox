@@ -106,7 +106,9 @@ func buildDSN(cfg dao.Config) string {
 	mc.WriteTimeout = time.Duration(writeTimeout) * time.Second
 	mc.ParseTime = true
 	mc.Loc = time.Local
-	mc.Params = map[string]string{"charset": "utf8"}
+	// Negotiate utf8mb4 with MySQL so utf8mb4 columns can preserve valid
+	// supplementary Unicode; this does not alter existing column charsets.
+	mc.Params = map[string]string{"charset": "utf8mb4"}
 	return mc.FormatDSN()
 }
 

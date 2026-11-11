@@ -83,7 +83,7 @@ func newMySQLEnv(t *testing.T) *dbTestEnv {
 	port := resource.GetPort("3306/tcp")
 	// Mirror mysql.buildDSN; multiStatements intentionally NOT enabled.
 	dsn := fmt.Sprintf(
-		"root:root@tcp(127.0.0.1:%s)/cube_test?charset=utf8&parseTime=true&loc=Local&timeout=5s&readTimeout=5s&writeTimeout=5s",
+		"root:root@tcp(127.0.0.1:%s)/cube_test?charset=utf8mb4&parseTime=true&loc=Local&timeout=5s&readTimeout=5s&writeTimeout=5s",
 		port,
 	)
 
