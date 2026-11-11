@@ -85,6 +85,16 @@ storage="${CUBE_JFS_STORAGE:-s3}"
 bucket="${CUBE_JFS_BUCKET:-}"
 access_key="${CUBE_JFS_ACCESS_KEY:-${CUBE_S3_ACCESS_KEY_ID:-}}"
 secret_key="${CUBE_JFS_SECRET_KEY:-${CUBE_S3_SECRET_ACCESS_KEY:-}}"
+# Block size and compression belong to the volume, so they are format flags and
+# cannot be passed to `juicefs mount` (it rejects them as unknown options).
+# `juicefs mount` reads both back from the format metadata and JuiceFS refuses
+# to change either on an existing volume, so they are pinned here.
+#
+# 1M keeps a cold read at 1 MiB instead of 4 MiB, which matters for restored VMs
+# faulting memory in from many vCPU threads at once. lz4 makes the zero ranges
+# compaction materializes nearly free: an all-zero 1 MiB block is ~8 KiB.
+jfs_block_size=1M
+jfs_compress=lz4
 : "${CUBE_JFS_META_URL:?set CUBE_JFS_META_URL in ${ENV_FILE}}"
 if [[ -n "${CUBE_JFS_META_PASSWORD:-}" \
     && "${CUBE_JFS_META_URL}" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*:[^/@]+@ ]]; then
@@ -96,6 +106,7 @@ if [[ -n "${access_key}" && -z "${secret_key}" ]] || [[ -z "${access_key}" && -n
 fi
 start_local_redis_if_configured "${CUBE_JFS_META_URL}"
 log "initializing ${name} when absent; an existing volume is not updated"
+log "volume layout: block-size=${jfs_block_size} compress=${jfs_compress}"
 meta_env_args=()
 if [[ -n "${CUBE_JFS_META_PASSWORD:-}" ]]; then
   export META_PASSWORD="${CUBE_JFS_META_PASSWORD}"
@@ -106,6 +117,8 @@ docker run --rm --env ACCESS_KEY --env SECRET_KEY "${meta_env_args[@]}" --entryp
   --no-update \
   --storage "${storage}" \
   --bucket "${bucket}" \
+  --block-size "${jfs_block_size}" \
+  --compress "${jfs_compress}" \
   "${CUBE_JFS_META_URL}" "${name}"
 docker run --rm "${meta_env_args[@]}" --entrypoint juicefs "${image}" status "${CUBE_JFS_META_URL}" >/dev/null
 log "JuiceFS volume is ready"

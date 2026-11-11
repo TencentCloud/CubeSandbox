@@ -56,6 +56,8 @@ spec:
               juicefs format --no-update \
                 --storage "$JFS_STORAGE" \
                 --bucket "$JFS_BUCKET" \
+                --block-size 1M \
+                --compress lz4 \
                 "$JFS_META_URL" "$JFS_VOLUME_NAME"
               juicefs status "$JFS_META_URL" >/dev/null
           env:
