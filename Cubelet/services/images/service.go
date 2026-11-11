@@ -42,7 +42,8 @@ import (
 var _ images.ImagesServer = (*service)(nil)
 
 type ImageServiceConfig struct {
-	ImageGCConfig ImageGCConfig `toml:"image_gc"`
+	ImageGCConfig   ImageGCConfig           `toml:"image_gc"`
+	ArtifactCacheGC ext4image.CacheGCConfig `toml:"artifact_cache_gc"`
 }
 
 type ImageGCConfig struct {
@@ -131,6 +132,18 @@ func initFunc(ic *plugin.InitContext) (interface{}, error) {
 	}
 	if usage, ok := cubeboxAPIObj.(imageUsageChecker); ok {
 		srv.imageUsage = usage
+	}
+	if config.ArtifactCacheGC.Enabled {
+		recovery, ok := cubeboxAPIObj.(interface{ ArtifactCacheReady() bool })
+		if !ok || srv.imageUsage == nil {
+			return nil, fmt.Errorf("rootfs cache GC requires authoritative runtime recovery and usage checks")
+		}
+		cacheGC, err := ext4image.NewCacheGC(config.ArtifactCacheGC, srv.imageUsage.IsImageInUse, recovery.ArtifactCacheReady)
+		if err != nil {
+			return nil, err
+		}
+		cacheGC.Activate()
+		go cacheGC.Run(ic.Context)
 	}
 	go srv.imageGCManager.Run(ic.Context)
 
