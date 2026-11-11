@@ -147,6 +147,15 @@ data:
                   labels:
                     cluster: {{ $obs.clusterId | default "cubesandbox" | quote }}
                     node: "${env:CUBE_NODE_NAME}"
+            - job_name: cubesandbox-network
+              scrape_interval: {{ $obs.otelCollector.scrapeInterval | default "15s" | quote }}
+              scrape_timeout: "10s"
+              metrics_path: /v1/metrics/network
+              static_configs:
+                - targets: [{{ $cubeletMetricsTarget | quote }}]
+                  labels:
+                    cluster: {{ $obs.clusterId | default "cubesandbox" | quote }}
+                    node: "${env:CUBE_NODE_NAME}"
 {{- if $logsEnabled }}
       filelog/sandbox_stdio:
         include:

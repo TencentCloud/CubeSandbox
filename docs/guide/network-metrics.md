@@ -405,6 +405,12 @@ sandbox resource endpoint at `/v1/metrics/resource`. Network metrics require no
 guest agent and no guest RPC. They are derived entirely from node-local CubeVS
 state.
 
+The bundled observability stack already wires this endpoint for you: the
+one-click stack (`deploy/one-click/observability`) and the Helm chart
+(`observability.enabled=true`) both scrape it as the `cubesandbox-network` job
+alongside `cubesandbox-resource`. Use the manual configuration below only for
+custom or externally managed Prometheus deployments.
+
 ```yaml
 scrape_configs:
   - job_name: cubesandbox-network
