@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	containerdsandbox "github.com/containerd/containerd/v2/core/sandbox"
@@ -14,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 )
 
@@ -79,6 +81,10 @@ func init() {
 		// The sibling InternalPlugin lookup below (the cgroup reader) goes
 		// through InitContext.GetByID, whose Instance() initializes the target
 		// on demand, so the self-requirement is not needed for ordering.
+		// containerd/plugin v1.1 rejects a plugin that requires its own type,
+		// so the sibling InternalPlugin cgroup reader cannot be declared here
+		// as a dependency; it is resolved lazily by lazyCgroupUsageReader on
+		// first use instead (see below).
 		Requires: []plugin.Type{
 			constants.CubeStorePlugin,
 			plugins.SandboxControllerPlugin,
@@ -121,20 +127,17 @@ func init() {
 			}
 			var hostSampler *HostSandboxSampler
 			if selection.HostSandbox {
-				cgroupPlugin, err := ic.GetByID(constants.InternalPlugin, constants.CgroupID.ID())
-				if err != nil {
-					return nil, fmt.Errorf("load cube cgroup reader for resource metrics: %w", err)
-				}
-				hostReader, ok := cgroupPlugin.(hostSandboxUsageReader)
-				if !ok {
-					return nil, fmt.Errorf("cube cgroup plugin does not expose host usage snapshots")
-				}
+				// The cgroup reader is a sibling InternalPlugin. containerd/plugin
+				// v1.1 forbids requiring own type, so there is no graph ordering
+				// edge to it and resolution must not depend on registration
+				// order — resolve lazily on first collection instead of at
+				// plugin-init time.
 				hostSampler, err = NewHostSandboxSampler(HostSandboxSamplerConfig{
 					CollectionInterval:    tomlext.ToStdTime(config.CollectionInterval),
 					RequestTimeout:        tomlext.ToStdTime(config.RequestTimeout),
 					MaxConcurrentRequests: config.MaxConcurrentRequests,
 					StaleAfter:            tomlext.ToStdTime(config.StaleAfter),
-				}, storeAdapter, hostReader)
+				}, storeAdapter, &lazyCgroupUsageReader{ic: ic})
 				if err != nil {
 					return nil, err
 				}
@@ -165,6 +168,49 @@ func init() {
 
 type cubeboxStoreAdapter struct {
 	store cubes.CubeboxAPI
+}
+
+// lazyCgroupUsageReader resolves the sibling InternalPlugin cgroup reader on
+// first use. containerd/plugin v1.1 forbids a plugin from requiring its own
+// type, so there is no graph ordering edge between resource-metrics and the
+// cgroup plugin and neither Instance() nor GetByID initializes anything —
+// they only return what the graph already initialized. Resolving at first
+// collection (long after the whole plugin set has been initialized) makes the
+// lookup independent of registration order; a missing or non-conforming
+// reader surfaces as a collection error instead of silently dropping
+// /v1/metrics/resource at boot.
+type lazyCgroupUsageReader struct {
+	ic     *plugin.InitContext
+	once   sync.Once
+	reader hostSandboxUsageReader
+	err    error
+}
+
+func (l *lazyCgroupUsageReader) resolve() {
+	p := l.ic.Plugins().Get(constants.InternalPlugin, constants.CgroupID.ID())
+	if p == nil {
+		l.err = fmt.Errorf("cube cgroup plugin (%s.%s) is not registered", constants.InternalPlugin, constants.CgroupID.ID())
+		return
+	}
+	inst, err := p.Instance()
+	if err != nil {
+		l.err = fmt.Errorf("initialize cube cgroup plugin for resource metrics: %w", err)
+		return
+	}
+	reader, ok := inst.(hostSandboxUsageReader)
+	if !ok {
+		l.err = fmt.Errorf("cube cgroup plugin does not expose host usage snapshots")
+		return
+	}
+	l.reader = reader
+}
+
+func (l *lazyCgroupUsageReader) UsageSnapshot(ctx context.Context, cgroupPath string) (handle.UsageSnapshot, error) {
+	l.once.Do(l.resolve)
+	if l.err != nil {
+		return handle.UsageSnapshot{}, l.err
+	}
+	return l.reader.UsageSnapshot(ctx, cgroupPath)
 }
 
 type cubeboxMetricsEpochListener struct {
