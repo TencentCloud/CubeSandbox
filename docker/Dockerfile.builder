@@ -9,9 +9,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 # (archive.ubuntu.com on amd64, ports.ubuntu.com on arm64). The rewrite is also
 # skipped when GITHUB_ACTIONS=true so CI always builds against upstream.
 ARG APT_MIRROR_BASE=
-# Keep in sync with the module go directives (Cubelet requires go >= 1.26.3
+# Keep in sync with the module go directives (Cubelet requires go >= 1.26.8
 # since it embeds containerd v2.3.x).
-ARG GO_VERSION=1.26.3
+ARG GO_VERSION=1.26.8
 ARG PROTOC_VERSION=28.3
 ARG LIBSECCOMP_VERSION=2.5.5
 ARG RUST_TOOLCHAIN_DEFAULT=1.89
