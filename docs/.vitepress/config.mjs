@@ -329,6 +329,7 @@ export default withMermaid(defineConfig({
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
                     { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
+                    { text: 'OpenClaw', link: '/guide/integrations/openclaw' },
                     { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' }
                   ]
                 },
@@ -351,8 +352,7 @@ export default withMermaid(defineConfig({
                     { text: 'LambChat', link: '/guide/usecases/lambchat' },
                     { text: 'ouc-online', link: '/guide/usecases/ouc-online' },
                     { text: 'KakuriZai', link: '/guide/usecases/kakurizai' },
-                    { text: 'OMA', link: '/guide/usecases/oma' },
-                    { text: 'OpenClaw', link: '/guide/usecases/openclaw-coding-agents' }
+                    { text: 'OMA', link: '/guide/usecases/oma' }
                   ]
                 }
               ]
@@ -575,6 +575,7 @@ export default withMermaid(defineConfig({
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
                     { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
+                    { text: 'OpenClaw', link: '/zh/guide/integrations/openclaw' },
                     { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' }
                   ]
                 },
@@ -597,8 +598,7 @@ export default withMermaid(defineConfig({
                     { text: 'LambChat', link: '/zh/guide/usecases/lambchat' },
                     { text: 'ouc-online', link: '/zh/guide/usecases/ouc-online' },
                     { text: 'KakuriZai', link: '/zh/guide/usecases/kakurizai' },
-                    { text: 'OMA', link: '/zh/guide/usecases/oma' },
-                    { text: 'OpenClaw', link: '/zh/guide/usecases/openclaw-coding-agents' }
+                    { text: 'OMA', link: '/zh/guide/usecases/oma' }
                   ]
                 }
               ]

@@ -1,22 +1,22 @@
 ---
-title: "在 Cube Sandbox 上运行 OpenClaw 编码智能体"
+title: "OpenClaw 集成指南（多租户编码智能体）"
 author: yjjnls
 date: 2026-11-10
 tags:
-  - agent
+  - integration
   - openclaw
+  - coding-agent
   - network-policy
-  - snapshot
 lang: zh-CN
 ---
 
-# 在 Cube Sandbox 上运行 OpenClaw 编码智能体
+# OpenClaw 集成指南（多租户编码智能体）
 
-## 业务背景
+## 部署背景
 
 一个平台工程团队为内部开发者提供 AI 编码智能体（OpenClaw）服务。这些智能体会审查 diff、编辑工作区文件、执行构建与测试、调用模型 API——运行的是事先无法完全人工审查的 shell 命令和生成代码。平台需要为每个智能体会话提供硬隔离边界、严格的出网管控、跨维护窗口的会话连续性，以及快到开发者无感知的冷启动。
 
-[OpenClaw 集成示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration)已经介绍了如何通过 E2B 兼容 SDK 把 `cube-sandbox` skill 接到单个沙箱上。本案例讲的是下一步：把这套方案作为多租户共享服务运行，并满足真实的安全与生命周期要求。
+[OpenClaw 集成示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration)已经介绍了如何通过 E2B 兼容 SDK 把 `cube-sandbox` skill 接到单个沙箱上。本指南讲的是下一步：把这套方案作为多租户共享服务运行，并满足真实的安全与生命周期要求。
 
 ## 关键挑战
 
@@ -75,7 +75,7 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)
 
 维护窗口场景下，工作区放在持久存储上（host mount 或 S3 volume 插件——见[持久化存储](/zh/guide/persistent-storage)），长时间运行的任务用快照做检查点，节点排空后会话可以原地恢复——见[快照/回滚/克隆](/zh/guide/snapshot-rollback-clone)。跨节点恢复还要求共享快照后端（`jfs` 或 `s3`，且 `remote_status=ready`）；节点本地的 `xfs` 存储扛不住排空。
 
-## 结果与收益
+## 运行效果与取舍
 
 - 每会话一台 MicroVM 的边界通过了共享内核方案没能通过的安全评审：智能体代码与宿主基础设施之间隔的是内核边界，不只是命名空间。
 - 默认拒绝的出网管控在日常运行中站住了。出现的出网失败都是智能体撞上未列入白名单的镜像源，通过在白名单里补条目解决——从未靠放宽默认策略解决。

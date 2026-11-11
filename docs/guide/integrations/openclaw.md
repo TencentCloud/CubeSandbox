@@ -1,22 +1,22 @@
 ---
-title: "Running OpenClaw Coding Agents on Cube Sandbox"
+title: "OpenClaw Integration Guide (Multi-Tenant Coding Agents)"
 author: yjjnls
 date: 2026-11-10
 tags:
-  - agent
+  - integration
   - openclaw
+  - coding-agent
   - network-policy
-  - snapshot
 lang: en-US
 ---
 
-# Running OpenClaw Coding Agents on Cube Sandbox
+# OpenClaw Integration Guide (Multi-Tenant Coding Agents)
 
-## Business Context
+## Deployment Context
 
 A platform engineering team operates AI coding agents (OpenClaw) for internal developers. The agents review diffs, edit files across a workspace, run builds and tests, and call model APIs — executing shell commands and generated code that no reviewer can fully vet in advance. The platform needed to give every agent session a hard isolation boundary, strict egress control, session continuity across maintenance, and a cold start fast enough that an interactive developer never notices the sandbox.
 
-The [OpenClaw integration example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration) already covers wiring the `cube-sandbox` skill to a single sandbox through the E2B-compatible SDK. This case study is about the next step: running that setup as a shared, multi-tenant service with real security and lifecycle requirements.
+The [OpenClaw integration example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration) already covers wiring the `cube-sandbox` skill to a single sandbox through the E2B-compatible SDK. This guide is about the next step: running that setup as a shared, multi-tenant service with real security and lifecycle requirements.
 
 ## Key Challenges
 
@@ -75,7 +75,7 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)
 
 For maintenance windows, the workspace lives on persistent storage (host mount or the S3 volume plugin — see [Persistent Storage](/guide/persistent-storage)), and long-running work is checkpointed with snapshots so a session can be brought back after a node drain — see [Snapshot/Rollback/Clone](/guide/snapshot-rollback-clone). Cross-node resume additionally requires a shared snapshot backend (`jfs` or `s3`, `remote_status=ready`); a node-local `xfs` mount does not survive a drain.
 
-## Results and Benefits
+## Operational Results and Trade-offs
 
 - The per-session MicroVM boundary passed the security review that a shared-kernel design had failed: agent code and host infrastructure are separated by a kernel boundary, not just namespaces.
 - Deny-by-default egress held in day-to-day operation. The egress failures that did appear were agents hitting unlisted mirrors, resolved by adding entries to the reviewed allowlist — never by loosening the default.

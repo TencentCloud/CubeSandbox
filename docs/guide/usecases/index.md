@@ -63,4 +63,3 @@ lang: en-US
 | [OUC Online: Session Isolation and Lifecycle Practices for an Agent Code Execution Layer](./ouc-online.md) | Lu Haoyang | 2026-11-06 | agent, session-isolation, lifecycle, pause-resume |
 | [KakuriZai: Lightweight Isolated Workspaces for Parallel Multi-Agent Editing](./kakurizai.md) | Ryo Sato (mizuame) | 2026-11-06 | agent, overlayfs, snapshot, host-mount |
 | [OMA: Architecture and Secure Execution Plane of a Cloud Managed Agents Platform](./oma.md) | Master Zhang's Blog | 2026-11-06 | agent, managed-agents, security, architecture |
-| [Running OpenClaw Coding Agents on Cube Sandbox](./openclaw-coding-agents.md) | yjjnls | 2026-11-10 | agent, openclaw, network-policy, snapshot |
