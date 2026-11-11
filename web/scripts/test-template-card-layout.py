@@ -52,7 +52,7 @@ RESPONSES = {
 }
 
 
-def route_request(route, base, errors):
+def route_request(route, base, fixture_errors):
     request = route.request
     path = urlsplit(request.url).path
     # Vite's API proxy also matches /templates document navigations.
@@ -60,7 +60,7 @@ def route_request(route, base, errors):
         route.fulfill(response=route.fetch(url=base + "/index.html"))
     elif request.resource_type in {"fetch", "xhr"}:
         if request.method != "GET" or path not in RESPONSES:
-            errors.append(
+            fixture_errors.append(
                 {"error": "unexpected fixture request", "method": request.method, "path": path}
             )
             route.fulfill(status=500, json={"error": "unexpected layout fixture request"})
@@ -71,23 +71,31 @@ def route_request(route, base, errors):
 
 
 def check_fixture_handler():
-    cases = [("GET", path, 200) for path in RESPONSES]
-    cases += [("GET", "/unexpected-endpoint", 500), ("DELETE", "/templates", 500)]
-    for method, path, expected in cases:
-        replies, errors = [], []
+    cases = [("GET", path, "fetch", 200) for path in RESPONSES]
+    cases += [
+        ("GET", "/unexpected-endpoint", "fetch", 500),
+        ("DELETE", "/templates", "fetch", 500),
+        ("GET", "/src/main.tsx", "script", None),
+    ]
+    for method, path, resource_type, expected in cases:
+        replies, continued, fixture_errors = [], [], []
         route = SimpleNamespace(
             request=SimpleNamespace(
                 url="http://localhost" + path,
                 method=method,
-                resource_type="fetch",
+                resource_type=resource_type,
                 is_navigation_request=lambda: False,
             ),
             fulfill=lambda replies=replies, **reply: replies.append(reply),
+            continue_=lambda continued=continued: continued.append(True),
         )
-        route_request(route, "http://localhost", errors)
-        assert len(replies) == 1, "fixture requests must always be completed"
-        assert replies[0].get("status", 200) == expected
-        assert bool(errors) == (expected == 500)
+        route_request(route, "http://localhost", fixture_errors)
+        if expected is None:
+            assert len(continued) == 1 and not replies and not fixture_errors
+        else:
+            assert len(replies) == 1, "fixture requests must always be completed"
+            assert replies[0].get("status", 200) == expected
+            assert bool(fixture_errors) == (expected == 500)
     return len(cases)
 
 
@@ -116,7 +124,8 @@ def main():
     if origin.scheme != "http" or origin.hostname not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("only a local test server is allowed")
     base = args.url.rstrip("/")
-    errors, cases, wrapped_cases = [], 0, 0
+    fixture_errors, layout_errors = [], []
+    cases, wrapped_cases = 0, 0
     started = time.monotonic()
     fixture_checks = check_fixture_handler()
     if args.output:
@@ -128,7 +137,7 @@ def main():
             context = browser.new_context(
                 viewport={"width": 1440, "height": 1100}, color_scheme="light", locale=language
             )
-            context.route("**/*", lambda route: route_request(route, base, errors))
+            context.route("**/*", lambda route: route_request(route, base, fixture_errors))
             context.add_init_script(
                 "localStorage.setItem('cube-theme','light'); localStorage.setItem('cube.lang',"
                 + json.dumps(language)
@@ -141,9 +150,9 @@ def main():
                     page.locator('a[href="/templates/' + TEMPLATES[0]["templateID"] + '"]')
                 ).to_be_visible()
             except Exception as error:
-                if errors:
+                if fixture_errors:
                     raise AssertionError(
-                        "Unexpected fixture requests: " + json.dumps(errors)
+                        "Unexpected fixture requests: " + json.dumps(fixture_errors)
                     ) from error
                 raise
             page.evaluate("document.fonts.ready")
@@ -175,13 +184,13 @@ def main():
                             or box["y"] < bounds["y"] - 1
                             or box["y"] + box["height"] > bounds["y"] + bounds["height"] + 1
                         ):
-                            errors.append({**tag, "error": label + " outside card"})
+                            layout_errors.append({**tag, "error": label + " outside card"})
                     if overlaps(status, action):
-                        errors.append({**tag, "error": "status/delete overlap"})
+                        layout_errors.append({**tag, "error": "status/delete overlap"})
                     if overlaps(header.locator("h3").bounding_box(), status):
-                        errors.append({**tag, "error": "title/status overlap"})
+                        layout_errors.append({**tag, "error": "title/status overlap"})
                     if badge.evaluate("el => el.scrollWidth > el.clientWidth + 1"):
-                        errors.append({**tag, "error": "status clipped"})
+                        layout_errors.append({**tag, "error": "status clipped"})
                     title = header.locator(":scope > div").bounding_box()
                     wrapped = status["y"] >= title["y"] + title["height"] - 1
                     if wrapped:
@@ -191,16 +200,18 @@ def main():
                                 "el => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight)"
                             )
                             if abs(status["x"] + status["width"] - content_right) > 1:
-                                errors.append(
+                                layout_errors.append(
                                     {**tag, "error": "wrapped status is not right-aligned"}
                                 )
                     if width == 360 and not args.baseline:
                         assert wrapped, "the narrow fixture must exercise a wrapped status"
-                    expect(header.locator("h3")).to_have_attribute(
-                        "title",
-                        template["aliases"][0] if template["aliases"] else template["templateID"],
+                    expected_title = (
+                        template["aliases"][0] if template["aliases"] else template["templateID"]
                     )
+                    expect(header.locator("h3")).to_have_attribute("title", expected_title)
+                    expect(header.locator("h3")).to_have_text(expected_title)
                     expect(header.locator("p")).to_have_attribute("title", template["templateID"])
+                    expect(header.locator("p")).to_have_text(template["templateID"])
                     cases += 1
                 if width in (360, 1440) and args.output:
                     subject_id = TEMPLATES[1 if width == 360 else 0]["templateID"]
@@ -239,8 +250,9 @@ def main():
                         page.screenshot(path=target, clip=clip)
                     else:
                         subject.locator("../..").screenshot(path=target)
+            delete_label = "Delete Template" if language == "en" else "删除模板"
             if not args.baseline:
-                # Hidden hover actions must also remain visible to keyboard users.
+                # Hidden hover actions must also remain visible and labelled for keyboard users.
                 ready = page.locator('a[href="/templates/' + TEMPLATES[2]["templateID"] + '"]')
                 page.mouse.move(0, 0)
                 ready.focus()
@@ -248,15 +260,20 @@ def main():
                 button = ready.locator("..").locator("button")
                 expect(button).to_be_focused()
                 expect(button).to_have_css("opacity", "1")
+                expect(button).to_have_attribute("aria-label", delete_label)
             # Opening the confirmation must not navigate or issue a DELETE.
+            delete_requests = []
+            page.on(
+                "request",
+                lambda req, seen=delete_requests: (
+                    seen.append(req.url) if req.method == "DELETE" else None
+                ),
+            )
             first = page.locator('a[href="/templates/' + TEMPLATES[0]["templateID"] + '"]')
             first.locator("..").locator("button").click()
             expect(page).to_have_url(base + "/templates")
-            expect(
-                page.get_by_role(
-                    "heading", name="Delete Template" if language == "en" else "删除模板"
-                )
-            ).to_be_visible()
+            expect(page.get_by_role("heading", name=delete_label)).to_be_visible()
+            assert not delete_requests, f"opening delete modal issued DELETE: {delete_requests}"
             context.close()
         browser.close()
     report = {
@@ -264,7 +281,8 @@ def main():
         "fixture_checks": fixture_checks,
         "wrapped_cases": wrapped_cases,
         "elapsed_seconds": round(time.monotonic() - started, 2),
-        "errors": errors,
+        "fixture_errors": fixture_errors,
+        "layout_errors": layout_errors,
         "fixture_responses": True,
         "color_scheme": "light",
         "baseline": args.baseline,
@@ -272,10 +290,14 @@ def main():
     if args.output:
         (args.output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
+    assert not fixture_errors, f"unexpected fixture requests: {fixture_errors}"
+    assert cases == 50, f"expected 50 cases, got {cases}"
     if args.baseline:
-        assert errors, "expected the original layout regression to reproduce"
+        assert layout_errors, "expected the original layout regression to reproduce"
     else:
-        assert not errors, "template card geometry regressed"
+        # Pre-fix CardHeader lacked flex-wrap, so wrapping only occurs after the fix.
+        assert wrapped_cases > 0, "the narrow fixture must exercise a wrapped status"
+        assert not layout_errors, "template card geometry regressed"
 
 
 if __name__ == "__main__":

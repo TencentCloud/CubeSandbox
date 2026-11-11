@@ -12,8 +12,9 @@ make web-build   # → web/dist/
 
 ## Template-card layout regression
 
-Run the WebUI locally, then use the optional Playwright browser check. It
-intercepts API requests with synthetic responses and never contacts a cluster:
+Guards the default `/templates` list-tab card grid (`Compatibility` and `Snapshots` tabs use separate layouts and are out of scope) against long unbroken aliases or template IDs widening `1fr` tracks, clipping status badges, or pushing badges underneath the top-right delete button. Overlong aliases and template IDs truncate with CSS ellipsis only when space runs out, keeping the full text in the DOM and in hover `title` attributes.
+
+Run the WebUI locally, then execute the optional Playwright check (manual-only so CI does not pull Chromium on every `web/` change):
 
 ```bash
 # Terminal 1, from web/
@@ -27,55 +28,9 @@ python3 -m venv /tmp/cube-web-layout-venv
 /tmp/cube-web-layout-venv/bin/python scripts/test-template-card-layout.py
 ```
 
-The check covers English/Chinese, five viewport widths (360–1440 px), long
-template IDs/aliases, READY/RUNNING/FAILED/PARTIALLY_READY and UNKNOWN
-compatibility. It checks badge/button bounds and collisions, wrapped-badge right
-alignment, full-name tooltips, keyboard focus visibility, and the delete
-confirmation without issuing DELETE. Pass `--output <directory>` for real Light
-screenshots at 360/1440 px and geometry results, or `--browser-executable <path>`
-to reuse an installed Chromium. `--baseline` requires the original bug to
-reproduce instead of passing the fixed layout.
+The script measures 50 card cases (`en`/`zh` × five widths `360–1440 px` × five templates covering `READY`, `RUNNING`, `FAILED`, `PARTIALLY_READY`, and `UNKNOWN` compatibility). It asserts badge/button card bounds and non-overlap, right-aligned wrapped badges on narrow cards, full ID text in the DOM with `title` tooltips, keyboard focus visibility and `aria-label` on the delete button, and an explicit check that opening the delete modal stays on `/templates` without issuing any `DELETE` request. Pass `--output <directory>` to write `results.json` and Light captures (`template-cards-<lang>-<360|1440>-light.png`), `--browser-executable <path>` to reuse a local Chromium, or `--baseline` against an unfixed checkout (e.g. `f2777699da7e`) to assert zero `fixture_errors` while requiring `layout_errors` to reproduce.
 
-Local Light captures with the same synthetic API responses, before and after
-the fix (not production template data):
-
-![Before: status badges collide with delete buttons or overflow the cards](scripts/fixtures/template-card-layout/before-light.png)
-
-![After: titles truncate and badges stay clear of delete buttons](scripts/fixtures/template-card-layout/after-light.png)
-
-This card crop from a 360px viewport shows a wrapped status staying right-aligned:
-
-![360px Light viewport: wrapped badges stay right-aligned](scripts/fixtures/template-card-layout/after-360-light.png)
-
-### Reproduce the committed capture names
-
-Keep the current WebUI running on port 5173. In a separate terminal, start the
-original layout at this PR's base revision (from the repository root):
-
-```bash
-git worktree add --detach /tmp/cube-web-layout-baseline f2777699da7e2f60b019519796f655c598a84342
-cd /tmp/cube-web-layout-baseline/web
-npm ci
-npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
-```
-
-Then, from the current branch's `web/` directory, use the same test script for
-both servers and copy its generated captures to the names used above:
-
-```bash
-/tmp/cube-web-layout-venv/bin/python scripts/test-template-card-layout.py --url http://127.0.0.1:5174 --baseline --output /tmp/cube-layout-before
-/tmp/cube-web-layout-venv/bin/python scripts/test-template-card-layout.py --url http://127.0.0.1:5173 --output /tmp/cube-layout-after
-cp /tmp/cube-layout-before/template-cards-zh-1440-light.png scripts/fixtures/template-card-layout/before-light.png
-cp /tmp/cube-layout-after/template-cards-zh-1440-light.png scripts/fixtures/template-card-layout/after-light.png
-cp /tmp/cube-layout-after/template-cards-zh-360-light.png scripts/fixtures/template-card-layout/after-360-light.png
-```
-
-The custom fixtures deliberately include a long unbroken alias and partial /
-unknown statuses; they are not a second general-purpose mock backend. Only the
-four GET endpoints used by this page/shell are registered. Unknown API requests
-and non-GET requests are recorded as failures and completed with HTTP 500, not
-left hanging. The run also checks those handler paths directly. Font rendering
-and relative dates can differ across machines and capture dates.
+Request interception only mocks `fetch`/`xhr` calls for the four `GET` endpoints this page and shell issue (`/templates`, `/templates/compat`, `/opsapi/v1/auth/session`, `/opsapi/v1/cluster/versions`); document `/templates` navigations load `index.html`, static/module assets pass through, and any other `fetch`/`xhr` path or non-`GET` method is recorded in `fixture_errors` and completed with HTTP 500. This stays separate from `src/mocks` (`?mock=1`) because the MSW handlers target legacy `/cubeapi/v1/*` routes with `onUnhandledRequest: 'bypass'` and general-purpose sample data rather than strict layout edge cases.
 
 ## Routes
 
