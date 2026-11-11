@@ -214,6 +214,8 @@ Any of these resets the idle clock:
 - SDK calls: `sandbox.run_code(...)`, `sandbox.commands.run(...)`, `sandbox.files.read(...)` / `write(...)`.
 - Direct HTTP traffic to a service inside the sandbox (e.g. via the URL returned by `getHost()`).
 
+A request counts as activity when it **starts** and again when its response **ends**; time spent in between does not. A single request that runs longer than `timeout` (for example `commands.run("sleep 900")` with `timeout=300`) can therefore be paused mid-flight. For such calls, send a cheap request to the sandbox periodically (more often than `timeout`) while the long one runs, or raise the timeout first with `set_timeout(...)`.
+
 Sandboxes that don't opt in (no `lifecycle` argument) default to `on_timeout="kill"`: once they sit idle for the effective `timeout` the platform destroys them. This matches e2b's `lifecycle.on_timeout="kill"` semantic. Manual `pause()` does **not** cancel that kill: a later-paused sandbox is still destroyed when idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), set a high `timeout`, or send periodic activity to reset the idle clock.
 
 ### End-to-end examples

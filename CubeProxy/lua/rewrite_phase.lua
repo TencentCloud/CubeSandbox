@@ -1,6 +1,7 @@
 local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
+local activity = require "activity"
 local request_host = require "request_host"
 
 -- Parse Host: <container_port>-<sandbox_id>.<domain> e.g. 49983-7c8fbcd45ffe450fb8f7fb223ad45507.cube.app
@@ -55,6 +56,11 @@ ngx.var.ins_id = ins_id
 
 -- Auto-pause gate. See sandbox_state.lua for failure-mode semantics.
 state.gate(ins_id)
+
+-- Stamp activity at request start too: log_phase stamps only after the
+-- response ends, so a request longer than the idle timeout would otherwise
+-- look idle while it is still in flight and be paused mid-request.
+activity.touch(ins_id)
 
 local host_ip, host_port, mask_request_host = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip
