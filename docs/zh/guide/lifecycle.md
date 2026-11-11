@@ -214,6 +214,8 @@ sandbox = Sandbox.create(
 - 通过 SDK 调用：`sandbox.run_code(...)`、`sandbox.commands.run(...)`、`sandbox.files.read(...)` / `write(...)`。
 - 通过 HTTP 直连沙箱内的服务（例如 `getHost()` 返回的 URL）。
 
+请求在**开始**时和响应**结束**时各算一次活跃，中间的执行时间不算。因此单个请求若运行时间超过 `timeout`（例如 `timeout=300` 时执行 `commands.run("sleep 900")`），可能在执行途中被暂停。对这类调用，请在长请求运行期间定期（间隔小于 `timeout`）向沙箱发送轻量请求，或先用 `set_timeout(...)` 调大超时。
+
 未配置 `auto_pause` / 不传 `lifecycle` 的沙箱默认行为是 `on_timeout="kill"`：空闲超过 `timeout` 秒后，平台会主动销毁该沙箱。这与 e2b `lifecycle.on_timeout="kill"` 语义一致。手动 `pause()` **不会取消** auto-kill：之后被暂停的沙箱，空闲仍超过 `timeout` 时一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、把 `timeout` 设得足够大，或通过定期活动刷新空闲计时。
 
 ### 端到端示例
