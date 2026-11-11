@@ -74,6 +74,26 @@ func TestNewStore(t *testing.T) {
 	assert.Equal(t, 0, store.Len())
 }
 
+func TestExt4ReferencesWithOrdinaryLabels(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		store, cleanup := createTestStore(t)
+		box := createTestCubeBox("ext4-reference", "")
+		box.Config.Image = &v1.ImageSpec{Image: "rootfs-used", StorageMedia: "ext4"}
+		box.FirstContainer().Labels = map[string]string{"app": "lesson"}
+		status := Status{StartedAt: 1}
+		if paused {
+			status.PausedAt = 2
+		}
+		box.FirstContainer().Status = StoreStatus(status)
+		store.Add(box)
+		found, err := store.GetCubeboxByImageID("rootfs-used")
+		if err != nil || len(found) != 1 {
+			t.Fatalf("paused=%t references=%d err=%v", paused, len(found), err)
+		}
+		cleanup()
+	}
+}
+
 func TestStoreAdd(t *testing.T) {
 	store, cleanup := createTestStore(t)
 	defer cleanup()

@@ -379,7 +379,8 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Overview', link: '/dev/' },
                 { text: 'Redis Key Convention', link: '/dev/redis-key-spec' },
-                { text: 'Sandbox Observability Design', link: '/dev/sandbox-otel-recommendation' }
+                { text: 'Sandbox Observability Design', link: '/dev/sandbox-otel-recommendation' },
+                { text: 'Worker rootfs cache GC', link: '/dev/rootfs-cache-gc' }
               ]
             }
           ]
