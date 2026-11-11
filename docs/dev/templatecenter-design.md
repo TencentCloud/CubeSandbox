@@ -71,27 +71,53 @@ DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 `t_cube_template_definitions.status` tracks the user-visible template
 lifecycle, independently of the build job row above.
 
+Initial state depends on the definition kind
+(`ensureTemplateDefinitionWithOptions`):
+
+- `kind=template` (image build / redo) starts at **PENDING**.
+- `kind=snapshot` (created from a sandbox snapshot) starts at **CREATING**.
+
 ```
-PENDING ─┬─→ READY              all replicas persisted and healthy
-         ├─→ PARTIALLY_READY    some replicas persisted, at least one failed
-         ├─→ FAILED             no replicas persisted (persistErr, all nodes
-         │                      failed, or redistribution yielded zero)
-         └─→ DELETING           concurrent delete acquired the row lock
-              └─→ DELETED       purge complete
+PENDING  ─┬─→ READY             every replica READY
+(template)├─→ PARTIALLY_READY   at least one replica READY, at least one not
+          └─→ FAILED            no replica READY, replica persistence failed
+                                (persistErr), or a force delete interrupted
+                                the build
+
+CREATING ─┬─→ READY             snapshot committed
+(snapshot)└─→ FAILED            snapshot commit failed
+
+any state ──→ (row removed)     delete hard-deletes the definition and its
+                                replica rows; there is no DELETED state for
+                                definitions
 ```
+
+READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
+a fresh aggregate status from the same summary rules.
 
 Invariants:
 
-- A definition in PENDING is treated as an in-progress build by
+- PENDING and CREATING are treated as an in-progress build by
   `hasActiveDefinitionBuild`; a normal (non-force) delete is rejected with
-  `ErrTemplateAttemptInProgress` while the definition remains PENDING.
-- FAILED is a terminal build state: the definition is available for redo
-  and a normal delete is permitted.
-- DELETING suppresses the publish path (`publishTemplateStatusWithAlias`
-  returns `ErrTemplateNotFound`) so a concurrent delete is never turned
-  into a second failure.
-- READY and PARTIALLY_READY are the only states where the alias is
-  claimed; FAILED deliberately skips the alias claim.
+  `ErrTemplateAttemptInProgress`. A force delete first marks the definition FAILED
+  (`UpdateDefinitionStatus`) and then removes the row.
+- Every terminal build outcome must publish a status through
+  `publishTemplateStatusWithAlias`; writing only the job row's
+  `template_status` does not update the definition and leaves it stuck in
+  PENDING.
+- A definition row already marked DELETING suppresses the publish path
+  (`publishTemplateStatusWithAlias` returns `ErrTemplateNotFound`), so a
+  concurrent delete is never turned into a second failure.
+- Alias claim on publish is gated on `status != FAILED`: READY and
+  PARTIALLY_READY claim the requested alias, FAILED skips the claim. Skipping
+  the claim does not release an alias the template already holds. A manual
+  alias set (`SetTemplateAlias`) is stricter and requires READY.
+- Sandbox creation does not check the definition status. It only requires a
+  READY replica on a healthy node (`EnsureTemplateLocalityReady`), so the
+  definition status is a user-visible summary and not a scheduling gate.
+- `last_error` (definition) and `error_message` (job row) are both returned
+  by the API and must hold sanitized, user-readable text. Raw driver or DB
+  errors go to CubeMaster logs only.
 
 ### 3.3 Error mapping
 

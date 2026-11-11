@@ -62,6 +62,39 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
 4. 回调 CubeMaster，触发 resume 流水线
 5. 由 CubeMaster 注册 artifact、向节点分发、写最终模板 / job 状态
 
+### 3.2a 模板定义状态
+
+`t_cube_template_definitions.status` 描述用户可见的模板生命周期，与上面的构建 job 行相互独立。
+
+初始状态取决于定义的 kind（`ensureTemplateDefinitionWithOptions`）：
+
+- `kind=template`（镜像构建 / redo）从 **PENDING** 开始。
+- `kind=snapshot`（由沙箱快照创建）从 **CREATING** 开始。
+
+```
+PENDING  ─┬─→ READY             所有副本均 READY
+(template)├─→ PARTIALLY_READY   至少一个副本 READY，且至少一个不是
+          └─→ FAILED            没有 READY 副本、副本落库失败（persistErr），
+                                或构建被强制删除中断
+
+CREATING ─┬─→ READY             快照提交成功
+(snapshot)└─→ FAILED            快照提交失败
+
+任意状态 ──→（行被删除）        删除操作会物理删除定义及其副本行；
+                                模板定义没有 DELETED 状态
+```
+
+`redo` 会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。
+
+不变式：
+
+- PENDING 和 CREATING 会被 `hasActiveDefinitionBuild` 视为构建进行中，普通（非强制）删除会以 `ErrTemplateAttemptInProgress` 拒绝。强制删除会先把定义标为 FAILED（`UpdateDefinitionStatus`），再删除该行。
+- 每个构建终态都必须通过 `publishTemplateStatusWithAlias` 发布状态；只写 job 行的 `template_status` 不会更新定义，会导致定义一直停留在 PENDING。
+- 定义行已处于 DELETING 时，发布路径会被抑制（`publishTemplateStatusWithAlias` 返回 `ErrTemplateNotFound`），因此并发删除不会被演变成第二次失败。
+- 发布时的别名认领条件是 `status != FAILED`：READY 和 PARTIALLY_READY 会认领请求的别名，FAILED 跳过认领。跳过认领不会释放模板已经持有的别名。手动设置别名（`SetTemplateAlias`）更严格，要求 READY。
+- 创建沙箱不检查定义状态，只要求某个健康节点上有 READY 副本（`EnsureTemplateLocalityReady`）。因此定义状态是面向用户的汇总信息，而不是调度闸门。
+- 定义的 `last_error` 和 job 行的 `error_message` 都会通过 API 返回，只能写脱敏后、用户可读的文本；原始驱动 / 数据库错误只进 CubeMaster 日志。
+
 ### 3.3 `tpl merge` / migrate job
 
 `POST /cube/template/migrate` 会提交一个 **migrate job**。CLI 命令名保持用户习惯上的 `tpl merge`，但后端 API 路径明确使用 `migrate`，强调它做的是**artifact 存储迁移**，不是“模板请求 merge”。

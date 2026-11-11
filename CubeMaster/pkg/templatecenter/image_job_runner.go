@@ -153,8 +153,11 @@ func finishTemplateImageJobAfterArtifact(
 		JobID:      jobID,
 	})
 	claimWarning := ""
+	// jobErrMsg overrides err.Error() in the job row when the raw error must
+	// not be exposed through the build-status API.
+	jobErrMsg := ""
 	if persistErr != nil {
-		err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr, logger)
+		jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr, logger)
 	} else {
 		// finalizeTemplateReplicas claims the alias *before* publishing the
 		// READY status so a client that sees READY can always resolve the
@@ -167,12 +170,15 @@ func finishTemplateImageJobAfterArtifact(
 				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
 			}
 		}
+		if jobErrMsg == "" {
+			jobErrMsg = err.Error()
+		}
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,
 			"template_status": StatusFailed,
-			"error_message":   err.Error(),
+			"error_message":   jobErrMsg,
 		})
 		return err
 	}
@@ -213,12 +219,15 @@ func finishTemplateImageJobAfterArtifact(
 }
 
 // markDefinitionFailedOnPersistErr marks the template definition as FAILED
-// after replica persistence fails. It invalidates caches and returns the
-// error to record in the job row.
+// after replica persistence fails and invalidates caches.
 //
-// The raw persistErr is logged for operators but a sanitized message is
-// written to the definition's last_error field to avoid leaking internal
-// database details through the API.
+// It returns two values:
+//   - userMsg: a sanitized, user-readable message. Both the definition's
+//     last_error and the job row's error_message are exposed through the API
+//     (GET /templates/:id and GET /templates/:id/builds/:bid), so callers must
+//     write only userMsg to the job row.
+//   - err: the raw error chain (persistErr, joined with the publish error if
+//     any) for logs and for the caller's return value only.
 //
 // ErrTemplateNotFound from the publish is suppressed: a concurrent normal
 // delete must not be turned into a second failure, and the job is still
@@ -229,21 +238,22 @@ func markDefinitionFailedOnPersistErr(
 	readyTargetCount int,
 	persistErr error,
 	logger interface{ Errorf(string, ...any) },
-) error {
+) (userMsg string, err error) {
 	logger.Errorf("replica persist error for template %s: %v", templateID, persistErr)
-	lastErrText := fmt.Sprintf(
-		"failed to persist template replicas (%d node(s)); see CubeMaster logs for job %s",
+	userMsg = fmt.Sprintf(
+		"failed to persist replica records (%d target node(s)); see CubeMaster logs for job %s",
 		readyTargetCount, jobID,
 	)
-	err := persistErr
-	if _, _, updErr := publishTemplateStatusWithAlias(ctx, templateID, jobID, StatusFailed, lastErrText); updErr != nil {
+	err = persistErr
+	if _, _, updErr := publishTemplateStatusWithAlias(ctx, templateID, jobID, StatusFailed, userMsg); updErr != nil {
 		logger.Errorf("mark template definition FAILED after replica persist error: %v", updErr)
 		if !errors.Is(updErr, ErrTemplateNotFound) {
 			err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
+			userMsg += "; template status could not be updated"
 		}
 		invalidateTemplateCaches(templateID)
 	}
-	return err
+	return userMsg, err
 }
 
 func errorString(err error) string {
