@@ -5,6 +5,7 @@
 package ext4image
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -154,16 +155,28 @@ func isAllZeros(buf []byte) bool {
 
 const sparseHoleThreshold = int64(1024 * 1024)
 
+// sparseFile is the subset of *os.File used by sparseCopy.
+type sparseFile interface {
+	io.Writer
+	io.Seeker
+	Truncate(size int64) error
+}
+
 // sparseCopy copies from src to dst while leaving zero runs of at least 1 MiB
 // sparse. Zero runs may start at any offset and may cross read-buffer boundaries.
 // It simultaneously feeds all read bytes into hasher (if non-nil) to preserve
 // hash integrity. dst.Truncate is called at the end to guarantee the file's
 // apparent size matches total bytes read.
-func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int64, error) {
+func sparseCopy(dst sparseFile, hasher hash.Hash, src io.Reader, bufSize int) (int64, error) {
 	if bufSize <= 0 {
 		bufSize = 1024 * 1024
 	}
 	buf := make([]byte, bufSize)
+	// Data is split at every zero byte, so mixed content such as binaries
+	// produces many tiny runs. Coalesce them into bufSize writes instead of
+	// issuing one write syscall per run. The buffer must be flushed before
+	// any direct operation on dst (Seek, Truncate).
+	writer := bufio.NewWriterSize(dst, bufSize)
 	zeroBuf := make([]byte, min(bufSize, int(sparseHoleThreshold)))
 	var totalBytes int64
 	var pendingZeros int64
@@ -173,6 +186,9 @@ func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int
 			return nil
 		}
 		if pendingZeros >= sparseHoleThreshold {
+			if err := writer.Flush(); err != nil {
+				return err
+			}
 			_, err := dst.Seek(pendingZeros, io.SeekCurrent)
 			pendingZeros = 0
 			return err
@@ -180,7 +196,7 @@ func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int
 		remaining := pendingZeros
 		for remaining > 0 {
 			n := min(int64(len(zeroBuf)), remaining)
-			if _, err := dst.Write(zeroBuf[:n]); err != nil {
+			if _, err := writer.Write(zeroBuf[:n]); err != nil {
 				return err
 			}
 			remaining -= n
@@ -219,7 +235,7 @@ func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int
 					} else {
 						offset = len(chunk)
 					}
-					if _, err := dst.Write(chunk[start:offset]); err != nil {
+					if _, err := writer.Write(chunk[start:offset]); err != nil {
 						return totalBytes, err
 					}
 				}
@@ -234,6 +250,9 @@ func sparseCopy(dst *os.File, hasher hash.Hash, src io.Reader, bufSize int) (int
 		}
 	}
 	if err := flushZeros(); err != nil {
+		return totalBytes, err
+	}
+	if err := writer.Flush(); err != nil {
 		return totalBytes, err
 	}
 	if err := dst.Truncate(totalBytes); err != nil {
