@@ -285,7 +285,7 @@ export CHECK_IMAGE_PULL_POLICY=IfNotPresent
 export PREFLIGHT_SERVICE_ACCOUNT=test-pvm-preflight
 export IMAGE_PULL_SECRET_NAMES=
 export STATE_DIR=/var/lib/cube-node-bootstrap
-export DESIRED_KERNEL_PATTERN=pvm.host
+export DESIRED_KERNEL_PATTERN=cubesandbox
 export KERNEL_BOOT_ARGS="nopti pti=off"
 export CHECK_POD_PHASE=Succeeded
 

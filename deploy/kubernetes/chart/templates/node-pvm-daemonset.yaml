@@ -57,10 +57,22 @@ spec:
               value: {{ .Release.Name | quote }}
             - name: PVM_KERNEL_RPM_PATH
               value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
+            - name: PVM_KERNEL_MODULES_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.modulesRpmPath | quote }}
+            - name: PVM_KERNEL_DEVEL_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.develRpmPath | quote }}
+            - name: PVM_KERNEL_HEADERS_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.headersRpmPath | quote }}
             - name: PVM_KERNEL_DEB_PATH
               value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
             - name: PVM_KERNEL_RPM_URL
               value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
+            - name: PVM_KERNEL_MODULES_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.modulesRpmUrl | quote }}
+            - name: PVM_KERNEL_DEVEL_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.develRpmUrl | quote }}
+            - name: PVM_KERNEL_HEADERS_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.headersRpmUrl | quote }}
             - name: PVM_KERNEL_DEB_URL
               value: {{ .Values.bootstrap.pvmHostKernel.package.debUrl | quote }}
             - name: PVM_KERNEL_PACKAGE_SOURCE

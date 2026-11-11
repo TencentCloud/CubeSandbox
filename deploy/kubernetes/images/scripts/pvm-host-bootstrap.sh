@@ -12,10 +12,19 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
-DESIRED_KERNEL_PATTERN="${DESIRED_KERNEL_PATTERN:-cubesandbox.pvm.host}"
+DESIRED_KERNEL_PATTERN="${DESIRED_KERNEL_PATTERN:-cubesandbox}"
+# RPM_PATH is the kernel-core package. The matching kernel-modules /
+# kernel-devel packages are installed in the same transaction when present;
+# kernel-headers is not installonly, so it is upgraded/replaced separately.
 RPM_PATH="${PVM_KERNEL_RPM_PATH:-/artifacts/kernel-pvm-host.rpm}"
+MODULES_RPM_PATH="${PVM_KERNEL_MODULES_RPM_PATH:-/artifacts/kernel-pvm-host-modules.rpm}"
+DEVEL_RPM_PATH="${PVM_KERNEL_DEVEL_RPM_PATH:-/artifacts/kernel-pvm-host-devel.rpm}"
+HEADERS_RPM_PATH="${PVM_KERNEL_HEADERS_RPM_PATH:-/artifacts/kernel-pvm-host-headers.rpm}"
 DEB_PATH="${PVM_KERNEL_DEB_PATH:-/artifacts/linux-image-pvm-host.deb}"
 RPM_URL="${PVM_KERNEL_RPM_URL:-}"
+MODULES_RPM_URL="${PVM_KERNEL_MODULES_RPM_URL:-}"
+DEVEL_RPM_URL="${PVM_KERNEL_DEVEL_RPM_URL:-}"
+HEADERS_RPM_URL="${PVM_KERNEL_HEADERS_RPM_URL:-}"
 DEB_URL="${PVM_KERNEL_DEB_URL:-}"
 PACKAGE_SOURCE="${PVM_KERNEL_PACKAGE_SOURCE:-image}"
 KERNEL_BOOT_ARGS="${KERNEL_BOOT_ARGS:-${PVM_KERNEL_BOOT_ARGS:-}}"
@@ -129,22 +138,52 @@ EOF
 # Only acquire the cluster reboot lease on paths that may reboot.
 # Do NOT acquire on the fast-success path (already on desired kernel).
 
+download_package() {
+  pkg_url="$1"
+  pkg_path="$2"
+  pkg_label="$3"
+  if [ -n "$pkg_url" ] && [ ! -f "$pkg_path" ]; then
+    log "downloading PVM host ${pkg_label} from ${pkg_url}"
+    curl -fL --retry 3 -o "$pkg_path" "$pkg_url"
+  fi
+}
+
 install_kernel() {
   if [ "$PACKAGE_SOURCE" = "download" ]; then
     mkdir -p /artifacts
-    if [ -n "$RPM_URL" ] && [ ! -f "$RPM_PATH" ]; then
-      log "downloading PVM host kernel rpm from ${RPM_URL}"
-      curl -fL --retry 3 -o "$RPM_PATH" "$RPM_URL"
-    fi
-    if [ -n "$DEB_URL" ] && [ ! -f "$DEB_PATH" ]; then
-      log "downloading PVM host kernel deb from ${DEB_URL}"
-      curl -fL --retry 3 -o "$DEB_PATH" "$DEB_URL"
-    fi
+    download_package "$RPM_URL" "$RPM_PATH" "kernel-core rpm"
+    download_package "$MODULES_RPM_URL" "$MODULES_RPM_PATH" "kernel-modules rpm"
+    download_package "$DEVEL_RPM_URL" "$DEVEL_RPM_PATH" "kernel-devel rpm"
+    download_package "$HEADERS_RPM_URL" "$HEADERS_RPM_PATH" "kernel-headers rpm"
+    download_package "$DEB_URL" "$DEB_PATH" "kernel deb"
   fi
   if [ -f "$RPM_PATH" ] && host_sh 'command -v rpm >/dev/null 2>&1'; then
-    log "installing PVM host kernel rpm from ${RPM_PATH}"
+    rpm_files="/tmp/cube-pvm-host-kernel.rpm"
+    log "installing PVM host kernel-core rpm from ${RPM_PATH}"
     cp "$RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel.rpm)"
-    host_sh "rpm -ivh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel.rpm || rpm -Uvh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel.rpm"
+    if [ -f "$MODULES_RPM_PATH" ]; then
+      log "installing PVM host kernel-modules rpm from ${MODULES_RPM_PATH}"
+      cp "$MODULES_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-modules.rpm)"
+      rpm_files="${rpm_files} /tmp/cube-pvm-host-kernel-modules.rpm"
+    else
+      log "WARNING: ${MODULES_RPM_PATH} not found; installing kernel-core only (drivers shipped in kernel-modules will be unavailable)"
+    fi
+    if [ -f "$DEVEL_RPM_PATH" ]; then
+      log "installing PVM host kernel-devel rpm from ${DEVEL_RPM_PATH}"
+      cp "$DEVEL_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-devel.rpm)"
+      rpm_files="${rpm_files} /tmp/cube-pvm-host-kernel-devel.rpm"
+    else
+      log "WARNING: ${DEVEL_RPM_PATH} not found; skipping kernel-devel"
+    fi
+    host_sh "rpm -ivh --oldpackage --replacepkgs ${rpm_files} || rpm -Uvh --oldpackage --replacepkgs ${rpm_files}"
+    if [ -f "$HEADERS_RPM_PATH" ]; then
+      log "installing PVM host kernel-headers rpm from ${HEADERS_RPM_PATH}"
+      cp "$HEADERS_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-headers.rpm)"
+      host_sh "rpm -Uvh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel-headers.rpm" ||
+        log "WARNING: kernel-headers install failed; the PVM kernel itself is installed and bootable"
+    else
+      log "WARNING: ${HEADERS_RPM_PATH} not found; skipping kernel-headers"
+    fi
   elif [ -f "$DEB_PATH" ]; then
     log "installing PVM host kernel deb from ${DEB_PATH}"
     cp "$DEB_PATH" "$(host_path /tmp/cube-pvm-host-kernel.deb)"

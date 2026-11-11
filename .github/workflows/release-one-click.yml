@@ -121,17 +121,18 @@ jobs:
             gh release view "${KERNEL_PVM_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
               --jq '.assets[].name'
           )"
-          has_rpm=0
+          has_core_rpm=0
+          has_modules_rpm=0
+          has_devel_rpm=0
+          has_headers_rpm=0
           has_deb=0
           while IFS= read -r name; do
             [[ -n "${name}" ]] || continue
             case "${name}" in
-              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
-                case "${name}" in
-                  *headers*) ;;
-                  *) has_rpm=1 ;;
-                esac
-                ;;
+              kernel-core-[0-9]*.x86_64.rpm) has_core_rpm=1 ;;
+              kernel-modules-[0-9]*.x86_64.rpm) has_modules_rpm=1 ;;
+              kernel-devel-[0-9]*.x86_64.rpm) has_devel_rpm=1 ;;
+              kernel-headers-[0-9]*.x86_64.rpm) has_headers_rpm=1 ;;
               linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb)
                 case "${name}" in
                   *-dbg_*) ;;
@@ -140,8 +141,9 @@ jobs:
                 ;;
             esac
           done <<<"${pvm_assets}"
-          if [[ "${has_rpm}" -ne 1 || "${has_deb}" -ne 1 ]]; then
-            echo "missing main PVM host rpm/deb on ${KERNEL_PVM_RELEASE_TAG}" >&2
+          if [[ "${has_core_rpm}" -ne 1 || "${has_modules_rpm}" -ne 1 \
+                || "${has_devel_rpm}" -ne 1 || "${has_headers_rpm}" -ne 1 || "${has_deb}" -ne 1 ]]; then
+            echo "missing PVM host kernel-core/modules/devel/headers rpm or main deb on ${KERNEL_PVM_RELEASE_TAG}" >&2
             printf '%s\n' "${pvm_assets}" >&2
             exit 1
           fi

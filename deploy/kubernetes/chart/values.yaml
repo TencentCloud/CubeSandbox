@@ -1385,7 +1385,9 @@ cubeJuiceFS:
 bootstrap:
   pvmHostKernel:
     enabled: true
-    desiredKernelPattern: pvm.host
+    # Matches both the RPM build (e.g. 6.6.117-45.16.cubesandbox.oc9.x86_64)
+    # and the DEB build (e.g. 6.6.117-opencloudos9.cubesandbox.pvm.host-g<sha>).
+    desiredKernelPattern: cubesandbox
     # KPTI (Kernel Page-Table Isolation) is disabled here because kvm_pvm on the
     # CubeSandbox host kernel does not currently support KPTI and boot fails
     # when it is on. This is a deliberate performance/compatibility choice for
@@ -1401,9 +1403,18 @@ bootstrap:
       # image: rpm/deb is baked into cube-pvm-host-bootstrap image under /artifacts.
       # production delivery should use image and normal registry pulls.
       source: image
+      # rpmPath / rpmUrl point at the kernel-core RPM; the modules / devel /
+      # headers fields point at the matching kernel-modules, kernel-devel and
+      # kernel-headers RPMs, which are installed alongside it.
       rpmPath: /artifacts/kernel-pvm-host.rpm
+      modulesRpmPath: /artifacts/kernel-pvm-host-modules.rpm
+      develRpmPath: /artifacts/kernel-pvm-host-devel.rpm
+      headersRpmPath: /artifacts/kernel-pvm-host-headers.rpm
       debPath: /artifacts/linux-image-pvm-host.deb
       rpmUrl: ""
+      modulesRpmUrl: ""
+      develRpmUrl: ""
+      headersRpmUrl: ""
       debUrl: ""
       sha256: ""
     reboot:
