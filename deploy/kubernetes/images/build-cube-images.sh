@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Build and optionally push CubeSandbox images for the Kubernetes/TKE chart.
 #
-# Component images are built from repository source and/or pre-built Release
-# artifacts (kernel/guest). cube-node intentionally uses
-# deploy/kubernetes/images/cube-node/Dockerfile because it is a Kubernetes delivery image
-# that bundles node-side runtime components.
+# Runtime images are built per component from repository source and/or pre-built
+# Release artifacts (kernel/guest). The legacy monolithic cube-node image is not
+# in the build list; node runtime pieces are built as cubelet/shim/kernel/guest/agent.
 #
 # Development shortcuts:
 #   Pass one or more image names to build only those images.
@@ -15,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 WORKTREE_ROOT="${REPO_ROOT}"
 
-VERSION="${VERSION:-v0.7.3}"
+VERSION="${VERSION:-v0.8.0-rc1}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 REGISTRY="${REGISTRY:-cube-sandbox-int.tencentcloudcr.com/cube-sandbox}"
 # SOURCE_REF pins the CubeMaster / CubeAPI / CubeOps / pkgs/cubedb / CubeProxy /
@@ -95,6 +94,7 @@ ALL_IMAGES=(
   cube-templatecenter
   cube-api
   cube-ops
+  cube-ops-agent
   cubemastercli
   cube-proxy
   cube-lifecycle-manager
@@ -102,6 +102,7 @@ ALL_IMAGES=(
   cube-egress-net
   cube-s3lvol
   cube-webui
+  cube-observability
   cubelet
   cube-shim
   cube-kernel
@@ -125,6 +126,7 @@ SOURCE_IMAGES=(
   cube-shim
   cube-api
   cube-ops
+  cube-ops-agent
   cube-proxy
   cube-lifecycle-manager
   cube-egress
@@ -258,9 +260,9 @@ Examples:
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-shim
   CUBE_KERNEL_VMLINUX=/path/vmlinux CUBE_KERNEL_PVM_VMLINUX=/path/vmlinux-pvm \\
     IMAGE_TAG=dev $0 cube-kernel
-  IMAGE_TAG=v0.7.3 $0 cube-kernel
+  IMAGE_TAG=v0.8.0-rc1 $0 cube-kernel
   CUBE_GUEST_IMAGE_DIR=/path/to/cube-image IMAGE_TAG=dev $0 cube-guest
-  IMAGE_TAG=v0.7.3 $0 cube-guest
+  IMAGE_TAG=v0.8.0-rc1 $0 cube-guest
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-api
   SOURCE_REF="" IMAGE_TAG=dev $0 cube-ops
 
@@ -657,6 +659,15 @@ build_cube_lifecycle_manager_image() {
   record_built cube-lifecycle-manager
 }
 
+build_cube_observability_image() {
+  local src="${WORKTREE_ROOT}/CubeObservability"
+  local dockerfile="${src}/Dockerfile"
+  [[ -f "${dockerfile}" ]] || fail "missing CubeObservability Dockerfile: ${dockerfile}"
+  [[ -d "${src}/grafana/dashboards" ]] || fail "missing CubeObservability dashboards: ${src}/grafana/dashboards"
+  build_image cube-observability "${src}" "${dockerfile}"
+  record_built cube-observability
+}
+
 # Same as .github/workflows/release-docker-images.yml for component "webui":
 # context=., file=deploy/one-click/webui/Dockerfile, OPENRESTY_BASE_IMAGE + CUBE_*.
 build_cube_webui_image() {
@@ -858,6 +869,15 @@ build_cube_ops_image() {
   record_built cube-ops
 }
 
+# Same as cube-ops: context=repo root, file=OpsAgent/Dockerfile (sibling
+# pkgs/CubeLog via the Dockerfile.dockerignore allowlist).
+build_cube_ops_agent_image() {
+  [[ -f "${REPO_ROOT}/OpsAgent/go.mod" ]] || fail "missing OpsAgent go.mod in ${REPO_ROOT}"
+  require_cubelog_module
+  build_image cube-ops-agent "${REPO_ROOT}" "${REPO_ROOT}/OpsAgent/Dockerfile"
+  record_built cube-ops-agent
+}
+
 build_cube_egress_openresty_base_image() {
   local image="cube-egress/openresty:1.29.2.5-tproxy"
   local docker_args=(
@@ -938,13 +958,13 @@ build_cube_s3lvol_image() {
 
 copy_cube_egress_net_context() {
   local ctx="$1"
-  local init_script="${REPO_ROOT}/CubeEgress/scripts/cube-proxy-iptables-init.sh"
+  local init_script="${REPO_ROOT}/CubeEgress/scripts/cube-egress-iptables-init.sh"
 
   [[ -f "${init_script}" ]] || fail "missing CubeEgress network init script: ${init_script}"
-  cp "${init_script}" "${ctx}/scripts/cube-proxy-iptables-init.sh"
+  cp "${init_script}" "${ctx}/scripts/cube-egress-iptables-init.sh"
   cp "${SCRIPT_DIR}/scripts/cube-egress-net-entrypoint.sh" "${ctx}/scripts/cube-egress-net-entrypoint.sh"
   chmod +x \
-    "${ctx}/scripts/cube-proxy-iptables-init.sh" \
+    "${ctx}/scripts/cube-egress-iptables-init.sh" \
     "${ctx}/scripts/cube-egress-net-entrypoint.sh"
 }
 
@@ -1211,6 +1231,11 @@ run_selected_builds() {
     build_cube_ops_image
   fi
 
+  if should_build cube-ops-agent; then
+    ensure_source_tree
+    build_cube_ops_agent_image
+  fi
+
   if should_build cubemastercli; then
     ensure_source_tree
     build_cubemastercli_image
@@ -1250,6 +1275,10 @@ run_selected_builds() {
   if should_build cube-webui; then
     ensure_source_tree
     build_cube_webui_image
+  fi
+
+  if should_build cube-observability; then
+    build_cube_observability_image
   fi
 
   if should_build cubelet; then

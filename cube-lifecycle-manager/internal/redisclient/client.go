@@ -15,6 +15,9 @@ import (
 
 // New builds a go-redis client for standalone or Sentinel mode.
 func New(cfg *config.Config) redis.UniversalClient {
+	if len(cfg.RedisClusterAddrs) > 0 {
+		return redis.NewClusterClient(&redis.ClusterOptions{Addrs: cfg.RedisClusterAddrs, Password: cfg.RedisPassword, MaxRetries: -1})
+	}
 	if cfg.RedisMasterName != "" {
 		// Do not fall back to RedisPassword: many deployments only set
 		// requirepass on the Redis master, while Sentinel has no AUTH.
@@ -35,6 +38,9 @@ func New(cfg *config.Config) redis.UniversalClient {
 
 // DisplayAddr returns a log-friendly Redis endpoint description.
 func DisplayAddr(cfg *config.Config) string {
+	if len(cfg.RedisClusterAddrs) > 0 {
+		return "cluster:" + strings.Join(cfg.RedisClusterAddrs, ",")
+	}
 	if cfg.RedisMasterName != "" {
 		return fmt.Sprintf("sentinel:%s(%s)", cfg.RedisMasterName, strings.Join(cfg.RedisSentinelAddrs, ","))
 	}

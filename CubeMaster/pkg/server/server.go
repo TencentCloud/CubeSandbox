@@ -109,6 +109,7 @@ func (s *internalHttp) registerRoutes() {
 	// gate is the only auth on these routes (same shape as TC's internal API).
 	internal := s.engine.Group("", gin.Recovery())
 	cube.RegisterInternalTemplateRoutes(internal)
+	cube.RegisterInternalSandboxStatusRoutes(internal)
 
 	root := s.engine.Group("")
 	root.Use(middleware.GinRequestMiddleware())

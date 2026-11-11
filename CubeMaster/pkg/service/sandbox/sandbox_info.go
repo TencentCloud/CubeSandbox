@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -227,6 +228,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
+		one.CreateAt = sandbox.GetCreatedAt()
 		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
 		one.VolumeMounts = volumeMountsToContainerInfo(collectVolumeMountsFromContainers(sandbox.GetContainers()))
 		rsp.Data = append(rsp.Data, one)
@@ -238,6 +240,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	if len(rsp.Data) == 0 {
 		return nil
 	}
+	enrichSandboxInfoRestart(ctx, rsp.Data)
 	if req.HostID != "" {
 		for _, item := range rsp.Data {
 			item.HostID = req.HostID
@@ -245,6 +248,9 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	}
 	if req.SandboxID == "" {
 		return nil
+	}
+	if item := findSandboxData(rsp.Data, req.SandboxID); item != nil {
+		decorateSandboxQos(ctx, item, sandboxspec.GetAnnotations)
 	}
 	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
 	if !ok || proxyMap == nil {
@@ -272,8 +278,53 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.RequestedContainerPort = endpoint.ContainerPort
 		item.ExposedPortEndpoint = endpoint.Address
 		item.ExposedPortMode = endpoint.Mode
+		item.ExposedPortHostPort = endpoint.HostPort
 	}
 	return nil
+}
+
+// decorateSandboxQos reports the QoS configuration of one sandbox. The
+// persisted create request is authoritative; when it is missing or carries no
+// QoS annotations, the template configuration is used as a fallback.
+func decorateSandboxQos(ctx context.Context, item *types.SandboxData, getAnnotations func(context.Context, string) (map[string]string, error)) {
+	if item == nil {
+		return
+	}
+	if getAnnotations != nil {
+		annotations, err := getAnnotations(ctx, item.SandboxID)
+		switch {
+		case err == nil:
+			item.ConfiguredQos = parseSandboxQosAnnotations(ctx, item.SandboxID, annotations)
+		case !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound):
+			log.G(ctx).Warnf("failed to load persisted QoS annotations for sandbox %s: %v", item.SandboxID, err)
+		}
+	}
+	if item.ConfiguredQos == nil && item.TemplateID != "" {
+		if configured, err := lookupTemplateQos(ctx, item.TemplateID); err == nil && configured != nil {
+			item.ConfiguredQos = configured
+		}
+	}
+}
+
+// parseSandboxQosAnnotations parses the two template-managed annotations
+// independently so one malformed section does not hide the other.
+func parseSandboxQosAnnotations(ctx context.Context, sandboxID string, annotations map[string]string) *qos.Config {
+	network, networkErr := qos.ParseAnnotation(annotations[constants.CubeAnnotationsNetWork])
+	if networkErr != nil {
+		log.G(ctx).Warnf("failed to parse %s for sandbox %s: %v", constants.CubeAnnotationsNetWork, sandboxID, networkErr)
+	}
+	blockIO, blockIOErr := qos.ParseBlockIOAnnotation(annotations[constants.CubeAnnotationsBlkQos])
+	if blockIOErr != nil {
+		log.G(ctx).Warnf("failed to parse %s for sandbox %s: %v", constants.CubeAnnotationsBlkQos, sandboxID, blockIOErr)
+	}
+	if network == nil && blockIO == nil {
+		return nil
+	}
+	configured := &qos.Config{BlockIO: blockIO}
+	if network != nil {
+		configured.Network = network.Network
+	}
+	return configured
 }
 
 func getContainerName(label map[string]string) string {
@@ -330,6 +381,11 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		}
 		item = sandboxDataFromSpec(req.SandboxID, spec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
+		// The binding only knows when the pause happened; the durable spec
+		// carries when the sandbox was created.
+		if ts, err := sandboxspec.GetCreatedAt(ctx, req.SandboxID); err == nil && !ts.IsZero() {
+			item.CreateAt = ts.UnixNano()
+		}
 	}
 	setSandboxDataStatus(item, view.status)
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)

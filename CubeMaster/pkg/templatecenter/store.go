@@ -26,10 +26,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxstatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
@@ -89,7 +92,15 @@ var (
 	ErrTemplateAttemptInProgress    = errors.New("template attempt is already in progress")
 	ErrAliasNotApplicableToSnapshot = errors.New("alias is not applicable to snapshot")
 	ErrInvalidAlias                 = errors.New("alias is invalid")
+	ErrInvalidSnapshotName          = errors.New("snapshot name is invalid")
 	ErrTemplateNotReady             = errors.New("template is not ready")
+	// ErrFilesystemOnlyRollback rejects a rollback whose target snapshot has no
+	// guest memory. Rollback restores memory, so the artifact cannot satisfy
+	// it; creating a new sandbox from the snapshot is the supported path.
+	ErrFilesystemOnlyRollback = errors.New("snapshot is filesystem-only and cannot be rolled back")
+	// ErrFilesystemOnlySharedVolume rejects an fs-only snapshot of a sandbox
+	// with writable plugin volumes: the snapshot only contains the rootfs.
+	ErrFilesystemOnlySharedVolume = errors.New("filesystem-only snapshots do not support writable plugin volumes")
 )
 
 type localStore struct {
@@ -111,6 +122,7 @@ var (
 type ReplicaStatus struct {
 	NodeID            string `json:"node_id"`
 	NodeIP            string `json:"node_ip"`
+	TemplateVariantID string `json:"template_variant_id,omitempty"`
 	InstanceType      string `json:"instance_type,omitempty"`
 	Spec              string `json:"spec,omitempty"`
 	Status            string `json:"status"`
@@ -147,6 +159,7 @@ type TemplateInfo struct {
 	ImageInfo                 string          `json:"image_info,omitempty"`
 	JobID                     string          `json:"job_id,omitempty"`
 	Replicas                  []ReplicaStatus `json:"replicas,omitempty"`
+	ConfiguredQos             *qos.Config     `json:"configured_qos,omitempty"`
 
 	// CubeEgress CA bake metadata, surfaced for ops triage. Populated
 	// from the RootfsArtifact row pointed to by the first replica.
@@ -159,7 +172,7 @@ type TemplateInfo struct {
 }
 
 func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
-	return TemplateInfo{
+	info := TemplateInfo{
 		TemplateID:                def.TemplateID,
 		InstanceType:              def.InstanceType,
 		Version:                   def.Version,
@@ -174,6 +187,8 @@ func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
 		RootfsSizeBytesAtSnapshot: def.RootfsSizeBytesAtSnapshot,
 		LastError:                 def.LastError,
 	}
+	info.ConfiguredQos = configuredQosFromCreateRequestJSON(def.RequestJSON)
+	return info
 }
 
 type replicaRunOptions struct {
@@ -411,8 +426,12 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 			if initErr = sandboxspec.Init(store.db); initErr != nil {
 				return
 			}
+			if initErr = sandboxstatus.Init(store.db); initErr != nil {
+				return
+			}
 			configureSnapshotRuntimeRefHooks()
 			configureSandboxSpecHooks()
+			sandbox.SetJFSTemplateVariantResolver(resolveReadyJFSTemplateVariant)
 		}
 		if includeSnapshotSide {
 			pausesnap.Init(store.db)
@@ -444,6 +463,22 @@ func initCommon(ctx context.Context, includeSnapshotSide bool) error {
 	return initErr
 }
 
+func resolveReadyJFSTemplateVariant(ctx context.Context, templateID, variantID string) (string, error) {
+	var replica models.TemplateReplica
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Select("template_variant_id").
+		Where("template_id = ? AND template_variant_id = ? AND status = ?",
+			strings.TrimSpace(templateID), strings.TrimSpace(variantID), ReplicaStatusReady).
+		First(&replica).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", ErrTemplateHasNoReadyReplica
+		}
+		return "", err
+	}
+	return strings.TrimSpace(replica.TemplateVariantID), nil
+}
+
 func configureSnapshotRuntimeRefHooks() {
 	releaseBySandboxID := func(ctx context.Context, sandboxID string) error {
 		// Look up the ref before releasing so we can trigger the tombstone
@@ -454,6 +489,10 @@ func configureSnapshotRuntimeRefHooks() {
 		}
 		errReleasingRefs := ReleaseSnapshotRuntimeRefsBySandbox(ctx, sandboxID, snapshotRuntimeRefReleasedByDestroy)
 		errDeletingSpec := sandboxspec.Delete(ctx, sandboxID)
+		// Status is best-effort. A missing row must not fail destroy.
+		if errDeletingStatus := sandboxstatus.SoftDelete(ctx, sandboxID); errDeletingStatus != nil {
+			log.G(ctx).Warnf("sandbox status soft delete %s: %v", sandboxID, errDeletingStatus)
+		}
 		if ref != nil && strings.TrimSpace(ref.SnapshotID) != "" {
 			maybeFinalizeTombstone(ctx, ref.SnapshotID)
 		}
@@ -486,6 +525,16 @@ func configureSandboxSpecHooks() {
 			HostID: hostID,
 			HostIP: hostIP,
 		})
+	})
+	sandbox.SetTemplateQosLookupHook(func(ctx context.Context, templateID string) (*qos.Config, error) {
+		req, err := GetTemplateRequest(ctx, templateID)
+		if err != nil {
+			return nil, err
+		}
+		return qos.ParseAnnotations(
+			req.Annotations[constants.CubeAnnotationsNetWork],
+			req.Annotations[constants.CubeAnnotationsBlkQos],
+		)
 	})
 }
 
@@ -569,12 +618,14 @@ func GenerateTemplateID() string {
 	return generateTemplateID()
 }
 
-func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
+func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq, enableJFSVariants bool) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	cloned, templateID, err := NormalizeRequest(req)
 	if err != nil {
 		return nil, err
 	}
+	jfsVariantTemplate := enableJFSVariants && constants.IsJFSBackend(storageBackendFromCreate(cloned))
 	delete(cloned.Annotations, constants.CubeAnnotationsAppSnapshotCreate)
+	delete(cloned.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
 	// Runtime plugin metadata may contain opaque provider state. Persist only
 	// the stable volume IDs/mount declarations and resolve current metadata
 	// from t_cube_volume for every restore.
@@ -593,6 +644,11 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sa
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
+	if jfsVariantTemplate {
+		cloned.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = hostcompat.VariantPolicyV1
+	} else {
+		delete(cloned.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+	}
 	return cloned, nil
 }
 
@@ -604,7 +660,7 @@ func CreateTemplate(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq)
 	if err != nil {
 		return nil, err
 	}
-	storedReq, err := normalizeStoredTemplateRequest(req)
+	storedReq, err := normalizeStoredTemplateRequest(req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -662,6 +718,10 @@ func healthyTemplateNodes(instanceType string) []*node.Node {
 }
 
 func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *sandboxtypes.CreateCubeSandboxReq, targets []*node.Node, opts replicaRunOptions) ([]ReplicaStatus, error) {
+	variantBuild := strings.EqualFold(
+		strings.TrimSpace(req.Annotations[constants.CubeAnnotationsAppSnapshotCreate]), "true",
+	)
+	targets = templateBuildTargets(storageBackendFromCreate(req), variantBuild, targets)
 	replicas := make([]ReplicaStatus, 0, len(targets))
 	envdVersions := make([]nodeEnvdVersion, 0, len(targets))
 	var lock sync.Mutex
@@ -690,6 +750,24 @@ func createTemplateReplicasOnNodes(ctx context.Context, templateID string, req *
 			lock.Unlock()
 
 			if upsertErr := UpsertReplica(ctx, templateID, req.InstanceType, replica); upsertErr != nil {
+				if replica.TemplateVariantID != "" {
+					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					cleanupErr := cleanupTemplateReplicasWithLocators(
+						cleanupCtx,
+						templateID,
+						[]templateCleanupLocator{{
+							NodeID:            target.ID(),
+							NodeIP:            target.HostIP(),
+							TemplateVariantID: replica.TemplateVariantID,
+						}},
+						storageBackendFromCreate(req),
+					)
+					cancel()
+					if cleanupErr != nil {
+						upsertErr = errors.Join(upsertErr,
+							fmt.Errorf("cleanup untracked template variant %s: %w", replica.TemplateVariantID, cleanupErr))
+					}
+				}
 				lock.Lock()
 				persistErr = errors.Join(persistErr, fmt.Errorf("upsert template replica fail, template=%s node=%s: %w", templateID, target.ID(), upsertErr))
 				lock.Unlock()
@@ -817,6 +895,26 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 		replica.Phase = ReplicaPhaseFailed
 		replica.ErrorMessage = err.Error()
 		return replica, ""
+	}
+	if constants.IsJFSBackend(storageBackendFromCreate(nodeReq)) &&
+		strings.EqualFold(strings.TrimSpace(nodeReq.Annotations[constants.CubeAnnotationsAppSnapshotCreate]), "true") {
+		logicalID := strings.TrimSpace(nodeReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+		if target.HostFacts == nil {
+			replica.Phase = ReplicaPhaseFailed
+			replica.ErrorMessage = "jfs template variant requires node host facts"
+			return replica, ""
+		}
+		variantID, _, ok := hostcompat.TemplateVariantID(
+			logicalID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
+		)
+		if !ok {
+			replica.Phase = ReplicaPhaseFailed
+			replica.ErrorMessage = "jfs template variant requires cpuid_hash and host_kernel_release"
+			return replica, ""
+		}
+		nodeReq.Annotations[constants.CubeAnnotationJFSTemplateVariantID] = variantID
+		nodeReq.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = hostcompat.VariantPolicyV1
+		replica.TemplateVariantID = variantID
 	}
 	ensureRuntimeTemplateRequest(nodeReq)
 	cubeletReq, err := sandbox.ConstructCubeletReq(ctx, nodeReq)
@@ -1101,7 +1199,7 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 	if status == "" {
 		status = JobStatusPending
 	}
-	return TemplateInfo{
+	info := TemplateInfo{
 		TemplateID:   job.TemplateID,
 		InstanceType: job.InstanceType,
 		Version:      DefaultTemplateVersion,
@@ -1111,6 +1209,41 @@ func templateInfoFromJob(job *models.TemplateImageJob) TemplateInfo {
 		ImageInfo:    composeImageInfo(job.SourceImageRef, job.SourceImageDigest),
 		JobID:        latestJobIDFromJob(job),
 	}
+	if job.RequestJSON != "" {
+		if job.Operation == JobOperationCommit {
+			// COMMIT jobs persist the sandbox create request, where template
+			// QoS is carried by the internal annotations rather than the public
+			// template-create qos field.
+			info.ConfiguredQos = configuredQosFromCreateRequestJSON(job.RequestJSON)
+		} else {
+			// CREATE and REDO jobs persist the public template-create request.
+			// LEGACY jobs decode through the same path; they predate the public
+			// qos field, so request.Qos is nil and ConfiguredQos stays unset.
+			request := &sandboxtypes.CreateTemplateFromImageReq{}
+			if err := json.Unmarshal([]byte(job.RequestJSON), request); err == nil {
+				info.ConfiguredQos = qos.Clone(request.Qos)
+			}
+		}
+	}
+	return info
+}
+
+func configuredQosFromCreateRequestJSON(raw string) *qos.Config {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	request := &sandboxtypes.CreateCubeSandboxReq{}
+	if err := json.Unmarshal([]byte(raw), request); err != nil || request.Annotations == nil {
+		return nil
+	}
+	configured, err := qos.ParseAnnotations(
+		request.Annotations[constants.CubeAnnotationsNetWork],
+		request.Annotations[constants.CubeAnnotationsBlkQos],
+	)
+	if err != nil {
+		return nil
+	}
+	return configured
 }
 
 func formatUTCRFC3339(ts time.Time) string {
@@ -1801,6 +1934,14 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 					return err
 				}
 				req = parsed
+				// Stamp the snapshot's display_name as the alias, replacing the
+				// source template's inherited one.
+				delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				if name := strings.TrimSpace(rec.DisplayName); name != "" {
+					req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = name
+				} else {
+					delete(req.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				}
 				if err = applyStoredCreateBackend(req, rec.Backend); err != nil {
 					return err
 				}
@@ -1822,6 +1963,13 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 			}
 			if req.Annotations == nil {
 				req.Annotations = make(map[string]string)
+			}
+			// Carry the alias on the cached request so later hits need no extra lookup.
+			if alias := strings.TrimSpace(def.DisplayName); alias != "" {
+				req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = alias
+			} else {
+				delete(req.Annotations, constants.CubeAnnotationAppSnapshotTemplateAlias)
+				delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
 			}
 			constants.NormalizeAppSnapshotAnnotations(req.Annotations)
 			if err = applyStoredCreateBackend(req, def.StorageBackend); err != nil {
@@ -2000,6 +2148,7 @@ func replicaModelToStatus(replica models.TemplateReplica) ReplicaStatus {
 	return ReplicaStatus{
 		NodeID:            replica.NodeID,
 		NodeIP:            replica.NodeIP,
+		TemplateVariantID: replica.TemplateVariantID,
 		InstanceType:      replica.InstanceType,
 		Spec:              replica.Spec,
 		Status:            replica.Status,
@@ -2024,6 +2173,7 @@ func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus
 		TemplateID:        templateID,
 		NodeID:            replica.NodeID,
 		NodeIP:            replica.NodeIP,
+		TemplateVariantID: replica.TemplateVariantID,
 		InstanceType:      instanceType,
 		Spec:              replica.Spec,
 		Status:            replica.Status,
@@ -2045,17 +2195,18 @@ func replicaStatusToModel(templateID, instanceType string, replica ReplicaStatus
 
 func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[string]any {
 	fields := map[string]any{
-		"node_ip":          replica.NodeIP,
-		"instance_type":    instanceType,
-		"spec":             replica.Spec,
-		"status":           replica.Status,
-		"phase":            replica.Phase,
-		"artifact_id":      replica.ArtifactID,
-		"last_job_id":      replica.LastJobID,
-		"last_error_phase": replica.LastErrorPhase,
-		"cleanup_required": replica.CleanupRequired,
-		"error_message":    replica.ErrorMessage,
-		"updated_at":       time.Now(),
+		"node_ip":             replica.NodeIP,
+		"template_variant_id": replica.TemplateVariantID,
+		"instance_type":       instanceType,
+		"spec":                replica.Spec,
+		"status":              replica.Status,
+		"phase":               replica.Phase,
+		"artifact_id":         replica.ArtifactID,
+		"last_job_id":         replica.LastJobID,
+		"last_error_phase":    replica.LastErrorPhase,
+		"cleanup_required":    replica.CleanupRequired,
+		"error_message":       replica.ErrorMessage,
+		"updated_at":          time.Now(),
 	}
 	if normalizeCompatStatus(replica.CompatStatus) != CompatStatusUnknown ||
 		normalizeComponentVersion(replica.GuestImageVersion) != "" ||
@@ -2324,13 +2475,27 @@ func applyTemplateRequest(templateReq, reqInOut *sandboxtypes.CreateCubeSandboxR
 	}
 	reqInOut.Volumes = append(reqInOut.Volumes, templateReq.Volumes...)
 	for i, templateCtr := range templateReq.Containers {
+		if templateCtr == nil {
+			continue
+		}
 		if len(reqInOut.Containers) <= i {
 			reqInOut.Containers = append(reqInOut.Containers, templateCtr)
 			continue
 		}
 		if reqInOut.Containers[i] == nil {
 			reqInOut.Containers[i] = templateCtr
+			continue
 		}
+		ctr := reqInOut.Containers[i]
+		if ctr.LivenessProbe == nil {
+			ctr.LivenessProbe = templateCtr.LivenessProbe
+		}
+	}
+	if reqInOut.RestartPolicy == "" {
+		reqInOut.RestartPolicy = templateReq.RestartPolicy
+	}
+	if reqInOut.RestartBackoff == nil {
+		reqInOut.RestartBackoff = templateReq.RestartBackoff
 	}
 	if reqInOut.NetworkType == "" {
 		reqInOut.NetworkType = templateReq.NetworkType

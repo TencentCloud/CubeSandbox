@@ -21,7 +21,9 @@ type cgPoolV1 struct {
 }
 
 func (cgp1 *cgPoolV1) initialAssign(inuseCgIdInt uint32) error {
-	if inuseCgIdInt > math.MaxInt16 {
+	// v1 ids span the full uint16 range; in-use ids must not be treated as
+	// free after a restart.
+	if inuseCgIdInt > math.MaxUint16 {
 		return nil
 	}
 

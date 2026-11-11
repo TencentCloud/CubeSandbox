@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -201,11 +202,13 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("not a workflow engine")
 			}
+			restarts := newRestartMgr(cb.cubeboxManger)
 			s := &service{
 				engine:                e,
 				cubeboxMgr:            cb,
 				cleaner:               newDeadContainerCleaner(config.deadContainerTTL),
-				eventMonitor:          newEventMonitor(cb),
+				eventMonitor:          newEventMonitor(cb, restarts),
+				restarts:              restarts,
 				config:                config,
 				events:                ep.(*exchange.Exchange),
 				numaNodeIndex:         0,
@@ -219,6 +222,9 @@ func init() {
 			// allocated-resource metrics so the cubelet heartbeat loop can
 			// pick it up without taking a hard dependency on this package.
 			resourcesource.Set(cb)
+			restarts.bind(s)
+			restarts.Recover()
+			restarts.startStatusReporter()
 
 			go func() {
 				CubeLog.Info("Start subscribing containerd event")
@@ -252,6 +258,7 @@ type service struct {
 	cubebox.UnimplementedCubeboxMgrServer
 	numaNodeIndex         uint32
 	sandboxLifecycleLocks *utils.ResourceLocks
+	restarts              *restartMgr
 
 	otherRuntime *ociRuntime
 }
@@ -296,15 +303,9 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // the host can match a still-running shim back to the sandbox, and the new
 // attempt is handed a tap/IP that is still in use.
 //
-// The check runs here, at the entry point, rather than in the create flow's
-// cubebox step where it used to live. By that step the flow has already
-// allocated network and volume for the new attempt, so the only way to fail
-// without stranding those allocations was an error code the workflow engine
-// answers with a failover — and failover destroys the sandbox with this same
-// ID, which on this path is the PAUSED sandbox the user asked to resume. A
-// transient gate failure therefore destroyed the very state it existed to
-// protect. Running before any allocation removes the trade-off: the caller
-// gets a retryable PreConditionFailed, and nothing is allocated or destroyed.
+// The check runs here, before the create flow allocates network and volume:
+// failing later would strand those allocations and, via failover, destroy the
+// paused sandbox the user asked to resume.
 func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
 	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
 	if desired == "" {
@@ -343,11 +344,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	// Cross-node restore: the disk describing what to run is not on this
 	// node yet, and the reads below expect it.
-	if err := prepareCrossNodeRestore(ctx, req); err != nil {
-		rsp.Ret.RetMsg = err.Error()
+	preparedCtx, prepareErr := prepareCrossNodeRestore(ctx, req)
+	if prepareErr != nil {
+		rsp.Ret.RetMsg = prepareErr.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
 		return rsp, nil
 	}
+	ctx = preparedCtx
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
 	if err := expandPauseSnapshotPackage(req); err != nil {
@@ -372,11 +375,25 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	SetRunCubeSandboxRequestDefaultValue(req)
+	if err := restartpolicy.Apply(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+
+	// Unknown mode values must fail rather than silently default to full.
+	mode, modeErr := parseCommitSnapshotMode(req.GetSnapshotMode())
+	if modeErr != nil {
+		rsp.Ret.RetMsg = modeErr.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
 
 	start := time.Now()
 	createInfo := &workflow.CreateContext{
-		ReqInfo:  req,
-		Failover: true,
+		ReqInfo:      req,
+		Failover:     true,
+		SnapshotMode: mode,
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 
@@ -457,12 +474,32 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
+	armedID := ""
+	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
+		id := ""
+		if req.GetAnnotations() != nil {
+			id = strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+		}
+		if id == "" && constants.IsCubeRuntime(ctx) {
+			id = utils.GenerateID()
+			if req.Annotations == nil {
+				req.Annotations = map[string]string{}
+			}
+			req.Annotations[constants.MasterAnnotationDesiredSandboxID] = id
+		}
+		if id != "" {
+			createInfo.SandboxID = id
+			s.restarts.armCreate(id, req)
+			armedID = id
+		}
+	}
 	var createErr error
 	if constants.IsCubeRuntime(ctx) {
 		createErr = s.engine.Create(ctx, createInfo)
 	} else {
-
-		createInfo.SandboxID = utils.GenerateID()
+		if createInfo.SandboxID == "" {
+			createInfo.SandboxID = utils.GenerateID()
+		}
 		createErr = s.otherRuntime.Create(ctx, createInfo)
 	}
 
@@ -476,6 +513,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	if s.restarts != nil {
+		if armedID != "" {
+			s.restarts.finishCreate(armedID, ret.IsSuccessCode(rsp.Ret.RetCode))
+		} else if ret.IsSuccessCode(rsp.Ret.RetCode) {
+			s.restarts.Start(createInfo.SandboxID, req)
+		}
 	}
 	return rsp, nil
 }
@@ -647,6 +691,9 @@ func getAllocatedPort(createInfo *workflow.CreateContext) []*cubebox.PortMapping
 }
 
 func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+	if s.restarts != nil {
+		s.restarts.Stop(req.GetSandboxID())
+	}
 	rsp := &cubebox.DestroyCubeSandboxResponse{
 		RequestID: req.RequestID,
 		SandboxID: req.SandboxID,
@@ -1109,11 +1156,26 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 			for key, v := range cb.Labels {
 				cc.Labels[key] = v
 			}
+			if box.RestartState != "" || box.RestartCount > 0 || box.LastExitReason != "" {
+				cc.RestartStats = &cubebox.RestartStats{
+					RestartCount:            box.RestartCount,
+					LastSuccessfulRestartAt: box.LastSuccessfulRestartAt,
+					LastFailedRestartAt:     box.LastFailedRestartAt,
+					LastRestartAt:           box.LastRestartAt,
+					RestartState:            box.RestartState,
+					LastExitCode:            box.LastExitCode,
+					LastExitReason:          box.LastExitReason,
+					NextRestartAt:           box.NextRestartAt,
+				}
+			}
 		}
 		cb.Containers = append(cb.Containers, cc)
 	}
 	if opt != nil && opt.GetPrivateWithCubeboxStore() {
-		v, err := jsoniter.MarshalIndent(box, "", "    ")
+		// Serialize a deep copy: MemoryLineage is mutated concurrently by
+		// Commit/Pause under its own lock, and marshaling the live object
+		// would race with those writers and could emit a half-updated tree.
+		v, err := jsoniter.MarshalIndent(box.DeepCopy(), "", "    ")
 		if err != nil {
 			log.L.Errorf("marshal cubebox to json failed: %v", err)
 		}

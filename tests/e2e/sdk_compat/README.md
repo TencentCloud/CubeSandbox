@@ -90,6 +90,40 @@ form:
 pytest --run-e2e --sdk-e2e-backends=cubesandbox
 ```
 
+## Template QoS E2E
+
+The QoS cases provision and clean up their own template and sandbox, so selecting this file alone does not require `CUBE_TEMPLATE_ID`. Set `CUBE_TEMPLATE_E2E_IMAGE` to an image that exposes envd on `49983` and responds to `/health` on `49999`.
+
+Run the control/runtime case:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+pytest --run-e2e cases/qos/test_template_qos.py::test_template_qos_control_and_runtime_state
+```
+
+Bandwidth tests require an iperf3 server reachable from the sandbox, and block I/O tests require a writable virtio-blk-backed filesystem. Start `iperf3 -s -p 5201`, set the server IP, and enable the dataplane opt-in:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_QOS_IPERF_SERVER=10.0.0.10 \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_E2E_INSTALL_TOOLS=1 \
+pytest --run-e2e -m "qos and not qos_node" cases/qos/test_template_qos.py
+```
+
+The pytest runner does not need `iperf3` or `fio`, but the sandbox does. Missing tools cause the affected case to skip unless `CUBE_QOS_E2E_INSTALL_TOOLS=1` is set; use `CUBE_QOS_E2E_INSTALL_COMMAND` to override installation. An IP-literal iperf server is automatically added to `allow_out` for a temporary template. Set `CUBE_QOS_CONTROL_TEMPLATE_ID` to reuse a template for the control/runtime case, `CUBE_QOS_E2E_TEMPLATE_ID` for the bandwidth and block I/O cases, or `CUBE_QOS_PPS_TEMPLATE_ID` for the PPS case. A reused template must already allow the required test endpoint and match the QoS values expected by that case.
+
+The PPS case must run on the sandbox compute node because it reads the TAP counter. It also requires the dataplane opt-in, so set both `CUBE_QOS_DATAPLANE_E2E=1` and `CUBE_QOS_NODE_PPS_E2E=1`, point `CUBE_QOS_IPERF_SERVER` at the node IP reachable from the sandbox, and run:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_TEMPLATE_E2E_NODE=<node-id> \
+CUBE_QOS_IPERF_SERVER=<node-ip> \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_NODE_PPS_E2E=1 \
+pytest --run-e2e -m qos_node cases/qos/test_template_qos.py
+```
+
 ## Execution Scope
 
 Recommended scopes:
@@ -390,6 +424,8 @@ Optional:
 - `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `s3`.
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`: seconds to wait for delete-while-bound `409`
   and post-unbind `204`. Defaults to `60`.
+- `SDK_E2E_RESTART_POLICY_WAIT`: seconds to wait for one restart-status
+  transition. Defaults to `300`.
 
 For self-hosted HTTPS sandbox endpoints, trust the local CA:
 
@@ -479,7 +515,9 @@ tests/e2e/sdk_compat/
 Current capability domains:
 
 - `cases/lifecycle/`: create/info smoke, connect, create options, pause/resume,
-  kill, and platform-managed auto-pause/auto-resume/auto-kill coverage.
+  kill, platform-managed auto-pause/auto-resume/auto-kill, node-local
+  restart policy (`test_restart_policy.py`), and filesystem-only snapshots plus
+  cold boot (`test_filesystem_only_snapshot.py`; both CubeSandbox only).
 - `cases/commands/`: stdout, stderr, exit code, env, special characters, multiline output, missing command.
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
@@ -517,18 +555,23 @@ Capability markers:
 - `@pytest.mark.sandbox_create_options(...)`: pass SDK create-time options such as `network`, `env_vars`, or `lifecycle`.
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
 - `@pytest.mark.volume`: Volume Plugin cases. Run with `--run-e2e`; skipped when `SDK_E2E_VOLUME_PLUGIN=false`.
+- `@pytest.mark.restart_policy`: node-local restart policy cases. Run with `--run-e2e`; e2b skips via the `restart_policy` capability.
 - `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
 - Common capabilities include `lifecycle`, `commands`, `filesystem`,
   `filesystem_extended`, and `run_code`.
 - Optional capabilities include `code_interpreter`, `pause_resume`, `set_timeout`,
   `rollback_clone`, `network_allow_deny`, `network_public_access`,
   `network_mask_request_host`, `platform_lifecycle`, `host_mount`,
-  `volume_plugin`, and `auth_simple_key`.
+  `volume_plugin`, `auth_simple_key`, `restart_policy`, and
+  `filesystem_only_snapshot`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 - `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that
   do not support host-directory mounts.
 - `volume_plugin` is available only to CubeSandbox Volume Plugin cases.
+- `restart_policy` is available only to CubeSandbox. The cluster needs a
+  template that exposes envd on port 49983 and root sysrq in the guest.
+  Run with `pytest --run-e2e -m restart_policy`.
 
 ## Cleanup
 

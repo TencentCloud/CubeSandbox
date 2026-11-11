@@ -90,8 +90,27 @@ export class Filesystem {
     return JSON.parse(text);
   }
 
-  /** Read a file's contents through envd's HTTP file API. */
-  async read(path: string, options: { user?: string } = {}): Promise<string> {
+  /**
+   * Read a file through envd's HTTP file API.
+   *
+   * Matches the e2b Node SDK surface: pass `text` (default), `bytes`, `blob`,
+   * or `stream` as `options.format` (an options object — the same shape as
+   * e2b's `files.read(path, { format })`, not a positional string). Without
+   * this, a binary file is always UTF-8-decoded — a PNG's `0x89` magic becomes
+   * the three-byte replacement character before the caller sees it.
+   */
+  async read(path: string, options?: { user?: string; format?: "text" }): Promise<string>;
+  async read(path: string, options: { user?: string; format: "bytes" }): Promise<Uint8Array>;
+  async read(path: string, options: { user?: string; format: "blob" }): Promise<Blob>;
+  async read(
+    path: string,
+    options: { user?: string; format: "stream" },
+  ): Promise<ReadableStream<Uint8Array>>;
+  async read(
+    path: string,
+    options: { user?: string; format?: "text" | "bytes" | "blob" | "stream" } = {},
+  ): Promise<string | Uint8Array | Blob | ReadableStream<Uint8Array>> {
+    const format = options.format ?? "text";
     const user = options.user || DEFAULT_ENVD_USER;
     const params = new URLSearchParams({ path, username: user });
     const resp = await fetch(this.sandbox.dataUrl(ENVD_PORT, `/files?${params.toString()}`), {
@@ -99,8 +118,8 @@ export class Filesystem {
       headers: this.baseHeaders(),
       dispatcher: this.sandbox.dataDispatcher,
     });
-    const text = await resp.text();
     if (resp.status !== 200) {
+      const text = await resp.text();
       let message = text || `HTTP ${resp.status}`;
       try {
         const body = JSON.parse(text);
@@ -110,7 +129,31 @@ export class Filesystem {
       }
       throw new Error(`Failed to read ${path}: ${message}`);
     }
-    return text;
+
+    // Mirror e2b: an explicit zero-length response short-circuits before the
+    // body parsers, so each format gets the empty value callers expect.
+    if (resp.headers.get("content-length") === "0") {
+      if (format === "bytes") return new Uint8Array(0);
+      if (format === "blob") return new Blob([]);
+      if (format === "stream") {
+        return new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+      }
+      return "";
+    }
+
+    if (format === "stream") {
+      if (!resp.body) {
+        return new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+      }
+      return resp.body as ReadableStream<Uint8Array>;
+    }
+    if (format === "bytes") {
+      return new Uint8Array(await resp.arrayBuffer());
+    }
+    if (format === "blob") {
+      return await resp.blob();
+    }
+    return await resp.text();
   }
 
   /** Write a file through envd's HTTP file API (octet-stream, multipart fallback). */

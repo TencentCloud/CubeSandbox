@@ -54,6 +54,10 @@ MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert-v1.4.4
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 
+# Validate the host WebUI toolchain before guest-image generation or packaging.
+# A caller supplying a prebuilt dist does not need npm.
+require_web_build_prerequisites "${WEB_DIST_OVERRIDE}"
+
 CUBE_VERSION_FROM_ENV="${CUBE_VERSION:-}"
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 : "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
@@ -85,6 +89,7 @@ CUBECLI_BIN_OVERRIDE="${ONE_CLICK_CUBECLI_BIN:-}"
 API_BIN_OVERRIDE="${ONE_CLICK_CUBE_API_BIN:-}"
 CUBE_OPS_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_BIN:-}"
 CUBE_OPS_CLI_BIN_OVERRIDE="${ONE_CLICK_CUBE_OPS_CLI_BIN:-}"
+OPS_AGENT_BIN_OVERRIDE="${ONE_CLICK_OPS_AGENT_BIN:-}"
 CUBEVSMAPDUMP_BIN_OVERRIDE="${ONE_CLICK_CUBEVSMAPDUMP_BIN:-}"
 VOLUME_S3_BIN_OVERRIDE="${ONE_CLICK_VOLUME_S3_BIN:-}"
 S3LVOL_DIR="${ONE_CLICK_S3LVOL_DIR:-}"
@@ -380,6 +385,14 @@ components["cubeopscli"] = {
     "commit": cube_commit,
     "build_time": cube_build_time,
     "digest_sha256": required_sha256(os.path.join(core_bin_dir, "cubeopscli")),
+}
+
+# ── ops-agent from CORE_BIN_DIR ──
+components["ops-agent"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(os.path.join(core_bin_dir, "ops-agent")),
 }
 
 # ── Rust binaries from build-vm-assets.sh ──
@@ -741,6 +754,11 @@ build_or_copy_go_binary \
   "cubeopscli" "${CUBE_OPS_CLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeOps" "${CUBE_OPS_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubeopscli" ./cmd/cubeopscli "${CUBEOPS_VERSION_PKG}"
+OPSAgent_VERSION_PKG="github.com/tencentcloud/CubeSandbox/OpsAgent/internal/version"
+build_or_copy_go_binary \
+  "ops-agent" "${OPS_AGENT_BIN_OVERRIDE}" \
+  "${ROOT_DIR}/OpsAgent" "${OPS_AGENT_BUILD_MODE:-local}" \
+  "${CORE_BIN_DIR}/ops-agent" ./cmd/ops-agent "${OPSAgent_VERSION_PKG}" static_linux
 build_or_copy_go_binary \
   "cubevsmapdump" "${CUBEVSMAPDUMP_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeNet/cubevs" "${CUBEVSMAPDUMP_BUILD_MODE}" \
@@ -756,6 +774,8 @@ mkdir -p \
   "${PACKAGE_ROOT}/Cubelet/plugin" \
   "${PACKAGE_ROOT}/Cubelet/config" \
   "${PACKAGE_ROOT}/Cubelet/dynamicconf" \
+  "${PACKAGE_ROOT}/ops-agent/bin" \
+  "${PACKAGE_ROOT}/ops-agent/conf" \
   "${PACKAGE_ROOT}/cubeproxy" \
   "${PACKAGE_ROOT}/cube-lifecycle-manager" \
   "${PACKAGE_ROOT}/coredns" \
@@ -769,6 +789,8 @@ mkdir -p \
   "${PACKAGE_ROOT}/CubeS3lvol" \
   "${PACKAGE_ROOT}/scripts/one-click" \
   "${PACKAGE_ROOT}/scripts/systemd" \
+  "${PACKAGE_ROOT}/scripts/cube-jfs" \
+  "${PACKAGE_ROOT}/scripts/logrotate" \
   "${PACKAGE_ROOT}/scripts/cube-egress" \
   "${PACKAGE_ROOT}/cube-egress" \
   "${PACKAGE_ROOT}/terraform/tencentcloud"
@@ -787,6 +809,11 @@ copy_file "${CORE_BIN_DIR}/cube-api" "${PACKAGE_ROOT}/CubeAPI/bin/cube-api"
 copy_dir_contents "${SCRIPT_DIR}/CubeOps" "${PACKAGE_ROOT}/CubeOps"
 copy_file "${CORE_BIN_DIR}/cubeops" "${PACKAGE_ROOT}/CubeOps/bin/cubeops"
 copy_file "${CORE_BIN_DIR}/cubeopscli" "${PACKAGE_ROOT}/CubeOps/bin/cubeopscli"
+
+# ops-agent: node-local agent binary plus the config template. The runtime
+# config is generated per node by prepare-compute-role.sh.
+copy_file "${CORE_BIN_DIR}/ops-agent" "${PACKAGE_ROOT}/ops-agent/bin/ops-agent"
+copy_file "${ROOT_DIR}/OpsAgent/config/config.example.yaml" "${PACKAGE_ROOT}/ops-agent/conf/config.example.yaml"
 
 # Same ordering for CubeMaster so cubemaster/cubemastercli binaries survive the
 # copy_dir_contents wipe and coexist with the one-click CubeMaster assets.
@@ -909,6 +936,8 @@ fi
 # siblings), so the runtime needs every script in this directory.
 copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
+copy_dir_contents "${SCRIPT_DIR}/scripts/cube-jfs" "${PACKAGE_ROOT}/scripts/cube-jfs"
+copy_dir_contents "${SCRIPT_DIR}/scripts/logrotate" "${PACKAGE_ROOT}/scripts/logrotate"
 # scripts/{one-click,systemd}/common.sh both `source ../common/validation.sh`,
 # so the shared scripts/common helpers must ship alongside them in the package.
 copy_dir_contents "${SCRIPT_DIR}/scripts/common" "${PACKAGE_ROOT}/scripts/common"
@@ -921,8 +950,8 @@ copy_dir_contents "${SCRIPT_DIR}/scripts/cube-diag" "${PACKAGE_ROOT}/scripts/cub
 # rather than the whole dir so we don't pull in the legacy
 # cube-proxy-net.service unit that conflicts with our deploy/one-click
 # integration.
-copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-proxy-iptables-init.sh" \
-          "${PACKAGE_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh"
+copy_file "${CUBE_EGRESS_SOURCE_DIR}/scripts/cube-egress-iptables-init.sh" \
+          "${PACKAGE_ROOT}/scripts/cube-egress/cube-egress-iptables-init.sh"
 
 # Host-side version marker for cube-egress: cubelet's versioninfo.Collector
 # detects the component by the presence of cube-egress/version and reports
@@ -980,13 +1009,39 @@ for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh 
   ensure_file "${PACKAGE_ROOT}/terraform/tencentcloud/${_tf}"
 done
 
+# Ship the one-click/systemd deployment scripts and the separately owned
+# CubeObservability dashboard assets inside sandbox-package.
+copy_dir_contents "${SCRIPT_DIR}/observability" "${PACKAGE_ROOT}/observability"
+copy_dir_contents "${ROOT_DIR}/CubeObservability" "${PACKAGE_ROOT}/CubeObservability"
+for _mf in \
+  install.sh \
+  otelcol/install.sh \
+  prometheus/install.sh \
+  loki/install.sh \
+  elasticsearch/install.sh \
+  grafana/install.sh; do
+  ensure_file "${PACKAGE_ROOT}/observability/${_mf}"
+done
+for _asset in \
+  Dockerfile \
+  grafana/dashboards/cubesandbox-cluster.json \
+  grafana/dashboards/cubesandbox-node.json \
+  grafana/dashboards/cubesandbox-sandbox.json \
+  grafana/dashboards/cubesandbox-logs.json \
+  grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
+  ensure_file "${PACKAGE_ROOT}/CubeObservability/${_asset}"
+done
+
 find "${PACKAGE_ROOT}" -type f -path "*/bin/*" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/one-click" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/systemd" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/cube-jfs" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/scripts/logrotate" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/common" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-diag" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/scripts/cube-egress" -type f -name "*.sh" -exec chmod +x {} \;
 find "${PACKAGE_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
+find "${PACKAGE_ROOT}/observability" -type f -name "*.sh" -exec chmod +x {} \;
 
 mkdir -p "$(dirname "${PACKAGE_TAR}")"
 tar_czf "${PACKAGE_TAR}" "${WORK_ROOT}" "sandbox-package"
@@ -1044,6 +1099,30 @@ for _tf in create.sh destroy.sh build_images.sh lib-state-sync.sh lib-phases.sh 
   ensure_file "${DIST_ROOT}/terraform/tencentcloud/${_tf}"
 done
 find "${DIST_ROOT}/terraform" -type f -name "*.sh" -exec chmod +x {} \;
+
+# Surface the deployment scripts and CubeObservability assets at the bundle
+# top level beside ./install.sh and ./terraform/tencentcloud/create.sh.
+copy_dir_contents "${SCRIPT_DIR}/observability" "${DIST_ROOT}/observability"
+copy_dir_contents "${ROOT_DIR}/CubeObservability" "${DIST_ROOT}/CubeObservability"
+for _mf in \
+  install.sh \
+  otelcol/install.sh \
+  prometheus/install.sh \
+  loki/install.sh \
+  elasticsearch/install.sh \
+  grafana/install.sh; do
+  ensure_file "${DIST_ROOT}/observability/${_mf}"
+done
+for _asset in \
+  Dockerfile \
+  grafana/dashboards/cubesandbox-cluster.json \
+  grafana/dashboards/cubesandbox-node.json \
+  grafana/dashboards/cubesandbox-sandbox.json \
+  grafana/dashboards/cubesandbox-logs.json \
+  grafana/dashboards/cubesandbox-logs-elasticsearch.json; do
+  ensure_file "${DIST_ROOT}/CubeObservability/${_asset}"
+done
+find "${DIST_ROOT}/observability" -type f -name "*.sh" -exec chmod +x {} \;
 
 chmod +x \
   "${DIST_ROOT}/install.sh" \

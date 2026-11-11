@@ -20,6 +20,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
+// loopAsyncScore periodically computes the multi-factor weighted average score
+// for every node in the local cache and writes it back to the node's Score
+// field (async scoring, read directly by the multi_factor plugin). The
+// interval is controlled by MultiFactorWeightedAverage.ScoreInterval.
 func loopAsyncScore(ctx context.Context) {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if cfg == nil {
@@ -83,6 +87,8 @@ func loopAsyncScore(ctx context.Context) {
 	}
 }
 
+// printAsyncScores is a debug helper: writes the healthy nodes' multi-factor
+// scores into tabwriter output (MockDebug mode).
 func printAsyncScores(w *tabwriter.Writer) {
 	if w == nil {
 		return
@@ -104,6 +110,8 @@ func printAsyncScores(w *tabwriter.Writer) {
 	w.Flush()
 }
 
+// getAsyncMultiFactorTotalWeight sums the weights of the enabled multi-factor
+// async scoring factors.
 func getAsyncMultiFactorTotalWeight() (float64, error) {
 	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if sconf == nil {
@@ -116,6 +124,8 @@ func getAsyncMultiFactorTotalWeight() (float64, error) {
 	return w, nil
 }
 
+// getMultiFactorWeightedAverageScore computes a node's multi-factor weighted
+// average score (unnormalized).
 func getMultiFactorWeightedAverageScore(n *node.Node) float64 {
 	sconf := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if sconf == nil {

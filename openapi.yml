@@ -30,10 +30,15 @@ paths:
     get:
       tags:
       - handlers::sandboxes
+      summary: List sandboxes in every state, `pausing` and `unknown` included; GET /v2/sandboxes is the E2B view.
       operationId: list_sandboxes
       parameters:
       - name: metadata
         in: query
+        description: |-
+          `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+          A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+          An empty value is the same as omitting `metadata`: no filter.
         required: false
         schema:
           type: string
@@ -46,6 +51,12 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/ListedSandbox'
+        '400':
+          description: Invalid metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
           content:
@@ -209,7 +220,58 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '409':
-          description: Sandbox cannot be connected during a conflicting lifecycle transition
+          description: Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/fork:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: fork_sandbox
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Source sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForkRequest'
+        required: true
+      responses:
+        '201':
+          description: Fork results (array length == count; per-fork failures are error entries, still 201)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ForkResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Sandbox state does not allow fork
           content:
             application/json:
               schema:
@@ -491,8 +553,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SnapshotInfo'
+        '400':
+          description: Snapshot name starts with a reserved tpl-/snap- prefix
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: The control plane refused the capture or recorded a different mode than the one requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Filesystem-only support could not be verified; retry
           content:
             application/json:
               schema:
@@ -564,6 +644,18 @@ paths:
       - name: nextToken
         in: query
         description: Pagination cursor from previous response header x-next-token.
+        required: false
+        schema:
+          type: string
+      - name: name
+        in: query
+        description: Filter by snapshot name or ID.
+        required: false
+        schema:
+          type: string
+      - name: backend
+        in: query
+        description: Filter by CoW backend (xfs | s3).
         required: false
         schema:
           type: string
@@ -806,7 +898,7 @@ paths:
       parameters:
       - name: templateID
         in: path
-        description: Template identifier or alias
+        description: Template or snapshot identifier, alias, or snapshot name
         required: true
         schema:
           type: string
@@ -822,11 +914,23 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: snapshot_only
+        in: query
+        description: Only match snapshots by id or name; a miss is 404 and never deletes a template
+        required: false
+        schema:
+          type: boolean
       responses:
         '204':
-          description: Template deleted
+          description: Template or snapshot deleted
         '404':
-          description: Template not found
+          description: Template or snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Name matches both a template alias and a snapshot, or several snapshots
           content:
             application/json:
               schema:
@@ -1019,16 +1123,25 @@ paths:
       parameters:
       - name: metadata
         in: query
+        description: |-
+          `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+          A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+          An empty value is the same as omitting `metadata`: no filter.
         required: false
         schema:
           type: string
       - name: state
         in: query
+        description: |-
+          Comma-separated states: `running`, `paused` (includes pausing), `pausing`, `unknown` (aliases `stopped`, `error`).
+          `pausing` is a Cube-native state: asking for it returns `pausing`; otherwise a pausing sandbox reads `paused`.
+          Defaults to running and paused sandboxes; any unrecognised or empty value is a 400.
         required: false
         schema:
           type: string
       - name: nextToken
         in: query
+        description: Continuation cursor from the previous response's `x-next-token` header.
         required: false
         schema:
           type: string
@@ -1041,12 +1154,101 @@ paths:
       responses:
         '200':
           description: Sandbox list
+          headers:
+            x-next-token:
+              schema:
+                type: string
+              description: Continuation cursor for the next page. Omitted on the last page.
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: '#/components/schemas/ListedSandbox'
+        '400':
+          description: Malformed nextToken, invalid state or invalid metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: create_sandbox_v2
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewSandboxV2'
+        required: true
+      responses:
+        '201':
+          description: Sandbox created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /v2/sandboxes/{sandboxID}/connect:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: connect_sandbox_v2
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectSandboxV2'
+        required: true
+      responses:
+        '200':
+          description: Sandbox connection info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox'
+        '400':
+          description: Invalid timeout value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Paused sandbox cannot be resumed during a conflicting lifecycle transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
           content:
@@ -1101,6 +1303,47 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /v2/volumes:
+    post:
+      tags:
+      - handlers::volumes
+      summary: |-
+        Create a volume with opaque plugin input. Query, delete and mount it through
+        the existing volume APIs using the returned volumeID.
+      operationId: create_volume_v2
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewVolumeV2'
+        required: true
+      responses:
+        '201':
+          description: Successfully created a new volume
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeAndToken'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Authentication error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+      security:
+      - apiKeyAuth: []
   /volumes:
     get:
       tags:
@@ -1270,10 +1513,48 @@ components:
           - 'null'
           format: int32
           description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry, and a positive value ensures at least that much remaining lifetime. For an already-running sandbox, a shorter positive window is ignored; use POST /sandboxes/{id}/timeout to shorten it. Zero and values below -1 are invalid.
+    ConnectSandboxV2:
+      allOf:
+      - $ref: '#/components/schemas/ConnectSandbox'
+      - type: object
+        properties:
+          memory:
+            type:
+            - boolean
+            - 'null'
+            description: |-
+              Resume from the memory snapshot. Defaults to true. `false` (cold-boot
+              from disk) is not supported and is rejected by the handler.
+      description: |-
+        Request body for POST /v2/sandboxes/{id}/connect (E2B SDK >= 2.51.0).
+
+        Reuses the v1 [`ConnectSandbox`] shape and adds the v2-only `memory` flag.
+        CubeSandbox always resumes from the memory snapshot, so `memory=false`
+        (cold-boot from disk) is rejected by the handler.
     CreateSnapshotRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend (xfs | s3). Empty means xfs.
+        keepMemory:
+          type:
+          - boolean
+          - 'null'
+          description: 'Deprecated E2B compatibility alias: false means fs-only.'
+        memory:
+          type:
+          - boolean
+          - 'null'
+          description: 'E2B compatibility alias: false means fs-only.'
+        mode:
+          type:
+          - string
+          - 'null'
+          description: 'Snapshot artifact mode: full | fs-only | filesystem (E2B alias).'
         name:
           type:
           - string
@@ -1308,6 +1589,11 @@ components:
           items:
             type: string
           description: Override container CMD args.
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend for this template and its sandboxes/snapshots (xfs | s3). Omitted keeps the historical xfs path.
         command:
           type:
           - array
@@ -1417,6 +1703,14 @@ components:
           description: |-
             Deprecated and ignored. Template IDs are always generated server-side
             with the `tpl-` prefix; clients must use the returned `templateID`.
+        user:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Container user for the template build and later sandboxes.
+            `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+            Omitted keeps the default root user.
         with_cube_ca:
           type:
           - boolean
@@ -1442,6 +1736,34 @@ components:
       properties:
         headers:
           type: object
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+      additionalProperties: false
+    E2bNetworkRule:
+      type: object
+      description: One entry of E2B's per-host `rules` mapping.
+      properties:
+        transform:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/E2bNetworkTransform'
+      additionalProperties: false
+    E2bNetworkTransform:
+      type: object
+      description: |-
+        Header rewrite in E2B's per-host `rules` shape.
+
+        Unknown keys are rejected rather than ignored: `headers` is the only
+        transform CubeEgress can express, and silently dropping another kind would
+        leave the caller believing a rewrite is in place that never runs.
+      properties:
+        headers:
+          type:
+          - object
+          - 'null'
+          description: Headers to inject or override on matching requests.
           additionalProperties:
             type: string
           propertyNames:
@@ -1544,6 +1866,80 @@ components:
           type:
           - string
           - 'null'
+    EgressRulesInput:
+      oneOf:
+      - type: array
+        items:
+          $ref: '#/components/schemas/EgressRule'
+      - type: object
+        additionalProperties:
+          type: array
+          items:
+            $ref: '#/components/schemas/E2bNetworkRule'
+        propertyNames:
+          type: string
+      description: |-
+        The two accepted shapes of `rules`.
+
+        CubeSandbox rules are a list carrying the full L7 semantics: a match on
+        sni/host/method/path/scheme/port, an allow-or-deny verdict, an audit level
+        and credential injection. E2B's are a map from host to header rewrites, with
+        no verdict, no audit and no match beyond the host -- a strict subset, and one
+        that its own docs note "does not allow egress on its own".
+
+        Both are accepted so an E2B client works unchanged, but the list stays the
+        canonical form: converting our rules into E2B's map would silently drop
+        `allow: false`, `audit`, and every match field except the host.
+
+        A JSON array and a JSON object cannot be confused, so the shape alone
+        discriminates.
+    ForkError:
+      type: object
+      description: |-
+        Per-fork error entry inside a fork response element. CubeMaster's business
+        ret_code is carried in `code`.
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+    ForkRequest:
+      type: object
+      description: Request body for POST /sandboxes/{sandboxID}/fork.
+      properties:
+        count:
+          type: integer
+          format: int32
+          description: Number of fork sandboxes to derive (1..=100). Defaults to 1 when absent.
+        mode:
+          type:
+          - string
+          - 'null'
+          description: Snapshot artifact mode for the one shared fork snapshot.
+        timeout:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Optional idle TTL (seconds) applied to each forked sandbox.
+    ForkResult:
+      type: object
+      description: |-
+        One element of a fork response: exactly one of `sandbox` or `error` is
+        present, encoding that fork's independent success/failure.
+      properties:
+        error:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ForkError'
+        sandbox:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/Sandbox'
     HashMap:
       type: object
       additionalProperties:
@@ -1554,11 +1950,7 @@ components:
       type: object
       required:
       - status
-      - sandboxes
       properties:
-        sandboxes:
-          type: integer
-          minimum: 0
         status:
           type: string
     ListedSandbox:
@@ -1583,11 +1975,12 @@ components:
         cpuCount:
           type: integer
           format: int32
-          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
         cpuMilli:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int32
-          description: Exact CPU allocation in millicores, e.g. 100 or 500.
+          description: Exact CPU allocation in millicores. Optional for compatibility with older responses.
         diskSizeMB:
           type:
           - integer
@@ -1606,11 +1999,15 @@ components:
         memoryMB:
           type: integer
           format: int32
-          description: Memory in MiB. The MB suffix is retained for API compatibility.
+          description: Historical field name; the value is memory in MiB.
         metadata:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        restartStatus:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RestartStatus'
         sandboxID:
           type: string
         startedAt:
@@ -1626,6 +2023,58 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+    LivenessHTTPGet:
+      type: object
+      required:
+      - port
+      properties:
+        path:
+          type:
+          - string
+          - 'null'
+        port:
+          type: integer
+          format: int32
+    LivenessProbe:
+      type: object
+      description: One health check. Exactly one of tcp or http.
+      properties:
+        failureThreshold:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        httpGet:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessHTTPGet'
+        initialDelaySecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        periodSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        probeTimeoutSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        tcpSocket:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessTCP'
+    LivenessTCP:
+      type: object
+      required:
+      - port
+      properties:
+        port:
+          type: integer
+          format: int32
     LogLevel:
       type: string
       enum:
@@ -1665,6 +2114,11 @@ components:
           - type: 'null'
           - $ref: '#/components/schemas/SandboxAutoResume'
             description: See `auto_pause`. Only meaningful alongside `autoPause = true`.
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend (xfs | s3). Omitted = inherit from the template, else xfs.
         distributionScope:
           type:
           - array
@@ -1675,6 +2129,11 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        livenessProbe:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessProbe'
+            description: Runtime health check applied to the sandbox. Times are seconds.
         lifecycle:
           oneOf:
           - type: 'null'
@@ -1705,6 +2164,16 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/SandboxNetworkConfig'
+        restartBackoff:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RestartBackoff'
+            description: Optional override of the node restart backoff.
+        restartPolicy:
+          type:
+          - string
+          - 'null'
+          description: Never, OnFailure or Always. Omitted means Never.
         secure:
           type:
           - boolean
@@ -1723,6 +2192,43 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+    NewSandboxV2:
+      allOf:
+      - $ref: '#/components/schemas/NewSandbox'
+      - type: object
+        properties:
+          autoPauseMemory:
+            type:
+            - boolean
+            - 'null'
+            description: |-
+              Keep the full memory snapshot when auto-pausing. Defaults to true.
+              `false` (filesystem-only, cold-boot on resume) is not supported and is
+              rejected by the handler.
+      description: |-
+        Request body for POST /v2/sandboxes (E2B SDK >= 2.51.0).
+
+        Reuses the v1 [`NewSandbox`] shape and adds the v2-only
+        `autoPauseMemory` flag. CubeSandbox always keeps the full memory snapshot
+        on pause, so `autoPauseMemory=false` (filesystem-only snapshot) is rejected
+        by the handler rather than silently ignored.
+    NewVolumeV2:
+      allOf:
+      - $ref: '#/components/schemas/NewVolume'
+      - type: object
+        properties:
+          private_data:
+            type:
+            - string
+            - 'null'
+            description: |-
+              Opaque input forwarded unchanged to the volume plugin's Create hook.
+              Valid UTF-8, at most 1024 bytes, with no NUL or characters outside
+              the Basic Multilingual Plane. Use credential references, never
+              plaintext credentials. This field is not included in volume responses.
+      description: |-
+        Request body for POST /v2/volumes, extending the legacy creation request
+        with opaque plugin input. Existing /volumes callers keep using NewVolume.
     NewVolume:
       type: object
       description: |-
@@ -1758,6 +2264,85 @@ components:
           - integer
           - 'null'
           format: int32
+    RestartBackoff:
+      type: object
+      description: Backoff between sandbox restarts. Zero fields use the node default.
+      properties:
+        initialIntervalSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        jitter:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: 0 or omitted uses the node default (0.1). It does not turn jitter off.
+        maxIntervalSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        maxRestarts:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: 0 means unlimited.
+        multiplier:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: 0 or omitted uses the node default (2). It does not select a constant interval.
+        stableDurationSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+    RestartStatus:
+      type: object
+      description: |-
+        Node-local restart bookkeeping. Separate from `state`, which stays the
+        lifecycle value (`running`, `paused`, …).
+      properties:
+        lastExitCode:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        lastExitReason:
+          type:
+          - string
+          - 'null'
+        lastFailedRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        lastRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        lastSuccessfulRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        nextRestartAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        restartCount:
+          type: integer
+          format: int32
+        restartPolicy:
+          type: string
+        restartState:
+          type: string
     ResumedSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/resume (deprecated).
@@ -1776,6 +2361,11 @@ components:
       required:
       - snapshotID
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend (xfs | s3). Empty means Cubelet uses the snapshot catalog.
         snapshotID:
           type: string
     RollbackResponse:
@@ -1866,11 +2456,12 @@ components:
         cpuCount:
           type: integer
           format: int32
-          description: Legacy whole-vCPU count. Use cpuMilli for fractional CPU values.
         cpuMilli:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int32
-          description: Exact CPU allocation in millicores, e.g. 100 or 500.
+          description: Exact CPU allocation in millicores. Optional for compatibility with older responses.
         diskSizeMB:
           type:
           - integer
@@ -1897,11 +2488,15 @@ components:
         memoryMB:
           type: integer
           format: int32
-          description: Memory in MiB. The MB suffix is retained for API compatibility.
+          description: Historical field name; the value is memory in MiB.
         metadata:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        restartStatus:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RestartStatus'
         sandboxID:
           type: string
         startedAt:
@@ -2106,11 +2701,25 @@ components:
       required:
       - snapshotID
       - names
+      - mode
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend that produced this snapshot (xfs | s3).
+        mode:
+          $ref: '#/components/schemas/SnapshotMode'
+          description: Snapshot artifact mode. Always one of full | fs-only.
         names:
           type: array
           items:
             type: string
+        remoteStatus:
+          type:
+          - string
+          - 'null'
+          description: S3 sync status (pending|running|ready|failed). Empty for xfs.
         snapshotID:
           type: string
     SnapshotListItem:
@@ -2120,7 +2729,13 @@ components:
       - snapshotID
       - names
       - status
+      - mode
       properties:
+        backend:
+          type:
+          - string
+          - 'null'
+          description: CoW backend that produced this snapshot (xfs | s3).
         createdAt:
           type:
           - string
@@ -2134,15 +2749,29 @@ components:
           type:
           - string
           - 'null'
+        remoteStatus:
+          type:
+          - string
+          - 'null'
+          description: S3 sync status (pending|running|ready|failed). Empty for xfs.
         snapshotID:
           type: string
         status:
           type: string
+        mode:
+          $ref: '#/components/schemas/SnapshotMode'
+          description: Snapshot artifact mode. Always one of full | fs-only.
         updatedAt:
           type:
           - string
           - 'null'
           format: date-time
+    SnapshotMode:
+      type: string
+      description: Canonical snapshot artifact mode.
+      enum:
+      - full
+      - fs-only
     TemplateAliasLookupResponse:
       type: object
       required:
@@ -2409,9 +3038,25 @@ components:
         Request body for PUT /sandboxes/{id}/network.
 
         The body is the complete desired egress policy, not a patch: any field left
-        out clears what the sandbox currently has. Fields sit at the top level
-        (E2B's update shape), not nested under `network`. Unknown fields are
-        rejected so a typo cannot silently clear a policy dimension.
+        out clears what the sandbox currently has.
+
+        The policy fields sit at the top level rather than under `network`, matching
+        E2B's update endpoint so a client written against either SDK reaches the same
+        wire format. Note this is deliberately *not* the shape of our own create body
+        (which nests them, as E2B's create also does) -- the inconsistency is
+        upstream's, and following it costs less than making E2B clients silently
+        apply an empty policy.
+
+        `allowPublicTraffic` and `maskRequestHost` are CubeSandbox extensions; E2B's
+        update schema carries neither.
+
+        Unknown fields are rejected. Under full-replacement semantics a key that fails
+        to match is indistinguishable from one deliberately left out, so a typo like
+        `allowOu` would clear that policy dimension and answer 204 -- and combined with
+        an omitted `allowInternetAccess` it reopens egress the caller was restricting.
+        Failing the request is the only outcome that cannot be mistaken for success.
+        E2B's own update body carries only `allowOut`, `denyOut`, `rules` and
+        `allowInternetAccess`, all accepted here, so strictness costs no compatibility.
       properties:
         allowInternetAccess:
           type:
@@ -2440,7 +3085,7 @@ components:
         rules:
           oneOf:
           - type: 'null'
-          - $ref: '#/components/schemas/SandboxNetworkRulesInput'
+          - $ref: '#/components/schemas/EgressRulesInput'
       additionalProperties: false
     Volume:
       type: object

@@ -154,6 +154,19 @@ impl ProcessOperations for Process {
     }
 }
 
+fn pty_winsize(ocip: &OCIProcess) -> Option<pty::Winsize> {
+    let size = ocip.console_size.as_ref()?;
+    if size.height == 0 || size.width == 0 {
+        return None;
+    }
+    Some(pty::Winsize {
+        ws_row: size.height as u16,
+        ws_col: size.width as u16,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    })
+}
+
 fn send_fd(socket_path: &str, fd: RawFd) -> result::Result<(), String> {
     // Connect to the Unix socket
     let stream = UnixStream::connect(socket_path)
@@ -223,7 +236,9 @@ impl Process {
     ) -> result::Result<(), String> {
         if self.tty {
             debug!(logger, "tty is true");
-            let pseudo = pty::openpty(None, None).map_err(|e| format!("openpty failed:{:?}", e))?;
+            let winsize = pty_winsize(&self.oci);
+            let pseudo = pty::openpty(winsize.as_ref(), None)
+                .map_err(|e| format!("openpty failed:{:?}", e))?;
             let _ = fcntl::fcntl(pseudo.master, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
                 .map_err(|e| format!("fnctl pseudo.master {:?}", e));
             let _ = fcntl::fcntl(pseudo.slave, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
@@ -650,6 +665,13 @@ impl Process {
 
     fn get_stream_and_store(&mut self, stream_type: StreamType) -> Option<(Reader, Writer)> {
         let fd = self.get_fd(&stream_type)?;
+        // The cached PipeStream owns its own dup of the fd. The raw fd stays
+        // owned by Process and is closed by close_process_stream!(). Without the
+        // dup, a reader still pending in read_stream() keeps the PipeStream
+        // alive after cleanup closes the raw fd, and its later drop closes the
+        // same fd number again, killing whatever reused it (e.g. a vsock conn).
+        let fd = unistd::dup(fd).ok()?;
+        let _ = fcntl::fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
         let stream = PipeStream::from_fd(fd);
 
         let (reader, writer) = split(stream);
@@ -672,18 +694,14 @@ impl Process {
     }
 
     /// After snapshot restore, cached Tokio `PipeStream` wrappers still point
-    /// at the pre-snapshot reactor. Dup the log-pipe read ends and drop the
-    /// cache so the next `read_stdout` / `read_stderr` attaches cleanly.
-    /// The write ends inherited by the init process are unchanged.
+    /// at the pre-snapshot reactor. Drop the cache so the next `read_stdout` /
+    /// `read_stderr` attaches cleanly. Each cached stream owns a private dup,
+    /// so clearing the cache leaves the raw `parent_*` fds untouched; the
+    /// next get_reader() simply makes a fresh dup. The write ends inherited
+    /// by the init process are unchanged.
     pub fn reset_log_stream_readers(&mut self) -> result::Result<(), String> {
-        if let Some(fd) = self.parent_stdout {
-            let dup = unistd::dup(fd).map_err(|e| format!("dup parent_stdout: {:?}", e))?;
-            self.parent_stdout = Some(dup);
-        }
-        if let Some(fd) = self.parent_stderr {
-            let dup = unistd::dup(fd).map_err(|e| format!("dup parent_stderr: {:?}", e))?;
-            self.parent_stderr = Some(dup);
-        }
+        // Cached streams own private dups, so dropping them leaves the raw
+        // parent_* fds intact; the next get_reader() makes a fresh dup.
         self.readers.clear();
         self.writers.clear();
         Ok(())
@@ -783,6 +801,27 @@ mod tests {
     }
 
     #[test]
+    fn test_pty_winsize_from_console_size() {
+        let mut ocip = OCIProcess::default();
+        ocip.console_size = Some(oci::Box {
+            height: 40,
+            width: 160,
+        });
+        let ws = pty_winsize(&ocip).expect("winsize");
+        assert_eq!(ws.ws_row, 40);
+        assert_eq!(ws.ws_col, 160);
+
+        ocip.console_size = None;
+        assert!(pty_winsize(&ocip).is_none());
+
+        ocip.console_size = Some(oci::Box {
+            height: 0,
+            width: 0,
+        });
+        assert!(pty_winsize(&ocip).is_none());
+    }
+
+    #[test]
     fn test_passfd_open_io_without_streams_does_not_create_stdio_pipes() {
         let id = "passfd-no-streams";
         let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
@@ -801,23 +840,88 @@ mod tests {
         assert!(process.parent_stderr.is_none());
     }
 
-    #[test]
-    fn test_reset_log_stream_readers_keeps_pipe_readable() {
+    // Cached PipeStreams own private dups: filling the cache, resetting it,
+    // and dropping the cached handle afterwards must all leave the raw
+    // parent_stdout fd open, and a fresh reader obtained after the reset
+    // must still read from the pipe.
+    #[tokio::test]
+    async fn test_reset_log_stream_readers_keeps_pipe_readable() {
         let (r, w) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
         let mut process =
             Process::new(&logger, &OCIProcess::default(), "reset-io", true, 32).unwrap();
         process.parent_stdout = Some(r);
+
+        // Fill the cache, then drop it via the reset path.
+        let cached = process.get_reader(StreamType::ParentStdout).unwrap();
+        assert!(process.readers.contains_key(&StreamType::ParentStdout));
         process.reset_log_stream_readers().unwrap();
+        drop(cached);
         assert!(process.readers.is_empty());
         assert!(process.writers.is_empty());
-        let new_fd = process.parent_stdout.expect("duped stdout");
-        assert_ne!(new_fd, r);
+
+        // The raw fd survived both the cache drop and the cached handle's drop.
+        let new_fd = process.parent_stdout.expect("stdout kept");
+        assert_eq!(new_fd, r);
+
+        // A fresh reader obtained after the reset still reads the pipe.
         unistd::write(w, b"x").unwrap();
+        let reader = process.get_reader(StreamType::ParentStdout).unwrap();
         let mut buf = [0u8; 1];
-        assert_eq!(unistd::read(new_fd, &mut buf).unwrap(), 1);
+        {
+            use tokio::io::AsyncReadExt;
+            let mut g = reader.lock().await;
+            assert_eq!(g.read(&mut buf).await.unwrap(), 1);
+        }
         assert_eq!(&buf, b"x");
         let _ = unistd::close(w);
         let _ = unistd::close(new_fd);
+    }
+
+    // A reader still pending in read_stream() keeps the cached PipeStream
+    // alive after cleanup_process_stream() closes the raw fd. Dropping it
+    // later must not close the fd number that has since been reused.
+    #[tokio::test]
+    async fn test_cleanup_with_pending_reader_keeps_reused_fd() {
+        let (r, w) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "pending-reader", false, 32).unwrap();
+        process.parent_stdout = Some(r);
+
+        let reader = process.get_reader(StreamType::ParentStdout).unwrap();
+        let task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 16];
+            let mut g = reader.lock().await;
+            let _ = g.read(&mut buf).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "reader must be pending");
+
+        process.cleanup_process_stream();
+        assert!(process.readers.is_empty());
+
+        // Put a new socket at the freed fd number, standing in for a vsock
+        // connection accepted after cleanup.
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        if a.as_raw_fd() == r {
+            std::mem::forget(a);
+        } else {
+            unistd::dup2(a.as_raw_fd(), r).unwrap();
+            drop(a);
+        }
+
+        // Drop the last reference to the cached stream.
+        task.abort();
+        let _ = task.await;
+
+        assert!(
+            fcntl::fcntl(r, FcntlArg::F_GETFD).is_ok(),
+            "fd reused after cleanup must survive the pending reader's drop"
+        );
+        let _ = unistd::close(r);
+        drop(b);
+        let _ = unistd::close(w);
     }
 }

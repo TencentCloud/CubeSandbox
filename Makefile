@@ -161,6 +161,8 @@ help:
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  cubeops       Build CubeOps in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
+	@printf "  ops-agent     Build ops-agent in Docker\n"
+	@printf "  ops-agent-test Run ops-agent unit tests in Docker\n"
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
@@ -173,6 +175,7 @@ help:
 	@printf "  cubelog-test  Run cubelog unit tests on the host\n"
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
 	@printf "  blobstore-test Run pkgs/blobstore unit tests on the host\n"
+	@printf "  sandboxrestart-test Run pkgs/sandboxrestart unit tests on the host\n"
 	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -326,6 +329,9 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	cd "$(CUBES3LVOL_DIR)" && make -j"$$(nproc)"
 	cd "$(CUBES3LVOL_DIR)" && mkdir -p /tmp/s3lvol-dpdk && \
 		RTE_RUNTIME_DIR=/tmp/s3lvol-dpdk make check-offline
+	cd "$(CUBES3LVOL_DIR)" && rm -f test/integration/s3_dynamic_json_test && \
+		$(MAKE) -C test/integration S3LVOL_ASAN=1 s3_dynamic_json_test && \
+		ASAN_OPTIONS=detect_leaks=1 ./test/integration/s3_dynamic_json_test
 else
 	$(MAKE) builder-image
 	$(MAKE) builder-run \
@@ -466,6 +472,16 @@ cubeops: builder-image
 cubeops-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeOps && go mod download && go test ./...'
 
+# ops-agent: standalone Go module (own go.mod, replace => ../pkgs/CubeLog).
+.PHONY: ops-agent
+ops-agent: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/OpsAgent && go mod download && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/ops-agent ./cmd/ops-agent"
+
+.PHONY: ops-agent-test
+ops-agent-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/OpsAgent && go mod download && go test ./...'
+
 # The plugin's tests need no cloud access; the s3fs helpers skip themselves when
 # mountpoint(1) is unavailable.
 .PHONY: cube-volume-s3-test
@@ -488,7 +504,7 @@ cubemaster-test: builder-image
 # through the builder like every other Go component.
 .PHONY: cubetemplatecenter-test
 cubetemplatecenter-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && go test ./... -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 go test ./... -count=1'
 
 # cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
 # for several Cubelet packages.
@@ -505,7 +521,7 @@ cubelet-test: builder-image
 # cleanup or a later unprivileged builder may require ownership repair.
 .PHONY: cubelet-mount-test
 cubelet-mount-test: builder-image
-	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox'
+	$(MAKE) builder-run BUILDER_USER=0:0 BUILDER_RUN_EXTRA_MOUNTS='--privileged' BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/Cubelet && go mod download && CI=true go test -count=1 ./plugins/snapshots/overlay/patchoverlay -run TestRemoveDirectory && CI=true go test -count=1 ./storage -run TestNewExt4\|TestParam\|TestCreateDestroy\|TestCleanupTemplateLocalData\|TestCreateWithTimeoutCtx\|TestCreateWithInvalidParam\|TestCreateCubeboxBySnap\|TestInit\|TestSnapCreateCubebox && CUBELET_REQUIRE_MOUNT_TESTS=1 CI=true go test -count=1 cmd/cubelet/state_tmpfs.go cmd/cubelet/root_shared_mount.go cmd/cubelet/state_tmpfs_test.go cmd/cubelet/root_shared_mount_test.go'
 
 .PHONY: cube-proxy-test
 cube-proxy-test:
@@ -535,6 +551,14 @@ cubedb-test:
 .PHONY: blobstore-test
 blobstore-test:
 	cd pkgs/blobstore && go mod download && go test ./...
+
+# pkgs/sandboxrestart is stdlib-only, so no module download is needed.
+.PHONY: sandboxrestart-test
+sandboxrestart-test:
+	cd pkgs/sandboxrestart && go test ./...
+.PHONY: redisx-test
+redisx-test:
+	cd pkgs/redisx && go test ./...
 
 # pkgs/proto runs on the host: pure Go (generated .pb.go + grpc/protobuf
 # deps, no CGO/builder-only deps), like cubelog/cubedb. Consumers only
@@ -668,6 +692,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C pkgs/proto fmt
 	@printf '  %-8s %s\n' "FMT" "blobstore"
 	@$(MAKE) -C pkgs/blobstore fmt
+	@printf '  %-8s %s\n' "FMT" "sandboxrestart"
+	@$(MAKE) -C pkgs/sandboxrestart fmt
 	@printf '  %-8s %s\n' "FMT" "CubeMaster"
 	@$(MAKE) -C CubeMaster fmt
 	@printf '  %-8s %s\n' "FMT" "CubeTemplateCenter"
@@ -676,6 +702,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C CubeNet fmt
 	@printf '  %-8s %s\n' "FMT" "CubeOps"
 	@$(MAKE) -C CubeOps fmt
+	@printf '  %-8s %s\n' "FMT" "OpsAgent"
+	@$(MAKE) -C OpsAgent fmt
 	@printf '  %-8s %s\n' "FMT" "CubeShim"
 	@$(MAKE) -C CubeShim fmt
 	@printf '  %-8s %s\n' "FMT" "cube-lifecycle-manager"
@@ -698,3 +726,28 @@ else
 		printf '  %-8s %s\n' "SKIP" "web (npm not available on host)"; \
 	fi
 endif
+
+# Live snapshot E2E (filesystem-only + regression). Requires a running cluster
+# that supports fs-only snapshots:
+#   make e2e-fs-only CUBE_API_URL=http://HOST:3000 CUBE_TEMPLATE_ID=tpl-...
+# This target always passes --run-e2e so the suite never silently skips, and
+# fails loudly when the cluster is unreachable or does not advertise fs-only.
+.PHONY: e2e-fs-only
+e2e-fs-only:
+	@test -n "$(CUBE_API_URL)" || (echo "CUBE_API_URL is required" >&2; exit 1)
+	@test -n "$(CUBE_TEMPLATE_ID)" || (echo "CUBE_TEMPLATE_ID is required" >&2; exit 1)
+	cd tests/e2e/sdk_compat && \
+		CUBE_API_URL="$(CUBE_API_URL)" \
+		CUBE_TEMPLATE_ID="$(CUBE_TEMPLATE_ID)" \
+		CUBE_PROXY_NODE_IP="$(CUBE_PROXY_NODE_IP)" \
+		PYTHONPATH="$(ROOT_DIR)/sdk/python" \
+		SDK_E2E_BACKENDS="$${SDK_E2E_BACKENDS:-cubesandbox}" \
+		python3 -m pytest \
+			cases/lifecycle/test_cold_start_mounts.py \
+			cases/lifecycle/test_filesystem_only_snapshot.py \
+			cases/lifecycle/test_rollback_clone.py \
+			cases/lifecycle/test_fork.py \
+			cases/lifecycle/test_pause_resume.py \
+			cases/volume/test_snapshot_reference.py \
+			cases/volume/test_snapshot_volume_mounts.py \
+			--run-e2e -q

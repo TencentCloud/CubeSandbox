@@ -54,7 +54,11 @@ export default defineConfig({
       '/sandboxes': 'http://127.0.0.1:3000',
       '/v2/sandboxes': 'http://127.0.0.1:3000',
       '/templates': 'http://127.0.0.1:3000',
-      '/snapshots': 'http://127.0.0.1:3000',
+      // Snapshots (list/detail/delete) are CubeOps-only SDK endpoints.
+      '/snapshots': {
+        target: 'http://127.0.0.1:3010',
+        rewrite: (path) => path.replace(/^\/snapshots/, '/api/v1/sdk/snapshots'),
+      },
       '/health': 'http://127.0.0.1:3000',
       // Legacy /cubeapi proxy for backward compat during transition
       '/cubeapi': 'http://127.0.0.1:3000',

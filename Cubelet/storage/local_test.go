@@ -618,39 +618,30 @@ func TestCreateWithInvalidParam(t *testing.T) {
 }
 
 func TestPollImmediateInfiniteWithContext(t *testing.T) {
-	timeout := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	done := make(chan bool, 1)
-	errChan := make(chan error, 1)
-	interval := 10 * time.Millisecond
-	expectedCnt := int(timeout/interval) + 1
-	gotCnt := 0
-	go func() {
-		alreadyRun := false
-		err := wait.PollImmediateInfiniteWithContext(ctx, interval, func(ctx context.Context) (bool, error) {
-			if !alreadyRun {
-				done <- false
-				alreadyRun = true
-			}
-			gotCnt++
-			return false, nil
+	for _, tc := range []struct {
+		name        string
+		interval    time.Duration
+		cancelAfter int
+	}{
+		// Interval exceeds the 5s context deadline to verify the first callback runs immediately without waiting.
+		{name: "immediate", interval: time.Minute, cancelAfter: 1},
+		{name: "repeated", interval: time.Millisecond, cancelAfter: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			calls := 0
+			err := wait.PollImmediateInfiniteWithContext(ctx, tc.interval, func(context.Context) (bool, error) {
+				calls++
+				if calls >= tc.cancelAfter {
+					cancel()
+				}
+				return false, nil
+			})
+			require.GreaterOrEqual(t, calls, tc.cancelAfter)
+			require.ErrorIs(t, err, wait.ErrWaitTimeout)
+			require.ErrorIs(t, ctx.Err(), context.Canceled)
 		})
-		errChan <- err
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(11 * time.Millisecond):
-		t.Fatal("PollImmediateInfiniteWithContext run immediately")
-	}
-
-	select {
-	case <-ctx.Done():
-		assert.Equal(t, expectedCnt, gotCnt)
-	case err := <-errChan:
-		assert.NoError(t, err)
 	}
 }
 

@@ -225,7 +225,9 @@ Domain rules are stored per sandbox in `dns_allow`, an LPM trie keyed by reverse
 - Exact match, for example `qq.com` -- matches only `qq.com`.
 - Wildcard prefix, for example `*.qq.com` -- matches subdomains such as `a.qq.com` but not the apex.
 
-When the sandbox sends a DNS query, `from_cube` extracts the queried name and looks it up in `dns_allow`. If the name is allowed, the query id and source port are recorded in `dns_query_track`. When the response comes back, `from_world` matches it against `dns_query_track`, extracts the A-records, and inserts each resolved IP into the sandbox's `allow_out_v2` with an expiration derived from the DNS TTL. The DNS reaper sweeps expired entries in the same way the NAT session reaper sweeps stale connections.
+When the sandbox sends a DNS query, `from_cube` extracts the queried name and looks it up in `dns_allow`. If the name is allowed, the query id and source port are recorded in `dns_query_track`. When the response comes back, `from_world` matches it against `dns_query_track`. A learnable positive A reply is not forwarded to the sandbox: the kernel hands the frame to Cubelet, which inserts each resolved IP into the sandbox's `allow_out_v2` with an expiration derived from the DNS TTL and injects the frame onto the TAP. The DNS reaper sweeps expired entries in the same way the NAT session reaper sweeps stale connections.
+
+Cubelet is on this delivery path. While it is stopped, DNS for names that match a domain rule is blocked. Names that match no rule, and negative or truncated replies, are still forwarded by the datapath. Addresses already learned stay in the kernel map until their TTL expires.
 
 Because DNS-learned rules land in the same `allow_out_v2` map as static CIDRs, the fast path in §5 does not need any special case for them.
 
@@ -269,6 +271,23 @@ To prevent collisions between subsystems, the host's usable port space is partit
 | `30000`--`65535` | Source ports used by SNAT for sandbox-originated traffic |
 
 Cubelet's embedded network runtime allocates host ports for sandbox port mappings only from `20000`--`29999`. The product create path exposes container ports via `exposedPorts` and always requests automatic host-port allocation (`HostPort=0`); users cannot choose a specific host port. The runtime then assigns a free port from this managed range and returns the mapping in the create response.
+
+### 7.5 Same-Host Access (Hairpin)
+
+The port-mapping DNAT lives only on the host's primary NIC ingress (`from_world` consults `remote_port_mapping` only for packets arriving from the primary NIC), so it naturally covers clients outside the host. Sandboxes on the same host have two paths to reach each other:
+
+- **Recommended: direct connection.** A same-host caller uses `peerSandboxIP:containerPort`, delivered straight through `from_envoy` on cube-dev egress. Both CubeProxy and CubeMaster's port-mapping endpoint APIs special-case same-host callers this way.
+- **Hairpin: same-host access to `nodeIP:hostPort`.** For clients that cannot (or do not want to) distinguish same-host from cross-host peers, the data plane in `from_cube` recognizes TCP packets destined to `nodenic_ip` whose `remote_port_mapping[dport]` lookup hits, SNATs them through the normal egress flow (source rewritten to `snat_ip:ephemeralPort`, still subject to the `classify_egress_flow` policy check), then loops them back into the primary NIC ingress (`BPF_F_INGRESS`) where `from_world` applies the DNAT. Replies are disambiguated in `from_cube`'s `local_port_mapping` fast path by whether the peer address is one of this node's own SNAT addresses (`nodenic_ip` or an address in `snat_iplist`): same-host replies loop back into the primary NIC ingress for `tcp_nat_session` reverse NAT, while external replies egress the wire as before. The whole path does not rely on switch hairpinning.
+
+Caveats when using hairpin:
+
+- **Egress policy still applies.** Hairpin traffic is not exempt from the sandbox's egress policy. The always-denied private ranges preinstalled by default (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, etc.) will reject access to a private node IP -- configure `allowOut` for the node IP/subnet explicitly in the sandbox's network settings, or same-host hairpin access is rejected (fail-fast RST).
+- **L7 domain rules on the node IP are not supported**: a hairpin packet classified as L7-proxied traffic is reset directly (the L7 proxy resolves external services; the host stack cannot reach hostPort).
+- The SNAT ephemeral port range (starting at `30000`) does not overlap the hostPort range (`20000`--`29999`), so replies on the primary NIC ingress never false-match `remote_port_mapping`.
+- Each hairpin connection creates a regular SNAT session pair (egress + ingress), reclaimed by the existing session reaper on timeout; the generation semantics on sandbox rollback match ordinary egress connections.
+
+For the user-facing access options and operational steps, see the
+[sandbox-to-sandbox guide](../guide/sandbox-to-sandbox.md).
 
 ---
 
@@ -338,5 +357,5 @@ graph TB
 
 The design rests on two ideas:
 
-- **Data-path logic lives in the kernel.** Policy evaluation, NAT, session tracking, DNS learning, and ARP resolution all happen in eBPF; the Go control plane only manages lifecycle and periodic cleanup.
+- **Data-path decisions live in the kernel.** Policy evaluation, NAT, session tracking, and ARP resolution happen in eBPF. DNS for a controlled domain is the exception: the kernel tracks the query and drops the learnable reply, and Cubelet writes the allow entry and injects the frame. While Cubelet is stopped, DNS for those domains is blocked. The Go control plane otherwise manages lifecycle and periodic cleanup.
 - **Each sandbox is isolated end-to-end.** Its own TAP device, its own policy maps, its own sessions -- no shared bridge or switch stands between two sandboxes on the same host.

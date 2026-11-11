@@ -12,11 +12,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/urfave/cli"
 )
@@ -338,6 +340,103 @@ func TestApplyCreateFromImageIvshmemFlag(t *testing.T) {
 	}
 }
 
+func TestParseCreateFromImageQosReadsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "qos.json")
+	if err := os.WriteFile(path, []byte(`{"network":{"bandwidthMbps":100}}`), 0o600); err != nil {
+		t.Fatalf("write qos file: %v", err)
+	}
+
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", "@" + path}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.Network == nil || got.Network.BandwidthMbps != 100 {
+		t.Fatalf("qos=%+v, want 100 Mbps", got)
+	}
+}
+
+func TestParseCreateFromImageQosRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "qos.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxCreateFromImageQosPayloadBytes+1), 0o600); err != nil {
+		t.Fatalf("write qos file: %v", err)
+	}
+	_, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", "@" + path}))
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("parseCreateFromImageQos error=%v, want size limit error", err)
+	}
+}
+
+func TestParseCreateFromImageQosReadsInlineJSON(t *testing.T) {
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"network":{"bandwidthMbps":200}}`}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.Network == nil || got.Network.BandwidthMbps != 200 {
+		t.Fatalf("qos=%+v, want 200 Mbps", got)
+	}
+}
+
+func TestParseCreateFromImageQosReadsPacketsPerSecond(t *testing.T) {
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"network":{"packetsPerSecond":5000}}`}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.Network == nil || got.Network.PacketsPerSecond != 5000 {
+		t.Fatalf("qos=%+v, want 5000 packets per second", got)
+	}
+}
+
+func TestParseCreateFromImageQosReadsBlockIO(t *testing.T) {
+	got, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"blockIo":{"throughputMiBps":64,"iops":1000}}`}))
+	if err != nil {
+		t.Fatalf("parseCreateFromImageQos error=%v", err)
+	}
+	if got == nil || got.BlockIO == nil || got.BlockIO.ThroughputMiBps != 64 || got.BlockIO.IOPS != 1000 {
+		t.Fatalf("qos=%+v, want 64 MiB/s and 1000 IOPS", got)
+	}
+}
+
+func TestFormatNetworkQosLimits(t *testing.T) {
+	tests := []struct {
+		name             string
+		bandwidthMbps    uint32
+		packetsPerSecond uint32
+		want             string
+	}{
+		{name: "bandwidth only", bandwidthMbps: 100, want: "100 Mbit/s per direction"},
+		{name: "packets only", packetsPerSecond: 5000, want: "5000 packets/s per direction"},
+		{name: "combined", bandwidthMbps: 100, packetsPerSecond: 5000, want: "100 Mbit/s per direction, 5000 packets/s per direction"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatNetworkQosLimits(tt.bandwidthMbps, tt.packetsPerSecond); got != tt.want {
+				t.Fatalf("formatNetworkQosLimits()=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatBlockIOQosLimits(t *testing.T) {
+	if got := formatBlockIOQosLimits(64, 1000); got != "64 MiB/s per block device, 1000 IOPS per block device" {
+		t.Fatalf("formatBlockIOQosLimits()=%q", got)
+	}
+}
+
+func TestParseCreateFromImageQosRejectsUnknownField(t *testing.T) {
+	_, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", `{"network":{"bandwidth_mbps":100}}`}))
+	if err == nil {
+		t.Fatal("expected unknown qos field error")
+	}
+}
+
+func TestParseCreateFromImageQosRejectsNonJSONValue(t *testing.T) {
+	_, err := parseCreateFromImageQos(newCreateFromImageContext(t, []string{"--qos", "qos.json"}))
+	if err == nil {
+		t.Fatal("expected inline JSON or @path error")
+	}
+}
+
 func TestMergeCreateFromImageCubeNetworkConfigFlagsRejectsUnexpectedArgs(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{
 		"--allow-internet-access", "false",
@@ -573,6 +672,50 @@ func TestParseContainerOverridesEnableInjectEnvd(t *testing.T) {
 	}
 }
 
+func TestParseContainerOverridesUser(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--user", "1000:1000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.SecurityContext == nil {
+		t.Fatal("expected security context")
+	}
+	sc := overrides.SecurityContext
+	if !sc.Privileged || sc.ReadonlyRootfs {
+		t.Fatalf("privileged=%v readonly=%v", sc.Privileged, sc.ReadonlyRootfs)
+	}
+	if sc.RunAsUser == nil || sc.RunAsUser.Value != 1000 || sc.RunAsGroup == nil || sc.RunAsGroup.Value != 1000 {
+		t.Fatalf("user context = %+v", sc)
+	}
+	if sc.RunAsUsername != "" {
+		t.Fatalf("username=%q", sc.RunAsUsername)
+	}
+}
+
+func TestParseContainerOverridesUsername(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--user", "sandbox:1000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sc := overrides.SecurityContext
+	if sc == nil || sc.RunAsUsername != "sandbox" || sc.RunAsUser != nil || sc.RunAsGroup == nil || sc.RunAsGroup.Value != 1000 {
+		t.Fatalf("user context = %+v", sc)
+	}
+}
+
+func TestParseContainerOverridesRejectsUser(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--user", ":1000"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if overrides != nil {
+		t.Fatalf("overrides=%+v", overrides)
+	}
+}
+
 func TestTemplateImageJobWatchPhaseLabel(t *testing.T) {
 	tests := []struct {
 		name string
@@ -709,6 +852,10 @@ func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
 			Status:       "READY",
 			CreatedAt:    "2026-06-17 12:00:00",
 			ImageInfo:    "docker.io/library/python:3.12",
+			ConfiguredQos: &qos.Config{
+				Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000},
+				BlockIO: &qos.BlockIOConfig{ThroughputMiBps: 64, IOPS: 1000},
+			},
 		})
 	})
 
@@ -718,6 +865,8 @@ func TestPrintTemplateSummaryIncludesOptionalMetadata(t *testing.T) {
 		"alias: python-template",
 		"created_at: 2026-06-17 12:00:00",
 		"image_info: docker.io/library/python:3.12",
+		"network_qos: 100 Mbit/s per direction, 5000 packets/s per direction",
+		"block_io_qos: 64 MiB/s per block device, 1000 IOPS per block device",
 	} {
 		if !strings.Contains(logOutput, want) {
 			t.Fatalf("log output=%q, missing %q", logOutput, want)
@@ -954,5 +1103,108 @@ func TestTemplateDeleteCommandContinuesAfterFailure(t *testing.T) {
 	}
 	if got := logBuf.String(); !strings.Contains(got, "template delete failed. delete failed. TemplateId: tpl-fail. RequestId:") {
 		t.Fatalf("failure log %q does not identify failed template", got)
+	}
+}
+
+func TestTemplateDeleteCommandForce(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		rejectID    string
+		wantIDs     []string
+		wantForce   bool
+		wantErrText string
+	}{
+		{
+			name:      "force omitted by default",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "tpl-default"},
+			wantIDs:   []string{"tpl-default"},
+			wantForce: false,
+		},
+		{
+			name:      "force on single flagged id",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "--force", "--template-id", "tpl-flag"},
+			wantIDs:   []string{"tpl-flag"},
+			wantForce: true,
+		},
+		{
+			name:      "force on multiple positional ids",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "--force", "tpl-1", "tpl-2"},
+			wantIDs:   []string{"tpl-1", "tpl-2"},
+			wantForce: true,
+		},
+		{
+			name:      "force false omitted",
+			args:      []string{"--address", "127.0.0.1", "--port", "8089", "--force=false", "tpl-no-force"},
+			wantIDs:   []string{"tpl-no-force"},
+			wantForce: false,
+		},
+		{
+			name:        "force keeps going after in-use rejection",
+			args:        []string{"--address", "127.0.0.1", "--port", "8089", "--force", "tpl-first", "tpl-busy", "tpl-last"},
+			rejectID:    "tpl-busy",
+			wantIDs:     []string{"tpl-first", "tpl-busy", "tpl-last"},
+			wantForce:   true,
+			wantErrText: "tpl-busy: template is in use",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotIDs []string
+			origHTTPClient := http.DefaultClient
+			http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatalf("decode delete request: %v", err)
+				}
+				var id string
+				if err := json.Unmarshal(body["template_id"], &id); err != nil {
+					t.Fatalf("decode template_id: %v", err)
+				}
+				gotIDs = append(gotIDs, id)
+
+				forceRaw, hasForce := body["force"]
+				if tt.wantForce {
+					if !hasForce {
+						t.Fatalf("request for %s omitted force", id)
+					}
+					var force bool
+					if err := json.Unmarshal(forceRaw, &force); err != nil {
+						t.Fatalf("decode force for %s: %v", id, err)
+					}
+					if !force {
+						t.Fatalf("request for %s sent force=false, want true", id)
+					}
+				} else if hasForce {
+					t.Fatalf("request for %s unexpectedly sent force: %s", id, forceRaw)
+				}
+
+				response := `{"ret":{"ret_code":200,"ret_msg":"success"}}`
+				if id == tt.rejectID {
+					response = `{"ret":{"ret_code":409,"ret_msg":"template is in use"}}`
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(response)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			})}
+			t.Cleanup(func() { http.DefaultClient = origHTTPClient })
+
+			ctx := newDeleteContext(t, tt.args)
+			action := TemplateDeleteCommand.Action.(func(*cli.Context) error)
+			err := action(ctx)
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("delete returned error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErrText)
+			}
+			if !reflect.DeepEqual(gotIDs, tt.wantIDs) {
+				t.Fatalf("deleted %v, want %v", gotIDs, tt.wantIDs)
+			}
+		})
 	}
 }

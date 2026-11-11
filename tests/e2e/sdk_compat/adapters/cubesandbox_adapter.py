@@ -104,6 +104,9 @@ class CubeSandboxAdapter(SandboxAdapter):
             raw=raw,
         )
 
+    def is_running(self) -> bool:
+        return bool(self._sandbox.is_running())
+
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
         result = self._sandbox.commands.run(command, user=user, timeout=timeout)
         return CommandResult(
@@ -117,6 +120,15 @@ class CubeSandboxAdapter(SandboxAdapter):
 
     def read_file(self, path: str, *, user: str = "root") -> str:
         return self._sandbox.files.read(path, user=user)
+
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        self._sandbox.files.write(path, content, user=user)
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return bytes(self._sandbox.files.read(path, format="bytes", user=user))
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return b"".join(self._sandbox.files.read(path, format="stream", user=user))
 
     def list_files(self, path: str) -> list[dict[str, Any]]:
         return list(self._sandbox.files.list(path))
@@ -225,13 +237,13 @@ class CubeSandboxAdapter(SandboxAdapter):
     def set_timeout(self, timeout: int) -> None:
         self._sandbox.set_timeout(timeout)
 
-    def create_snapshot(self) -> str:
-        return str(self._sandbox.create_snapshot().snapshot_id)
+    def create_snapshot(self, name: str | None = None, *, mode: str | None = None) -> str:
+        return str(self._sandbox.create_snapshot(name=name, mode=mode).snapshot_id)
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         from cubesandbox import Sandbox
 
-        Sandbox.delete_snapshot(snapshot_id, config=self._sdk_config)
+        return bool(Sandbox.delete_snapshot(snapshot_id, config=self._sdk_config))
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
         return dict(self._sandbox.rollback(snapshot_id))
@@ -246,6 +258,24 @@ class CubeSandboxAdapter(SandboxAdapter):
             for sandbox in self._sandbox.clone(n=n, concurrency=concurrency)
         ]
 
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple["CubeSandboxAdapter" | None, Exception | None]]:
+        results = self._sandbox.fork(count, timeout=timeout)
+        return [
+            (
+                type(self)(
+                    item,
+                    sdk_config=self._sdk_config,
+                    e2e_config=self._e2e_config,
+                ),
+                None,
+            )
+            if isinstance(item, self._sandbox.__class__)
+            else (None, item)
+            for item in results
+        ]
+
     def list_snapshot_ids(self) -> set[str]:
         from cubesandbox import Sandbox
 
@@ -255,8 +285,20 @@ class CubeSandboxAdapter(SandboxAdapter):
         )
         return {str(snapshot.snapshot_id) for snapshot in snapshots}
 
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        from cubesandbox import Sandbox
+
+        snapshots, _ = Sandbox.list_snapshots(
+            name=name,
+            config=self._sdk_config,
+        )
+        return {str(snapshot.snapshot_id) for snapshot in snapshots}
+
     def get_host(self, port: int) -> str:
         return str(self._sandbox.get_host(port))
+
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        return self._sandbox.get_exposed_port_endpoint(port)
 
     def traffic_access_token(self) -> str | None:
         token = getattr(self._sandbox, "traffic_access_token", None)

@@ -119,7 +119,7 @@ const features = computed(() => isZh.value ? [
     metric: 'DENSITY: 1000+',
     title: 'MB 级超低开销与高密度驻留',
     summary: '通过内核空间共享与写时复制技术将单个沙箱内存开销压缩至 MB 级。单台物理机可高密度稳定运行数千个沙箱实例，搭配自动挂起唤醒实现极致资源利用。',
-    link: '/zh/blog/posts/2026-06-01-cubesandbox-perf-benchmark',
+    link: '/zh/blog/posts/2026-10-28-cubebench-073',
     action: '查看性能基准测试报告',
     spanClass: 'grid-span-4'
   },
@@ -219,7 +219,7 @@ const features = computed(() => isZh.value ? [
     metric: 'DENSITY: 1000+',
     title: 'MB-level Footprint & Extreme Host Density',
     summary: 'Through shared read-only kernel structures and memory pages, per-sandbox overhead drops to single-digit MBs, supporting thousands of resident instances with auto-sleep/resume.',
-    link: '/blog/posts/2026-06-01-cubesandbox-perf-benchmark',
+    link: '/blog/posts/2026-10-28-cubebench-073',
     action: 'Explore Performance Benchmarks',
     spanClass: 'grid-span-4'
   },

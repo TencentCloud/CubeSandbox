@@ -72,6 +72,12 @@ require_cmd() {
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
 }
 
+require_web_build_prerequisites() {
+  local web_dist_override="${1:-}"
+  [[ -n "${web_dist_override}" ]] && return 0
+  require_cmd npm
+}
+
 _version_trim_leading_zeroes() {
   local value="$1"
   value="${value#${value%%[!0]*}}"
@@ -499,20 +505,25 @@ load_env_file() {
   fi
 }
 
-# Installer toggle keys: on/off switches whose this-run value must survive the
-# upgrade env merge. The merge treats a bundle-.env value as an explicit
-# operator override only when it differs from the new env.example default
+# Installer desired-state keys: on/off switches and selectors whose this-run
+# value must survive the upgrade env merge. The merge treats a bundle-.env
+# value as an explicit operator override only when it differs from the new
+# env.example default
 # (the `cp env.example .env` safeguard), so flipping one of these keys BACK to
 # the template default via .env would otherwise be inexpressible on upgrade.
 # For the keys listed here, presence in the bundle .env or in install.sh's
 # process environment counts as explicit operator intent and is re-applied
 # after the merge (snapshot_one_click_toggles / apply_one_click_toggles).
 #
-# Opting a key in gives it presence-implies-explicit semantics: a wholesale
-# `cp env.example .env` carried into an upgrade resets the key to the template
-# default (documented caveat in the one-click README).
+# MinIO, the logs backend, and observability retain the merge's
+# template-default safeguard. Their defaults copied from env.example are not
+# intent; use the process environment to explicitly switch back to them.
 ONE_CLICK_TOGGLE_KEYS=(
   ONE_CLICK_ENABLE_S3LVOL
+  ONE_CLICK_ENABLE_JFS
+  ONE_CLICK_ENABLE_OBSERVABILITY
+  CUBE_LOGS_BACKEND
+  CUBE_SANDBOX_MINIO_ENABLED
   CUBE_PVM_ENABLE
 )
 
@@ -522,11 +533,12 @@ ONE_CLICK_TOGGLE_KEYS=(
 # merged old-runtime env, which would otherwise clobber both channels.
 #   ONE_CLICK_TOGGLE_ENV_SNAPSHOT     key -> value from the process environment
 #   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT  key -> value from the bundle .env
-# (presence in .env is enough — a value equal to the env.example default still
-# counts, which is exactly what makes "flip back to default" expressible)
+# Most toggles accept presence as intent, including their default value.
+# MinIO, the logs backend, and observability only accept non-default dotenv values as intent.
 snapshot_one_click_toggles() {
   local env_file="$1"
-  local key
+  local key value default_value
+  local template="$(dirname "${BASH_SOURCE[0]}")/../env.example"
   # -g: these are process-wide state read later by apply_one_click_toggles;
   # -A: keys are env-var names, not numeric indexes. NOTE: the declaration and
   # the empty-assignment must be separate statements — bash 4.2 (CentOS 7)
@@ -540,7 +552,14 @@ snapshot_one_click_toggles() {
       ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
     fi
     if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
-      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="$(read_env_key "${env_file}" "${key}")"
+      value="$(read_env_key "${env_file}" "${key}")"
+      case "${key}" in
+        CUBE_SANDBOX_MINIO_ENABLED|CUBE_LOGS_BACKEND|ONE_CLICK_ENABLE_OBSERVABILITY)
+          default_value="$(read_env_key "${template}" "${key}")"
+          [[ "${value}" == "${default_value}" ]] && continue
+          ;;
+      esac
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="${value}"
     fi
   done
   return 0
@@ -548,11 +567,10 @@ snapshot_one_click_toggles() {
 
 # apply_one_click_toggles: re-apply the snapshotted operator intent after the
 # env files (including the upgrade merge output) have been sourced. Same
-# snapshot/replay shape as apply_one_click_database_intent (change both together). Precedence
-# mirrors install.sh's documented channel order (CLI flags > .env > process
-# environment > defaults): .env key > process environment > merged/loaded
-# value. The final value is persisted by install.sh's upsert_env_kv, so this
-# is the single place toggle intent is resolved.
+# snapshot/replay shape as apply_one_click_database_intent (change both together).
+# Toggle precedence is .env key > process environment > merged/loaded value.
+# The final value is persisted by install.sh's upsert_env_kv, so this is the
+# single place toggle intent is resolved.
 apply_one_click_toggles() {
   local key
   for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
@@ -562,6 +580,120 @@ apply_one_click_toggles() {
     elif [[ -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" ]]; then
       printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]}"
       log "toggle ${key}=${!key} (explicit in process environment)"
+    fi
+  done
+  return 0
+}
+
+# Resolve the log backend after the upgrade env merge. New templates contribute
+# the default "loki" value even when an older runtime never had a selector, so
+# a legacy ES endpoint/service must win unless this run explicitly selected a
+# backend.
+resolve_one_click_logs_backend_selection() {
+  local selected="${1:-}"
+  local legacy_es_endpoint="${2:-}"
+  local legacy_es_service="${3:-0}"
+  local explicit_selection="${4:-0}"
+
+  if [[ "${explicit_selection}" == "0" &&
+        ( -n "${legacy_es_endpoint}" || "${legacy_es_service}" == "1" ) ]]; then
+    selected="elasticsearch"
+  fi
+
+  case "${selected:-loki}" in
+    loki) printf 'loki\n' ;;
+    elasticsearch|es) printf 'elasticsearch\n' ;;
+    *) die "CUBE_LOGS_BACKEND must be loki or elasticsearch (got: '${selected}')" ;;
+  esac
+}
+
+# Observability settings may be commented out in env.example and therefore look
+# like custom runtime keys to the three-way upgrade merge. Snapshot values named
+# by this run so endpoint/password rotation and explicit KEY= clearing win over
+# the previous .one-click.env without logging secret values.
+ONE_CLICK_OBSERVABILITY_INTENT_KEYS=(
+  ONE_CLICK_OBSERVABILITY_ROLE
+  CUBE_OBSERVABILITY_CLUSTER_ID
+  CUBE_METRICS_OTLP_HTTP_ENDPOINT
+  CUBE_METRICS_REMOTE_WRITE_URL
+  CUBE_METRICS_AUTHORIZATION
+  CUBE_METRICS_REMOTE_WRITE_TOKEN
+  CUBE_METRICS_TENANT_ID
+  CUBE_LOGS_ES_ENDPOINT
+  CUBE_LOGS_ELASTICSEARCH_ENDPOINT
+  CUBE_LOGS_ES_INDEX
+  CUBE_LOGS_ES_USER
+  CUBE_LOGS_ES_PASSWORD
+  CUBE_LOGS_ES_API_KEY
+  CUBE_LOGS_ES_TLS_INSECURE_SKIP_VERIFY
+  CUBE_LOGS_OTLP_HTTP_ENDPOINT
+  CUBE_LOGS_AUTHORIZATION
+  CUBE_LOGS_TOKEN
+  CUBE_LOGS_TENANT_ID
+  CUBE_LOGS_SANDBOX_ID
+  CUBE_LOGS_FILE_START_AT
+  CUBE_PROMETHEUS_LISTEN_ADDRESS
+  CUBE_PROMETHEUS_RETENTION_TIME
+  CUBE_PROMETHEUS_RETENTION_SIZE
+  CUBE_LOKI_LISTEN_ADDRESS
+  CUBE_LOKI_RETENTION_PERIOD
+  CUBE_LOKI_DATA_DIR
+  CUBE_ES_LISTEN_ADDRESS
+  CUBE_ES_HEAP_SIZE
+  CUBE_ES_DATA_DIR
+  CUBE_ES_LOG_DIR
+  CUBE_GRAFANA_LISTEN_ADDRESS
+  CUBE_GRAFANA_ADMIN_USER
+  CUBE_GRAFANA_ADMIN_PASSWORD
+  CUBE_GRAFANA_PROMETHEUS_URL
+  CUBE_GRAFANA_LOKI_URL
+  CUBE_GRAFANA_ES_URL
+  CUBE_GRAFANA_ES_INDEX
+)
+
+snapshot_one_click_observability_intent() {
+  local env_file="$1"
+  local key
+  declare -gA ONE_CLICK_OBS_ENV_SNAPSHOT
+  declare -gA ONE_CLICK_OBS_DOTENV_SNAPSHOT
+  declare -gA ONE_CLICK_OBS_DOTENV_PRESENT
+  ONE_CLICK_OBS_ENV_SNAPSHOT=()
+  ONE_CLICK_OBS_DOTENV_SNAPSHOT=()
+  ONE_CLICK_OBS_DOTENV_PRESENT=()
+  for key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_OBS_ENV_SNAPSHOT["${key}"]="${!key}"
+    fi
+    if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+      ONE_CLICK_OBS_DOTENV_PRESENT["${key}"]=1
+    fi
+  done
+  return 0
+}
+
+capture_one_click_observability_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_OBS_DOTENV_PRESENT[${key}]+x}" ]]; then
+      ONE_CLICK_OBS_DOTENV_SNAPSHOT["${key}"]="${!key-}"
+    fi
+  done
+  return 0
+}
+
+one_click_observability_intent_declared() {
+  local key="$1"
+  [[ -n "${ONE_CLICK_OBS_DOTENV_PRESENT[${key}]+x}" ||
+     -n "${ONE_CLICK_OBS_ENV_SNAPSHOT[${key}]+x}" ]]
+}
+
+apply_one_click_observability_intent() {
+  local key
+  for key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_OBS_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_OBS_DOTENV_SNAPSHOT[${key}]}"
+    elif [[ -n "${ONE_CLICK_OBS_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_OBS_ENV_SNAPSHOT[${key}]}"
     fi
   done
   return 0
@@ -1559,6 +1691,21 @@ one_click_patch_conf_redis_endpoint() {
   local restore_bundled="${3:-0}"
   [[ -f "${cfg}" ]] || die "Redis config not found for ${component}: ${cfg}"
 
+  # Remove stale Cluster config before selecting another mode.
+  one_click_sed_in_place "${cfg}" -e '/^  cluster_nodes:/d'
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    [[ -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" && -z "${CUBE_EXTERNAL_REDIS_HOST:-}" ]] \
+      || die "Redis Cluster cannot be combined with a standalone host or Sentinel"
+    [[ "$(one_click_redis_db)" == "0" ]] || die "Redis Cluster requires DB 0"
+    local nodes_esc pwd_esc
+    nodes_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}")"
+    pwd_esc="$(escape_sed "${CUBE_EXTERNAL_REDIS_PASSWORD:-}")"
+    one_click_sed_in_place "${cfg}" \
+      -e '/^  master_name:/d' -e '/^  sentinel_nodes:/d' -e '/^  sentinel_password:/d' \
+      -e "/^redis:/,/^[^[:space:]#]/{s|^  nodes:.*|  nodes: \"\"\\
+  cluster_nodes: \"${nodes_esc}\"|; s|^  password:.*|  password: \"${pwd_esc}\"|;}"
+    return
+  fi
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     [[ -n "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] \
       || die "CUBE_EXTERNAL_REDIS_SENTINEL_NODES is required when CUBE_EXTERNAL_REDIS_MASTER_NAME is set"
@@ -1642,6 +1789,32 @@ persist_one_click_redis_runtime_env() {
     CUBE_PROXY_REGISTRY_REDIS_DB \
     CUBE_LCM_REDIS_DB
 
+  if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" ]]; then
+    [[ -z "${CUBE_EXTERNAL_REDIS_HOST:-}" && -z "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" && -z "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}" ]] || die "Redis Cluster cannot use a standalone host or Sentinel"
+    [[ "${redis_db}" == "0" ]] || die "Redis Cluster requires DB 0"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_CLUSTER_NODES" "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_PASSWORD" "${CUBE_EXTERNAL_REDIS_PASSWORD:-}"
+    # Unified Cluster config replaces per-component endpoint overrides from
+    # older installs, including exported variables in this install process.
+    local stale_key
+    for stale_key in \
+      CUBE_PROXY_REDIS_IP CUBE_PROXY_REDIS_PORT CUBE_PROXY_REDIS_PASSWORD CUBE_PROXY_REDIS_CLUSTER_NODES \
+      CUBE_PROXY_REDIS_MASTER_NAME CUBE_PROXY_REDIS_SENTINEL_NODES CUBE_PROXY_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REGISTRY_REDIS_HOST CUBE_PROXY_REGISTRY_REDIS_PORT CUBE_PROXY_REGISTRY_REDIS_PASSWORD \
+      CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME \
+      CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD \
+      CUBE_LCM_REDIS_ADDR CUBE_LCM_REDIS_HOST CUBE_LCM_REDIS_PORT CUBE_LCM_REDIS_PASSWORD \
+      CUBE_LCM_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_MASTER_NAME CUBE_LCM_REDIS_SENTINEL_NODES CUBE_LCM_REDIS_SENTINEL_PASSWORD; do
+      _remove_env_keys "${env_file}" "${stale_key}"
+      unset "${stale_key}"
+    done
+    _remove_env_keys "${env_file}" CUBE_EXTERNAL_REDIS_HOST CUBE_EXTERNAL_REDIS_PORT \
+      CUBE_EXTERNAL_REDIS_MASTER_NAME CUBE_EXTERNAL_REDIS_SENTINEL_NODES CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD \
+      CUBE_PROXY_REDIS_MASTER_NAME CUBE_PROXY_REDIS_SENTINEL_NODES CUBE_PROXY_REDIS_SENTINEL_PASSWORD
+    return
+  fi
+  _remove_env_keys "${env_file}" CUBE_EXTERNAL_REDIS_CLUSTER_NODES CUBE_PROXY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_CLUSTER_NODES
+  unset CUBE_PROXY_REDIS_CLUSTER_NODES CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES CUBE_LCM_REDIS_CLUSTER_NODES
   if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}" ]]; then
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_MASTER_NAME" "${CUBE_EXTERNAL_REDIS_MASTER_NAME}"
     upsert_env_kv "${env_file}" "CUBE_EXTERNAL_REDIS_SENTINEL_NODES" "${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}"
@@ -2912,6 +3085,66 @@ EOF
   exit 1
 }
 
+# Print one key from an os-release file (quotes stripped); missing prints nothing.
+host_os_release_field() {
+  local key="$1"
+  local release="${2:-/etc/os-release}"
+  local line value
+  [[ -r "${release}" ]] || return 0
+  line="$(grep -E "^${key}=" "${release}" | head -n 1 || true)"
+  value="${line#"${key}"=}"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf '%s\n' "${value}"
+}
+
+# True when ID or ID_LIKE names OpenCloudOS.
+host_is_opencloudos() {
+  local release="${1:-/etc/os-release}"
+  local id like
+  id="$(host_os_release_field ID "${release}")"
+  like="$(host_os_release_field ID_LIKE "${release}")"
+  case " ${id} ${like} " in
+    *opencloudos*) return 0 ;;
+  esac
+  return 1
+}
+
+# die_yum_docker_packages_missing <packages> [release]: report a failed yum
+# install. OpenCloudOS ships docker-compose only in EPOL, not AppStream (#1959).
+die_yum_docker_packages_missing() {
+  local packages="$1"
+  local release="${2:-/etc/os-release}"
+  printf '[one-click] ERROR: failed to install %s with yum.\n' "${packages}" >&2
+  if host_is_opencloudos "${release}"; then
+    cat >&2 <<'EOF'
+[one-click]   A common cause on OpenCloudOS: docker comes from moby in
+[one-click]   AppStream, while docker-compose is published only in EPOL.
+[one-click]   If that is the cause here, enable EPOL and rerun this installer:
+[one-click]     sudo dnf install -y epol-release
+EOF
+    printf '[one-click]     sudo dnf install -y %s\n' "${packages}" >&2
+    cat >&2 <<'EOF'
+[one-click]   If docker-compose is still missing, the EPOL mirror does not contain it.
+[one-click]   Check with: dnf repolist; rpm -q epol-release
+EOF
+  else
+    cat >&2 <<'EOF'
+[one-click]   The packages were not found in the enabled repositories, or the
+[one-click]   package manager returned an error. Install them manually, then
+[one-click]   rerun this installer.
+EOF
+  fi
+  exit 1
+}
+
+# yum_install_docker_or_die <package>...: install via yum, or abort with the
+# Docker-specific hint. Do not reuse for other packages.
+yum_install_docker_or_die() {
+  local packages="$*"
+  yum install -y "$@" || die_yum_docker_packages_missing "${packages}"
+}
+
 install_docker() {
   reject_snap_docker
   if command -v docker >/dev/null 2>&1; then
@@ -2926,7 +3159,7 @@ install_docker() {
       apt-get install -y -qq docker.io docker-compose
       ;;
     yum)
-      yum install -y docker docker-compose
+      yum_install_docker_or_die docker docker-compose
       ;;
   esac
   systemctl enable docker && systemctl start docker
@@ -2948,7 +3181,7 @@ install_docker_compose() {
       apt-get update -qq && apt-get install -y -qq docker-compose
       ;;
     yum)
-      yum install -y docker-compose
+      yum_install_docker_or_die docker-compose
       ;;
   esac
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
@@ -3536,7 +3769,7 @@ check_compute_control_plane_preflight() {
 ║      ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR=<host>:<port>       ║
 ║                                                                  ║
 ║  Or pass as environment variables:                               ║
-║    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11 ./install-compute.sh     ║
+║    ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10 ./install-compute.sh     ║
 ║                                                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
 

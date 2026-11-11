@@ -30,6 +30,7 @@ type SnapshotRecord struct {
 	CleanupArtifactIDsJSON    string `json:"-" gorm:"column:cleanup_artifact_ids_json"`
 	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
 	Backend                   string `json:"backend" gorm:"column:backend"`
+	Mode                      string `json:"mode" gorm:"column:mode"`
 	RemoteStatus              string `json:"remote_status" gorm:"column:remote_status"`
 	ExportUUIDs               string `json:"export_uuids" gorm:"column:export_uuids"`
 }

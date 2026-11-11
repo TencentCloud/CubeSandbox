@@ -1,4 +1,4 @@
-{{- if and .Values.cubeEgress.enabled (ne .Values.cubeEgress.ca.mode "existingSecret") }}
+{{- if ne .Values.cubeEgress.ca.mode "existingSecret" }}
 {{- $secretName := include "cube.egressCASecretName" . -}}
 {{- if eq .Values.cubeEgress.ca.mode "inline" }}
 apiVersion: v1

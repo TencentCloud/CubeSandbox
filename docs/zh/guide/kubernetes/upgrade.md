@@ -43,6 +43,24 @@ cubeNode:
 - 切换后 node-init 会在已 ready 的节点上重跑（prepGeneration 已 bump），宿主机端口被占用时会卡在 node-init、cubelet 起不来。
 - `helm rollback` / `--atomic` 仅在目标 revision 带本 Hook 时受闸门；更旧目标无闸门——请先 drain。回滚重放目标 revision 的 stored values，要把模式切回去请用带 `hostNetworkChangeAck: true` 的 `helm upgrade`，不要用 `helm rollback`。
 
+## 修改 JuiceFS 开关或存储配置
+
+启用 JuiceFS 后，挂载 DaemonSet 使用 `OnDelete`，日常 Helm 升级不会自动
+卸载正在使用的节点。已有 release 在启用、关闭，或修改挂载路径、root、
+元数据/对象后端、镜像及挂载参数时，会被同一个 preflight Hook 拦截。
+
+先 drain 所有计算节点，为本次升级设置
+`cubeJuiceFS.lifecycleChangeAck: true`。升级完成后将其改回 `false`，并再次
+执行相同的 Helm upgrade 以清除 release 中的一次性确认；这不会重启工作负载。如果 JuiceFS
+仍保持启用，应只在对应节点完成 drain 后逐个删除 `cube-juicefs` Pod，
+使新的 `OnDelete` 模板生效。关闭 JuiceFS 会删除 DaemonSet 并卸载全部节点，
+因此集群中不能再保留 JFS 后端沙箱。
+
+不要用 `helm rollback` 回到不包含本 preflight Hook 的旧 revision：旧目标无法
+拦截危险的卸载。失败的 `helm upgrade --atomic` 也可能自动回滚到这种无闸门
+revision。执行这两类操作前都必须 drain 所有计算节点；修改或关闭 JuiceFS 时，
+应优先使用带 `lifecycleChangeAck: true` 的 `helm upgrade`。
+
 ## 升什么，动哪条工作负载？
 
 计算面拆成四条线，**日常升级只改对应组件的镜像 tag**，避免顺手改 Big Pod 的 env / volumeMount / 容器列表（这些同样会 recreate）。
@@ -70,10 +88,10 @@ cubeNode:
 ```yaml
 images:
   cubelet:
-    tag: v0.7.3
+    tag: v0.8.0-rc1
   # 需要一起升再写上，例如：
   # cubeShim:
-  #   tag: v0.7.3
+  #   tag: v0.8.0-rc1
 ```
 
 只改你真正要升的键；其它镜像保持不动即可。完整键名见文末[附录](#附录-镜像键速查)。
@@ -141,7 +159,7 @@ kubectl rollout status deploy/cube-master -n cube-system
 | 手动删 Big Pod | 等于重建数据面 |
 | 把产物安装塞进 Big Pod | 破坏分工；产物应走 Installer |
 
-另外：`cubeNode.env`、`cubeNode.podAnnotations`、网络相关 env、`global.timezone`、`cubeEgress.enabled` 也会改 Pod template——**不是日常无感升级项**。
+另外：`cubeNode.env`、`cubeNode.podAnnotations`、网络相关 env、`global.timezone` 也会改 Pod template——**不是日常无感升级项**。
 
 ---
 

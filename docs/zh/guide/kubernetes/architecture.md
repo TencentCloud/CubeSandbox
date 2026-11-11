@@ -18,7 +18,7 @@
 | 管理入口 | WebUI | Deployment + Service + ConfigMap | 静态控制台；`/opsapi/`、`/cubeapi/v1/` 反代到 CubeOps（依赖 `cubeOps.enabled`） |
 | 运维入口 | cubemastercli | Deployment | `kubectl exec` 用 CLI；注入本 Release 的 CubeMaster endpoint |
 | 依赖存储 | MySQL / Redis / MinIO | 内置 StatefulSet 或第三方 | 业务数据 / Proxy 与 lifecycle 状态 / S3 Volume 后端 |
-| 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + 内嵌 network runtime 的 cubelet + 可选 egress / s3lvol |
+| 计算面 · 运行时 | `cube-node`（Big Pod） | 原生 `apps/v1` DaemonSet | `wait-node-prep` init + 内嵌 network runtime 的 cubelet + egress / 可选 s3lvol |
 | 计算面 · 产物 | `cube-node-installer` | 原生 `apps/v1` DaemonSet | 将 shim / kernel / guest 安装到宿主机 toolbox |
 | 计算面 · 节点引导 | `cube-node-bootstrap` | 原生 `apps/v1` DaemonSet | `wait-pvm-host`、`cube-node-init`、写 `node-prep-ready` |
 | 计算面 · PVM 宿主机 | `cube-node-pvm` | 原生 `apps/v1` DaemonSet（仅 `placement.pvm`） | PVM host kernel 安装（可 reboot）；管理 L0 污点并写指纹 |
@@ -121,11 +121,17 @@ flowchart TB
 | 外部 S3 | `minio.enabled=false` 且设置 `volumeS3.endpoint` / `volumeS3.existingSecret` → 不部署内置 MinIO；`volume-s3.conf` 从 `volumeS3.*` 生成 |
 | 本地盘 blobstore | `artifactStore.backend=fs` / `cubeOps.store.backend=fs` 用于模板产物与组件仓库（默认 `s3`）；S3 Volume 不受影响 |
 
-### 2.3 计算面：四个 DaemonSet
+### 2.3 计算面：四个核心 DaemonSet 与可选存储
 
 `cube-node` / `cube-node-installer` / `cube-node-bootstrap` 用 `placement.compute`（**不含** `allow-pvm-bootstrap`）。`cube-node-pvm` 用 `placement.pvm`（含 `allow-pvm-bootstrap`），因此非 PVM 节点不会拉取 `cube-pvm-host-bootstrap` 大镜像。
 
-四条计算面（Big Pod / installer / bootstrap / PVM）均为原生 `apps/v1` DaemonSet。无状态控制面（master/api/ops/webui/proxy/lifecycle/cubemastercli）为原生 Deployment；MySQL/Redis/MinIO 继续使用原生 StatefulSet。
+四条核心计算面（Big Pod / installer / bootstrap / PVM）均为原生
+`apps/v1` DaemonSet。启用 `cubeJuiceFS` 后会在相同计算节点 placement
+增加第五个 `OnDelete` 挂载 DaemonSet；格式化 Job 初始化共享卷，挂载通过
+`/data/cubelet` 传播。默认由独立 Redis StatefulSet 保存 JuiceFS 元数据
+（不复用 Cube 业务 Redis）；设置外部 `cubeJuiceFS.metadata.url` 时不创建它。
+无状态控制面（master/api/ops/webui/proxy/lifecycle/cubemastercli）
+为原生 Deployment；MySQL/Redis/MinIO 继续使用原生 StatefulSet。
 
 #### Big Pod：`cube-node`
 
@@ -139,8 +145,8 @@ flowchart TB
 | --- | --- | --- |
 | `wait-node-prep`（init） | `images.waitNodePrep` | 只读 hostPath `node-prep-ready` 自描述指纹；匹配后退出，主容器才启动 |
 | `cubelet` | `images.cubelet` | self-stage 后启动；包含内嵌 network runtime 和 CubeVS 工具 |
-| `cube-egress` / `cube-egress-net` | 对应镜像 | 可选；透明出站 / TPROXY |
-| `cube-s3lvol` | `images.cubeS3lvol` | 可选；SPDK NVMe/TCP target，用于 S3 CoW / 跨机快照 |
+| `cube-egress` / `cube-egress-net` | 对应镜像 | 透明出站代理与主机 TPROXY 规则 |
+| `cube-s3lvol` | `images.cubeS3lvol` | 可选；SPDK NVMe/TCP target，用于 S3 CoW / 跨机迁移 |
 
 **容器名 / volumeMount / securityContext / imagePullPolicy 变更同样 recreate**。
 
@@ -401,8 +407,8 @@ externalControlPlane:
 | --- | --- | --- |
 | `global.timezone` | `Asia/Shanghai` | 注入 Chart 管理容器的 `TZ` |
 | `storageClass.create` / `name` / `provisioner` | `create=false` | 是否由 chart 创建 StorageClass；默认不创建（PVC 走集群 default SC；TKE 用 `values-tke.yaml`） |
-| `persistence.storageClassName` | `""` | 四 PVC 共用此 SC；`""` → 集群 default |
-| `*.persistence.storageClassName` (master/mysql/redis/minio) | `""` | 组件级覆盖；非空优先于顶层 |
+| `persistence.storageClassName` | `""` | 有状态 PVC（含可选 JuiceFS Redis）共用此 SC；`""` → 集群 default |
+| 组件级 `persistence.storageClassName`（master/mysql/redis/minio/JuiceFS Redis） | `""` | 组件级覆盖；非空优先于顶层 |
 | `controlPlane.enabled` | `true` | 内置控制面 |
 | `externalControlPlane.enabled` | `false` | 外部 CubeMaster |
 | `placement.controlPlane.nodeSelector` | `cube-control=true` | 控制面调度 |
@@ -422,8 +428,9 @@ externalControlPlane:
 | `volumeS3.endpoint` / `existingSecret` | `""` | S3 配置来源：都为空且 `minio.enabled=true` 时由内置 MinIO 自动填充；显式设置任一值需 `minio.enabled=false`（二选一，互斥） |
 | `cubeProxy.enabled` / `ingress.enabled` | `true` | Proxy / Ingress |
 | `lifecycleManager.enabled` | `true` | Proxy 启用时必开 |
-| `cubeEgress.enabled` | `true` | Big Pod egress sidecar |
-| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 19 GiB / 512 GiB 稀疏 WAL，含默认 1 GiB RAM cache） |
+| `cubeS3lvol.enabled` | `false` | Big Pod s3lvol sidecar（会重建 Pod；约 2 核 / 23 GiB / 512 GiB 稀疏 WAL，含默认 1 GiB RAM cache 和 4 GiB 宿主机 tmpfs 写回环） |
+| `cubeJuiceFS.enabled` | `false` | 共享 JuiceFS CoW 后端；增加独立元数据 Redis、格式化 Job 和逐节点 FUSE 挂载 DaemonSet |
+| `cubeJuiceFS.lifecycleChangeAck` | `false` | 启用、关闭或修改存储配置前先 drain 计算节点，再为该次升级临时设置的确认键 |
 | `cubeOps.enabled` | `true` | CubeOps（JWT 运维 API；WebUI 上游） |
 | `webui.enabled` | `true` | WebUI（要求 `cubeOps.enabled=true`） |
 

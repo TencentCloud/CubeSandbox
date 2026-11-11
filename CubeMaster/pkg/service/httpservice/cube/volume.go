@@ -4,13 +4,17 @@
 package cube
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -37,6 +41,9 @@ type CreateVolumeReq struct {
 	// Driver is the plugin name to use (e.g. "cos"). Optional;
 	// defaults to the first registered plugin when empty.
 	Driver string `json:"driver,omitempty"`
+	// PrivateData is opaque caller input forwarded to the Create hook only.
+	// Later operations use the state returned by the plugin, which may be empty.
+	PrivateData string `json:"private_data,omitempty"`
 }
 
 // VolumeItem is the serialised form of a volume returned to the caller.
@@ -95,13 +102,44 @@ func volumeItemFromRecord(r *models.VolumeRecord) VolumeItem {
 	}
 }
 
-// validatePluginPrivateData rejects Create-hook private_data that exceeds
-// models.MaxPrivateDataLen (1024 bytes via Go len()).
+// validatePluginPrivateData validates caller input before reservation and
+// plugin state before persistence, independent of Controller transport: a
+// later Node hook may use binary argv.
 func validatePluginPrivateData(privateData string) error {
 	if len(privateData) > models.MaxPrivateDataLen {
-		return fmt.Errorf("plugin private_data exceeds max length %d", models.MaxPrivateDataLen)
+		return fmt.Errorf("private_data exceeds max length %d", models.MaxPrivateDataLen)
+	}
+	if !utf8.ValidString(privateData) {
+		return errors.New("private_data must be valid UTF-8")
+	}
+	if strings.ContainsRune(privateData, '\x00') {
+		return errors.New("private_data must not contain NUL")
+	}
+	for _, r := range privateData {
+		if r > 0xffff {
+			return errors.New("private_data must not contain characters outside the BMP")
+		}
 	}
 	return nil
+}
+
+// rollbackCreatedVolume keeps cleanup best effort. Never log the returned
+// state or the raw plugin error, which may itself contain that state.
+func rollbackCreatedVolume(ctx context.Context, p plugin.ControllerPlugin, volumeID, privateData, phase string) {
+	if err := p.Destroy(ctx, volumeID, privateData); err != nil {
+		class := "plugin_failure"
+		if errors.Is(err, context.Canceled) {
+			class = "canceled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			class = "timeout"
+		}
+		log.G(ctx).WithFields(map[string]interface{}{
+			"volume_id":   volumeID,
+			"driver":      p.Name(),
+			"phase":       phase,
+			"error_class": class,
+		}).Error("volume create rollback cleanup failed; backend resources may remain")
+	}
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
@@ -125,11 +163,18 @@ func handleListVolumes(c *gin.Context) {
 }
 
 // handleCreateVolume implements POST /cube/volume
+// private_data content validation failures use HTTP 400 with the existing
+// parameter-error envelope; other responses retain their legacy status.
 func handleCreateVolume(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	var req CreateVolumeReq
 	if err := common.GetBodyReq(c.Request, &req); err != nil {
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "invalid request: "+err.Error())})
+		// Parser errors can include request excerpts containing private_data.
+		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "invalid request")})
+		return
+	}
+	if err := validatePluginPrivateData(req.PrivateData); err != nil {
+		common.WriteResponse(c.Writer, http.StatusBadRequest, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
 		return
 	}
 
@@ -189,7 +234,7 @@ func handleCreateVolume(c *gin.Context) {
 		return
 	}
 
-	info, err := p.Create(c.Request.Context(), volumeID, req.Name)
+	info, err := p.Create(c.Request.Context(), volumeID, req.Name, req.PrivateData)
 	if err != nil {
 		_ = volumeDB().WithContext(c.Request.Context()).
 			Where("volume_id = ?", volumeID).
@@ -199,11 +244,11 @@ func handleCreateVolume(c *gin.Context) {
 	}
 
 	if err := validatePluginPrivateData(info.PrivateData); err != nil {
-		_ = p.Destroy(c.Request.Context(), volumeID)
+		rollbackCreatedVolume(c.Request.Context(), p, volumeID, info.PrivateData, "invalid_plugin_state")
 		_ = volumeDB().WithContext(c.Request.Context()).
 			Where("volume_id = ?", volumeID).
 			Delete(&models.VolumeRecord{}).Error
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
+		common.WriteResponse(c.Writer, http.StatusBadRequest, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, err.Error())})
 		return
 	}
 
@@ -220,7 +265,7 @@ func handleCreateVolume(c *gin.Context) {
 		if err := volumeDB().WithContext(c.Request.Context()).
 			Model(record).
 			Updates(updates).Error; err != nil {
-			_ = p.Destroy(c.Request.Context(), volumeID)
+			rollbackCreatedVolume(c.Request.Context(), p, volumeID, info.PrivateData, "db_update_failed")
 			_ = volumeDB().WithContext(c.Request.Context()).
 				Where("volume_id = ?", volumeID).
 				Delete(&models.VolumeRecord{}).Error
@@ -302,7 +347,7 @@ func handleDeleteVolume(c *gin.Context) {
 		return
 	}
 
-	if destroyErr := p.Destroy(c.Request.Context(), volumeID); destroyErr != nil {
+	if destroyErr := p.Destroy(c.Request.Context(), volumeID, record.PrivateData); destroyErr != nil {
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, "plugin destroy error: "+destroyErr.Error())})
 		return
 	}

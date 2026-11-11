@@ -111,7 +111,7 @@ pkill -f s3lvol_tgt 2>/dev/null; sleep 1
 rm -f /var/tmp/spdk_cpu_lock_* /var/run/s3lvol.sock.lock "${WAL_FILE}" "${ACTIVE_FILE}"
 truncate -s 1G "${WAL_FILE}"
 
-"${TGT}" -m 0x3 --no-huge -s 2048 -r /var/run/s3lvol.sock >/tmp/actprobe_tgt.log 2>&1 &
+"${TGT}" -m "${S3LVOL_TGT_CPUMASK:-0x3}" --no-huge -s 2048 -r /var/run/s3lvol.sock >/tmp/actprobe_tgt.log 2>&1 &
 TGT_PID=$!
 for _ in $(seq 80); do [ -e /var/run/s3lvol.sock ] && break; sleep 0.25; done
 sleep 1

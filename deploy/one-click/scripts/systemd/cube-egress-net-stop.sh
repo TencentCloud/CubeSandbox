@@ -13,7 +13,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 require_root
 
-INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-${TOOLBOX_ROOT}/scripts/cube-egress/cube-proxy-iptables-init.sh}"
+INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-${TOOLBOX_ROOT}/scripts/cube-egress/cube-egress-iptables-init.sh}"
 ensure_executable "${INIT_SCRIPT}"
 
 exec "${INIT_SCRIPT}" down

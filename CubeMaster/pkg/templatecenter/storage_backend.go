@@ -24,7 +24,7 @@ func storageBackendFromCreate(req *sandboxtypes.CreateCubeSandboxReq) string {
 	return strings.TrimSpace(req.Annotations[constants.CubeAnnotationStorageBackend])
 }
 
-// stampCreateRequestBackend writes a normalized xfs|s3 backend onto the
+// stampCreateRequestBackend writes a normalized xfs|s3|jfs backend onto the
 // create request and the Master→Cubelet annotation. Empty input is a no-op
 // so callers that omit backend keep the historical request shape.
 func stampCreateRequestBackend(req *sandboxtypes.CreateCubeSandboxReq, backend string) error {
@@ -71,7 +71,7 @@ func applyStoredCreateBackend(req *sandboxtypes.CreateCubeSandboxReq, stored str
 	return nil
 }
 
-// resolvePersistedCreateBackend returns the xfs|s3 backend Master already
+// resolvePersistedCreateBackend returns the xfs|s3|jfs backend Master already
 // stored on a sandbox/template create request. Empty input becomes xfs.
 func resolvePersistedCreateBackend(req *sandboxtypes.CreateCubeSandboxReq) (string, error) {
 	return constants.NormalizeSnapshotBackend(storageBackendFromCreate(req))
@@ -79,14 +79,14 @@ func resolvePersistedCreateBackend(req *sandboxtypes.CreateCubeSandboxReq) (stri
 
 func isPinnedSnapshotBackend(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case constants.SnapshotBackendXFS, constants.SnapshotBackendS3:
+	case constants.SnapshotBackendXFS, constants.SnapshotBackendS3, constants.SnapshotBackendJFS:
 		return true
 	default:
 		return false
 	}
 }
 
-// pinnedCleanupBackend returns xfs|s3 only when the row was explicitly
+// pinnedCleanupBackend returns xfs|s3|jfs only when the row was explicitly
 // pinned. Empty / historical cubecow stay empty so Cleanup keeps the
 // historical Cubelet default (xfs).
 func pinnedCleanupBackend(raw string) string {

@@ -117,6 +117,9 @@ func requireCowUploader(backend string) (cow.Uploader, error) {
 	if err != nil {
 		return nil, err
 	}
+	if normalized == cow.BackendJFS {
+		return jfsUploader{}, nil
+	}
 	if normalized != cow.BackendS3 {
 		return noopUploader{}, nil
 	}

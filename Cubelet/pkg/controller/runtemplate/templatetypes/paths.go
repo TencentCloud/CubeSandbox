@@ -56,7 +56,7 @@ func VersionedLocalPath(base, name, version, relativePath string) string {
 // other versions are unchanged.
 func InventoryVersionKey(version string) string {
 	version = path.Base(strings.TrimSpace(version))
-	if version == "." || version == "/" || version == "" {
+	if version == "." || version == ".." || version == "/" || version == "" {
 		return ""
 	}
 	candidate := version
@@ -70,7 +70,7 @@ func InventoryVersionKey(version string) string {
 	if short := InventoryKeyFromContentDigest(candidate); short != "" {
 		return short
 	}
-	if strings.HasPrefix(candidate, "sha256:") {
+	if candidate == "." || candidate == ".." || strings.HasPrefix(candidate, "sha256:") {
 		return ""
 	}
 	return candidate

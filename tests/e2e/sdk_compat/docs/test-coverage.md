@@ -37,7 +37,10 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_rollback_clone.py` | Rollback errors/filesystem/kernel state; default/concurrent clone state and temporary-snapshot cleanup | `rollback_clone` (CubeSandbox only), partially Code Interpreter | P1 |
 | `cases/lifecycle/test_negative_and_timeout.py` | Missing create/connect targets, pause-after-delete and online timeout update | `lifecycle`, `pause_resume`, `set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | unusable after kill, list removal, idempotent terminal semantics | `lifecycle` | P1 |
+| `cases/lifecycle/test_list_metadata_filter.py` | sandbox list `metadata` filter: values E2B's SDKs percent-encode twice (space, `/`, non-ASCII, `=`, `&`, `%`), multi-key AND, single-encoded values from older callers (as written, `urlencode`, `quote`; an escaped `&` stays in the value), hand-built URL needs the value's `&`/`=` double-encoded, 400 on a value that is not key=value pairs (v1 and v2) | `lifecycle`; SDK cases run on the `e2b` backend only | P1 |
+| `cases/lifecycle/test_list_state_filter.py` | `GET /v2/sandboxes` comma-separated `state`, whole-request 400 on any bad token, default list limited to states E2B can parse, paused/running separation; E2B SDK `SandboxQuery(state=...)` | `lifecycle`; paused cases also `pause_resume`; SDK cases run on the `e2b` backend only | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause, manual/auto resume, reentrant resume, auto-kill, manual pause before timeout | `platform_lifecycle`, CubeProxy, lifecycle-manager, partially Code Interpreter | P1 + `slow`, daily run |
+| `cases/lifecycle/test_restart_policy.py` | policy on info, default Never, rejected values, healthy sandbox stays up, guest crash keeps id and durable file, kill does not restart, maxRestarts gives up, exit 0 only restarts Always, non-zero main-process exit, backoff schedule, stable-period reset, pause during backoff, pause and resume after a cold restart, delete during backoff, liveness failure | `restart_policy` (CubeSandbox only). Runs with `--run-e2e`. Cluster needs envd on port 49983. Pause cases also need `pause_resume` | P1 control plane; P2/P3 + `slow` for crash, exit, backoff and give-up |
 
 The current `platform_lifecycle` prerequisite reflects this branch's execution
 configuration: it depends on CubeProxy and lifecycle-manager coordination, but
@@ -77,7 +80,8 @@ data-plane regressions.
 - overwrite, multiline text and deep paths;
 - larger text content;
 - interoperability between file API and shell;
-- missing file error semantics.
+- missing file error semantics;
+- binary `bytes` and `stream` reads, including an empty file and a file created by the shell.
 
 `cases/filesystem/test_extended.py` covers directory and file metadata, nested
 and empty directory listing, exists, remove, rename and mkdir through the SDK
@@ -86,9 +90,8 @@ filesystem API.
 `cases/filesystem/test_batch_and_watch.py` covers multi-file writes and live
 directory create/write/remove events through both SDK backends.
 
-The current content coverage is text-file focused. Non-root permission
-behavior, binary round-trips, atomic replace and concurrent file access are not
-covered yet.
+Binary content is covered for `bytes` and `stream` reads. Non-root permission
+behavior, atomic replace and concurrent file access are not covered yet.
 
 ### 2.4 Run Code
 
@@ -145,6 +148,32 @@ The established-connection cases use the guest-side holder in
 flow is re-evaluated when the guest next sends, so nothing would be observed on
 an idle socket.
 
+`cases/network/test_sandbox_to_sandbox.py` covers sandbox-to-sandbox
+data-plane access (`network_sandbox_to_sandbox`, CubeSandbox only), mirroring
+`examples/code-sandbox-quickstart/sandbox-curl-sandbox.py` and
+`sandbox-port-mapping.py`:
+
+- an HTTP service in sandbox B reached from sandbox A through CubeProxy Host
+  routing (`curl --resolve` pins `<port>-<sandboxID>.<domain>` to the proxy
+  node IP, so no wildcard DNS is needed inside the sandbox);
+- the same path with B created `allow_public_traffic=False`: no token gets
+  HTTP 403, B's traffic access token gets 200;
+- node host-port mapping: B is created from a module-provisioned template
+  exposing the service port, the `hostIP:hostPort` endpoint is discovered via
+  the SDK's `get_exposed_port_endpoint` (a caller-IP override forces
+  `host_port` mode),
+  and A is created with `allow_out` for the node IP so the case also holds
+  when the node IP falls inside the built-in always-denied private ranges;
+- egress policy applied to hairpin traffic: a deny-all A is rejected when
+  curling `nodeIP:hostPort`.
+
+All cases create B from a module-provisioned template that declares the
+service port (same pattern as `test_mask_request_host.py`), which makes them
+scheduler-placement independent: the CubeProxy route resolves cross-node via
+the host-port mapping, and same-node pairs exercise the in-software hairpin
+loopback while cross-node pairs traverse the wire, both satisfying the same
+assertions. Neither group needs public internet.
+
 `cases/lifecycle/test_pause_resume_network.py` covers the same create-time
 policies after an SDK pause + connect resume:
 
@@ -153,6 +182,16 @@ policies after an SDK pause + connect resume:
   listed target;
 - restricted public access still requires a traffic access token after resume
   (CubeProxy HostIP rewrite path).
+
+`cases/network/test_l7_catch_all.py` covers a `"*"` L7 rule
+(`network_l7_egress` + `network_dns_allow`, CubeSandbox only):
+
+- a name resolved inside the sandbox can use ports 80 and 443, and the HTTPS
+  response is allowed by the catch-all;
+- another open port on that name stays closed;
+- a public IP that was never looked up stays closed;
+- a rule for one name is applied before the catch-all;
+- creating a catch-all rule that injects credentials is accepted.
 
 Shared TCP / public-access probe helpers live in
 `framework/network_probe.py`.
@@ -215,11 +254,11 @@ UUID-named directories so parallel runs do not collide.
 The current suite mainly validates synchronous Python SDK paths and the
 CubeSandbox/E2B compatibility surface:
 
-- covered: create, info, command, text files, Python code, pause/resume, kill,
+- covered: create, info, command, text and binary file reads, Python code, pause/resume, kill,
   partial platform lifecycle, basic egress policy and two-sandbox file
   isolation;
 - not covered: async SDK, streaming output, complete template/snapshot/metadata
-  APIs, directory and binary filesystem operations, full HTTP/HTTPS/L7/UDP-DNS
+  APIs, non-root filesystem permissions, full HTTP/HTTPS/L7/UDP-DNS
   network semantics, cancellation/resource limits, real concurrency load and
   multi-node failure recovery.
 
@@ -244,7 +283,7 @@ contract maturity, environment reproducibility and CI budget.
 | --- | --- | --- | --- |
 | Lifecycle races | pause vs timeout, reentrant resume, kill vs resume | Expose state-machine and distributed lock issues | `cases/lifecycle/` |
 | Lifecycle timing | timeout refresh, manual pause before timeout, new idle cycle after manual connect, `endAt` drift | Validate lifecycle contract across time windows | `cases/lifecycle/` |
-| Filesystem | directories, non-root permissions, binary round-trip, empty files, delete/rename | Expand SDK file API compatibility | `cases/filesystem/` |
+| Filesystem | non-root permissions, atomic replace, concurrent file access | Expand SDK file API compatibility | `cases/filesystem/` |
 | Commands | working directory, user switching, signal/cancel, large output and resource cleanup after timeout | Catch process/stream cleanup bugs | `cases/commands/` |
 | Run code | kernel usability after errors, timeout, resource limit, rich output, language parameters | Validate interpreter resilience | `cases/run_code/` |
 | Network DNS/UDP | domain allow/deny, DNS failure, UDP DNS request/response | Avoid using TCP as a proxy for DNS/UDP policy | `cases/network/` |

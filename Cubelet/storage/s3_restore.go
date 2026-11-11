@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -28,9 +29,14 @@ func activateStoreObjects(ctx context.Context, store cow.Store, backend, snapsho
 	if id == "" {
 		return fmt.Errorf("snapshot_id is required")
 	}
-	refs := activateObjectRefs(ctx, backend, id)
-	if len(refs) == 0 {
-		return fmt.Errorf("%w: snapshot %s has no rootfs/memory objects", ErrCowObjectMissing, id)
+	refs, err := activateObjectRefs(ctx, store, backend, id)
+	if err != nil {
+		return fmt.Errorf("resolve snapshot %s objects: %w", id, err)
+	}
+	// The rootfs is the package's proof of existence: memory or metadata
+	// alone name a partial package, not something that can be activated.
+	if !hasRootfsRef(refs) {
+		return fmt.Errorf("%w: snapshot %s has no rootfs object", ErrCowObjectMissing, id)
 	}
 	for _, ref := range refs {
 		if IsS3MetadataBaseName(ref.Name) {
@@ -62,47 +68,102 @@ func activateStoreObjects(ctx context.Context, store cow.Store, backend, snapsho
 	return nil
 }
 
-func activateObjectRefs(ctx context.Context, backend, snapshotID string) []CowObjectRef {
+// activateObjectRefs returns the objects of a package in the order callers
+// activate or export them (rootfs, memory, metadata).
+//
+// The catalog is the authority on what a package contains: a filesystem-only
+// package has no memory object, and inventing one would turn a valid package
+// into a dangling reference. When the catalog cannot be read, the object names
+// are still a pure function of the package id, so probe the store and keep only
+// names that exist — the contract ADR-14 states for the degraded path.
+func activateObjectRefs(ctx context.Context, store cow.Store, backend, snapshotID string) ([]CowObjectRef, error) {
 	entry, err := GetLocalSnapshotFor(ctx, backend, snapshotID)
+	if err != nil && !errors.Is(err, ErrSnapshotCatalogNotFound) {
+		// A broken catalog must not fall back to name guessing: the
+		// conventional names could belong to a different package.
+		return nil, fmt.Errorf("load snapshot %s catalog: %w", snapshotID, err)
+	}
 	if err == nil && entry != nil {
-		refs := make([]CowObjectRef, 0, 3)
-		if name := strings.TrimSpace(entry.RootfsVol); name != "" {
-			kind := strings.TrimSpace(entry.RootfsKind)
-			if kind == "" {
-				kind = cowKindSnapshot
-			}
-			refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "rootfs"})
-		}
-		if name := strings.TrimSpace(entry.MemoryVol); name != "" {
-			kind := strings.TrimSpace(entry.MemoryKind)
-			if kind == "" {
-				kind = cowKindVolume
-			}
-			refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "memory"})
-		}
-		if name := strings.TrimSpace(entry.MetadataVol); name != "" && !IsS3MetadataBaseName(name) {
-			kind := strings.TrimSpace(entry.MetadataKind)
-			if kind == "" {
-				kind = cowKindSnapshot
-			}
-			refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
-		} else if isS3CatalogBackend(backend) {
-			if meta := S3MetadataSnapshotName(entry.SnapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
-				refs = append(refs, CowObjectRef{Name: meta, Kind: cowKindSnapshot, Role: "metadata"})
-			}
-		}
-		if len(refs) > 0 {
-			return refs
+		if refs := catalogObjectRefs(entry, backend); len(refs) > 0 {
+			return refs, nil
 		}
 	}
-	refs := []CowObjectRef{
-		{Name: cowTemplateRootfsName(snapshotID), Kind: cowKindSnapshot, Role: "rootfs"},
-		{Name: cowTemplateMemoryName(snapshotID), Kind: cowKindVolume, Role: "memory"},
+	return fallbackObjectRefs(ctx, store, backend, snapshotID)
+}
+
+func hasRootfsRef(refs []CowObjectRef) bool {
+	for _, ref := range refs {
+		if ref.Role == "rootfs" && strings.TrimSpace(ref.Name) != "" {
+			return true
+		}
 	}
-	if isS3CatalogBackend(backend) {
-		if meta := S3MetadataSnapshotName(snapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
+	return false
+}
+
+// catalogObjectRefs lists the objects a readable catalog entry names.
+func catalogObjectRefs(entry *SnapshotCatalogEntry, backend string) []CowObjectRef {
+	refs := make([]CowObjectRef, 0, 3)
+	if name := strings.TrimSpace(entry.RootfsVol); name != "" {
+		kind := strings.TrimSpace(entry.RootfsKind)
+		if kind == "" {
+			kind = cowKindSnapshot
+		}
+		refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "rootfs"})
+	}
+	if name := strings.TrimSpace(entry.MemoryVol); name != "" {
+		kind := strings.TrimSpace(entry.MemoryKind)
+		if kind == "" {
+			kind = cowKindVolume
+		}
+		refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "memory"})
+	}
+	if name := strings.TrimSpace(entry.MetadataVol); name != "" && !IsS3MetadataBaseName(name) {
+		kind := strings.TrimSpace(entry.MetadataKind)
+		if kind == "" {
+			kind = cowKindSnapshot
+		}
+		refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
+	} else if isS3CatalogBackend(backend) {
+		if meta := S3MetadataSnapshotName(entry.SnapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
 			refs = append(refs, CowObjectRef{Name: meta, Kind: cowKindSnapshot, Role: "metadata"})
 		}
 	}
 	return refs
+}
+
+// fallbackObjectRefs derives a package's objects from its id alone, using the
+// same name table as deriveS3CatalogEntry so the two degraded paths cannot
+// disagree about what a sealed package looks like.
+func fallbackObjectRefs(ctx context.Context, store cow.Store, backend, snapshotID string) ([]CowObjectRef, error) {
+	rootfs, _, err := firstExistingCowObject(ctx, store,
+		s3ObjectCandidate{name: cowTemplateRootfsName(snapshotID), kind: cowKindSnapshot},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if rootfs == "" {
+		// No rootfs means this id names no package on this node, even if a
+		// leftover memory or metadata object still carries the name.
+		return nil, nil
+	}
+	refs := []CowObjectRef{{Name: rootfs, Kind: cowKindSnapshot, Role: "rootfs"}}
+	memory, memoryKind, err := firstExistingCowObject(ctx, store, packageMemoryCandidates(snapshotID)...)
+	if err != nil {
+		return nil, err
+	}
+	if memory != "" {
+		refs = append(refs, CowObjectRef{Name: memory, Kind: memoryKind, Role: "memory"})
+	}
+	if isS3CatalogBackend(backend) {
+		// Probe, do not assume: a phantom metadata ref would make an
+		// otherwise empty ref list look like a package.
+		meta, metaKind, err := firstExistingCowObject(ctx, store, packageMetadataCandidates(snapshotID)...)
+		if err != nil {
+			return nil, err
+		}
+		if meta != "" && !IsS3MetadataBaseName(meta) {
+			refs = append(refs, CowObjectRef{Name: meta, Kind: metaKind, Role: "metadata"})
+		}
+	}
+	return refs, nil
 }

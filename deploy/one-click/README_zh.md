@@ -160,7 +160,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — 设计与运维要点](../../docs/zh/guide/lifecycle.md#集群默认空闲超时default_timeout_insec)。
 - `Cubelet/config/` -> `Cubelet/config/`
 - `Cubelet/dynamicconf/` -> `Cubelet/dynamicconf/`
-- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-proxy-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}`（环境变量） -> `/etc/cubeegress/l7-marks.conf` —— L7 egress 的 skb->mark 值，由 Cubelet 内置 network runtime 的 eBPF 数据面（负责打标）与 `cube-egress-iptables-init` 的 TPROXY 规则（负责匹配）共用。两侧读取同一文件并各自校验（`HTTP != HTTPS`、取值只能落在 mask 位内）。默认值与覆盖方式见 `env.example`。
 - `CubeAPI/bin/cube-api` -> `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` -> `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
@@ -178,6 +178,43 @@ cd cube-sandbox-one-click-<version>
 cp env.example .env
 sudo ./install.sh
 ```
+
+### 在线安装与可选组件开关
+
+`online-install.sh` 只是 one-click 发布包的下载入口：完成下载、解压后仍会执行包内同一份
+`install.sh`，因此它不是独立的部署形态。管道安装时推荐通过进程环境传递可选组件开关，
+与内置 MinIO 的方式保持一致：
+
+```bash
+# 控制节点：MinIO 保持默认开启，同时开启完整可观测性栈
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      CUBE_SANDBOX_MINIO_ENABLED=1 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+
+# 计算节点：不会安装 MinIO；仅安装 OTel Collector 并推送到控制面
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      ONE_CLICK_DEPLOY_ROLE=compute \
+      ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+```
+
+`CUBE_SANDBOX_MINIO_ENABLED` 与 `ONE_CLICK_ENABLE_OBSERVABILITY` 都是期望状态开关，
+会写入 `.one-click.env` 并在升级时继续生效。监控后端地址
+`CUBE_METRICS_OTLP_HTTP_ENDPOINT` / `CUBE_LOGS_OTLP_HTTP_ENDPOINT` /
+`CUBE_LOGS_ES_ENDPOINT` 只配置数据去向，不会独立
+开启监控。本地解压安装请直接修改 `.env` 中的开关；在线管道安装则按上例通过
+`sudo env` 传入。节点 Collector 仅采集 Cubelet 沙箱资源指标和
+`/data/cubelet/log/<sandbox-id>/{stdout,stderr}` 中的沙箱标准输出/标准错误日志。
+
+日志后端支持 `CUBE_LOGS_BACKEND=loki|elasticsearch`，默认和后续建议均为 Loki；
+已有 ES 平台或需要复杂全文检索时可选择 Elasticsearch。安装器一次只启用一个日志
+后端，不默认双写。
+组件版本、Collector 配置、外部后端和运维命令见
+[可观测性部署指南](../../docs/zh/guide/observability.md)。
 
 one-click 固定安装到 `/usr/local/services/cubetoolbox`。
 
@@ -202,8 +239,8 @@ CubeS3lvol（s3lvol）作为 `cube-sandbox-*` 角色 target 的 `Wants=` 成员�
 - **停止（`down.sh` / `systemctl stop cube-sandbox-{control,compute}.target`）**：s3lvol 单元会走 `cube-s3lvol-stop.sh` 的**条件卸载**——target 进程存活时完整执行 `rcow_stop.sh`（断开 initiator → 卸载 lvstore/回刷 → 终止 target），target 已崩溃时只清理 target 侧残留、绝不断开 NVMf initiator。`down.sh` 只停止服务，**不删除任何数据**（`/data/cubelet/rcow/wal_bdev.img` 与 bstore 元数据保留），再次启动走 attach/replay 恢复。
 - **升级（`install.sh` 升级模式）**：组件安装到**版本化目录**（`CubeS3lvol-<version>/`），裸名 `CubeS3lvol` 是指向它的软链；被替换的版本保留在旁边，更旧的会被清理。
   - **首次升级**（旧装、或 target 过旧无法自述盘上格式、或脚本早于改名 `rcow_upgrade.sh`）：target 走**停止再启动**，仅这一次有中断。具体原因由 `install.sh` 说明。
-  - **此后每次升级都是原地热升级**：在线 checkpoint、直接 kill，替换进程重建同一套 NQN/(subsys, nsid)/UUID 网格，因此 host 重连到同一个 `/dev/nvmeXnY`，sandbox 的 I/O 只是暂停（约 8s）。initiator 全程不断开，lvstore 从不卸载。checkpoint 没能推上去的数据仍在 WAL 中，由替换进程 replay，因此 kill 前的 flush 默认被跳过（`RCOW_HOT_FLUSH_MS=0`）。该步骤在 `install.sh` 停掉其它组件**之前**运行，因为 prepare 与 layout 快照都需要活着的 target 和 S3 端点。
-  - 若替换后布局未能完整恢复，会**回滚**到上一版本；`install.sh` 仍会把其余部分装完，然后以非零退出。节点是完整的，但 s3lvol 仍是旧版本。
+  - **此后每次升级都是原地热升级**：在线 checkpoint、直接 kill，替换进程重建同一套 NQN/(subsys, nsid)/UUID 网格，因此 host 重连到同一个 `/dev/nvmeXnY`，sandbox 的 I/O 只是暂停（约 8s）。initiator 全程不断开，lvstore 从不卸载。checkpoint 没能推上去的数据在共享内存 write-back 环里，不在磁盘 WAL 中，由同一节点上的替换进程 replay 这个环。节点重启会丢掉还没进入 S3 的记录。kill 前的 flush 默认被跳过（`RCOW_HOT_FLUSH_MS=0`）。新进程已经在服务，或已经 attach 了 lvstore 之后，脚本拒绝回滚到旧二进制。该步骤在 `install.sh` 停掉其它组件**之前**运行，因为 prepare 与 layout 快照都需要活着的 target 和 S3 端点。
+  - 若替换后布局未能完整恢复，只有新进程既没有开始服务、也没有 attach lvstore 时才会**回滚**到上一版本。已经服务或已经 attach 的，脚本让新版本继续跑。`install.sh` 仍会把其余部分装完，然后以非零退出。发生回滚时节点是完整的，但 s3lvol 仍是旧版本。
   - `wal_bdev.img` **永不覆盖**（仅首次安装创建，其尺寸固定 journal/WAL 布局），`.one-click.env` 中 `RCOW_*` 配置经升级合并保留。热升级的两个旋钮 `RCOW_HOT_FLUSH_MS`（默认 `0`，跳过 kill 前 flush）与 `RCOW_HOT_PREPARE_SUSPEND_MS`（默认 `60000`，单次 flusher hold 的上限）也会写入 `.one-click.env`，可直接按常规 `.env` 方式调整。
 - **启停开关**：推荐 `ONE_CLICK_ENABLE_S3LVOL=0|1 ./install.sh`（upgrade 同样生效）。或在包内 `.env` **只写这一项** 再重跑 `install.sh`。不要整份 `cp env.example .env` 再 upgrade，否则这个开关会被重置成 `0`。不必再手改 `.one-click.env`。也可以直接 `systemctl enable/disable cube-sandbox-s3lvol.service`。`CUBE_PVM_ENABLE` 遵循同样规则：出现在 `.env` 或进程环境中即视为显式设置（整份 `cp` 同样会把它重置为 `0`）。
 - **S3 后端**：启用后 `install.sh` 用 `CUBE_S3_*` 自动写出 `/data/cubelet/s3.cfg`（默认对接内置 MinIO；配了外部 S3 就跟外部走）。s3lvol 使用独立桶 `CUBE_S3LVOL_BUCKET`（默认 `cube-s3lvol`），与 volume 插件的 `cube-volumes` 分开。supervisor 启动前会用 stdlib SigV4 工具幂等建桶，不依赖 awscli。手写且不含 one-click sentinel 的 `s3.cfg` 不会被覆盖。开发机上旧的 `/data/cubelet/cos.cfg` **不会回落**，请改名为 `s3.cfg` 并换成新字段名。
@@ -247,7 +284,7 @@ cp env.example .env
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
 ```
 
 若控制节点用了内置 MinIO（或任何 S3 后端），建议把该节点回填的 `CUBE_S3_*` 拷过来：
@@ -296,6 +333,10 @@ MySQL/Redis 依赖默认会部署到：
 - `mysql:8.0`
 - `redis:7-alpine`
 - `minio`（S3 兼容 Volume 后端；由 `CUBE_SANDBOX_MINIO_ENABLED` 显式开关，默认开启）
+
+### 使用外部原生 Redis Cluster
+
+将 `CUBE_EXTERNAL_REDIS_CLUSTER_NODES` 设置为以逗号分隔的 `host:port` 种子节点列表，将 `CUBE_EXTERNAL_REDIS_DB` 设置为 `0`，并清空固定的单机 Redis 地址和 Sentinel 配置。部署脚本连接已有的 Cluster，不负责创建 Redis 集群。各组件配置、一致性限制和迁移检查见 [配置与迁移指南](../../docs/zh/guide/redis-cluster.md)。
 
 ### 使用外部 MySQL / PostgreSQL / Redis
 
@@ -392,8 +433,8 @@ grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
-CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
+CUBE_S3_ENDPOINT=http://10.0.0.10:9000
 CUBE_S3_ACCESS_KEY_ID=cubeminio
 CUBE_S3_SECRET_ACCESS_KEY=<控制面 .one-click.env 里的值>
 CUBE_S3_BUCKET=cube-volumes
@@ -463,6 +504,7 @@ export E2B_API_KEY=e2b_000000
 - `sed`
 - `pgrep`
 - `date`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
 
 条件命令：
 
@@ -514,6 +556,7 @@ sudo yum install -y python3 libaio libnuma libuuid
 - `date`
 - `ip`
 - `awk`
+- `openssl`（cube-egress-prepare.sh 生成 CubeEgress 根 CA 的硬依赖；精简/云镜像可能未预装，如 OpenCloudOS 9 minimal，需 `dnf install -y openssl` 或 `apt-get install -y openssl`）
 
 二选一命令：
 
@@ -647,7 +690,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker 节点数（默�
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                 # 默认使用公网预置镜像
 export TENCENTCLOUD_USE_CFS=false                 # 默认无 CFS，cubemaster 单副本
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.3
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.8.0-rc1
 ```
 
 非交互 / CI 运行时建议显式设置以下变量（没有 TTY 时交互菜单会回退到默认值，显式设置可避免意外）。密码变量是例外：非交互运行会拒绝使用仓库中公开可见的内置演示密码并要求显式设置；如需在临时沙箱中使用不安全的默认密码，可设置 `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1`。

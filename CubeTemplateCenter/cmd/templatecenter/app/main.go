@@ -192,13 +192,8 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("dao migrate: %w", err)
 	}
 
-	// The node view is always loaded: TC serves /cube/template* directly (see
-	// pkg/httpservice.registerRoutes), and its distribution step has to pick
-	// target nodes -- distributeRootfsArtifact -> resolveTemplateNodes ->
-	// healthyTemplateNodes -> localcache.GetHealthyNodesByInstanceType, whose
-	// data only exists because nodemeta.Init registers the node loader
-	// (localcache.RegisterNodeLoader). Without it every build would fail with
-	// ErrNoTemplateNodes.
+	// The node view supports TC's read-only template info/list handlers.
+	// Artifact distribution runs only in CubeMaster.
 	//
 	// Node heartbeats only ever reach CubeMaster, so this view is a DB-derived
 	// replica, not an authoritative one.

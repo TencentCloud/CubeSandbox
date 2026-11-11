@@ -55,6 +55,7 @@ func TestErrNoBaseMemoryForIncrementalIsSentinel(t *testing.T) {
 // matches the post-rollback CH process's just-armed soft-dirty window.
 func TestResolveBaseSnapshotIDFollowsCommitChain(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{
+		MemoryLineage: &cubeboxstore.MemoryLineage{},
 		Metadata: cubeboxstore.Metadata{
 			Annotations: map[string]string{
 				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
@@ -62,30 +63,30 @@ func TestResolveBaseSnapshotIDFollowsCommitChain(t *testing.T) {
 		},
 	}
 
-	// 1. Fresh start from template T: only the create-time template
-	//    annotation is present; resolve must fall back to it.
-	assert.Equal(t, "tpl-T", resolveBaseSnapshotID(cb), "initial: bound to template T")
+	// A create-request annotation is not a memory base. Create-from-template
+	// stamps the lineage; a restarted sandbox keeps this empty struct.
+	assert.Equal(t, "", resolveBaseSnapshotID(cb), "annotations alone are not a memory base")
 
 	// 2. CommitSandbox(target=A) success: stamp the new commit so that
 	//    the *next* commit knows to clone A as its base.
-	setRuntimeSnapshotBindingLabels(cb, "snap-A", time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, "snap-A")
 	assert.Equal(t, "snap-A", resolveBaseSnapshotID(cb), "after commit A: bound to A")
 
 	// 3. CommitSandbox(target=B) success.
-	setRuntimeSnapshotBindingLabels(cb, "snap-B", time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, "snap-B")
 	assert.Equal(t, "snap-B", resolveBaseSnapshotID(cb), "after commit B: bound to B")
 
 	// 4. RollbackSandbox(snapshot_id=A): rollback.go already stamps the
 	//    runtime-snapshot label to the rolled-back-to snapshot id, so we
 	//    just simulate the same setter call here.
-	setRuntimeSnapshotBindingLabels(cb, "snap-A", time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, "snap-A")
 	assert.Equal(t, "snap-A", resolveBaseSnapshotID(cb),
 		"after rollback to A: binding must collapse to A so next commit clones A as base")
 
 	// 5. CommitSandbox(target=C) success: this is the user-facing concern
 	//    — without the binding update on the prior commits, this step
 	//    would have inherited "tpl-T" from step 1.
-	setRuntimeSnapshotBindingLabels(cb, "snap-C", time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, "snap-C")
 	assert.Equal(t, "snap-C", resolveBaseSnapshotID(cb), "after commit C: bound to C")
 }
 
@@ -103,85 +104,33 @@ func TestRuntimeBindingLabelOverridesCreateAnnotation(t *testing.T) {
 			},
 		},
 	}
-	setRuntimeSnapshotBindingLabels(cb, "snap-after-commit", time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, "snap-after-commit")
 	assert.Equal(t, "snap-after-commit", resolveBaseSnapshotID(cb),
 		"the per-commit Labels stamp must beat both create-time annotations")
 }
 
-// TestResolveRestoreBaseSnapshotIDPriorityOrder pins the lookup priority
-// for the pagemap_anon fallback path.
-//
-// Restore-base resolution must prefer, in order:
-//  1. Labels[RuntimeRestoreSnapshotID]      — set at Create + Rollback
-//  2. Annotations[RuntimeRestoreSnapshotID] — never used today, kept for
-//     forward compatibility if the master ever stamps it on a request
-//  3. Annotations[RuntimeSnapshotID]        — create-time runtime binding
-//  4. Annotations[AppSnapshotTemplateID]    — original create-time template
-//
-// The annotation backstops exist so a sandbox that pre-dates the new
-// Labels-based binding (i.e. one that survives an in-place upgrade) still
-// gets the pagemap_anon path on first commit-after-deletion, instead of
-// falling through to the full-rewrite tier.
-func TestResolveRestoreBaseSnapshotIDPriorityOrder(t *testing.T) {
-	cases := []struct {
-		name        string
-		labels      map[string]string
-		annotations map[string]string
-		want        string
-	}{
-		{
-			name: "label wins over every annotation backstop",
-			labels: map[string]string{
+// TestResolveRestoreBaseSnapshotIDIgnoresMetadata pins that create-request
+// labels and annotations are never a restore base. Only the lineage counts,
+// so a restarted sandbox cannot inherit the pre-restart memory image.
+func TestResolveRestoreBaseSnapshotIDIgnoresMetadata(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			Labels: map[string]string{
 				constants.MasterAnnotationRuntimeRestoreSnapshotID: "label-restore",
 			},
-			annotations: map[string]string{
+			Annotations: map[string]string{
 				constants.MasterAnnotationRuntimeRestoreSnapshotID: "ann-restore",
 				constants.MasterAnnotationRuntimeSnapshotID:        "ann-runtime",
 				constants.MasterAnnotationAppSnapshotTemplateID:    "tpl-T",
 			},
-			want: "label-restore",
-		},
-		{
-			name: "annotation restore key wins when label absent",
-			annotations: map[string]string{
-				constants.MasterAnnotationRuntimeRestoreSnapshotID: "ann-restore",
-				constants.MasterAnnotationRuntimeSnapshotID:        "ann-runtime",
-				constants.MasterAnnotationAppSnapshotTemplateID:    "tpl-T",
-			},
-			want: "ann-restore",
-		},
-		{
-			name: "annotation runtime key is the next backstop",
-			annotations: map[string]string{
-				constants.MasterAnnotationRuntimeSnapshotID:     "ann-runtime",
-				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
-			},
-			want: "ann-runtime",
-		},
-		{
-			name: "create-time template id is the final backstop",
-			annotations: map[string]string{
-				constants.MasterAnnotationAppSnapshotTemplateID: "tpl-T",
-			},
-			want: "tpl-T",
-		},
-		{
-			name: "no binding => empty",
-			want: "",
 		},
 	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			cb := &cubeboxstore.CubeBox{
-				Metadata: cubeboxstore.Metadata{
-					Labels:      tc.labels,
-					Annotations: tc.annotations,
-				},
-			}
-			assert.Equal(t, tc.want, resolveRestoreBaseSnapshotID(cb))
-		})
-	}
+	assert.Equal(t, "", resolveRestoreBaseSnapshotID(cb))
+	assert.Equal(t, "", resolveBaseSnapshotID(cb))
+	assert.Equal(t, "", resolveLaunchAncestorSnapshotID(cb))
+
+	cb.BindRestoreBase("snap-true")
+	assert.Equal(t, "snap-true", resolveRestoreBaseSnapshotID(cb))
 }
 
 // TestRestoreBaseLabelDoesNotAdvanceOnCommit is the core invariant of the
@@ -210,35 +159,34 @@ func TestRestoreBaseLabelDoesNotAdvanceOnCommit(t *testing.T) {
 		},
 	}
 
-	now := time.Now().UTC()
 	// Step 1: Create-restore from tpl-T sets BOTH bindings.
-	setRuntimeSnapshotBindingLabels(cb, "tpl-T", now)
-	setRuntimeRestoreBaseLabels(cb, "tpl-T", now)
-	assert.Equal(t, "tpl-T", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, "tpl-T", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
+	setRuntimeSnapshotBinding(cb, "tpl-T")
+	setRuntimeRestoreBase(cb, "tpl-T")
+	assert.Equal(t, "tpl-T", cb.RuntimeBaseID())
+	assert.Equal(t, "tpl-T", cb.RestoreBaseID())
 
 	// Step 2: Commit A advances the runtime-snapshot binding only.
-	setRuntimeSnapshotBindingLabels(cb, "snap-A", now.Add(time.Second))
-	assert.Equal(t, "snap-A", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, "tpl-T", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID],
-		"commit must not advance the restore-base label")
+	setRuntimeSnapshotBinding(cb, "snap-A")
+	assert.Equal(t, "snap-A", cb.RuntimeBaseID())
+	assert.Equal(t, "tpl-T", cb.RestoreBaseID(),
+		"commit must not advance the restore-base")
 
 	// Step 3: Commit B — same invariant.
-	setRuntimeSnapshotBindingLabels(cb, "snap-B", now.Add(2*time.Second))
-	assert.Equal(t, "snap-B", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, "tpl-T", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
+	setRuntimeSnapshotBinding(cb, "snap-B")
+	assert.Equal(t, "snap-B", cb.RuntimeBaseID())
+	assert.Equal(t, "tpl-T", cb.RestoreBaseID())
 
 	// Step 4: Rollback to A: rollback restarts the VM, so it bumps BOTH.
-	setRuntimeSnapshotBindingLabels(cb, "snap-A", now.Add(3*time.Second))
-	setRuntimeRestoreBaseLabels(cb, "snap-A", now.Add(3*time.Second))
-	assert.Equal(t, "snap-A", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, "snap-A", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
+	setRuntimeSnapshotBinding(cb, "snap-A")
+	setRuntimeRestoreBase(cb, "snap-A")
+	assert.Equal(t, "snap-A", cb.RuntimeBaseID())
+	assert.Equal(t, "snap-A", cb.RestoreBaseID())
 
 	// Step 5: Commit C after rollback — runtime-snapshot advances; the
 	//         restore-base label remains pinned at the rollback target.
-	setRuntimeSnapshotBindingLabels(cb, "snap-C", now.Add(4*time.Second))
-	assert.Equal(t, "snap-C", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, "snap-A", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID],
+	setRuntimeSnapshotBinding(cb, "snap-C")
+	assert.Equal(t, "snap-C", cb.RuntimeBaseID())
+	assert.Equal(t, "snap-A", cb.RestoreBaseID(),
 		"after rollback-then-commit, the restore-base label must still point at A "+
 			"(otherwise pagemap_anon's reflink source would point at the just-committed "+
 			"C, whose memory file does not match the VM's pre-commit memory state — "+
@@ -255,11 +203,11 @@ func TestRestoreBaseLabelDoesNotAdvanceOnCommit(t *testing.T) {
 // last successfully set.
 func TestSetRuntimeRestoreBaseLabelsEmptyIDIsNoop(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{}
-	setRuntimeRestoreBaseLabels(cb, "snap-A", time.Now().UTC())
-	assert.Equal(t, "snap-A", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
+	setRuntimeRestoreBase(cb, "snap-A")
+	assert.Equal(t, "snap-A", cb.RestoreBaseID())
 
-	setRuntimeRestoreBaseLabels(cb, "", time.Now().UTC())
-	assert.Equal(t, "snap-A", cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID],
+	setRuntimeRestoreBase(cb, "")
+	assert.Equal(t, "snap-A", cb.RestoreBaseID(),
 		"empty snapshot id must be a no-op, not a clear")
 }
 
@@ -277,21 +225,20 @@ func TestOpaqueRestoreInvalidatesIncrementalBases(t *testing.T) {
 			},
 		},
 	}
-	now := time.Now().UTC()
-	setRuntimeSnapshotBindingLabels(cb, "snap-B", now)
-	setRuntimeRestoreBaseLabels(cb, "snap-A", now)
+	setRuntimeSnapshotBinding(cb, "snap-B")
+	setRuntimeRestoreBase(cb, "snap-A")
 
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb, now.Add(time.Second))
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb)
 
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, resolveBaseSnapshotID(cb))
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, resolveRestoreBaseSnapshotID(cb))
+	assert.Equal(t, "", resolveBaseSnapshotID(cb))
+	assert.Equal(t, "", resolveRestoreBaseSnapshotID(cb))
 
 	// A successful full CommitSandbox after the opaque restore re-establishes
 	// the direct runtime base for future soft-dirty commits, but it must not
 	// pretend to be the VM's last restore source.
-	setRuntimeSnapshotBindingLabels(cb, "snap-full-after-resume", now.Add(2*time.Second))
+	setRuntimeSnapshotBinding(cb, "snap-full-after-resume")
 	assert.Equal(t, "snap-full-after-resume", resolveBaseSnapshotID(cb))
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, resolveRestoreBaseSnapshotID(cb))
+	assert.Equal(t, "", resolveRestoreBaseSnapshotID(cb))
 }
 
 func TestResolveLaunchAncestorKeepsStartImage(t *testing.T) {
@@ -302,6 +249,7 @@ func TestResolveLaunchAncestorKeepsStartImage(t *testing.T) {
 			},
 		},
 	}
+	fromTpl.BindLaunchAncestorOnce("tpl-T")
 	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl))
 
 	fromSnap := &cubeboxstore.CubeBox{
@@ -312,28 +260,22 @@ func TestResolveLaunchAncestorKeepsStartImage(t *testing.T) {
 			},
 		},
 	}
+	fromSnap.BindLaunchAncestorOnce("snap-customer")
 	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap))
 
-	// Commit/Resume rewrite runtime labels; Pause must still copy the start image.
-	now := time.Now().UTC()
-	setRuntimeSnapshotBindingLabels(fromTpl, "snap-after-commit", now)
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(time.Second))
-	fromTpl.AddAnnotations(map[string]string{
-		constants.MasterAnnotationRuntimeSnapshotID: runtimeSnapshotBindingInvalidID,
-	})
-	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl))
+	setRuntimeSnapshotBinding(fromTpl, "snap-after-commit")
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl)
+	assert.Equal(t, "tpl-T", resolveLaunchAncestorSnapshotID(fromTpl),
+		"clearing the runtime bases must keep the launch ancestor")
 
 	stampLaunchMemoryAncestorOnce(fromSnap, "snap-customer")
 	stampPauseSnapshotID(fromSnap, "snap-pause-1")
-	fromSnap.AddAnnotations(map[string]string{
-		constants.MasterAnnotationRuntimeSnapshotID: "snap-pause-1",
-	})
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromSnap, now)
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromSnap)
 	assert.Equal(t, "snap-customer", resolveLaunchAncestorSnapshotID(fromSnap),
 		"Resume must not replace the FromSnap ancestor with the pause package")
 
 	stampLaunchMemoryAncestorOnce(fromSnap, "tpl-T")
-	assert.Equal(t, "snap-customer", fromSnap.Labels[constants.MasterAnnotationLaunchMemorySnapshotID],
+	assert.Equal(t, "snap-customer", fromSnap.LaunchAncestorID(),
 		"launch ancestor is written once and never overwritten")
 }
 
@@ -345,24 +287,23 @@ func TestLaunchAncestorIsLastRestore(t *testing.T) {
 			},
 		},
 	}
-	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
-		"first Pause after Create-from-template: no restore-base yet is OK")
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
+		"an annotation without a restore base is not a license to incremental-overlay")
 
-	now := time.Now().UTC()
-	setRuntimeRestoreBaseLabels(fromTpl, "tpl-T", now)
-	assert.True(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	setRuntimeRestoreBase(fromTpl, "tpl-T")
+	assert.True(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"Create-from-template stamps restore-base to the same ancestor")
 
-	setRuntimeRestoreBaseLabels(fromTpl, "snap-pause-1", now.Add(time.Second))
+	setRuntimeRestoreBase(fromTpl, "snap-pause-1")
 	stampPauseSnapshotID(fromTpl, "snap-pause-1")
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"after Resume the restore-base is the pause package, not the template")
 
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl, now.Add(2*time.Second))
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, "tpl-T"),
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(fromTpl)
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), "tpl-T"),
 		"opaque restore must not incremental-overlay onto the ancestor")
 
-	assert.False(t, launchAncestorIsLastRestore(fromTpl, ""),
+	assert.False(t, launchAncestorIsLastRestore(resolveRestoreBaseSnapshotID(fromTpl), ""),
 		"empty ancestor is never a valid incremental dest")
 }
 
@@ -370,20 +311,20 @@ func TestImportedMemoryIsCurrentRestore(t *testing.T) {
 	pauseID := "snap-pause-keep-2b"
 	cb := newCubeboxWithStatusForTest("sb-2b", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(cb, pauseID)
-	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	setRuntimeRestoreBase(cb, pauseID)
 	assert.True(t, importedMemoryIsCurrentRestore(cb),
 		"Resume stamps restore-base to the pause id; 2b may use the import")
 
-	setRuntimeRestoreBaseLabels(cb, "snap-rollback-target", time.Now().UTC())
+	setRuntimeRestoreBase(cb, "snap-rollback-target")
 	assert.False(t, importedMemoryIsCurrentRestore(cb),
 		"Rollback restamps restore-base; stale ImportedMemoryVol must not be 2b")
 
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb, time.Now().UTC())
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(cb)
 	assert.False(t, importedMemoryIsCurrentRestore(cb),
 		"opaque resume invalidates restore-base; stale import must not be 2b")
 
 	fromSnap := newCubeboxWithStatusForTest("sb-fromsnap", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
-	setRuntimeRestoreBaseLabels(fromSnap, "snap-customer", time.Now().UTC())
+	setRuntimeRestoreBase(fromSnap, "snap-customer")
 	assert.False(t, importedMemoryIsCurrentRestore(fromSnap),
 		"FromSnap without a pause binding stays on catalog / full")
 
@@ -400,7 +341,7 @@ func TestShouldUseImportedMemoryForCommit(t *testing.T) {
 	pauseID := "snap-pause-keep-2b-vol"
 	cb := newCubeboxWithStatusForTest("sb-2b-vol", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(cb, pauseID)
-	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	setRuntimeRestoreBase(cb, pauseID)
 
 	assert.True(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{
 		Name: "sb-2b-vol-memory",
@@ -411,7 +352,7 @@ func TestShouldUseImportedMemoryForCommit(t *testing.T) {
 	assert.False(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{}),
 		"nameless import must fall through to full")
 
-	setRuntimeRestoreBaseLabels(cb, "snap-after-rollback", time.Now().UTC())
+	setRuntimeRestoreBase(cb, "snap-after-rollback")
 	assert.False(t, shouldUseImportedMemoryForCommit(cb, &storage.CowSnapshotObject{
 		Name: "sb-2b-vol-memory",
 		Kind: storage.CowKindVolume,
@@ -443,7 +384,7 @@ func installCommitMemoryTestHooks(t *testing.T) {
 func resumeBoxForCommit2b(id, pauseID string) *cubeboxstore.CubeBox {
 	cb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(cb, pauseID)
-	setRuntimeRestoreBaseLabels(cb, pauseID, time.Now().UTC())
+	setRuntimeRestoreBase(cb, pauseID)
 	return cb
 }
 

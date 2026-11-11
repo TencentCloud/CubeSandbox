@@ -72,6 +72,16 @@ spec:
             - name: CUBE_S3LVOL_SOCKET
               value: {{ include "cube.s3lvolSocketPath" . | quote }}
             {{- end }}
+            {{- if .Values.cubeJuiceFS.enabled }}
+            - name: CUBE_JFS_ENABLED
+              value: "1"
+            - name: CUBE_JFS_MOUNT_PATH
+              value: {{ .Values.cubeJuiceFS.mountPath | quote }}
+            - name: CUBE_JFS_ROOT
+              value: {{ .Values.cubeJuiceFS.root | quote }}
+            - name: CUBE_JFS_CACHE_DIR
+              value: {{ .Values.cubeJuiceFS.cacheDir | quote }}
+            {{- end }}
           ports:
             - name: cubelet-grpc
               containerPort: 9999
@@ -156,7 +166,6 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.cubeNode.resources | nindent 12 }}
-        {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgress "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
@@ -222,7 +231,6 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- if .Values.cubeEgress.network.enabled }}
         - name: cube-egress-net
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgressNet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
@@ -275,8 +283,6 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- end }}
-        {{- end }}
         {{- if .Values.cubeS3lvol.enabled }}
         - name: cube-s3lvol
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeS3lvol "context" $) | quote }}
@@ -360,6 +366,8 @@ spec:
               readOnly: true
             - name: s3lvol-rpc
               mountPath: /var/run/s3lvol
+            - name: s3lvol-shm
+              mountPath: /dev/shm
             - name: s3lvol-cfg
               mountPath: /etc/s3lvol
               readOnly: true
@@ -445,7 +453,6 @@ spec:
             secretName: {{ include "cube.volumeS3SecretName" . }}
             defaultMode: 0400
       {{- end }}
-      {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
@@ -453,12 +460,15 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
-      {{- end }}
       {{- if .Values.cubeS3lvol.enabled }}
         - name: s3lvol-rpc
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        - name: s3lvol-shm
+          hostPath:
+            path: /dev/shm/cube-s3lvol
+            type: DirectoryOrCreate
         - name: s3lvol-cfg
           secret:
             secretName: {{ include "cube.s3lvolSecretName" . }}

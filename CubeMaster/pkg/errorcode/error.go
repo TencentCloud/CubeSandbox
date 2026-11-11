@@ -25,6 +25,7 @@ var (
 	ErrorCode_DBError                ErrorCode = 130594
 	ErrorCode_MasterInternalError    ErrorCode = 130593
 	ErrorCode_MasterRateLimitedError ErrorCode = 130592
+	ErrorCode_MasterUnavailable      ErrorCode = 130503
 
 	ErrorCode_MasterParamsError ErrorCode = 130400
 	ErrorCode_AuthFailed        ErrorCode = 130401
@@ -45,6 +46,7 @@ var (
 		"DBError":                130594,
 		"MasterInternalError":    130593,
 		"MasterRateLimitedError": 130592,
+		"MasterUnavailable":      130503,
 		"MasterParamsError":      130400,
 		"Conflict":               130409,
 		"NotFound":               130404,
@@ -63,6 +65,7 @@ var (
 		130594: "DBError",
 		130593: "MasterInternalError",
 		130592: "MasterRateLimitedError",
+		130503: "MasterUnavailable",
 		130400: "MasterParamsError",
 		130409: "Conflict",
 		130401: "AuthFailed",

@@ -170,6 +170,9 @@ func (l *volumeLocal) Destroy(ctx context.Context, opts *workflow.DestroyContext
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
 	}
+	if workflow.RetainFor(opts).Volume {
+		return nil
+	}
 	log.G(ctx).Debugf("Destroy doing")
 	info, err := l.readVolumeInfo(ctx, opts.SandboxID)
 	if err != nil {

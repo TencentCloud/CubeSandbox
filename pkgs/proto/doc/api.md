@@ -594,7 +594,7 @@ ContainerStateValue is the wrapper of ContainerState.
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  | ID of the CubeSandbox. |
 | namespace | [string](#string) |  | containerd namespace. |
-| created_at | [int64](#int64) |  | Creation time of the sandbox. |
+| created_at | [int64](#int64) |  | Creation time of the sandbox in nanoseconds. |
 | containers | [Container](#cubelet-services-cubebox-v1-Container) | repeated | containers Sandbox.Spec.Containers |
 | port_mappings | [PortMapping](#cubelet-services-cubebox-v1-PortMapping) | repeated | Local cubevs portmapping |
 | labels | [CubeSandbox.LabelsEntry](#cubelet-services-cubebox-v1-CubeSandbox-LabelsEntry) | repeated |  |
@@ -2548,6 +2548,7 @@ many snapshot packages on one node in a single RPC.
 | ----- | ---- | ----- | ----------- |
 | volume_id | [string](#string) |  | volume_id is the stable identifier assigned by CubeMaster. |
 | name | [string](#string) |  | name is the human-readable label. |
+| private_data | [string](#string) |  | private_data is opaque caller input forwarded unchanged to Create. Only the plugin&#39;s returned private_data is persisted and used by Attach and Destroy. Max length: 1024 bytes. May be empty. Carry credential references, never plaintext credentials. |
 
 
 
@@ -2563,7 +2564,7 @@ many snapshot packages on one node in a single RPC.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | token | [string](#string) |  | token is an optional credential for volume-content access. volume_id and name come from the CreateRequest; plugins must not echo them. |
-| private_data | [string](#string) |  | private_data is opaque plugin state persisted in t_cube_volume and forwarded to Attach on sandbox create. Not returned to API/SDK clients. Max length: 1024 bytes. May be empty. |
+| private_data | [string](#string) |  | private_data is opaque plugin state persisted in t_cube_volume and forwarded to Attach and Destroy. An empty value is stored as empty; the caller&#39;s input is never used as a fallback. Not returned to API/SDK clients. Max length: 1024 bytes. May be empty. |
 
 
 
@@ -2579,6 +2580,7 @@ many snapshot packages on one node in a single RPC.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | volume_id | [string](#string) |  |  |
+| private_data | [string](#string) |  | private_data is the plugin state returned by Create and persisted in t_cube_volume. Create rollback uses the returned state even if persistence or length validation failed. May be empty. |
 
 
 

@@ -24,6 +24,10 @@ message StatusRequest {
   string snapshot_id = 2;
   // xfs | s3; empty defaults to xfs.
   string backend = 3;
+  // When > 0, hold the reply until the upload state is ready or failed, or
+  // this many milliseconds pass, so the caller learns of it at once instead
+  // of polling. A Cubelet without this field answers immediately.
+  int32 wait_ready_ms = 4;
 }
 
 message StatusResponse {

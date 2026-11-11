@@ -5,6 +5,7 @@
 package cubebox
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -44,9 +45,10 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 				HostPort:      80,
 			},
 		},
-		NetworkType:    "tap",
-		RuntimeHandler: "cube",
-		ExposedPorts:   []int64{8080, 443},
+		NetworkType:         "tap",
+		RuntimeHandler:      "cube",
+		ExposedPorts:        []int64{8080, 443},
+		RootfsWritableLayer: "disk/tpl-2f7b0d7b7caa476c98cdf416_0",
 		CubeNetworkConfig: &cubebox.CubeNetworkConfig{
 			AllowOut: []string{"10.0.0.0/8"},
 		},
@@ -66,14 +68,28 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 					ID:   "container1",
 					Name: "test-container",
 				},
-				IP:            "192.168.1.2",
-				IsDebugStdout: true,
-				Status:        StoreStatus(Status{Pid: 12345}),
+				IP:              "192.168.1.2",
+				IsDebugStdout:   true,
+				RequestIndex:    2,
+				RequestIndexSet: true,
+				Status:          StoreStatus(Status{Pid: 12345}),
 			},
 		},
 	}
 
 	copied := original.DeepCopy()
+
+	originalJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal original: %v", err)
+	}
+	copiedJSON, err := json.Marshal(copied)
+	if err != nil {
+		t.Fatalf("marshal copy: %v", err)
+	}
+	if string(copiedJSON) != string(originalJSON) {
+		t.Errorf("deep copy is not persisted-equivalent:\n original=%s\n copy=%s", originalJSON, copiedJSON)
+	}
 
 	if copied.ID != original.ID {
 		t.Errorf("ID not copied correctly: got %s, want %s", copied.ID, original.ID)
@@ -125,6 +141,9 @@ func TestCubeBoxDeepCopy(t *testing.T) {
 	}
 
 	copiedContainer, _ := copied.ContainersMap.Get("container1")
+	if copiedContainer.RequestIndex != 2 || !copiedContainer.RequestIndexSet {
+		t.Errorf("RequestIndex not copied: %+v", copiedContainer.RequestIndex)
+	}
 	copiedContainer.IP = "192.168.1.100"
 	originalContainer, _ := original.ContainersMap.Get("container1")
 	if originalContainer.IP == "192.168.1.100" {

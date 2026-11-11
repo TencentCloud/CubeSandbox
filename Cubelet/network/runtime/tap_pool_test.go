@@ -241,6 +241,8 @@ func mustReadyEntry(t *testing.T, name string, ifindex int, ip string) *TapPoolE
 type fakeTapDeviceAdapter struct {
 	createCount      int
 	restoreCount     int
+	quarantineErr    error
+	quarantined      map[int]bool
 	openCount        int
 	openErr          error
 	closeHook        func(*os.File)
@@ -256,6 +258,7 @@ func (f *fakeTapDeviceAdapter) Create(ip net.IP, _ string, _ int, _ int) (*tapDe
 
 func (f *fakeTapDeviceAdapter) Restore(tap *tapDevice, _ int, _ string, _ int) (*tapDevice, error) {
 	f.restoreCount++
+	delete(f.quarantined, tap.Index)
 	if tap != nil && tap.File == nil && !f.restoreWithoutFD {
 		file, err := os.CreateTemp("", "cube-test-tap-*")
 		if err != nil {
@@ -264,6 +267,17 @@ func (f *fakeTapDeviceAdapter) Restore(tap *tapDevice, _ int, _ string, _ int) (
 		tap.File = file
 	}
 	return tap, nil
+}
+
+func (f *fakeTapDeviceAdapter) Quarantine(tap *tapDevice) error {
+	if f.quarantineErr != nil {
+		return f.quarantineErr
+	}
+	if f.quarantined == nil {
+		f.quarantined = make(map[int]bool)
+	}
+	f.quarantined[tap.Index] = true
+	return nil
 }
 
 func (f *fakeTapDeviceAdapter) Open(_ string) (*os.File, error) {

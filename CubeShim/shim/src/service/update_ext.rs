@@ -3,6 +3,7 @@
 //
 
 use crate::log::Log;
+use crate::sandbox::snapshot_mode::SnapshotMode;
 use crate::{common::CResult, errf, infof, sandbox::sb::SandBox};
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::SnapshotType;
@@ -125,6 +126,14 @@ struct FrozenSnapshotConfig {
     snapshot_type: Option<String>,
     #[serde(default)]
     renew_only: bool,
+    /// `full` (default) or `fs-only`. Unknown values are rejected rather than
+    /// silently treated as full.
+    #[serde(default)]
+    snapshot_mode: Option<String>,
+    /// Host path of the writable rootfs disk. Required for `fs-only`; used to
+    /// find the guest mount point through the sandbox disk map.
+    #[serde(default)]
+    rootfs_host_path: Option<String>,
 }
 
 async fn do_snapshot_capture(
@@ -142,11 +151,14 @@ async fn do_snapshot_capture(
     }
     let destination = strip_file_url(&config.destination_url);
     let snapshot_type = parse_pause_snapshot_type(config.snapshot_type.as_deref());
+    let mode = SnapshotMode::parse(config.snapshot_mode.as_deref())?;
     sb.capture_snapshot_frozen(
         &config.snapshot_id,
         &destination,
         config.memory_vol_url,
         snapshot_type,
+        mode,
+        config.rootfs_host_path.as_deref(),
     )
     .await?;
     Ok(UpdateOutcome::default())

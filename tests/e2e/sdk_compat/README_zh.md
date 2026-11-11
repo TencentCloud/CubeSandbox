@@ -86,6 +86,40 @@ pytest --run-e2e
 pytest --run-e2e --sdk-e2e-backends=cubesandbox
 ```
 
+## 模板 QoS E2E
+
+QoS 用例会自行创建并清理模板和沙箱，因此单独运行该文件时不需要设置 `CUBE_TEMPLATE_ID`。`CUBE_TEMPLATE_E2E_IMAGE` 指定的镜像需要在 `49983` 端口提供 envd，并在 `49999` 端口响应 `/health`。
+
+运行配置与运行时状态用例：
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+pytest --run-e2e cases/qos/test_template_qos.py::test_template_qos_control_and_runtime_state
+```
+
+带宽用例需要沙箱能够访问 iperf3 server，块设备 I/O 用例需要可写的 virtio-blk 文件系统。先执行 `iperf3 -s -p 5201`，再设置 server IP 并启用数据面测试：
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_QOS_IPERF_SERVER=10.0.0.10 \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_E2E_INSTALL_TOOLS=1 \
+pytest --run-e2e -m "qos and not qos_node" cases/qos/test_template_qos.py
+```
+
+pytest runner 不需要安装 `iperf3` 或 `fio`，但沙箱中需要。命令缺失时，对应用例会跳过；设置 `CUBE_QOS_E2E_INSTALL_TOOLS=1` 后可以在沙箱内安装，也可以通过 `CUBE_QOS_E2E_INSTALL_COMMAND` 自定义安装命令。临时模板会自动把 IP 形式的 iperf3 server 加入 `allow_out`。配置与运行时状态用例通过 `CUBE_QOS_CONTROL_TEMPLATE_ID` 复用模板，带宽和块设备 I/O 用例通过 `CUBE_QOS_E2E_TEMPLATE_ID` 复用模板，PPS 用例通过 `CUBE_QOS_PPS_TEMPLATE_ID` 复用模板。复用的模板需要提前放通测试端点，并且 QoS 配置需要与对应测试预期一致。
+
+PPS 用例需要在沙箱所在计算节点运行，因为测试会读取 TAP 计数器。它还需要数据面开关，因此要同时设置 `CUBE_QOS_DATAPLANE_E2E=1` 和 `CUBE_QOS_NODE_PPS_E2E=1`，将 `CUBE_QOS_IPERF_SERVER` 设为沙箱可访问的节点 IP，然后执行：
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_TEMPLATE_E2E_NODE=<node-id> \
+CUBE_QOS_IPERF_SERVER=<node-ip> \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_NODE_PPS_E2E=1 \
+pytest --run-e2e -m qos_node cases/qos/test_template_qos.py
+```
+
 ## 执行范围
 
 ```bash
@@ -331,7 +365,10 @@ cp env.example .env
   `volumeMounts` 绑定/解绑），默认 `true`；设为 `false` 可跳过；
 - `SDK_E2E_VOLUME_DRIVER`：`POST /volumes` 使用的 driver，默认 `s3`；
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`：等待绑定中删除 `409` / 解绑后 `204`
-  的秒数，默认 `60`。
+  的秒数，默认 `60`；
+- `SDK_E2E_RESTART_POLICY_WAIT`：每次等待重启状态变化的秒数，默认 `300`。
+  用例随 `--run-e2e` 执行。模板需暴露 envd 49983，guest 里 root 可以写
+  `/proc/sysrq-trigger`。
 
 ### 失败时保留 sandbox
 
@@ -445,7 +482,9 @@ tests/e2e/sdk_compat/
 当前测试域：
 
 - `cases/lifecycle/`：创建、info、connect、create options、pause/resume、
-  kill、auto-pause、auto-resume、auto-kill；
+  kill、auto-pause、auto-resume、auto-kill、节点本地重启策略
+  （`test_restart_policy.py`），以及文件系统快照与冷启动
+  （`test_filesystem_only_snapshot.py`；两者均仅 CubeSandbox）；
 - `cases/commands/`：stdout、stderr、退出码、环境变量、特殊字符、多行
   输出和缺失命令；
 - `cases/filesystem/`：读写、覆盖、多行内容、文件 API 与 shell 互操作；
@@ -483,7 +522,9 @@ Capability marker：
 - `@pytest.mark.requires_cubeproxy`：依赖 CubeProxy/lifecycle-manager
   协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过；
 - `@pytest.mark.volume`：Volume Plugin 用例，随 `--run-e2e` 执行；设置
-  `SDK_E2E_VOLUME_PLUGIN=false` 时跳过。
+  `SDK_E2E_VOLUME_PLUGIN=false` 时跳过；
+- `@pytest.mark.restart_policy`：节点本地重启策略用例，随 `--run-e2e` 执行；
+  e2b 因没有 `restart_policy` capability 而跳过。
 - `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置
   `CUBE_API_KEY` 或后端不支持 `auth_simple_key`（仅 CubeSandbox）时跳过。
 
@@ -491,7 +532,8 @@ Capability marker：
 `filesystem_extended`、`run_code`。可选 capability 包括 `code_interpreter`、
 `pause_resume`、`set_timeout`、`rollback_clone`、`network_allow_deny`、
 `network_public_access`、`network_mask_request_host`、`platform_lifecycle`、
-`host_mount`、`volume_plugin` 和 `auth_simple_key`。
+`host_mount`、`volume_plugin`、`auth_simple_key`、`restart_policy` 和
+`filesystem_only_snapshot`。
 当前分支的 `platform_lifecycle` 与 `volume_plugin` 仅在 CubeSandbox
 capability 集合中启用。
 这不是 E2B 的固有能力限制，而是 E2B SDK 传递的 lifecycle 参数与 CubeAPI
@@ -501,6 +543,9 @@ capability 集合中启用。
 `host_mount` 是 CubeSandbox 独有扩展；`cases/host-mount/` 通过
 `@pytest.mark.requires_capability("host_mount")` 跳过不支持宿主目录挂载的后端（如 e2b）。
 `volume_plugin` 仅用于 CubeSandbox Volume Plugin 用例。
+`restart_policy` 仅用于 CubeSandbox。模板需暴露 envd 49983，以及 guest 内
+root 可以触发 sysrq。运行：
+`pytest --run-e2e -m restart_policy`。
 
 ## 清理
 

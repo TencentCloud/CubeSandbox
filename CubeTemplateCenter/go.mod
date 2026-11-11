@@ -17,14 +17,17 @@ require (
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
+	gorm.io/driver/mysql v1.5.1
 	gorm.io/gorm v1.25.10
 )
 
 require (
+	cel.dev/expr v0.25.1 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.14.0-rc.1 // indirect
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bytedance/sonic v1.14.0 // indirect
 	github.com/bytedance/sonic/loader v0.3.0 // indirect
@@ -53,6 +56,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/gomodule/redigo v1.9.3 // indirect
+	github.com/google/cel-go v0.28.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
@@ -73,6 +77,7 @@ require (
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/minio-go/v7 v7.3.0 // indirect
+	github.com/mna/redisc v1.4.0 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -95,6 +100,9 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a // indirect
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0 // indirect
+	github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart v0.0.0-00010101000000-000000000000 // indirect
+	github.com/tencentcloud/CubeSandbox/pkgs/redisx v0.0.0 // indirect
+	github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode v0.0.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.0 // indirect
@@ -112,13 +120,13 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260120221211-b8f7ae30c516 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gorm.io/driver/mysql v1.5.1 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 	k8s.io/api v0.34.1 // indirect
@@ -143,4 +151,10 @@ replace github.com/tencentcloud/CubeSandbox/pkgs/blobstore => ../pkgs/blobstore
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/proto => ../pkgs/proto
 
+replace github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart => ../pkgs/sandboxrestart
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode => ../pkgs/snapshotmode
+
 replace cloud.google.com/go/compute/metadata => cloud.google.com/go/compute/metadata v0.9.0
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/redisx => ../pkgs/redisx

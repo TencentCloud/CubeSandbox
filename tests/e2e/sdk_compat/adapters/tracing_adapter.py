@@ -35,6 +35,13 @@ class TracingSandboxAdapter(SandboxAdapter):
             },
         )
 
+    def is_running(self) -> bool:
+        return self._trace.capture(
+            "is_running",
+            {"backend": self.backend, "sandbox_id": self.sandbox_id},
+            self._wrapped.is_running,
+        )
+
     def run_command(
         self,
         command: str,
@@ -78,6 +85,46 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "user": user,
             },
             lambda: self._wrapped.read_file(path, user=user),
+            output=_content_summary,
+        )
+
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        return self._trace.capture(
+            "write_bytes",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+                **_content_summary(content),
+            },
+            lambda: self._wrapped.write_bytes(path, content, user=user),
+            output=lambda _: {"written": True},
+        )
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return self._trace.capture(
+            "read_bytes",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+            },
+            lambda: self._wrapped.read_bytes(path, user=user),
+            output=_content_summary,
+        )
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return self._trace.capture(
+            "read_stream",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "path": path,
+                "user": user,
+            },
+            lambda: self._wrapped.read_stream(path, user=user),
             output=_content_summary,
         )
 
@@ -235,18 +282,20 @@ class TracingSandboxAdapter(SandboxAdapter):
             lambda: self._wrapped.set_timeout(timeout),
         )
 
-    def create_snapshot(self) -> str:
+    def create_snapshot(self, name: str | None = None, *, mode: str | None = None) -> str:
         return self._trace.capture(
             "create_snapshot",
             {
                 "backend": self.backend,
                 "sandbox_id": self.sandbox_id,
+                "name": name,
+                "mode": mode,
             },
-            self._wrapped.create_snapshot,
+            lambda: self._wrapped.create_snapshot(name=name, mode=mode),
             output=lambda snapshot_id: {"snapshot_id": snapshot_id},
         )
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         return self._trace.capture(
             "delete_snapshot",
             {
@@ -255,7 +304,7 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "snapshot_id": snapshot_id,
             },
             lambda: self._wrapped.delete_snapshot(snapshot_id),
-            output=lambda _: {"deleted": True},
+            output=lambda deleted: {"deleted": deleted},
         )
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
@@ -285,11 +334,40 @@ class TracingSandboxAdapter(SandboxAdapter):
         )
         return [wrap_adapter(clone, self._trace) for clone in clones]
 
+    def fork(
+        self, count: int = 1, *, timeout: int | None = None
+    ) -> list[tuple[SandboxAdapter | None, Exception | None]]:
+        results = self._trace.capture(
+            "fork",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "count": count,
+                "timeout": timeout,
+            },
+            lambda: self._wrapped.fork(count, timeout=timeout),
+            output=lambda results: {
+                "forked_ids": [a.sandbox_id for a, _ in results if a is not None],
+                "failures": [str(err) for _, err in results if err is not None],
+            },
+        )
+        return [
+            (wrap_adapter(adapter, self._trace) if adapter is not None else None, err)
+            for adapter, err in results
+        ]
+
     def list_snapshot_ids(self) -> set[str]:
         return self._trace.capture(
             "list_snapshot_ids",
             {"backend": self.backend, "sandbox_id": self.sandbox_id},
             self._wrapped.list_snapshot_ids,
+        )
+
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        return self._trace.capture(
+            "list_snapshot_ids_by_name",
+            {"backend": self.backend, "name": name},
+            lambda: self._wrapped.list_snapshot_ids_by_name(name),
         )
 
     def get_host(self, port: int) -> str:
@@ -301,6 +379,18 @@ class TracingSandboxAdapter(SandboxAdapter):
                 "port": port,
             },
             lambda: self._wrapped.get_host(port),
+        )
+
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        return self._trace.capture(
+            "get_exposed_port_endpoint",
+            {
+                "backend": self.backend,
+                "sandbox_id": self.sandbox_id,
+                "port": port,
+            },
+            lambda: self._wrapped.get_exposed_port_endpoint(port),
+            output=lambda endpoint: {"endpoint": endpoint},
         )
 
     def traffic_access_token(self) -> str | None:
@@ -368,6 +458,8 @@ def wrap_adapter(adapter: SandboxAdapter, trace: TraceCollector | None) -> Sandb
 
 
 def _content_summary(content: Any) -> dict[str, Any]:
+    if isinstance(content, (bytes, bytearray)):
+        return {"content_length": len(content)}
     text = str(content)
     return {
         "content_length": len(text),

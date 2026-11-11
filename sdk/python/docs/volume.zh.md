@@ -37,6 +37,7 @@ from cubesandbox import Sandbox, Volume, VolumeMount
 | 方法 | HTTP | 入参 | 返回 |
 |---|---|---|---|
 | `Volume.create(name=None, *, driver=None, config=None)` | `POST /volumes` | 见下方参数表 | `Volume` |
+| `Volume.create_with_private_data(name=None, *, private_data, driver=None, config=None)` | `POST /v2/volumes` | 不透明字符串输入；Cube/SDK ≥ 0.8.0 | `Volume` |
 | `Volume.connect(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`：卷标识 | `Volume` |
 | `Volume.list(*, config=None)` | `GET /volumes` | — | `list[VolumeInfo]`（**`token` 恒为空**） |
 | `Volume.get_info(volume_id, *, config=None)` | `GET /volumes/{id}` | `volume_id`：卷标识 | `VolumeInfo`（**含 `token`**） |
@@ -49,6 +50,22 @@ from cubesandbox import Sandbox, Volume, VolumeMount
 | `name` | `str \| None` | 否 | 卷名称。须满足 `^[a-zA-Z0-9_-]+$`，≤128 字符。省略时服务端分配 UUID。 |
 | `driver` | `str \| None` | 否 | 卷插件名称（如 `"cos"`）。传 `None` 或 `""` 时不发送该字段，后端使用默认插件。 |
 | `config` | `Config \| None` | 否 | SDK 配置对象，覆盖环境变量。 |
+
+### 插件输入
+
+通过 `Volume.create_with_private_data("my-data", driver="my-storage", private_data='{"cred_ref":"account-7"}')`
+调用独立的新创建入口。要求 CubeAPI、所有处理卷操作的 CubeMaster 与 Cubelet 均为 0.8.0
+或更高版本，所选插件支持该协议，且 Python SDK ≥ 0.8.0；原 `Volume.create` 的定义和路径保持不变。
+`private_data` 必须是有效 UTF-8，最多 1024 字节，不含 NUL，且字符范围不超出 BMP。
+只传凭据引用，不传明文密钥。空字符串会显式转发；CubeAPI 不支持 `/v2/volumes` 时直接报错，
+不会回退旧路径并丢弃输入。校验只检查一次 JSON 解码后的字符串；ASCII 字面量 `\uD83D\uDE00`
+仍按原样处理，不会再解析。返回的 `Volume` 继续使用已有查询、删除和挂载 API。
+
+升级顺序：先检查或升级 Controller/Node 插件，确保 Create 接收输入 A、Attach/Destroy
+使用返回状态 B；再升级**所有处理卷操作的 CubeMaster**；最后部署新 CubeAPI 并开始调用新方法。
+新 API 连接旧 Master 时，可能返回 201 但 A 已被静默丢弃，旧 Master 删除时也不会传 B。
+SDK 不会自动检测这种混合版本部署。回退版本时，依赖 A/B 的既有卷仍须由兼容的 Master 处理。
+详情见[插件升级说明](../../../docs/zh/guide/volume-plugin.md)。
 
 ### 返回值详解
 

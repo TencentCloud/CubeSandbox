@@ -17,6 +17,7 @@
   "fields": {
     "templateID": "模板 ID",
     "alias": "别名",
+    "backend": "存储后端",
     "status": "状态",
     "instanceType": "实例类型",
     "version": "版本",

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,8 @@ func (h *SDKHandler) Register(r *gin.RouterGroup) {
 
 	// Snapshots
 	r.GET("/snapshots", h.ListSnapshots)
+	r.GET("/snapshots/:id", h.GetSnapshot)
+	r.DELETE("/snapshots/:id", h.DeleteSnapshot)
 	r.POST("/sandboxes/:id/snapshots", h.CreateSnapshot)
 	r.POST("/sandboxes/:id/rollback", h.RollbackSandbox)
 
@@ -157,16 +160,23 @@ func writeCMError(c *gin.Context, err error) {
 	httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
 }
 
-// longOpTimeout is the per-request deadline for CubeMaster operations that
-// can legitimately take well beyond the default 30 s — currently snapshot
-// create, snapshot rollback, and template/snapshot delete. These are
-// synchronous Cubelet/LVM operations.
-const longOpTimeout = 240 * time.Second
+// longOpTimeout aligns with CubeMaster's snapshotOperationTimeout (15 min) for the
+// synchronous snapshot handlers (create, rollback, delete), whose write deadline CM extends.
+const longOpTimeout = 15 * time.Minute
 
 // longOpCtx returns a request-derived context bounded by longOpTimeout,
-// for synchronous slow CubeMaster calls (snapshot/rollback, template delete).
+// for the synchronous snapshot calls (create, rollback, delete).
 func longOpCtx(c *gin.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.Request.Context(), longOpTimeout)
+}
+
+// templateDeleteTimeout stays under CM's default http_writetimeout (360s), which
+// DeleteTemplate does not extend, so a slow delete times out here and can be retried.
+const templateDeleteTimeout = 350 * time.Second
+
+// templateDeleteCtx returns a request-derived context bounded by templateDeleteTimeout.
+func templateDeleteCtx(c *gin.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.Request.Context(), templateDeleteTimeout)
 }
 
 // ── Response transformation ─────────────────────────────────────────────────
@@ -604,6 +614,125 @@ func (h *SDKHandler) ListSnapshots(c *gin.Context) {
 		writeCMError(c, err)
 		return
 	}
+	// Surface the pagination cursor via X-Next-Token; writeSDKResponse drops it.
+	var env struct {
+		Ret       *cmRet          `json:"ret,omitempty"`
+		Data      json.RawMessage `json:"data,omitempty"`
+		NextToken string          `json:"next_token"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		logging.G(c.Request.Context()).Errorf("sdk: cubemaster returned a non-JSON snapshot list: %v", err)
+		httputil.WriteError(c, http.StatusBadGateway, "cubemaster: invalid snapshot list response")
+		return
+	}
+	if env.NextToken != "" {
+		c.Header("X-Next-Token", env.NextToken)
+	}
+	// Empty list: CM omits `data` (omitempty), so return [] to honor the array contract.
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		httputil.WriteRawJSON(c, http.StatusOK, json.RawMessage("[]"))
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// snapshotIDPattern matches the IDs CubeMaster issues (snap- + hex).
+var snapshotIDPattern = regexp.MustCompile(`^snap-[A-Za-z0-9_-]{1,64}$`)
+
+// rejectInvalidSnapshotID answers 404 for IDs CubeMaster never issues, so they
+// cannot hit its static /snapshot/* routes or reach AgentHub rows. Reports whether it did.
+func rejectInvalidSnapshotID(c *gin.Context, id string) bool {
+	if snapshotIDPattern.MatchString(id) {
+		return false
+	}
+	logging.G(c.Request.Context()).Warnf("sdk: rejected malformed snapshot id: %q", id)
+	httputil.WriteError(c, http.StatusNotFound, "snapshot not found")
+	return true
+}
+
+// GetSnapshot — GET /api/v1/sdk/snapshots/{id}
+func (h *SDKHandler) GetSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
+	snapshotID := c.Param("id")
+	if rejectInvalidSnapshotID(c, snapshotID) {
+		return
+	}
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = snapshotID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	raw, err := h.cm.GetSnapshot(ctx, snapshotID)
+	if err != nil {
+		var httpErr *cubemaster.HTTPError
+		if errors.As(err, &httpErr) && httpErr.IsNotFound() {
+			// Same not-found as the ret_code shape; let writeCMError map it to 404.
+			err = &cubemaster.CMError{RetCode: 130404, RetMsg: "snapshot not found"}
+		}
+		writeCMError(c, err)
+		return
+	}
+	writeSDKResponse(c, raw)
+}
+
+// DeleteSnapshot — DELETE /api/v1/sdk/snapshots/{id}
+// Physical delete is synchronous (LVM cleanup), so bounded by longOpTimeout.
+func (h *SDKHandler) DeleteSnapshot(c *gin.Context) {
+	ctx := c.Request.Context()
+	snapshotID := c.Param("id")
+	if rejectInvalidSnapshotID(c, snapshotID) {
+		return
+	}
+	if rt := cubelog.GetTraceInfo(ctx); rt != nil {
+		rt.InstanceID = snapshotID
+		rt.InstanceType = sdkInstanceType
+		ctx = logging.WithLogger(ctx, logging.ReNewLogger(ctx))
+	}
+	// Block deletion while AgentHub templates still reference this snapshot.
+	if h.agenthubSvc != nil {
+		n, err := h.agenthubSvc.SnapshotTemplateRefCount(ctx, snapshotID)
+		if err != nil {
+			logging.G(ctx).Errorf("sdk: count snapshot template refs failed: %v", err)
+			httputil.WriteError(c, http.StatusBadGateway, "failed to check snapshot references")
+			return
+		}
+		if n > 0 {
+			logging.G(ctx).Warnf("sdk: block snapshot delete, referenced by %d template(s): snapshotID=%s", n, snapshotID)
+			httputil.WriteError(c, http.StatusConflict, fmt.Sprintf("snapshot is referenced by %d template(s); remove them first", n))
+			return
+		}
+	}
+	ctx, cancel := longOpCtx(c)
+	defer cancel()
+	raw, err := h.cm.DeleteSnapshot(ctx, snapshotID)
+	if err != nil {
+		// CM 404 (either shape) = already deleted; still clean up AgentHub rows.
+		var cmErr *cubemaster.CMError
+		var httpErr *cubemaster.HTTPError
+		notFound := (errors.As(err, &cmErr) && cmErr.IsNotFound()) ||
+			(errors.As(err, &httpErr) && httpErr.IsNotFound())
+		if !notFound {
+			writeCMError(c, err)
+			return
+		}
+		logging.G(ctx).Warnf("sdk: snapshot already gone on CubeMaster: snapshotID=%s", snapshotID)
+	}
+	// Reverse-sync must outlive the (possibly near-expired) delete deadline.
+	if h.agenthubSvc != nil {
+		syncCtx, syncCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		syncErr := h.agenthubSvc.ReverseSyncAgentHubSnapshot(syncCtx, snapshotID)
+		syncCancel()
+		if syncErr != nil {
+			// The delete succeeded; flag the stale AgentHub rows. A retry reconciles them.
+			logging.G(ctx).Errorf("sdk: agenthub cleanup failed after snapshot delete: snapshotID=%s err=%v", snapshotID, syncErr)
+			c.Header("X-Cube-Warning", "agenthub cleanup failed; retry DELETE to reconcile")
+		}
+	}
+	if raw == nil {
+		// Idempotent: CM already deleted it, nothing to return.
+		c.Status(http.StatusNoContent)
+		return
+	}
 	writeSDKResponse(c, raw)
 }
 
@@ -768,7 +897,7 @@ func (h *SDKHandler) DeleteTemplate(c *gin.Context) {
 		"instance_type": sdkInstanceType,
 		"sync":          true,
 	}
-	ctx, cancel := longOpCtx(c)
+	ctx, cancel := templateDeleteCtx(c)
 	defer cancel()
 	raw, err := h.cm.DeleteTemplate(ctx, body)
 	if err != nil {

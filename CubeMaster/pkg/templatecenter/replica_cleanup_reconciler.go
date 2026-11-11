@@ -39,10 +39,11 @@ import (
 
 // orphanCleanupReplica is the projection the sweep needs.
 type orphanCleanupReplica struct {
-	ID         uint   `gorm:"column:id"`
-	TemplateID string `gorm:"column:template_id"`
-	NodeID     string `gorm:"column:node_id"`
-	NodeIP     string `gorm:"column:node_ip"`
+	ID                uint   `gorm:"column:id"`
+	TemplateID        string `gorm:"column:template_id"`
+	NodeID            string `gorm:"column:node_id"`
+	NodeIP            string `gorm:"column:node_ip"`
+	TemplateVariantID string `gorm:"column:template_variant_id"`
 }
 
 // Seams, so the sweep can be tested without a database or a live cubelet.
@@ -51,7 +52,7 @@ var (
 		var rows []orphanCleanupReplica
 		err := store.db.WithContext(ctx).
 			Table(constants.TemplateReplicaTableName+" AS r").
-			Select("r.id, r.template_id, r.node_id, r.node_ip").
+			Select("r.id, r.template_id, r.node_id, r.node_ip, r.template_variant_id").
 			Where("r.cleanup_required = ?", true).
 			Where("NOT EXISTS (SELECT 1 FROM " + constants.TemplateDefinitionTableName + " d WHERE d.template_id = r.template_id AND d.deleted_at IS NULL)").
 			Where("NOT EXISTS (SELECT 1 FROM " + constants.SnapshotTableName + " s WHERE s.snapshot_id = r.template_id AND s.deleted_at IS NULL)").
@@ -92,7 +93,11 @@ func reconcileOrphanReplicaCleanups(ctx context.Context) error {
 	logger.Warnf("found %d orphan replica cleanup(s) left by earlier deletes; retrying cubelet cleanup", len(rows))
 
 	for _, row := range rows {
-		locator := templateCleanupLocator{NodeID: row.NodeID, NodeIP: row.NodeIP}
+		locator := templateCleanupLocator{
+			NodeID:            row.NodeID,
+			NodeIP:            row.NodeIP,
+			TemplateVariantID: row.TemplateVariantID,
+		}
 		// Re-resolve the address from the live node cache: the stored IP may
 		// predate a re-deployment, while the node id is the stable identity.
 		if row.NodeID != "" {

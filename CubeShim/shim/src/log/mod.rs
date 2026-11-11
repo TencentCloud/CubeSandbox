@@ -4,6 +4,7 @@
 
 pub mod stat_defer;
 use crate::common::CResult;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::unistd::dup2;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -57,6 +58,11 @@ macro_rules! errf {
 }
 
 const LOG_ITEM_COUNT: usize = 1024;
+// Each write to the shim's stdout/stderr arrives as one datagram and recv()
+// silently drops whatever does not fit. The VMM writes guest virtio-console
+// output one descriptor at a time, and a descriptor holds at most one guest
+// page of hvc output (64 KiB on 64K-page kernels).
+const FORWARD_RECV_BUF_SIZE: usize = 64 * 1024;
 const LOG_REOPEN_INTERVAL: Duration = Duration::from_secs(1800);
 const LOG_DIR: &str = "/data/log/CubeShim/";
 const LOF_FILE: &str = "cube-shim-req.log";
@@ -205,7 +211,15 @@ impl Log {
         // The crate's signal_server_started() runs dup2(STDERR->STDOUT) only after
         // server.start(), which then redirects stdout onto this datagram for us while
         // preserving the readiness handshake.
-        dup2(writer.as_raw_fd(), std::io::stderr().as_raw_fd()).expect("dup stderr failed");
+        let writer_fd = writer.as_raw_fd();
+        dup2(writer_fd, std::io::stderr().as_raw_fd()).expect("dup stderr failed");
+
+        // Inherited console writes must block under log backpressure; the separate reader
+        // descriptor stays nonblocking, so clear only O_NONBLOCK here.
+        let flags = fcntl(writer_fd, FcntlArg::F_GETFL).expect("get stderr file flags failed");
+        let oflags = OFlag::from_bits_retain(flags & !OFlag::O_NONBLOCK.bits());
+        fcntl(writer_fd, FcntlArg::F_SETFL(oflags)).expect("clear stderr nonblock failed");
+
         mem::forget(writer);
 
         tokio::spawn(Self::consumer(sender.clone(), receiver));
@@ -233,8 +247,8 @@ impl Log {
         let qos_quota = 1000;
         let qos_period = std::time::Duration::from_secs(3600);
         let mut tm = SystemTime::now() + qos_period;
+        let mut buf = vec![0u8; FORWARD_RECV_BUF_SIZE];
         loop {
-            let mut buf = [0; 1024];
             match reader.recv(&mut buf).await {
                 Ok(n) => {
                     if n == 0 {
@@ -242,7 +256,8 @@ impl Log {
                         return;
                     }
 
-                    let mut bufs = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let decoded = String::from_utf8_lossy(&buf[..n]);
+                    let mut bufs = decoded.as_ref();
 
                     loop {
                         if counter >= qos_quota && SystemTime::now() >= tm {
@@ -257,7 +272,7 @@ impl Log {
                                 counter += 1;
                             }
                             buffer.clear();
-                            bufs = r.to_string();
+                            bufs = r;
                         } else {
                             buffer.push_str(&bufs);
                             if buffer.len() > 4096 {
@@ -529,5 +544,43 @@ mod tests {
             fs::read_to_string(&files.active).unwrap(),
             "before\nafter\n"
         );
+    }
+
+    fn forward_test_log(sender: Sender<(LogType, String)>) -> Log {
+        Log {
+            module: "test".to_string(),
+            instance_id: String::new(),
+            container_id: String::new(),
+            sender,
+            level: LogLevel::Info,
+            function_type: String::new(),
+        }
+    }
+
+    async fn next_forwarded_line(rx: &mut Receiver<(LogType, String)>) -> String {
+        let (_, msg) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for a forwarded line")
+            .expect("log channel closed");
+        serde_json::from_str::<LogItem>(&msg).unwrap().log_content
+    }
+
+    #[tokio::test]
+    async fn forwards_datagram_filling_recv_buffer_intact() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (reader, writer) = UnixDatagram::pair().unwrap();
+        tokio::spawn(Log::forward(tx.clone(), reader, forward_test_log(tx)));
+
+        let long_line = "x".repeat(FORWARD_RECV_BUF_SIZE - 1);
+        writer
+            .send(format!("{}\n", long_line).as_bytes())
+            .await
+            .unwrap();
+        writer.send(b"tail\n").await.unwrap();
+
+        let line = next_forwarded_line(&mut rx).await;
+        assert_eq!(line.len(), long_line.len());
+        assert!(line == long_line);
+        assert_eq!(next_forwarded_line(&mut rx).await, "tail");
     }
 }

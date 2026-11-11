@@ -18,6 +18,29 @@ ensure_file "${CUBELET_CONFIG}"
 OPS_ADDR="$(resolve_control_plane_cubeops_addr)"
 write_cubelet_cubeops_addr "${CUBELET_CONFIG}" "${CUBE_OPS_ADDR:-${OPS_ADDR}}"
 
+# ops-agent: node-local agent for CubeOps-driven config. Runs wherever cubelet
+# does (compute role and all-in-one control), so the config is regenerated on
+# every run before the role split. A missing NODE_IP skips the rewrite (warn
+# only) so cubelet startup is unaffected when identity is not yet available.
+if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
+  OPS_AGENT_CONF_DIR="${TOOLBOX_ROOT}/ops-agent/conf"
+  mkdir -p "${OPS_AGENT_CONF_DIR}"
+  cat > "${OPS_AGENT_CONF_DIR}/config.yaml" <<EOF
+node_id: "${CUBE_SANDBOX_NODE_IP}"
+listen_addr: "0.0.0.0:8890"
+cubeops_url: "http://${OPS_ADDR}"
+dynamicconf_path: "${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
+reconcile_interval: 300s
+backup_keep: 5
+log_level: "info"
+log_dir: "/data/log/ops-agent"
+EOF
+  chmod 600 "${OPS_AGENT_CONF_DIR}/config.yaml"
+  log "updated ops-agent config node_id=${CUBE_SANDBOX_NODE_IP} cubeops_url=http://${OPS_ADDR}"
+else
+  log "CUBE_SANDBOX_NODE_IP empty; skipping ops-agent config rewrite"
+fi
+
 if ! is_compute_role; then
   exit 0
 fi

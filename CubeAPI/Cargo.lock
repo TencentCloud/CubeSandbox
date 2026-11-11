@@ -533,6 +533,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "governor",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

@@ -14,6 +14,8 @@ common:
   collect_metric_interval: 1s
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
+  # Per-call max concurrency for rootfs artifact distribution. Default 4.
+  # distribution_workers: 4
   # CubeMaster no longer builds templates in-process: every template-from-image
   # build is forwarded to the standalone CubeTemplateCenter process. There is
   # no local fallback and no "templatecenter_enabled" switch anymore -- a
@@ -103,12 +105,29 @@ scheduler:
   priority_select_num: 1
   metric_update_timeout: 300s
   local_metric_update_timeout: 300s
+  # Kept so the filter set stays visible. With profiles present, this list is
+  # not compiled; the same checks run as mandatory profile guards.
   filter:
     enable_filters:
       - "cpu"
       - "mem"
       - "template_locality"
       - "realtime_create_num"
+  profile_route_label_keys: [workload]
+  profiles:
+    - name: cel_deny
+      route:
+        labels: {workload: cel_deny}
+      filters:
+        - name: deny_all
+          type: expr
+          expr: "false"
+      failure:
+        filter: fail-closed
+        no_candidate: fail
+    - name: default
+      default: true
+      selection: {top_n: 1, method: random}
 
 # Volume plugin (S3 / COS binary reference). Credentials:
 #   CubeMaster/plugin/volume-s3.conf (written by one-click from MinIO or CUBE_S3_*)

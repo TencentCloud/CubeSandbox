@@ -21,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -121,7 +122,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 
 	released := volrefcount.ReleasedVolumeIDs(cubeRsp.GetExtInfo())
 	exportUUIDs := ""
-	if constants.IsS3Backend(req.Backend) {
+	if constants.IsRemoteTrackedBackend(req.Backend) {
 		exportUUIDs = strings.TrimSpace(cubeRsp.GetRemoteUuids())
 		if exportUUIDs == "" {
 			exportUUIDs = remoteUUIDsFromExtInfo(cubeRsp.GetExtInfo())
@@ -136,8 +137,18 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		rsp.Ret.RetMsg = fmt.Sprintf("pause ok on cubelet but master meta failed: %v", err)
 		return rsp
 	}
+	if pauseNeedsRemoteStatusWatch(req.Backend) {
+		remotestatus.WatchPause(ctx, snapID, hostIP, req.Backend)
+	}
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID)
 	return rsp
+}
+
+// pauseNeedsRemoteStatusWatch is independent of remote_uuids: JFS publishes
+// through its shared namespace and therefore has no UUIDs, but still needs its
+// JuiceFS writeback readiness tracked.
+func pauseNeedsRemoteStatusWatch(backend string) bool {
+	return constants.IsRemoteTrackedBackend(backend)
 }
 
 func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
@@ -392,7 +403,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		// Only Master knows the target holds no replica. Saying so lets
 		// Cubelet import the package up front instead of inferring it from a
 		// catalog miss, and lets it reject a restore it cannot serve.
-		cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		if constants.IsS3Backend(rec.Backend) {
+			cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		}
 	}
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
 
@@ -446,25 +459,20 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// describes a sandbox that is by now running whatever the proxy thinks.
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
-	// After Create the sandbox runs on private disks. Ask Cubelet to drop
-	// the pause package on the node that still holds it: origin when that
-	// IP is known and not the target (also the PAUSED tombstone), otherwise
-	// this node. Cubelet no-ops while a live sandbox still restores from
-	// that catalog (XFS mmap; S3 Snapshot last-restore) and GCs on the
-	// next Pause or Destroy. Cross-node origin is not live, so the origin
-	// package still goes away. Do not key this off CrossNode — a
-	// cross-node placement with a blank origin would otherwise skip both
-	// cleanup paths and leak the package.
-	origin := strings.TrimSpace(rec.NodeIP)
-	if origin != "" && origin != targetIP {
-		if err := pausesnap.DropOriginTombstone(ctx, req.RequestID, req.SandboxID, origin, rec.SnapshotID, rec.Backend); err != nil {
-			log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still has pause leftovers: %v",
+	// After Create the sandbox has a private rootfs, while reflink memory
+	// restore may still use the pause package. The origin's PAUSED tombstone
+	// goes synchronously: a quick Pause and Resume back onto origin would
+	// otherwise meet it. Package cleanup runs in the background; Cubelet
+	// no-ops while a live sandbox still restores from that catalog and GCs it
+	// on the next Pause or Destroy.
+	origin, packageNode := pausePackageNodes(rec.NodeIP, targetIP, rec.Backend)
+	if origin != "" {
+		if err := pausesnap.DropPausedTombstone(ctx, req.RequestID, req.SandboxID, origin); err != nil {
+			log.G(ctx).Errorf("resume: sandbox %s runs on %s but origin %s still holds its PAUSED tombstone: %v",
 				req.SandboxID, targetIP, origin, err)
 		}
-	} else if err := pausesnap.CleanupPauseSnapshot(ctx, req.RequestID, targetIP, rec.SnapshotID, rec.Backend); err != nil {
-		log.G(ctx).Errorf("resume: sandbox %s is running but pause package %s on %s was not deleted: %v",
-			req.SandboxID, rec.SnapshotID, targetIP, err)
 	}
+	cleanupPausePackageAfterResume(ctx, req.RequestID, req.SandboxID, packageNode, rec.SnapshotID, rec.Backend)
 
 	// Binding must go so the next Pause can allocate a new id.
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
@@ -480,6 +488,38 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		log.G(ctx).Errorf("resume: %s", rsp.Ret.RetMsg)
 	}
 	return rsp
+}
+
+// pausePackageNodes returns the origin to drop a PAUSED tombstone on (empty
+// for same-node) and the node that should evaluate pause-package cleanup.
+// Cross-node JFS cleanup goes to the target so its live-sandbox keep gate
+// retains the shared package until the next Pause or Destroy.
+func pausePackageNodes(recordNodeIP, targetIP, backend string) (origin, packageNode string) {
+	origin = strings.TrimSpace(recordNodeIP)
+	if origin == "" || origin == targetIP {
+		return "", targetIP
+	}
+	if constants.IsJFSBackend(backend) {
+		return origin, targetIP
+	}
+	return origin, origin
+}
+
+const resumePackageCleanupTimeout = 2 * time.Minute
+
+// cleanupPausePackageAfterResume drops the pause package without holding up
+// the Resume response. A failed or interrupted cleanup leaves the package to
+// Cubelet's next-Pause / Destroy GC, as a failed synchronous one did.
+var cleanupPausePackageAfterResume = func(ctx context.Context, requestID, sandboxID, nodeIP, snapshotID, backend string) {
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, resumePackageCleanupTimeout)
+		defer cancel()
+		if err := pausesnap.CleanupPauseSnapshot(ctx, requestID, nodeIP, snapshotID, backend); err != nil {
+			log.G(ctx).Errorf("resume: sandbox %s is running but pause package %s on %s was not deleted: %v",
+				sandboxID, snapshotID, nodeIP, err)
+		}
+	}()
 }
 
 // loadResumeSandboxSpec is the single sandboxspec.Get on the Resume path.
@@ -509,6 +549,9 @@ func fillResumeRecreateFields(ctx context.Context, sandboxID string, out *cubebo
 	if err := getExposedPorts(createReq, out); err != nil {
 		// Non-fatal: Cubelet may still recover ports from packed annotations.
 		log.G(ctx).Warnf("resume: restore exposed_ports from sandboxspec for %s: %v", sandboxID, err)
+	}
+	if err := applyRestartPolicy(createReq, out); err != nil {
+		log.G(ctx).Warnf("resume: restore restart policy for %s: %v", sandboxID, err)
 	}
 }
 

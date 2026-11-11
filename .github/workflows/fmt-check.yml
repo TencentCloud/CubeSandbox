@@ -14,6 +14,7 @@ on:
       - 'CubeNet/Makefile'
       - 'CubeNet/cubevs/Makefile'
       - 'CubeOps/Makefile'
+      - 'OpsAgent/Makefile'
       - 'CubeShim/Makefile'
       - 'cube-lifecycle-manager/Makefile'
       - 'cubecow/Makefile'

@@ -818,6 +818,10 @@ impl VirtioDevice for Net {
             Wrapping(self.counters.tx_dropped_frames.load(Ordering::Acquire)),
         );
         counters.insert(
+            "tx_malformed_frames",
+            Wrapping(self.counters.tx_malformed_frames.load(Ordering::Acquire)),
+        );
+        counters.insert(
             "tx_limit_bytes",
             Wrapping(self.counters.tx_limit_bytes.load(Ordering::Acquire)),
         );

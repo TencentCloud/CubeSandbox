@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -26,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxRequest) (*cubebox.CommitSandboxResponse, error) {
@@ -50,6 +50,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = "sandboxID is required"
 		return rsp, nil
 	}
+	defer s.holdProbes(rsp.SandboxID)()
 
 	rt := &CubeLog.RequestTrace{
 		Action:       "CommitSandbox",
@@ -131,10 +132,33 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	tmpSnapshotPath := layout.TmpHome
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 
+	mode, err := parseCommitSnapshotMode(req.GetSnapshotMode())
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	rsp.SnapshotMode = mode.String()
+	if err := validateFilesystemOnlyCapture(cb, mode); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	shimCapability := resolveShimSnapshotCapability(cb)
+
 	sourceRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, rsp.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
+		return rsp, nil
+	}
+	if mode.IsFsOnly() && strings.TrimSpace(sourceRootfs.DevPath) == "" {
+		// The shim resolves the guest mount point from the host disk path in
+		// the sandbox disk annotation. Without one there is no filesystem to
+		// freeze, and guessing "the first disk" would freeze the wrong volume.
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("%s: rootfs %s has no host device path",
+			snapshotmode.ErrFilesystemOnlyRootfsUnsupported, sourceRootfs.Name)
 		return rsp, nil
 	}
 	// Reject existing packages before preparing writable memory or metadata.
@@ -147,15 +171,34 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	var rootfsObject *storage.CowSnapshotObject
-	// Resolve / build the memory artifact:
-	//   - if the sandbox is bound to a previous snapshot whose memory blob
-	//     can be resolved, reflink-clone that blob and ask the shim for
-	//     a soft-dirty per-cycle delta;
-	//   - otherwise (lineage broken: missing/purged catalog or upstream
-	//     volume gone) create a fresh empty volume and fall back to a full
-	//     snapshot.
-	memoryObject, snapshotTypeForCmd, err := prepareCommitMemoryArtifact(ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend)
+	cleanupPreparedLayout := func() {
+		layout.releaseMetadata(ctx)
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
+	}
+
+	// Memory preparation and package layout creation are independent. Prepare
+	// them together so JFS metadata latency does not serialize the snapshot
+	// critical path.
+	layout.resetTmpDir()
+	layoutReady := make(chan error, 1)
+	go func() {
+		layoutReady <- layout.prepareWork(ctx)
+	}()
+
+	// Resolve / build the physical payload. A filesystem-only snapshot has no
+	// memory artifact at all; a full snapshot clones an incremental base when
+	// the sandbox's memory lineage allows it and falls back to a full capture
+	// otherwise.
+	payload, snapshotTypeForCmd, err := prepareCommitPayload(
+		ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend, mode,
+	)
+	layoutErr := <-layoutReady
 	if err != nil {
+		cleanupPreparedLayout()
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("template memory object already exists: %v", err)
@@ -165,27 +208,23 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to prepare memory artifact for snapshot: %v", err)
 		return rsp, nil
 	}
-	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+	if err := validateCommitPayload(payload, mode); err != nil {
+		cleanupPreparedLayout()
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
 
 	cleanupArtifacts := func() {
-		layout.releaseMetadata(ctx)
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
-		layout.discardTmpDir()
-		if !layout.usesTmpRename() {
-			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
-		}
+		cleanupPreparedLayout()
+		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
 	}
 
-	layout.resetTmpDir()
-	if err := layout.prepareWork(ctx); err != nil {
+	if layoutErr != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", layoutErr)
 		return rsp, nil
 	}
 	// CommitSandbox snapshots a running sandbox whose memory artifact has
@@ -193,18 +232,23 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// for the path we took: soft-dirty when reflink-cloning a base, or full
 	// when degrading because no base could be resolved. AppSnapshot keeps
 	// using the default full type via its own call site.
-	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
+	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd, "snapshotMode": mode})
 	frozenCtx, frozenCancel := detachedSnapshotWorkContext(ctx)
 	defer frozenCancel()
 	var bindingErr error
 	var snapshotErr, rootfsErr, resumeErr error
-	shimCapability := resolveShimSnapshotCapability(cb)
 
 	// The legacy sequence: commit rootfs first, then capture memory, which is
 	// v0.7.1 behaviour for this entry point and deliberately differs from
 	// AppSnapshot's order. Used both as the ordinary path for a shim below the
 	// coordinated boundary and as the one-shot retry described below.
 	runLegacy := func() (snapshotErr, rootfsErr error) {
+		if !payload.HasMemory() {
+			// The legacy path captures memory unconditionally. Refusing here
+			// is the last line of defence against recording an fs-only
+			// artifact that actually contains memory.
+			return errFilesystemOnlyNeedsCoordinatedShim, nil
+		}
 		rootfsErr, snapshotErr = runLegacySnapshot(
 			func() (err error) {
 				rootfsObject, err = storage.CommitRootfsFor(frozenCtx, backend, sourceRootfs, rsp.TemplateID)
@@ -217,12 +261,12 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 					// baseline before starting so metadata-fixup failures
 					// force the next commit to take a full snapshot.
 					bindingErr = persistRuntimeSnapshotBinding(
-						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
+						frozenCtx, s.cubeboxMgr.cubeboxManger, cb, "",
 					)
 					return bindingErr
 				}, func() error {
 					return s.captureLegacyMemory(
-						frozenCtx, cb, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd,
+						frozenCtx, cb, rsp.SandboxID, spec, layout.MetaWork, payload.MemoryDevPath(), snapshotTypeForCmd,
 					)
 				})
 			},
@@ -230,28 +274,45 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return snapshotErr, rootfsErr
 	}
 
-	if shimCapability.Coordinated {
+	if useCoordinatedSnapshotPath(shimCapability, mode) {
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
-			// Invalidate only once memory capture is about to start.
-			previousLabels := copyCubeBoxLabels(cb)
-			bindingErr = persistRuntimeSnapshotBinding(
-				frozenCtx, s.cubeboxMgr.cubeboxManger, cb, runtimeSnapshotBindingInvalidID, time.Now().UTC(),
-			)
-			if bindingErr != nil {
-				return bindingErr
+			// A filesystem-only capture only reads the rootfs: it must not
+			// touch the memory lineage, because it cannot become the base of
+			// the next incremental commit.
+			var previousLineage *cubeboxstore.MemoryLineage
+			if payload.HasMemory() {
+				// Invalidate only once memory capture is about to start.
+				previousLineage = cb.MemoryLineageCopy()
+				bindingErr = persistRuntimeSnapshotBinding(
+					frozenCtx, s.cubeboxMgr.cubeboxManger, cb, "",
+				)
+				if bindingErr != nil {
+					return bindingErr
+				}
 			}
 			captureStarted = true
-			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, rsp.TemplateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd)
+			captureErr := s.captureSnapshotWithShim(
+				frozenCtx, cb, rsp.TemplateID, layout.MetaWork,
+				payload.MemoryDevPath(), snapshotTypeForCmd, sourceRootfs.DevPath, mode,
+			)
+			if captureErr == nil && mode.IsFsOnly() {
+				// A cold boot mounts what the package names, so the package must
+				// name the layer this sandbox actually uses -- see
+				// recordWritableLayer for why it cannot be derived.
+				captureErr = recordWritableLayer(layout.MetaWork, cb.RootfsWritableLayer)
+			}
 			if shimSnapshotUnsupported(captureErr) {
 				captureStarted = false
 				// A mislabeled shim rejected the action before touching the VM,
 				// so its previous incremental baseline is still valid.
-				restoreCubeBoxLabels(cb, previousLabels)
-				if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
-					setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
-					return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+				if payload.HasMemory() {
+					cb.RestoreMemoryLineage(previousLineage)
+					if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(frozenCtx, cb.ID); restoreErr != nil {
+						cb.ClearRuntimeBase()
+						return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+					}
 				}
 			}
 			if captureErr == nil {
@@ -284,7 +345,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		// safely be redone on the legacy path, which also preserves this entry
 		// point's rootfs-then-memory order. The legacy path never re-enters the
 		// coordinated one, so this retries at most once.
-		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr, mode) {
 			logShimDegradedToLegacy(stepLog, shimCapability.Version)
 			snapshotErr, rootfsErr = runLegacy()
 		}
@@ -298,11 +359,14 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		}
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		if errors.Is(snapshotErr, errSnapshotShimIncompatible) {
+		fsOnlyUnsupported := filesystemOnlyUnsupportedMessage(snapshotErr, shimCapability.Version, mode)
+		if fsOnlyUnsupported != "" || errors.Is(snapshotErr, errSnapshotShimIncompatible) || filesystemOnlyPrecondition(snapshotErr) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		}
 		if bindingErr != nil {
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist runtime snapshot binding: %v", bindingErr)
+		} else if fsOnlyUnsupported != "" {
+			rsp.Ret.RetMsg = fsOnlyUnsupported
 		} else {
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to capture sandbox snapshot: %v", snapshotErr)
 		}
@@ -329,7 +393,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
-	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
+	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
@@ -358,11 +422,11 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	rsp.RootfsVol = rootfsObject.Name
-	rsp.MemoryVol = memoryObject.Name
+	rsp.MemoryVol = payload.MemoryVol()
 	rsp.RootfsKind = rootfsObject.Kind
-	rsp.MemoryKind = memoryObject.Kind
+	rsp.MemoryKind = payload.MemoryKind()
 	rsp.RootfsDev = rootfsObject.DevPath
-	rsp.MemoryDev = memoryObject.DevPath
+	rsp.MemoryDev = payload.MemoryDevPath()
 	rsp.RootfsSizeBytes = rootfsObject.SizeBytes
 	// Capture first so the Commit RPC response matches catalog ComponentVersions
 	// (pinned sandbox versions), not whatever is currently in the live toolbox.
@@ -385,8 +449,8 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		MetaDir:           layout.MetaDir,
 		RootfsVol:         rootfsObject.Name,
 		RootfsKind:        rootfsObject.Kind,
-		MemoryVol:         memoryObject.Name,
-		MemoryKind:        memoryObject.Kind,
+		MemoryVol:         payload.MemoryVol(),
+		MemoryKind:        payload.MemoryKind(),
 		MetadataVol:       storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
 		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
@@ -404,7 +468,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, rsp.TemplateID); err != nil {
 		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
 	}
-	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
+	if raw := uploadRemoteUUIDs(ctx, backend, rsp.TemplateID); raw != "" {
 		rsp.RemoteUuids = raw
 	}
 	// Publish the completed package and component versions together. On a
@@ -413,11 +477,28 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// Master; publishing the incremental baseline is only an optimization.
 	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotResumeTimeout)
 	defer publishCancel()
-	if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID, time.Now().UTC()); err != nil {
-		stepLog.Warnf("snapshot %s completed but baseline/component version sync failed; future commits will use a safe fallback: %v", rsp.TemplateID, err)
+	if payload.HasMemory() {
+		if err := persistRuntimeSnapshotBinding(publishCtx, s.cubeboxMgr.cubeboxManger, cb, rsp.TemplateID); err != nil {
+			stepLog.Warnf("snapshot %s completed but baseline/component version sync failed; future commits will use a safe fallback: %v", rsp.TemplateID, err)
+		}
 	}
 	stepLog.Infof("CommitSandbox completed successfully: snapshotPath=%s", snapshotPath)
 	return rsp, nil
+}
+
+// validateFilesystemOnlyCapture rejects sandbox shapes that a filesystem-only
+// artifact cannot represent faithfully: a package records exactly one overlay
+// upper directory, so a sandbox with more than one container cannot be captured
+// without containers seeing each other's files.
+func validateFilesystemOnlyCapture(cb *cubeboxstore.CubeBox, mode snapshotmode.Mode) error {
+	if !mode.IsFsOnly() || cb == nil {
+		return nil
+	}
+	if n := len(cb.AllContainers()); n > 1 {
+		return fmt.Errorf("%s: sandbox has %d containers; filesystem-only snapshots support one",
+			snapshotmode.ErrFilesystemOnlyMultiContainer, n)
+	}
+	return nil
 }
 
 func validateCommitSandboxTarget(cb *cubeboxstore.CubeBox) (string, error) {
@@ -726,6 +807,7 @@ var (
 	cleanupReleaseS3Metadata   = storage.ReleaseS3MetadataVolume
 	cleanupObjectsFor          = storage.CleanupObjectsFor
 	cleanupTemplateLocalDataFn = storage.CleanupTemplateLocalData
+	cleanupJFSConfigured       = storage.JFSConfigured
 )
 
 // cleanupTemplate removes a catalog package. honorLivePauseKeep is true for
@@ -773,6 +855,11 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 				entry = alt
 			}
 		}
+	}
+	// Master asks every node to drop a shared jfs template, and a node
+	// without jfs never held one.
+	if entry == nil && backend == cow.BackendJFS && !cleanupJFSConfigured() {
+		return rsp, nil
 	}
 	if shouldKeepLivePausePackage(honorLivePauseKeep, s.listCubeboxes(), rsp.TemplateID, catalogKindForKeep(entry)) {
 		log.G(ctx).Infof("CleanupTemplate %s: keeping pause package; a live sandbox still restores from it",

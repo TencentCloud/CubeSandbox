@@ -122,6 +122,7 @@ RUN . /etc/buildenv \
         mtools \
         musl-tools \
         docker.io \
+        e2fsprogs \
         nasm \
         ninja-build \
         ntfs-3g \

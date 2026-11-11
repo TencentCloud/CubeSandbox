@@ -58,3 +58,8 @@ lang: en-US
 | [WeKnora: A Persistent Agent Runtime on CubeSandbox](./weknora.md) | Chen Yang, Zhao Hailong | 2026-09-17 | agent, snapshot, session-persistence, e2b-compat |
 | [Huajiao: Sandbox as an Option, Not a Default — Agent Platform Practice](./huajiao.md) | Wang Chenglong, Feng Bingqing | 2026-09-17 | agent, host-mount, go-sdk, execution-environment |
 | [openFuyao: Running CubeSandbox on Kubernetes](./openfuyao.md) | Wang Wentao, Li Aihua | 2026-09-17 | kubernetes, deployment, ebpf, production |
+| [Galxe Alva: Landing CubeSandbox on GKE — Selection and Troubleshooting](./galxe-alva.md) | RuiPeng Zhang | 2026-10-15 | agent, gke, kubernetes, security |
+| [LambChat: Migrating an Agent Platform's Sandbox to CubeSandbox](./lambchat.md) | Clivia | 2026-10-15 | agent, e2b-compat, pause-resume, multi-tenant |
+| [OUC Online: Session Isolation and Lifecycle Practices for an Agent Code Execution Layer](./ouc-online.md) | Lu Haoyang | 2026-11-06 | agent, session-isolation, lifecycle, pause-resume |
+| [KakuriZai: Lightweight Isolated Workspaces for Parallel Multi-Agent Editing](./kakurizai.md) | Ryo Sato (mizuame) | 2026-11-06 | agent, overlayfs, snapshot, host-mount |
+| [OMA: Architecture and Secure Execution Plane of a Cloud Managed Agents Platform](./oma.md) | Master Zhang's Blog | 2026-11-06 | agent, managed-agents, security, architecture |

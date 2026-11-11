@@ -73,6 +73,14 @@ func TestFullLifecycle(t *testing.T) {
 	if info.DevicePath == "" {
 		t.Fatal("GetVolumeInfo returned empty device path")
 	}
+	objectInfo, err := engine.GetObjectInfo(volumeName)
+	if err != nil {
+		t.Fatalf("GetObjectInfo failed: %v", err)
+	}
+	if objectInfo.DevicePath != info.DevicePath || objectInfo.SizeBytes != info.SizeBytes {
+		t.Fatalf("GetObjectInfo mismatch: got path=%q size=%d, want path=%q size=%d",
+			objectInfo.DevicePath, objectInfo.SizeBytes, info.DevicePath, info.SizeBytes)
+	}
 
 	oldSize, newSize, err := engine.ResizeVolume(volumeName, info.SizeBytes+(256<<20))
 	if err != nil {

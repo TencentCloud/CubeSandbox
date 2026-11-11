@@ -134,6 +134,20 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     enable = false
     socket_path = "/var/run/s3lvol.sock"
 
+    [plugins."io.cubelet.internal.v1.storage".cow.jfs]
+    # backend=jfs: the reflink Store on a JuiceFS mount (cube-sandbox-jfs.service).
+    # Every node shares <mount_path>/{objects,snapshots,pause-snapshots}.
+    # Cube provides globally unique names and serialized object lifecycles.
+    # Files are cloned with copy_file_range, a metadata-only clone on JuiceFS.
+    # Default false: jfs requests fail with "jfs storage is not configured".
+    enable = false
+    mount_path = "/data/cubelet/storage/jfs"
+    root = "."
+    # The JuiceFS client's cache dir (CUBE_JFS_CACHE_DIR, colon-separated). A
+    # package is ready for cross-node restore once none of its blocks is in
+    # the --writeback staging area under it.
+    # cache_dir = "/data/cubelet/jfs-cache"
+
     # Only needed when switching back to the legacy ext4 / raw / reflink-pool
     # backend: change storage_backend to the corresponding value (e.g. "ext4")
     # and uncomment the fields below as needed. Under cubecow these fields are ignored.

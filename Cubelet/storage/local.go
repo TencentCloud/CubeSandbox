@@ -47,6 +47,7 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 type local struct {
@@ -72,6 +73,11 @@ type local struct {
 	cowManager           cowVolumeManager // XFS / xfscow Store (reflink handle)
 	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
 	s3InitCancel         context.CancelFunc
+	jfsInitMu            sync.Mutex // serializes jfs handle initialization and close
+	jfsStateMu           sync.RWMutex
+	jfsCowEngine         *cubecow.Engine
+	jfsCowManager        cowVolumeManager // jfs Store (reflink handle on JuiceFS)
+	jfsInitCancel        context.CancelFunc
 
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
@@ -190,6 +196,9 @@ func (l *local) resetCowNodeStorage() error {
 			return fmt.Errorf("reset cubecow s3 storage: %w", err)
 		}
 	}
+	// JFS is a cluster-wide namespace. A node reset must never call
+	// reset_node_storage on that handle because it would erase objects owned
+	// by every other node. Normal object lifecycle cleanup is driven by Cube.
 	l.Close()
 	return nil
 }
@@ -314,6 +323,13 @@ func (l *local) RecoverStorageState(ctx context.Context) error {
 				CubeLog.Warnf("storage recover: skipping id=%s while s3 storage is initializing: %v", id, err)
 				continue
 			}
+			// A jfs file path is stable across restarts, so a sandbox
+			// recorded before the JuiceFS mount came back keeps a valid
+			// one; only the refresh is skipped.
+			if errors.Is(err, ErrJFSNotReady) || errors.Is(err, ErrJFSNotConfigured) {
+				CubeLog.Warnf("storage recover: skipping id=%s while jfs storage is unavailable: %v", id, err)
+				continue
+			}
 			return err
 		}
 	}
@@ -342,10 +358,9 @@ func (l *local) recoverStorageInfo(ctx context.Context, id string, info *Storage
 	if IsS3Backend(storageBackendFromInfo(info)) {
 		// Boot does nothing for an S3 sandbox. Every disk it needs is resolved
 		// and attached by the request that uses it, and a restarted Cubelet
-		// cannot tell a leftover from a disk a live sandbox is reading: acting
-		// on that guess is what used to pull the memory snapshot out from
-		// under a resumed VM. Reading this entry later drops the stale device
-		// path (see refreshCowPaths), so there is nothing to persist here.
+		// cannot tell a leftover from a disk a live sandbox is reading, so
+		// guessing would be unsafe. refreshCowPaths drops the stale device
+		// path, so there is nothing to persist here.
 		return nil
 	}
 	if err := l.refreshCowPaths(info); err != nil {
@@ -455,6 +470,7 @@ func (l *local) Close() error {
 		l.cowEngine = nil
 	}
 	l.clearS3Cow()
+	l.closeJFSCow()
 	l.cowManager = nil
 	return nil
 }
@@ -838,6 +854,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.CreateContext nil")
 	}
+	if workflow.ReuseFor(opts).Storage {
+		info, err := l.readBackendFileInfo(ctx, opts.SandboxID)
+		if err != nil {
+			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "restart storage %s: %v", opts.SandboxID, err)
+		}
+		opts.StorageInfo = info
+		return nil
+	}
 	realReq := opts.ReqInfo
 
 	if opts.IsCreateSnapshot() && !opts.IsCubeboxV2() {
@@ -980,6 +1004,12 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
 		return "", "", nil
 	}
+	// A cold boot starts a fresh VM without guest memory: there is no memory
+	// artifact to resolve, and looking one up would either fail on a node that
+	// never had the package or attach the pre-restart image to a new VM.
+	if opts.IsColdBoot() {
+		return "", "", nil
+	}
 	// Emptydir / file pools do not use the cubecow snapshot catalog.
 	if !l.useCowStorage() {
 		return "", "", nil
@@ -1008,6 +1038,12 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		if name != "" {
 			return cowFileURLFromPath(devPath), name, nil
 		}
+		// A full restore needs memory. An import without one is an incomplete
+		// package; falling through to the local catalog would only look up a
+		// package this node does not have and fail later with a worse error.
+		snapshotID, _ := opts.GetSnapshotTemplateID()
+		return "", "", fmt.Errorf("%s: cross-node import of %s carries no memory volume",
+			snapshotmode.ErrSnapshotMemoryMissing, snapshotID)
 	}
 	pauseOwner := ""
 	if pauseResumeClonesLiveMemory(backend) && opts.IsPauseResume() && CrossNodeSandboxImport(annotations) == nil {
@@ -1023,6 +1059,19 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		return "", "", err
 	}
 	if volumeName == "" {
+		// Only a runtime snapshot or a pause package must carry memory: both
+		// restore guest memory. An app-snapshot template may legitimately be
+		// rootfs-only (the template itself has no memory to prefetch), so it
+		// keeps the historical empty result instead of failing.
+		runtimeSnapshotID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
+		if opts.IsPauseResume() || runtimeSnapshotID != "" {
+			reference := runtimeSnapshotID
+			if reference == "" {
+				reference = opts.GetSandboxID()
+			}
+			return "", "", fmt.Errorf("%s: snapshot %s has no memory volume for memory restore",
+				snapshotmode.ErrSnapshotMemoryMissing, reference)
+		}
 		return "", "", nil
 	}
 	if pauseOwner != "" {
@@ -1056,11 +1105,11 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 
 // pauseResumeClonesLiveMemory is true when same-node pause resume must
 // copy package memory onto a sandbox-private volume before Create
-// returns. XFS is false: the original snapshot file is the restore
+// returns. XFS and jfs are false: the original snapshot file is the restore
 // image. S3 is true because the live disk is an NVMe lvol.
 func pauseResumeClonesLiveMemory(backend string) bool {
 	normalized, err := cow.NormalizeBackend(backend)
-	return err == nil && normalized != cow.BackendXFS
+	return err == nil && !cow.IsReflinkBackend(normalized)
 }
 
 // pauseResumeMemoryOwnerID is the sandbox that must own a private copy of the
@@ -1122,22 +1171,26 @@ func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, in
 //     template), so memory prefetch is correctly a no-op.
 //   - Logical id present, catalog hit with memory_vol -> normal restore.
 func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, backend string, annotations map[string]string) (string, string, error) {
-	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
-	if logicalID == "" {
-		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+	storageID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
+	if storageID == "" &&
+		annotations[constants.MasterAnnotationJFSTemplateVariantPolicy] == constants.MasterJFSTemplateVariantPolicyV1 {
+		storageID = strings.TrimSpace(annotations[constants.MasterAnnotationJFSTemplateVariantID])
 	}
-	if logicalID == "" {
+	if storageID == "" {
+		storageID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+	}
+	if storageID == "" {
 		return "", "", nil
 	}
 	if strings.TrimSpace(backend) == "" {
 		backend = annotations[constants.MasterAnnotationStorageBackend]
 	}
-	entry, err := GetLocalSnapshotFor(ctx, backend, logicalID)
+	entry, err := GetLocalSnapshotFor(ctx, backend, storageID)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
+		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", storageID, err)
 	}
 	if entry == nil {
-		return "", "", fmt.Errorf("snapshot %s missing from local catalog", logicalID)
+		return "", "", fmt.Errorf("snapshot %s missing from local catalog", storageID)
 	}
 	volumeName := strings.TrimSpace(entry.MemoryVol)
 	if volumeName == "" {
@@ -1303,6 +1356,15 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 			return nil, ErrS3NotConfigured
 		}
 		return nil, ErrS3NotReady
+	case cow.BackendJFS:
+		_, manager := l.loadJFSCowState()
+		if manager != nil {
+			return manager, nil
+		}
+		if !l.config.jfsConfigured() {
+			return nil, ErrJFSNotConfigured
+		}
+		return nil, ErrJFSNotReady
 	default:
 		if l.cowManager != nil {
 			return l.cowManager, nil
@@ -1516,6 +1578,12 @@ func (l *local) getDevInfo(ctx context.Context, q resource.Quantity) (*devInfo, 
 func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err error) {
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
+	}
+	if workflow.RetainFor(opts).Storage {
+		// The guest crashed without unmounting. The retained ext4 still has
+		// the torn directory entries, and the next cold boot hits them
+		// (deleted inode) before the code interpreter can listen.
+		return l.repairRetainedRootfs(ctx, opts.SandboxID)
 	}
 	log.G(ctx).Debugf("Destroy doing")
 	start := time.Now()

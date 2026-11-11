@@ -159,16 +159,41 @@ fn compute_reg_len(gic: &DeviceFd, reg: &DistReg, base: u32) -> Result<u32> {
     Ok(end)
 }
 
-/// Set distributor registers of the GIC.
+/// Distributor registers whose saved zero can be skipped on restore:
+/// I{S,C}* are W1S/W1C bitmaps (a zero write is an architectural no-op),
+/// IROUTER/IPRIORITYR are per-IRQ RAM zeroed by KVM's vgic init
+/// (arch/arm64/kvm/vgic/vgic-init.c); IGROUPR is excluded because KVM GICv3
+/// inits irq->group to 1, so it resets to all-ones.
+fn dist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICD_ISENABLER
+            | GICD_ICENABLER
+            | GICD_IROUTER
+            | GICD_ISPENDR
+            | GICD_ICPENDR
+            | GICD_ISACTIVER
+            | GICD_ICACTIVER
+            | GICD_IPRIORITYR
+    )
+}
+
+/// Set distributor registers of the GIC. Only valid on a freshly created
+/// vGIC: the zero-skip in `dist_reg_resets_to_zero` assumes the vGIC still
+/// holds its reset values.
 pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
     let mut idx = 0;
 
     for dreg in VGIC_DIST_REGS {
         let mut base = dreg.base + REG_SIZE as u32 * dreg.bpi as u32;
         let end = compute_reg_len(gic, dreg, base)?;
+        let skip_zero = dist_reg_resets_to_zero(dreg.base);
 
         while base < end {
-            dist_attr_set(gic, base, state[idx])?;
+            let val = state[idx];
+            if val != 0 || !skip_zero {
+                dist_attr_set(gic, base, val)?;
+            }
             idx += 1;
             base += REG_SIZE as u32;
         }
@@ -189,4 +214,55 @@ pub fn get_dist_regs(gic: &DeviceFd) -> Result<Vec<u32>> {
         }
     }
     Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::aarch64::gic::VgicConfig;
+    use crate::kvm::KvmGicV3Its;
+
+    fn test_vgic_config() -> VgicConfig {
+        VgicConfig {
+            vcpu_count: 1,
+            dist_addr: 0x0900_0000 - 0x01_0000,
+            dist_size: 0x01_0000,
+            redists_addr: 0x0900_0000 - 0x01_0000 - 0x02_0000,
+            redists_size: 0x02_0000,
+            msi_addr: 0x0900_0000 - 0x01_0000 - 0x02_0000 - 0x02_0000,
+            msi_size: 0x02_0000,
+            nr_irqs: 256,
+        }
+    }
+
+    // The zero-skip is reset-value-dependent only for the RAM classes
+    // (IROUTER/IPRIORITYR); the W1S/W1C bitmaps ignore a zero write
+    // whatever the current state. Pin the RAM banks against the running
+    // kernel.
+    #[test]
+    fn test_fresh_vgic_ram_skip_list_reads_zero() {
+        let hv = crate::new().unwrap();
+        let vm = hv.create_vm().unwrap();
+        vm.create_vcpu(0, None).unwrap();
+        let gic = KvmGicV3Its::new(&*vm, test_vgic_config()).expect("Cannot create gic");
+
+        let state = get_dist_regs(&gic.device).unwrap();
+        let mut idx = 0;
+        for dreg in VGIC_DIST_REGS {
+            let base = dreg.base + REG_SIZE as u32 * dreg.bpi as u32;
+            let end = compute_reg_len(&gic.device, dreg, base).unwrap();
+            let words = ((end - base) / REG_SIZE as u32) as usize;
+            if matches!(dreg.base, GICD_IROUTER | GICD_IPRIORITYR) {
+                for w in &state[idx..idx + words] {
+                    assert_eq!(
+                        *w, 0,
+                        "RAM skip-list register {:#06x} is non-zero on a fresh vGIC",
+                        dreg.base
+                    );
+                }
+            }
+            idx += words;
+        }
+        assert_eq!(idx, state.len());
+    }
 }

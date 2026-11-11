@@ -37,6 +37,7 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 			log.G(ctx).Errorf("Unmarshal to cubebox %s from meta: %v", id, err)
 			continue
 		}
+		cb.ReconcileRecoveredMemoryLineage(legacyRestoreBaseLabel(cb))
 
 		if cb.Namespace == "" {
 			cb.Namespace = namespaces.Default
@@ -69,6 +70,17 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 		}
 	}
 	return nil
+}
+
+// legacyRestoreBaseLabel reads the pre-MemoryLineage restore binding. Labels
+// only: create-request annotations are user controllable and were never
+// written by Cubelet, so they are not evidence. The row was just unmarshalled
+// and is not in the store yet, so reading Labels needs no lock.
+func legacyRestoreBaseLabel(cb *cubeboxstore.CubeBox) string {
+	if cb == nil {
+		return ""
+	}
+	return cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID]
 }
 
 func RecoverPod(ctx context.Context, client *containerd.Client, cb *cubeboxstore.CubeBox) (err error) {

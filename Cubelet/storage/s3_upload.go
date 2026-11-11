@@ -39,8 +39,13 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
 	uuids := &cow.RemoteUUIDs{}
+	refs, err := activateObjectRefs(ctx, m, cow.BackendS3, id)
+	if err != nil {
+		m.setUpload(id, cow.RemoteStateFailed, err.Error(), nil)
+		return nil, fmt.Errorf("resolve %s objects: %w", id, err)
+	}
 	var exportable []CowObjectRef
-	for _, ref := range activateObjectRefs(ctx, cow.BackendS3, id) {
+	for _, ref := range refs {
 		if IsS3MetadataBaseName(ref.Name) {
 			continue
 		}
@@ -52,7 +57,12 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 				return nil, fmt.Errorf("upload %s %s: %w", ref.Role, ref.Name, existsErr)
 			}
 			if !exists {
-				continue
+				// metadata.json carries the guest runtime identity and the
+				// writable-layer name; a package without it cannot be cold
+				// booted, so "uploaded but unusable" must not look like success.
+				err := fmt.Errorf("required %s object %s is missing", ref.Role, ref.Name)
+				m.setUpload(id, cow.RemoteStateFailed, err.Error(), nil)
+				return nil, fmt.Errorf("upload %s %s: %w", ref.Role, ref.Name, err)
 			}
 		}
 		exportable = append(exportable, ref)
@@ -212,7 +222,10 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		}
 	}
 
-	refs := activateObjectRefs(ctx, cow.BackendS3, id)
+	refs, err := activateObjectRefs(ctx, m, cow.BackendS3, id)
+	if err != nil {
+		return nil, err
+	}
 	if len(refs) == 0 {
 		st.State = cow.RemoteStateRunning
 		st.Message = "waiting for local snapshot objects"

@@ -262,7 +262,7 @@ mod adjuster {
     }
 }
 
-const TEST_LIST: [PerformanceTest; 17] = [
+const TEST_LIST: [PerformanceTest; 18] = [
     PerformanceTest {
         name: "boot_time_ms",
         func_ptr: performance_boot_time,
@@ -358,6 +358,15 @@ const TEST_LIST: [PerformanceTest; 17] = [
             ..PerformanceTestControl::default()
         },
         unit_adjuster: adjuster::bps_to_gbps,
+    },
+    PerformanceTest {
+        name: "virtio_vsock_echo_throughput_MiBps",
+        func_ptr: performance_vsock_echo_throughput,
+        control: PerformanceTestControl {
+            test_timeout: 30,
+            ..PerformanceTestControl::default()
+        },
+        unit_adjuster: adjuster::Bps_to_MiBps,
     },
     PerformanceTest {
         name: "block_read_MiBps",

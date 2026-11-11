@@ -12,7 +12,6 @@ import (
 	eventtypes "github.com/containerd/containerd/api/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 )
@@ -107,13 +106,9 @@ func TestConvergeResumeStateAfterOpaqueRestoreClearsPauseStateAndInvalidatesBind
 		PausedAt:  time.Now().Add(-2 * time.Minute).UnixNano(),
 		PausingAt: time.Now().Add(-time.Minute).UnixNano(),
 	})
-	cb.Metadata.Labels = map[string]string{
-		constants.MasterAnnotationRuntimeSnapshotID:                "snap-before-resume",
-		constants.MasterAnnotationRuntimeRestoreSnapshotID:         "restore-before-resume",
-		constants.MasterAnnotationRuntimeSnapshotAttachedAt:        time.Now().Add(-3 * time.Minute).UTC().Format(time.RFC3339Nano),
-		constants.MasterAnnotationRuntimeRestoreSnapshotAttachedAt: time.Now().Add(-3 * time.Minute).UTC().Format(time.RFC3339Nano),
-		"keep": "value",
-	}
+	cb.BindRuntimeBase("snap-before-resume")
+	cb.BindRestoreBase("restore-before-resume")
+	cb.Metadata.Labels = map[string]string{"keep": "value"}
 	cb.ContainersMap.AddContainer(&cubeboxstore.Container{
 		Metadata: cubeboxstore.Metadata{ID: "sb-resume-helper-sidecar"},
 		Status: cubeboxstore.StoreStatus(cubeboxstore.Status{
@@ -131,10 +126,8 @@ func TestConvergeResumeStateAfterOpaqueRestoreClearsPauseStateAndInvalidatesBind
 		assert.Equal(t, int64(0), got.PausingAt, "PausingAt must be cleared for %s", id)
 		assert.NotZero(t, got.StartedAt, "resumed %s must have a running marker", id)
 	}
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
-	assert.Equal(t, attachedAt.Format(time.RFC3339Nano), cb.Labels[constants.MasterAnnotationRuntimeSnapshotAttachedAt])
-	assert.Equal(t, attachedAt.Format(time.RFC3339Nano), cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotAttachedAt])
+	assert.Equal(t, "", cb.RuntimeBaseID())
+	assert.Equal(t, "", cb.RestoreBaseID())
 	assert.Equal(t, "value", cb.Labels["keep"], "unrelated labels must be preserved")
 }
 
@@ -143,10 +136,8 @@ func TestHandleEventTaskResumedConvergesOpaqueRestoreBindings(t *testing.T) {
 		PausedAt:  time.Now().Add(-2 * time.Minute).UnixNano(),
 		PausingAt: time.Now().Add(-time.Minute).UnixNano(),
 	})
-	cb.Metadata.Labels = map[string]string{
-		constants.MasterAnnotationRuntimeSnapshotID:        "snap-before-event",
-		constants.MasterAnnotationRuntimeRestoreSnapshotID: "restore-before-event",
-	}
+	cb.BindRuntimeBase("snap-before-event")
+	cb.BindRestoreBase("restore-before-event")
 	manager := &fakeCubeboxAPI{cb: cb}
 	em := &eventMonitor{c: &local{cubeboxManger: manager}}
 
@@ -157,9 +148,7 @@ func TestHandleEventTaskResumedConvergesOpaqueRestoreBindings(t *testing.T) {
 	assert.Equal(t, int64(0), got.PausedAt, "TaskResumed must clear PausedAt")
 	assert.Equal(t, int64(0), got.PausingAt, "TaskResumed must clear PausingAt")
 	assert.NotZero(t, got.StartedAt, "TaskResumed must restore a running marker")
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	assert.Equal(t, runtimeSnapshotBindingInvalidID, cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID])
-	assert.NotEmpty(t, cb.Labels[constants.MasterAnnotationRuntimeSnapshotAttachedAt], "TaskResumed must stamp attached_at")
-	assert.NotEmpty(t, cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotAttachedAt], "TaskResumed must stamp restore attached_at")
+	assert.Equal(t, "", cb.RuntimeBaseID())
+	assert.Equal(t, "", cb.RestoreBaseID())
 	assert.Equal(t, []string{cb.ID}, manager.syncIDs, "TaskResumed must persist the converged cubebox")
 }

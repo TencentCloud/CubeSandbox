@@ -21,6 +21,17 @@ rule list attached at sandbox-creation time:
 Upstream `proxy_read_timeout` / `proxy_send_timeout` are 2h (same
 order as CubeProxy). `proxy_connect_timeout` stays 10s.
 
+Outbound WebSocket connections (`ws://` and `wss://`) use the HTTP and
+HTTPS listeners. The proxy applies L7 rules to the opening HTTP handshake,
+then forwards WebSocket frames after a successful upgrade. Upgrade headers
+for other protocols are not forwarded. The two-hour timeouts limit gaps
+between I/O operations, not the total connection lifetime.
+
+Filtering other upgrade headers relies on upstreams honoring HTTP upgrade
+negotiation. If a client sends an `Upgrade` header and an upstream returns
+`101 Switching Protocols` without negotiating it, nginx can still switch to
+a tunnel. L7 rules do not inspect traffic after that switch.
+
 ## How it intercepts
 
 CubeEgress runs as a host-network container and binds two TPROXY
@@ -235,6 +246,8 @@ Behavior:
   schemes.
 - Inject only fires when `action.allow=true`. A deny rule with
   `inject=[…]` is a configuration error — the inject is dropped.
+- `host="*"` and `sni="*"` can carry `inject`. The secret is attached to
+  every destination the rule matches, under the same gates as a named host.
 
 The point of the inject path is that the secret stays on the
 operator side: it lives in the rule list, gets pushed to
@@ -273,8 +286,13 @@ per rule via `action.audit`:
 | Level | What gets logged |
 | --- | --- |
 | `none` | Nothing |
-| `metadata` (default) | timestamp, sandbox IP, dst IP/port, scheme, host, method, path, status, request/response sizes, latency, TLS version + cipher, upstream addr |
+| `metadata` (default) | request ID, sandbox ID/IP, destination IP/port, HTTP method/host/path/status and sizes, TLS SNI/version/cipher, matched rule/decision, duration in microseconds, redacted request headers |
 | `full` | Reserved — same as `metadata` today; full request/response body capture is planned |
+
+For Cubelet-managed policies, `sandbox.policy_id` in HTTP and security-event
+records contains the stable sandbox ID once a policy is found. Policy lookup
+and `sandbox.src_ip` still use the sandbox IP. Existing policies take the new
+ID on their next push or CubeEgress bootstrap after Cubelet is upgraded.
 
 Logs are JSONL on the host at `/data/log/cube-egress/access.jsonl`,
 one line per request:
@@ -282,23 +300,44 @@ one line per request:
 ```json
 {
   "ts": "2026-05-29T11:24:01+08:00",
-  "sandbox_ip": "192.168.1.154",
-  "dst_ip": "104.16.132.229",
-  "dst_port": 443,
-  "scheme": "https",
-  "host": "api.deepseek.com",
-  "method": "POST",
-  "path": "/v1/chat",
-  "status": 200,
-  "bytes_in": 412,
-  "bytes_out": 1856,
-  "latency_ms": 384,
-  "tls_version": "TLSv1.3",
-  "cipher": "TLS_AES_128_GCM_SHA256",
-  "upstream_status": "200",
-  "upstream_addr": "104.16.132.229:443"
+  "request_id": "42-1",
+  "event": "http_request",
+  "sandbox": {
+    "src_ip": "192.168.1.154",
+    "policy_id": "sandbox-1"
+  },
+  "conn": {
+    "original_dst_ip": "203.0.113.10",
+    "original_dst_port": 443
+  },
+  "tls": {
+    "sni": "api.example.com",
+    "cipher": "TLS_AES_128_GCM_SHA256",
+    "version": "TLSv1.3"
+  },
+  "http": {
+    "method": "POST",
+    "host": "api.example.com",
+    "path": "/v1/chat",
+    "status": 200,
+    "req_bytes": 412,
+    "resp_bytes": 1856
+  },
+  "policy": {
+    "matched_rule": "api_rule",
+    "decision": "allow",
+    "duration_us": 384000
+  },
+  "redacted_request_headers": {
+    "Content-Type": "application/json"
+  }
 }
 ```
+
+Fields with no value are omitted. `credentials` appears when header injection
+is recorded; `security` appears for security events or upstream failures.
+`upstream_addr` and `upstream_status` appear under `security` only for
+upstream failures.
 
 Two extra event types land in the same file with their own shape:
 

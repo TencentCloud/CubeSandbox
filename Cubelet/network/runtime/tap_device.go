@@ -37,6 +37,7 @@ var netlinkLinkList = func() ([]netlink.Link, error) {
 	return systemnet.WithDumpRetry(netlink.LinkList)
 }
 var netlinkLinkDel = netlink.LinkDel
+var netlinkLinkSetDown = netlink.LinkSetDown
 var deleteTAPDevicePolicyMaps = cubevs.DeleteTAPDevicePolicyMaps
 var unixOpen = unix.Open
 var unixClose = unix.Close
@@ -79,8 +80,13 @@ type tapDevice struct {
 // TapDeviceAdapter isolates privileged netlink/TUN operations from controller
 // logic so tests can exercise state transitions without creating real devices.
 type TapDeviceAdapter interface {
+	// Create returns a TAP whose filter is already attached. The controller
+	// records the ifindex and does not call AttachFilter again.
 	Create(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx int) (*tapDevice, error)
+	// Restore reconciles link state, MTU, and ARP. It does not attach the filter.
 	Restore(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error)
+	// Quarantine disables traffic while policy cleanup is pending.
+	Quarantine(tap *tapDevice) error
 	Open(name string) (*os.File, error)
 	Close(file *os.File)
 	List() (map[string]*tapDevice, error)
@@ -111,6 +117,24 @@ func (realTapDeviceAdapter) Create(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx
 
 func (realTapDeviceAdapter) Restore(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error) {
 	return restoreTap(tap, mtu, mvmMacAddr, cubeDevIdx)
+}
+
+func (realTapDeviceAdapter) Quarantine(tap *tapDevice) error {
+	if tap == nil || tap.Index <= 0 || tap.Name == "" {
+		return fmt.Errorf("missing TAP identity for quarantine")
+	}
+	link, err := netlinkLinkByIndex(tap.Index)
+	if err != nil {
+		return err
+	}
+	device, ok := link.(*netlink.Tuntap)
+	if !ok || device.Mode != netlink.TUNTAP_MODE_TAP || device.Name != tap.Name || device.Index != tap.Index {
+		return fmt.Errorf("TAP identity changed before quarantine: %s(%d)", tap.Name, tap.Index)
+	}
+	if err := netlinkLinkSetDown(link); err != nil {
+		return fmt.Errorf("disable TAP %s(%d): %w", tap.Name, tap.Index, err)
+	}
+	return nil
 }
 
 func (realTapDeviceAdapter) Open(name string) (*os.File, error) {
@@ -226,8 +250,9 @@ func configureTapFD(fd int, name string) error {
 // tap device identified by name, WITHOUT any netlink/rtnl lookup. It is the hot
 // path used when the caller already knows the device exists and is fully set up
 // (e.g. a pooled tap whose fd was closed while idle). Compared to restoreTap it
-// avoids netlinkLinkByName (an rtnl read), LinkSetUp/SetMTU, the TC AttachFilter
-// and the ARP entry, all of which were already applied when the tap was created.
+// avoids netlinkLinkByName (an rtnl read), LinkSetUp/SetMTU, and the ARP entry,
+// all of which were already applied when the tap was created. Filter attachment
+// is owned by the controller, not by either of these helpers.
 // For recovering taps of unknown state (e.g. after a restart) use restoreTap.
 func openTapFdByName(name string) (*os.File, error) {
 	// Use unix.Ifreq (a properly-sized struct ifreq) rather than the local
@@ -259,9 +284,12 @@ func openTapFdByName(name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), tunDevicePath), nil
 }
 
-// restoreTap reconciles a live TAP discovered after restart. Recovery never
-// opens a TAP fd: fd ownership is acquired lazily by GetTapFile or by the
-// explicit reusable probe after cleanup.
+// restoreTap reconciles a live TAP discovered after restart: link up, MTU, and
+// ARP. It does not call AttachFilter. That work pays synchronize_rcu once per
+// missing inner map, so the controller attaches recovered devices in the
+// background and compensates on acquire. Recovery never opens a TAP fd: fd
+// ownership is acquired lazily by GetTapFile or by the explicit reusable probe
+// after cleanup.
 func restoreTap(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error) {
 	if tap == nil {
 		return nil, fmt.Errorf("tap is nil")
@@ -301,9 +329,6 @@ func restoreTap(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*ta
 		if err := netlink.LinkSetMTU(sysTap, mtu); err != nil {
 			return nil, err
 		}
-	}
-	if err := cubevs.AttachFilter(uint32(restored.Index)); err != nil {
-		return nil, err
 	}
 	if err := systemnet.AddARPEntry(restored.IP, mvmMacAddr, cubeDevIdx); err != nil && !errors.Is(err, syscall.EEXIST) {
 		return nil, err

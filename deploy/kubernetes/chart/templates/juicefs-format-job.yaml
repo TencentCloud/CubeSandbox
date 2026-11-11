@@ -1,0 +1,95 @@
+{{- if eq (include "cube.juicefsEnabled" .) "true" }}
+{{- $meta := default dict ((.Values.cubeJuiceFS).metadata) }}
+{{- $storage := default dict ((.Values.cubeJuiceFS).storage) }}
+{{- $formatSpec := dict
+  "chartVersion" .Chart.Version
+  "appVersion" .Chart.AppVersion
+  "image" .Values.images.juicefs
+  "controlPlaneEnabled" .Values.controlPlane.enabled
+  "controlPlacement" .Values.placement.controlPlane
+  "computePlacement" .Values.placement.compute
+  "imagePullSecrets" .Values.imagePullSecrets
+  "volumeName" .Values.cubeJuiceFS.volumeName
+  "storageType" (($storage.type) | default "s3")
+  "metadataURL" (include "cube.juicefsMetadataURL" .)
+  "bucket" (include "cube.juicefsBucket" .)
+  "metadataSecret" (include "cube.juicefsMetadataSecretName" .)
+  "metadataPasswordKey" (($meta.passwordKey) | default "meta-password")
+  "storageSecret" (include "cube.juicefsStorageSecretName" .)
+  "storageAccessKeyKey" (($storage.accessKeyKey) | default "access-key")
+  "storageSecretKeyKey" (($storage.secretKeyKey) | default "secret-key")
+}}
+{{- $formatID := toJson $formatSpec | sha256sum | trunc 10 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cube.juicefsName" . }}-format-{{ $formatID }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-juicefs-format
+spec:
+  backoffLimit: 30
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-juicefs-format
+    spec:
+      restartPolicy: OnFailure
+      {{- if .Values.controlPlane.enabled }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      {{- else }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: format
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.juicefs "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.juicefs.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              juicefs format --no-update \
+                --storage "$JFS_STORAGE" \
+                --bucket "$JFS_BUCKET" \
+                "$JFS_META_URL" "$JFS_VOLUME_NAME"
+              juicefs status "$JFS_META_URL" >/dev/null
+          env:
+            - name: JFS_META_URL
+              value: {{ include "cube.juicefsMetadataURL" . | quote }}
+            - name: JFS_VOLUME_NAME
+              value: {{ .Values.cubeJuiceFS.volumeName | quote }}
+            - name: JFS_STORAGE
+              value: {{ $storage.type | default "s3" | quote }}
+            - name: JFS_BUCKET
+              value: {{ include "cube.juicefsBucket" . | quote }}
+            - name: META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.juicefsMetadataSecretName" . }}
+                  key: {{ $meta.passwordKey | default "meta-password" }}
+            - name: ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if ne (($storage.bucket) | default "") "" }}
+                  name: {{ include "cube.juicefsStorageSecretName" . }}
+                  key: {{ $storage.accessKeyKey | default "access-key" }}
+                  {{- else }}
+                  name: {{ include "cube.secretName" . }}
+                  key: minio-root-user
+                  {{- end }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if ne (($storage.bucket) | default "") "" }}
+                  name: {{ include "cube.juicefsStorageSecretName" . }}
+                  key: {{ $storage.secretKeyKey | default "secret-key" }}
+                  {{- else }}
+                  name: {{ include "cube.secretName" . }}
+                  key: minio-root-password
+                  {{- end }}
+{{- end }}

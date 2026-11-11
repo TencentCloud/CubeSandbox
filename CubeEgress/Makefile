@@ -1,4 +1,4 @@
-IMAGE_TAG              ?= v0.7.3
+IMAGE_TAG              ?= v0.8.0-rc1
 IMAGE_LOCAL            := cube-egress
 CUBE_VERSION           ?= $(IMAGE_TAG)
 CUBE_COMMIT            ?= $(shell git rev-parse HEAD | cut -c1-8)
@@ -33,6 +33,12 @@ test-lua:
 		test -n "$$LUA_BIN" || { echo "error: lua or luajit not installed"; exit 1; }; \
 		$$LUA_BIN tests/port_scheme_test.lua && \
 		$$LUA_BIN tests/port_scheme_extra_test.lua
+
+.PHONY: test-websocket
+test-websocket: build
+	$(Q)docker run --rm --entrypoint bash \
+		-v "$(CURDIR):/workspace:ro" -w /workspace \
+		$(IMAGE_LOCAL):$(IMAGE_TAG)-$(ARCH) tests/websocket_test.sh
 
 .PHONY: build
 build:
