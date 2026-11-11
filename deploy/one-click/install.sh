@@ -1997,6 +1997,10 @@ CUBE_JFS_ROOT="${CUBE_JFS_ROOT:-.}"
 CUBE_JFS_CACHE_DIR="${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
 CUBE_JFS_CACHE_SIZE_MB="${CUBE_JFS_CACHE_SIZE_MB:-102400}"
 CUBE_JFS_MOUNT_OPTS="${CUBE_JFS_MOUNT_OPTS:---writeback}"
+# Volume-level layout, fixed at format time: `juicefs mount` takes both from the
+# volume metadata, so they cannot be set as mount options.
+CUBE_JFS_BLOCK_SIZE="${CUBE_JFS_BLOCK_SIZE:-1M}"
+CUBE_JFS_COMPRESS="${CUBE_JFS_COMPRESS:-lz4}"
 if [[ "${ONE_CLICK_ENABLE_JFS}" == "1" && -z "${CUBE_JFS_META_URL}" ]]; then
   if [[ "${DEPLOY_ROLE}" == "compute" && -n "${ONE_CLICK_CONTROL_PLANE_IP:-}" ]]; then
     CUBE_JFS_META_URL="redis://${ONE_CLICK_CONTROL_PLANE_IP}:6380/0"
@@ -2443,6 +2447,8 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_ROOT" "${CUBE_JFS_ROOT}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_CACHE_DIR" "${CUBE_JFS_CACHE_DIR}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_CACHE_SIZE_MB" "${CUBE_JFS_CACHE_SIZE_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_MOUNT_OPTS" "${CUBE_JFS_MOUNT_OPTS}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_BLOCK_SIZE" "${CUBE_JFS_BLOCK_SIZE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_COMPRESS" "${CUBE_JFS_COMPRESS}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3LVOL_BUCKET" "${CUBE_S3LVOL_BUCKET}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_OPS_S3_BUCKET" "${CUBE_OPS_S3_BUCKET:-cube-ops}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_ARTIFACT_STORE_BACKEND" "${CUBE_ARTIFACT_STORE_BACKEND:-s3}"

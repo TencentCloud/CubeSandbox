@@ -68,6 +68,10 @@ grep -q 'key: minio-root-password' "$TMP_DIR/on.yaml" \
   || { echo "default object credentials must use the chart Secret" >&2; exit 1; }
 grep -q 'juicefs format --no-update' "$TMP_DIR/on.yaml" \
   || { echo "format Job must initialize JuiceFS idempotently" >&2; exit 1; }
+grep -q -- '--block-size 1M' "$TMP_DIR/on.yaml" \
+  || { echo "format Job must pin a 1M block size" >&2; exit 1; }
+grep -q -- '--compress lz4' "$TMP_DIR/on.yaml" \
+  || { echo "format Job must pin lz4 compression" >&2; exit 1; }
 grep -q 'juicefs status "$JFS_META_URL"' "$TMP_DIR/on.yaml" \
   || { echo "format Job must verify JuiceFS status" >&2; exit 1; }
 
