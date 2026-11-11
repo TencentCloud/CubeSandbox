@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -152,6 +153,17 @@ func pauseNeedsRemoteStatusWatch(backend string) bool {
 }
 
 func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
+	return cubeletReportsState(ctx, hostIP, sandboxID, cubebox.ContainerState_CONTAINER_PAUSED)
+}
+
+func cubeletReportsRunning(ctx context.Context, hostIP, sandboxID string) bool {
+	return cubeletReportsState(ctx, hostIP, sandboxID, cubebox.ContainerState_CONTAINER_RUNNING)
+}
+
+func cubeletReportsState(ctx context.Context, hostIP, sandboxID string, want cubebox.ContainerState) bool {
+	if strings.TrimSpace(hostIP) == "" {
+		return false
+	}
 	listRsp, err := cubelet.List(ctx, cubelet.GetCubeletAddr(hostIP), &cubebox.ListCubeSandboxRequest{
 		Id: &sandboxID,
 	})
@@ -163,7 +175,7 @@ func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
 			continue
 		}
 		for _, c := range item.GetContainers() {
-			if c.GetId() == sandboxID && c.GetState() == cubebox.ContainerState_CONTAINER_PAUSED {
+			if c.GetId() == sandboxID && c.GetState() == want {
 				return true
 			}
 		}
@@ -292,6 +304,40 @@ func clearStalePauseBindingIfRunning(ctx context.Context, requestID, sandboxID, 
 	}
 }
 
+// runningHostForLostResume returns the node on which a sandbox whose pause
+// binding is gone is RUNNING, or "" if none of the candidates report it.
+//
+// hostIP comes from this replica's process-local cache first, which on a
+// multi-replica CubeMaster can still name the pre-pause node after another
+// replica resumed the sandbox on a different node. The winning resume always
+// rewrites the shared Redis proxy map, so that host is probed as well. When
+// the sandbox is found elsewhere, the local cache is corrected so the next
+// lifecycle call on this replica goes to the right node.
+func runningHostForLostResume(ctx context.Context, sandboxID, hostIP string) string {
+	hostIP = strings.TrimSpace(hostIP)
+	candidates := []string{hostIP}
+	if pm, ok := getSandboxProxyMapFn(ctx, sandboxID); ok && pm != nil {
+		if ip := strings.TrimSpace(pm.HostIP); ip != "" && ip != hostIP {
+			candidates = append(candidates, ip)
+		}
+	}
+	for _, ip := range candidates {
+		if !cubeletReportsRunning(ctx, ip, sandboxID) {
+			continue
+		}
+		if ip != hostIP {
+			log.G(ctx).Infof("resume: sandbox=%s already running on %s (local cache had %q)",
+				sandboxID, ip, hostIP)
+			localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+				SandboxID: sandboxID,
+				HostIP:    ip,
+			})
+		}
+		return ip
+	}
+	return ""
+}
+
 // resumeFromPauseSnapshot asks Cubelet to Create with only sandboxID + snapID;
 // Cubelet expands sandbox_spec.json (incl. volume mounts) and Attaches volumes.
 func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, hostIP string) *types.Res {
@@ -305,6 +351,15 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		if errors.Is(err, pausesnap.ErrNotFound) {
+			// A resume that lost the race to another resume (e.g. SDK connect
+			// vs CLM auto-resume) reaches here after the winner already
+			// dropped the binding. Report "already running" so callers can
+			// treat it as a no-op instead of a hard failure.
+			if runningHostForLostResume(ctx, req.SandboxID, hostIP) != "" {
+				rsp.Ret.RetCode = int(errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskStateInvalid))
+				rsp.Ret.RetMsg = fmt.Sprintf("sandbox %s is already running", req.SandboxID)
+				return rsp
+			}
 			rsp.Ret.RetMsg = fmt.Sprintf("no pause snapshot for sandbox %s", req.SandboxID)
 		} else {
 			rsp.Ret.RetMsg = fmt.Sprintf("load pause snapshot: %v", err)

@@ -155,7 +155,7 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 | `N > 0` | ensure at least N seconds remain; a running or paused sandbox keeps a longer existing deadline, otherwise the timeout starts a new N-second window after connecting |
 | `0` or `N < -1` | reject the request with HTTP 400 |
 
-When connecting a paused sandbox, the underlying Resume may return HTTP 409 while another lifecycle operation is still settling; retry after the sandbox reaches a stable state. A connect 409 can also mean the sandbox's container has already exited: that state is permanent, so retrying will not help — see [State Model](#state-model).
+When connecting or resuming a paused sandbox while another lifecycle operation on it is still settling, CubeAPI returns HTTP 503 with `Retry-After: 2` if the sandbox is not running yet; wait at least that long and retry. If a concurrent request has already resumed it, connect succeeds and returns the connection info, while `POST /sandboxes/<id>/resume` returns 409 (already running). A connect 409 can also mean the sandbox's container has already exited: that state is permanent, so retrying will not help — see [State Model](#state-model).
 
 The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 
