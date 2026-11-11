@@ -3491,9 +3491,26 @@ step6_replace_kernel() {
 	key_file="${TENCENTCLOUD_SSH_PRIVATE_KEY_PATH:-$SSH_PRI_KEY}"
 	js_public_ip=$(terraform output -raw jumpserver_public_ip 2>/dev/null || echo "")
 	local pvm_kernel_url="${TENCENTCLOUD_PVM_KERNEL_RPM_URL:-https://mirrors.opencloudos.tech/opencloudos/9.6/extras/x86_64/os/Packages/kernel-core-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
-	local rpm_name
-	rpm_name=$(basename "$pvm_kernel_url")
-	local rpm_file="/tmp/${rpm_name}"
+	# The PVM host kernel is a five-package RPM set. Derive companion URLs from
+	# the kernel-core URL so an operator override still selects one matching
+	# version from one repository.
+	if [ "${pvm_kernel_url/kernel-core-/}" = "$pvm_kernel_url" ]; then
+		echo -e "${RED}✗ TENCENTCLOUD_PVM_KERNEL_RPM_URL must name a kernel-core RPM${NC}" >&2
+		return 1
+	fi
+	local pvm_meta_url="${pvm_kernel_url/kernel-core-/kernel-}"
+	local pvm_modules_url="${pvm_kernel_url/kernel-core-/kernel-modules-}"
+	local pvm_devel_url="${pvm_kernel_url/kernel-core-/kernel-devel-}"
+	local pvm_headers_url="${pvm_kernel_url/kernel-core-/kernel-headers-}"
+	local rpm_urls=("$pvm_kernel_url" "$pvm_meta_url" "$pvm_modules_url" "$pvm_devel_url" "$pvm_headers_url")
+	local rpm_labels=(kernel-core kernel kernel-modules kernel-devel kernel-headers)
+	# Bind cached filenames to their URLs so changing a version or repository
+	# can never silently reuse packages from a previous deployment.
+	local rpm_files=() rpm_url cache_key
+	for rpm_url in "${rpm_urls[@]}"; do
+		cache_key=$(printf '%s' "$rpm_url" | sha256sum | cut -c1-16)
+		rpm_files+=("/tmp/cube-pvm-host-${cache_key}.rpm")
+	done
 
 	# SSH to the target node (through the jumpserver proxy)
 	local ssh_opts=(
@@ -3518,98 +3535,69 @@ step6_replace_kernel() {
 		fi
 	fi
 
-	# 1) Download the RPM on the jumpserver (reusing a previously cached copy).
-	#    Reuse the cache only when the file is NON-EMPTY ([ -s ]): a prior failed
-	#    `wget -O` leaves a 0-byte file that would otherwise be treated as cached
-	#    and distributed/installed as a broken RPM on every rerun. On download
-	#    failure, remove the partial file (no poisoned cache) and surface FAILED so
-	#    the marker check below actually aborts (the old `|| echo FAILED` made the
-	#    remote command exit 0, so a failed download was treated as success).
-	echo -e "  ${CYAN}[1/5] Downloading the PVM kernel RPM on the jumpserver...${NC}"
-	echo -e "  URL: ${pvm_kernel_url}"
-	local _rpm_dl_out
-	_rpm_dl_out=$(ssh -i "${key_file}" -p 443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR root@"${js_public_ip}" "
-    if [ -s ${rpm_file} ]; then
+	# 1) Download all split RPMs on the jumpserver. Download to a temporary file
+	#    and rename only after success so interrupted transfers cannot poison the
+	#    cache used by a later run.
+	echo -e "  ${CYAN}[1/5] Downloading the PVM kernel RPM set on the jumpserver...${NC}"
+	local _rpm_dl_out rpm_index
+	for rpm_index in "${!rpm_urls[@]}"; do
+		echo -e "  ${rpm_labels[$rpm_index]}: ${rpm_urls[$rpm_index]}"
+		_rpm_dl_out=$(ssh -i "${key_file}" -p 443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR root@"${js_public_ip}" "
+    if [ -s '${rpm_files[$rpm_index]}' ]; then
       echo 'CACHED'
-    elif wget -q --timeout=30 --tries=3 '${pvm_kernel_url}' -O ${rpm_file} && [ -s ${rpm_file} ]; then
+    elif wget -q --timeout=30 --tries=3 '${rpm_urls[$rpm_index]}' -O '${rpm_files[$rpm_index]}.tmp' && [ -s '${rpm_files[$rpm_index]}.tmp' ]; then
+      mv -f '${rpm_files[$rpm_index]}.tmp' '${rpm_files[$rpm_index]}'
       echo 'DOWNLOADED'
     else
-      rm -f ${rpm_file}
+      rm -f '${rpm_files[$rpm_index]}.tmp'
       echo 'FAILED'
     fi
   " 2>&1) || true
-	if ! printf '%s' "$_rpm_dl_out" | grep -qE 'DOWNLOADED|CACHED'; then
-		echo ""
-		echo -e "${RED}✗ RPM download failed${NC}"
-		printf '%s\n' "$_rpm_dl_out" | sed 's/^/    /'
-		return 1
-	fi
-	echo -e "${GREEN}✓ RPM ready (jumpserver:${rpm_file})${NC}"
+		if ! printf '%s' "$_rpm_dl_out" | grep -qE 'DOWNLOADED|CACHED'; then
+			echo -e "${RED}✗ ${rpm_labels[$rpm_index]} RPM download failed${NC}"
+			printf '%s\n' "$_rpm_dl_out" | sed 's/^/    /'
+			return 1
+		fi
+	done
+	echo -e "${GREEN}✓ RPM set ready on jumpserver${NC}"
 
-	# 2) Distribute the RPM from the jumpserver to the target node
+	# 2) Distribute the complete RPM set from the jumpserver to the target node.
 	echo ""
-	echo -e "  ${CYAN}[2/5] Distributing the RPM from the jumpserver to ${label} (${target_ip})...${NC}"
+	echo -e "  ${CYAN}[2/5] Distributing the RPM set to ${label} (${target_ip})...${NC}"
 	ssh -i "${key_file}" -p 443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR root@"${js_public_ip}" "
-    scp -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${rpm_file} root@${target_ip}:${rpm_file}
+    scp -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${rpm_files[*]} root@${target_ip}:/tmp/
   " 2>&1 || {
 		echo -e "${RED}✗ RPM distribution failed${NC}"
 		return 1
 	}
-	echo -e "${GREEN}✓ RPM distributed to ${label}${NC}"
+	echo -e "${GREEN}✓ RPM set distributed to ${label}${NC}"
 
-	# 3) Install the RPM
+	# 3) Install the meta-package, core, modules, and devel atomically, then
+	#    update headers (which are not installonly) in a separate transaction.
 	echo ""
-	echo -e "  ${CYAN}[3/5] Installing the PVM kernel RPM...${NC}"
+	echo -e "  ${CYAN}[3/5] Installing the PVM kernel RPM set...${NC}"
 
-	local rpm_basename already_installed
-	rpm_basename="${rpm_name%.rpm}"
-	already_installed=$(ssh "${ssh_opts[@]}" root@"${target_ip}" "rpm -q '${rpm_basename}' 2>&1" || true)
-	if echo "$already_installed" | grep -q "^${rpm_basename}"; then
-		echo -e "${GREEN}✓ Kernel RPM already installed, skipping${NC}"
-	else
-		local install_ok=0
-		local install_out install_exit
+	local install_out install_exit
+	echo -e "  ${CYAN}Trying rpm with dependency checks enabled...${NC}"
+	install_out=$(ssh "${ssh_opts[@]}" root@"${target_ip}" \
+		"sudo rpm -ivh --oldpackage --replacepkgs --nosignature '${rpm_files[0]}' '${rpm_files[1]}' '${rpm_files[2]}' '${rpm_files[3]}' && sudo rpm -Uvh --oldpackage --replacepkgs --nosignature '${rpm_files[4]}'; echo EXIT:\$?") || true
+	echo "$install_out" | grep -v "^EXIT:" || true
+	install_exit=$(echo "$install_out" | grep "^EXIT:" | tail -1 | cut -d: -f2 || echo "1")
 
-		_is_install_success() {
-			local out="$1"
-			local filtered
-			filtered=$(echo "$out" | grep -v "dracut-install:" || true)
-			echo "$filtered" | grep -qE "(#+.*#+|Verifying|installed|already)"
-		}
-
-		echo -e "  ${CYAN}Trying: rpm -ivh --oldpackage --nodeps${NC}"
+	if [ "$install_exit" != "0" ]; then
+		echo ""
+		echo -e "  ${YELLOW}Trying dnf install for dependency resolution...${NC}"
 		install_out=$(ssh "${ssh_opts[@]}" root@"${target_ip}" \
-			"sudo rpm -ivh --oldpackage --nodeps --nosignature '${rpm_file}' 2>&1; echo EXIT:\$?") || true
+			"sudo dnf install -y --nogpgcheck '${rpm_files[0]}' '${rpm_files[1]}' '${rpm_files[2]}' '${rpm_files[3]}' '${rpm_files[4]}'; echo EXIT:\$?") || true
 		echo "$install_out" | grep -v "^EXIT:" || true
-		install_exit=$(echo "$install_out" | grep "^EXIT:" | head -1 | cut -d: -f2 || echo "1")
-		[ "$install_exit" = "0" ] || _is_install_success "$install_out" && install_ok=1
+		install_exit=$(echo "$install_out" | grep "^EXIT:" | tail -1 | cut -d: -f2 || echo "1")
+	fi
 
-		if [ "$install_ok" -eq 0 ]; then
-			echo ""
-			echo -e "  ${YELLOW}Trying dnf install...${NC}"
-			install_out=$(ssh "${ssh_opts[@]}" root@"${target_ip}" \
-				"sudo dnf install -y --nogpgcheck '${rpm_file}' 2>&1; echo EXIT:\$?") || true
-			echo "$install_out" | grep -v "^EXIT:" || true
-			install_exit=$(echo "$install_out" | grep "^EXIT:" | head -1 | cut -d: -f2 || echo "1")
-			[ "$install_exit" = "0" ] || echo "$install_out" | grep -qiE "(Complete|Nothing to do|already|Installed)" && install_ok=1
-		fi
-
-		if [ "$install_ok" -eq 0 ]; then
-			echo ""
-			echo -e "  ${YELLOW}Trying rpm --force...${NC}"
-			install_out=$(ssh "${ssh_opts[@]}" root@"${target_ip}" \
-				"sudo rpm -ivh --force --nodeps --nosignature '${rpm_file}' 2>&1; echo EXIT:\$?") || true
-			echo "$install_out" | grep -v "^EXIT:" || true
-			install_exit=$(echo "$install_out" | grep "^EXIT:" | head -1 | cut -d: -f2 || echo "1")
-			[ "$install_exit" = "0" ] || _is_install_success "$install_out" && install_ok=1
-		fi
-
-		if [ "$install_ok" -eq 0 ]; then
-			echo ""
-			echo -e "${RED}✗ RPM installation failed${NC}"
-			echo "$install_out" | grep -v "^EXIT:" | tail -10
-			return 1
-		fi
+	if [ "$install_exit" != "0" ]; then
+		echo ""
+		echo -e "${RED}✗ Complete RPM set installation failed${NC}"
+		echo "$install_out" | grep -v "^EXIT:" | tail -10
+		return 1
 	fi
 	echo ""
 	echo -e "${GREEN}✓ RPM installation complete${NC}"
@@ -3644,7 +3632,7 @@ step6_replace_kernel() {
 	local set_default_out
 	set_default_out=$(ssh "${ssh_opts[@]}" root@"${target_ip}" '
     set -e
-    CUBE_KERNEL=$(ls /boot/vmlinuz-*cubesandbox* 2>/dev/null | head -1)
+    CUBE_KERNEL=$(find /boot -maxdepth 1 -type f -name "vmlinuz-*cubesandbox*" -print 2>/dev/null | sort -V | tail -1)
     if [ -z "$CUBE_KERNEL" ]; then
       echo "ERROR: cubesandbox kernel file not found"
       exit 1

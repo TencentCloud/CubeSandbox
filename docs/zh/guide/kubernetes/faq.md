@@ -225,7 +225,7 @@ kubectl -n cube-system logs -l app.kubernetes.io/component=cube-node -c wait-nod
 若卡在 wait-node-prep：先确认 bootstrap Ready，以及 `/var/lib/cube-node-bootstrap/node-prep-ready` 指纹。若换核后迟迟不重启，多半是节点无 reboot 权限或 GRUB 未更新——登录节点人工 `reboot`，并检查：
 
 ```bash
-uname -r     # 应含 cubesandbox.pvm.host（与 Chart 默认 DESIRED_KERNEL_PATTERN 一致）
+uname -r     # 应含 cubesandbox（与 Chart 默认 DESIRED_KERNEL_PATTERN 一致）
 cat /proc/cmdline | grep -o pti=off
 ```
 

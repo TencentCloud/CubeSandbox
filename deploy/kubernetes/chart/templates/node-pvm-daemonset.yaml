@@ -57,6 +57,8 @@ spec:
               value: {{ .Release.Name | quote }}
             - name: PVM_KERNEL_RPM_PATH
               value: {{ .Values.bootstrap.pvmHostKernel.package.rpmPath | quote }}
+            - name: PVM_KERNEL_META_RPM_PATH
+              value: {{ .Values.bootstrap.pvmHostKernel.package.metaRpmPath | quote }}
             - name: PVM_KERNEL_MODULES_RPM_PATH
               value: {{ .Values.bootstrap.pvmHostKernel.package.modulesRpmPath | quote }}
             - name: PVM_KERNEL_DEVEL_RPM_PATH
@@ -67,6 +69,8 @@ spec:
               value: {{ .Values.bootstrap.pvmHostKernel.package.debPath | quote }}
             - name: PVM_KERNEL_RPM_URL
               value: {{ .Values.bootstrap.pvmHostKernel.package.rpmUrl | quote }}
+            - name: PVM_KERNEL_META_RPM_URL
+              value: {{ .Values.bootstrap.pvmHostKernel.package.metaRpmUrl | quote }}
             - name: PVM_KERNEL_MODULES_RPM_URL
               value: {{ .Values.bootstrap.pvmHostKernel.package.modulesRpmUrl | quote }}
             - name: PVM_KERNEL_DEVEL_RPM_URL

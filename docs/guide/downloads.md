@@ -34,11 +34,11 @@ The host kernel package is the only artifact you download by hand for a PVM depl
 The kernel package is published on dedicated `kernel-release-*` Releases — download it from the release page:
 
 1. Open the [GitHub Releases page](https://github.com/TencentCloud/CubeSandbox/releases?q=kernel-release-&expanded=true) (or the [CNB mirror](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) for mainland China — filter by `kernel-release` there), and open the newest `kernel-release-*` release
-2. Download the **main package** for your distribution:
-   - RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora): `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+2. Download the **main packages** for your distribution:
+   - RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora): `kernel-*`, `kernel-core-*`, `kernel-modules-*`, `kernel-devel-*` and `kernel-headers-*` (all `*.cubesandbox.oc9.x86_64.rpm`)
    - DEB-based (Ubuntu, Debian): `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
 
-<small>Optional assets like `kernel-headers-*` and `-dbg` are not needed.</small>
+<small>Other assets such as `bpftool-*`, `kernel-debuginfo-*`, `kernel-signing-keys-*`, `kernel-tools-*`, `perf-*`, `python3-perf-*`, and DEB `-dbg` packages are optional and not needed.</small>
 
 If you have the GitHub CLI installed, you can download by glob without hunting for the exact filename — see the [appendix](#appendix-url-patterns-latest-tags-and-version-pinning).
 
@@ -82,7 +82,11 @@ gh release list --repo TencentCloud/CubeSandbox --limit 30 | grep kernel-release
 # Download by glob (replace <tag> with the newest tag found above; no exact
 # filename needed)
 gh release download <tag> --repo TencentCloud/CubeSandbox \
-  --pattern 'kernel-6*.x86_64.rpm'   # or: --pattern 'linux-image-6*_amd64.deb'
+  --pattern 'kernel-6*.x86_64.rpm' \
+  --pattern 'kernel-core-6*.x86_64.rpm' \
+  --pattern 'kernel-modules-6*.x86_64.rpm' \
+  --pattern 'kernel-devel-6*.x86_64.rpm' \
+  --pattern 'kernel-headers-6*.x86_64.rpm'   # or: --pattern 'linux-image-6*_amd64.deb'
 ```
 
 **Version pinning** — every `v*` product release records the kernel / guest-image tags it was built with in [`deploy/release-assets.yaml`](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/release-assets.yaml) (also recorded in the bundle's `release-manifest.json`), which answers "which kernel is inside my bundle". Dedicated tags are released on their own cadence, so the pin may lag behind the newest tag — for the **PVM host kernel, always take the newest `kernel-release-*`** (it carries kernel security fixes); there is no need to match a product version.

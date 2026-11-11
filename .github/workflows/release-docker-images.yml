@@ -695,6 +695,7 @@ jobs:
           gh release download "${KERNEL_PVM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/cube-pvm-host-dl \
+            --pattern "kernel-[0-9]*.rpm" \
             --pattern "kernel-core-*.rpm" \
             --pattern "kernel-modules-*.rpm" \
             --pattern "kernel-devel-*.rpm" \
@@ -705,8 +706,10 @@ jobs:
             --pattern "*.deb" || true
 
           # kernel-core keeps the historical kernel-pvm-host.rpm name; the
-          # other packages are staged as kernel-pvm-host-<pkg>.rpm.
+          # other packages are staged as kernel-pvm-host-<pkg>.rpm. Select one
+          # coherent version even if a rebuilt release retains older assets.
           declare -A rpm_dest=(
+            [kernel]=kernel-pvm-host-meta.rpm
             [core]=kernel-pvm-host.rpm
             [modules]=kernel-pvm-host-modules.rpm
             [devel]=kernel-pvm-host-devel.rpm
@@ -715,15 +718,29 @@ jobs:
           staged_rpms=()
           deb_src=""
           shopt -s nullglob
-          for pkg in core modules devel headers; do
-            matches=(/tmp/cube-pvm-host-dl/kernel-"${pkg}"-[0-9]*.x86_64.rpm)
-            if [[ "${#matches[@]}" -eq 0 ]]; then
-              echo "missing PVM host kernel-${pkg} RPM on ${KERNEL_PVM_RELEASE_TAG}" >&2
+          core_matches=(/tmp/cube-pvm-host-dl/kernel-core-[0-9]*.x86_64.rpm)
+          if [[ "${#core_matches[@]}" -eq 0 ]]; then
+            echo "missing PVM host kernel-core RPM on ${KERNEL_PVM_RELEASE_TAG}" >&2
+            ls -la /tmp/cube-pvm-host-dl >&2 || true
+            exit 1
+          fi
+          core_src="$(printf '%s\n' "${core_matches[@]}" | sort -V | tail -1)"
+          rpm_version="$(basename "${core_src}")"
+          rpm_version="${rpm_version#kernel-core-}"
+          rpm_version="${rpm_version%.x86_64.rpm}"
+          for pkg in kernel core modules devel headers; do
+            if [[ "${pkg}" == kernel ]]; then
+              src="/tmp/cube-pvm-host-dl/kernel-${rpm_version}.x86_64.rpm"
+            else
+              src="/tmp/cube-pvm-host-dl/kernel-${pkg}-${rpm_version}.x86_64.rpm"
+            fi
+            if [[ ! -f "${src}" ]]; then
+              echo "missing matching PVM host kernel-${pkg} RPM for ${rpm_version} on ${KERNEL_PVM_RELEASE_TAG}" >&2
               ls -la /tmp/cube-pvm-host-dl >&2 || true
               exit 1
             fi
-            install -m 0644 "${matches[0]}" "cube-pvm-host-bootstrap-ctx/artifacts/${rpm_dest[${pkg}]}"
-            staged_rpms+=("$(basename "${matches[0]}")")
+            install -m 0644 "${src}" "cube-pvm-host-bootstrap-ctx/artifacts/${rpm_dest[${pkg}]}"
+            staged_rpms+=("$(basename "${src}")")
           done
           for f in /tmp/cube-pvm-host-dl/*.deb; do
             base="$(basename "${f}")"
