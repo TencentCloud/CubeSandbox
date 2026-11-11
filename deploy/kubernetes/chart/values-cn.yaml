@@ -11,12 +11,12 @@
 #   2. Points mysql / redis / minio / kubectl (cube.image, no registry rewrite) at the
 #      mirrored CN repositories under cube-sandbox/.
 #   3. Points the dedicated JuiceFS metadata Redis at the mirrored CN redis.
-#      juicedata/mount (the JuiceFS format/mount image) has no CN mirror yet;
-#      clusters that cannot reach Docker Hub must mirror it themselves and
-#      override images.juicefs.repository.
+#      The JuiceFS client image (images.juicefs) needs no override here: it is
+#      rendered with cube.cubeImage, so global.imageRegistry rewrites it to cn
+#      like every other Cube-owned image.
 #
 # Prerequisites: CN images already published, including
-#   cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/{mysql,redis,minio,alpine-k8s,...}
+#   cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/{mysql,redis,minio,juicefs,alpine-k8s,...}
 
 global:
   # Host only — path /cube-sandbox/<image> is preserved from values.yaml.

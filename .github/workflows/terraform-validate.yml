@@ -19,6 +19,9 @@ on:
       # tags this deployer bakes in; test_bump_image.sh guards it.
       - 'scripts/bump-image.sh'
       - '.github/workflows/terraform-validate.yml'
+      - 'CubeObservability/**'
+      - 'docs/guide/observability.md'
+      - 'docs/zh/guide/observability.md'
   workflow_dispatch:
 
 permissions:
@@ -90,3 +93,52 @@ jobs:
             fi
           done
           exit "${status}"
+
+      - name: Observability static checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n \
+            deploy/one-click/observability/install.sh \
+            deploy/one-click/observability/otelcol/install.sh \
+            deploy/one-click/observability/prometheus/install.sh \
+            deploy/one-click/observability/loki/install.sh \
+            deploy/one-click/observability/elasticsearch/install.sh \
+            deploy/one-click/observability/grafana/install.sh
+          for dashboard in CubeObservability/grafana/dashboards/*.json; do
+            python3 -m json.tool "${dashboard}" >/dev/null
+          done
+          python3 CubeObservability/grafana/generate_dashboards.py --check
+          python3 CubeObservability/grafana/test_dashboards.py
+
+      - name: Validate generated OTel Collector configs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "${tmp}"' EXIT
+          common=(
+            CUBE_OBSERVABILITY_CLUSTER_ID=ci
+            CUBE_METRICS_OTLP_HTTP_ENDPOINT=http://prometheus:9092/api/v1/otlp
+            CUBE_METRICS_AUTHORIZATION="Bearer ci-metrics-token"
+            CUBE_METRICS_TENANT_ID=ci
+          )
+          env "${common[@]}" \
+            CUBE_LOGS_OTLP_HTTP_ENDPOINT=http://loki:3100/otlp \
+            CUBE_LOGS_AUTHORIZATION="Bearer ci-logs-token" \
+            CUBE_LOGS_TENANT_ID=ci \
+            CUBE_OTEL_CONFIG_OUTPUT="${tmp}/systemd-loki.yaml" \
+            bash deploy/one-click/observability/otelcol/install.sh render
+          env "${common[@]}" \
+            CUBE_LOGS_ES_ENDPOINT=http://elasticsearch:9200 \
+            CUBE_LOGS_ES_API_KEY=ci-api-key \
+            CUBE_OTEL_CONFIG_OUTPUT="${tmp}/systemd-es.yaml" \
+            bash deploy/one-click/observability/otelcol/install.sh render
+          chmod 0755 "${tmp}"
+          chmod 0644 "${tmp}"/*.yaml
+          for config in "${tmp}"/*.yaml; do
+            docker run --rm \
+              -v "${tmp}:/work:ro" \
+              otel/opentelemetry-collector-contrib:0.162.0 \
+              validate --config="file:/work/$(basename "${config}")"
+          done

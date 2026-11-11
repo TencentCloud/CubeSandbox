@@ -302,13 +302,56 @@ resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512
 
 ### 退避与重启上限
 
-重启会保留磁盘、网络和沙箱 ID，再冷启动一次；内存不保留。
+重启会保留磁盘、网络、卷与宿主目录挂载，以及沙箱 ID，再冷启动一次；内存不保留。
 
 连续失败从 10 秒开始退避，每次加倍，最长 300 秒；运行满 10 分钟视为稳定，重启计数清零。重启次数上限由 `restartBackoff.maxRestarts` 控制，默认 `0` 表示不限；集群可以用 `cubelet_conf.max_restarts_cap` 设全局上限，配置后，`0`（不限）也会被收紧到该值。达到上限后不再重启，沙箱不再自动拉起，但仍计入节点 `MvmNum` 配额，直到空闲超时或被显式销毁。
 
 ### 存活探针
 
 存活探针写在创建请求里。没有探针、且镜像带 envd（暴露 `49983`）时，节点会默认请求 `GET /health`。没有 envd 的镜像不会被探测，避免误重启。`Never` 配存活探针会被拒绝，返回 HTTP 400：探测永远不可能触发重启，只会把沙箱杀掉。
+
+下面的创建请求片段会检查 `8080` 端口上的 `GET /health`。连续失败三次后，
+CubeSandbox 会按照 `OnFailure` 策略冷重启整个沙箱：
+
+```json
+{
+  "restartPolicy": "OnFailure",
+  "restartBackoff": {
+    "initialIntervalSecond": 10,
+    "multiplier": 2,
+    "maxIntervalSecond": 300,
+    "maxRestarts": 5
+  },
+  "livenessProbe": {
+    "httpGet": {
+      "path": "/health",
+      "port": 8080
+    },
+    "initialDelaySecond": 30,
+    "periodSecond": 10,
+    "probeTimeoutSecond": 1,
+    "failureThreshold": 3
+  }
+}
+```
+
+如需 TCP 探测，可将 `httpGet` 替换为 `tcpSocket`；两种探测类型只能配置一种：
+
+```json
+{
+  "restartPolicy": "Always",
+  "livenessProbe": {
+    "tcpSocket": {
+      "port": 8080
+    },
+    "periodSecond": 10,
+    "failureThreshold": 3
+  }
+}
+```
+
+探针时间的单位均为秒。未填写或填写非正数时，默认启动延迟为 30 秒、检查周期为
+10 秒、单次超时为 1 秒、连续失败阈值为 3 次。
 
 ### 查询重启状态
 

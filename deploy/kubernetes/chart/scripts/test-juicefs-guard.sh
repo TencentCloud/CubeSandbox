@@ -52,8 +52,8 @@ grep -q 'name: wait-volume-format' "$TMP_DIR/on.yaml" \
   || { echo "JuiceFS mount must wait for the format Job" >&2; exit 1; }
 grep -q 'name: CUBE_JFS_ENABLED' "$TMP_DIR/on.yaml" \
   || { echo "enabled render must configure Cubelet" >&2; exit 1; }
-grep -q 'juicedata/mount:ce-v1.4.1' "$TMP_DIR/on.yaml" \
-  || { echo "enabled render must use the official JuiceFS image" >&2; exit 1; }
+grep -q 'cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1' "$TMP_DIR/on.yaml" \
+  || { echo "enabled render must pull JuiceFS from TCR int" >&2; exit 1; }
 grep -q 'command: \["/usr/local/bin/juicefs"\]' "$TMP_DIR/on.yaml" \
   || { echo "mount DaemonSet must invoke JuiceFS instead of the image default command" >&2; exit 1; }
 grep -q 'app.kubernetes.io/component: cube-juicefs-redis' "$TMP_DIR/on.yaml" \
@@ -109,11 +109,23 @@ if [ -z "$base_hash" ] || [ "$base_hash" = "$revision_hash" ]; then
   exit 1
 fi
 
+helm template jfs-mirror "$CHART_DIR" $COMMON_SETS \
+  --set cubeJuiceFS.enabled=true \
+  --set-string global.imageRegistry=mirror.example.com > "$TMP_DIR/mirror.yaml"
+grep -q 'mirror.example.com/cube-sandbox/juicefs:ce-v1.4.1' "$TMP_DIR/mirror.yaml" \
+  || { echo "global.imageRegistry must rewrite the JuiceFS image to the mirror host" >&2; exit 1; }
+
 helm template jfs-cn "$CHART_DIR" $COMMON_SETS \
   --set cubeJuiceFS.enabled=true \
-  --set-string global.imageRegistry=mirror.example.com > "$TMP_DIR/cn.yaml"
-grep -q 'juicedata/mount:ce-v1.4.1' "$TMP_DIR/cn.yaml" \
-  || { echo "global.imageRegistry must not rewrite the third-party JuiceFS image" >&2; exit 1; }
+  -f "$CHART_DIR/values-cn.yaml" > "$TMP_DIR/cn.yaml"
+grep -q 'cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1' "$TMP_DIR/cn.yaml" \
+  || { echo "values-cn must render the JuiceFS image from the CN host" >&2; exit 1; }
+grep -q 'cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/redis:7-alpine' "$TMP_DIR/cn.yaml" \
+  || { echo "values-cn must render the JuiceFS metadata Redis from the CN host" >&2; exit 1; }
+if grep -q 'juicedata/mount' "$TMP_DIR/on.yaml" "$TMP_DIR/mirror.yaml" "$TMP_DIR/cn.yaml"; then
+  echo "JuiceFS must not be pulled from Docker Hub" >&2
+  exit 1
+fi
 
 helm template jfs-on "$CHART_DIR" $COMMON_SETS \
   --set cubeJuiceFS.enabled=true \
@@ -130,7 +142,7 @@ expect_fail jfs-bad-path "absolute child of hostPaths.dataCubelet" \
   --set-string cubeJuiceFS.mountPath=/mnt/jfs
 expect_fail jfs-overlap "must not overlap" \
   --set cubeJuiceFS.enabled=true \
-  --set-string cubeJuiceFS.cacheDir=/data/cubelet/jfs/cache
+  --set-string cubeJuiceFS.cacheDir=/data/cubelet/storage/jfs/cache
 expect_fail jfs-bad-root "clean relative path" \
   --set cubeJuiceFS.enabled=true \
   --set-string cubeJuiceFS.root=..

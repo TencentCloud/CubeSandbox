@@ -424,8 +424,13 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	exportUUIDs := ""
 	if constants.IsRemoteTrackedBackend(commitBackend) {
 		raw := strings.TrimSpace(commitRsp.GetRemoteUuids())
-		exportUUIDs = raw
-		if raw != "" {
+		if constants.IsJFSBackend(commitBackend) {
+			// JFS readiness tracks writeback drain, not a set of paths that
+			// another node must import. The shared namespace needs no UUIDs.
+			snapUpdates["export_uuids"] = ""
+			snapUpdates["remote_status"] = constants.RemoteStatusInProgress
+		} else if raw != "" {
+			exportUUIDs = raw
 			snapUpdates["export_uuids"] = raw
 			snapUpdates["remote_status"] = constants.RemoteStatusInProgress
 		} else {
@@ -985,7 +990,7 @@ func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID, s
 	if constants.GetAppSnapshotVersion(createReq.Annotations) == "" {
 		constants.SetAppSnapshotVersion(createReq.Annotations, DefaultTemplateVersion)
 	}
-	storedReq, err := normalizeStoredTemplateRequest(createReq)
+	storedReq, err := normalizeStoredTemplateRequest(createReq, false)
 	if err != nil {
 		return nil, nil, err
 	}

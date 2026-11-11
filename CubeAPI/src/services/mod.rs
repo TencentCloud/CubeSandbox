@@ -11,9 +11,40 @@ pub mod volumes;
 
 use crate::{
     config::ServerConfig,
-    cubemaster::CubeMasterClient,
+    cubemaster::{CubeBlockIoQosConfig, CubeMasterClient, CubeNetworkQosConfig, CubeQosConfig},
     error::{AppError, AppResult},
+    models::{BlockIoQosConfig, NetworkQosConfig, QosConfig},
 };
+
+impl From<CubeQosConfig> for QosConfig {
+    fn from(qos: CubeQosConfig) -> Self {
+        Self {
+            network: qos.network.map(|network| NetworkQosConfig {
+                bandwidth_mbps: network.bandwidth_mbps.filter(|value| *value > 0),
+                packets_per_second: network.packets_per_second.filter(|value| *value > 0),
+            }),
+            block_io: qos.block_io.map(|block_io| BlockIoQosConfig {
+                throughput_mibps: block_io.throughput_mibps.filter(|value| *value > 0),
+                iops: block_io.iops.filter(|value| *value > 0),
+            }),
+        }
+    }
+}
+
+impl From<&QosConfig> for CubeQosConfig {
+    fn from(qos: &QosConfig) -> Self {
+        Self {
+            network: qos.network.as_ref().map(|network| CubeNetworkQosConfig {
+                bandwidth_mbps: network.bandwidth_mbps,
+                packets_per_second: network.packets_per_second,
+            }),
+            block_io: qos.block_io.as_ref().map(|block_io| CubeBlockIoQosConfig {
+                throughput_mibps: block_io.throughput_mibps,
+                iops: block_io.iops,
+            }),
+        }
+    }
+}
 
 const DENY_ALL_IPV4_CIDR: &str = "0.0.0.0/0";
 const ALLOW_OUT_DOMAIN_REQUIRES_DENY_ALL: &str =
@@ -144,6 +175,7 @@ impl AppServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::QosConfig;
     use axum::{extract::State, routing::get, Json, Router};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -316,6 +348,28 @@ mod tests {
             Err(AppError::Internal(_)) => {}
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn qos_response_conversion_omits_zero_values() {
+        let response: QosConfig = CubeQosConfig {
+            network: Some(crate::cubemaster::CubeNetworkQosConfig {
+                bandwidth_mbps: Some(0),
+                packets_per_second: Some(0),
+            }),
+            block_io: Some(crate::cubemaster::CubeBlockIoQosConfig {
+                throughput_mibps: Some(0),
+                iops: Some(0),
+            }),
+        }
+        .into();
+
+        let network = response.network.expect("network section");
+        assert!(network.bandwidth_mbps.is_none());
+        assert!(network.packets_per_second.is_none());
+        let block_io = response.block_io.expect("block io section");
+        assert!(block_io.throughput_mibps.is_none());
+        assert!(block_io.iops.is_none());
     }
 
     #[test]

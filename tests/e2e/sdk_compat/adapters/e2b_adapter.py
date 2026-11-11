@@ -13,6 +13,7 @@ from typing import Any
 
 from adapters.base import SandboxAdapter, cleanup_raw_sandbox
 from framework.capabilities import E2B_CAPABILITIES
+from framework.exceptions import UnsupportedCapability
 from framework.config import SdkE2EConfig
 from framework.models import (
     CodeResult,
@@ -263,6 +264,12 @@ class E2BAdapter(SandboxAdapter):
             state=state_from_raw(raw),
             raw=raw,
         )
+
+    def is_running(self) -> bool:
+        method = getattr(self._sandbox, "is_running", None)
+        if not callable(method):
+            raise UnsupportedCapability(self.backend, "is_running")
+        return bool(method())
 
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
         commands = getattr(self._sandbox, "commands", None)

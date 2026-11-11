@@ -596,6 +596,56 @@ pub extern "C" fn cubecow_get_volume_info(
     }
 }
 
+/// Get lightweight path and size information without management-only
+/// projection work such as snapshot counting.
+#[no_mangle]
+pub extern "C" fn cubecow_get_object_info(
+    engine: *mut std::ffi::c_void,
+    name: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // SAFETY: `engine` was created by `cubecow_init` and is valid.
+        let eng = unsafe { engine_ref(engine) }?;
+        // SAFETY: `name` is a valid C string provided by the caller.
+        let object_name = unsafe { c_str_to_str(name) }?;
+
+        match eng.get_object_info(object_name) {
+            Ok(vol) => {
+                let payload = serde_json::json!({
+                    "name": vol.name,
+                    "size_bytes": vol.size_bytes,
+                    "device_path": vol.device_path,
+                    "snapshot_count": vol.snapshot_count,
+                    "created_at": vol.created_at,
+                    "export_uuid": vol.export_uuid,
+                    "export_status": vol.export_status,
+                    "deletable": vol.deletable,
+                });
+                let json_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+
+                // SAFETY: `out_json` is checked for null before dereferencing.
+                unsafe {
+                    if !out_json.is_null() {
+                        *out_json = rust_string_to_c(&json_str);
+                    }
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_get_object_info");
+            COW_ERR_PANIC
+        }
+    }
+}
+
 /// Get block-level info for a volume.
 ///
 /// # Parameters

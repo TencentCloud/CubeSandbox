@@ -225,7 +225,9 @@ Domain rules are stored per sandbox in `dns_allow`, an LPM trie keyed by reverse
 - Exact match, for example `qq.com` -- matches only `qq.com`.
 - Wildcard prefix, for example `*.qq.com` -- matches subdomains such as `a.qq.com` but not the apex.
 
-When the sandbox sends a DNS query, `from_cube` extracts the queried name and looks it up in `dns_allow`. If the name is allowed, the query id and source port are recorded in `dns_query_track`. When the response comes back, `from_world` matches it against `dns_query_track`, extracts the A-records, and inserts each resolved IP into the sandbox's `allow_out_v2` with an expiration derived from the DNS TTL. The DNS reaper sweeps expired entries in the same way the NAT session reaper sweeps stale connections.
+When the sandbox sends a DNS query, `from_cube` extracts the queried name and looks it up in `dns_allow`. If the name is allowed, the query id and source port are recorded in `dns_query_track`. When the response comes back, `from_world` matches it against `dns_query_track`. A learnable positive A reply is not forwarded to the sandbox: the kernel hands the frame to Cubelet, which inserts each resolved IP into the sandbox's `allow_out_v2` with an expiration derived from the DNS TTL and injects the frame onto the TAP. The DNS reaper sweeps expired entries in the same way the NAT session reaper sweeps stale connections.
+
+Cubelet is on this delivery path. While it is stopped, DNS for names that match a domain rule is blocked. Names that match no rule, and negative or truncated replies, are still forwarded by the datapath. Addresses already learned stay in the kernel map until their TTL expires.
 
 Because DNS-learned rules land in the same `allow_out_v2` map as static CIDRs, the fast path in §5 does not need any special case for them.
 
@@ -355,5 +357,5 @@ graph TB
 
 The design rests on two ideas:
 
-- **Data-path logic lives in the kernel.** Policy evaluation, NAT, session tracking, DNS learning, and ARP resolution all happen in eBPF; the Go control plane only manages lifecycle and periodic cleanup.
+- **Data-path decisions live in the kernel.** Policy evaluation, NAT, session tracking, and ARP resolution happen in eBPF. DNS for a controlled domain is the exception: the kernel tracks the query and drops the learnable reply, and Cubelet writes the allow entry and injects the frame. While Cubelet is stopped, DNS for those domains is blocked. The Go control plane otherwise manages lifecycle and periodic cleanup.
 - **Each sandbox is isolated end-to-end.** Its own TAP device, its own policy maps, its own sessions -- no shared bridge or switch stands between two sandboxes on the same host.

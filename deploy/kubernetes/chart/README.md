@@ -31,6 +31,25 @@ Official docs (source of truth; do not keep a parallel copy under this chart):
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
+## Sandbox observability
+
+Observability is disabled by default. Add
+`--set observability.enabled=true` to the normal Helm install or upgrade to
+deploy the compute-node Collector, Prometheus, Loki, and Grafana. Loki is the
+default and recommended log backend; set
+`observability.logs.backend=elasticsearch` to use Elasticsearch instead.
+
+The compute-node Collector reads Cubelet sandbox CPU/memory/count metrics and
+sandbox `stdout`/`stderr` logs. `observability.logs.components.enabled=true`
+adds a second Collector DaemonSet for allowlisted component containers, mounting
+`/var/log/pods` read-only. Collector and backend Pods carry readiness/liveness
+probes. The chart also generates a random Grafana admin password in a
+release-scoped Secret unless `observability.backend.grafana.existingSecret` is
+set. See `observability` in [values.yaml](values.yaml) for endpoints,
+credentials, persistence, and retention settings. Backend and Collector details
+are documented in the
+[observability guide](../../../docs/guide/observability.md).
+
 ## Architecture
 
 See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, core and optional compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
@@ -52,6 +71,7 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
 | `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
 | `cube-webui` | WebUI static assets and OpenResty. |
+| `cube-observability` | Grafana OSS image plus CubeSandbox dashboards; build with `deploy/kubernetes/images/build-cube-images.sh cube-observability` and set `observability.backend.grafana.image`. |
 
 ## Node selection
 
@@ -182,7 +202,7 @@ To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstr
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.3 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.8.0-rc1 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Cube-owned images default to `imagePullPolicy: IfNotPresent`. To pick up a

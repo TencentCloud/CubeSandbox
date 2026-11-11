@@ -92,7 +92,8 @@ install_cosfs() {
     fuse ca-certificates curl libcurl3-gnutls libxml2
   tmp="$(mktemp -d)"
   deb="${tmp}/cosfs.deb"
-  curl -fsSL "$url" -o "$deb"
+  curl -fsSL --retry 5 --retry-delay 3 \
+    --retry-max-time 180 --connect-timeout 15 --max-time 90 "$url" -o "$deb"
   dpkg -i "$deb" || apt-get install -y -f
   rm -rf "$tmp"
   command -v cosfs >/dev/null 2>&1 || {

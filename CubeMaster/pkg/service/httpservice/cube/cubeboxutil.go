@@ -27,7 +27,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 var (
@@ -523,10 +522,9 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 			return err
 		}
 		if src != nil && src.Mode.IsFsOnly() {
-			// The snapshot holds the rootfs only, and a cold-booted guest mounts
-			// none of the origin's external volumes. Drop them here so the merged
-			// request carries no dangling reference; the caller's own mounts are
-			// refused before placement, in bindSnapshotCreateReplicaForCreate.
+			// The package holds the rootfs only, so the template's recorded
+			// external mounts cannot be honoured. Drop them; the caller's own
+			// declarations are mounted on the guest by Cubelet.
 			stripSnapshotExternalMounts(templateReq)
 		} else if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
 			return err
@@ -542,6 +540,14 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		applySnapshotTemplateAnnotationsAndLabels(templateReq, reqInOut)
 	} else {
 		applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	}
+	if reqInOut.Annotations == nil {
+		reqInOut.Annotations = make(map[string]string)
+	}
+	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
+	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+	if policy := strings.TrimSpace(templateReq.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy]); policy != "" {
+		reqInOut.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = policy
 	}
 	if err := templatecenter.InheritCreateBackendFromTemplate(reqInOut, templateReq); err != nil {
 		return err
@@ -636,10 +642,10 @@ func reconcileSnapshotPluginVolumes(snapshotID string, req, templateReq *types.C
 	return nil
 }
 
-// externalVolumeNames lists the volumes in req that a guest booted from a
-// filesystem-only snapshot cannot mount: plugin volumes (declared by the
-// plugin-volume-mounts annotation, by an explicit plugin source, or by having
-// no source at all) and raw host directories.
+// externalVolumeNames lists the volumes in req that a filesystem-only package
+// does not carry: plugin volumes (declared by the plugin-volume-mounts
+// annotation, by an explicit plugin source, or by having no source at all) and
+// raw host directories.
 //
 // Sandbox-local sources (emptyDir, sandboxPath, image) stay: they belong to the
 // sandbox spec rather than to a node, and the rootfs scratch volume every create
@@ -695,8 +701,8 @@ func externalVolumeNames(req *types.CreateCubeSandboxReq) []string {
 // that reference them, and the annotations that would inject them again. Doing
 // all three keeps the merged request free of dangling mount references.
 //
-// Only the template side is touched: the request's own mounts are the caller's
-// choice and are refused separately when a cold boot cannot honour them.
+// Only the template side is touched; mounts the caller declares are honoured by
+// Cubelet.
 func stripSnapshotExternalMounts(templateReq *types.CreateCubeSandboxReq) {
 	if templateReq == nil {
 		return
@@ -736,25 +742,6 @@ func stripSnapshotExternalMounts(templateReq *types.CreateCubeSandboxReq) {
 	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeMounts)
 	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeSources)
 	delete(templateReq.Annotations, sandbox.AnnotationHostDirMount)
-}
-
-// rejectFilesystemOnlyExternalMounts refuses a create that would attach an
-// external mount to a guest booted from a filesystem-only snapshot: nothing
-// would mount it, so accepting the request would silently drop the user's data.
-func rejectFilesystemOnlyExternalMounts(req *types.CreateCubeSandboxReq) error {
-	if req == nil {
-		return nil
-	}
-	var detail []string
-	if sandbox.CreateRequestHasHostMount(req) {
-		detail = append(detail, "host-mount")
-	}
-	detail = append(detail, externalVolumeNames(req)...)
-	if len(detail) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s: a sandbox created from a filesystem-only snapshot cannot mount external storage (%s); use a full snapshot",
-		snapshotmode.ErrFilesystemOnlyExternalMount, strings.Join(detail, ", "))
 }
 
 func parseSnapshotPluginVolumeMounts(raw string) (map[string]snapshotPluginVolumeMount, error) {
@@ -860,23 +847,16 @@ func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID stri
 
 // bindSnapshotCreateReplicaForCreate places the sandbox and returns the
 // restore source it used; nil on the legacy local fallback. A filesystem-only
-// source is never pinned to its origin, and a request that attaches an external
-// mount to it is rejected here, before placement.
+// source is never pinned to its origin.
 func bindSnapshotCreateReplicaForCreate(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) (*templatecenter.RestoreSource, error) {
 	delete(reqInOut.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
 		return nil, err
 	}
 	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
-		// A filesystem-only package carries no external mount and cold boot
-		// re-establishes none (Cubelet only emits container mount propagation
-		// for WantsSnapshotRestore, which a cold boot is not), so such a restore
-		// has neither an origin dependency nor a way to honour one the caller
-		// asks for.
+		// The package carries no memory or mounts; the caller re-declares them,
+		// so the origin node is not a dependency.
 		if src.Mode.IsFsOnly() {
-			if err := rejectFilesystemOnlyExternalMounts(reqInOut); err != nil {
-				return nil, err
-			}
 			pinToOrigin = false
 		}
 		return src, bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
@@ -966,7 +946,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 	if b := strings.TrimSpace(src.Backend); b != "" {
 		reqInOut.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	if constants.IsRemoteTrackedBackend(src.Backend) {
+	if constants.IsS3Backend(src.Backend) {
 		if raw := strings.TrimSpace(src.ExportUUIDs); raw != "" {
 			reqInOut.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
@@ -974,7 +954,9 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 
 	if placement.CrossNode {
 		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
-		reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		if constants.IsS3Backend(src.Backend) {
+			reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		}
 		if resolved := templateResolveResultFromContext(ctx); resolved != nil {
 			resolved.ChosenReplica = templatecenter.ReplicaStatus{
 				NodeID:       placement.NodeID,

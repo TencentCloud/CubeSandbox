@@ -46,9 +46,9 @@
 // by mid-flight crashes (empty directories, zero-byte snapshot files
 // whose FICLONE never landed, etc.).
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::ffi::CString;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
@@ -97,7 +97,7 @@ const FICLONE: libc::c_ulong = 0x40049409;
 /// **ultimate** origin volume directory it lives under, so that
 /// `delete_snapshot(name)` can locate the file without rescanning the
 /// filesystem.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum NameKind {
     Volume,
     Snapshot { origin_volume: String },
@@ -181,7 +181,11 @@ impl ReflinkEngine {
 
         let metrics = Arc::new(MetricsCollector::new());
 
-        let name_index = scan_and_rebuild_index(&volumes_dir).map_err(|e| {
+        // copy_file_range is the shared JuiceFS mode. A process starting on
+        // one node must not perform destructive orphan cleanup while another
+        // node may be publishing an object.
+        let cleanup_orphans = clone_method == CloneMethod::Ficlone;
+        let name_index = scan_index(&volumes_dir, cleanup_orphans).map_err(|e| {
             anyhow::anyhow!(
                 "failed to scan reflink volumes dir '{}': {e}",
                 volumes_dir.display()
@@ -214,6 +218,149 @@ impl ReflinkEngine {
             name_index: RwLock::new(name_index),
             metrics,
         })
+    }
+
+    /// Return an existing object's kind from the process-local index.
+    ///
+    /// JuiceFS (`copy_file_range`) additionally discovers an object created by
+    /// another engine on a cache miss. Local XFS (`ficlone`) deliberately keeps
+    /// its original behavior: the startup scan is the only disk scan and all
+    /// later lookups use the in-memory index exclusively.
+    ///
+    /// Cube guarantees globally unique names and serializes one object's
+    /// lifecycle. The filesystem remains the source of truth; this map is only
+    /// a per-process acceleration structure.
+    fn lookup_existing_name(&self, name: &str) -> CubecowResult<Option<NameKind>> {
+        let cached = {
+            let index = self
+                .name_index
+                .read()
+                .expect("reflink name_index lock poisoned");
+            index.get(name).cloned()
+        };
+        if self.clone_method == CloneMethod::Ficlone {
+            return Ok(cached);
+        }
+        Ok(self
+            .lookup_shared_name_with_metadata(name, cached)?
+            .map(|(kind, _)| kind))
+    }
+
+    /// Resolve a name together with the metadata used to validate it. This is
+    /// the path for information queries: shared JuiceFS cache validation and
+    /// object projection must use the same stat result.
+    fn lookup_existing_name_with_metadata(
+        &self,
+        name: &str,
+    ) -> CubecowResult<Option<(NameKind, Metadata)>> {
+        let cached = {
+            let index = self
+                .name_index
+                .read()
+                .expect("reflink name_index lock poisoned");
+            index.get(name).cloned()
+        };
+        if self.clone_method != CloneMethod::Ficlone {
+            return self.lookup_shared_name_with_metadata(name, cached);
+        }
+        let Some(kind) = cached else {
+            return Ok(None);
+        };
+        match std::fs::metadata(self.path_for_name_kind(name, &kind)) {
+            Ok(meta) if meta.is_file() => Ok(Some((kind, meta))),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CubecowError::IoError(e)),
+        }
+    }
+
+    fn lookup_shared_name_with_metadata(
+        &self,
+        name: &str,
+        cached: Option<NameKind>,
+    ) -> CubecowResult<Option<(NameKind, Metadata)>> {
+        if let Some(kind) = cached.as_ref() {
+            match std::fs::metadata(self.path_for_name_kind(name, kind)) {
+                Ok(meta) if meta.is_file() => return Ok(Some((kind.clone(), meta))),
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(CubecowError::IoError(e)),
+            }
+            let mut index = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            if index.get(name) == Some(kind) {
+                let removed = index.remove(name).expect("checked entry disappeared");
+                self.dec_name_metric(&removed);
+            }
+        }
+        let discovered =
+            discover_name_on_disk(&self.volumes_dir, name).map_err(CubecowError::IoError)?;
+        if let Some((kind, _)) = discovered.as_ref() {
+            let mut index = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            if let Entry::Vacant(entry) = index.entry(name.to_string()) {
+                match &kind {
+                    NameKind::Volume => self.metrics.inc(METRIC_VOLUME_COUNT),
+                    NameKind::Snapshot { .. } => self.metrics.inc(METRIC_SNAPSHOT_COUNT),
+                }
+                entry.insert(kind.clone());
+            }
+        }
+        Ok(discovered)
+    }
+
+    /// Reserve a globally unique destination name without scanning the shared
+    /// namespace. In JuiceFS mode, an index hit is validated at its exact
+    /// cached path so a file deleted by another engine does not block name
+    /// reuse by a later, serialized lifecycle.
+    fn reserve_new_name(&self, name: &str, kind: NameKind) -> CubecowResult<()> {
+        loop {
+            let mut index = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            let Some(cached) = index.get(name).cloned() else {
+                index.insert(name.to_string(), kind);
+                return Ok(());
+            };
+            if self.clone_method == CloneMethod::Ficlone
+                || self
+                    .name_kind_exists_on_disk(name, &cached)
+                    .map_err(CubecowError::IoError)?
+            {
+                return Err(CubecowError::AlreadyExists(format!(
+                    "name '{name}' already exists in reflink namespace"
+                )));
+            }
+            index.remove(name);
+            self.dec_name_metric(&cached);
+        }
+    }
+
+    fn name_kind_exists_on_disk(&self, name: &str, kind: &NameKind) -> std::io::Result<bool> {
+        match std::fs::metadata(self.path_for_name_kind(name, kind)) {
+            Ok(meta) => Ok(meta.is_file()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn path_for_name_kind(&self, name: &str, kind: &NameKind) -> PathBuf {
+        match kind {
+            NameKind::Volume => self.vol_main_file(name),
+            NameKind::Snapshot { origin_volume } => self.snap_file(origin_volume, name),
+        }
+    }
+
+    fn dec_name_metric(&self, kind: &NameKind) {
+        match kind {
+            NameKind::Volume => self.metrics.dec(METRIC_VOLUME_COUNT),
+            NameKind::Snapshot { .. } => self.metrics.dec(METRIC_SNAPSHOT_COUNT),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -280,8 +427,21 @@ impl ReflinkEngine {
                 CubecowError::IoError(e)
             }
         })?;
+        self.project_volume_with_metadata(volume_name, meta, true)
+    }
 
-        let snapshot_count = count_snapshots_on_disk(&self.vol_dir(volume_name), volume_name)?;
+    fn project_volume_with_metadata(
+        &self,
+        volume_name: &str,
+        meta: Metadata,
+        include_snapshot_count: bool,
+    ) -> CubecowResult<Volume> {
+        let main = self.vol_main_file(volume_name);
+        let snapshot_count = if include_snapshot_count {
+            count_snapshots_on_disk(&self.vol_dir(volume_name), volume_name)?
+        } else {
+            0
+        };
 
         Ok(Volume {
             name: volume_name.to_string(),
@@ -326,17 +486,56 @@ impl ReflinkEngine {
                 CubecowError::IoError(e)
             }
         })?;
+        Ok(self.project_snapshot_with_metadata(snapshot_name, &origin, meta))
+    }
 
-        Ok(Snapshot {
+    fn project_snapshot_with_metadata(
+        &self,
+        snapshot_name: &str,
+        origin_volume: &str,
+        meta: Metadata,
+    ) -> Snapshot {
+        let path = self.snap_file(origin_volume, snapshot_name);
+        Snapshot {
             name: snapshot_name.to_string(),
             size_bytes: meta.size(),
             device_path: path.to_string_lossy().into_owned(),
-            origin_volume: origin,
+            origin_volume: origin_volume.to_string(),
             created_at: rfc3339_from_meta(&meta),
             export_uuid: String::new(),
             export_status: String::new(),
             deletable: None,
-        })
+        }
+    }
+
+    fn project_named_object(
+        &self,
+        name: &str,
+        include_snapshot_count: bool,
+    ) -> CubecowResult<Volume> {
+        let Some((kind, meta)) = self.lookup_existing_name_with_metadata(name)? else {
+            return Err(CubecowError::NotFound(format!(
+                "volume or snapshot '{name}'"
+            )));
+        };
+        match kind {
+            NameKind::Volume => {
+                self.project_volume_with_metadata(name, meta, include_snapshot_count)
+            }
+            NameKind::Snapshot { origin_volume } => {
+                let snap = self.project_snapshot_with_metadata(name, &origin_volume, meta);
+                Ok(Volume {
+                    name: snap.name,
+                    size_bytes: snap.size_bytes,
+                    device_path: snap.device_path,
+                    snapshot_count: 0,
+                    created_at: snap.created_at,
+                    export_uuid: snap.export_uuid,
+                    export_status: snap.export_status,
+                    deletable: snap.deletable,
+                })
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -346,24 +545,14 @@ impl ReflinkEngine {
     /// Reserve `volume_name` and clone `source_path` into its main file,
     /// rolling the reservation back on failure.
     fn clone_into_new_volume(&self, volume_name: &str, source_path: &Path) -> CubecowResult<()> {
-        {
-            let mut idx = self
-                .name_index
-                .write()
-                .expect("reflink name_index lock poisoned");
-            if idx.contains_key(volume_name) {
-                return Err(CubecowError::AlreadyExists(format!(
-                    "name '{volume_name}' already exists in reflink namespace"
-                )));
-            }
-            idx.insert(volume_name.to_string(), NameKind::Volume);
-        }
+        self.reserve_new_name(volume_name, NameKind::Volume)?;
 
+        let mut created_dir = false;
         let result = (|| -> CubecowResult<()> {
             let dir = self.vol_dir(volume_name);
             let main = self.vol_main_file(volume_name);
 
-            std::fs::create_dir_all(&dir).map_err(CubecowError::IoError)?;
+            created_dir = ensure_dir_exists(&dir).map_err(CubecowError::IoError)?;
 
             let src_file = File::open(source_path).map_err(|e| {
                 if e.kind() == ErrorKind::NotFound {
@@ -377,6 +566,12 @@ impl ReflinkEngine {
             })?;
 
             clone_file(self.clone_method, &src_file, &main).map_err(|errno| {
+                if errno == libc::EEXIST {
+                    return CubecowError::AlreadyExists(format!(
+                        "volume main file '{}' already exists",
+                        main.display()
+                    ));
+                }
                 let reason = describe_ficlone_errno(errno);
                 CubecowError::PreconditionFailed(format!(
                     "{:?} clone failed for volume '{volume_name}' from '{}': {reason}",
@@ -394,17 +589,16 @@ impl ReflinkEngine {
         })();
 
         if result.is_err() {
-            // Roll back the name reservation and best-effort clean up
-            // any partially-created files. `ficlone()` removes the dst
-            // on FICLONE failure, but the empty directory (and the
-            // dst file on non-FICLONE errors) may still be around.
+            // clone_file removes only artefacts it created. Never unlink the
+            // main path here: EEXIST means it belongs to another engine.
             let mut idx = self
                 .name_index
                 .write()
                 .expect("reflink name_index lock poisoned");
             idx.remove(volume_name);
-            let _ = std::fs::remove_file(self.vol_main_file(volume_name));
-            let _ = std::fs::remove_dir(self.vol_dir(volume_name));
+            if created_dir {
+                let _ = std::fs::remove_dir(self.vol_dir(volume_name));
+            }
         }
         result
     }
@@ -434,26 +628,17 @@ impl Engine for ReflinkEngine {
 
         // Reserve the name under the writer lock to make creation
         // atomic vs. concurrent create/delete on the same name.
-        {
-            let mut idx = self
-                .name_index
-                .write()
-                .expect("reflink name_index lock poisoned");
-            if idx.contains_key(name) {
-                return Err(CubecowError::AlreadyExists(format!(
-                    "name '{name}' already exists in reflink namespace"
-                )));
-            }
-            idx.insert(name.to_string(), NameKind::Volume);
-        }
+        self.reserve_new_name(name, NameKind::Volume)?;
 
         // From here on, any failure must roll the index entry back so a
         // retry can succeed.
+        let mut created_dir = false;
+        let mut created_main = false;
         let result = (|| -> CubecowResult<Volume> {
             let dir = self.vol_dir(name);
             let main = self.vol_main_file(name);
 
-            std::fs::create_dir_all(&dir).map_err(CubecowError::IoError)?;
+            created_dir = ensure_dir_exists(&dir).map_err(CubecowError::IoError)?;
 
             let file = OpenOptions::new()
                 .write(true)
@@ -469,34 +654,40 @@ impl Engine for ReflinkEngine {
                         CubecowError::IoError(e)
                     }
                 })?;
+            created_main = true;
             file.set_len(size_bytes).map_err(CubecowError::IoError)?;
             file.sync_all().map_err(CubecowError::IoError)?;
             // fsync the parent directory so the new entry is durable.
             fsync_dir(&dir).map_err(CubecowError::IoError)?;
             fsync_dir(&self.volumes_dir).map_err(CubecowError::IoError)?;
 
+            let volume = self.project_volume(name)?;
             self.metrics.inc(METRIC_VOLUME_COUNT);
             info!(volume = name, size_bytes, "reflink volume created");
-            self.project_volume(name)
+            Ok(volume)
         })();
 
         if result.is_err() {
-            // Roll back the name reservation. Best-effort cleanup of
-            // any partially-created files; the directory scan on next
-            // boot would catch anything we miss.
+            // Roll back only paths this call created. An EEXIST destination
+            // belongs to another engine sharing the JuiceFS namespace.
             let mut idx = self
                 .name_index
                 .write()
                 .expect("reflink name_index lock poisoned");
             idx.remove(name);
-            let _ = std::fs::remove_file(self.vol_main_file(name));
-            let _ = std::fs::remove_dir(self.vol_dir(name));
+            if created_main {
+                let _ = std::fs::remove_file(self.vol_main_file(name));
+            }
+            if created_dir {
+                let _ = std::fs::remove_dir(self.vol_dir(name));
+            }
         }
 
         result
     }
 
     fn delete_volume(&self, name: &str) -> CubecowResult<()> {
+        let _ = self.lookup_existing_name(name)?;
         // Take the writer lock, validate that it really is a volume,
         // then unlink under the lock so a concurrent create_snapshot_from_volume
         // cannot race in between.
@@ -528,18 +719,14 @@ impl Engine for ReflinkEngine {
         // while the freshly-created template snapshot is still alive —
         // exactly the contract dm-thin allows.
         //
-        // Since the snapshot file itself is an independent reflink copy
-        // (its content does NOT depend on the origin file existing once
-        // the FICLONE has happened), it is safe to drop just the main
-        // volume file: snapshots in the same directory survive
-        // unaffected, and the directory is kept around as long as any
-        // snapshot remains.  When the last snapshot is deleted, that
-        // path's `delete_snapshot` will reap the now-empty directory.
-        let has_live_snapshots = idx.iter().any(|(_, kind)| match kind {
+        // Since snapshot files are independent copies, deleting a volume
+        // unlinks only its main file. XFS keeps its original index-only
+        // decision; shared JuiceFS must decide from the directory itself
+        // because another engine's snapshots need not be in this index.
+        let indexed_live_snapshots = idx.iter().any(|(_, kind)| match kind {
             NameKind::Snapshot { origin_volume } => origin_volume == name,
             _ => false,
         });
-
         let main = self.vol_main_file(name);
         let dir = self.vol_dir(name);
         match std::fs::remove_file(&main) {
@@ -547,13 +734,27 @@ impl Engine for ReflinkEngine {
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(CubecowError::IoError(e)),
         }
-        if !has_live_snapshots {
+        let has_live_snapshots = if self.clone_method == CloneMethod::Ficlone {
+            if !indexed_live_snapshots {
+                match std::fs::remove_dir(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => return Err(CubecowError::IoError(e)),
+                }
+            }
+            indexed_live_snapshots
+        } else {
             match std::fs::remove_dir(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Ok(()) => false,
+                Err(e)
+                    if e.kind() == ErrorKind::NotFound
+                        || e.kind() == ErrorKind::DirectoryNotEmpty =>
+                {
+                    e.kind() == ErrorKind::DirectoryNotEmpty
+                }
                 Err(e) => return Err(CubecowError::IoError(e)),
             }
-        }
+        };
         let _ = fsync_dir(&self.volumes_dir);
 
         idx.remove(name);
@@ -571,6 +772,7 @@ impl Engine for ReflinkEngine {
         // files are independent reflink copies and intentionally keep
         // their old size — same observable behaviour as taking a
         // dm-thin snapshot before an origin resize.
+        let _ = self.lookup_existing_name(name)?;
         let _guard = self
             .name_index
             .read()
@@ -617,51 +819,25 @@ impl Engine for ReflinkEngine {
 
     fn get_volume_info(&self, name: &str) -> CubecowResult<Volume> {
         // Match dm-thin's contract: `get_volume_info` is the one-shot
-        // "give me size + device path for this name" entry point that
-        // upper layers (notably Cubelet's `CubecowVolumeManager.GetSizeBytes`
-        // / `ResolveDevPath`) call regardless of whether the name refers
-        // to a volume or a snapshot.  In dm-thin both kinds are the same
-        // LV behind the scenes, so the call always succeeds; refusing
-        // snapshots here breaks every flow that touches a template
-        // rootfs (e.g. `CommitTemplateRootfs` → `GetSizeBytes`,
-        // immediately on a freshly-created `tpl-<id>-rootfs` snapshot).
+        // information entry point regardless of whether the name refers to a
+        // volume or snapshot. In dm-thin both kinds are the same LV behind the
+        // scenes, so refusing snapshots here breaks management callers. Data
+        // path callers use `get_object_info` below to skip snapshot counting.
         //
         // We therefore mirror `activate_volume` below: snapshot names
         // are projected through the snapshot view and re-shaped as a
         // `Volume`.  The origin chain is intentionally not surfaced
         // here; callers that need it should use `list_snapshots` /
         // `get_snapshot_info` directly.
-        let idx = self
-            .name_index
-            .read()
-            .expect("reflink name_index lock poisoned");
-        match idx.get(name) {
-            Some(NameKind::Volume) => {
-                drop(idx);
-                self.project_volume(name)
-            }
-            Some(NameKind::Snapshot { .. }) => {
-                drop(idx);
-                let snap = self.project_snapshot(name)?;
-                Ok(Volume {
-                    name: snap.name,
-                    size_bytes: snap.size_bytes,
-                    device_path: snap.device_path,
-                    snapshot_count: 0,
-                    created_at: snap.created_at,
-                    export_uuid: snap.export_uuid,
-                    export_status: snap.export_status,
-                    deletable: snap.deletable,
-                })
-            }
-            None => Err(CubecowError::NotFound(format!(
-                "volume or snapshot '{name}'"
-            ))),
-        }
+        self.project_named_object(name, true)
+    }
+
+    fn get_object_info(&self, name: &str) -> CubecowResult<Volume> {
+        self.project_named_object(name, false)
     }
 
     fn get_volume_block_info(&self, name: &str) -> CubecowResult<VolumeBlockInfo> {
-        let vol = self.get_volume_info(name)?;
+        let vol = self.get_object_info(name)?;
         Ok(VolumeBlockInfo {
             num_blocks: vol.size_bytes / REFLINK_BLOCK_SIZE as u64,
             block_size: REFLINK_BLOCK_SIZE,
@@ -726,6 +902,7 @@ impl Engine for ReflinkEngine {
         // FICLONE returns. We accept the parameter for trait-shape
         // parity with dm-thin but ignore it.
         Self::validate_name(snapshot_name, "snapshot")?;
+        let _ = self.lookup_existing_name(source_name)?;
 
         // Resolve source: it may be either a volume (FICLONE the main
         // file) or another snapshot (FICLONE the snapshot file, but
@@ -752,23 +929,12 @@ impl Engine for ReflinkEngine {
         };
 
         // Reserve the snapshot name atomically.
-        {
-            let mut idx = self
-                .name_index
-                .write()
-                .expect("reflink name_index lock poisoned");
-            if idx.contains_key(snapshot_name) {
-                return Err(CubecowError::AlreadyExists(format!(
-                    "name '{snapshot_name}' already exists in reflink namespace"
-                )));
-            }
-            idx.insert(
-                snapshot_name.to_string(),
-                NameKind::Snapshot {
-                    origin_volume: ultimate_origin.clone(),
-                },
-            );
-        }
+        self.reserve_new_name(
+            snapshot_name,
+            NameKind::Snapshot {
+                origin_volume: ultimate_origin.clone(),
+            },
+        )?;
 
         let result = (|| -> CubecowResult<Snapshot> {
             let dst = self.snap_file(&ultimate_origin, snapshot_name);
@@ -827,6 +993,7 @@ impl Engine for ReflinkEngine {
         // device path *is* the file path, and the file exists from
         // the moment FICLONE returns.
         Self::validate_name(volume_name, "volume")?;
+        let _ = self.lookup_existing_name(source_snapshot)?;
 
         // XFS: volume and snapshot are both independent FICLONE files.
         // Clone from either. (S3 keeps a real snapshot vs volume split.)
@@ -856,6 +1023,7 @@ impl Engine for ReflinkEngine {
     }
 
     fn delete_snapshot(&self, snapshot_name: &str) -> CubecowResult<()> {
+        let _ = self.lookup_existing_name(snapshot_name)?;
         let mut idx = self
             .name_index
             .write()
@@ -885,28 +1053,32 @@ impl Engine for ReflinkEngine {
         idx.remove(snapshot_name);
         self.metrics.dec(METRIC_SNAPSHOT_COUNT);
 
-        // If this snapshot's origin was deleted earlier (the origin name
-        // is no longer in the index but its directory survived because
-        // it still held this snapshot file) and we just removed the
-        // last sibling, the now-empty directory becomes garbage —
-        // reap it and fsync the parent so listings stay consistent.
-        let origin_alive = idx.contains_key(&origin);
-        let still_has_siblings = idx.iter().any(|(_, kind)| match kind {
-            NameKind::Snapshot { origin_volume } => origin_volume == &origin,
-            _ => false,
-        });
-        if !origin_alive && !still_has_siblings {
+        let should_try_reap = if self.clone_method == CloneMethod::Ficlone {
+            let origin_alive = idx.contains_key(&origin);
+            let still_has_siblings = idx.iter().any(|(_, kind)| match kind {
+                NameKind::Snapshot { origin_volume } => origin_volume == &origin,
+                _ => false,
+            });
+            !origin_alive && !still_has_siblings
+        } else {
+            true
+        };
+        if should_try_reap {
+            // In shared mode, remove_dir is the authoritative empty check.
             let dir = self.vol_dir(&origin);
             match std::fs::remove_dir(&dir) {
                 Ok(()) => {
                     let _ = fsync_dir(&self.volumes_dir);
                 }
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e)
+                    if e.kind() == ErrorKind::NotFound
+                        || (self.clone_method != CloneMethod::Ficlone
+                            && e.kind() == ErrorKind::DirectoryNotEmpty) => {}
                 Err(e) => {
                     warn!(
                         origin_volume = %origin,
                         error = %e,
-                        "reflink: failed to reap orphan origin dir after last snapshot",
+                        "reflink: failed to reap origin dir after snapshot delete",
                     );
                 }
             }
@@ -976,45 +1148,14 @@ impl Engine for ReflinkEngine {
         // call site behaves identically to dm-thin's
         // [`Engine::activate_volume`] (which returns a [`Volume`] for
         // both volume *and* snapshot names).
-        let idx = self
-            .name_index
-            .read()
-            .expect("reflink name_index lock poisoned");
-        match idx.get(name) {
-            Some(NameKind::Volume) => {
-                drop(idx);
-                self.project_volume(name)
-            }
-            Some(NameKind::Snapshot { .. }) => {
-                drop(idx);
-                let snap = self.project_snapshot(name)?;
-                // Surface the snapshot using the Volume shape so
-                // callers that hold a `Volume` after `activate_volume`
-                // (matching dm-thin's behaviour) see the device path
-                // and size. The origin volume is intentionally not
-                // re-exposed here: it is already available via
-                // `list_snapshots` / `Snapshot::origin_volume`.
-                Ok(Volume {
-                    name: snap.name,
-                    size_bytes: snap.size_bytes,
-                    device_path: snap.device_path,
-                    snapshot_count: 0,
-                    created_at: snap.created_at,
-                    export_uuid: snap.export_uuid,
-                    export_status: snap.export_status,
-                    deletable: snap.deletable,
-                })
-            }
-            None => Err(CubecowError::NotFound(format!(
-                "volume or snapshot '{name}'"
-            ))),
-        }
+        self.project_named_object(name, true)
     }
 
     fn deactivate_volume(&self, name: &str) -> CubecowResult<()> {
         // No-op for reflink: there is no kernel device node to tear
         // down. We still validate the name so callers receive a
         // consistent NotFound error if they pass garbage.
+        let _ = self.lookup_existing_name(name)?;
         let idx = self
             .name_index
             .read()
@@ -1122,6 +1263,21 @@ impl Engine for ReflinkEngine {
 // ---------------------------------------------------------------------------
 // Filesystem helpers
 // ---------------------------------------------------------------------------
+
+/// Ensure `path` is a directory and report whether this call created it.
+/// Callers use the ownership bit to avoid deleting another engine's directory
+/// while rolling back a failed shared-namespace operation.
+fn ensure_dir_exists(path: &Path) -> std::io::Result<bool> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => Ok(false),
+            Ok(_) => Err(e),
+            Err(meta_err) => Err(meta_err),
+        },
+        Err(e) => Err(e),
+    }
+}
 
 /// Clone `src` into a freshly-created `dst_path` with `method`.
 fn clone_file(method: CloneMethod, src: &File, dst_path: &Path) -> Result<(), i32> {
@@ -1349,8 +1505,61 @@ fn statvfs_total_used(path: &Path) -> std::io::Result<(u64, u64)> {
 //   * Zero-byte snapshot files when the
 //     origin's main file is non-zero           → orphan from a crashed FICLONE;
 //                                                 unlink.
-// ---------------------------------------------------------------------------
+fn discover_name_on_disk(
+    volumes_dir: &Path,
+    name: &str,
+) -> std::io::Result<Option<(NameKind, Metadata)>> {
+    let direct_main = volumes_dir.join(name).join(name);
+    match std::fs::metadata(&direct_main) {
+        Ok(meta) if meta.is_file() => return Ok(Some((NameKind::Volume, meta))),
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    let entries = match std::fs::read_dir(volumes_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let origin = match entry.file_name().into_string() {
+            Ok(origin) if !origin.starts_with('.') && origin != name => origin,
+            _ => continue,
+        };
+        let candidate = entry.path().join(name);
+        match std::fs::metadata(candidate) {
+            Ok(meta) if meta.is_file() => {
+                return Ok(Some((
+                    NameKind::Snapshot {
+                        origin_volume: origin,
+                    },
+                    meta,
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
 fn scan_and_rebuild_index(volumes_dir: &Path) -> std::io::Result<HashMap<String, NameKind>> {
+    scan_index(volumes_dir, true)
+}
+
+// Shared JuiceFS startup scans are read-only because another engine may be
+// between creating a directory and atomically publishing its main file.
+fn scan_index(
+    volumes_dir: &Path,
+    cleanup_orphans: bool,
+) -> std::io::Result<HashMap<String, NameKind>> {
     let mut index: HashMap<String, NameKind> = HashMap::new();
 
     let read = match std::fs::read_dir(volumes_dir) {
@@ -1390,11 +1599,13 @@ fn scan_and_rebuild_index(volumes_dir: &Path) -> std::io::Result<HashMap<String,
         if !main_present {
             let leftovers = read_dir_count_non_dotfiles(&vol_dir)?;
             if leftovers == 0 {
-                let _ = std::fs::remove_dir(&vol_dir);
-                warn!(
-                    path = %vol_dir.display(),
-                    "removed orphan empty volume directory"
-                );
+                if cleanup_orphans {
+                    let _ = std::fs::remove_dir(&vol_dir);
+                    warn!(
+                        path = %vol_dir.display(),
+                        "removed orphan empty volume directory"
+                    );
+                }
                 continue;
             }
             warn!(
@@ -1425,13 +1636,16 @@ fn scan_and_rebuild_index(volumes_dir: &Path) -> std::io::Result<HashMap<String,
 
             let sub_meta = sub.metadata()?;
             if sub_meta.size() == 0 {
-                // Zero-byte snapshot file — almost certainly an orphan
-                // from a crash between `creat` and `FICLONE`. Drop it.
-                let _ = std::fs::remove_file(sub.path());
-                warn!(
-                    path = %sub.path().display(),
-                    "removed orphan zero-byte snapshot file"
-                );
+                // A shared-engine startup can observe another engine between
+                // creat and clone. Local XFS recovery may remove the crash
+                // artefact; shared JuiceFS startup leaves it untouched.
+                if cleanup_orphans {
+                    let _ = std::fs::remove_file(sub.path());
+                    warn!(
+                        path = %sub.path().display(),
+                        "removed orphan zero-byte snapshot file"
+                    );
+                }
                 continue;
             }
 
@@ -1575,6 +1789,237 @@ mod tests {
             Err(CubecowError::NotFound(_))
         ));
         assert!(engine.get_volume_info("sb-z").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_engines_share_created_volumes_and_snapshots() {
+        let root = unique_root("shared-discovery");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        first.create_volume("shared-vol", 2 * 4096).unwrap();
+        assert_eq!(
+            second.get_volume_info("shared-vol").unwrap().size_bytes,
+            2 * 4096
+        );
+
+        first
+            .create_snapshot_from_volume("shared-vol", "shared-snap", false)
+            .unwrap();
+        assert_eq!(
+            second.get_volume_info("shared-snap").unwrap().name,
+            "shared-snap"
+        );
+        let (snapshots, _) = second.list_snapshots("shared-vol", 0, None);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].name, "shared-snap");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_source_cache_hit_is_invalidated_after_remote_delete() {
+        let root = unique_root("shared-source-invalidation");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        second.create_volume("shared-vol", 4096).unwrap();
+        assert!(first.get_volume_info("shared-vol").is_ok());
+        second.delete_volume("shared-vol").unwrap();
+        assert!(matches!(
+            first.get_volume_info("shared-vol"),
+            Err(CubecowError::NotFound(_))
+        ));
+
+        second.create_volume("shared-vol", 2 * 4096).unwrap();
+        assert_eq!(
+            first.get_volume_info("shared-vol").unwrap().size_bytes,
+            2 * 4096
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_stale_destination_does_not_block_serialized_recreate() {
+        let root = unique_root("shared-destination-recreate");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        second.create_volume("origin", 4096).unwrap();
+        second
+            .create_snapshot_from_volume("origin", "pause-source", false)
+            .unwrap();
+        second
+            .create_snapshot_from_volume("pause-source", "sb-rootfs-gen0", false)
+            .unwrap();
+        assert!(first.get_volume_info("sb-rootfs-gen0").is_ok());
+
+        second.delete_snapshot("sb-rootfs-gen0").unwrap();
+        let recreated = first
+            .create_snapshot_from_volume("pause-source", "sb-rootfs-gen0", false)
+            .unwrap();
+        assert_eq!(recreated.name, "sb-rootfs-gen0");
+        assert!(Path::new(&recreated.device_path).is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_volume_delete_uses_directory_state_for_unknown_snapshots() {
+        let root = unique_root("shared-delete-directory-state");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        second.create_volume("shared-vol", 4096).unwrap();
+        second
+            .create_snapshot_from_volume("shared-vol", "unknown-to-first", false)
+            .unwrap();
+        assert!(first.get_volume_info("shared-vol").is_ok());
+
+        first.delete_volume("shared-vol").unwrap();
+        let dir = root.join("volumes").join("shared-vol");
+        assert!(!dir.join("shared-vol").exists());
+        assert!(dir.join("unknown-to-first").is_file());
+
+        second.delete_snapshot("unknown-to-first").unwrap();
+        assert!(!dir.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_duplicate_create_does_not_delete_existing_volume() {
+        let root = unique_root("shared-duplicate-create");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        let original = first.create_volume("shared-vol", 4096).unwrap();
+        std::fs::write(&original.device_path, b"original-data").unwrap();
+
+        assert!(matches!(
+            second.create_volume("shared-vol", 4096),
+            Err(CubecowError::AlreadyExists(_))
+        ));
+        assert_eq!(
+            std::fs::read(&original.device_path).unwrap(),
+            b"original-data"
+        );
+        assert_eq!(
+            second.get_volume_info("shared-vol").unwrap().device_path,
+            original.device_path
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_duplicate_clone_does_not_delete_existing_volume() {
+        let root = unique_root("shared-duplicate-clone");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        first.create_volume("source", 4096).unwrap();
+        let original = first.create_volume("destination", 4096).unwrap();
+        std::fs::write(&original.device_path, b"original-data").unwrap();
+
+        assert!(matches!(
+            second.create_volume_from_snapshot("source", "destination"),
+            Err(CubecowError::AlreadyExists(_))
+        ));
+        assert_eq!(
+            std::fs::read(&original.device_path).unwrap(),
+            b"original-data"
+        );
+        assert_eq!(
+            second.get_volume_info("destination").unwrap().device_path,
+            original.device_path
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn xfs_engine_keeps_startup_index_without_runtime_discovery() {
+        let root = unique_root("xfs-no-runtime-discovery");
+        let first = make_engine(&root);
+        let second = make_engine(&root);
+
+        first.create_volume("created-after-startup", 4096).unwrap();
+        assert!(matches!(
+            second.get_volume_info("created-after-startup"),
+            Err(CubecowError::NotFound(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_engines_share_deletes_and_restart_rebuilds_namespace() {
+        let root = unique_root("shared-delete-restart");
+        let mut first = make_engine(&root);
+        let mut second = make_engine(&root);
+        first.clone_method = CloneMethod::CopyFileRange;
+        second.clone_method = CloneMethod::CopyFileRange;
+
+        first.create_volume("shared-vol", 4096).unwrap();
+        first
+            .create_snapshot_from_volume("shared-vol", "shared-snap", false)
+            .unwrap();
+        assert!(second.get_volume_info("shared-snap").is_ok());
+
+        second.delete_snapshot("shared-snap").unwrap();
+        first.delete_volume("shared-vol").unwrap();
+        assert!(second.get_volume_info("shared-vol").is_err());
+        second.create_volume("shared-vol", 2 * 4096).unwrap();
+        assert_eq!(
+            first.get_volume_info("shared-vol").unwrap().size_bytes,
+            2 * 4096
+        );
+        first.delete_volume("shared-vol").unwrap();
+
+        // Shared-engine startup must not perform orphan cleanup against an
+        // object directory another engine may still be populating.
+        let pending = root.join("volumes").join("pending-create");
+        std::fs::create_dir_all(&pending).unwrap();
+        let startup_config = AppConfig::from_json_str(&format!(
+            r#"{{"log":{{}},"backend":{{"kind":"reflink","reflink":{{"root_dir":"{}","clone_method":"copy_file_range"}}}}}}"#,
+            root.display()
+        ))
+        .unwrap();
+        let third = ReflinkEngine::initialize_without_logging(startup_config).unwrap();
+        assert!(
+            pending.exists(),
+            "shared startup must not reap another engine's pending directory"
+        );
+        drop(third);
+        std::fs::remove_dir(&pending).unwrap();
+
+        drop(first);
+        drop(second);
+        let config = AppConfig::from_json_str(&format!(
+            r#"{{"log":{{}},"backend":{{"kind":"reflink","reflink":{{"root_dir":"{}","clone_method":"copy_file_range"}}}}}}"#,
+            root.display()
+        ))
+        .unwrap();
+        let restarted = ReflinkEngine::initialize_without_logging(config).unwrap();
+        let (volumes, _, total) = restarted.list_volumes(0, None);
+        assert!(volumes.is_empty());
+        assert_eq!(total, 0);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1777,6 +2222,28 @@ mod tests {
         // Shrink rejected.
         let bad = engine.resize_volume("v", 0);
         assert!(matches!(bad, Err(CubecowError::InvalidArg(_))));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lightweight_object_info_skips_snapshot_count() {
+        let root = unique_root("lightweight-object-info");
+        let mut engine = make_engine(&root);
+        // The projection under test (snapshot counting vs. the lightweight
+        // skip) is clone-method independent, and copy_file_range works on
+        // any local filesystem, so this needs no FICLONE.
+        engine.clone_method = CloneMethod::CopyFileRange;
+
+        engine.create_volume("vol", 4096).unwrap();
+        engine
+            .create_snapshot_from_volume("vol", "snap", false)
+            .unwrap();
+
+        assert_eq!(engine.get_volume_info("vol").unwrap().snapshot_count, 1);
+        let object = engine.get_object_info("vol").unwrap();
+        assert_eq!(object.size_bytes, 4096);
+        assert_eq!(object.snapshot_count, 0);
 
         let _ = std::fs::remove_dir_all(&root);
     }

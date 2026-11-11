@@ -351,11 +351,6 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	ctx = preparedCtx
-	if err := prepareSharedTemplate(ctx, req); err != nil {
-		rsp.Ret.RetMsg = err.Error()
-		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
-		return rsp, nil
-	}
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
 	if err := expandPauseSnapshotPackage(req); err != nil {

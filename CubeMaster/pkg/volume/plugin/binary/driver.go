@@ -17,10 +17,12 @@
 //	create
 //	  --volume-id  <volumeID>   pre-generated UUIDv4
 //	  --name       <name>       human-readable label
+//	  --private-data <data>     opaque caller input; omitted when empty
 //	  stdout JSON: {"token":"...","private_data":"...","error":""}
 //
 //	destroy
 //	  --volume-id  <volumeID>
+//	  --private-data <data>     state returned by Create; omitted when empty
 //	  stdout JSON: {"error":""}
 //
 // # Configuration
@@ -63,18 +65,25 @@ func (p *Plugin) Name() string { return p.name }
 // Create forks the binary with --op create.
 func (p *Plugin) Create(
 	ctx context.Context,
-	volumeID, name string,
+	volumeID, name, privateData string,
 ) (*plugin.VolumeInfo, error) {
+	if strings.ContainsRune(privateData, '\x00') {
+		return nil, fmt.Errorf("binary plugin %q create: volume %q private_data must not contain NUL", p.name, volumeID)
+	}
 	var resp struct {
 		Token       string `json:"token"`
 		PrivateData string `json:"private_data"`
 		Error       string `json:"error"`
 	}
-	if err := p.run(ctx, &resp,
+	args := []string{
 		"--op", "create",
 		"--volume-id", volumeID,
 		"--name", name,
-	); err != nil {
+	}
+	if privateData != "" {
+		args = append(args, "--private-data", privateData)
+	}
+	if err := p.run(ctx, &resp, args...); err != nil {
 		return nil, fmt.Errorf("binary plugin %q create: %w", p.name, err)
 	}
 	if resp.Error != "" {
@@ -90,14 +99,21 @@ func (p *Plugin) Create(
 }
 
 // Destroy forks the binary with --op destroy.
-func (p *Plugin) Destroy(ctx context.Context, volumeID string) error {
+func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) error {
+	if strings.ContainsRune(privateData, '\x00') {
+		return fmt.Errorf("binary plugin %q destroy: volume %q private_data must not contain NUL", p.name, volumeID)
+	}
 	var resp struct {
 		Error string `json:"error"`
 	}
-	if err := p.run(ctx, &resp,
+	args := []string{
 		"--op", "destroy",
 		"--volume-id", volumeID,
-	); err != nil {
+	}
+	if privateData != "" {
+		args = append(args, "--private-data", privateData)
+	}
+	if err := p.run(ctx, &resp, args...); err != nil {
 		return fmt.Errorf("binary plugin %q destroy: %w", p.name, err)
 	}
 	if resp.Error != "" {

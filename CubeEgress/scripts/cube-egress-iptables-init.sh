@@ -177,24 +177,46 @@ install_chain() {
         || iptables -t mangle -A PREROUTING -j "${CHAIN}"
 }
 
+# Count the cube fwmark rule for one mark in a captured `ip rule show` listing.
+# Never pipe `ip rule show` into `grep -q`: iproute2 writes one rule per
+# write(), grep exits on the first match while ip is still writing, ip dies
+# with SIGPIPE, and under pipefail an existing rule reads as missing. A failed
+# listing is an error, not "zero rules", so callers never add on a bad read.
+count_fwmark_rules() {
+    local mark="$1" rules
+    rules="$(ip rule show)" || return 1
+    grep -ciE "fwmark ${mark}/${CUBE_L7_MARK_MASK} lookup ${ROUTE_TABLE}[[:space:]]*$" \
+        <<<"${rules}" || true
+}
+
 install_routing() {
     # Two ip rules: cube-owned mark bits → table 100. Match on fwmark so the
     # rule set stays independent of the original destination port; user rules
     # may attach L7 handling to arbitrary ports (e.g. tcp/3000) and mvmtap
     # writes the same mark for all of them.
-    local mark
+    #
+    # The kernel does not deduplicate ip rules, so add only when the rule is
+    # missing, and collapse duplicates left behind by earlier versions of this
+    # check. `ip rule del` removes the lowest-preference match first.
+    local mark count routes
     for mark in "${CUBE_L7_MARK_HTTP}" "${CUBE_L7_MARK_HTTPS}"; do
-        if ! ip rule show \
-             | grep -qiE "fwmark ${mark}/${CUBE_L7_MARK_MASK} lookup ${ROUTE_TABLE}[[:space:]]*$"; then
+        count="$(count_fwmark_rules "${mark}")" \
+            || fatal "ip rule show failed while checking ${mark}"
+        if (( count == 0 )); then
             ip rule add fwmark "${mark}/${CUBE_L7_MARK_MASK}" \
                        table "${ROUTE_TABLE}"
         fi
+        while (( count > 1 )); do
+            ip rule del fwmark "${mark}/${CUBE_L7_MARK_MASK}" \
+                       table "${ROUTE_TABLE}"
+            count=$((count - 1))
+        done
     done
 
     # ip route show normalises 0.0.0.0/0 to "default"; match both forms for safety.
-    if ! ip route show table "${ROUTE_TABLE}" | grep -qF \
-            -e "local 0.0.0.0/0 dev lo" \
-            -e "local default dev lo"; then
+    routes="$(ip route show table "${ROUTE_TABLE}" 2>/dev/null)" || routes=""
+    if ! grep -qF -e "local 0.0.0.0/0 dev lo" -e "local default dev lo" \
+            <<<"${routes}"; then
         ip route add local 0.0.0.0/0 dev lo table "${ROUTE_TABLE}"
     fi
 }
@@ -212,12 +234,13 @@ remove_chain() {
 }
 
 remove_routing() {
-    local mark
+    local mark count
     for mark in "${CUBE_L7_MARK_HTTP}" "${CUBE_L7_MARK_HTTPS}"; do
-        while ip rule show \
-              | grep -qiE "fwmark ${mark}/${CUBE_L7_MARK_MASK} lookup ${ROUTE_TABLE}[[:space:]]*$"; do
+        count="$(count_fwmark_rules "${mark}")" || continue
+        while (( count > 0 )); do
             ip rule del fwmark "${mark}/${CUBE_L7_MARK_MASK}" \
                        table "${ROUTE_TABLE}" || break
+            count=$((count - 1))
         done
     done
     ip route flush table "${ROUTE_TABLE}" 2>/dev/null || true

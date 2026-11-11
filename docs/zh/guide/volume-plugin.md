@@ -4,7 +4,7 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 
 > **版本要求**
 >
-> Volume 能力需要 **Cube 平台 ≥ 0.6.0**（CubeMaster、CubeAPI、Cubelet 均需升级），以及 **Python SDK `cubesandbox` ≥ 0.6.0**（提供 `Volume` 与 `Sandbox.create(volume_mounts=...)`）。**Go SDK**（`sdk/go`）自仓库 master 起提供等价能力（`Client.CreateVolume` 等与 `CreateOptions.VolumeMounts`）。低于上述版本的环境无 Volume API，请勿混用旧版 SDK 调用 `/volumes`。
+> 基础 Volume 能力需要 **Cube 平台 ≥ 0.6.0**（CubeMaster、CubeAPI、Cubelet 均需升级），Python Volume API 还需 **Python SDK `cubesandbox` ≥ 0.6.0**。通过插件 `private_data` 创建卷需要 **CubeAPI、CubeMaster、Cubelet ≥ 0.8.0**、所选插件支持该协议，以及使用 SDK 方法时 **Python/Go/Node SDK ≥ 0.8.0**。该功能使用 `POST /v2/volumes`，不会回退到 `POST /volumes`。
 
 > **当前进展**（API / SDK）
 >
@@ -12,11 +12,15 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 > |------|------|
 > | REST `GET /volumes` — 列出 Volume | ✅ 已支持（Cube ≥ 0.6.0） |
 > | REST `POST /volumes` — 创建 Volume | ✅ 已支持 |
+> | REST `POST /v2/volumes` — 携带可选 `private_data` 创建 | ✅ Cube ≥ 0.8.0；不回退 `/volumes` |
 > | REST `GET /volumes/{volumeID}` — 查询 Volume + token | ✅ 已支持 |
 > | REST `DELETE /volumes/{volumeID}` — 删除 Volume | ✅ 已支持（仍被挂载时返回 409） |
 > | Python SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ 已支持（SDK ≥ 0.6.0） |
+> | Python SDK `Volume.create_with_private_data` | ✅ Cube + SDK ≥ 0.8.0；不回退 `/volumes` |
 > | Python SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ 已支持（e2b dict 映射） |
 > | Go SDK `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume` | ✅ 已支持 |
+> | Go SDK `Client.CreateVolumeWithPrivateData` / `CreateVolumeWithPrivateDataOptions` | ✅ Cube + SDK ≥ 0.8.0；不回退 `/volumes` |
+> | Node SDK `Volume.createWithPrivateData` | ✅ Cube + SDK ≥ 0.8.0；不回退 `/volumes` |
 > | Go SDK `CreateOptions.VolumeMounts`（含 `ReadOnly`） | ✅ 已支持 |
 > | 同一 Volume 被多个沙箱同时挂载 | ✅ 已支持 |
 > | 按沙箱只读挂载 | ✅ Cube SDK 扩展（Python `VolumeMount(..., read_only=True)`，Go `VolumeMount{ReadOnly: true}`）；官方 e2b SDK 自身没有只读挂载选项 |
@@ -182,8 +186,9 @@ flowchart LR
 |------|------|------|------|
 | 输入 | `volumeID` | string | 稳定 ID（UUID 或与 `name` 相同） |
 | 输入 | `name` | string | 展示名 |
+| 输入 | `private_data` | string | 可选的不透明调用方输入，由 CubeMaster 原样转发（最长 **1024** 个 UTF-8 字节）。binary：`--private-data`，为空时不传 |
 | 输出 | `token` | string | 可选鉴权令牌，返回给 SDK |
-| 输出 | `private_data` | string | 插件私有状态（最长 **1024** 字节）。写入 `t_cube_volume`，沙箱创建绑定时转发给 **Attach**。**不**对 API/SDK 暴露。可为空。 |
+| 输出 | `private_data` | string | 插件私有状态（最长 **1024** 字节）。写入 `t_cube_volume`，转发给 **Attach** 与 **Destroy**。成功的 Volume API/SDK 响应不含该字段。可为空。 |
 | 输出 | `error` | string | 成功为 `""`（仅 binary stdout JSON） |
 
 **binary 示例**
@@ -192,6 +197,8 @@ flowchart LR
 
 ```bash
 /path/to/my-plugin --op create --volume-id my-vol --name my-vol
+# 调用方输入非空时，以一个参数传入原始值：
+#   --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
 ```
 
 输出（stdout JSON，exit 0）：
@@ -205,9 +212,10 @@ flowchart LR
 | 方向 | 字段 | 类型 | 说明 |
 |------|------|------|------|
 | 输入 | `volumeID` | string | 要在后端删除的 Volume |
+| 输入 | `private_data` | string | 从 `t_cube_volume` 读取的插件返回状态；创建失败回滚时使用 Create 返回的状态。binary：`--private-data`，为空时不传 |
 | 输出 | `error` | string | 成功为 `""`（仅 binary stdout JSON） |
 
-插件须仅凭 `volumeID` 定位后端资源（如删除 `volumes/<volumeID>/` 前缀）。Destroy **不会**自动 Detach 运行中沙箱。
+插件使用 `volumeID` 和返回的 `private_data` 定位后端资源（例如绑定的桶与前缀）。Destroy 只能删除属于该卷的资源，**不会**自动 Detach 运行中沙箱。
 
 **binary 示例**
 
@@ -215,6 +223,8 @@ flowchart LR
 
 ```bash
 /path/to/my-plugin --op destroy --volume-id my-vol
+# Create 返回的状态非空时，附加：
+#   --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
 ```
 
 输出（stdout JSON，exit 0）：
@@ -291,6 +301,26 @@ flowchart LR
 {"error":""}
 ```
 
+### `private_data` 契约
+
+旧 CubeAPI `POST /volumes` 保持既有的 `name`/`driver` 请求定义。独立的 `POST /v2/volumes` 接受可选 `private_data`，并将其原样转发到 CubeMaster 内部 `POST /cube/volume`。超过 1024 个 UTF-8 字节、包含 NUL 或含有 BMP 以外字符时，新入口在调用 Master 前返回 HTTP 400。省略或 null 输入时，发往 Master 的请求省略该字段；显式空字符串按空值转发。两者返回相同的卷响应，共用既有查询、删除和沙箱挂载 API。
+
+SDK 通过显式新方法访问新创建入口：Go `Client.CreateVolumeWithPrivateData`、Python `Volume.create_with_private_data`、Node `Volume.createWithPrivateData`。原创建方法继续调用 `/volumes`。新方法要求 CubeAPI、所有处理卷操作的 CubeMaster 和所选插件均支持该契约，不会自动回退旧入口。使用前须遵循下文的升级顺序：即使新 API 返回 201，旧 Master 仍可能静默忽略输入。
+
+CubeMaster 将其视为不透明字符串，不解析 JSON、不 trim 空白、不规范化存储路径。调用方输入 A 与 Create 返回状态 B 必须是有效 UTF-8，最长 **1024 字节**（Go `len`，不是字符数），不得含 NUL，且字符范围不得超出 U+FFFF。该规则适用于所有 Controller 类型，因为同一状态后续可能交给 binary Node 插件。校验在外层 JSON 解码后进行；内容中由 ASCII 字符组成的字面量 `\uD83D\uDE00` 会原样透传，不会再解析一遍。
+
+上述内容校验失败时，CubeMaster 返回 **HTTP 400**，响应体保留 `ret.ret_code = 130400`。非法 A 在预留数据库行和调用插件前被拒绝；非法 B 先走既有的 best-effort 回滚及预留行清理，再返回该响应。CubeAPI 将此错误映射为 HTTP 400，也兼容较早 Master 的 HTTP 200 + `130400` 响应。请求解码失败和其他内部错误分支保持原有响应约定。
+
+- Create 接收输入 A，可以返回不同的状态 B。只持久化 B，并将 B 转发给 Attach 和正常 Destroy。
+- 返回空值就保存空值，不回退到 A。
+- Create 成功后，若 B 的长度校验或数据库更新失败，回滚 Destroy 直接接收 B；B 超过持久化上限时也传完整值。清理属于尽力尝试，binary 参数限制或插件错误可能导致清理失败。
+- 回滚 Destroy 失败时，CubeMaster 记录卷 ID、driver、失败阶段和固定错误类别，不记录状态或插件原始错误；仍会尝试删除 DB 占位行，不提供自动清理恢复机制。数据库更新返回错误不能证明状态一定未提交。
+- Binary Create/Destroy 与 Node Attach 在启动进程前拒绝 NUL，Node 校验也覆盖非法的存量状态。RPC 回滚仍可携带非法返回状态，以便插件尽力清理。
+
+只放桶、前缀、endpoint/region 和 `cred_ref` 等凭据引用，**绝不能放明文访问密钥或其他秘密**。插件在沙箱外用引用换取凭据。该字段在数据库中明文存储，并经注解转发；binary 参数在宿主机上可见，且不能包含 NUL 字节。
+
+插件不得记录该字段或把它写入错误信息。现有错误路径可能将 binary stderr/stdout、结构化插件错误或 gRPC status message 回显到 API 错误；启用 HTTP debug body dump 时也可能记录请求体。本次透传改动不提供完整的错误及日志脱敏。
+
 ### RefCount
 
 同一 Volume 可被多个沙箱共享。Cubelet 维护 **node 本地**引用计数，在调用 Node Hook 时传入 `refCount`：
@@ -334,7 +364,7 @@ sequenceDiagram
     Note over U,VM: ① 创建 Volume（管理面）
     U->>API: POST /volumes {name, driver}
     API->>M: POST /cube/volume
-    M->>P: Create(volumeID, name)
+    M->>P: Create(volumeID, name, private_data)
     P-->>M: stdout JSON {"token":"...","private_data":"...","error":""}
     M->>M: 写入 t_cube_volume
     M-->>U: {volumeID, name, token}
@@ -362,7 +392,7 @@ sequenceDiagram
     U->>API: DELETE /volumes/:id
     API->>M: DELETE /cube/volume/:id
     M->>M: refcount ≠ 0 → 拒绝删除
-    M->>P: Destroy(volumeID)（refcount == 0 时）
+    M->>P: Destroy(volumeID, stored private_data)（refcount == 0 时）
     P-->>M: ok
     M->>M: 硬删除 DB 记录
 ```
@@ -552,7 +582,7 @@ Snapshot 会保存稳定的 Volume ID、容器挂载路径和只读属性，但�
 
 从快照创建沙箱时可以省略 `volumeMounts`，快照记录的挂载会自动重新挂载。官方 e2b 客户端会在每次创建时重新传入 `volumeMounts`，这同样可以接受，但必须与快照完全一致（相同的卷、路径和只读属性）。只要有任何不同，请求就会返回 HTTP 400（`volumeMounts must match the snapshot's volume mounts`），因为快照的 VM 内存中挂载已经固定，无法改挂到其他位置。
 
-fs-only 快照是例外：它既不携带 Volume 数据，也不携带 VM 内存，因此快照记录的挂载会被丢弃而不是重新挂载，上面的 400 一致性校验也不适用。用这类快照创建沙箱时也不能挂载 Volume——冷启动的 guest 不会挂任何外部卷，请求会返回 `snapshot_filesystem_only_external_mount_unsupported`。新沙箱需要该 Volume 时请改用 full 快照。
+**fs-only 快照不记录挂载，创建时必须重新声明 `volumeMounts`（含容器路径）**。没声明的卷不会挂载，也不会要求与快照一致。Attach 或挂载失败（卷不存在、driver 报错）会让创建直接失败，不会留下空目录。
 
 因此它采用 **external-reference（外部引用）**语义：
 
@@ -728,6 +758,23 @@ Volume 依赖 CubeMaster 与 Cubelet **双侧**均升级到支持 Volume 插件�
 | 旧（如 v0.5.x） | 新 / 旧 | 不可用 | 不可用；勿传 `volumeMounts`，普通创建不受影响 |
 
 混合版本时勿假设旧节点已挂载成功；需要挂载效果时，请确认调度到的 Cubelet 已升级。
+
+### `private_data` 升级顺序
+
+通过 `/v2/volumes` 或新 SDK 方法创建卷前：
+
+1. 检查或升级 Controller 和 Node 插件，确保 Create 接收调用方输入 A，Attach 与 Destroy 使用返回状态 B，且过渡期间既有卷仍可使用。新旧 Master 并存时，须检查插件对两种调用方式的兼容性。
+2. 升级**所有处理卷操作的 CubeMaster**，包括创建、删除和沙箱挂载元数据解析。在依赖每卷 A/B 之前完成 Master 滚动升级；需要新契约的卷不能再由旧 Master 处理。
+3. 部署支持 `/v2/volumes` 的 CubeAPI，再开始调用新 API 或 SDK 方法。仅部署新 API 不能确认其下游 Master 已支持该能力。
+
+新 CubeAPI 连接旧 Master 时，可能返回 **201**，但 A 已被旧 Master 忽略；旧 Master 调用 Destroy 时也不传 B，可能失败或按插件默认配置操作。目前没有自动探测下游能力的机制。回退版本时，须停止新的版本化创建请求，并让兼容的 Master 继续处理依赖 A/B 的卷，直到这些卷被删除或兼容迁移得到验证。
+
+Controller 插件兼容性还需检查：
+
+- Create 输入为空、Destroy 状态为空时，省略 `--private-data`，保留原有 binary 命令形式。
+- 旧 binary 插件可能拒绝新 flag。即使调用方没有传该字段，只要旧插件 Create 返回非空状态，Destroy 仍会接收该状态，既有卷和创建回滚也如此。须检查两个操作；不能仅凭输入为空就保证整个生命周期兼容。
+- 旧 RPC 服务可以忽略新增请求字段，但这不代表其使用了传入配置，也不代表返回空状态；仍以既有 Create 响应为准。
+- CubeMaster 不会在 Destroy 失败后去掉 `private_data` 重试：第一次调用可能已有副作用，去掉状态也可能指向其他资源。
 
 ---
 

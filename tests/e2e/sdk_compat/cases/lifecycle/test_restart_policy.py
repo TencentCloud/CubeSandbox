@@ -26,7 +26,7 @@ from email.utils import parsedate_to_datetime
 import pytest
 from adapters import create_adapter
 from framework.assertions import assert_command_ok
-from framework.capabilities import COMMANDS, PAUSE_RESUME, RESTART_POLICY, capabilities_for_backend
+from framework.capabilities import COMMANDS, PAUSE_RESUME, RESTART_POLICY, require_capabilities
 from framework.create_retry import create_with_capacity_retry
 from framework.lifecycle import (
     assert_connect_fails,
@@ -131,10 +131,7 @@ _MARKER = "cube-e2e-restart-marker"
 
 @pytest.fixture(autouse=True)
 def _restart_policy_gate(sdk_backend: str) -> None:
-    if RESTART_POLICY not in capabilities_for_backend(sdk_backend):
-        pytest.skip(
-            f"backend {sdk_backend!r} does not support capability {RESTART_POLICY!r}"
-        )
+    require_capabilities(sdk_backend, RESTART_POLICY)
 
 
 def _count(status: dict | None) -> int:

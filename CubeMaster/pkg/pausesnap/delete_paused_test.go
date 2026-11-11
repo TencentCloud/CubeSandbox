@@ -125,6 +125,14 @@ func TestBeginCompletePersistsBackendAndRemoteStatus(t *testing.T) {
 	require.Equal(t, constants.RemoteStatusFailed, ready2.RemoteStatus)
 	require.Empty(t, ready2.ExportUUIDs)
 
+	jfsID, err := Begin(ctx, "sb-jfs", "node-1", "10.0.0.9", "cubebox", "jfs")
+	require.NoError(t, err)
+	require.NoError(t, Complete(ctx, "sb-jfs", jfsID, "node-1", "10.0.0.9", "cubebox", nil, ""))
+	jfsReady, err := GetBySnapshotID(ctx, jfsID)
+	require.NoError(t, err)
+	require.Equal(t, constants.RemoteStatusInProgress, jfsReady.RemoteStatus)
+	require.Empty(t, jfsReady.ExportUUIDs)
+
 	_, err = Begin(ctx, "sb-bad", "node-1", "10.0.0.9", "cubebox", "nfs")
 	require.Error(t, err)
 }

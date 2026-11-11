@@ -179,6 +179,43 @@ cp env.example .env
 sudo ./install.sh
 ```
 
+### 在线安装与可选组件开关
+
+`online-install.sh` 只是 one-click 发布包的下载入口：完成下载、解压后仍会执行包内同一份
+`install.sh`，因此它不是独立的部署形态。管道安装时推荐通过进程环境传递可选组件开关，
+与内置 MinIO 的方式保持一致：
+
+```bash
+# 控制节点：MinIO 保持默认开启，同时开启完整可观测性栈
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      CUBE_SANDBOX_MINIO_ENABLED=1 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+
+# 计算节点：不会安装 MinIO；仅安装 OTel Collector 并推送到控制面
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      ONE_CLICK_DEPLOY_ROLE=compute \
+      ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+```
+
+`CUBE_SANDBOX_MINIO_ENABLED` 与 `ONE_CLICK_ENABLE_OBSERVABILITY` 都是期望状态开关，
+会写入 `.one-click.env` 并在升级时继续生效。监控后端地址
+`CUBE_METRICS_OTLP_HTTP_ENDPOINT` / `CUBE_LOGS_OTLP_HTTP_ENDPOINT` /
+`CUBE_LOGS_ES_ENDPOINT` 只配置数据去向，不会独立
+开启监控。本地解压安装请直接修改 `.env` 中的开关；在线管道安装则按上例通过
+`sudo env` 传入。节点 Collector 仅采集 Cubelet 沙箱资源指标和
+`/data/cubelet/log/<sandbox-id>/{stdout,stderr}` 中的沙箱标准输出/标准错误日志。
+
+日志后端支持 `CUBE_LOGS_BACKEND=loki|elasticsearch`，默认和后续建议均为 Loki；
+已有 ES 平台或需要复杂全文检索时可选择 Elasticsearch。安装器一次只启用一个日志
+后端，不默认双写。
+组件版本、Collector 配置、外部后端和运维命令见
+[可观测性部署指南](../../docs/zh/guide/observability.md)。
+
 one-click 固定安装到 `/usr/local/services/cubetoolbox`。
 
 新的 one-click 安装统一只使用 systemd 托管：
@@ -247,7 +284,7 @@ cp env.example .env
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
 ```
 
 若控制节点用了内置 MinIO（或任何 S3 后端），建议把该节点回填的 `CUBE_S3_*` 拷过来：
@@ -396,8 +433,8 @@ grep '^CUBE_S3_' /usr/local/services/cubetoolbox/.one-click.env
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
-CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
+CUBE_S3_ENDPOINT=http://10.0.0.10:9000
 CUBE_S3_ACCESS_KEY_ID=cubeminio
 CUBE_S3_SECRET_ACCESS_KEY=<控制面 .one-click.env 里的值>
 CUBE_S3_BUCKET=cube-volumes
@@ -653,7 +690,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker 节点数（默�
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                 # 默认使用公网预置镜像
 export TENCENTCLOUD_USE_CFS=false                 # 默认无 CFS，cubemaster 单副本
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.3
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.8.0-rc1
 ```
 
 非交互 / CI 运行时建议显式设置以下变量（没有 TTY 时交互菜单会回退到默认值，显式设置可避免意外）。密码变量是例外：非交互运行会拒绝使用仓库中公开可见的内置演示密码并要求显式设置；如需在临时沙箱中使用不安全的默认密码，可设置 `TENCENTCLOUD_ALLOW_INSECURE_DEFAULTS=1`。

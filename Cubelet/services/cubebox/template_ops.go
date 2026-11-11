@@ -171,6 +171,23 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	var rootfsObject *storage.CowSnapshotObject
+	cleanupPreparedLayout := func() {
+		layout.releaseMetadata(ctx)
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
+	}
+
+	// Memory preparation and package layout creation are independent. Prepare
+	// them together so JFS metadata latency does not serialize the snapshot
+	// critical path.
+	layout.resetTmpDir()
+	layoutReady := make(chan error, 1)
+	go func() {
+		layoutReady <- layout.prepareWork(ctx)
+	}()
+
 	// Resolve / build the physical payload. A filesystem-only snapshot has no
 	// memory artifact at all; a full snapshot clones an incremental base when
 	// the sandbox's memory lineage allows it and falls back to a full capture
@@ -178,7 +195,9 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	payload, snapshotTypeForCmd, err := prepareCommitPayload(
 		ctx, stepLog, cb, rsp.TemplateID, memorySizeBytes, backend, mode,
 	)
+	layoutErr := <-layoutReady
 	if err != nil {
+		cleanupPreparedLayout()
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
@@ -190,6 +209,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	if err := validateCommitPayload(payload, mode); err != nil {
+		cleanupPreparedLayout()
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
@@ -197,19 +217,14 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 
 	cleanupArtifacts := func() {
-		layout.releaseMetadata(ctx)
+		cleanupPreparedLayout()
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
-		layout.discardTmpDir()
-		if !layout.usesTmpRename() {
-			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
-		}
 	}
 
-	layout.resetTmpDir()
-	if err := layout.prepareWork(ctx); err != nil {
+	if layoutErr != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", layoutErr)
 		return rsp, nil
 	}
 	// CommitSandbox snapshots a running sandbox whose memory artifact has

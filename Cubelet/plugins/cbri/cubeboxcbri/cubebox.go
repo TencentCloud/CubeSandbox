@@ -324,7 +324,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				}
 				specOpts = append(specOpts, opts...)
 			}
-			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, false)
+			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, true)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 			}
@@ -357,7 +357,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
-			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, true)
+			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, false)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 			}
@@ -368,7 +368,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		annotations[constants.AnnotationSnapshotDisable] = "true"
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
-			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, true)
+			opts, err := generateSandboxVirtiofsOpt(ctx, flowOpts, false)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 			}

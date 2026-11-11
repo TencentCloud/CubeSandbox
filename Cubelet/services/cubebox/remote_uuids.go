@@ -13,12 +13,10 @@ import (
 )
 
 // uploadRemoteUUIDs publishes a package another node can restore from, after
-// Pause / CommitSandbox has already sealed its disks to snapshots. s3 runs
-// cubecow_export_snapshot (via UploadSnapshot); jfs reports the package's
-// paths on the shared volume. Templates (AppSnapshot) do not export, and xfs
-// is a no-op. Failure is logged and returns empty — the customer-facing RPC
-// still succeeds; Master records remote_status=failed without uuids
-// (same-node resume does not need them; cross-node needs ready + uuids).
+// Pause / CommitSandbox has already sealed its disks to snapshots. S3 runs
+// cubecow_export_snapshot (via UploadSnapshot). JFS needs no export because
+// every node opens the same namespace; its writeback readiness is polled
+// separately through the snapshot status service.
 func uploadRemoteUUIDs(ctx context.Context, backend, snapshotID string) string {
 	normalized, err := cow.NormalizeBackend(backend)
 	if err != nil || !storage.CrossNodeImportBackend(normalized) {

@@ -48,6 +48,7 @@ ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 # otherwise clobber both `VAR=x ./install.sh` and toggle keys carried in .env.
 snapshot_one_click_toggles "${ENV_FILE}"
 snapshot_one_click_database_intent "${ENV_FILE}"
+snapshot_one_click_observability_intent "${ENV_FILE}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
@@ -55,6 +56,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   apply_cli_overrides
   # Shell-interpret .env DB values (quotes stripped) into the dotenv snapshot.
   capture_one_click_database_dotenv_values
+  # Preserve shell-interpreted observability values, including empty values
+  # used to clear settings inherited from a previous runtime.
+  capture_one_click_observability_dotenv_values
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -290,6 +294,7 @@ fi
 # above preserves the old runtime values for keys whose .env value equals the
 # env.example default, which would otherwise ignore an explicit flip back.
 apply_one_click_toggles
+apply_one_click_observability_intent
 # Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
@@ -1970,10 +1975,25 @@ CUBE_JFS_STORAGE="${CUBE_JFS_STORAGE:-s3}"
 CUBE_JFS_BUCKET="${CUBE_JFS_BUCKET:-}"
 CUBE_JFS_ACCESS_KEY="${CUBE_JFS_ACCESS_KEY:-}"
 CUBE_JFS_SECRET_KEY="${CUBE_JFS_SECRET_KEY:-}"
-CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE:-juicedata/mount:ce-v1.4.1}"
+# JuiceFS client image. Resolution priority mirrors up-cube-proxy.sh /
+# up-cube-lifecycle-manager.sh:
+#   1. CUBE_JFS_IMAGE (explicit operator override)
+#   2. MIRROR=cn  -> cube-sandbox-cn.tencentcloudcr.com
+#   3. default    -> cube-sandbox-int.tencentcloudcr.com
+# MIRROR is validated further down; use the tolerant form here so a bad value
+# still reaches that check instead of silently selecting int.
+CUBE_JFS_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+CUBE_JFS_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1"
+if [[ -n "${CUBE_JFS_IMAGE:-}" ]]; then
+  :
+elif [[ "${MIRROR:-}" == "cn" ]]; then
+  CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE_CN_DEFAULT}"
+else
+  CUBE_JFS_IMAGE="${CUBE_JFS_IMAGE_INT_DEFAULT}"
+fi
 CUBE_JFS_CONTAINER_NAME="${CUBE_JFS_CONTAINER_NAME:-cube-sandbox-jfs}"
-CUBE_JFS_MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/jfs}"
-CUBE_JFS_ROOT="${CUBE_JFS_ROOT:-cube}"
+CUBE_JFS_MOUNT_PATH="${CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs}"
+CUBE_JFS_ROOT="${CUBE_JFS_ROOT:-.}"
 CUBE_JFS_CACHE_DIR="${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
 CUBE_JFS_CACHE_SIZE_MB="${CUBE_JFS_CACHE_SIZE_MB:-102400}"
 CUBE_JFS_MOUNT_OPTS="${CUBE_JFS_MOUNT_OPTS:---writeback}"
@@ -2157,6 +2177,8 @@ fi
 # Inventory component_versions before replacing toolbox.
 inventory_package_component_versions
 
+# Replace packaged observability deployment files on upgrade. Runtime data
+# lives outside these source trees and remains intact.
 rm -rf \
   "${INSTALL_PREFIX}/network-agent" \
   "${INSTALL_PREFIX}/CubeAPI" \
@@ -2177,6 +2199,9 @@ rm -rf \
   "${INSTALL_PREFIX}/cube-egress" \
   "${INSTALL_PREFIX}/cube-lifecycle-manager" \
   "${INSTALL_PREFIX}/scripts" \
+  "${INSTALL_PREFIX}/CubeObservability" \
+  "${INSTALL_PREFIX}/observability" \
+  "${INSTALL_PREFIX}/metrics" \
   "${INSTALL_PREFIX}/sql" \
   "${INSTALL_PREFIX}/.one-click.env"
 
@@ -2197,6 +2222,12 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   # the target it replaces is still running.
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
+  if [[ -d "${PKG_ROOT}/observability" ]]; then
+    copy_dir_contents "${PKG_ROOT}/observability" "${INSTALL_PREFIX}/observability"
+  fi
+  if [[ -d "${PKG_ROOT}/CubeObservability" ]]; then
+    copy_dir_contents "${PKG_ROOT}/CubeObservability" "${INSTALL_PREFIX}/CubeObservability"
+  fi
 else
   generate_cubemaster_config_ports
   generate_templatecenter_config
@@ -2445,6 +2476,72 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_HOT_FLUSH_MS" "${RCOW_HOT_FLUSH_MS:-0}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_HOT_PREPARE_SUSPEND_MS" "${RCOW_HOT_PREPARE_SUSPEND_MS:-60000}"
 
+# Observability runtime env (OTel Collector / Prometheus / Loki or Elasticsearch / Grafana).
+ONE_CLICK_ENABLE_OBSERVABILITY="${ONE_CLICK_ENABLE_OBSERVABILITY:-0}"
+case "${ONE_CLICK_ENABLE_OBSERVABILITY}" in
+  0|1) ;;
+  *) die "ONE_CLICK_ENABLE_OBSERVABILITY must be 0 or 1 (got: '${ONE_CLICK_ENABLE_OBSERVABILITY}')" ;;
+esac
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_ENABLE_OBSERVABILITY" "${ONE_CLICK_ENABLE_OBSERVABILITY}"
+
+_logs_backend_explicit=0
+if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[CUBE_LOGS_BACKEND]+x}" ||
+      -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[CUBE_LOGS_BACKEND]+x}" ]]; then
+  _logs_backend_explicit=1
+fi
+_legacy_es_service=0
+if [[ -f /etc/systemd/system/cube-sandbox-elasticsearch.service &&
+      ! -f /etc/systemd/system/cube-sandbox-loki.service ]]; then
+  _legacy_es_service=1
+fi
+CUBE_LOGS_BACKEND="$(
+  resolve_one_click_logs_backend_selection \
+    "${CUBE_LOGS_BACKEND:-}" \
+    "${CUBE_LOGS_ES_ENDPOINT:-}" \
+    "${_legacy_es_service}" \
+    "${_logs_backend_explicit}"
+)"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_LOGS_BACKEND" "${CUBE_LOGS_BACKEND}"
+
+# An explicit backend selection is authoritative during upgrades. Remove
+# destinations and credentials inherited from the opposite backend so changing
+# an old Elasticsearch install back to the default Loki (or vice versa) cannot
+# leave two mutually exclusive log exporters configured.
+if [[ "${_logs_backend_explicit}" == "1" ]]; then
+  if [[ "${CUBE_LOGS_BACKEND}" == "loki" ]]; then
+    _opposite_log_keys=(
+      CUBE_LOGS_ES_ENDPOINT CUBE_LOGS_ELASTICSEARCH_ENDPOINT
+      CUBE_LOGS_ES_USER CUBE_LOGS_ES_PASSWORD CUBE_LOGS_ES_API_KEY
+      CUBE_LOGS_ES_TLS_INSECURE_SKIP_VERIFY
+    )
+  else
+    _opposite_log_keys=(
+      CUBE_LOGS_OTLP_HTTP_ENDPOINT CUBE_LOGS_AUTHORIZATION
+      CUBE_LOGS_TOKEN CUBE_LOGS_TENANT_ID
+    )
+  fi
+  for _obs_key in "${_opposite_log_keys[@]}"; do
+    unset "${_obs_key}"
+    remove_env_kv "${RUNTIME_ENV_FILE}" "${_obs_key}"
+  done
+fi
+
+if [[ -n "${ONE_CLICK_OBSERVABILITY_ROLE:-}" ]]; then
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_OBSERVABILITY_ROLE" "${ONE_CLICK_OBSERVABILITY_ROLE}"
+elif one_click_observability_intent_declared ONE_CLICK_OBSERVABILITY_ROLE; then
+  remove_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_OBSERVABILITY_ROLE"
+fi
+for _obs_key in "${ONE_CLICK_OBSERVABILITY_INTENT_KEYS[@]}"; do
+  case "${_obs_key}" in
+    CUBE_LOGS_BACKEND|ONE_CLICK_OBSERVABILITY_ROLE) continue ;;
+  esac
+  if [[ -n "${!_obs_key:-}" ]]; then
+    upsert_env_kv "${RUNTIME_ENV_FILE}" "${_obs_key}" "${!_obs_key}"
+  elif one_click_observability_intent_declared "${_obs_key}"; then
+    remove_env_kv "${RUNTIME_ENV_FILE}" "${_obs_key}"
+  fi
+done
+
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
@@ -2454,6 +2551,9 @@ chmod +x "${INSTALL_PREFIX}/scripts/logrotate/"*.sh 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/CubeS3lvol/scripts/"*.sh 2>/dev/null || true
 chmod +x "${INSTALL_PREFIX}/CubeS3lvol/bin/s3lvol_tgt" 2>/dev/null || true
+if [[ -d "${INSTALL_PREFIX}/observability" ]]; then
+  find "${INSTALL_PREFIX}/observability" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+fi
 
 if [[ -z "${CUBE_SANDBOX_NETWORK_CIDR:-}" ]]; then
   # Log current CIDR for debugging
@@ -2503,6 +2603,30 @@ start_systemd_target
 
 if [[ "${ONE_CLICK_RUN_QUICKCHECK:-1}" == "1" ]]; then
   "${INSTALL_PREFIX}/scripts/one-click/quickcheck.sh"
+fi
+
+obs_installer=""
+if [[ -f "${INSTALL_PREFIX}/observability/install.sh" ]]; then
+  obs_installer="${INSTALL_PREFIX}/observability/install.sh"
+elif [[ -f "${SCRIPT_DIR}/observability/install.sh" ]]; then
+  obs_installer="${SCRIPT_DIR}/observability/install.sh"
+fi
+
+if [[ "${ONE_CLICK_ENABLE_OBSERVABILITY}" == "1" ]]; then
+  if [[ -n "${obs_installer}" ]]; then
+    log "installing observability stack via ${obs_installer} (role=${DEPLOY_ROLE})"
+    ONE_CLICK_RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE}" \
+      bash "${obs_installer}" auto
+  else
+    log "WARNING: observability enabled but observability/install.sh was not found"
+  fi
+elif [[ -n "${obs_installer}" ]]; then
+  # Match bundled MinIO's reconciliation semantics: the persisted effective
+  # switch is authoritative regardless of whether it came from .env or the
+  # online installer's process environment. Turning it off also removes
+  # components left by an earlier enabled install.
+  log "observability disabled (ONE_CLICK_ENABLE_OBSERVABILITY=0); ensuring observability units are stopped"
+  bash "${obs_installer}" uninstall all >/dev/null 2>&1 || true
 fi
 
 log "install complete (role=${DEPLOY_ROLE})"

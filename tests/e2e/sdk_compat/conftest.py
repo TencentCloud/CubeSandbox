@@ -57,6 +57,7 @@ from adapters import create_adapter_with_capacity_retry  # noqa: E402
 from framework.capabilities import (  # noqa: E402
     CODE_INTERPRETER,
     capabilities_for_backend,
+    require_capabilities,
 )
 from framework.cleanup import safe_kill  # noqa: E402
 from framework.config import SdkE2EConfig, volume_plugin_enabled_from_env  # noqa: E402
@@ -167,6 +168,7 @@ def pytest_configure(config: pytest.Config):
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
         "sandbox_template_id(template_id, optional=False): override template ID for this test or module; "
         "optional templates are left out of preflight and their tests are skipped when the template does not exist",
+        "self_managed_template: test provisions and cleans up its own template",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_run_code_env_inheritance: test requires an opt-in template whose run_code inherits create-time envs",
         "requires_internet: test requires public internet access from the sandbox",
@@ -216,7 +218,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         if (template_id := _template_id_for_node(item)) is not None and not _template_is_optional(item)
     }
     config._sdk_e2e_default_template_needed = any(
-        _template_id_for_node(item) is None for item in items
+        _template_id_for_node(item) is None
+        and item.get_closest_marker("self_managed_template") is None
+        for item in items
     )
     volume_skip = None
     if not volume_plugin_enabled_from_env():
@@ -411,10 +415,10 @@ def sdk_sandbox(
     sdk_e2e_reporter: JsonlReporter,
     sdk_e2e_trace: TraceCollector,
 ):
-    for marker in request.node.iter_markers("requires_capability"):
-        capability = marker.args[0]
-        if capability not in capabilities_for_backend(sdk_backend):
-            pytest.skip(f"backend {sdk_backend!r} does not support capability {capability!r}")
+    require_capabilities(
+        sdk_backend,
+        *[marker.args[0] for marker in request.node.iter_markers("requires_capability")],
+    )
 
     if request.node.get_closest_marker("requires_code_interpreter"):
         if CODE_INTERPRETER not in capabilities_for_backend(sdk_backend):

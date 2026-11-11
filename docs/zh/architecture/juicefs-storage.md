@@ -26,9 +26,9 @@ JuiceFS 方案希望保留同样的文件操作模型，即整体流程上和 xf
 
 <JuiceFSArchitecture mode="architecture" />
 
-Cube 的 JuiceFS 方案架构图如上所示，其中元数据引擎 Redis 和对象存储 MinIO 位于控制节点（也可以调整配置指向其他机器），JuiceFS 客户端运行在所有节点，并在所有节点挂载同一个 JuiceFS 卷。所有节点在 JuiceFS 卷上看到的文件视图相同，即节点 A 在 `/data/cubelet/jfs` 下创建的文件，节点 B 在 `/data/cubelet/jfs` 下也能看到。
+Cube 的 JuiceFS 方案架构图如上所示，其中元数据引擎 Redis 和对象存储 MinIO 位于控制节点（也可以调整配置指向其他机器），JuiceFS 客户端运行在所有节点，并在所有节点挂载同一个 JuiceFS 卷。所有节点在 JuiceFS 卷上看到的文件视图相同，即节点 A 在 `/data/cubelet/storage/jfs` 下创建的文件，节点 B 在 `/data/cubelet/storage/jfs` 下也能看到。
 
-每个节点单独设置的 `raw` 读缓存和 `rawstaging` 写缓存以优化性能，读写缓存的目录的后端可以是任何文件系统，只有 `/data/cubelet/jfs` 目录的后端是 JuiceFS 卷(JuiceFS 文件系统)。
+每个节点单独设置的 `raw` 读缓存和 `rawstaging` 写缓存以优化性能，读写缓存的目录的后端可以是任何文件系统，只有 `/data/cubelet/storage/jfs` 目录的后端是 JuiceFS 卷(JuiceFS 文件系统)。
 
 ## 方案流程
 

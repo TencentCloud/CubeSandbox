@@ -1230,12 +1230,25 @@ func TestWritableLayerSubdirKeepsTemplateUpperOnRestart(t *testing.T) {
 	assert.Equal(t, "disk/"+tpl+"_1", writableLayerSubdir(restart, "sandbox-id", "1"))
 	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", ""))
 
+	variant := tpl + "-hf1-deadbeef"
+	variantRestart := &workflow.CreateContext{
+		IsRestart: true,
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+				constants.MasterAnnotationJFSTemplateVariantID:  variant,
+			},
+		},
+	}
+	assert.Equal(t, "disk/"+variant+"_0", writableLayerSubdir(variantRestart, "sandbox-id", "0"))
+
 	coldBoot := &workflow.CreateContext{
 		IsRestart:             true,
 		SnapshotWritableLayer: "disk/tpl-from-the-snapshot_0",
 		ReqInfo: &cubebox.RunCubeSandboxRequest{
 			Annotations: map[string]string{
 				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+				constants.MasterAnnotationJFSTemplateVariantID:  variant,
 			},
 		},
 	}
@@ -1575,4 +1588,138 @@ func TestCBRIcreateErrorKeepsOnlyThePrecondition(t *testing.T) {
 	if !ret.IsErrorCode(got, errorcode.ErrorCode_InvalidParamFormat) {
 		t.Fatalf("plain error must keep the historical 400, got %v", got)
 	}
+}
+
+func TestHostDirRootfsMounts(t *testing.T) {
+	t.Parallel()
+
+	const shareDir = "/data/cubelet/hostdir/sandbox/rw"
+	storageInfo := &storage.StorageInfo{
+		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"writable": {VolumeName: "writable", ShareDir: shareDir, BindPath: shareDir + "/writable"},
+			"readonly": {VolumeName: "readonly", ShareDir: shareDir, BindPath: shareDir + "/readonly", ReadOnly: true},
+		},
+	}
+	containerReq := &cubebox.ContainerConfig{VolumeMounts: []*cubebox.VolumeMounts{
+		{Name: "writable", ContainerPath: "/mnt/rw"},
+		{Name: "readonly", ContainerPath: "/mnt/ro", Readonly: true},
+	}}
+
+	tests := []struct {
+		name      string
+		flowOpts  *workflow.CreateContext
+		container *cubebox.ContainerConfig
+		want      []virtiofs.CubeRootfsMount
+	}{
+		{
+			name:      "no workflow context",
+			container: containerReq,
+		},
+		{
+			name:      "no storage info",
+			flowOpts:  &workflow.CreateContext{},
+			container: containerReq,
+		},
+		{
+			name: "memory restore reconnects to the running container",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo: &cubebox.RunCubeSandboxRequest{
+					InstanceType: cubebox.InstanceType_cubebox.String(),
+					Annotations: map[string]string{
+						constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
+					},
+				},
+				StorageInfo: storageInfo,
+			},
+			container: containerReq,
+		},
+		{
+			name: "template build has its mounts cleared by the shim",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo: &cubebox.RunCubeSandboxRequest{
+					InstanceType: cubebox.InstanceType_cubebox.String(),
+					Annotations: map[string]string{
+						constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
+						constants.MasterAnnotationsAppSnapshotCreate:    "true",
+					},
+				},
+				StorageInfo: storageInfo,
+			},
+			container: containerReq,
+		},
+		{
+			name: "cold boot binds the volumes into the new container",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo:     &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}},
+				StorageInfo: storageInfo,
+			},
+			container: containerReq,
+			want: []virtiofs.CubeRootfsMount{
+				{
+					VirtiofsID:     constants.PropagationVirtioRo,
+					VirtiofsSource: "readonly",
+					ContainerDest:  "/mnt/ro",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO, constants.MountOptReadOnly},
+				},
+				{
+					VirtiofsID:     constants.PropagationVirtioRw,
+					VirtiofsSource: "writable",
+					ContainerDest:  "/mnt/rw",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO},
+				},
+			},
+		},
+		{
+			name: "restart cold boots the same way",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo:     &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}},
+				StorageInfo: storageInfo,
+				IsRestart:   true,
+			},
+			container: containerReq,
+			want: []virtiofs.CubeRootfsMount{
+				{
+					VirtiofsID:     constants.PropagationVirtioRo,
+					VirtiofsSource: "readonly",
+					ContainerDest:  "/mnt/ro",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO, constants.MountOptReadOnly},
+				},
+				{
+					VirtiofsID:     constants.PropagationVirtioRw,
+					VirtiofsSource: "writable",
+					ContainerDest:  "/mnt/rw",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mounts, err := hostDirRootfsMounts(context.Background(), tt.flowOpts, tt.container)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, mounts)
+		})
+	}
+}
+
+func TestHostDirRootfsMountsFailsOnAnUnusableBackend(t *testing.T) {
+	t.Parallel()
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}},
+		StorageInfo: &storage.StorageInfo{HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"outside": {VolumeName: "outside", ShareDir: "/share", BindPath: "/elsewhere/outside"},
+		}},
+	}
+	mounts, err := hostDirRootfsMounts(context.Background(), flowOpts, &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{{Name: "outside", ContainerPath: "/mnt/outside"}},
+	})
+	require.ErrorContains(t, err, "unusable bind path")
+	require.Nil(t, mounts)
 }

@@ -743,9 +743,11 @@ e2e-fs-only:
 		PYTHONPATH="$(ROOT_DIR)/sdk/python" \
 		SDK_E2E_BACKENDS="$${SDK_E2E_BACKENDS:-cubesandbox}" \
 		python3 -m pytest \
+			cases/lifecycle/test_cold_start_mounts.py \
 			cases/lifecycle/test_filesystem_only_snapshot.py \
 			cases/lifecycle/test_rollback_clone.py \
 			cases/lifecycle/test_fork.py \
 			cases/lifecycle/test_pause_resume.py \
 			cases/volume/test_snapshot_reference.py \
+			cases/volume/test_snapshot_volume_mounts.py \
 			--run-e2e -q

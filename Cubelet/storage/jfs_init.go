@@ -21,14 +21,11 @@ import (
 )
 
 const (
-	defaultJFSMountPath = "/data/cubelet/jfs"
+	defaultJFSMountPath = "/data/cubelet/storage/jfs"
 	defaultJFSCacheDir  = "/data/cubelet/jfs-cache"
-	defaultJFSRoot      = "cube"
-	// jfsNodesDir keeps every node's packages apart on the shared volume, so
-	// one node's object scan and GC never see another node's files.
-	jfsNodesDir     = "nodes"
-	jfsFSTypePrefix = "fuse.juicefs"
-	cowCloneCFR     = "copy_file_range"
+	defaultJFSRoot      = "."
+	jfsFSTypePrefix     = "fuse.juicefs"
+	cowCloneCFR         = "copy_file_range"
 )
 
 // ErrJFSNotConfigured is returned for backend=jfs requests when [cow.jfs]
@@ -58,18 +55,6 @@ func (c *Config) jfsMountPath() string {
 	return defaultJFSMountPath
 }
 
-func (c *Config) jfsNodeName() string {
-	if c != nil {
-		if n := strings.TrimSpace(c.Cow.JFS.NodeName); n != "" {
-			return n
-		}
-	}
-	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
-		return strings.TrimSpace(h)
-	}
-	return "localhost"
-}
-
 // jfsCacheDirs are the juicefs --cache-dir entries (colon separated).
 func (c *Config) jfsCacheDirs() []string {
 	raw := defaultJFSCacheDir
@@ -87,23 +72,17 @@ func (c *Config) jfsCacheDirs() []string {
 	return dirs
 }
 
-// jfsNodesRoot is <mount_path>/<root>/nodes: every node's tree, and the only
-// place a cross-node import may read from.
-func (c *Config) jfsNodesRoot() string {
+// jfsStorageRoot is the cluster-wide JFS namespace. Every Cubelet opens the
+// same objects/, snapshots/ and pause-snapshots/ trees. Cube guarantees
+// globally unique object names and serializes each object's lifecycle.
+func (c *Config) jfsStorageRoot() string {
 	root := defaultJFSRoot
 	if c != nil {
 		if r := strings.Trim(strings.TrimSpace(c.Cow.JFS.Root), "/"); r != "" {
 			root = r
 		}
 	}
-	return filepath.Join(c.jfsMountPath(), root, jfsNodesDir)
-}
-
-// jfsStorageRoot is <mount_path>/<root>/nodes/<node_name>: the jfs
-// counterpart of <work>/xfs, holding objects/, snapshots/ and
-// pause-snapshots/.
-func (c *Config) jfsStorageRoot() string {
-	return filepath.Join(c.jfsNodesRoot(), c.jfsNodeName())
+	return filepath.Join(c.jfsMountPath(), root)
 }
 
 // JFSConfigured reports whether this node has the jfs backend enabled.
@@ -115,7 +94,7 @@ func JFSConfigured() bool {
 	return cfg.jfsConfigured()
 }
 
-// JFSStorageRoot is this node's jfs backend root on the JuiceFS mount.
+// JFSStorageRoot is the shared jfs backend root on the JuiceFS mount.
 func JFSStorageRoot() string {
 	var cfg *Config
 	if localStorage != nil {

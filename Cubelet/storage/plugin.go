@@ -140,16 +140,13 @@ type CowInlineConfig struct {
 }
 
 // CowJFSUserConfig is the operator-facing `[cow.jfs]` block. backend=jfs
-// runs the reflink Store on a JuiceFS mount: objects and packages live under
-// <mount_path>/<root>/nodes/<node_name>/ and are cloned with copy_file_range.
+// runs one cluster-wide reflink Store on a JuiceFS mount. All nodes share
+// <mount_path>/<root>/{objects,snapshots,pause-snapshots}; Cube guarantees
+// globally unique object names and serializes each object's lifecycle.
 type CowJFSUserConfig struct {
 	Enable    bool   `toml:"enable"`
 	MountPath string `toml:"mount_path"`
 	Root      string `toml:"root"`
-	// NodeName names this node's directory on the shared volume. Defaults
-	// to the hostname; it must be unique per node and stable across
-	// restarts.
-	NodeName string `toml:"node_name"`
 	// CacheDir is the juicefs mount --cache-dir. A package counts as
 	// uploaded, and so restorable on another node, once none of its blocks
 	// is left in the writeback staging area under it.
