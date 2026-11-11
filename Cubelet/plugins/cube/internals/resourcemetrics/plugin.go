@@ -75,9 +75,12 @@ func init() {
 	registry.Register(&plugin.Registration{
 		Type: constants.InternalPlugin,
 		ID:   PluginID,
+		// containerd/plugin v1.1 rejects a plugin that requires its own type.
+		// The sibling InternalPlugin lookup below (the cgroup reader) goes
+		// through InitContext.GetByID, whose Instance() initializes the target
+		// on demand, so the self-requirement is not needed for ordering.
 		Requires: []plugin.Type{
 			constants.CubeStorePlugin,
-			constants.InternalPlugin,
 			plugins.SandboxControllerPlugin,
 		},
 		Config: defaultConfig(),

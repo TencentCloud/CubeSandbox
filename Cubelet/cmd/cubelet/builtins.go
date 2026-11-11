@@ -33,6 +33,8 @@ import (
 
 	_ "github.com/containerd/containerd/v2/plugins/mount/erofs"
 	_ "github.com/containerd/containerd/v2/plugins/restart"
+	_ "github.com/containerd/containerd/v2/plugins/server/grpc"
+	_ "github.com/containerd/containerd/v2/plugins/server/ttrpc"
 	_ "github.com/containerd/containerd/v2/plugins/services/containers"
 	_ "github.com/containerd/containerd/v2/plugins/services/content"
 	_ "github.com/containerd/containerd/v2/plugins/services/diff"

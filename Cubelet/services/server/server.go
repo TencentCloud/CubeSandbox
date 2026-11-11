@@ -247,12 +247,37 @@ func (s *Server) ServeTap(l net.Listener) error {
 	return trapClosedConnErr(s.tapProvider.Serve(l))
 }
 
+// ServeGRPC serves the containerd gRPC API surface on the provided listener.
+// containerd v2.3.x hosts the grpc server inside the ServerPlugin "grpc"
+// instance instead of exposing ServeGRPC on cmd/containerd/server.Server, so
+// the serving instance is extracted from the initialized plugin set.
 func (s *Server) ServeGRPC(l net.Listener) error {
-	return s.Server.ServeGRPC(l)
+	inst, err := containerdServerPluginInstance(s.Server, "grpc")
+	if err != nil {
+		return err
+	}
+	srv, ok := inst.(interface{ Serve(net.Listener) error })
+	if !ok {
+		return fmt.Errorf("containerd grpc server plugin instance does not implement Serve: %T", inst)
+	}
+	return trapClosedConnErr(srv.Serve(l))
 }
 
+// ServeTTRPC serves the containerd ttrpc API surface (e.g. the events ttrpc
+// service) on the provided listener. containerd v2.3.x hosts the ttrpc server
+// inside the ServerPlugin "ttrpc" instance.
 func (s *Server) ServeTTRPC(l net.Listener) error {
-	return s.Server.ServeTTRPC(l)
+	inst, err := containerdServerPluginInstance(s.Server, "ttrpc")
+	if err != nil {
+		return err
+	}
+	srv, ok := inst.(interface {
+		Serve(context.Context, net.Listener) error
+	})
+	if !ok {
+		return fmt.Errorf("containerd ttrpc server plugin instance does not implement Serve: %T", inst)
+	}
+	return trapClosedConnErr(srv.Serve(context.Background(), l))
 }
 
 func (s *Server) serveMetrics() map[string]http.Handler {
@@ -269,9 +294,21 @@ func (s *Server) serveMetrics() map[string]http.Handler {
 	return handlers
 }
 
+// ServeTCP serves Cubelet's own TCP gRPC services on the provided listener;
+// when no Cubelet TCP server is configured it falls back to the containerd
+// "grpc-tcp" server plugin instance (matching the pre-v2.3 behavior of the
+// embedded cmd/containerd/server.Server).
 func (s *Server) ServeTCP(l net.Listener) error {
 	if s.tcpServer == nil {
-		return s.Server.ServeTCP(l)
+		inst, err := containerdServerPluginInstance(s.Server, "grpc-tcp")
+		if err != nil {
+			return err
+		}
+		srv, ok := inst.(interface{ Serve(net.Listener) error })
+		if !ok {
+			return fmt.Errorf("containerd grpc-tcp server plugin instance does not implement Serve: %T", inst)
+		}
+		return trapClosedConnErr(srv.Serve(l))
 	}
 	return trapClosedConnErr(s.tcpServer.Serve(l))
 }
