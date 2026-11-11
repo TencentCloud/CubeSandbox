@@ -27,9 +27,14 @@ host:
     mem_limit: ""
     mvm_limit: 0
     creation_concurrent_num: 0
+    # 可选。仅在未设置 mcpu_limit / mem_limit 时生效。
+    # 默认：cpu_overcommit_factor=2.0，mem_overcommit_factor=1.25。
+    # 都设为 1.0 即可不超卖，同时仍自动识别宿主机规格。
+    # cpu_overcommit_factor: 2.0
+    # mem_overcommit_factor: 1.25
 ```
 
-配额里的 `0` 表示让 Cubelet 按宿主机资源自动推导，不是无限。压测或高密度场景要显式设置这些值。
+配额里的 `0` 表示让 Cubelet 按宿主机资源自动推导，不是无限。自动推导时会对检测到的 CPU 乘以 `cpu_overcommit_factor`（历史默认 `2.0`）、对内存乘以 `mem_overcommit_factor`（历史默认 `1.25`）。不想超卖时可把两个 factor 都设为 `1.0`，而不必手填机器规格；压测或高密度场景也可继续显式设置 `mcpu_limit` / `mem_limit`。
 
 Terraform 部署的环境变量见[腾讯云集群部署](./tencentcloud-terraform-deploy.md)，计算节点的环境变量见[多机集群部署](./multi-node-deploy.md)。
 
@@ -140,7 +145,7 @@ Cubelet 通过 CubeOps 的 `/internal/v1/node-agent` 接口注册并持续上报
 |----------|------|------|
 | `instance_type` | 节点身份 | 匹配请求、选模板副本、套用按类型的上限 |
 | `cluster_label` | `host.scheduler_label` | 节点池亲和与隔离 |
-| `quota_cpu` / `quota_mem_mb` | `host.quota` 或宿主机推导 | 可调度容量，参与过滤和打分 |
+| `quota_cpu` / `quota_mem_mb` | `host.quota` 绝对额度，或宿主机 CPU/内存 × 超卖倍率（默认 2.0 / 1.25） | 可调度容量，参与过滤和打分 |
 | `max_mvm_num` | `host.quota.mvm_limit` 或内存推导 | 单节点 MVM 上限 |
 | `create_concurrent_num` | `host.quota.creation_concurrent_num` | 创建并发；为 0 时调度层回落到 CubeMaster 自身的限流配置 |
 | 资源用量 / 磁盘 / cgroup | 周期上报 | 使用率、磁盘水位、打分因子 |

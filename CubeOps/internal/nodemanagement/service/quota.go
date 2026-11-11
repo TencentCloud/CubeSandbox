@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"regexp"
 	"strconv"
@@ -284,7 +285,12 @@ func (svc *NodeService) GetNodeQuotaView(ctx context.Context, nodeID string) (*m
 	} else {
 		var physical model.PhysicalTotals
 		if snap.HostFacts != nil {
-			physical = model.PhysicalTotals{CpuTotal: snap.HostFacts.CPUCount, MemMBTotal: snap.HostFacts.MemTotalMB}
+			physical = model.PhysicalTotals{
+				CpuTotal:            snap.HostFacts.CPUCount,
+				MemMBTotal:          snap.HostFacts.MemTotalMB,
+				CpuOvercommitFactor: snap.HostFacts.CpuOvercommitFactor,
+				MemOvercommitFactor: snap.HostFacts.MemOvercommitFactor,
+			}
 		}
 		view.Drift, view.Message = quotaDrift(view.Spec, view.Actual, physical)
 	}
@@ -506,20 +512,32 @@ func (svc *NodeService) GetOpsAgentSpec(ctx context.Context, nodeID string) (*mo
 
 // defaultMCpuLimit mirrors cubelet's hostCPUCount*1000*overcommitFactor
 // fallback. ok=false means physical cpu count is not known yet.
+// Prefer the Cubelet-reported factor from HostFacts when present so a
+// non-default cpu_overcommit_factor does not look like permanent drift.
 func defaultMCpuLimit(physical model.PhysicalTotals) (mcpu int64, ok bool) {
 	if physical.CpuTotal <= 0 {
 		return 0, false
 	}
-	return physical.CpuTotal * 1000 * defaultHostQuotaCPUOvercommitFactor, true
+	factor := float64(defaultHostQuotaCPUOvercommitFactor)
+	if physical.CpuOvercommitFactor > 0 {
+		factor = physical.CpuOvercommitFactor
+	}
+	return int64(math.Round(float64(physical.CpuTotal) * 1000 * factor)), true
 }
 
-// defaultMemLimitMB mirrors cubelet's ceil(memTotalMB*5/4) fallback. ok=false
+// defaultMemLimitMB mirrors cubelet's ceil(memTotalMB*factor) fallback. ok=false
 // means physical memory total is not known yet.
+// Prefer the Cubelet-reported factor from HostFacts when present so a
+// non-default mem_overcommit_factor does not look like permanent drift.
 func defaultMemLimitMB(physical model.PhysicalTotals) (memMB int64, ok bool) {
 	if physical.MemMBTotal <= 0 {
 		return 0, false
 	}
-	return (physical.MemMBTotal*defaultHostQuotaMemNumerator + defaultHostQuotaMemDenominator - 1) / defaultHostQuotaMemDenominator, true
+	factor := float64(defaultHostQuotaMemNumerator) / float64(defaultHostQuotaMemDenominator)
+	if physical.MemOvercommitFactor > 0 {
+		factor = physical.MemOvercommitFactor
+	}
+	return int64(math.Ceil(float64(physical.MemMBTotal) * factor)), true
 }
 
 // defaultMvmLimit mirrors cubelet's resolveHostMaxMvmNum: floor(effectiveMemMB/512),
@@ -597,7 +615,12 @@ func quotaDrift(spec *model.QuotaSpec, actual model.QuotaActual, physical model.
 // closed if either total is missing rather than deriving from quota capacity.
 func physicalFromRegistration(reg *store.NodeRegistration) (model.PhysicalTotals, error) {
 	if reg.CPUCount > 0 && reg.MemTotalMB > 0 {
-		return model.PhysicalTotals{CpuTotal: reg.CPUCount, MemMBTotal: reg.MemTotalMB}, nil
+		physical := model.PhysicalTotals{CpuTotal: reg.CPUCount, MemMBTotal: reg.MemTotalMB}
+		if f := unmarshalHostFacts(reg.HostFactsJSON); f != nil {
+			physical.CpuOvercommitFactor = f.CpuOvercommitFactor
+			physical.MemOvercommitFactor = f.MemOvercommitFactor
+		}
+		return physical, nil
 	}
 	return model.PhysicalTotals{}, fmt.Errorf("physical capacity not fully reported by cubelet (upgrade cubelet to enable quota)")
 }
