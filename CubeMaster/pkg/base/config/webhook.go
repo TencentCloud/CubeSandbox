@@ -84,6 +84,38 @@ func (c WebhookConf) MarshalJSON() ([]byte, error) {
 
 var ErrWebhookConfig = errors.New("webhooks disabled: invalid configuration (values redacted)")
 
+// webhookEventNames is the closed set of event names a subscription may select.
+// Both the membership check and the per-subscription count bound are derived
+// from this table: a hand-maintained bound drifts from the accepted set, and a
+// subscription that lists every supported event ("subscribe to all lifecycle
+// events") is exactly the configuration that hits the discrepancy. Rejecting it
+// would silently discard the whole block, because UnmarshalYAML maps any
+// validation error to DefaultWebhookConf + Invalid and only logs a generic
+// warning.
+//
+// Keep in sync with the Type* constants in pkg/webhook/event.go; this package
+// cannot import that one, since pkg/webhook depends on the parsed config.
+var webhookEventNames = map[string]struct{}{
+	"sandbox.lifecycle.created":                      {},
+	"sandbox.lifecycle.killed":                       {},
+	"sandbox.lifecycle.paused":                       {},
+	"sandbox.lifecycle.resumed":                      {},
+	"sandbox.lifecycle.updated":                      {},
+	"sandbox.lifecycle.checkpointed":                 {},
+	"template.lifecycle.build.started":               {},
+	"template.lifecycle.build.completed":             {},
+	"template.lifecycle.build.failed":                {},
+	"template.lifecycle.deleted":                     {},
+	"template.lifecycle.migrated":                    {},
+	"template.lifecycle.snapshot.created":            {},
+	"template.lifecycle.snapshot.deleted":            {},
+	"template.lifecycle.snapshot.rollback.completed": {},
+}
+
+// maxWebhookEventsPerSubscription bounds one subscription's event list at the
+// size of the accepted set, so listing every event is always valid.
+var maxWebhookEventsPerSubscription = len(webhookEventNames)
+
 func (c WebhookConf) Validate() error {
 	s := c.Store
 	if c.Invalid || c.IngressCapacity < 1 || c.IngressCapacity > 4096 || c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 1000 ||
@@ -100,7 +132,7 @@ func (c WebhookConf) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, sub := range c.Subscriptions {
-		if strings.TrimSpace(sub.ID) == "" || len(sub.ID) > 1024 || !utf8.ValidString(sub.ID) || strings.IndexFunc(sub.ID, unicode.IsControl) >= 0 || seen[sub.ID] || len(sub.Events) == 0 || len(sub.Events) > 13 {
+		if strings.TrimSpace(sub.ID) == "" || len(sub.ID) > 1024 || !utf8.ValidString(sub.ID) || strings.IndexFunc(sub.ID, unicode.IsControl) >= 0 || seen[sub.ID] || len(sub.Events) == 0 || len(sub.Events) > maxWebhookEventsPerSubscription {
 			return ErrWebhookConfig
 		}
 		seen[sub.ID] = true
@@ -109,19 +141,7 @@ func (c WebhookConf) Validate() error {
 		}
 		events := map[string]bool{}
 		for _, e := range sub.Events {
-			switch e {
-			case "sandbox.lifecycle.created", "sandbox.lifecycle.killed",
-				"sandbox.lifecycle.paused", "sandbox.lifecycle.resumed",
-				"sandbox.lifecycle.updated", "sandbox.lifecycle.checkpointed",
-				"template.lifecycle.build.started", "template.lifecycle.build.completed",
-				"template.lifecycle.build.failed", "template.lifecycle.deleted",
-				"template.lifecycle.migrated",
-				"template.lifecycle.snapshot.created", "template.lifecycle.snapshot.deleted",
-				"template.lifecycle.snapshot.rollback.completed":
-			default:
-				return ErrWebhookConfig
-			}
-			if events[e] {
+			if _, ok := webhookEventNames[e]; !ok || events[e] {
 				return ErrWebhookConfig
 			}
 			events[e] = true

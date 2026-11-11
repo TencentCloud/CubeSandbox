@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -100,4 +101,33 @@ func TestWebhookActualInitAndListener(t *testing.T) {
 			require.NotContains(t, string(out), "redis-secret-injected")
 		})
 	}
+}
+
+// Subscribing to every supported event is the natural "forward everything"
+// configuration, and it used to be rejected: the per-subscription count bound
+// (13) disagreed with the accepted event set (14). Because UnmarshalYAML maps
+// any validation error to DefaultWebhookConf + Invalid, that mismatch discarded
+// the whole webhooks block and left the operator with one generic warning.
+func TestWebhookAllEventsSubscriptionIsValid(t *testing.T) {
+	names := make([]string, 0, len(webhookEventNames))
+	for name := range webhookEventNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	c := DefaultWebhookConf()
+	c.Enabled = true
+	c.Subscriptions = []WebhookSubscription{{ID: "all", URL: "https://example.test/hook", Events: names}}
+	require.NoError(t, c.Validate())
+
+	block := "webhooks:\n  enabled: true\n  subscriptions:\n    - id: all\n      url: https://example.test/hook\n      events: [" + strings.Join(names, ", ") + "]\n"
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte(block), &cfg))
+	require.False(t, cfg.Webhooks.Invalid, "subscribing to every event must not invalidate the block")
+	require.Len(t, cfg.Webhooks.Subscriptions, 1)
+
+	// One name more than the accepted set can only be a repeat, which stays
+	// rejected even though the bound itself now matches the set.
+	c.Subscriptions[0].Events = append(names, names[0])
+	require.Error(t, c.Validate())
 }

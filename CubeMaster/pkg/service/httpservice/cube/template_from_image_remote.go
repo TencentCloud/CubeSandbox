@@ -129,7 +129,11 @@ func markForwardBuildJobFailed(ctx context.Context, jobID, msg string) {
 		"error_message": msg,
 	}); err != nil {
 		log.G(failCtx).Errorf("forward to templatecenter: mark job failed fail: job_id=%s err=%v", jobID, err)
+		return
 	}
+	// The build never reached the builder, but from a subscriber's point of view
+	// it is a terminal build failure and must be observable as one.
+	templatecenter.PublishTemplateBuildFailedForJob(failCtx, jobID)
 }
 
 func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *templatecenter.EnvdInjectionPayload) {

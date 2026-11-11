@@ -5,6 +5,8 @@ package templatecenter
 import (
 	"context"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 )
 
@@ -57,6 +59,50 @@ func PublishTemplateBuildFailed(ctx context.Context, templateID, buildID, source
 		ErrorMsg:       errorMsg,
 	})
 	lifecyclePublisher.PublishContext(webhook.WithBuildID(ctx, buildID), webhook.TypeTemplateBuildFailed, "", templateID, fields)
+}
+
+// PublishTemplateBuildFailedForJob publishes template.lifecycle.build.failed for
+// a job that has just been persisted as FAILED, rebuilding the build metadata
+// from the job row. Failure paths do not all carry the original request (the
+// builder callback only knows the job id, and the resume/reconcile paths keep
+// the request in different shapes), so the row is the one place the source
+// image, instance type and error message are always available.
+func PublishTemplateBuildFailedForJob(ctx context.Context, jobID string) {
+	if !lifecyclePublisher.Enabled() {
+		return
+	}
+	job, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		log.G(ctx).Warnf("publish template build failed: load job fail: job_id=%s err=%v", jobID, err)
+		return
+	}
+	PublishTemplateBuildFailed(ctx, job.TemplateID, jobID, job.SourceImageRef, job.InstanceType,
+		templateBuildMode(job), job.ErrorMessage)
+}
+
+// templateBuildMode rebuilds the build mode carried by build.started so a
+// failure event describes the same build as its start event.
+func templateBuildMode(job *models.TemplateImageJob) string {
+	mode := "remote"
+	if job.Operation == JobOperationRedo {
+		mode = "redo"
+	}
+	if job.InstanceType != "" {
+		mode += ":" + job.InstanceType
+	}
+	return mode
+}
+
+// failTemplateImageJob persists the terminal FAILED state of a build job and
+// publishes template.lifecycle.build.failed once the write lands, so a write
+// that failed cannot announce a state that was never persisted.
+func failTemplateImageJob(ctx context.Context, jobID string, values map[string]any) error {
+	values["status"] = JobStatusFailed
+	if err := updateTemplateImageJob(ctx, jobID, values); err != nil {
+		return err
+	}
+	PublishTemplateBuildFailedForJob(ctx, jobID)
+	return nil
 }
 
 // PublishTemplateDeleted publishes the template.lifecycle.deleted event.
