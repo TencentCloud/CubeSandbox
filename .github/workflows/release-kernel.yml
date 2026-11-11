@@ -308,7 +308,7 @@ jobs:
           dnf clean all
           rm -rf /var/cache/dnf/*
 
-      - name: Build RPM package
+      - name: Build RPM packages (dist-rpm)
         run: |
           WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
           OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
@@ -316,6 +316,7 @@ jobs:
 
       - name: Verify package artifacts
         run: |
+          set -euo pipefail
           shopt -s nullglob
           packages=(pvm-host-build/output/*.rpm)
           if [[ "${#packages[@]}" -eq 0 ]]; then
@@ -323,6 +324,13 @@ jobs:
             exit 1
           fi
           ls -lh "${packages[@]}"
+          for prefix in kernel kernel-core kernel-modules kernel-devel kernel-headers; do
+            matches=(pvm-host-build/output/"${prefix}"-[0-9]*.x86_64.rpm)
+            if [[ "${#matches[@]}" -eq 0 ]]; then
+              echo "missing ${prefix} rpm from dist-rpm output" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -358,19 +366,15 @@ jobs:
           test -f kernel-release-assets/vmlinux-arm64
           test -f kernel-release-assets/vmlinux-pvm-amd64
 
-          has_rpm=0
-          has_deb=0
-          for f in kernel-release-assets/*.rpm; do
-            base="$(basename "${f}")"
-            case "${base}" in
-              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
-                case "${base}" in
-                  *headers*) ;;
-                  *) has_rpm=1 ;;
-                esac
-                ;;
-            esac
+          has_rpm=1
+          for prefix in kernel kernel-core kernel-modules kernel-devel kernel-headers; do
+            matches=(kernel-release-assets/"${prefix}"-[0-9]*.x86_64.rpm)
+            if [[ "${#matches[@]}" -eq 0 ]]; then
+              echo "missing PVM host ${prefix} rpm" >&2
+              has_rpm=0
+            fi
           done
+          has_deb=0
           for f in kernel-release-assets/*.deb; do
             base="$(basename "${f}")"
             case "${base}" in
