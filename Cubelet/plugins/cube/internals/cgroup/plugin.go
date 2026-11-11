@@ -19,7 +19,8 @@ import (
 )
 
 type Config struct {
-	RootPath                         string `toml:"root_path"`
+	RootPath string `toml:"root_path"`
+	// PoolSize controls cgroup preallocation independently of the host MVM quota.
 	PoolSize                         int    `toml:"pool_size"`
 	PoolTriggerIntervalInMs          int    `toml:"pool_trigger_interval_in_ms"`
 	VmMemoryOverheadBase             string `toml:"vm_memory_overhead_base"`

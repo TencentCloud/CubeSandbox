@@ -56,6 +56,8 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     #mount -t tmpfs -o size=100m none /data/cubelet/cleanup
     root_path = "/data/cubelet/cleanup"
   [plugins."io.cubelet.internal.v1.cgroup"]
+    # Cgroup pool preallocation is independent of host.quota.mvm_limit.
+    # Applied to poolV1 and to each NUMA pool in poolV2; pools grow on demand.
     pool_size = 3000
     pool_workers = 1
     pool_trigger_interval_in_ms = 1000

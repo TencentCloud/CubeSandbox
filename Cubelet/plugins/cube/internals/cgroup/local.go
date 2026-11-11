@@ -220,7 +220,7 @@ func (l *CgPlugin) initPool() error {
 		l.pool.stop()
 	}
 	p := &cgPool{
-		initialSize:         dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+		initialSize:         l.config.PoolSize,
 		db:                  l.db,
 		poolV1Handle:        l.poolV1Handle,
 		poolV2Handle:        l.poolV2Handle,
