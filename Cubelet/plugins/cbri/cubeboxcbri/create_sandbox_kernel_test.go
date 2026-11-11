@@ -225,3 +225,75 @@ func TestCreateSandboxWithoutTemplateKeepsInstalledKernel(t *testing.T) {
 	spec := applySpecOpts(t, context.Background(), opts)
 	require.Equal(t, plugin.artifactPaths.SharedKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
 }
+
+// A restart cold-boots on its retained disk and never reaches the template or
+// restore branches, so it has to re-apply the guest component pin itself. If it
+// does not, the shim boots the live toolbox artifacts and stamps their versions
+// into the next snapshot's metadata while the catalog keeps the sandbox pin.
+func TestCreateSandboxRestartPinsGuestArtifacts(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	inventory := t.TempDir()
+
+	pinned := map[templatetypes.CubeComponent]string{
+		templatetypes.CubeComponentCubeKernel: filepath.Join(inventory, "cube-kernel-scf", "pin-k", "vmlinux"),
+		templatetypes.CubeComponentCubeImage:  filepath.Join(inventory, "cube-image", "pin-i", "cube-guest-image-cpu.img"),
+		templatetypes.CubeComponentCubeAgent:  filepath.Join(inventory, "cube-agent", "pin-a", "cube-agent.ext4"),
+	}
+	localTemplate := &templatetypes.LocalRunTemplate{
+		Componts: map[string]templatetypes.LocalComponent{},
+	}
+	for component, componentPath := range pinned {
+		localTemplate.Componts[string(component)] = templatetypes.LocalComponent{
+			Component: templatetypes.MachineComponent{
+				Name:    component,
+				Version: "pin-" + string(component),
+				Path:    componentPath,
+			},
+		}
+	}
+
+	flow := &workflow.CreateContext{
+		ReqInfo:          &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"},
+		IsRestart:        true,
+		LocalRunTemplate: localTemplate,
+	}
+	opts, err := plugin.CreateSandbox(context.Background(), flow)
+	require.NoError(t, err)
+	spec := applySpecOpts(t, context.Background(), opts)
+
+	require.Equal(t, pinned[templatetypes.CubeComponentCubeKernel], spec.Annotations[constants.AnnotationsVMKernelPath])
+	require.Equal(t, pinned[templatetypes.CubeComponentCubeImage], spec.Annotations[constants.AnnotationsVMOSImagePath])
+	require.Equal(t, pinned[templatetypes.CubeComponentCubeAgent], spec.Annotations[constants.AnnotationsVMAgentPath])
+	require.NotEqual(t,
+		filepath.Join(plugin.config.BasePath, "cube-agent", "cube-agent.ext4"),
+		spec.Annotations[constants.AnnotationsVMAgentPath],
+		"restart must not fall back to the live toolbox agent",
+	)
+}
+
+// Without a pin the restart keeps the toolbox default, so behaviour for
+// sandboxes created outside a template is unchanged.
+func TestCreateSandboxRestartWithoutPinFallsBackToToolbox(t *testing.T) {
+	t.Parallel()
+
+	plugin := newTestCubeboxPlugin(t)
+	flow := &workflow.CreateContext{
+		ReqInfo:   &cubebox.RunCubeSandboxRequest{InstanceType: "cubebox"},
+		IsRestart: true,
+	}
+	opts, err := plugin.CreateSandbox(context.Background(), flow)
+	require.NoError(t, err)
+	spec := applySpecOpts(t, context.Background(), opts)
+
+	require.Equal(t,
+		filepath.Join(plugin.config.BasePath, "cube-agent", "cube-agent.ext4"),
+		spec.Annotations[constants.AnnotationsVMAgentPath],
+	)
+	require.Equal(t,
+		filepath.Join(plugin.config.BasePath, "cube-image", "cube-guest-image-cpu.img"),
+		spec.Annotations[constants.AnnotationsVMOSImagePath],
+	)
+	require.Equal(t, plugin.artifactPaths.SharedKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+}

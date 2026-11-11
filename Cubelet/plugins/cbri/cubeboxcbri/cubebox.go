@@ -365,6 +365,13 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		}
 	} else {
 
+		// Restart bypasses the branches above, so re-apply the guest artifact
+		// pin: the toolbox default would make the next snapshot disagree with
+		// the catalog and fail to restore.
+		if flowOpts.IsRestart {
+			e.applyPinnedGuestArtifacts(annotations, flowOpts.LocalRunTemplate)
+		}
+
 		annotations[constants.AnnotationSnapshotDisable] = "true"
 		sandbox := cubeboxstore.GetCubeBox(ctx)
 		if sandbox != nil && sandbox.FirstContainer() != nil {
@@ -589,6 +596,29 @@ func (e *cubeboxInstancePlugin) resolveSnapshotRuntimeArtifacts(
 		return "", "", fmt.Errorf("template have no os image component")
 	}
 	return kernelPath, imagePath, nil
+}
+
+// applyPinnedGuestArtifacts repoints the guest artifact annotations at the
+// pinned inventory paths. Unpinned components keep the caller's toolbox default.
+func (e *cubeboxInstancePlugin) applyPinnedGuestArtifacts(
+	annotations map[string]string, localTemplate *templatetypes.LocalRunTemplate,
+) {
+	if annotations == nil {
+		return
+	}
+	pinned := []struct {
+		annotation string
+		component  templatetypes.CubeComponent
+	}{
+		{constants.AnnotationsVMKernelPath, templatetypes.CubeComponentCubeKernel},
+		{constants.AnnotationsVMOSImagePath, templatetypes.CubeComponentCubeImage},
+		{constants.AnnotationsVMAgentPath, templatetypes.CubeComponentCubeAgent},
+	}
+	for _, item := range pinned {
+		if componentPath := resolveTemplateComponentPath(localTemplate, item.component); componentPath != "" {
+			annotations[item.annotation] = componentPath
+		}
+	}
 }
 
 func resolveTemplateComponentPath(localTemplate *templatetypes.LocalRunTemplate, name templatetypes.CubeComponent) string {
