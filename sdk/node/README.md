@@ -6,7 +6,8 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Node.js-18%2B-blue" alt="Node.js 18+" />
-  <img src="https://img.shields.io/badge/version-0.7.3-orange" alt="v0.7.3" />
+  <img src="https://img.shields.io/badge/version-0.8.0-orange" alt="v0.8.0" />
+  <a href="https://www.npmjs.com/package/@cubesandbox/sdk"><img src="https://img.shields.io/npm/v/%40cubesandbox/sdk" alt="npm version" /></a>
 </p>
 
 ---
@@ -18,7 +19,9 @@ manage files, and control the full sandbox lifecycle — including pause/resume
 with memory snapshot. It matches the Python SDK's surface with idiomatic
 JavaScript naming (camelCase, `async`/`await`).
 
-## Installation
+## Install from npm
+
+Install the published [`@cubesandbox/sdk` package](https://www.npmjs.com/package/@cubesandbox/sdk):
 
 ```bash
 npm install @cubesandbox/sdk
