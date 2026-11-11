@@ -968,7 +968,20 @@ printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/cube-egress/version"
 if [[ -n "${S3LVOL_DIR}" ]]; then
   copy_dir_contents "${S3LVOL_DIR}" "${PACKAGE_ROOT}/CubeS3lvol"
   ensure_file "${PACKAGE_ROOT}/CubeS3lvol/bin/s3lvol_tgt"
+  # Single source of truth: make_release's VERSION stanza. A missing stanza
+  # means the prebuilt tree is broken — fail the bundle instead of synthesizing
+  # DIST_VERSION (which can diverge from CUBE_VERSION).
+  s3lvol_version="$(sed -n 's/^version:[[:space:]]*//p' \
+    "${PACKAGE_ROOT}/CubeS3lvol/VERSION" 2>/dev/null | head -1 || true)"
+  s3lvol_version="$(printf '%s' "${s3lvol_version}" | tr -d '[:space:]')"
+  [[ -n "${s3lvol_version}" ]] ||
+    die "CubeS3lvol tree from ${S3LVOL_DIR} has no make_release VERSION stanza; rebuild it with make_release.sh"
+  if [[ -n "${CUBE_VERSION:-}" && "${s3lvol_version}" != "${CUBE_VERSION}" ]]; then
+    die "CubeS3lvol VERSION (${s3lvol_version}) does not match CUBE_VERSION (${CUBE_VERSION})"
+  fi
   # Host-side version marker, same convention as cube-egress/version above.
+  # Distinct from uppercase VERSION; on case-insensitive filesystems these
+  # paths collide — release builds run on Linux where they stay separate.
   printf '%s\n' "${DIST_VERSION}" > "${PACKAGE_ROOT}/CubeS3lvol/version"
 else
   log "WARN: ONE_CLICK_S3LVOL_DIR not set; CubeS3lvol omitted from sandbox-package"

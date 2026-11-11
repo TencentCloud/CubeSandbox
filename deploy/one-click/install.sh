@@ -1500,10 +1500,18 @@ systemd_target_for_role() {
   esac
 }
 
-# CubeS3lvol's own version, as its VERSION file records it. Empty when the file
-# is not there.
+# CubeS3lvol version from make_release's VERSION stanza (`version: X`).
+# Must not abort under set -euo pipefail when VERSION is missing: a bare
+# `sed … | head` used to kill install with no ERROR line. Empty return is
+# fine; callers die loudly when a packaged tree lacks the stanza.
 s3lvol_component_version() {
-  sed -n 's/^version:[[:space:]]*//p' "$1/VERSION" 2>/dev/null | head -1
+  local src="$1" v=""
+  if [[ -f "${src}/VERSION" ]]; then
+    v="$(sed -n 's/^version:[[:space:]]*//p' "${src}/VERSION" 2>/dev/null | head -1 || true)"
+    v="$(printf '%s' "${v}" | tr -d '[:space:]')"
+  fi
+  printf '%s' "${v}"
+  return 0
 }
 
 # Install CubeS3lvol under a versioned directory, with the bare name as a
@@ -1528,8 +1536,12 @@ s3lvol_component_version() {
 install_cubes3lvol_versioned() {
   local src="$1" version prev prev_dir base stage nonce lock_fd
 
+  if [[ ! -f "${src}/VERSION" ]]; then
+    die "CubeS3lvol package is missing VERSION file (expected make_release output); refusing to stage"
+  fi
   version="$(s3lvol_component_version "${src}")"
-  [[ -n "${version}" ]] || version="legacy-$(date +%Y%m%d-%H%M%S)"
+  [[ -n "${version}" ]] ||
+    die "CubeS3lvol VERSION has no 'version: <tag>' stanza; refusing to stage"
   base="CubeS3lvol-${version}"
   nonce="$(date +%s%N)-$$-${RANDOM}"
   stage="${INSTALL_PREFIX}/.CubeS3lvol.stage.${nonce}"
@@ -1572,7 +1584,7 @@ install_cubes3lvol_versioned() {
      [[ ! -f "${stage}/VERSION" ]]; then
     rm -rf "${stage}"
     exec {lock_fd}>&-
-    die "CubeS3lvol: staged package validation failed"
+    die "CubeS3lvol: staged package validation failed (need scripts/rcow_common.sh and VERSION)"
   fi
   if ! mv -T "${stage}" "${INSTALL_PREFIX}/${S3LVOL_STAGED_DIR}"; then
     rm -rf "${stage}"
