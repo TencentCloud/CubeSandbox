@@ -324,10 +324,35 @@ jobs:
             exit 1
           fi
           ls -lh "${packages[@]}"
-          for prefix in kernel kernel-core kernel-modules kernel-devel kernel-headers; do
-            matches=(pvm-host-build/output/"${prefix}"-[0-9]*.x86_64.rpm)
-            if [[ "${#matches[@]}" -eq 0 ]]; then
-              echo "missing ${prefix} rpm from dist-rpm output" >&2
+          expected_packages=(
+            bpftool
+            bpftool-debuginfo
+            kernel
+            kernel-core
+            kernel-debuginfo
+            kernel-debuginfo-common
+            kernel-devel
+            kernel-headers
+            kernel-modules
+            kernel-signing-keys
+            kernel-source
+            kernel-tools
+            kernel-tools-debuginfo
+            kernel-tools-libs
+            kernel-tools-libs-devel
+            perf
+            perf-debuginfo
+            python3-perf
+            python3-perf-debuginfo
+          )
+          for package in "${expected_packages[@]}"; do
+            arch=x86_64
+            if [[ "${package}" == kernel-source ]]; then
+              arch=noarch
+            fi
+            matches=(pvm-host-build/output/"${package}"-[0-9]*.oc9."${arch}".rpm)
+            if [[ "${#matches[@]}" -ne 1 ]]; then
+              echo "expected exactly one ${package}-*.oc9.${arch}.rpm from dist-rpm, found ${#matches[@]}" >&2
               exit 1
             fi
           done
@@ -367,10 +392,35 @@ jobs:
           test -f kernel-release-assets/vmlinux-pvm-amd64
 
           has_rpm=1
-          for prefix in kernel kernel-core kernel-modules kernel-devel kernel-headers; do
-            matches=(kernel-release-assets/"${prefix}"-[0-9]*.x86_64.rpm)
-            if [[ "${#matches[@]}" -eq 0 ]]; then
-              echo "missing PVM host ${prefix} rpm" >&2
+          expected_packages=(
+            bpftool
+            bpftool-debuginfo
+            kernel
+            kernel-core
+            kernel-debuginfo
+            kernel-debuginfo-common
+            kernel-devel
+            kernel-headers
+            kernel-modules
+            kernel-signing-keys
+            kernel-source
+            kernel-tools
+            kernel-tools-debuginfo
+            kernel-tools-libs
+            kernel-tools-libs-devel
+            perf
+            perf-debuginfo
+            python3-perf
+            python3-perf-debuginfo
+          )
+          for package in "${expected_packages[@]}"; do
+            arch=x86_64
+            if [[ "${package}" == kernel-source ]]; then
+              arch=noarch
+            fi
+            matches=(kernel-release-assets/"${package}"-[0-9]*.oc9."${arch}".rpm)
+            if [[ "${#matches[@]}" -ne 1 ]]; then
+              echo "expected exactly one PVM host ${package}-*.oc9.${arch}.rpm, found ${#matches[@]}" >&2
               has_rpm=0
             fi
           done

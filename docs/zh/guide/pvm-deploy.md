@@ -66,18 +66,19 @@ PVM 宿主机内核包发布在专属的 `kernel-release-*` Release 上，请到
 
 1. 打开 [CubeSandbox Releases 页面](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases)，在过滤框输入 `kernel-release`，打开最新的一个
 2. 按你的 Linux 发行版下载**内核主包**：
-   - RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）：`kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+   - RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）：`kernel-*`、`kernel-core-*`、`kernel-modules-*`、`kernel-devel-*`、`kernel-headers-*` 五个包（均为 `*.cubesandbox.oc9.x86_64.rpm`）
    - DEB 系（Ubuntu、Debian）：`linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
 
-<small>资产列表中的 `kernel-headers-*`、`-dbg` 等为可选包，无需下载。</small>
+<small>资产列表中的 `bpftool-*`、`kernel-debuginfo-*`、`kernel-signing-keys-*`、`kernel-tools-*`、`perf-*`、`python3-perf-*` 及 DEB `-dbg` 等为可选包，无需下载。</small>
 
 ### RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）
 
 安装下载好的内核包：
 
 ```bash
-# 若宿主机已有更高版本内核，--oldpackage 跳过版本号比较
-rpm -ivh --oldpackage kernel-*.rpm
+# 在同一事务中安装全套软件包，以满足带版本约束的依赖；-U 会替换非
+# installonly 的 kernel-headers；若宿主机已有更高版本，--oldpackage 跳过版本号比较
+rpm -Uvh --oldpackage kernel-[0-9]*.rpm kernel-core-*.rpm kernel-modules-*.rpm kernel-devel-*.rpm kernel-headers-*.rpm
 ```
 
 设置 PVM 内核为默认启动项：
@@ -136,7 +137,8 @@ reboot
 ```bash
 # 确认内核版本
 uname -r
-# 期望输出包含：opencloudos9.cubesandbox.pvm.host
+# 期望输出包含：cubesandbox
+# （RPM 例如 6.6.117-45.16.cubesandbox.oc9.x86_64；DEB 为 *-opencloudos9.cubesandbox.pvm.host*）
 
 # 加载 PVM KVM 模块
 modprobe kvm_pvm
@@ -269,12 +271,12 @@ sudo rm -rf /usr/local/services/cubetoolbox
 
 **Q2：`lsmod | grep kvm_pvm` 无输出，或 `/dev/kvm` 不存在**
 
-**A：** 执行 `uname -r` 确认已重启进入 PVM 内核，内核版本应包含 `opencloudos9.cubesandbox.pvm.host`。确认后手动执行 `modprobe kvm_pvm`。若仍失败，检查内核包是否正确安装：
+**A：** 执行 `uname -r` 确认已重启进入 PVM 内核，内核版本应包含 `cubesandbox`。确认后手动执行 `modprobe kvm_pvm`。若仍失败，检查内核包是否正确安装：
 
 ```bash
-# RPM 系
-rpm -qa | grep cube.pvm
+# RPM 系（应看到 kernel、kernel-core、kernel-modules、kernel-devel 与 kernel-headers）
+rpm -qa | grep cubesandbox
 
 # DEB 系
-dpkg -l | grep cube.pvm
+dpkg -l | grep cubesandbox
 ```

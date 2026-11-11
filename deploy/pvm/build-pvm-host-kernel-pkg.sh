@@ -57,6 +57,31 @@ JOBS="${JOBS:-$(nproc)}"
 # It is created right before the actual build step starts.
 BUILD_MARKER="${WORK_DIR}/.build-start.stamp"
 
+# make dist-rpm emits this complete binary package set. Keep the local build
+# contract aligned with the release workflow so a partial rpmbuild result is
+# rejected before it can be published.
+DIST_RPM_PACKAGES=(
+    bpftool
+    bpftool-debuginfo
+    kernel
+    kernel-core
+    kernel-debuginfo
+    kernel-debuginfo-common
+    kernel-devel
+    kernel-headers
+    kernel-modules
+    kernel-signing-keys
+    kernel-source
+    kernel-tools
+    kernel-tools-debuginfo
+    kernel-tools-libs
+    kernel-tools-libs-devel
+    perf
+    perf-debuginfo
+    python3-perf
+    python3-perf-debuginfo
+)
+
 # ------------------------- Build -------------------------
 # rpmbuild -bb refuses to start while any BuildRequires of the generated
 # kernel.spec (perf, tools, docs, ...) is missing, so resolve them up front.
@@ -111,6 +136,21 @@ build_rpm() {
         err "No RPM artifacts were found. Check the build log above."
         exit 1
     fi
+
+    local package arch matches
+    shopt -s nullglob
+    for package in "${DIST_RPM_PACKAGES[@]}"; do
+        arch="x86_64"
+        if [[ "${package}" == "kernel-source" ]]; then
+            arch="noarch"
+        fi
+        matches=("${OUTPUT_DIR}/${package}"-[0-9]*.oc9."${arch}".rpm)
+        if [[ ${#matches[@]} -ne 1 ]]; then
+            err "Expected exactly one ${package}-*.oc9.${arch}.rpm, found ${#matches[@]}"
+            exit 1
+        fi
+    done
+    shopt -u nullglob
 
     log "RPM build finished. Artifacts in: ${OUTPUT_DIR}"
     ls -lh "${OUTPUT_DIR}"

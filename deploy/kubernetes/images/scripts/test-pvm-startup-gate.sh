@@ -285,7 +285,7 @@ export CHECK_IMAGE_PULL_POLICY=IfNotPresent
 export PREFLIGHT_SERVICE_ACCOUNT=test-pvm-preflight
 export IMAGE_PULL_SECRET_NAMES=
 export STATE_DIR=/var/lib/cube-node-bootstrap
-export DESIRED_KERNEL_PATTERN=cubesandbox
+export DESIRED_KERNEL_PATTERN='cubesandbox\.\(oc9\|pvm\.host\)'
 export KERNEL_BOOT_ARGS="nopti pti=off"
 export CHECK_POD_PHASE=Succeeded
 
@@ -296,6 +296,11 @@ sh "$PREFLIGHT_SCRIPT"
 grep -q 'create -f -' "$TEST_LOG"
 grep -q 'wait ' "$TEST_LOG"
 grep -q 'value: "true"' "$TEST_STATE/last-pod.yaml"
+grep -Fq "value: 'cubesandbox\\.\\(oc9\\|pvm\\.host\\)'" "$TEST_STATE/last-pod.yaml"
+if grep -Eq 'value: ".*\\[.()|]' "$TEST_STATE/last-pod.yaml"; then
+  echo "check pod rendered a backslash escape in a YAML double-quoted scalar" >&2
+  exit 1
+fi
 if grep -q 'hostPID:' "$TEST_STATE/last-pod.yaml"; then
   echo "check pod unexpectedly set hostPID" >&2
   exit 1
