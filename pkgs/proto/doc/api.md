@@ -67,6 +67,7 @@
     - [ListLocalSnapshotsResponse](#cubelet-services-cubebox-v1-ListLocalSnapshotsResponse)
     - [ListSandboxSnapshotsRequest](#cubelet-services-cubebox-v1-ListSandboxSnapshotsRequest)
     - [ListSandboxSnapshotsResponse](#cubelet-services-cubebox-v1-ListSandboxSnapshotsResponse)
+    - [LivenessProbe](#cubelet-services-cubebox-v1-LivenessProbe)
     - [LocalSnapshotInfo](#cubelet-services-cubebox-v1-LocalSnapshotInfo)
     - [OCIConfig](#cubelet-services-cubebox-v1-OCIConfig)
     - [PingAction](#cubelet-services-cubebox-v1-PingAction)
@@ -77,6 +78,8 @@
     - [ProbeHandler](#cubelet-services-cubebox-v1-ProbeHandler)
     - [RLimit](#cubelet-services-cubebox-v1-RLimit)
     - [Resource](#cubelet-services-cubebox-v1-Resource)
+    - [RestartBackoffConfig](#cubelet-services-cubebox-v1-RestartBackoffConfig)
+    - [RestartStats](#cubelet-services-cubebox-v1-RestartStats)
     - [RollbackSandboxRequest](#cubelet-services-cubebox-v1-RollbackSandboxRequest)
     - [RollbackSandboxResponse](#cubelet-services-cubebox-v1-RollbackSandboxResponse)
     - [RunCubeSandboxRequest](#cubelet-services-cubebox-v1-RunCubeSandboxRequest)
@@ -113,7 +116,7 @@
   
     - [ErrorCode](#cubelet-services-errorcode-v1-ErrorCode)
   
-- [services/images/v1/images.proto](#services_images_v1_images-proto)
+- [services/images/v1/cubelet_images.proto](#services_images_v1_cubelet_images-proto)
     - [CreateImageRequest](#cubelet-services-images-v1-CreateImageRequest)
     - [CreateImageRequestResponse](#cubelet-services-images-v1-CreateImageRequestResponse)
     - [CubeListImageRequest](#cubelet-services-images-v1-CubeListImageRequest)
@@ -345,6 +348,7 @@ Capability contains the container capabilities to add or drop
 | templateID | [string](#string) |  | Logical template ID. |
 | snapshot_dir | [string](#string) |  | Custom snapshot directory path. If empty, uses default path. |
 | backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. |
+| snapshot_mode | [string](#string) |  | Snapshot artifact mode: &#34;full&#34; or &#34;fs-only&#34;. Empty means full. |
 
 
 
@@ -377,6 +381,7 @@ Capability contains the container capabilities to add or drop
 | envd_version | [string](#string) |  | envd semantic version collected in-guest at commit time (best-effort). |
 | shim_version | [string](#string) |  | cube-shim (and sibling cube-runtime) version bound when this snapshot was created. |
 | remote_uuids | [string](#string) |  | S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata). Filled before this RPC returns. Empty on xfs. |
+| snapshot_mode | [string](#string) |  | Canonical mode this commit actually produced: &#34;full&#34; or &#34;fs-only&#34;. |
 
 
 
@@ -401,6 +406,7 @@ Capability contains the container capabilities to add or drop
 | labels | [Container.LabelsEntry](#cubelet-services-cubebox-v1-Container-LabelsEntry) | repeated |  |
 | paused_at | [int64](#int64) |  |  |
 | volume_mounts | [VolumeMounts](#cubelet-services-cubebox-v1-VolumeMounts) | repeated | Mounts declared on the container spec (including host-dir mounts). |
+| restart_stats | [RestartStats](#cubelet-services-cubebox-v1-RestartStats) |  | restart_stats is set on the sandbox (pod) container. |
 
 
 
@@ -452,6 +458,7 @@ Capability contains the container capabilities to add or drop
 | id | [string](#string) |  | container name use by cubebox |
 | hooks | [Hooks](#cubelet-services-cubebox-v1-Hooks) |  | Hooks for the container. |
 | oci_config | [OCIConfig](#cubelet-services-cubebox-v1-OCIConfig) |  | CDI |
+| liveness_probe | [LivenessProbe](#cubelet-services-cubebox-v1-LivenessProbe) |  | Runtime liveness check. Times are seconds; see LivenessProbe. |
 
 
 
@@ -1320,6 +1327,28 @@ LifecycleHandler defines a specific action that should be taken in a lifecycle h
 
 
 
+<a name="cubelet-services-cubebox-v1-LivenessProbe"></a>
+
+### LivenessProbe
+LivenessProbe is the runtime health check that restarts the whole sandbox
+after consecutive failures. Times are seconds. Distinct from Probe, which is
+the create-time readiness check and uses milliseconds.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| probe_handler | [ProbeHandler](#cubelet-services-cubebox-v1-ProbeHandler) |  |  |
+| initial_delay_second | [int32](#int32) |  | Seconds to wait after the sandbox starts before the first check. Default 30. |
+| period_second | [int32](#int32) |  | Seconds between checks. Default 10. |
+| success_threshold | [int32](#int32) |  | Consecutive successes required to clear a failure streak. Must be 1. |
+| failure_threshold | [int32](#int32) |  | Consecutive failures that trigger a sandbox restart. Default 3. |
+| probe_timeout_second | [int32](#int32) |  | Per-check timeout in seconds. Default 1. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-LocalSnapshotInfo"></a>
 
 ### LocalSnapshotInfo
@@ -1503,6 +1532,50 @@ ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definiti
 
 
 
+<a name="cubelet-services-cubebox-v1-RestartBackoffConfig"></a>
+
+### RestartBackoffConfig
+RestartBackoffConfig is the optional per-sandbox override of the restart
+backoff. Zero fields fall back to the node default (10s, x2, cap 300s,
+unlimited restarts, 10min stable window).
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| initial_interval_second | [int32](#int32) |  |  |
+| max_interval_second | [int32](#int32) |  |  |
+| multiplier | [double](#double) |  |  |
+| max_restarts | [int32](#int32) |  | 0 means unlimited. |
+| jitter | [double](#double) |  |  |
+| stable_duration_second | [int32](#int32) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-RestartStats"></a>
+
+### RestartStats
+RestartStats is the sandbox-level restart bookkeeping exposed on List.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| restart_count | [int32](#int32) |  |  |
+| last_successful_restart_at | [int64](#int64) |  |  |
+| last_failed_restart_at | [int64](#int64) |  |  |
+| last_restart_at | [int64](#int64) |  |  |
+| restart_state | [string](#string) |  | Running, Restarting, BackOff, GaveUp, Succeeded, Failed. Succeeded and Failed are terminal restart states. Empty until a non-Never policy is set or the sandbox has exited. |
+| last_exit_code | [int32](#int32) |  |  |
+| last_exit_reason | [string](#string) |  |  |
+| next_restart_at | [int64](#int64) |  |  |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-RollbackSandboxRequest"></a>
 
 ### RollbackSandboxRequest
@@ -1571,6 +1644,9 @@ ref by https://kubernetes.io/zh-cn/docs/reference/kubernetes-api/common-definiti
 | namespace | [string](#string) |  | user define namespace |
 | cube_network_config | [CubeNetworkConfig](#cubelet-services-cubebox-v1-CubeNetworkConfig) | optional | Egress network policy for the sandbox template/runtime. |
 | backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. Used when Create restores from a snapshot / pause-snap. |
+| restart_policy | [string](#string) |  | restart_policy is Never, OnFailure or Always (RESTART_POLICY_* also accepted). Empty means Never. OnFailure and Always persist the request for later restarts. |
+| restart_backoff | [RestartBackoffConfig](#cubelet-services-cubebox-v1-RestartBackoffConfig) |  |  |
+| snapshot_mode | [string](#string) |  | snapshot_mode describes the snapshot this sandbox is created from: &#34;full&#34; (memory restore) or &#34;fs-only&#34; (cold boot). Empty means full. It is set by Master from the snapshot record; clients cannot set it. |
 
 
 
@@ -2119,10 +2195,10 @@ Service for handling cubesandbox
 
 
 
-<a name="services_images_v1_images-proto"></a>
+<a name="services_images_v1_cubelet_images-proto"></a>
 <p align="right"><a href="#top">Top</a></p>
 
-## services/images/v1/images.proto
+## services/images/v1/cubelet_images.proto
 
 
 
@@ -2427,6 +2503,7 @@ Service for handling image operations.
 | request_id | [string](#string) |  |  |
 | snapshot_id | [string](#string) |  |  |
 | backend | [string](#string) |  | xfs | s3; empty defaults to xfs. |
+| wait_ready_ms | [int32](#int32) |  | When &gt; 0, hold the reply until the upload state is ready or failed, or this many milliseconds pass, so the caller learns of it at once instead of polling. A Cubelet without this field answers immediately. |
 
 
 
