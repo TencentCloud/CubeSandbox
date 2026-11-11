@@ -861,6 +861,10 @@ pub struct SandboxDetail {
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
     pub envd_access_token: Option<String>,
+    /// Stored status or exit reason for the primary container. Omitted when unavailable.
+    #[serde(rename = "errorReason", skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub error_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     #[serde(rename = "cpuCount")]

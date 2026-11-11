@@ -199,8 +199,9 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 
 	for _, sandbox := range cubeRsp.GetItems() {
 		one := &types.SandboxData{
-			SandboxID: sandbox.GetId(),
-			NameSpace: sandbox.GetNamespace(),
+			SandboxID:   sandbox.GetId(),
+			NameSpace:   sandbox.GetNamespace(),
+			ErrorReason: sandbox.GetErrorReason(),
 		}
 		sandboxLabels := cloneStringMap(sandbox.GetLabels())
 

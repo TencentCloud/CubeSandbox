@@ -20,6 +20,8 @@ type fakeCubeboxAPI struct {
 	cb            *cubeboxstore.CubeBox
 	list          []*cubeboxstore.CubeBox
 	getCalls      int
+	getErr        error
+	listCalls     int
 	saveCalls     int
 	getHook       func(call int)
 	syncIDs       []string
@@ -39,6 +41,9 @@ func (f *fakeCubeboxAPI) Init(ctx context.Context) error {
 }
 
 func (f *fakeCubeboxAPI) Get(ctx context.Context, id string) (*cubeboxstore.CubeBox, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	cb := f.cb
 	f.getCalls++
 	if f.getHook != nil {
@@ -62,6 +67,7 @@ func (f *fakeCubeboxAPI) FindContainerOfCubebox(ctx context.Context, id string) 
 }
 
 func (f *fakeCubeboxAPI) List() []*cubeboxstore.CubeBox {
+	f.listCalls++
 	if f.list != nil {
 		return f.list
 	}

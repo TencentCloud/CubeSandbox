@@ -4,38 +4,6 @@
  */
 
 export interface paths {
-    "/cluster/overview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["cluster_overview"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cluster/versions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["cluster_versions"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/health": {
         parameters: {
             query?: never;
@@ -53,32 +21,17 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/nodes": {
+    "/sandboxes": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["list_nodes"];
+        /** List sandboxes in every state, `pausing` and `unknown` included; GET /v2/sandboxes is the E2B view. */
+        get: operations["list_sandboxes"];
         put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/nodes/{nodeID}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get_node"];
-        put?: never;
-        post?: never;
+        post: operations["create_sandbox"];
         delete?: never;
         options?: never;
         head?: never;
@@ -101,6 +54,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxID}/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["connect_sandbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/exposed-ports/{containerPort}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_sandbox_exposed_port"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/fork": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fork_sandbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_sandbox_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_sandbox_network"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxID}/pause": {
         parameters: {
             query?: never;
@@ -111,6 +144,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["pause_sandbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/refreshes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["refresh_sandbox"];
         delete?: never;
         options?: never;
         head?: never;
@@ -133,6 +182,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxID}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["rollback_sandbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_snapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sandboxes/{sandboxID}/timeout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["set_sandbox_timeout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_snapshots"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/templates": {
         parameters: {
             query?: never;
@@ -142,7 +255,7 @@ export interface paths {
         };
         get: operations["list_templates"];
         put?: never;
-        post?: never;
+        post: operations["create_template"];
         delete?: never;
         options?: never;
         head?: never;
@@ -206,6 +319,70 @@ export interface paths {
         };
         get: operations["get_template"];
         put?: never;
+        post: operations["rebuild_template"];
+        delete: operations["delete_template"];
+        options?: never;
+        head?: never;
+        patch: operations["update_template"];
+        trace?: never;
+    };
+    "/templates/{templateID}/alias": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_template_alias"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/templates/{templateID}/builds/{buildID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["start_template_build"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/templates/{templateID}/builds/{buildID}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_template_build_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/templates/{templateID}/builds/{buildID}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_template_build_status"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -222,7 +399,23 @@ export interface paths {
         };
         get: operations["list_sandboxes_v2"];
         put?: never;
-        post?: never;
+        post: operations["create_sandbox_v2"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/sandboxes/{sandboxID}/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["connect_sandbox_v2"];
         delete?: never;
         options?: never;
         head?: never;
@@ -245,6 +438,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/volumes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all volumes.
+         * @description Returns `200 OK` with `[Volume]` on success.
+         */
+        get: operations["list_volumes"];
+        put?: never;
+        /**
+         * Create a new volume.
+         * @description Returns `201 Created` with `VolumeAndToken` on success.
+         */
+        post: operations["create_volume"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/volumes/{volumeID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get info for a single volume (includes auth token).
+         * @description Returns `200 OK` with `VolumeAndToken` on success.
+         */
+        get: operations["get_volume"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a volume.
+         * @description Returns `204 No Content` on success.
+         */
+        delete: operations["delete_volume"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -253,6 +494,12 @@ export interface components {
             /** Format: int32 */
             code: number;
             message: string;
+        };
+        BlockIoQosConfig: {
+            /** Format: int32 */
+            iops?: number | null;
+            /** Format: int32 */
+            throughputMiBps?: number | null;
         };
         ClusterOverview: {
             /**
@@ -304,11 +551,271 @@ export interface components {
             source?: string;
             version?: string;
         };
+        /** @description Request body for POST /sandboxes/{id}/connect. */
+        ConnectSandbox: {
+            /**
+             * Format: int32
+             * @description Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+             *     Zero and values below -1 are invalid.
+             */
+            timeout?: number | null;
+        };
+        /**
+         * @description Request body for POST /v2/sandboxes/{id}/connect (E2B SDK >= 2.51.0).
+         *
+         *     Reuses the v1 [`ConnectSandbox`] shape and adds the v2-only `memory` flag.
+         *     CubeSandbox always resumes from the memory snapshot, so `memory=false`
+         *     (cold-boot from disk) is rejected by the handler.
+         */
+        ConnectSandboxV2: components["schemas"]["ConnectSandbox"] & {
+            /**
+             * @description Resume from the memory snapshot. Defaults to true. `false` (cold-boot
+             *     from disk) is not supported and is rejected by the handler.
+             */
+            memory?: boolean | null;
+        };
         /** @description Control-plane reference version (the cluster's target version). */
         ControlPlaneVersionView: {
             buildTime?: string;
             commit?: string;
             version: string;
+        };
+        /** @description Request body for POST /sandboxes/{id}/snapshots. */
+        CreateSnapshotRequest: {
+            /** @description CoW backend (xfs | s3). Empty means xfs. */
+            backend?: string | null;
+            /** @description Deprecated E2B alias for `memory`. */
+            keepMemory?: boolean | null;
+            /** @description E2B compatibility alias: false means fs-only. */
+            memory?: boolean | null;
+            /** @description Snapshot artifact mode: full | fs-only | filesystem (E2B alias). */
+            mode?: string | null;
+            name?: string | null;
+        };
+        /** @description Body for POST /templates (create from image). */
+        CreateTemplateRequest: {
+            /** @description Deprecated E2B template alias. Used when `name` is absent or blank. */
+            alias?: string | null;
+            /** @description Allow internet (public) access. */
+            allowInternetAccess?: boolean | null;
+            /** @description Allowed outbound CIDRs for CubeVS egress policy. */
+            allowOut?: string[] | null;
+            /** @description Override container CMD args. */
+            args?: string[] | null;
+            /**
+             * @description CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
+             *     Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
+             */
+            backend?: string | null;
+            /** @description Override container ENTRYPOINT. */
+            command?: string[] | null;
+            /**
+             * Format: int32
+             * @description CPU in millicores, e.g. 2000 means 2000m.
+             */
+            cpu?: number | null;
+            /** @description Denied outbound CIDRs for CubeVS egress policy. */
+            denyOut?: string[] | null;
+            /** @description Container DNS nameservers. */
+            dns?: string[] | null;
+            /** @description Enable ivshmem when building the template snapshot. */
+            enableIvshmem?: boolean | null;
+            /** @description Environment variables as "KEY=VALUE" strings. */
+            env?: string[] | null;
+            /** @description Ports the container listens on. */
+            exposedPorts?: number[] | null;
+            /** @description Container image reference, e.g. `registry.example.com/code:latest`. */
+            image: string;
+            instanceType?: string | null;
+            /**
+             * Format: int32
+             * @description Memory in MiB, e.g. 2000.
+             */
+            memory?: number | null;
+            /**
+             * @description E2B v3 template name. A tag suffix after ':' is accepted by CubeAPI but
+             *     only the name portion is forwarded as the CubeMaster alias.
+             */
+            name?: string | null;
+            /** @description Network mode, e.g. "tap". */
+            networkType?: string | null;
+            /** @description Limit template distribution to these node IDs or host IPs. */
+            nodes?: string[] | null;
+            /** @description HTTP probe path, e.g. "/health". Defaults to "/health" when `probePort` is set. */
+            probePath?: string | null;
+            /**
+             * Format: int32
+             * @description HTTP probe port.
+             */
+            probePort?: number | null;
+            qos?: null | components["schemas"]["QosConfig"];
+            /** @description Registry password for private source images. */
+            registryPassword?: string | null;
+            /** @description Registry username for private source images. */
+            registryUsername?: string | null;
+            /**
+             * @description Deprecated and ignored. Template IDs are always generated server-side
+             *     with the `tpl-` prefix; clients must use the returned `templateID`.
+             */
+            templateID?: string;
+            /**
+             * @description Container user for the template build and later sandboxes.
+             *     `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+             *     Omitted keeps the default root user.
+             */
+            user?: string | null;
+            /**
+             * @description Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
+             *     Omitted or null defaults to true on CubeMaster.
+             */
+            with_cube_ca?: boolean | null;
+            /** @description Writable layer size for the rootfs, e.g. "1G". */
+            writableLayerSize?: string | null;
+        };
+        E2BNetworkRule: {
+            transform?: null | components["schemas"]["E2BNetworkTransform"];
+        };
+        E2BNetworkTransform: {
+            headers?: {
+                [key: string]: string;
+            };
+        };
+        /** @description One entry of E2B's per-host `rules` mapping. */
+        E2bNetworkRule: {
+            transform?: null | components["schemas"]["E2bNetworkTransform"];
+        };
+        /**
+         * @description Header rewrite in E2B's per-host `rules` shape.
+         *
+         *     Unknown keys are rejected rather than ignored: `headers` is the only
+         *     transform CubeEgress can express, and silently dropping another kind would
+         *     leave the caller believing a rewrite is in place that never runs.
+         */
+        E2bNetworkTransform: {
+            /** @description Headers to inject or override on matching requests. */
+            headers?: {
+                [key: string]: string;
+            } | null;
+        };
+        /** @description L7 egress rule: match conditions + action (allow/deny, audit, credential injection). */
+        EgressRule: {
+            action: components["schemas"]["EgressRuleAction"];
+            match: components["schemas"]["EgressRuleMatch"];
+            /** @description Human-readable label used for audit logging. */
+            name: string;
+        };
+        /**
+         * @description Rule action.
+         *
+         *     - `allow=true`: pass the request through; optional credential injection.
+         *     - `allow=false`: reject (HTTP 403); `inject` is ignored if set.
+         *     - `audit` defaults to `"metadata"` server-side when omitted.
+         */
+        EgressRuleAction: {
+            allow: boolean;
+            /** @description One of `"full"`, `"metadata"`, `"none"`. */
+            audit?: string | null;
+            inject?: components["schemas"]["EgressRuleInject"][] | null;
+        };
+        /**
+         * @description Credential injection. Only honored when `Action.allow=true` and the
+         *     request is HTTPS with matching SNI/Host (downstream enforces).
+         */
+        EgressRuleInject: {
+            /** @description Template containing `${SECRET}`; defaults to `"${SECRET}"` when omitted. */
+            format?: string | null;
+            header: string;
+            secret: string;
+        };
+        /**
+         * @description Rule match conditions. All fields optional; empty match matches any request.
+         *
+         *     Multi-field semantics: AND across fields, OR within `method`.
+         *     Comparisons on sni/host/scheme are case-insensitive.
+         *
+         *     `port` + `scheme` together pin the (host, port) tuple CubeEgress intercepts.
+         *     Both nil keeps the legacy default {80/http, 443/https}. When `port` is set,
+         *     `scheme` MUST also be set — same-`(host, port)` rules across the policy
+         *     must agree on `scheme` (the server rejects the whole policy on mismatch).
+         */
+        EgressRuleMatch: {
+            host?: string | null;
+            method?: string[] | null;
+            path?: string | null;
+            /** Format: int32 */
+            port?: number | null;
+            scheme?: string | null;
+            sni?: string | null;
+        };
+        /**
+         * @description The two accepted shapes of `rules`.
+         *
+         *     CubeSandbox rules are a list carrying the full L7 semantics: a match on
+         *     sni/host/method/path/scheme/port, an allow-or-deny verdict, an audit level
+         *     and credential injection. E2B's are a map from host to header rewrites, with
+         *     no verdict, no audit and no match beyond the host -- a strict subset, and one
+         *     that its own docs note "does not allow egress on its own".
+         *
+         *     Both are accepted so an E2B client works unchanged, but the list stays the
+         *     canonical form: converting our rules into E2B's map would silently drop
+         *     `allow: false`, `audit`, and every match field except the host.
+         *
+         *     A JSON array and a JSON object cannot be confused, so the shape alone
+         *     discriminates.
+         */
+        EgressRulesInput: components["schemas"]["EgressRule"][] | {
+            [key: string]: components["schemas"]["E2bNetworkRule"][];
+        };
+        /**
+         * @description Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+         *
+         *     `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+         *     hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+         *     sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+         *     node).
+         */
+        ExposedPortEndpoint: {
+            /** Format: int32 */
+            containerPort: number;
+            endpoint: string;
+            hostIP?: string | null;
+            /** Format: int32 */
+            hostPort?: number | null;
+            mode: string;
+            sandboxID: string;
+            sandboxIP?: string | null;
+        };
+        /**
+         * @description Per-fork error entry inside a fork response element. CubeMaster's business
+         *     ret_code is carried in `code`.
+         */
+        ForkError: {
+            /** Format: int32 */
+            code: number;
+            message: string;
+        };
+        /** @description Request body for POST /sandboxes/{sandboxID}/fork. */
+        ForkRequest: {
+            /**
+             * Format: int32
+             * @description Number of fork sandboxes to derive (1..=100). Defaults to 1 when absent.
+             */
+            count?: number;
+            /** @description Snapshot artifact mode for the one shared fork snapshot. */
+            mode?: string | null;
+            /**
+             * Format: int32
+             * @description Optional idle TTL (seconds) applied to each forked sandbox.
+             */
+            timeout?: number | null;
+        };
+        /**
+         * @description One element of a fork response: exactly one of `sandbox` or `error` is
+         *     present, encoding that fork's independent success/failure.
+         */
+        ForkResult: {
+            error?: null | components["schemas"]["ForkError"];
+            sandbox?: null | components["schemas"]["Sandbox"];
         };
         HashMap: {
             [key: string]: string;
@@ -320,18 +827,29 @@ export interface components {
         ListedSandbox: {
             alias?: string | null;
             clientID: string;
-            /** Legacy whole-vCPU count; use cpuMilli for fractional CPU values. */
+            /** Format: int32 */
             cpuCount: number;
-            /** Exact CPU allocation in millicores, e.g. 100 or 500. */
-            cpuMilli?: number;
+            /**
+             * Format: int32
+             * @description Exact CPU allocation in millicores. Optional for compatibility with older responses.
+             */
+            cpuMilli?: number | null;
             /** Format: int32 */
             diskSizeMB?: number | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
+             *     (no deadline) rather than being misreported as equal to startedAt.
+             */
+            endAt?: string | null;
             envdVersion: string;
-            /** Memory in MiB; the MB suffix is retained for API compatibility. Format: int32 */
+            /**
+             * Format: int32
+             * @description Historical field name; the value is memory in MiB.
+             */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
+            restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
             startedAt: string;
@@ -339,8 +857,122 @@ export interface components {
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
         };
+        LivenessHTTPGet: {
+            path?: string | null;
+            /** Format: int32 */
+            port: number;
+        };
+        /** @description One health check. Exactly one of tcp or http. */
+        LivenessProbe: {
+            /** Format: int32 */
+            failureThreshold?: number | null;
+            httpGet?: null | components["schemas"]["LivenessHTTPGet"];
+            /** Format: int32 */
+            initialDelaySecond?: number | null;
+            /** Format: int32 */
+            periodSecond?: number | null;
+            /** Format: int32 */
+            probeTimeoutSecond?: number | null;
+            tcpSocket?: null | components["schemas"]["LivenessTCP"];
+        };
+        LivenessTCP: {
+            /** Format: int32 */
+            port: number;
+        };
         /** @enum {string} */
         LogLevel: "debug" | "info" | "warn" | "error";
+        NetworkQosConfig: {
+            /** Format: int32 */
+            bandwidthMbps?: number | null;
+            /** Format: int32 */
+            packetsPerSecond?: number | null;
+        };
+        /**
+         * @description Request body for POST /sandboxes
+         *     Field names match exactly what the E2B SDK sends.
+         *     Rule: ID abbreviations → uppercase (templateID, sandboxID, envVars);
+         *           allow_internet_access is a known SDK snake_case quirk;
+         *           lifecycle is a nested object — see SandboxLifecycleConfig.
+         *     `envVars` is the canonical field name; `envs` is accepted as a compatibility
+         *     alias for E2B SDK callers.
+         */
+        NewSandbox: {
+            /** @description SDK sends this as snake_case (known quirk). */
+            allow_internet_access?: boolean | null;
+            /**
+             * @description e2b SDK compatibility: the SDK flattens its user-facing `lifecycle`
+             *     object into top-level `autoPause` / `autoResume` before it hits the
+             *     wire, so `lifecycle` never arrives from an SDK caller. Ignored when
+             *     `lifecycle` is present.
+             */
+            autoPause?: boolean | null;
+            autoResume?: null | components["schemas"]["SandboxAutoResume"];
+            /** @description CoW backend (xfs | s3). Omitted = inherit from the template, else xfs. */
+            backend?: string | null;
+            distributionScope?: string[] | null;
+            envVars?: null | components["schemas"]["HashMap"];
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            livenessProbe?: null | components["schemas"]["LivenessProbe"];
+            /**
+             * @description E2B-compatible MCP servers keyed by server name, e.g.
+             *     `{"duckduckgo": {}, "arxiv": {"storagePath": "/"}}`. Keys starting with
+             *     `github/<owner>/<repo>` require `runCmd` and may set `installCmd` and
+             *     `envs`. CubeAPI validates the shape only; the SDK starts `mcp-gateway`
+             *     inside the sandbox, and the value is never forwarded or returned.
+             */
+            mcp?: {
+                [key: string]: Record<string, never>;
+            } | null;
+            metadata?: null | components["schemas"]["HashMap"];
+            network?: null | components["schemas"]["SandboxNetworkConfig"];
+            restartBackoff?: null | components["schemas"]["RestartBackoff"];
+            /** @description Never, OnFailure or Always. Omitted means Never. */
+            restartPolicy?: string | null;
+            secure?: boolean | null;
+            templateID: string;
+            /**
+             * Format: int32
+             * @description Optional idle TTL in seconds. See docs/guide/lifecycle.md.
+             */
+            timeout?: number | null;
+            volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+        };
+        /**
+         * @description Request body for POST /v2/sandboxes (E2B SDK >= 2.51.0).
+         *
+         *     Reuses the v1 [`NewSandbox`] shape and adds the v2-only
+         *     `autoPauseMemory` flag. CubeSandbox always keeps the full memory snapshot
+         *     on pause, so `autoPauseMemory=false` (filesystem-only snapshot) is rejected
+         *     by the handler rather than silently ignored.
+         */
+        NewSandboxV2: components["schemas"]["NewSandbox"] & {
+            /**
+             * @description Keep the full memory snapshot when auto-pausing. Defaults to true.
+             *     `false` (filesystem-only, cold-boot on resume) is not supported and is
+             *     rejected by the handler.
+             */
+            autoPauseMemory?: boolean | null;
+        };
+        /**
+         * @description Request body for POST /volumes.
+         *
+         *     `name` must match `^[a-zA-Z0-9_-]+$` and be at most [`MAX_VOLUME_NAME_LEN`] characters
+         *     (validated in the handler).
+         *     `driver` selects the Controller Hook Plugin in CubeMaster; omit to use the
+         *     default plugin configured in CubeMaster.
+         */
+        NewVolume: {
+            /**
+             * @description Plugin/driver to use, e.g. "nfs", "cos", "host-mount".
+             *     Omit to use CubeMaster's default plugin.
+             */
+            driver?: string | null;
+            /**
+             * @description Human-readable name for the volume. Optional;
+             *     if omitted a UUIDv4 is generated and used as both name and volume_id.
+             */
+            name?: string;
+        };
         /** @description A single component version on a single node, with release declaration membership. */
         NodeComponentEntryView: {
             component: string;
@@ -361,7 +993,10 @@ export interface components {
              * @description CPU capacity or availability expressed in millicpu.
              */
             cpuMilli: number;
-            /** Memory in MiB; the MB suffix is retained for API compatibility. Format: int64 */
+            /**
+             * Format: int64
+             * @description Memory in MiB. The MB suffix is retained for API compatibility.
+             */
             memoryMB: number;
         };
         /** @description Per-node view of the version matrix. */
@@ -410,11 +1045,87 @@ export interface components {
             quotaMemMB: number;
             versions?: components["schemas"]["ComponentVersionView"][];
         };
+        QosConfig: {
+            blockIo?: null | components["schemas"]["BlockIoQosConfig"];
+            network?: null | components["schemas"]["NetworkQosConfig"];
+        };
+        /** @description Body for POST /templates/:id (rebuild). */
+        RebuildTemplateRequest: {
+            [key: string]: unknown;
+        };
+        /** @description Request body for POST /sandboxes/{id}/refreshes */
+        RefreshRequest: {
+            /** Format: int32 */
+            duration?: number | null;
+        };
+        /** @description Backoff between sandbox restarts. Zero fields use the node default. */
+        RestartBackoff: {
+            /** Format: int32 */
+            initialIntervalSecond?: number | null;
+            /**
+             * Format: double
+             * @description 0 or omitted uses the node default (0.1). It does not turn jitter off.
+             */
+            jitter?: number | null;
+            /** Format: int32 */
+            maxIntervalSecond?: number | null;
+            /**
+             * Format: int32
+             * @description 0 means unlimited.
+             */
+            maxRestarts?: number | null;
+            /**
+             * Format: double
+             * @description 0 or omitted uses the node default (2). It does not select a constant interval.
+             */
+            multiplier?: number | null;
+            /** Format: int32 */
+            stableDurationSecond?: number | null;
+        };
+        /**
+         * @description Node-local restart bookkeeping. Separate from `state`, which stays the
+         *     lifecycle value (`running`, `paused`, …).
+         */
+        RestartStatus: {
+            /** Format: int32 */
+            lastExitCode?: number | null;
+            lastExitReason?: string | null;
+            /** Format: date-time */
+            lastFailedRestartAt?: string | null;
+            /** Format: date-time */
+            lastRestartAt?: string | null;
+            /** Format: date-time */
+            lastSuccessfulRestartAt?: string | null;
+            /** Format: date-time */
+            nextRestartAt?: string | null;
+            /** Format: int32 */
+            restartCount?: number;
+            restartPolicy?: string;
+            restartState?: string;
+        };
         /** @description Request body for POST /sandboxes/{id}/resume (deprecated). */
         ResumedSandbox: {
             autoPause?: boolean;
-            /** Format: int32 */
-            timeout?: number;
+            /**
+             * Format: int32
+             * @description Idle timeout in seconds; None keeps the current value, 0 keeps the
+             *     current value for this deprecated endpoint, -1 disables expiry, and a
+             *     positive value starts a new window after resume.
+             */
+            timeout?: number | null;
+        };
+        /** @description Request body for POST /sandboxes/{id}/rollback. */
+        RollbackRequest: {
+            /** @description CoW backend (xfs | s3). Empty means Cubelet uses the snapshot catalog. */
+            backend?: string | null;
+            snapshotID: string;
+        };
+        /** @description Response for POST /sandboxes/{id}/rollback after synchronous completion. */
+        RollbackResponse: {
+            operationID: string;
+            sandboxID: string;
+            snapshotID: string;
+            status: string;
         };
         /**
          * @description Response for POST /sandboxes and POST /sandboxes/{id}/connect.
@@ -430,30 +1141,78 @@ export interface components {
             templateID: string;
             trafficAccessToken?: string | null;
         };
+        /**
+         * @description Wire shape of the top-level `autoResume` field the e2b SDK sends. Current
+         *     SDK releases send `{"enabled": true}`; older ones and hand-rolled clients
+         *     send a bare `true`. Both mean the same thing, so accept either rather than
+         *     rejecting on shape.
+         */
+        SandboxAutoResume: boolean | {
+            enabled: boolean;
+        };
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
             clientID: string;
-            /** Legacy whole-vCPU count; use cpuMilli for fractional CPU values. */
+            configuredQos?: null | components["schemas"]["QosConfig"];
+            /** Format: int32 */
             cpuCount: number;
-            /** Exact CPU allocation in millicores, e.g. 100 or 500. */
-            cpuMilli?: number;
+            /**
+             * Format: int32
+             * @description Exact CPU allocation in millicores. Optional for compatibility with older responses.
+             */
+            cpuMilli?: number | null;
             /** Format: int32 */
             diskSizeMB?: number | null;
             domain?: string | null;
-            /** Format: date-time */
-            endAt: string;
+            /**
+             * Format: date-time
+             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
+             *     (no deadline) rather than being misreported as equal to startedAt.
+             */
+            endAt?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
-            /** Memory in MiB; the MB suffix is retained for API compatibility. Format: int32 */
+            /** @description Stored status or exit reason for the primary container. Omitted when unavailable. */
+            errorReason?: string;
+            /**
+             * Format: int32
+             * @description Historical field name; the value is memory in MiB.
+             */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
+            restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
             startedAt: string;
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+        };
+        /**
+         * @description Sandbox lifecycle configuration. Mirrors the e2b SDK's `lifecycle` object —
+         *     see https://e2b.dev/docs/sandbox/auto-resume for the canonical reference.
+         *
+         *     `on_timeout` decides what happens when the sandbox idle timer fires; the
+         *     historical default is "kill" (delete the sandbox) which matches today's
+         *     behaviour. `auto_resume` only takes effect when `on_timeout = "pause"` —
+         *     it tells the proxy/sidecar to wake a paused sandbox up automatically when
+         *     activity arrives, instead of returning an error.
+         */
+        SandboxLifecycleConfig: {
+            /**
+             * @description Auto-resume on activity. Defaults to false. Only meaningful when
+             *     `on_timeout` is set to "pause".
+             */
+            autoResume?: boolean;
+            /** @description "kill" (default) | "pause". */
+            onTimeout?: components["schemas"]["SandboxOnTimeout"];
+        };
+        /** @description Single raw log line — matches E2B SandboxLog schema (timestamp + line). */
+        SandboxLog: {
+            line: string;
+            /** Format: date-time */
+            timestamp: string;
         };
         /** @description Structured log entry (v2 logs). */
         SandboxLogEntry: {
@@ -465,10 +1224,39 @@ export interface components {
             /** Format: date-time */
             timestamp: string;
         };
+        /** @description Legacy log response — matches E2B SandboxLogs schema. */
+        SandboxLogs: {
+            logEntries: components["schemas"]["SandboxLogEntry"][];
+            logs: components["schemas"]["SandboxLog"][];
+        };
         /** @description v2 log response. */
         SandboxLogsV2Response: {
             logs: components["schemas"]["SandboxLogEntry"][];
         };
+        /** @description Network configuration for sandbox egress/ingress control. */
+        SandboxNetworkConfig: {
+            allowOut?: string[] | null;
+            allowPublicTraffic?: boolean | null;
+            denyOut?: string[] | null;
+            /**
+             * @description Host authority forwarded to user services by CubeProxy. `${PORT}` is
+             *     expanded to the requested sandbox port; envd traffic is exempt.
+             */
+            maskRequestHost?: string | null;
+            rules?: null | components["schemas"]["SandboxNetworkRulesInput"];
+        };
+        /**
+         * @description Accepted wire shapes for `SandboxNetworkConfig.rules`.
+         *
+         *     CubeSandbox clients use the ordered rule array. E2B clients use a
+         *     host-keyed map whose values are request transforms. CubeAPI normalizes both
+         *     shapes into the internal ordered egress-rule model.
+         */
+        SandboxNetworkRulesInput: components["schemas"]["EgressRule"][] | {
+            [key: string]: components["schemas"]["E2BNetworkRule"][];
+        };
+        /** @enum {string} */
+        SandboxOnTimeout: "kill" | "pause";
         /**
          * @description State of the sandbox (running | paused | pausing | unknown)
          * @enum {string}
@@ -478,11 +1266,81 @@ export interface components {
         SandboxVolumeMount: {
             name: string;
             path: string;
-            /** CubeSandbox extension: mount this volume read-only for this sandbox attachment. Defaults to false when omitted. */
+            /**
+             * @description CubeSandbox extension: mount this volume read-only for this sandbox
+             *     attachment. Defaults to false when omitted.
+             */
             readOnly?: boolean;
         };
+        /**
+         * @description Body for PUT /templates/:id/alias (set / modify / clear alias).
+         *
+         *     `alias` is `None` / null / empty string ⇒ clear the current alias.
+         *     A non-empty value is validated by CubeMaster's `validateTemplateAlias`
+         *     (the single source of truth; CubeAPI does not re-validate).
+         */
+        SetTemplateAliasRequest: {
+            alias?: string | null;
+        };
+        /** @description Request body for POST /sandboxes/{id}/timeout */
+        SetTimeoutRequest: {
+            /** Format: int32 */
+            timeout: number;
+        };
+        /** @description Response for POST /sandboxes/{id}/snapshots. */
+        SnapshotInfo: {
+            /** @description CoW backend that produced this snapshot (xfs | s3). */
+            backend?: string | null;
+            /** @description Snapshot artifact mode. Always one of full | fs-only. */
+            mode: components["schemas"]["SnapshotMode"];
+            names: string[];
+            /** @description S3 sync status (pending|running|ready|failed). Empty for xfs. */
+            remoteStatus?: string | null;
+            snapshotID: string;
+        };
+        /** @description One entry in the GET /snapshots list. */
+        SnapshotListItem: {
+            /** @description CoW backend that produced this snapshot (xfs | s3). */
+            backend?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** @description Snapshot artifact mode. Always one of full | fs-only. */
+            mode: components["schemas"]["SnapshotMode"];
+            names: string[];
+            originSandboxID?: string | null;
+            /** @description S3 sync status (pending|running|ready|failed). Empty for xfs. */
+            remoteStatus?: string | null;
+            snapshotID: string;
+            status: string;
+            /** Format: date-time */
+            updatedAt?: string | null;
+        };
+        /**
+         * @description Canonical snapshot artifact mode.
+         * @enum {string}
+         */
+        SnapshotMode: "full" | "fs-only";
         TemplateAliasLookupResponse: {
             public: boolean;
+            templateID: string;
+        };
+        /** @description Job envelope returned by create / rebuild. */
+        TemplateBuildJob: {
+            errorMessage?: string;
+            jobID: string;
+            phase: string;
+            /** Format: int32 */
+            progress: number;
+            status: string;
+            templateID: string;
+        };
+        /** @description Response for GET /templates/:id/builds/:bid/status */
+        TemplateBuildStatus: {
+            buildID: string;
+            message: string;
+            /** Format: int32 */
+            progress: number;
+            status: string;
             templateID: string;
         };
         TemplateCompatAdoptResponseView: {
@@ -520,6 +1378,7 @@ export interface components {
             aliases: string[];
             /** @description Whether public internet access is allowed for sandboxes from this template. */
             allowInternetAccess?: boolean | null;
+            configuredQos?: null | components["schemas"]["QosConfig"];
             createRequest?: unknown;
             createdAt?: string | null;
             instanceType?: string | null;
@@ -563,11 +1422,59 @@ export interface components {
             templateID: string;
             version?: string | null;
         };
+        /**
+         * @description Request body for PUT /sandboxes/{id}/network.
+         *
+         *     The body is the complete desired egress policy, not a patch: any field left
+         *     out clears what the sandbox currently has.
+         *
+         *     The policy fields sit at the top level rather than under `network`, matching
+         *     E2B's update endpoint so a client written against either SDK reaches the same
+         *     wire format. Note this is deliberately *not* the shape of our own create body
+         *     (which nests them, as E2B's create also does) -- the inconsistency is
+         *     upstream's, and following it costs less than making E2B clients silently
+         *     apply an empty policy.
+         *
+         *     `allowPublicTraffic` and `maskRequestHost` are CubeSandbox extensions; E2B's
+         *     update schema carries neither.
+         *
+         *     Unknown fields are rejected. Under full-replacement semantics a key that fails
+         *     to match is indistinguishable from one deliberately left out, so a typo like
+         *     `allowOu` would clear that policy dimension and answer 204 -- and combined with
+         *     an omitted `allowInternetAccess` it reopens egress the caller was restricting.
+         *     Failing the request is the only outcome that cannot be mistaken for success.
+         *     E2B's own update body carries only `allowOut`, `denyOut`, `rules` and
+         *     `allowInternetAccess`, all accepted here, so strictness costs no compatibility.
+         */
+        UpdateSandboxNetworkRequest: {
+            allowInternetAccess?: boolean | null;
+            allowOut?: string[] | null;
+            allowPublicTraffic?: boolean | null;
+            denyOut?: string[] | null;
+            maskRequestHost?: string | null;
+            rules?: null | components["schemas"]["EgressRulesInput"];
+        };
         /** @description Full node x component version matrix. */
         VersionMatrixView: {
             components: components["schemas"]["ComponentMatrixRowView"][];
             controlPlane: components["schemas"]["ControlPlaneVersionView"];
             nodes: components["schemas"]["NodeVersionRowView"][];
+        };
+        /** @description Volume descriptor returned in list responses (no token). */
+        Volume: {
+            name: string;
+            volumeID: string;
+        };
+        /**
+         * @description Volume descriptor with auth token — returned on create / get-single.
+         *     E2B SDK requires `token` to always be present (non-optional); use empty
+         *     string when the plugin does not return a token.
+         */
+        VolumeAndToken: {
+            name: string;
+            /** @description Auth token returned by the volume plugin. Empty string when not applicable. */
+            token?: string;
+            volumeID: string;
         };
     };
     responses: never;
@@ -578,73 +1485,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    cluster_overview: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Cluster capacity overview */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ClusterOverview"];
-                };
-            };
-            /** @description Cluster endpoint unavailable */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-            /** @description Unexpected backend error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-        };
-    };
-    cluster_versions: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Cluster component version matrix */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["VersionMatrixView"];
-                };
-            };
-            /** @description Unexpected backend error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-        };
-    };
     health: {
         parameters: {
             query?: never;
@@ -665,26 +1505,33 @@ export interface operations {
             };
         };
     };
-    list_nodes: {
+    list_sandboxes: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+                 *     A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+                 *     An empty value is the same as omitting `metadata`: no filter.
+                 */
+                metadata?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Node list */
+            /** @description Sandbox list */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NodeView"][];
+                    "application/json": components["schemas"]["ListedSandbox"][];
                 };
             };
-            /** @description Node inventory unavailable */
-            404: {
+            /** @description Invalid metadata */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -703,29 +1550,48 @@ export interface operations {
             };
         };
     };
-    get_node: {
+    create_sandbox: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                /** @description Node identifier */
-                nodeID: string;
-            };
+            path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewSandbox"];
+            };
+        };
         responses: {
-            /** @description Node detail */
-            200: {
+            /** @description Sandbox created */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NodeView"];
+                    "application/json": components["schemas"]["Sandbox"];
                 };
             };
-            /** @description Node not found */
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Template or snapshot not found (e.g. deleted/tombstoned) */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description A referenced resource is in a conflicting state and cannot be used to create a sandbox */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -813,6 +1679,316 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
+            /** @description The existing standard API request timeout expired before the synchronous delete completed */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Paused sandbox cannot be admitted for internal resume because node capacity or resource metadata is unavailable */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox is pausing, another lifecycle operation is in progress, the Cubelet RPC has too little remaining time, or its internal resume could not be completed */
+            503: {
+                headers: {
+                    /** @description Seconds a client should wait before retrying DELETE */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    connect_sandbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectSandbox"];
+            };
+        };
+        responses: {
+            /** @description Sandbox connection info */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sandbox"];
+                };
+            };
+            /** @description Invalid timeout value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_sandbox_exposed_port: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox ID */
+                sandboxID: string;
+                /** @description Container port declared via the template's expose-port list */
+                containerPort: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Exposed port endpoint */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExposedPortEndpoint"];
+                };
+            };
+            /** @description Invalid container port */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found or port not exposed */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    fork_sandbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Source sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForkRequest"];
+            };
+        };
+        responses: {
+            /** @description Fork results (array length == count; per-fork failures are error entries, still 201) */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForkResult"][];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox state does not allow fork */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_sandbox_logs: {
+        parameters: {
+            query?: {
+                start?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sandbox logs (legacy shape) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SandboxLogs"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    update_sandbox_network: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSandboxNetworkRequest"];
+            };
+        };
+        responses: {
+            /** @description Network policy updated */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid network policy */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox is not running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description Unexpected backend error */
             500: {
                 headers: {
@@ -872,6 +2048,58 @@ export interface operations {
             };
         };
     };
+    refresh_sandbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefreshRequest"];
+            };
+        };
+        responses: {
+            /** @description Sandbox refreshed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid duration value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     resume_sandbox: {
         parameters: {
             query?: never;
@@ -897,6 +2125,15 @@ export interface operations {
                     "application/json": components["schemas"]["Sandbox"];
                 };
             };
+            /** @description Invalid timeout value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description Sandbox not found */
             404: {
                 headers: {
@@ -913,6 +2150,215 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    rollback_sandbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RollbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Sandbox rolled back to snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollbackResponse"];
+                };
+            };
+            /** @description Sandbox or snapshot not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    create_snapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSnapshotRequest"];
+            };
+        };
+        responses: {
+            /** @description Snapshot created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotInfo"];
+                };
+            };
+            /** @description Snapshot name starts with a reserved tpl-/snap- prefix, or the requested snapshot mode is invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The control plane refused the capture or recorded a different mode than the one requested */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Filesystem-only support could not be verified; retry */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    set_sandbox_timeout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetTimeoutRequest"];
+            };
+        };
+        responses: {
+            /** @description Timeout updated */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid timeout value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_snapshots: {
+        parameters: {
+            query?: {
+                /** @description Filter by originating sandbox ID. */
+                sandboxID?: string;
+                /** @description Max items per page (default 100, max 100). */
+                limit?: number;
+                /** @description Pagination cursor from previous response header x-next-token. */
+                nextToken?: string;
+                /** @description Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0) */
+                name?: string;
+                /** @description Filter by CoW backend (xfs | s3). */
+                backend?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotListItem"][];
                 };
             };
             /** @description Unexpected backend error */
@@ -952,6 +2398,48 @@ export interface operations {
             };
             /** @description Template endpoint unavailable */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    create_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Template build job accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Invalid request (bad alias, missing image, etc.) */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1131,11 +2619,335 @@ export interface operations {
             };
         };
     };
+    rebuild_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RebuildTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Rebuild job accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    delete_template: {
+        parameters: {
+            query?: {
+                /** @description CubeMaster instance_type filter */
+                instance_type?: string;
+                /** @description Wait for deletion to complete before returning */
+                sync?: boolean;
+                /** @description Only match snapshots by id or name; a miss is 404 and never deletes a template */
+                snapshot_only?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Template or snapshot identifier, alias, or snapshot name */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Template or snapshot deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Template or snapshot not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Name matches both a template alias and a snapshot, or several snapshots */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    update_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Not implemented; use POST /templates/{id} to rebuild */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    set_template_alias: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier or current alias */
+                templateID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetTemplateAliasRequest"];
+            };
+        };
+        responses: {
+            /** @description Alias updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDetail"];
+                };
+            };
+            /** @description Invalid alias, or alias requested on a snapshot (not applicable) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Template not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Template is not READY, or concurrent alias claim conflict; retry may succeed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    start_template_build: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+                /** @description Build identifier */
+                buildID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Build started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildJob"];
+                };
+            };
+            /** @description Template or build not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_template_build_logs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+                /** @description Build identifier */
+                buildID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Build logs (JSON) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Build not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_template_build_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template identifier */
+                templateID: string;
+                /** @description Build identifier */
+                buildID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Build status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateBuildStatus"];
+                };
+            };
+            /** @description Template or build not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     list_sandboxes_v2: {
         parameters: {
             query?: {
+                /**
+                 * @description `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+                 *     A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+                 *     An empty value is the same as omitting `metadata`: no filter.
+                 */
                 metadata?: string;
+                /**
+                 * @description Comma-separated states: `running`, `paused` (includes pausing), `pausing`, `unknown` (aliases `stopped`, `error`).
+                 *     `pausing` is a Cube-native state: asking for it returns `pausing`; otherwise a pausing sandbox reads `paused`.
+                 *     Defaults to running and paused sandboxes; any unrecognised or empty value is a 400.
+                 */
                 state?: string;
+                /** @description Continuation cursor from the previous response's `x-next-token` header. */
                 nextToken?: string;
                 limit?: number;
             };
@@ -1148,10 +2960,126 @@ export interface operations {
             /** @description Sandbox list */
             200: {
                 headers: {
+                    /** @description Continuation cursor for the next page. Omitted on the last page. */
+                    "x-next-token"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ListedSandbox"][];
+                };
+            };
+            /** @description Malformed nextToken, invalid state or invalid metadata */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    create_sandbox_v2: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewSandboxV2"];
+            };
+        };
+        responses: {
+            /** @description Sandbox created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sandbox"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    connect_sandbox_v2: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sandbox identifier */
+                sandboxID: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectSandboxV2"];
+            };
+        };
+        responses: {
+            /** @description Sandbox connection info */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sandbox"];
+                };
+            };
+            /** @description Invalid timeout value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sandbox not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Paused sandbox cannot be resumed during a conflicting lifecycle transition */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description Unexpected backend error */
@@ -1200,6 +3128,193 @@ export interface operations {
                 };
             };
             /** @description Unexpected backend error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_volumes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successfully listed all volumes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Volume"][];
+                };
+            };
+            /** @description Authentication error */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    create_volume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewVolume"];
+            };
+        };
+        responses: {
+            /** @description Successfully created a new volume */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VolumeAndToken"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Authentication error */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_volume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Identifier of the volume */
+                volumeID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successfully retrieved a volume */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VolumeAndToken"];
+                };
+            };
+            /** @description Authentication error */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    delete_volume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Identifier of the volume */
+                volumeID: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successfully deleted a volume */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication error */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Server error */
             500: {
                 headers: {
                     [name: string]: unknown;

@@ -209,9 +209,6 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 			return nil
 		}
 		CubeLog.Errorf("TaskExit event %+v", e)
-		if strings.HasPrefix(e.ID, "exec-") {
-			return nil
-		}
 		cntr, cb, err = em.c.cubeboxManger.FindContainerOfCubebox(ctx, e.ID)
 		if err != nil && !errdefs.IsNotFound(err) {
 			return fmt.Errorf("failed to find container of cubebox: %w", err)
@@ -287,7 +284,7 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 		CubeLog.WithFields(CubeLog.Fields{"ContainerId": e.ContainerID}).Error("container oom")
 		cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 			status.ExitCode = 137
-			status.Reason = "OOMKilled"
+			status.Reason = string(restartpolicy.ReasonOOMKilled)
 			status.FinishedAt = time.Now().UnixNano()
 			return status, nil
 		})
@@ -440,8 +437,12 @@ func (em *eventMonitor) handleContainerExit(ctx context.Context, e *eventtypes.T
 	}
 	cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Pid = pid
-		status.FinishedAt = exitTime
 		status.ExitCode = int32(e.ExitStatus)
+		// TaskExit can follow TaskOOM; retain OOM only when it marked this run finished.
+		if status.Reason != string(restartpolicy.ReasonOOMKilled) || status.FinishedAt == 0 || status.FinishedAt < status.StartedAt {
+			status.Reason = string(restartpolicy.ReasonForTaskExit(e.Pid, e.ExitStatus))
+		}
+		status.FinishedAt = exitTime
 		return status, nil
 	})
 

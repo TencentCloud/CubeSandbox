@@ -17,6 +17,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
@@ -194,6 +195,14 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 
 	if ctr.SandboxID == "" {
 		ctr.SandboxID = cb.ID
+	}
+	newStatus.Reason = oldStatus.Reason
+	// Exit reasons belong to a finished run; non-exit reasons such as PauseFailed can remain live.
+	if newStatus.FinishedAt == 0 {
+		switch restartpolicy.Reason(oldStatus.Reason) {
+		case restartpolicy.ReasonCompleted, restartpolicy.ReasonError, restartpolicy.ReasonOOMKilled, restartpolicy.ReasonSandboxCrashed:
+			newStatus.Reason = ""
+		}
 	}
 	ctr.Status = cubeboxstore.StoreStatus(*newStatus)
 	ctr.Container = cntr

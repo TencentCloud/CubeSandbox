@@ -348,6 +348,7 @@ impl SandboxService {
             end_at,
             envd_version,
             envd_access_token: None,
+            error_reason: d.error_reason,
             domain: Some(self.sandbox_domain.clone()),
             cpu_count: d.cpu_count,
             cpu_milli: (d.cpu_milli > 0).then_some(d.cpu_milli),
@@ -2170,6 +2171,73 @@ mod tests {
 
     fn params_error_reason() -> &'static str {
         r#""host-mount" entry[0]: hostPath "/tmp" is not within an allowed mount prefix"#
+    }
+
+    #[tokio::test]
+    async fn sandbox_detail_serializes_error_reason() {
+        for (status, reason, expected) in [
+            (2, Some(serde_json::json!("OOMKilled")), Some("OOMKilled")),
+            (2, Some(serde_json::json!("Error")), Some("Error")),
+            (2, Some(serde_json::json!("Completed")), Some("Completed")),
+            (
+                2,
+                Some(serde_json::json!("SandboxCrashed")),
+                Some("SandboxCrashed"),
+            ),
+            (
+                3,
+                Some(serde_json::json!("PauseFailed")),
+                Some("PauseFailed"),
+            ),
+            (
+                1,
+                Some(serde_json::json!("PauseFailed")),
+                Some("PauseFailed"),
+            ),
+            (2, Some(serde_json::json!("")), None),
+            (2, Some(serde_json::json!(" \t\n")), None),
+            (2, Some(Value::Null), None),
+            (2, None, None),
+            (1, None, None),
+        ] {
+            let mut info = sandbox_detail_envelope(status).0;
+            if let Some(reason) = &reason {
+                info["data"][0]["error_reason"] = reason.clone();
+            }
+            let service = spawn_fake_cubemaster(
+                Router::new()
+                    .route(
+                        "/cube/sandbox/info",
+                        get(move || {
+                            let info = info.clone();
+                            async move { Json(info) }
+                        }),
+                    )
+                    .route(
+                        "/cube/sandbox/list",
+                        post(|| async { ret_envelope(0, "ok") }),
+                    ),
+            )
+            .await;
+
+            let detail = service.get_sandbox("sbx-1").await.expect("sandbox detail");
+            let response = Json(detail).into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body");
+            let wire: Value = serde_json::from_slice(&body).expect("JSON response");
+            if let Some(reason) = expected {
+                assert_eq!(wire["errorReason"], reason);
+            } else {
+                assert!(wire.get("errorReason").is_none());
+            }
+            assert_eq!(
+                wire["state"],
+                if status == 1 { "running" } else { "unknown" }
+            );
+            assert!(wire.get("error_reason").is_none());
+        }
     }
 
     fn probe_sandbox() -> NewSandbox {

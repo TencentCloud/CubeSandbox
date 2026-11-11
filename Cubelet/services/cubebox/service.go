@@ -1005,6 +1005,10 @@ func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest)
 	})
 	res = &cubebox.ListCubeSandboxResponse{}
 
+	if req.GetId() != "" {
+		return &cubebox.ListCubeSandboxResponse{Items: s.filterGRPCContainer(nil, req)}, nil
+	}
+
 	cubeboxInStore := s.cubeboxMgr.cubeboxManger.List()
 	if len(cubeboxInStore) > maxListCubebox {
 
@@ -1027,22 +1031,26 @@ func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest)
 }
 
 func toGRPCContainer(c *cubeboxstore.Container) *cubebox.Container {
+	status := cubeboxstore.Status{CreatedAt: c.CreatedAt}
+	if c.Status != nil {
+		status = c.Status.Get()
+	}
 	cc := &cubebox.Container{
 		Id:         c.ID,
 		Image:      c.Config.GetImage().GetImage(),
 		Type:       constants.ContainerTypeContainer,
 		Resources:  c.Config.GetResources(),
-		State:      c.Status.Get().State(),
+		State:      status.State(),
 		CreatedAt:  c.CreatedAt,
-		FinishedAt: c.Status.Get().FinishedAt,
+		FinishedAt: status.FinishedAt,
 		Labels:     maps.Clone(c.Labels),
 	}
 
 	switch cc.State {
 	case cubebox.ContainerState_CONTAINER_PAUSING:
-		cc.PausedAt = c.Status.Status.PausingAt
+		cc.PausedAt = status.PausingAt
 	case cubebox.ContainerState_CONTAINER_PAUSED:
-		cc.PausedAt = c.Status.Status.PausedAt
+		cc.PausedAt = status.PausedAt
 	}
 
 	if mounts := c.Config.GetVolumeMounts(); len(mounts) > 0 {
@@ -1141,12 +1149,14 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		NumaNode:     box.NumaNode,
 	}
 
-	if box.GetStatus() != nil {
-		switch box.GetStatus().Get().State() {
+	if status := box.MainStatus(); status != nil {
+		stored := status.Get()
+		cb.ErrorReason = stored.Reason
+		switch stored.State() {
 		case cubebox.ContainerState_CONTAINER_PAUSING:
-			cb.PausedAt = box.GetStatus().Get().PausingAt
+			cb.PausedAt = stored.PausingAt
 		case cubebox.ContainerState_CONTAINER_PAUSED:
-			cb.PausedAt = box.GetStatus().Get().PausedAt
+			cb.PausedAt = stored.PausedAt
 		}
 	}
 
