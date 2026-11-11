@@ -231,6 +231,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '503':
+          description: A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int64
+                minimum: 0
+              description: Seconds a client should wait before retrying connect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /sandboxes/{sandboxID}/fork:
     post:
       tags:
@@ -487,6 +500,19 @@ paths:
                 $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int64
+                minimum: 0
+              description: Seconds a client should wait before retrying resume
           content:
             application/json:
               schema:
@@ -1251,6 +1277,19 @@ paths:
                 $ref: '#/components/schemas/ApiError'
         '500':
           description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int64
+                minimum: 0
+              description: Seconds a client should wait before retrying connect
           content:
             application/json:
               schema:

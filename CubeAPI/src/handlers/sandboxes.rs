@@ -446,7 +446,12 @@ pub async fn pause_sandbox(
         (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Sandbox is already running", body = ApiError),
-        (status = 500, description = "Unexpected backend error", body = ApiError)
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+        (status = 503, description = "A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying resume")
+            )
+        )
     )
 )]
 pub async fn resume_sandbox(
@@ -496,7 +501,12 @@ pub async fn resume_sandbox(
         (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request", body = ApiError),
-        (status = 500, description = "Unexpected backend error", body = ApiError)
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+        (status = 503, description = "A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying connect")
+            )
+        )
     )
 )]
 pub async fn connect_sandbox(
@@ -539,7 +549,12 @@ pub async fn connect_sandbox(
         (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Paused sandbox cannot be resumed during a conflicting lifecycle transition", body = ApiError),
-        (status = 500, description = "Unexpected backend error", body = ApiError)
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+        (status = 503, description = "A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying connect")
+            )
+        )
     )
 )]
 pub async fn connect_sandbox_v2(

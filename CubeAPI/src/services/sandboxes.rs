@@ -614,11 +614,34 @@ impl SandboxService {
         sandbox_id: &str,
         timeout: Option<i32>,
     ) -> AppResult<Sandbox> {
-        let resp = self
+        let resp = match self
             .cubemaster
             .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
             .await
-            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+        {
+            Ok(resp) => resp,
+            // 130490 means "already running" only if the sandbox really is;
+            // Cubelet also returns it on a lifecycle-lock conflict while the
+            // sandbox is still paused, which must stay retryable.
+            Err(CubeMasterError::Api { ret_code, ret_msg })
+                if ret_code == RET_CODE_TASK_STATE_INVALID =>
+            {
+                let d = self.fetch_sandbox_detail(sandbox_id).await?;
+                if d.status == SandboxStatus::Running {
+                    return Err(AppError::Conflict(ret_msg));
+                }
+                return Err(AppError::ServiceUnavailable {
+                    message: format!(
+                        "sandbox {} is still {}; retry resume after 2 seconds ({})",
+                        sandbox_id,
+                        sandbox_status_label(&d.status),
+                        ret_msg
+                    ),
+                    retry_after: 2,
+                });
+            }
+            Err(e) => return Err(map_update_cubemaster_err(e, sandbox_id)),
+        };
 
         ensure_update_result(
             resp.ret.ret_code,
@@ -665,18 +688,52 @@ impl SandboxService {
             let resume_timeout = timeout.filter(|timeout| {
                 should_extend_connect_timeout(d.end_at.clone(), *timeout, chrono::Utc::now())
             });
-            let resp = self
+            // A concurrent resume (CLM auto-resume on dataplane traffic, or
+            // another connect) may win the race; CubeMaster then reports the
+            // sandbox as already running, which is exactly what connect wants.
+            match self
                 .cubemaster
                 .update_sandbox(&self.build_update_request(sandbox_id, "resume", resume_timeout))
                 .await
-                .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
-
-            ensure_update_result(
-                resp.ret.ret_code,
-                resp.ret.ret_msg,
-                sandbox_id,
-                "is already running",
-            )?;
+            {
+                Ok(resp) => ensure_update_result(
+                    resp.ret.ret_code,
+                    resp.ret.ret_msg,
+                    sandbox_id,
+                    "is already running",
+                )?,
+                Err(CubeMasterError::Api { ret_code, ret_msg })
+                    if ret_code == RET_CODE_TASK_STATE_INVALID =>
+                {
+                    // 130490 also covers a transient lifecycle-lock conflict
+                    // on Cubelet, where the sandbox is still paused. Only the
+                    // live state tells the two apart.
+                    d = self.fetch_sandbox_detail(sandbox_id).await?;
+                    if d.status != SandboxStatus::Running {
+                        return Err(AppError::ServiceUnavailable {
+                            message: format!(
+                                "sandbox {} is still {} after a concurrent lifecycle operation; retry connect after 2 seconds ({})",
+                                sandbox_id,
+                                sandbox_status_label(&d.status),
+                                ret_msg
+                            ),
+                            retry_after: 2,
+                        });
+                    }
+                    // The winning resume did not carry our timeout, but it may
+                    // have set a longer deadline of its own; never shorten it.
+                    if let Some(timeout) = timeout {
+                        if should_extend_connect_timeout(
+                            d.end_at.clone(),
+                            timeout,
+                            chrono::Utc::now(),
+                        ) {
+                            self.set_timeout(sandbox_id, timeout).await?;
+                        }
+                    }
+                }
+                Err(e) => return Err(map_update_cubemaster_err(e, sandbox_id)),
+            }
 
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         } else if d.status == SandboxStatus::Running {
@@ -2378,6 +2435,192 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Another resume (CLM auto-resume on dataplane traffic) won the race, so
+    // CubeMaster answers ours with TaskStateInvalid "already running". Connect
+    // must succeed and still apply its timeout; plain resume keeps its 409.
+    #[tokio::test]
+    async fn connect_treats_lost_resume_race_as_success() {
+        #[derive(Clone)]
+        struct Fake {
+            status: Arc<Mutex<i32>>,
+            timeouts: Arc<Mutex<Vec<Value>>>,
+        }
+        let fake = Fake {
+            status: Arc::new(Mutex::new(5)),
+            timeouts: Arc::new(Mutex::new(Vec::new())),
+        };
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|State(f): State<Fake>| async move {
+                        let mut body = sandbox_detail_envelope(*f.status.lock().await).0;
+                        body["data"][0]["end_at"] = Value::from(
+                            (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+                        );
+                        Json(body)
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|State(f): State<Fake>| async move {
+                        *f.status.lock().await = 1;
+                        ret_envelope(
+                            RET_CODE_TASK_STATE_INVALID,
+                            "sandbox sbx-1 is already running",
+                        )
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/timeout",
+                    post(
+                        |State(f): State<Fake>, Json(body): Json<Value>| async move {
+                            f.timeouts.lock().await.push(body);
+                            ret_envelope(0, "ok")
+                        },
+                    ),
+                )
+                .with_state(fake.clone()),
+        )
+        .await;
+
+        let sandbox = service
+            .connect_sandbox("sbx-1", Some(120))
+            .await
+            .expect("connect should succeed when a concurrent resume already won");
+        assert_eq!(sandbox.sandbox_id, "sbx-1");
+        let timeouts = fake.timeouts.lock().await;
+        assert_eq!(timeouts.len(), 1);
+        assert_eq!(timeouts[0]["timeout"], 120);
+        drop(timeouts);
+
+        // Explicit resume on a sandbox that is already running: the fake
+        // reports 130490 and the re-read sees running, so this is 409. The
+        // still-paused (lock conflict) case is 503, covered below.
+        *fake.status.lock().await = 1;
+        let err = service
+            .resume_sandbox("sbx-1", None)
+            .await
+            .expect_err("explicit resume of a running sandbox stays an error");
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    // The winning resume may have set a longer deadline (for example
+    // connect(3600) or never-timeout) than the one seen while paused. The
+    // losing connect must not cut it back.
+    #[tokio::test]
+    async fn connect_lost_resume_race_does_not_shorten_winner_timeout() {
+        #[derive(Clone)]
+        struct Fake {
+            status: Arc<Mutex<i32>>,
+            end_secs: Arc<Mutex<i64>>,
+            timeouts: Arc<Mutex<Vec<Value>>>,
+        }
+        let fake = Fake {
+            status: Arc::new(Mutex::new(5)),
+            end_secs: Arc::new(Mutex::new(10)),
+            timeouts: Arc::new(Mutex::new(Vec::new())),
+        };
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|State(f): State<Fake>| async move {
+                        let mut body = sandbox_detail_envelope(*f.status.lock().await).0;
+                        body["data"][0]["end_at"] = Value::from(
+                            (chrono::Utc::now()
+                                + chrono::Duration::seconds(*f.end_secs.lock().await))
+                            .to_rfc3339(),
+                        );
+                        Json(body)
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|State(f): State<Fake>| async move {
+                        // The winner resumed it with connect(3600).
+                        *f.status.lock().await = 1;
+                        *f.end_secs.lock().await = 3600;
+                        ret_envelope(
+                            RET_CODE_TASK_STATE_INVALID,
+                            "sandbox sbx-1 is already running",
+                        )
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/timeout",
+                    post(
+                        |State(f): State<Fake>, Json(body): Json<Value>| async move {
+                            f.timeouts.lock().await.push(body);
+                            ret_envelope(0, "ok")
+                        },
+                    ),
+                )
+                .with_state(fake.clone()),
+        )
+        .await;
+
+        service
+            .connect_sandbox("sbx-1", Some(60))
+            .await
+            .expect("connect should succeed when a concurrent resume already won");
+        assert!(fake.timeouts.lock().await.is_empty());
+    }
+
+    // Cubelet also answers 130490 when its per-sandbox lifecycle lock is
+    // busy; the sandbox is still paused. Connect must not report success or
+    // apply the timeout, and must stay retryable.
+    #[tokio::test]
+    async fn connect_does_not_succeed_when_130490_leaves_sandbox_paused() {
+        let timeouts = Arc::new(Mutex::new(0usize));
+        let t = timeouts.clone();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|| async { sandbox_detail_envelope(5) }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|| async {
+                        ret_envelope(
+                            RET_CODE_TASK_STATE_INVALID,
+                            "sandbox lifecycle operation is in progress; retry Resume after 2 seconds",
+                        )
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/timeout",
+                    post(move || {
+                        let t = t.clone();
+                        async move {
+                            *t.lock().await += 1;
+                            ret_envelope(0, "ok")
+                        }
+                    }),
+                ),
+        )
+        .await;
+
+        let err = service
+            .connect_sandbox("sbx-1", Some(120))
+            .await
+            .expect_err("connect must not succeed while the sandbox is still paused");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
+        assert_eq!(*timeouts.lock().await, 0);
+
+        // Explicit resume must not claim "already running" (409) either.
+        let err = service
+            .resume_sandbox("sbx-1", None)
+            .await
+            .expect_err("resume must not succeed while the sandbox is still paused");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
     }
 
     #[tokio::test]
