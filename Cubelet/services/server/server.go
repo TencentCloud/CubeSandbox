@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -131,6 +132,7 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		operationServices   []operationService
 		httpServices        []httpService
 		tcpServices         []tcpService
+		grpcServices        []grpcService
 		engine              *workflow.Engine
 		imgExpirationSetter images.ExpirationTimeSetter
 	)
@@ -196,6 +198,9 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		if service, ok := instance.(tcpService); ok {
 			tcpServices = append(tcpServices, service)
 		}
+		if service, ok := instance.(grpcService); ok {
+			grpcServices = append(grpcServices, service)
+		}
 	}
 	if len(criticalPluginErrs) > 0 {
 		return nil, fmt.Errorf("critical cubelet plugins failed to initialize: %s", strings.Join(criticalPluginErrs, "; "))
@@ -219,8 +224,70 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			return nil, err
 		}
 	}
+	if err := registerGRPCServices(s.Server, grpcServices); err != nil {
+		return nil, err
+	}
 
 	return s, nil
+}
+
+// grpcService mirrors the pre-v2.3 containerd embedded-server contract: any
+// initialized plugin instance could register itself on the gRPC server by
+// implementing Register, regardless of its plugin type. Cubelet's own gRPC
+// services (CubeboxMgr, Images, Version, NBI, Snapshot, MultiMetaDB, ...)
+// register under Cubelet-specific plugin types, not plugins.GRPCPlugin.
+type grpcService interface {
+	Register(*grpc.Server) error
+}
+
+// registerGRPCServices registers Cubelet-owned gRPC services on the serving
+// instance behind ServeGRPC. containerd v2.3.x moved the gRPC server into the
+// "grpc" ServerPlugin, which only fans in plugins.GRPCPlugin-typed instances;
+// without this fan-out every Cubelet service would vanish from
+// /data/cubelet/cubelet.sock (clients would see Unimplemented).
+func registerGRPCServices(s *containerdserver.Server, services []grpcService) error {
+	if len(services) == 0 {
+		return nil
+	}
+	inst, err := containerdServerPluginInstance(s, "grpc")
+	if err != nil {
+		return fmt.Errorf("failed to locate the containerd grpc server plugin: %w", err)
+	}
+	srv, err := servingGRPCServer(inst)
+	if err != nil {
+		return err
+	}
+	return registerGRPCServicesOn(srv, services)
+}
+
+func registerGRPCServicesOn(srv *grpc.Server, services []grpcService) error {
+	for _, service := range services {
+		if err := service.Register(srv); err != nil {
+			return fmt.Errorf("failed to register grpc service: %w", err)
+		}
+	}
+	return nil
+}
+
+// servingGRPCServer extracts the concrete *grpc.Server that the containerd
+// "grpc" server plugin serves. The plugin's instance embeds it; Cubelet
+// services keep their pre-v2.3 Register(*grpc.Server) contract (some, like
+// the CRI image service, are bound to generated APIs that require the
+// concrete type). Same class of compatibility shim as serverPlugins above.
+func servingGRPCServer(inst any) (*grpc.Server, error) {
+	v := reflect.Indirect(reflect.ValueOf(inst))
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("containerd grpc server plugin instance is not a struct: %T", inst)
+	}
+	f := v.FieldByName("Server")
+	if !f.IsValid() {
+		return nil, fmt.Errorf("containerd grpc server plugin instance has no embedded Server field: %T", inst)
+	}
+	srv, ok := f.Interface().(*grpc.Server)
+	if !ok {
+		return nil, fmt.Errorf("containerd grpc server plugin instance embedded Server field is not *grpc.Server: %T", inst)
+	}
+	return srv, nil
 }
 
 func isCriticalCubeletPlugin(id string) bool {
@@ -294,22 +361,12 @@ func (s *Server) serveMetrics() map[string]http.Handler {
 	return handlers
 }
 
-// ServeTCP serves Cubelet's own TCP gRPC services on the provided listener;
-// when no Cubelet TCP server is configured it falls back to the containerd
-// "grpc-tcp" server plugin instance (matching the pre-v2.3 behavior of the
-// embedded cmd/containerd/server.Server).
+// ServeTCP serves Cubelet's own TCP gRPC services (registered by plugins via
+// RegisterTCP on s.tcpServer) on the provided listener. containerd's own
+// "grpc-tcp" server plugin is not served here: Cubelet has always owned the
+// TCP endpoint, and that plugin self-serves only via Server.Start, which
+// Cubelet does not use.
 func (s *Server) ServeTCP(l net.Listener) error {
-	if s.tcpServer == nil {
-		inst, err := containerdServerPluginInstance(s.Server, "grpc-tcp")
-		if err != nil {
-			return err
-		}
-		srv, ok := inst.(interface{ Serve(net.Listener) error })
-		if !ok {
-			return fmt.Errorf("containerd grpc-tcp server plugin instance does not implement Serve: %T", inst)
-		}
-		return trapClosedConnErr(srv.Serve(l))
-	}
 	return trapClosedConnErr(s.tcpServer.Serve(l))
 }
 
