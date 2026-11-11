@@ -4,6 +4,8 @@
 package binding
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -53,7 +55,7 @@ func TestNormalizePrefix(t *testing.T) {
 }
 
 func TestParseCreateLegacy(t *testing.T) {
-	for _, raw := range []string{"", "   ", "{}", "null"} {
+	for _, raw := range []string{"", "   ", "{}", "null", `{"bucket":"","prefix":"","cred_ref":""}`, `{"cred_ref":""}`, `{"cred_ref":null}`, `{"bucket":null,"prefix":null,"cred_ref":null}`} {
 		req, err := ParseCreate(raw, "vol-1")
 		if err != nil {
 			t.Fatalf("ParseCreate(%q): %v", raw, err)
@@ -120,13 +122,13 @@ func TestParseCreateRejects(t *testing.T) {
 	}{
 		{"invalid json", `bucket=user-bucket`, "JSON object"},
 		{"array", `["a"]`, "JSON object"},
-		{"bucket only requires reference", `{"bucket":"user-bucket"}`, "requires cred_ref"},
-		{"prefix only requires reference", `{"prefix":"workspaces/user-a/"}`, "requires cred_ref"},
-		{"bucket and prefix require reference", `{"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "requires cred_ref"},
+		{"bucket only requires reference", `{"bucket":"user-bucket"}`, "cred_ref is required"},
+		{"prefix only requires reference", `{"prefix":"workspaces/user-a/"}`, "cred_ref is required"},
+		{"bucket and prefix require reference", `{"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "cred_ref is required"},
 		{"invalid bucket", `{"bucket":"bad/bucket","cred_ref":"team-a"}`, "unsupported character"},
 		{"bucket traversal", `{"bucket":"..","cred_ref":"team-a"}`, "at least 3"},
 		{"invalid prefix", `{"prefix":"a/../b/","cred_ref":"team-a"}`, `".."`},
-		{"invalid ref", `{"cred_ref":"../escape"}`, "must not contain .."},
+		{"invalid ref", `{"cred_ref":"../escape"}`, "cred_ref has an invalid format"},
 		{"oversize", `{"prefix":"` + strings.Repeat("a", MaxPrivateDataLen) + `","cred_ref":"team-a"}`, "over the"},
 		{"nul", "{\"bucket\":\"abc\",\"prefix\":\"a\\u0000b/\",\"cred_ref\":\"team-a\"}", "control"},
 	} {
@@ -293,7 +295,7 @@ func TestValidateBucket(t *testing.T) {
 }
 
 func TestValidateCredRef(t *testing.T) {
-	for _, ref := range []string{"team-a", "user.1", "a_b"} {
+	for _, ref := range []string{"team-a", "user.1", "a_b", strings.Repeat("a", 64)} {
 		if err := ValidateCredRef(ref); err != nil {
 			t.Errorf("ValidateCredRef(%q): %v", ref, err)
 		}
@@ -302,5 +304,123 @@ func TestValidateCredRef(t *testing.T) {
 		if err := ValidateCredRef(ref); err == nil {
 			t.Errorf("ValidateCredRef(%q) succeeded, want error", ref)
 		}
+	}
+}
+
+func TestParseCreateMissingCredRef(t *testing.T) {
+	for _, raw := range []string{
+		`{"bucket":"user-bucket"}`,
+		`{"prefix":"workspaces/user-a/"}`,
+		`{"bucket":"user-bucket","prefix":"workspaces/user-a/"}`,
+		`{"bucket":"user-bucket","cred_ref":""}`,
+		`{"bucket":"user-bucket","cred_ref":null}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := ParseCreate(raw, "vol-1")
+			if !errors.Is(err, ErrMissingCredRef) {
+				t.Fatalf("ParseCreate error = %v, want ErrMissingCredRef", err)
+			}
+			const want = "cred_ref is required"
+			if err.Error() != want {
+				t.Errorf("error = %q, want public message %q", err, want)
+			}
+			if !errors.Is(fmt.Errorf("create: %w", err), ErrMissingCredRef) {
+				t.Error("wrapped error does not preserve ErrMissingCredRef")
+			}
+		})
+	}
+}
+
+func TestParseCreateInvalidCredRef(t *testing.T) {
+	for _, ref := range []string{"../x", strings.Repeat("a", 65), " ", "a/b", `a\b`, "-a"} {
+		t.Run(ref, func(t *testing.T) {
+			for _, raw := range []string{
+				fmt.Sprintf(`{"bucket":"user-bucket","cred_ref":%q}`, ref),
+				fmt.Sprintf(`{"cred_ref":%q}`, ref),
+			} {
+				_, err := ParseCreate(raw, "vol-1")
+				if !errors.Is(err, ErrInvalidCredRef) || errors.Is(err, ErrMissingCredRef) {
+					t.Fatalf("ParseCreate error = %v, want only ErrInvalidCredRef", err)
+				}
+				if err.Error() != "cred_ref has an invalid format" {
+					t.Errorf("error = %q, want fixed public message", err)
+				}
+				if !errors.Is(fmt.Errorf("create: %w", err), ErrInvalidCredRef) {
+					t.Error("wrapped error does not preserve ErrInvalidCredRef")
+				}
+			}
+		})
+	}
+}
+
+func TestParseCreateCredRefLengthBoundary(t *testing.T) {
+	ref := strings.Repeat("a", 64)
+	req, err := ParseCreate(fmt.Sprintf(`{"cred_ref":%q}`, ref), "vol-1")
+	if err != nil || !req.Dynamic || req.CredRef != ref {
+		t.Fatalf("64-character reference = %+v, %v; want dynamic binding", req, err)
+	}
+}
+
+func TestCreateCredRefClassificationBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		parse func() error
+	}{
+		{"invalid volume ID precedes reference", func() error {
+			_, err := ParseCreate(`{"cred_ref":"../x"}`, "../volume")
+			return err
+		}},
+		{"oversized input precedes reference", func() error {
+			_, err := ParseCreate(`{"cred_ref":"../x","padding":"`+strings.Repeat("a", MaxPrivateDataLen)+`"}`, "vol-1")
+			return err
+		}},
+		{"malformed JSON", func() error {
+			_, err := ParseCreate(`{"bucket":`, "vol-1")
+			return err
+		}},
+		{"non-string reference", func() error {
+			_, err := ParseCreate(`{"bucket":"user-bucket","cred_ref":123}`, "vol-1")
+			return err
+		}},
+		{"object reference", func() error {
+			_, err := ParseCreate(`{"bucket":"user-bucket","cred_ref":{}}`, "vol-1")
+			return err
+		}},
+		{"invalid bucket", func() error {
+			_, err := ParseCreate(`{"bucket":"bad/bucket","cred_ref":"user"}`, "vol-1")
+			return err
+		}},
+		{"invalid prefix", func() error {
+			_, err := ParseCreate(`{"prefix":"a/../b","cred_ref":"user"}`, "vol-1")
+			return err
+		}},
+		{"persisted state missing reference", func() error {
+			_, err := ParseState(`{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "vol-1")
+			return err
+		}},
+		{"persisted state invalid reference", func() error {
+			_, err := ParseState(`{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/","cred_ref":"../x"}`, "vol-1")
+			return err
+		}},
+		{"encoded state missing reference", func() error {
+			_, err := EncodeState(Binding{Bucket: "user-bucket", Prefix: "workspaces/user-a/", Dynamic: true})
+			return err
+		}},
+		{"encoded state invalid reference", func() error {
+			_, err := EncodeState(Binding{Bucket: "user-bucket", Prefix: "workspaces/user-a/", CredRef: "../x", Dynamic: true})
+			return err
+		}},
+		{"shared reference validator", func() error { return ValidateCredRef("") }},
+		{"shared invalid reference validator", func() error { return ValidateCredRef("../x") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.parse()
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if errors.Is(err, ErrMissingCredRef) || errors.Is(err, ErrInvalidCredRef) {
+				t.Errorf("ordinary validation error classified as Create reference: %v", err)
+			}
+		})
 	}
 }

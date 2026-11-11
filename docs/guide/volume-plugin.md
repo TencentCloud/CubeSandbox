@@ -190,6 +190,7 @@ Config field `type` selects the plugin type; **`name` (driver) must match end-to
 | Output | `token` | string | Optional auth token returned to SDK |
 | Output | `private_data` | string | Opaque plugin state (max **1024** bytes). Persisted in `t_cube_volume` and forwarded to **Attach** and **Destroy**. Omitted from successful Volume API/SDK responses. May be empty. |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
+| Output | `error_kind` | string | Optional closed-set error classification for binary Create failures; omit on success. See below. |
 
 **binary example**
 
@@ -206,6 +207,27 @@ Output (stdout JSON, exit 0):
 ```json
 {"token":"","private_data":"","error":""}
 ```
+
+**Binary Create errors.** Plugins return an error kind, not an HTTP status or a CubeMaster `ret_code`:
+
+```json
+{"error":"cred_ref is required","error_kind":"invalid_argument"}
+```
+
+`error_kind` is a closed set containing only `invalid_argument`. All other values are treated as unknown:
+
+| `error_kind` | CubeMaster `ret_code` | CubeAPI HTTP status | Behavior |
+| --- | --- | --- | --- |
+| `invalid_argument` | 130400 | 400 | Supported for binary Create |
+| Missing, unknown or malformed kind in a failure | 130593 | 500 | Generic failure |
+
+The plugin must write one complete JSON response with a non-empty `error`. The Create driver recognizes the supported kind on a normal process exit, including a non-zero exit, while the command context remains active; exit 0 with a non-empty `error` also remains a failure. Process startup errors and processes interrupted by cancellation, timeouts or signals remain execution failures regardless of stdout. Malformed or incomplete responses and unsupported kinds remain generic failures. A response containing `error_kind` without a non-empty `error`, including an empty or `null` kind, is a protocol failure. The existing success form remains exit 0, an empty `error`, and no `error_kind`; unrelated extension fields are still allowed.
+
+CubeMaster keeps HTTP 200 for this plugin-error response envelope and selects the business `ret_code`; CubeAPI translates that code to the public HTTP status. This classification currently applies only to binary Create. Destroy, RPC plugins and Cubelet Attach/Detach retain their existing error handling.
+
+The JSON `error` message for a caller error must be safe to display publicly: do not include credentials, credential-file paths or raw `private_data`. The driver does not append stderr or the original execution diagnostic to a typed caller error. Stderr remains a diagnostic channel; adding an error kind does not make arbitrary plugin messages safe.
+
+Compatibility requires retaining the string `error` field and a failing exit status when emitting a typed error. New CubeMaster versions continue to accept old success responses and treat old untyped failures as generic errors. An old CubeMaster still rejects a new plugin's exit-1 error response, but normally reports 500 because it cannot read the kind. Upgrade both CubeMaster and the plugin to get the new classification; no new CLI argument is required.
 
 #### Destroy
 

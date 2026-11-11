@@ -546,3 +546,42 @@ func TestIsValidVolumeName(t *testing.T) {
 	assert.False(t, isValidVolumeName("has space"))
 	assert.False(t, isValidVolumeName("bad/name"))
 }
+
+func TestVolumeHTTP_PluginCreateErrorKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code errorcode.ErrorCode
+	}{
+		{"invalid_argument", fmt.Errorf("wrapped: %w", &plugin.InvalidArgumentError{Message: "dynamic private_data requires cred_ref"}), errorcode.ErrorCode_MasterParamsError},
+		{"backend", errors.New("backend unavailable"), errorcode.ErrorCode_MasterInternalError},
+		{"untyped_message", errors.New("dynamic private_data requires cred_ref"), errorcode.ErrorCode_MasterInternalError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db, fake := newVolumeTestEngine(t)
+			fake.createErr = tc.err
+			volumeID := "vol-kind-" + tc.name
+			rt := &CubeLog.RequestTrace{}
+			req := httptest.NewRequest(http.MethodPost, "/cube/volume", strings.NewReader(volumeCreateBody(t, volumeID, fake.Name(), "caller-input")))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = req.WithContext(CubeLog.WithRequestTrace(req.Context(), rt))
+			handleCreateVolume(c)
+			require.Equal(t, http.StatusOK, w.Code)
+			var env volumeRetEnvelope
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
+			require.NotNil(t, env.Ret)
+			assert.Equal(t, int(tc.code), env.Ret.RetCode)
+			assert.Equal(t, int64(tc.code), rt.RetCode)
+			assert.Nil(t, env.Volume)
+			assert.Equal(t, 1, fake.createCalls)
+			assert.Zero(t, fake.destroyCalls)
+			var count int64
+			require.NoError(t, db.Model(&models.VolumeRecord{}).Where("volume_id = ?", volumeID).Count(&count).Error)
+			assert.Zero(t, count, "failed create must remove its reservation in a writable database")
+			_, got := doVolumeRequest(t, r, http.MethodGet, "/cube/volume/"+volumeID, "")
+			assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
+		})
+	}
+}

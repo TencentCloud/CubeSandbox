@@ -9,8 +9,11 @@
 //	<binary_path> --op <op> [--<key> <value> ...]
 //
 // The binary writes a single JSON object to stdout and exits.
-// Exit code 0 + empty "error" field = success.
+// Exit code 0 + empty "error" field without "error_kind" = success.
 // Exit code != 0 or non-empty "error" field = failure.
+// Create accepts error_kind="invalid_argument" with a non-empty public error
+// message on normal exits, including non-zero exits. Other kinds remain generic
+// failures; Destroy does not interpret error_kind.
 //
 // # Operations and flags
 //
@@ -36,6 +39,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -71,9 +75,10 @@ func (p *Plugin) Create(
 		return nil, fmt.Errorf("binary plugin %q create: volume %q private_data must not contain NUL", p.name, volumeID)
 	}
 	var resp struct {
-		Token       string `json:"token"`
-		PrivateData string `json:"private_data"`
-		Error       string `json:"error"`
+		Token       string          `json:"token"`
+		PrivateData string          `json:"private_data"`
+		Error       string          `json:"error"`
+		ErrorKind   json.RawMessage `json:"error_kind"`
 	}
 	args := []string{
 		"--op", "create",
@@ -83,11 +88,38 @@ func (p *Plugin) Create(
 	if privateData != "" {
 		args = append(args, "--private-data", privateData)
 	}
-	if err := p.run(ctx, &resp, args...); err != nil {
-		return nil, fmt.Errorf("binary plugin %q create: %w", p.name, err)
+	stdout, stderr, runErr := p.execute(ctx, args...)
+	// Do not replace a successful exit with a later context cancellation.
+	if runErr != nil {
+		// On Windows, canceled processes can report a non-negative exit code.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("binary plugin %q create: %w", p.name, ctx.Err())
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() < 0 {
+			return nil, fmt.Errorf("binary plugin %q create: %w", p.name, executionError(runErr, stdout, stderr))
+		}
+	}
+
+	decodeErr := json.Unmarshal(stdout, &resp)
+	var kind string
+	if decodeErr == nil && len(resp.ErrorKind) != 0 {
+		// RawMessage distinguishes an absent field from null or an empty value.
+		if err := json.Unmarshal(resp.ErrorKind, &kind); err == nil && kind == "invalid_argument" && resp.Error != "" {
+			return nil, fmt.Errorf("binary plugin %q create: %w", p.name, &plugin.InvalidArgumentError{Message: resp.Error})
+		}
+	}
+	if runErr != nil {
+		return nil, fmt.Errorf("binary plugin %q create: %w", p.name, executionError(runErr, stdout, stderr))
+	}
+	if decodeErr != nil {
+		return nil, fmt.Errorf("binary plugin %q create: decode stdout: %w (raw: %s)", p.name, decodeErr, strings.TrimSpace(string(stdout)))
 	}
 	if resp.Error != "" {
 		return nil, fmt.Errorf("binary plugin %q create: %s", p.name, resp.Error)
+	}
+	if len(resp.ErrorKind) != 0 {
+		return nil, fmt.Errorf("binary plugin %q create: invalid error_kind response", p.name)
 	}
 	return &plugin.VolumeInfo{
 		VolumeID:    volumeID,
@@ -126,22 +158,33 @@ func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) erro
 // helpers
 // ---------------------------------------------------------------------------
 
-func (p *Plugin) run(ctx context.Context, out any, args ...string) error {
+// execute only captures process output. Each operation keeps its own response
+// interpretation; in particular, Destroy retains its original exit-first rule.
+func (p *Plugin) execute(ctx context.Context, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, p.binaryPath, args...) //nolint:gosec
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
 
-	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
-		}
-		return fmt.Errorf("exit error: %w: %s", err, detail)
+func executionError(err error, stdout, stderr []byte) error {
+	detail := strings.TrimSpace(string(stderr))
+	if detail == "" {
+		detail = strings.TrimSpace(string(stdout))
+	}
+	return fmt.Errorf("exit error: %w: %s", err, detail)
+}
+
+func (p *Plugin) run(ctx context.Context, out any, args ...string) error {
+	stdout, stderr, err := p.execute(ctx, args...)
+	if err != nil {
+		return executionError(err, stdout, stderr)
 	}
 	if out != nil {
-		if err := json.Unmarshal(stdout.Bytes(), out); err != nil {
-			return fmt.Errorf("decode stdout: %w (raw: %s)", err, strings.TrimSpace(stdout.String()))
+		if err := json.Unmarshal(stdout, out); err != nil {
+			return fmt.Errorf("decode stdout: %w (raw: %s)", err, strings.TrimSpace(string(stdout)))
 		}
 	}
 	return nil

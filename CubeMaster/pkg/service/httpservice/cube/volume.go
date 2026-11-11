@@ -239,7 +239,12 @@ func handleCreateVolume(c *gin.Context) {
 		_ = volumeDB().WithContext(c.Request.Context()).
 			Where("volume_id = ?", volumeID).
 			Delete(&models.VolumeRecord{}).Error
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, "plugin create error: "+err.Error())})
+		code := errorcode.ErrorCode_MasterInternalError
+		var invalidArgument *plugin.InvalidArgumentError
+		if errors.As(err, &invalidArgument) {
+			code = errorcode.ErrorCode_MasterParamsError
+		}
+		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, code, "plugin create error: "+err.Error())})
 		return
 	}
 
