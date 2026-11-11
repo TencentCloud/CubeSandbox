@@ -24,7 +24,7 @@ The [OpenClaw integration example](https://github.com/TencentCloud/CubeSandbox/t
 - **Egress control.** An agent only ever needs a handful of destinations: the model API, package registries, and an internal git mirror. The requirement was deny-by-default — not audit-only — with allowlists reviewed like code.
 - **Session continuity.** Coding sessions run for hours or days and must survive node maintenance without losing the gateway state or the workspace.
 - **Interactive latency.** Developers type into a live agent; a cold start that lands in seconds rather than milliseconds degrades the workflow into polling.
-- **Inbound access.** The OpenClaw gateway inside each sandbox exposes an HTTP UI/API that the developer's browser and CLI must reach — without opening any other inbound path into the sandbox network.
+- **Inbound access.** The OpenClaw gateway runs on the host next to the agents and exposes an HTTP UI/API that the developer's browser and CLI must reach; the sandboxes themselves are reached through port mapping, and the deployment must not open any other inbound path into the sandbox network.
 
 ## Solution with Cube Sandbox
 
@@ -32,17 +32,17 @@ Each agent session maps to one Cube sandbox created from a baked template:
 
 ```
 Developer browser / CLI
-        │  (mapped gateway port)
+        │  (gateway UI port, host side)
         ▼
-OpenClaw gateway  ◄─── OpenClaw agents (skills, CLI tools)
+OpenClaw gateway (on the host)  ◄─── OpenClaw agents (skills, CLI tools)
         │  E2B-compatible SDK
         ▼
 CubeAPI ──► CubeMaster ──► Cubelet ──► MicroVM (one per session, own kernel)
-                                          ├─ workspace (persistent volume / host mount)
+                                          ├─ workspace (plugin volume; a raw host mount pins to the node)
                                           └─ egress: default-deny + allowlist (eBPF)
 ```
 
-**Template, not provisioning.** OpenClaw, its skills, and the toolchains agents actually invoke (git, node, build tools) are baked into a Cube template. Every session starts from a known-good image, and nothing is installed while the developer watches. Template-based creation keeps cold start in the sub-second range, consistent with the project's own [performance benchmark](/blog/posts/2026-06-01-cubesandbox-perf-benchmark).
+**Template, not provisioning.** The toolchains the agents actually invoke (git, node, build tools) are baked into a Cube template; the OpenClaw gateway, agents, and skills run on the host and are not re-provisioned per session. Every session starts from a known-good image, and nothing is installed while the developer watches. Template-based creation keeps cold start in the sub-second range, consistent with the project's own [performance benchmark](/blog/posts/2026-06-01-cubesandbox-perf-benchmark).
 
 **Egress policy as code.** Sessions are created with internet access off and an explicit allowlist. Domain targets are handled by Cube's DNS query/response learning, so a hostname entry keeps working when the provider's IPs change:
 
@@ -63,7 +63,7 @@ sandbox = Sandbox.create(
 
 Cube installs a `0.0.0.0/0` deny and enforces allow-over-deny in the eBPF data plane. Sandbox-private and host-internal CIDRs (`10.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`) sit in the deny set by default, so nothing internal is reachable through ordinary public egress — but an explicit `allow_out` entry takes precedence over the deny, which is exactly what the `10.60.0.0/16` git-mirror entry above relies on. Anything not allowlisted stays unreachable, which closed the usual "agent reaches cluster-internal services" review finding on its own. Policy changes flow through the same reviewed configuration as the rest of the platform rather than ad-hoc manual edits — see [Network Policy](/guide/network-policy).
 
-**Inbound via port mapping.** The gateway port is mapped at sandbox creation and surfaced through the platform's URL. Port mapping is the main inbound path this deployment relies on — not a hard network boundary: CubeProxy can route `<port>-<sandbox-id>.<domain>` for any sandbox port, and a sandbox URL is reachable by default unless public traffic is restricted (`network.allow_public_traffic=False`). Egress policy alone does not gate inbound access, so the ingress side got its own review too.
+**Inbound access.** The OpenClaw gateway runs on the host, next to the agents — not inside the sandboxes; each sandbox carries the session's workspace and toolchain. The gateway's HTTP UI/API is served on a host port surfaced through the platform's URL, and services inside a sandbox are reached through CubeProxy port mapping. Port mapping is the main inbound path this deployment relies on — not a hard network boundary: CubeProxy can route `<port>-<sandbox-id>.<domain>` for any sandbox port, and a sandbox URL is reachable by default unless public traffic is restricted (`network.allow_public_traffic=False`). Egress policy alone does not gate inbound access, so the ingress side got its own review too.
 
 **Session continuity.** Idle sessions are paused to release CPU/memory while keeping state; paused sessions are restored with a plain connect when the developer returns:
 
@@ -73,7 +73,7 @@ sandbox.pause()                       # checkpoint state, free CPU/memory
 sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)
 ```
 
-For maintenance windows, the workspace lives on persistent storage (host mount or the S3 volume plugin — see [Persistent Storage](/guide/persistent-storage)), and long-running work is checkpointed with snapshots so a session can be brought back after a node drain — see [Snapshot/Rollback/Clone](/guide/snapshot-rollback-clone). Cross-node resume additionally requires a shared snapshot backend (`jfs` or `s3`, `remote_status=ready`); a node-local `xfs` mount does not survive a drain.
+For maintenance windows, long-running work is checkpointed with snapshots so a session can be brought back after a node drain — see [Snapshot/Rollback/Clone](/guide/snapshot-rollback-clone). The workspace has to live on a plugin Volume for this (for example an [S3 Volume](/guide/s3-volume), backed by storage every eligible node can attach): a raw host mount is pinned to its origin node and cannot follow a session that is restored onto a different node, so it only supports same-node pause/resume. Cross-node resume additionally requires a shared snapshot backend (`jfs` or `s3`, `remote_status=ready`); a node-local `xfs` mount does not survive a drain.
 
 ## Operational Results and Trade-offs
 
