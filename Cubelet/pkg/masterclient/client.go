@@ -53,6 +53,11 @@ type HostFacts struct {
 	// Physical machine capacity, distinct from the quota-carrying Capacity.
 	CPUCount   int64 `json:"cpu_count,omitempty"`
 	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
+	// Effective host.quota overcommit factors used when mcpu_limit / mem_limit
+	// are unset (historical defaults 2.0 / 1.25). CubeOps drift checks consume
+	// these so a non-default factor does not look like a permanent push miss.
+	CpuOvercommitFactor float64 `json:"cpu_overcommit_factor,omitempty"`
+	MemOvercommitFactor float64 `json:"mem_overcommit_factor,omitempty"`
 }
 
 type RegisterNodeRequest struct {

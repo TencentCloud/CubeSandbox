@@ -30,6 +30,12 @@ host:
     mem_limit: ""
     mvm_limit: 0
     creation_concurrent_num: 0
+    # When mcpu_limit / mem_limit are unset, multiply detected host CPU / MemTotal
+    # by these factors. Omit or set 0 to keep historical defaults (CPU 2.0, mem
+    # 1.25). Set both to 1.0 for no overcommit while still auto-detecting size.
+    # Explicit mcpu_limit / mem_limit ignore these factors.
+    # cpu_overcommit_factor: 2.0
+    # mem_overcommit_factor: 1.25
     # Fraction of a paused sandbox's CPU/memory quota to release back to the
     # scheduler, in [0,1], applied symmetrically to CPU and memory. A paused
     # sandbox is snapshotted to disk with its MicroVM shut down, so the quota is

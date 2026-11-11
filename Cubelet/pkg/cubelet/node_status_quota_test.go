@@ -111,6 +111,42 @@ func TestBuildQuotaReportMatchesRegisterResolution(t *testing.T) {
 			if reg.CreateConcurrentNum != report.CreateConcurrentNum {
 				t.Errorf("createConcurrentNum: register=%d heartbeat=%d", reg.CreateConcurrentNum, report.CreateConcurrentNum)
 			}
+			if reg.HostFacts == nil {
+				t.Fatal("expected host facts on register")
+			}
+			wantCPUFactor := effectiveCPUOvercommitFactor(tc.hostCfg)
+			wantMemFactor := effectiveMemOvercommitFactor(tc.hostCfg)
+			if reg.HostFacts.CpuOvercommitFactor != wantCPUFactor {
+				t.Errorf("cpu factor: register=%v want=%v", reg.HostFacts.CpuOvercommitFactor, wantCPUFactor)
+			}
+			if reg.HostFacts.MemOvercommitFactor != wantMemFactor {
+				t.Errorf("mem factor: register=%v want=%v", reg.HostFacts.MemOvercommitFactor, wantMemFactor)
+			}
 		})
+	}
+}
+
+func TestScaleCeilMBAvoidsFloatOvershoot(t *testing.T) {
+	// 102400 * 1.1 is not exactly representable; naive Ceil bumps by 1MiB.
+	if got := scaleCeilMB(102400, 1.1); got != 112640 {
+		t.Fatalf("scaleCeilMB(102400, 1.1) = %d, want 112640", got)
+	}
+	// Historical default 1.25 must stay exact.
+	if got := scaleCeilMB(8192, 1.25); got != 10240 {
+		t.Fatalf("scaleCeilMB(8192, 1.25) = %d, want 10240", got)
+	}
+	// Genuine fractional remainders still ceil up.
+	if got := scaleCeilMB(3, 1.1); got != 4 {
+		t.Fatalf("scaleCeilMB(3, 1.1) = %d, want 4", got)
+	}
+}
+
+func TestResolveHostQuotaMemMBDecimalFactor(t *testing.T) {
+	stubMachineInfo(t, 4, 102400)
+	got := resolveHostQuotaMemMB(&config.HostConf{
+		Quota: config.HostConfigQuota{MemOvercommitFactor: 1.1},
+	})
+	if got != 112640 {
+		t.Fatalf("mem quota = %d, want 112640 (no +1MiB overshoot)", got)
 	}
 }
