@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -44,7 +46,11 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		return
 	}
 	// Resolve before config-dependent work so invalid / ambiguous IDs fail fast.
-	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
+	if sandboxid.IsFullID(req.SandboxID) {
+		// Destroy also repairs persisted state after the live routing entry has
+		// disappeared. Resolve the exact ID's route below, not via a live scan.
+		req.SandboxID = strings.ToLower(req.SandboxID)
+	} else if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
 		rsp.Ret = ret
 		return
 	}
@@ -105,7 +111,12 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 
 	switch req.InstanceType {
 	case cubebox.InstanceType_cubebox.String():
-		if !dealScfSandbox(ctx, req, t) {
+		found, routeErr := dealScfSandbox(ctx, req, t)
+		if routeErr != nil {
+			setSyncDestroyFailure(rsp, routeErr)
+			return
+		}
+		if !found {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_NotFound)
 			rsp.Ret.RetMsg = "no such sandbox"
 			return
@@ -152,7 +163,7 @@ func isDeleteAutoResumeBusinessCode(code errorcode.ErrorCode) bool {
 	}
 }
 
-func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *task.Task) bool {
+func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *task.Task) (bool, error) {
 	var hostIP string
 	if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
 		hostIP = v.HostIP
@@ -162,9 +173,18 @@ func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *tas
 			// Paused sandboxes keep proxy normally; fall back to pausesnap node.
 			if ip, ok := resolvePauseHostIP(ctx, req.SandboxID); ok {
 				t.CallEp = cubelet.GetCubeletAddr(ip)
-				return true
+				return true, nil
 			}
-			return false
+			_, err := sandboxspec.GetHostIP(ctx, req.SandboxID)
+			if errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			// The canonical spec stores the create-time host. A cross-node
+			// resume can move the sandbox, so it cannot authorize destruction.
+			return false, ret.Err(errorcode.ErrorCode_CubeletUnHealthy, "sandbox route is unavailable; reconcile the owning worker before retrying destroy")
 		}
 		hostIP = proxyMap.HostIP
 		if proxyMap.CreatedAt != "" {
@@ -183,7 +203,7 @@ func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *tas
 	}
 
 	t.CallEp = cubelet.GetCubeletAddr(hostIP)
-	return true
+	return true, nil
 }
 
 func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSandboxRequest) error {
@@ -198,6 +218,9 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return err
+		}
+		if !handled && !nodeOK {
+			return ret.Err(errorcode.ErrorCode_CubeletUnHealthy, "destroy worker is unavailable; cleanup is not confirmed")
 		}
 		if !handled && nodeOK {
 			rsp, err := cubelet.Destroy(ctx, callEp, req)
@@ -221,15 +244,17 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 			volrefcount.ApplyFromExtInfo(ctx, rsp.GetExtInfo())
 		}
 
+		// Keep the durable route until metadata cleanup succeeds, so an error
+		// can be retried without losing the only route to the owning worker.
+		if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID()); err != nil {
+			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "after-destroy cleanup failed: %s", err.Error())
+		}
 		err = localcache.DeleteSandboxProxyMap(ctx, req.GetSandboxID())
 		if err != nil {
 			log.G(ctx).Errorf("DeleteSandboxProxyMap:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterInternalError, "DeleteSandboxProxyMap failed: %s", err.Error())
 		}
 		localcache.DeleteSandboxCache(req.GetSandboxID())
-		if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID()); err != nil {
-			log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
-		}
 
 		return nil
 	})

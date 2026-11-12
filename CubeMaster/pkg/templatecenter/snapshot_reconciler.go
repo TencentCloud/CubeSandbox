@@ -128,6 +128,9 @@ func runSnapshotReconcilerPass(ctx context.Context) {
 		return
 	}
 	logger := log.G(ctx).WithFields(map[string]any{"component": "snapshot_reconciler"})
+	if err := reconcileUnclaimedSnapshotJobs(ctx); err != nil {
+		logger.Warnf("reconcile unclaimed snapshot jobs failed: %v", err)
+	}
 	if err := reconcileSnapshotDefinitionTimeouts(ctx); err != nil {
 		logger.Warnf("reconcile snapshot definition timeouts failed: %v", err)
 	}
@@ -143,6 +146,32 @@ func runSnapshotReconcilerPass(ctx context.Context) {
 	if err := refreshSnapshotStorageMetrics(ctx); err != nil {
 		logger.Warnf("refresh snapshot storage metrics failed: %v", err)
 	}
+}
+
+// A job that never won the PENDING -> RUNNING CAS cannot have reached the
+// engine. Reclaim only these expired claims; a RUNNING rollback may already
+// have side effects and must not be blindly failed or replayed on a timeout.
+func reconcileUnclaimedSnapshotJobs(ctx context.Context) error {
+	cutoff := time.Now().Add(-snapshotOperationTimeout)
+	var jobs []models.TemplateImageJob
+	if err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
+		Where("status = ? AND operation IN ? AND updated_at < ?", JobStatusPending,
+			[]string{JobOperationSnapshotCreate, JobOperationSnapshotRollback, JobOperationSnapshotDelete}, cutoff).
+		Order("updated_at, id").Limit(100).Find(&jobs).Error; err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if err := templateImageJobWriteTable(store.db.WithContext(ctx)).
+			Where("job_id = ? AND status = ? AND updated_at < ?", job.JobID, JobStatusPending, cutoff).
+			Updates(map[string]any{
+				"status":        JobStatusFailed,
+				"updated_at":    time.Now(),
+				"error_message": fmt.Sprintf("snapshot job was not claimed within %s; no engine operation was started", snapshotOperationTimeout),
+			}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureSnapshotNodeWritable(ctx context.Context, nodeID, nodeIP string, allowDelete bool) error {
@@ -372,7 +401,7 @@ func reconcileSnapshotRuntimeRefs(ctx context.Context) error {
 		if nodeID == "" && nodeIP == "" {
 			continue
 		}
-		rsp := sandbox.ListSandbox(ctx, &sandboxtypes.ListCubeSandboxReq{
+		rsp := sandbox.ListSandboxWithFailOnError(ctx, &sandboxtypes.ListCubeSandboxReq{
 			RequestID:    uuid.NewString(),
 			HostID:       nodeID,
 			InstanceType: cubeboxv1.InstanceType_cubebox.String(),

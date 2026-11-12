@@ -43,6 +43,9 @@ func TestDestroySandboxMissingSandboxReturnsNotFound(t *testing.T) {
 	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
 		return nil, false
 	})
+	patches.ApplyFunc(sandboxspec.GetHostIP, func(context.Context, string) (string, error) {
+		return "", sandboxspec.ErrSandboxSpecNotFound
+	})
 
 	got := DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{
 		RequestID:    "req-missing-delete",
