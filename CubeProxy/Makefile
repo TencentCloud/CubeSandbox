@@ -1,4 +1,4 @@
-IMAGE_TAG           ?= v0.8.0-rc3
+IMAGE_TAG           ?= v0.8.0-rc4
 IMAGE_LOCAL         := cube-proxy
 
 # Base OpenResty image; overridable for private mirrors / pinned digests.
