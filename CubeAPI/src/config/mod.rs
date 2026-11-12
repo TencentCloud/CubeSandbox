@@ -18,7 +18,13 @@ pub struct ServerConfig {
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
 
-    /// Rate limit: max requests per second per API key
+    /// Shared rate limit: max requests per second per API key for requests
+    /// without a dedicated class quota. Once `rate_limit_read_per_sec` and
+    /// `rate_limit_write_per_sec` are both configured, this value only
+    /// applies to unclassified methods (anything outside GET/HEAD and
+    /// POST/PUT/PATCH/DELETE) and no longer acts as a total ceiling — a
+    /// key's effective read+write budget is then
+    /// `rate_limit_read_per_sec + rate_limit_write_per_sec`.
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_sec: u32,
 

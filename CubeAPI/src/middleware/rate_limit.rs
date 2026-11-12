@@ -166,6 +166,30 @@ mod tests {
         second_write.assert_status(StatusCode::TOO_MANY_REQUESTS);
     }
 
+    /// Symmetric fallback: when only the write limit is configured, writes
+    /// use their own bucket while reads keep using the shared
+    /// `RATE_LIMIT_PER_SEC` bucket.
+    #[tokio::test]
+    async fn read_falls_back_to_shared_limit_when_only_write_configured() {
+        let mut config = test_config();
+        config.rate_limit_per_sec = 1;
+        config.rate_limit_write_per_sec = Some(100);
+        let server = test_server(config).await;
+
+        // Writes ride the dedicated bucket — repeated lifecycle calls pass.
+        let first_write = request(&server, Method::POST, "/ping").await;
+        first_write.assert_status_ok();
+        let second_write = request(&server, Method::POST, "/ping").await;
+        second_write.assert_status_ok();
+
+        // Reads fall back to the shared bucket (quota 1): the first passes,
+        // the second is throttled.
+        let first_read = request(&server, Method::GET, "/ping").await;
+        first_read.assert_status_ok();
+        let second_read = request(&server, Method::GET, "/ping").await;
+        second_read.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     /// HEAD belongs to the read class and PUT to the write class: HEAD must
     /// consume the read bucket and PUT the write bucket.
     #[tokio::test]
