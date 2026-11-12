@@ -1,0 +1,120 @@
+name: Publish Node.js SDK to npm
+
+# Mirrors publish-python-sdk.yml:
+#   - dedicated tag prefix (node-sdk-v*)
+#   - tag version must match the SDK manifest
+#   - skip when sdk/node/ is unchanged since the previous SDK tag
+#   - test -> build -> validate artifact -> publish
+on:
+  push:
+    tags:
+      - 'node-sdk-v*'
+
+jobs:
+  build-and-publish:
+    name: Build and publish to npm
+    runs-on: ubuntu-latest
+    environment: CUBE_NPM_ENV # Must match the npm Trusted Publisher environment
+    permissions:
+      contents: read
+      id-token: write   # Required for npm OIDC trusted publishing
+
+    steps:
+      - name: Checkout (full history, blobless)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: 'blob:none'
+
+      - name: Verify tag version matches package.json and package-lock.json
+        working-directory: sdk/node
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${CURRENT_TAG#node-sdk-v}"
+          echo "Tag version: $TAG_VERSION"
+
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          LOCK_VERSION=$(node -p "require('./package-lock.json').version")
+          echo "package.json version: $PKG_VERSION"
+          echo "package-lock.json version: $LOCK_VERSION"
+
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$LOCK_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match package-lock.json version ($LOCK_VERSION)"
+            exit 1
+          fi
+          echo "All versions match: $TAG_VERSION"
+
+      - name: Check if sdk/node/ changed since last tag
+        id: check_changes
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          echo "Current tag: $CURRENT_TAG"
+
+          PREV_TAG=$(git describe --tags --first-parent --match 'node-sdk-v*' --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || true)
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous node-sdk tag found -- first release, proceeding."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Comparing $PREV_TAG -> $CURRENT_TAG for sdk/node/ changes"
+            CHANGED=$(git diff --name-only "$PREV_TAG" "$CURRENT_TAG" -- sdk/node/)
+            if [ -n "$CHANGED" ]; then
+              echo "sdk/node/ has changes:"
+              echo "$CHANGED"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "No changes in sdk/node/ since $PREV_TAG -- skipping publish."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Set up Node.js
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'   # trusted publishing requires Node >= 22.14 / npm >= 11.5.1
+
+      - name: Install dependencies
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/node
+        run: npm ci
+
+      - name: Run tests
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/node
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build package
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/node
+        run: npm run build
+
+      - name: Validate package contents
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/node
+        run: npm pack --dry-run
+
+      - name: Determine dist-tag
+        id: dist_tag
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#node-sdk-v}"
+          if [[ "$TAG_VERSION" == *-* ]]; then
+            echo "value=rc" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # OIDC trusted publishing: no NPM_TOKEN / NODE_AUTH_TOKEN secret here.
+      # registry-url is intentionally omitted so setup-node does not write a
+      # placeholder _authToken that npm would prefer over the OIDC exchange.
+      - name: Publish to npm
+        if: steps.check_changes.outputs.changed == 'true'
+        working-directory: sdk/node
+        run: npm publish --access public --tag ${{ steps.dist_tag.outputs.value }} --registry=https://registry.npmjs.org/
