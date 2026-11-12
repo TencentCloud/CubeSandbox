@@ -59,9 +59,7 @@ pub fn normalize_zero_tsc_deadline(msrs: &mut [MsrEntry], lapic_state: &LapicSta
 /// KVM evaluates a deadline against the vCPU's current TSC when the deadline
 /// is written. Keeping deadlines in a final group guarantees that the saved
 /// TSC has already been restored, independent of the order KVM advertised its
-/// MSR index list in or the order in an older snapshot. Restore intentionally
-/// fails if the destination rejects any saved MSR: resuming with partial CPU
-/// state is unsupported, including across hosts with mismatched MSR support.
+/// MSR index list in or the order in an older snapshot.
 pub fn order_msrs_for_restore(msrs: &[MsrEntry]) -> Vec<MsrEntry> {
     use crate::arch::x86::msr_index::MSR_IA32_TSC_DEADLINE;
 
