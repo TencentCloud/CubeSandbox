@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -53,7 +54,7 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 	if rec == nil || strings.TrimSpace(rec.SnapshotID) == "" {
 		return false, nil
 	}
-	if ip := strings.TrimSpace(rec.NodeIP); ip != "" {
+	if ip := localcache.ResolveNodeIP(rec.NodeID, rec.NodeIP); ip != "" {
 		hostIP = ip
 	}
 	if hostIP == "" {

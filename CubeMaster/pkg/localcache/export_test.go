@@ -438,3 +438,28 @@ func TestSyncAllFromDB_ExternalLoaderSyncsTemplates(t *testing.T) {
 		t.Fatal("expected tpl-2 locality")
 	}
 }
+
+func TestResolveNodeIPPrefersCurrentNodeAddress(t *testing.T) {
+	origCache := l.cache
+	t.Cleanup(func() { l.cache = origCache })
+	l.cache = cache.New(0, 0)
+	// The cube-node pod was recreated: same node ID, new pod IP.
+	l.cache.SetDefault("node-a", &node.Node{InsID: "node-a", IP: "10.0.0.44", Healthy: true})
+
+	cases := []struct {
+		name, nodeID, recorded, want string
+	}{
+		{"stale recorded ip is replaced", "node-a", "10.0.0.43", "10.0.0.44"},
+		{"empty recorded ip is filled", "node-a", "", "10.0.0.44"},
+		{"node gone keeps recorded ip", "node-gone", " 10.0.0.9 ", "10.0.0.9"},
+		{"no node id keeps recorded ip", "", "10.0.0.9", "10.0.0.9"},
+		{"nothing known", "node-gone", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveNodeIP(tc.nodeID, tc.recorded); got != tc.want {
+				t.Fatalf("ResolveNodeIP(%q, %q) = %q, want %q", tc.nodeID, tc.recorded, got, tc.want)
+			}
+		})
+	}
+}

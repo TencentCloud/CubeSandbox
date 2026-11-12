@@ -11,6 +11,8 @@ import (
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -505,5 +507,63 @@ func TestIsIgnorableArtifactDeleteError(t *testing.T) {
 	}
 	if isIgnorableArtifactDeleteError(errors.New("registry not found for node")) {
 		t.Fatal("generic not found should not be ignored")
+	}
+}
+
+func TestCleanupTemplateReplicasWithLocatorsDialsCurrentNodeIP(t *testing.T) {
+	origCleanupTemplateOnCubelet := cleanupTemplateOnCubelet
+	origGetCubeletAddrForDelete := getCubeletAddrForDelete
+	t.Cleanup(func() {
+		cleanupTemplateOnCubelet = origCleanupTemplateOnCubelet
+		getCubeletAddrForDelete = origGetCubeletAddrForDelete
+	})
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	// The replica row still holds the IP of a cube-node pod that has since
+	// been recreated; the node cache has the live address.
+	patches.ApplyFunc(localcache.GetNode, func(id string) (*node.Node, bool) {
+		if id == "node-a" {
+			return &node.Node{InsID: "node-a", IP: "10.0.0.44"}, true
+		}
+		return nil, false
+	})
+
+	getCubeletAddrForDelete = func(hostIP string) string { return hostIP + ":9000" }
+	var dialed []string
+	cleanupTemplateOnCubelet = func(ctx context.Context, calleeEp string, req *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+		dialed = append(dialed, calleeEp)
+		return &cubeboxv1.CleanupTemplateResponse{Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success}}, nil
+	}
+
+	locators := []templateCleanupLocator{
+		{NodeID: "node-a", NodeIP: "10.0.0.43"},
+		{NodeID: "node-gone", NodeIP: "10.0.0.9"},
+	}
+	if err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-1", locators, ""); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	want := []string{"10.0.0.44:9000", "10.0.0.9:9000"}
+	if len(dialed) != len(want) || dialed[0] != want[0] || dialed[1] != want[1] {
+		t.Fatalf("dialed %v, want %v", dialed, want)
+	}
+}
+
+func TestPlacementToNodePrefersCurrentNodeIP(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetNode, func(id string) (*node.Node, bool) {
+		if id == "node-a" {
+			return &node.Node{InsID: "node-a", IP: "10.0.0.44"}, true
+		}
+		return nil, false
+	})
+
+	got := placementToNode(&models.ArtifactNodePlacement{NodeID: "node-a", NodeIP: "10.0.0.43"})
+	if got == nil || got.IP != "10.0.0.44" {
+		t.Fatalf("placementToNode = %+v, want IP 10.0.0.44", got)
+	}
+	got = placementToNode(&models.ArtifactNodePlacement{NodeID: "node-gone", NodeIP: "10.0.0.9"})
+	if got == nil || got.IP != "10.0.0.9" {
+		t.Fatalf("placementToNode for a departed node = %+v, want recorded IP 10.0.0.9", got)
 	}
 }

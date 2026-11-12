@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -163,6 +164,23 @@ func collectCacheNodes(n int, requireSchedulable bool) node.NodeList {
 		}
 	}
 	return nodes
+}
+
+// ResolveNodeIP returns the address to dial for nodeID. The node's current
+// registered IP wins over recordedIP: a cube-node pod that is recreated keeps
+// its node ID but gets a new pod IP, so an IP stored on a template replica,
+// artifact placement or pause snapshot can point at a dead address. recordedIP
+// is used only when the node is no longer in the cache.
+func ResolveNodeIP(nodeID, recordedIP string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID != "" {
+		if n, ok := GetNode(nodeID); ok && n != nil {
+			if ip := strings.TrimSpace(n.HostIP()); ip != "" {
+				return ip
+			}
+		}
+	}
+	return strings.TrimSpace(recordedIP)
 }
 
 func GetNode(id string) (*node.Node, bool) {

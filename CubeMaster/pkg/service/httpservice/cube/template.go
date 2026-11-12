@@ -585,12 +585,7 @@ func firstReadyReplicaOriginFromList(replicas []templatecenter.ReplicaStatus, or
 			continue
 		}
 		nodeID := strings.TrimSpace(replica.NodeID)
-		nodeIP := strings.TrimSpace(replica.NodeIP)
-		if nodeIP == "" && nodeID != "" {
-			if n, ok := localcache.GetNode(nodeID); ok && n != nil {
-				nodeIP = strings.TrimSpace(n.HostIP())
-			}
-		}
+		nodeIP := localcache.ResolveNodeIP(nodeID, replica.NodeIP)
 		if nodeIP == "" {
 			continue
 		}

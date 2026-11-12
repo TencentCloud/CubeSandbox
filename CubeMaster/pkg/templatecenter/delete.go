@@ -488,12 +488,7 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 		if cleanupID == "" {
 			cleanupID = templateID
 		}
-		hostIP := locator.NodeIP
-		if hostIP == "" && locator.NodeID != "" {
-			if n, ok := localcache.GetNode(locator.NodeID); ok && n != nil {
-				hostIP = n.HostIP()
-			}
-		}
+		hostIP := localcache.ResolveNodeIP(locator.NodeID, locator.NodeIP)
 		if hostIP == "" {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s: missing node address for locator node=%s", templateID, locator.NodeID))
 			continue

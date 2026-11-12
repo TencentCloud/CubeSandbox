@@ -290,18 +290,13 @@ func notifyTemplateCenterArtifactDelete(ctx context.Context, artifactID string) 
 }
 
 // placementToNode resolves a placement row to a node with a usable host ip,
-// falling back to the local node cache when the recorded ip is empty.
+// preferring the node's current address over the one recorded on the row.
 func placementToNode(p *models.ArtifactNodePlacement) *node.Node {
 	if p == nil {
 		return nil
 	}
 	nodeID := strings.TrimSpace(p.NodeID)
-	nodeIP := strings.TrimSpace(p.NodeIP)
-	if nodeIP == "" && nodeID != "" {
-		if cached, ok := localcache.GetNode(nodeID); ok && cached != nil {
-			nodeIP = strings.TrimSpace(cached.HostIP())
-		}
-	}
+	nodeIP := localcache.ResolveNodeIP(nodeID, p.NodeIP)
 	if nodeIP == "" {
 		return nil
 	}
