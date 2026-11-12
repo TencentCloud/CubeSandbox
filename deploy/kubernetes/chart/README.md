@@ -4,7 +4,7 @@ This chart delivers CubeSandbox on Kubernetes/TKE as chart-managed resources.
 
 Current compute-plane shape (per compute node):
 
-- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + optional egress; host network by default (`cubeNode.hostNetwork: true`). Image/template changes recreate the Pod: sandbox tap devices and cubevs hooks live in the Pod netns, so they survive that on the host network and are lost on the Pod network. Switching the mode on an existing release is gated by the `cube-node-hostnet-preflight` Hook.
+- **`cube-node` (Big Pod)**: native `apps/v1` DaemonSet; `wait-node-prep` **initContainer** (exits when ready) + `cubelet` with embedded network runtime + CubeEgress; host network by default (`cubeNode.hostNetwork: true`). Image/template changes recreate the Pod: sandbox tap devices and cubevs hooks live in the Pod netns, so they survive that on the host network and are lost on the Pod network. Switching the mode on an existing release is gated by the `cube-node-hostnet-preflight` Hook.
 - **`cube-node-installer`**: native DaemonSet that stages shim / kernel / guest into the host toolbox tree.
 - **`cube-node-bootstrap`**: native DaemonSet that runs `wait-pvm-host` + `cube-node-init`, then writes `node-prep-ready`.
 - **`cube-node-pvm`**: native `apps/v1` DaemonSet scheduled only via `placement.pvm` (`allow-pvm-bootstrap`); installs PVM host kernel and writes fingerprint `pvm-host-ready`. Non-PVM compute nodes never pull this image.
@@ -26,14 +26,33 @@ Official docs (source of truth; do not keep a parallel copy under this chart):
 
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
-- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
+- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, compute DaemonSets, DNS / Proxy / Egress, compute-only mode
 - [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
+## Sandbox observability
+
+Observability is disabled by default. Add
+`--set observability.enabled=true` to the normal Helm install or upgrade to
+deploy the compute-node Collector, Prometheus, Loki, and Grafana. Loki is the
+default and recommended log backend; set
+`observability.logs.backend=elasticsearch` to use Elasticsearch instead.
+
+The compute-node Collector reads Cubelet sandbox CPU/memory/count metrics and
+sandbox `stdout`/`stderr` logs. `observability.logs.components.enabled=true`
+adds a second Collector DaemonSet for allowlisted component containers, mounting
+`/var/log/pods` read-only. Collector and backend Pods carry readiness/liveness
+probes. The chart also generates a random Grafana admin password in a
+release-scoped Secret unless `observability.backend.grafana.existingSecret` is
+set. See `observability` in [values.yaml](values.yaml) for endpoints,
+credentials, persistence, and retention settings. Backend and Collector details
+are documented in the
+[observability guide](../../../docs/guide/observability.md).
+
 ## Architecture
 
-See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
+See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, core and optional compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
@@ -52,6 +71,7 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
 | `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
 | `cube-webui` | WebUI static assets and OpenResty. |
+| `cube-observability` | Grafana OSS image plus CubeSandbox dashboards; build with `deploy/kubernetes/images/build-cube-images.sh cube-observability` and set `observability.backend.grafana.image`. |
 
 ## Node selection
 
@@ -182,7 +202,7 @@ To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstr
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.2 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.8.0-rc2 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Cube-owned images default to `imagePullPolicy: IfNotPresent`. To pick up a
@@ -231,7 +251,7 @@ postgres:
   database: cube_mvp
 ```
 
-The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
+The chart installs the `cube-redis` StatefulSet only when `redis.enabled=true` and no external host, Sentinel master, or Cluster seeds are configured.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
 CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
 Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
@@ -276,6 +296,33 @@ volumeS3:
 When `minio.rootPassword` is set, it must be at least 8 characters (MinIO
 requirement).
 
+## Private-CA registry trust (trustedCACerts)
+
+If the image registries the TemplateCenter pod pulls from sit behind a
+private CA, enable the feature and the pod trusts those registries in
+addition to the public roots (Go's `SSL_CERT_DIR`; default-off renders
+byte-identical to a release without it):
+
+```yaml
+trustedCACerts:
+  enabled: true
+  certs:
+    - |
+      -----BEGIN CERTIFICATE-----
+      ...your CA PEM...
+      -----END CERTIFICATE-----
+```
+
+- Multiple entries (and multi-cert chain files) are supported; each entry
+  becomes a key in a chart-managed ConfigMap mounted at `/etc/cube/trusted-ca`.
+- `certs` and `existingConfigMap` are mutually exclusive; with
+  `existingConfigMap: <name>` the chart mounts your own ConfigMap (same
+  namespace) instead of rendering one. Certificate blocks only — a pasted
+  private key fails the render.
+- Certificate changes (inline certs or `existingConfigMap` edits) take
+  effect after the pods restart — inline certs roll automatically via a
+  checksum annotation, `existingConfigMap` needs a manual restart.
+
 ## CubeMaster configuration
 
 The `cube-master` image is built like CI from `CubeMaster/docker/Dockerfile` (repository-root context) and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
@@ -291,7 +338,7 @@ The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
-# Optional: pin master / mysql / redis / minio PVCs at once.
+# Optional: pin stateful PVCs (including optional JuiceFS Redis) at once.
 persistence:
   storageClassName: ""   # empty → cluster default SC
 
@@ -450,7 +497,9 @@ The lifecycle manager runs two warm replicas by default. Both replicas consume
 lifecycle events and serve resume callbacks, while a Redis lease elects the
 single replica allowed to run idle sweep/kill and stale-proxy pruning. The
 lease uses single-key Redis transactions and requires no Kubernetes RBAC.
-Production deployments should pair this with Sentinel or managed HA Redis;
+Production deployments should pair this with Sentinel, external native Redis
+Cluster (`redis.clusterNodes`, DB 0), or managed HA Redis. See the
+[Cluster configuration and migration guide](../../../docs/guide/redis-cluster.md);
 the chart's built-in single-replica Redis remains a shared failure point.
 Because Redis replication is asynchronous, a Redis failover does not provide
 strict fencing for an already in-flight leader operation. The new leader
@@ -508,28 +557,95 @@ cubeProxy:
         - "*.sandbox.example.com"
 ```
 
-Wildcard public certificates usually require a DNS-01 issuer.
+The chart does **not** derive `*.domain` for `certManager` mode. Set
+`certManager.dnsNames` explicitly to the base domain and its wildcard. Wildcard
+public certificates usually require a DNS-01 issuer.
 
 ### Self-signed TLS for test only
 
 For offline test environments, explicitly opt in to a chart-generated self-signed certificate:
 
 ```yaml
+controlPlane:
+  api:
+    sandboxDomain: sandbox.example.com
 cubeProxy:
   enabled: true
-  domain: cube.app
+  domain: sandbox.example.com
   tls:
     mode: selfSigned
     selfSigned:
+      # Optional extra SANs. cubeProxy.domain and *.cubeProxy.domain are
+      # always added automatically.
       dnsNames:
-        - cube.app
-        - "*.cube.app"
         - localhost
       ipAddresses:
         - 127.0.0.1
 ```
 
-This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required. Do not use this mode for production.
+For the default `cube.app` quick start, keep `domain: cube.app` and omit the
+`controlPlane` override; the chart's default `dnsNames` already covers
+`cube.app` and `*.cube.app`.
+
+The chart always adds `cubeProxy.domain` and `*.${cubeProxy.domain}` to the
+certificate SANs when `cubeProxy.domain` is set, so sandbox hosts such as
+`49999-<sandboxId>.sandbox.example.com` verify correctly. `selfSigned.dnsNames`
+is additive, not a replacement for those two entries. Keep
+`controlPlane.api.sandboxDomain` equal to `cubeProxy.domain`; otherwise CubeAPI
+returns a different sandbox host and this certificate is not used.
+
+This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and
+`ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required.
+Do not use this mode for production.
+
+IP-based access (Pod IP or NodePort IP) is not covered unless you add the IP to
+`selfSigned.ipAddresses`.
+
+#### Rotating the self-signed certificate
+
+By default the chart reuses an existing `<fullname>-proxy-certs` Secret across
+upgrades. Changing `cubeProxy.domain`, `selfSigned.dnsNames`, or
+`selfSigned.ipAddresses` does **not** re-issue the certificate unless you enable
+rotation:
+
+```yaml
+cubeProxy:
+  tls:
+    mode: selfSigned
+    selfSigned:
+      rotateOnSanChange: true
+```
+
+With `rotateOnSanChange: true`, the chart records a hash of the desired
+certificate spec (common name, DNS SANs, IP SANs, and validity) on the Secret.
+When that spec changes — or when you enable the flag on an existing release for
+the first time — it re-issues the certificate **and the CA**, and updates a Pod
+annotation so the proxy Deployment rolls. Because the CA changes, clients that
+imported the old `ca.crt` must re-import it. Back up the Secret before enabling
+rotation; `helm rollback` is not a certificate rollback.
+
+```bash
+kubectl -n <namespace> get secret <fullname>-proxy-certs -o yaml > proxy-certs-backup.yaml
+```
+
+To rotate manually (for example, when `rotateOnSanChange` is false):
+
+```bash
+kubectl -n <namespace> delete secret <fullname>-proxy-certs
+helm upgrade --install <release> ./deploy/kubernetes/chart \
+  -n <namespace> -f runtime-values.yaml
+kubectl -n <namespace> rollout restart deploy/<fullname>-proxy
+kubectl -n <namespace> get secret <fullname>-proxy-certs \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName
+# Re-import ca.crt into clients:
+kubectl -n <namespace> get secret <fullname>-proxy-certs \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+```
+
+`<fullname>` is the Helm fullname: the release name if it already contains
+`cube`, otherwise `<release>-cube`. For release `cube`, the objects are
+`cube-proxy-certs` and `cube-proxy`; for release `prod`, they are
+`prod-cube-proxy-certs` and `prod-cube-proxy`.
 
 `cube-proxy` uses `placement.controlPlane`. The chart does not create node labels.
 
@@ -634,10 +750,10 @@ The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpo
 
 ## CubeEgress
 
-`cubeEgress.enabled=true` runs CubeEgress inside the Cube Node Big Pod:
+CubeEgress always runs inside the Cube Node Big Pod:
 
 - `cube-egress` mounts `/etc/cube/ca` and exposes the loopback admin API on `127.0.0.1:9091` by default (`cubeEgress.adminPort` / `CUBE_EGRESS_ADMIN_PORT`);
-- `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-proxy-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
+- `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-egress-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
 - CubeMaster and CubeAPI both mount the same CA Secret at `/etc/cube/ca` so template CA bake and AgentHub/OpenClaw CA injection use the same trust root.
 
 Default CA mode is `selfSigned`; the chart creates and reuses a release-scoped Secret named `<release>-egress-ca` with:
@@ -653,7 +769,6 @@ For production CA lifecycle control, pre-create a Secret and use:
 
 ```yaml
 cubeEgress:
-  enabled: true
   ca:
     mode: existingSecret
     existingSecret: cube-egress-ca
@@ -663,19 +778,26 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 
 ## CubeS3lvol
 
-`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 23 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
 
 When enabled, the sidecar:
 
 - runs in its own `cube-s3lvol` image next to cubelet;
 - shares a Unix socket (`/var/run/s3lvol/s3lvol.sock`) with cubelet over an in-memory emptyDir, and writes cubelet's `[cow.s3] enable = true` + `socket_path` (a socket path alone does not opt in);
-- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths, so a Pod recreate loses nothing;
+- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths and
+  mounts the fixed host path `/dev/shm/cube-s3lvol` at `/dev/shm`,
+  so a Pod recreate on the same node can replay acknowledged writes that have
+  not reached S3;
 - reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
 - uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
 - reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
   per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
+- uses the host's memory-backed `/dev/shm` for the default 4 GiB write-back
+  ring. The sidecar refuses to start if that mount is not tmpfs or lacks room.
+  The host path survives Pod recreation but is cleared by a node reboot; writes
+  that have not reached S3 can therefore still be lost on node reboot.
 
 ```yaml
 cubeS3lvol:
@@ -759,3 +881,28 @@ Prepare a separate host-kernel rollback runbook for production.
 - external DNS or load balancer records.
 
 Clean those items using the platform runbook for the target environment.
+
+### Operator-managed network allowlist
+
+`cubeNode.operatorAllowOut` is an administrator-owned list of IPv4 CIDRs.
+It defaults to `[]`, preserving existing sandbox policy behavior. For example:
+
+```yaml
+cubeNode:
+  operatorAllowOut:
+    - 10.204.0.10/32 # replace with your managed resolver address
+```
+
+The chart writes `common.operator_allow_out` through
+`CUBE_SANDBOX_OPERATOR_ALLOW_OUT`. Restart Cubelet after changing the list.
+Every CubeVS policy installation (create, update, and recovery) layers this
+list onto the sandbox-authored allow_out. Sandbox callers cannot change the
+operator list; replacing or clearing their policy does not remove platform grants.
+Platform grants are not persisted as caller policy, so removing a grant and
+restarting Cubelet does not resurrect it from sandbox state.
+
+This is a general network allowance, independent of guest DNS configuration.
+It admits all ports to the selected CIDRs; it is not a DNS-port-only exception.
+No resolver or Kubernetes Service CIDR is automatically included. Configure
+only the exact resolver /32 when that is the access required. Existing CubeVS
+allow/deny precedence and domain/L7 resolver admission remain unchanged.

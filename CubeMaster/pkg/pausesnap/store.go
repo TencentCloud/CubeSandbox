@@ -31,9 +31,12 @@ const (
 	KindPauseSnapshot = "pause_snapshot"
 	// StatusReady marks a completed pause: the shim is gone and the sandbox
 	// exists only as this binding plus the node-local package.
-	StatusReady    = "READY"
-	statusReady    = StatusReady
-	statusCreating = "CREATING"
+	StatusReady = "READY"
+	statusReady = StatusReady
+	// StatusCreating marks a pause in flight: the binding is written before the
+	// node call and completed or failed after it.
+	StatusCreating = "CREATING"
+	statusCreating = StatusCreating
 	// StatusFailed is a terminal Pause failure. Binding and sandbox proxy are
 	// kept so the user can see the failure; Resume is rejected until Delete.
 	StatusFailed = "FAILED"
@@ -167,9 +170,8 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend
 }
 
 // Complete marks the pause snapshot READY and records the node + plugin volumes.
-// S3 export_uuids move remote_status to inprogress; empty uuids on an S3 row
-// mean export failed — remote_status=failed so CanCrossNode stays false while
-// same-node Resume still works. CubeMaster does not query Cubelet here.
+// S3 requires export_uuids; JFS tracks writeback readiness without UUIDs
+// because its namespace is shared. CubeMaster does not query Cubelet here.
 func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instanceType string, pluginVolumeIDs []string, exportUUIDs string) error {
 	client := getDB()
 	if client == nil {
@@ -199,8 +201,11 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
 		First(&existing).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	if constants.IsS3Backend(existing.Backend) {
-		if raw := strings.TrimSpace(exportUUIDs); raw != "" {
+	if constants.IsRemoteTrackedBackend(existing.Backend) {
+		if constants.IsJFSBackend(existing.Backend) {
+			updates["export_uuids"] = ""
+			updates["remote_status"] = constants.RemoteStatusInProgress
+		} else if raw := strings.TrimSpace(exportUUIDs); raw != "" {
 			updates["export_uuids"] = raw
 			updates["remote_status"] = constants.RemoteStatusInProgress
 		} else {

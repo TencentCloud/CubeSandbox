@@ -51,7 +51,7 @@ SPDK_ROOT   ?= $(abspath $(S3LVOL_ROOT)/../spdk)
 # unpatched SPDK.
 # ---------------------------------------------------------------------------
 ifeq ($(filter clean help,$(MAKECMDGOALS)),)
-SPDK_PATCH_PROBE := $(shell grep -c spdk_blob_get_io_unit_lba \
+SPDK_PATCH_PROBE := $(shell grep -c copy_on_materialize_only \
            $(SPDK_ROOT)/include/spdk/blob.h 2>/dev/null)
 ifeq ($(SPDK_PATCH_PROBE),0)
 $(error SPDK at $(SPDK_ROOT) is missing the patches in patches/. Run \

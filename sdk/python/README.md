@@ -6,7 +6,7 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/version-0.7.0-orange" alt="v0.7.0" />
+  <img src="https://img.shields.io/badge/version-0.8.0-orange" alt="v0.8.0" />
 </p>
 
 ---
@@ -105,6 +105,36 @@ sb.pause(timeout=60, interval=0.5) # custom poll params
 # Resume by connecting — auto-resumes paused sandbox
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
+
+### MCP gateway (preview)
+
+Pass the E2B-compatible `mcp` option to start an MCP gateway inside the sandbox. It needs a template that ships `mcp-gateway`; when `template` is omitted, the alias `mcp-gateway` is tried first (override with `CUBE_MCP_TEMPLATE_ID`), then `CUBE_TEMPLATE_ID` if that template does not exist. `TemplateNotFoundError` is raised when neither exists. See [MCP Gateway](../../docs/guide/mcp-gateway.md).
+
+```python
+sb = Sandbox.create(mcp={"duckduckgo": {}, "arxiv": {"storagePath": "/tmp/papers"}})
+url = sb.get_mcp_url()      # streamable HTTP endpoint
+token = sb.get_mcp_token()  # send as "Authorization: Bearer <token>"
+```
+
+### Fork
+
+```python
+sb = Sandbox.create()
+
+# One server-side call: the backend snapshots sb once and derives N copies.
+forks = sb.fork(count=3)              # list[Sandbox | Exception], one per fork
+forks = sb.fork(count=3, timeout=60)  # timeout: per-fork idle TTL in seconds
+
+for f in forks:
+    if isinstance(f, Sandbox):
+        f.run_code("print('alive')")  # a running copy
+    else:
+        print(f)                      # that fork's exception
+```
+
+Partial success keeps the copies and does not raise; only whole-request
+failures raise (e.g. unknown sandbox). `count` is 1..100 (default 1). Unlike
+`clone`, the temporary snapshot is managed by the server.
 
 ### Compute node placement
 
@@ -212,6 +242,7 @@ with Sandbox.create() as sb:
     # Read & write
     sb.files.write("/tmp/hello.txt", "Hello, world!")
     print(sb.files.read("/tmp/hello.txt"))  # "Hello, world!"
+    png = sb.files.read("/tmp/chart.png", format="bytes")  # bytearray
 
     # Batch write
     sb.files.write_files([
@@ -295,9 +326,9 @@ invalid names raise `ValueError` before any network call. See
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # list of running sandbox dicts
-print(Sandbox.list_v2())    # v2 API (supports filtering)
+print(Sandbox.list_v2())    # v2 E2B view: running and paused only
 ```
 
 ## Configuration
@@ -310,6 +341,7 @@ print(Sandbox.list_v2())    # v2 API (supports filtering)
 | `CUBE_API_KEY` | | — | API key for auth-enabled deployments |
 | `CUBE_PROXY_PORT_HTTP` | | `80` | CubeProxy HTTP port |
 | `CUBE_SANDBOX_DOMAIN` | | `cube.app` | Sandbox domain suffix |
+| `CUBE_MCP_TEMPLATE_ID` | | `mcp-gateway` | Template tried first when `mcp` is set and no template is given; falls back to `CUBE_TEMPLATE_ID` if it does not exist |
 
 You can also pass a `Config` object directly:
 
@@ -335,7 +367,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, envs, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally restricted to specified compute nodes or mounting volumes); `envs` is the E2B-compatible alias for `env_vars` |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) and optionally reset the idle timeout |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list running and paused sandboxes (v2 E2B view) |
 | `Sandbox.health(config)` | `GET /health` — service health check |
 
 ### `Sandbox` — instance methods
@@ -344,6 +376,7 @@ with Sandbox.create(config=cfg) as sb:
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.get_info()` | `GET /sandboxes/:id` — get sandbox state and metadata as a `SandboxInfo` |
+| `sb.is_running(request_timeout=None)` | Report if the sandbox is running — checks control-plane state first, probes envd `/health` only when running/unknown; returns `bool` (`False` on unreachable/transport errors) |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.set_timeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |
@@ -354,7 +387,7 @@ with Sandbox.create(config=cfg) as sb:
 
 | Method | Description |
 |---|---|
-| `sb.files.read(path)` | Download file content via `GET /files` |
+| `sb.files.read(path, *, format=...)` | Download via `GET /files`; `format` is `text` (default) / `bytes` / `stream` (e2b-compatible) |
 | `sb.files.write(path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `sb.files.write_files(files)` | Batch write `[(path, data), ...]`, stops on first error |
 | `sb.files.list(path)` | List directory entries → `list[dict]` |

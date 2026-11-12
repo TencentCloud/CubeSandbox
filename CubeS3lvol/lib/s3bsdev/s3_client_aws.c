@@ -38,12 +38,6 @@
  * Protected by refcnt: last s3_client_put() triggers destroy. */
 #define S3_MAX_ENDPOINTS        128
 
-/* Upper bound on keys per s3_delete_batch() call. Kept at the historical
- * DeleteObjects limit even though the batch is now a fan-out of single-key
- * DELETEs (see DELETE BATCH below): it caps how many concurrent requests one
- * call can inject into the CRT connection pool. */
-#define S3_MAX_KEYS_PER_DELETE  1000
-
 #define S3_MAX_ENDPOINT_LEN     256
 #define S3_MAX_REGION_LEN       64
 #define S3_MAX_BUCKET_LEN       128
@@ -79,42 +73,23 @@ struct s3_client {
 
 	uint32_t                         refcnt;
 
-	/* Counters are bumped from CRT IO threads, several concurrently (a
-	 * 1000-key s3_delete_batch() fan-out completes on many threads at
-	 * once), and ->inflight is additionally bumped by the submitting
-	 * thread. Plain ++ loses counts, so keep them atomic and assemble a
-	 * snapshot in s3_client_get_stats(). */
-	struct {
-		struct aws_atomic_var    get_ops;
-		struct aws_atomic_var    put_ops;
-		struct aws_atomic_var    head_ops;
-		struct aws_atomic_var    delete_ops;
-		struct aws_atomic_var    copy_ops;
-		struct aws_atomic_var    bytes_read;
-		struct aws_atomic_var    bytes_written;
-		struct aws_atomic_var    errors_4xx;
-		struct aws_atomic_var    errors_5xx;
-		struct aws_atomic_var    retries;
-		struct aws_atomic_var    inflight;
-	} stats;
+	/* Bumped from CRT IO threads and from the submitting thread. Plain ++
+	 * loses counts, so keep it atomic. */
+	struct aws_atomic_var            inflight;
 };
 
 /* Shorthand for the counter updates below. */
 #define S3_STAT_INC(client, field)         \
-	aws_atomic_fetch_add(&(client)->stats.field, 1)
+	aws_atomic_fetch_add(&(client)->field, 1)
 #define S3_STAT_DEC(client, field)         \
-	aws_atomic_fetch_sub(&(client)->stats.field, 1)
-#define S3_STAT_ADD(client, field, n)      \
-	aws_atomic_fetch_add(&(client)->stats.field, (size_t)(n))
+	aws_atomic_fetch_sub(&(client)->field, 1)
 #define S3_STAT_GET(client, field)         \
-	aws_atomic_load_int(&(client)->stats.field)
+	aws_atomic_load_int(&(client)->field)
 
 /* Per-request context. Allocated at submit, freed in the finish callback.
  *
  * IMPORTANT: nothing here may point into caller-owned memory that could be
  * freed before the callback runs. Payloads are always copied into ->buf. */
-struct s3_delete_batch_ctx;
-
 struct s3_request {
 	struct s3_client               *client;
 
@@ -167,10 +142,6 @@ struct s3_request {
 	/* COPY: source location, kept for error messages */
 	char                             src_bucket[S3_MAX_BUCKET_LEN];
 	char                             src_key[S3_MAX_KEY_LEN];
-
-	/* DELETE_BATCH fan-out: the shared batch this single-key DELETE belongs
-	 * to (NULL for standalone deletes). See struct s3_delete_batch_ctx. */
-	struct s3_delete_batch_ctx      *batch;
 
 	union {
 		s3_op_cb   op_cb;
@@ -337,17 +308,6 @@ crt_error_to_errno(int aws_error, int http_status)
 
 	default:
 		return -EIO;
-	}
-}
-
-/* Update per-client error counters based on HTTP status */
-static void
-s3_stats_record_error(struct s3_client *client, int http_status)
-{
-	if (http_status >= 400 && http_status < 500) {
-		S3_STAT_INC(client, errors_4xx);
-	} else if (http_status >= 500) {
-		S3_STAT_INC(client, errors_5xx);
 	}
 }
 
@@ -856,18 +816,7 @@ s3_client_get_or_create(const struct s3_target *target, struct s3_client **out)
 	client->use_path_style = target->use_path_style;
 	client->verify_tls = target->verify_tls;
 	client->refcnt = 1;
-	memset(&client->stats, 0, sizeof(client->stats));
-	aws_atomic_init_int(&client->stats.get_ops, 0);
-	aws_atomic_init_int(&client->stats.put_ops, 0);
-	aws_atomic_init_int(&client->stats.head_ops, 0);
-	aws_atomic_init_int(&client->stats.delete_ops, 0);
-	aws_atomic_init_int(&client->stats.copy_ops, 0);
-	aws_atomic_init_int(&client->stats.bytes_read, 0);
-	aws_atomic_init_int(&client->stats.bytes_written, 0);
-	aws_atomic_init_int(&client->stats.errors_4xx, 0);
-	aws_atomic_init_int(&client->stats.errors_5xx, 0);
-	aws_atomic_init_int(&client->stats.retries, 0);
-	aws_atomic_init_int(&client->stats.inflight, 0);
+	aws_atomic_init_int(&client->inflight, 0);
 
 	/* Build credentials provider based on auth mode  */
 	struct aws_credentials_provider *creds_provider = NULL;
@@ -1055,7 +1004,7 @@ s3_client_get_or_create(const struct s3_target *target, struct s3_client **out)
  * returned.
  *
  * That is the only point at which freeing the client is safe. Finish callbacks
- * dereference req->client to record statistics -- get_ops, inflight, bytes_read --
+ * dereference req->client to drop inflight --
  * and aws_s3_client_release() is asynchronous, so freeing right after it returns
  * leaves those callbacks writing into freed memory. */
 static void
@@ -1240,14 +1189,11 @@ s3_get_finished(struct aws_s3_meta_request *meta_request,
 			    result->response_status);
 		req->status = crt_error_to_errno(result->error_code,
 						result->response_status);
-		s3_stats_record_error(req->client, result->response_status);
 		req->bytes_read = 0;
 	} else {
 		req->status = 0;
-		S3_STAT_ADD(req->client, bytes_read, req->bytes_read);
 	}
 
-	S3_STAT_INC(req->client, get_ops);
 	assert(S3_STAT_GET(req->client, inflight) > 0);
 	S3_STAT_DEC(req->client, inflight);
 
@@ -1368,8 +1314,6 @@ s3_put_finished(struct aws_s3_meta_request *meta_request,
 	if (result->error_code != AWS_ERROR_SUCCESS) {
 		req->status = crt_error_to_errno(result->error_code,
 						result->response_status);
-		s3_stats_record_error(req->client, result->response_status);
-
 		/* 412 Precondition Failed / 409 Conflict on If-None-Match: *
 		 * means the object already exists. Expected during concurrent
 		 * create  — log at a lower level. */
@@ -1385,13 +1329,8 @@ s3_put_finished(struct aws_s3_meta_request *meta_request,
 		}
 	} else {
 		req->status = 0;
-		/* bytes_read holds the total payload size, captured at submit
-		 * time — do NOT walk req->iov here, the caller may have already
-		 * freed it. */
-		S3_STAT_ADD(req->client, bytes_written, req->bytes_read);
 	}
 
-	S3_STAT_INC(req->client, put_ops);
 	assert(S3_STAT_GET(req->client, inflight) > 0);
 	S3_STAT_DEC(req->client, inflight);
 
@@ -1601,8 +1540,6 @@ s3_head_finished(struct aws_s3_meta_request *meta_request,
 	if (result->error_code != AWS_ERROR_SUCCESS) {
 		req->status = crt_error_to_errno(result->error_code,
 						result->response_status);
-		s3_stats_record_error(req->client, result->response_status);
-
 		/* 404 is a normal, expected answer for "does this key exist?" —
 		 * used by the create/attach branch decision . */
 		if (req->status != -ENOENT) {
@@ -1615,7 +1552,6 @@ s3_head_finished(struct aws_s3_meta_request *meta_request,
 		req->status = 0;
 	}
 
-	S3_STAT_INC(req->client, head_ops);
 	assert(S3_STAT_GET(req->client, inflight) > 0);
 	S3_STAT_DEC(req->client, inflight);
 
@@ -1705,9 +1641,6 @@ s3_head(struct s3_client *client, const char *key,
  * DELETE OBJECT
  * ========================================================================== */
 
-/* Forward decl: batch fan-out completion accounting (see DELETE BATCH). */
-static void s3_delete_batch_one_done(struct s3_delete_batch_ctx *batch, int status);
-
 static void
 s3_delete_finished(struct aws_s3_meta_request *meta_request,
 		   const struct aws_s3_meta_request_result *result,
@@ -1725,39 +1658,23 @@ s3_delete_finished(struct aws_s3_meta_request *meta_request,
 			    result->response_status);
 		req->status = crt_error_to_errno(result->error_code,
 						result->response_status);
-		s3_stats_record_error(req->client, result->response_status);
 	} else {
 		req->status = 0;
 	}
 
-	S3_STAT_INC(req->client, delete_ops);
 	assert(S3_STAT_GET(req->client, inflight) > 0);
 	S3_STAT_DEC(req->client, inflight);
 
 	/* Release CRT state before anything may hop threads. */
 	aws_s3_meta_request_release(meta_request);
 
-	if (req->batch) {
-		/* Batch fan-out: the user callback belongs to the batch, not to
-		 * this individual key, and only the last child fires it. The
-		 * bounce to the submitting thread happens inside the batch (see
-		 * s3_delete_batch_one_done), so this request is done for good. */
-		struct s3_delete_batch_ctx *batch = req->batch;
-		int status = req->status;
-
-		aws_mem_release(req->allocator, req);
-		s3_delete_batch_one_done(batch, status);
-		return;
-	}
-
 	s3_request_complete(req);
 }
 
 /* Submit a single-key DeleteObject.
  *
- * Shared by s3_delete() and the s3_delete_batch() fan-out. On success the
- * request is owned by CRT and must not be touched again; on failure the caller
- * still owns `req` and is responsible for releasing it.
+ * On success the request is owned by CRT and must not be touched again; on
+ * failure the caller still owns `req` and is responsible for releasing it.
  */
 static int
 s3_delete_submit_one(struct s3_client *client, struct s3_request *req)
@@ -1846,247 +1763,6 @@ s3_delete(struct s3_client *client, const char *key,
 }
 
 /* ==========================================================================
- * DELETE BATCH (GC)
- *
- * Implemented as a fan-out of N single-key DeleteObject requests rather than
- * one DeleteObjects (POST /?delete) call. Rationale:
- *
- *   - DeleteObjects returns HTTP 200 even when individual keys failed; the
- *     per-key <Error> entries live in the XML response body. Getting real
- *     per-key status therefore requires accumulating and parsing that XML,
- *     which CRT's AWS_S3_META_REQUEST_TYPE_DEFAULT does not hand us for
- *     successful responses (same limitation that blocks s3_list_objects).
- *     Until that is solved, a 200 tells us almost nothing.
- *   - DeleteObjects also mandates a Content-MD5 header that SigV4 payload
- *     signing does not substitute for — verified against COS, which rejects
- *     the request with 400 otherwise.
- *   - Single-key DELETE gives an unambiguous per-key HTTP status, is
- *     idempotent (404 counts as success), and CRT already pipelines the
- *     requests over the shared connection pool.
- *
- * Cost: N round trips instead of 1. For GC that is acceptable — it runs in
- * the background and CRT issues the deletes concurrently. If a backend-tuned
- * fast path is ever needed, add DeleteObjects back behind a capability flag
- * *and* parse the response body; do not reintroduce it as a blind 200 check.
- * ========================================================================== */
-
-/* Shared context for one s3_delete_batch() call.
- *
- * Lifetime: created before any child request is submitted, destroyed by
- * whichever child completes last. `remaining` is the ref count.
- *
- * Threading: children complete on arbitrary CRT IO threads, concurrently, so
- * `remaining` and `first_error` must be atomic. Everything else is written
- * once before submission and only read afterwards.
- */
-struct s3_delete_batch_ctx {
-	struct s3_client        *client;
-
-	/* Held directly for the same reason struct s3_request does: the batch is
-	 * destroyed by whichever child completes last, and that can be one
-	 * spdk_thread_send_msg() hop after the client was freed. */
-	struct aws_allocator    *allocator;
-
-	s3_op_cb                 cb;
-	void                    *cb_arg;
-
-	uint32_t                 total;
-
-	/* Outstanding children. Hits zero exactly once → fire user callback. */
-	struct aws_atomic_var    remaining;
-
-	/* First non-zero status reported by any child, as a negated errno.
-	 * Stored negated (i.e. positive) because aws_atomic_var holds size_t;
-	 * 0 means "no error yet". */
-	struct aws_atomic_var    first_error;
-
-	/* Count of failed keys, for the summary log line. */
-	struct aws_atomic_var    failed;
-
-	/* Aggregate status, settled by the last child before the callback is
-	 * delivered. Only read after `remaining` hits zero, so plain int. */
-	int                      final_status;
-
-	struct spdk_thread      *owner_thread;
-};
-
-static void
-s3_delete_batch_ctx_destroy(struct s3_delete_batch_ctx *batch)
-{
-	aws_mem_release(batch->allocator, batch);
-}
-
-/* Runs on batch->owner_thread. */
-static void
-s3_delete_batch_complete_on_owner(void *ctx)
-{
-	struct s3_delete_batch_ctx *batch = ctx;
-	s3_op_cb cb     = batch->cb;
-	void    *cb_arg = batch->cb_arg;
-	int      status = batch->final_status;
-
-	s3_delete_batch_ctx_destroy(batch);
-
-	if (cb) {
-		cb(cb_arg, status);
-	}
-}
-
-/* Called once per child completion, from a CRT IO thread. */
-static void
-s3_delete_batch_one_done(struct s3_delete_batch_ctx *batch, int status)
-{
-	if (status != 0) {
-		size_t expected = 0;
-
-		aws_atomic_fetch_add(&batch->failed, 1);
-		/* Keep the first error only; later ones are usually noise from
-		 * the same root cause. */
-		aws_atomic_compare_exchange_int(&batch->first_error, &expected,
-						(size_t)(-status));
-	}
-
-	/* fetch_sub returns the value *before* the subtraction, so the child
-	 * that sees 1 is the last one. */
-	if (aws_atomic_fetch_sub(&batch->remaining, 1) != 1) {
-		return;
-	}
-
-	/* Last child: settle up and fire the user callback exactly once. */
-	size_t err    = aws_atomic_load_int(&batch->first_error);
-	size_t failed = aws_atomic_load_int(&batch->failed);
-
-	batch->final_status = err ? -(int)err : 0;
-
-	if (failed) {
-		SPDK_ERRLOG("Delete batch: %zu of %u keys failed, "
-			    "first error=%d\n", failed, batch->total,
-			    batch->final_status);
-	}
-
-	/* Bounce to the submitting thread, same contract as s3_request_complete().
-	 * Note the batch must stay alive across the hop, so it is freed on the
-	 * far side rather than here. */
-	if (batch->owner_thread == NULL ||
-	    batch->owner_thread == spdk_get_thread()) {
-		s3_delete_batch_complete_on_owner(batch);
-		return;
-	}
-
-	spdk_thread_send_msg(batch->owner_thread,
-			     s3_delete_batch_complete_on_owner, batch);
-}
-
-int
-s3_delete_batch(struct s3_client *client, const char **keys, uint32_t count,
-		s3_op_cb cb, void *cb_arg)
-{
-	struct s3_delete_batch_ctx *batch;
-	uint32_t i;
-
-	if (!client || !keys || count == 0 || !cb) {
-		return -EINVAL;
-	}
-
-	if (count > S3_MAX_KEYS_PER_DELETE) {
-		SPDK_ERRLOG("Delete batch: %u keys exceeds max %u\n",
-			    count, S3_MAX_KEYS_PER_DELETE);
-		return -EINVAL;
-	}
-
-	/* Validate every key up front. Submitting a partial batch and then
-	 * failing would leave the caller unable to tell what happened: it gets
-	 * an error return *and* callbacks for the keys already in flight. */
-	for (i = 0; i < count; i++) {
-		size_t len;
-
-		if (!keys[i]) {
-			SPDK_ERRLOG("Delete batch: keys[%u] is NULL\n", i);
-			return -EINVAL;
-		}
-		len = strlen(keys[i]);
-		if (len == 0) {
-			SPDK_ERRLOG("Delete batch: keys[%u] is empty\n", i);
-			return -EINVAL;
-		}
-		if (len >= S3_MAX_KEY_LEN) {
-			SPDK_ERRLOG("Delete batch: keys[%u] too long: %zu bytes "
-				    "(max %d)\n", i, len, S3_MAX_KEY_LEN - 1);
-			return -ENAMETOOLONG;
-		}
-	}
-
-	batch = aws_mem_calloc(client->app_ctx->allocator, 1, sizeof(*batch));
-	if (!batch) {
-		return -ENOMEM;
-	}
-
-	batch->client       = client;
-	batch->allocator    = client->app_ctx->allocator;
-	batch->cb           = cb;
-	batch->cb_arg       = cb_arg;
-	batch->total        = count;
-	batch->owner_thread = spdk_get_thread();
-
-	/* Start at count + 1: the extra reference is held by this function so
-	 * the batch cannot be completed-and-freed by a fast child while we are
-	 * still submitting the rest. Released at the end of the submit loop.
-	 *
-	 * NOTE: we deliberately do NOT stash `keys` — the caller may free the
-	 * array as soon as we return. Each key is copied into its own request. */
-	aws_atomic_init_int(&batch->remaining, (size_t)count + 1);
-	aws_atomic_init_int(&batch->first_error, 0);
-	aws_atomic_init_int(&batch->failed, 0);
-
-	for (i = 0; i < count; i++) {
-		struct s3_request *req;
-		int rc;
-
-		req = aws_mem_calloc(client->app_ctx->allocator, 1, sizeof(*req));
-		if (!req) {
-			rc = -ENOMEM;
-			goto submit_failed;
-		}
-
-		req->client       = client;
-		req->allocator = client->app_ctx->allocator;
-		req->batch        = batch;
-		req->owner_thread = batch->owner_thread;
-		/* cb/cb_arg stay NULL: completion is reported to the batch,
-		 * which owns the user callback. */
-
-		rc = s3_request_set_key(req, keys[i]);
-		if (rc == 0) {
-			rc = s3_delete_submit_one(client, req);
-		}
-
-		if (rc != 0) {
-			aws_mem_release(client->app_ctx->allocator, req);
-			goto submit_failed;
-		}
-		/* req is owned by CRT now; its completion will decrement. */
-		continue;
-
-submit_failed:
-		/* This child never reached CRT, so nothing will ever decrement
-		 * for it. Account for it here — and for every key we have not
-		 * even attempted yet — so the count still converges. */
-		SPDK_ERRLOG("Delete batch: failed to submit key %u/%u (%s): %d\n",
-			    i + 1, count, keys[i], rc);
-		for (uint32_t j = i; j < count; j++) {
-			s3_delete_batch_one_done(batch, rc);
-		}
-		break;
-	}
-
-	/* Drop our submit-time reference. If every child already finished, this
-	 * is what fires the user callback — possibly on this very thread. */
-	s3_delete_batch_one_done(batch, 0);
-
-	return 0;
-}
-
-/* ==========================================================================
  * COPY OBJECT (server-side)
  * ========================================================================== */
 
@@ -2148,7 +1824,6 @@ s3_copy_finished(struct aws_s3_meta_request *meta_request,
 			    result->response_status);
 		req->status = crt_error_to_errno(result->error_code,
 						result->response_status);
-		s3_stats_record_error(req->client, result->response_status);
 	} else {
 		/* HTTP 200 is not success: S3 can park an <Error> in the body
 		 * while the copy runs. CRT does not parse that for DEFAULT. */
@@ -2159,7 +1834,6 @@ s3_copy_finished(struct aws_s3_meta_request *meta_request,
 				      req->src_bucket, req->src_key, req->key_buf);
 	}
 
-	S3_STAT_INC(req->client, copy_ops);
 	assert(S3_STAT_GET(req->client, inflight) > 0);
 	S3_STAT_DEC(req->client, inflight);
 
@@ -2282,74 +1956,4 @@ s3_copy_object(struct s3_client *client,
 	return 0;
 }
 
-/* ==========================================================================
- * LIST OBJECTS (GC scan, export manifest)
- *
- * NOT YET IMPLEMENTED — deliberately returns -ENOTSUP rather than silently
- * succeeding without invoking entry_cb.
- *
- * Two problems must be solved together:
- *
- *  1. Response body access. For AWS_S3_META_REQUEST_TYPE_DEFAULT, CRT delivers
- *     the success-path body through body_callback, but only in chunks with no
- *     framing guarantees. ListObjectsV2 XML must therefore be accumulated
- *     across callbacks and parsed once complete (aws_xml_parser from
- *     aws-c-common, or CRT's own s3_list_objects.c helper if the linked
- *     version exposes aws_s3_paginator).
- *
- *  2. Query parameter encoding. prefix and continuation-token both require
- *     RFC 3986 percent-encoding. Continuation tokens are base64 and routinely
- *     contain '+', '/' and '=' — pasting them raw into the path produces
- *     wrong results that look like premature end-of-listing, which is a
- *     particularly nasty failure mode for GC (it would under-collect
- *     silently). Use aws_byte_buf_append_encoding_uri_param().
- *
- * Callers (s3_gc.c, s3_export.c) are not written yet, so failing loudly here
- * is strictly better than returning 0 and never calling entry_cb.
- * ========================================================================== */
 
-int
-s3_list_objects(struct s3_client *client, const char *prefix,
-		const char *continuation_token,
-		void (*entry_cb)(void *ctx, const char *key, uint64_t size),
-		void *entry_ctx, s3_op_cb cb, void *cb_arg)
-{
-	if (!client || !cb) {
-		return -EINVAL;
-	}
-
-	SPDK_ERRLOG("s3_list_objects() not implemented yet "
-		    "(prefix=%s) — needs XML accumulation + URI encoding, "
-		    "see the comment above\n",
-		    prefix ? prefix : "(null)");
-
-	return -ENOTSUP;
-}
-
-/* ==========================================================================
- * Stats 
- * ========================================================================== */
-
-void
-s3_client_get_stats(struct s3_client *client, struct s3_client_stats *out)
-{
-	if (!client || !out) {
-		return;
-	}
-
-	/* Snapshot, not an atomic view of the whole struct: the counters are
-	 * read one at a time, so a caller can observe e.g. get_ops already
-	 * bumped while bytes_read is not. Fine for metrics; do not build
-	 * invariants on cross-field consistency. */
-	out->get_ops       = S3_STAT_GET(client, get_ops);
-	out->put_ops       = S3_STAT_GET(client, put_ops);
-	out->head_ops      = S3_STAT_GET(client, head_ops);
-	out->delete_ops    = S3_STAT_GET(client, delete_ops);
-	out->copy_ops      = S3_STAT_GET(client, copy_ops);
-	out->bytes_read    = S3_STAT_GET(client, bytes_read);
-	out->bytes_written = S3_STAT_GET(client, bytes_written);
-	out->errors_4xx    = S3_STAT_GET(client, errors_4xx);
-	out->errors_5xx    = S3_STAT_GET(client, errors_5xx);
-	out->retries       = S3_STAT_GET(client, retries);
-	out->inflight      = S3_STAT_GET(client, inflight);
-}

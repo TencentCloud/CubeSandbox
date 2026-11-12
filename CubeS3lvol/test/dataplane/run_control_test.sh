@@ -136,7 +136,7 @@ has_key() {
 rpc() { python3 "${RPC}" "$@"; }
 
 registry_names() {
-	python3 - "${ACTIVE_FILE}" <<'PY'
+	python3 - "${1:-${ACTIVE_FILE}}" <<'PY'
 import json, sys
 try:
     print(" ".join(sorted(json.load(open(sys.argv[1])))))
@@ -175,6 +175,15 @@ for s in json.load(sys.stdin):
 else:
     print(-1)
 ' "$(rcow_nqn "$1")" "$2"
+}
+
+lvol_present() {
+	rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+name = sys.argv[1]
+print(sum(1 for s in json.load(sys.stdin)
+          for l in s.get("lvols", []) if l.get("name") == name))
+' "$1"
 }
 
 # --------------------------------------------------------------------------
@@ -756,6 +765,132 @@ else
 	fail "the restart did not restore the layout"
 	tail -20 /tmp/rcow_ctl_start4.log | sed 's/^/       /'
 fi
+
+# ==========================================================================
+echo ""
+echo "=== [9] lvol-open ENOMEM is retried and remains recoverable"
+
+rpc rcow_create_snapshot \
+	'{"lvol_name":"ctl-a","snapshot_name":"ctl-open-guard"}' >/dev/null ||
+	fail "could not create the degraded-delete snapshot"
+rpc rcow_create_clone \
+	'{"snapshot_name":"ctl-open-guard","clone_name":"ctl-open-extra"}' >/dev/null ||
+	fail "could not create the degraded-delete blocker"
+rpc rcow_delete_lvol '{"lvol_name":"ctl-open-guard"}' >/dev/null 2>&1
+
+"${SCRIPTS}/rcow_stop.sh" >/dev/null 2>&1
+export S3LVOL_TEST_OPEN_SETUP_ENOMEM=1
+if "${SCRIPTS}/rcow_start.sh" >/tmp/rcow_ctl_open_setup.log 2>&1; then
+	fail "open-scheduler allocation failure was reported as a successful start"
+else
+	pass "open-scheduler allocation failure aborted attach cleanly"
+fi
+unset S3LVOL_TEST_OPEN_SETUP_ENOMEM
+[ -z "$(rcow_target_instances)" ] &&
+	pass "failed scheduler setup unloaded the lvstore and stopped the target" ||
+	fail "failed scheduler setup left a target or loaded lvstore behind"
+if "${SCRIPTS}/rcow_start.sh" >/tmp/rcow_ctl_open_setup_recovered.log 2>&1; then
+	pass "a clean attach succeeded after scheduler setup failure"
+else
+	fail "attach did not recover after scheduler setup failure"
+	tail -25 /tmp/rcow_ctl_open_setup_recovered.log | sed 's/^/       /'
+fi
+
+"${SCRIPTS}/rcow_stop.sh" >/dev/null 2>&1
+export S3LVOL_TEST_OPEN_FAIL_NAME=ctl-b
+export S3LVOL_TEST_OPEN_FAIL_ATTEMPTS=2
+if "${SCRIPTS}/rcow_start.sh" >/tmp/rcow_ctl_open_transient.log 2>&1; then
+	pass "a transient NULL/-ENOMEM open callback was retried to success"
+else
+	fail "transient open ENOMEM prevented recovery"
+	tail -25 /tmp/rcow_ctl_open_transient.log | sed 's/^/       /'
+fi
+unset S3LVOL_TEST_OPEN_FAIL_NAME S3LVOL_TEST_OPEN_FAIL_ATTEMPTS
+
+OPEN_FAILURES="$(rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+name = sys.argv[1]
+stores = [s for s in json.load(sys.stdin) if s.get("lvs_name") == name]
+print(len(stores[0].get("lvol_open_failures", [])) if len(stores) == 1 else -1)
+' "${RCOW_LVS_NAME}")"
+[ "${OPEN_FAILURES}" = "0" ] &&
+	pass "the successful retry left a complete, empty failure inventory" ||
+	fail "the transient retry left ${OPEN_FAILURES} terminal open failure(s)"
+
+"${SCRIPTS}/rcow_stop.sh" >/dev/null 2>&1
+export S3LVOL_TEST_OPEN_FAIL_NAME=ctl-b
+export S3LVOL_TEST_OPEN_FAIL_ATTEMPTS=32
+if "${SCRIPTS}/rcow_start.sh" >/tmp/rcow_ctl_open_persistent.log 2>&1; then
+	fail "persistent open ENOMEM was reported as a successful start"
+else
+	pass "persistent open ENOMEM made registry replay fail"
+fi
+unset S3LVOL_TEST_OPEN_FAIL_NAME S3LVOL_TEST_OPEN_FAIL_ATTEMPTS
+
+if rpc rcow_get_lvstores 2>/dev/null | python3 -c '
+import json, sys
+name = sys.argv[1]
+stores = [s for s in json.load(sys.stdin) if s.get("lvs_name") == name]
+assert len(stores) == 1
+s = stores[0]
+assert s.get("lvol_open_failures_complete") is True
+f = s.get("lvol_open_failures", [])
+assert len(f) == 1
+assert f[0].get("name") == "ctl-b"
+assert f[0].get("errno") == -12
+assert f[0].get("attempts") == 32
+assert "memory" in f[0].get("error", "").lower()
+' "${RCOW_LVS_NAME}"; then
+	pass "the failure inventory names ctl-b, ENOMEM and all 32 attempts"
+else
+	fail "the persistent open failure inventory is incomplete"
+fi
+
+rpc rcow_delete_lvol '{"lvol_name":"ctl-open-extra"}' >/dev/null 2>&1 ||
+	fail "could not remove the degraded-delete blocker"
+DEGRADED_WARN=0
+for _ in $(seq 75); do
+	if grep -q "pending deletes are paused until a clean attach" "${RCOW_LOG}"; then
+		DEGRADED_WARN=1
+		break
+	fi
+	sleep 1
+done
+if [ "${DEGRADED_WARN}" -eq 1 ] &&
+   [ "$(lvol_present ctl-open-guard)" = "1" ] &&
+   rpc rcow_get_pending_deletes 2>/dev/null | python3 -c '
+import json, sys
+assert any(e.get("lvol_name") == "ctl-open-guard"
+           for e in json.load(sys.stdin))
+'; then
+	pass "pending delete stayed queued while the lvstore topology was degraded"
+else
+	fail "degraded lvstore did not pause its pending delete"
+fi
+
+grep -q "'ctl-b' could not be opened by the target: Cannot allocate memory" \
+	/tmp/rcow_ctl_open_persistent.log &&
+	pass "registry replay printed the per-volume open error" ||
+	fail "registry replay did not print ctl-b's open error"
+
+[ "$(registry_names "${REPLAY_FILE}")" = "ctl-a ctl-b ctl-snap" ] &&
+	pass "the durable replay plan retained the complete restart transaction" ||
+	fail "the replay plan retained '$(registry_names "${REPLAY_FILE}")'"
+
+"${SCRIPTS}/rcow_stop.sh" >/dev/null 2>&1
+if "${SCRIPTS}/rcow_start.sh" >/tmp/rcow_ctl_open_recovered.log 2>&1; then
+	pass "the next clean attach recovered every volume"
+else
+	fail "the next clean attach did not recover"
+	tail -25 /tmp/rcow_ctl_open_recovered.log | sed 's/^/       /'
+fi
+python3 "${RPC}" --retry-pending >/dev/null 2>&1 || true
+[ "$(lvol_present ctl-open-guard)" = "0" ] &&
+	pass "the queued delete completed after a clean attach restored topology" ||
+	fail "the queued delete did not complete after topology recovery"
+[ ! -e "${REPLAY_FILE}" ] &&
+	pass "the replay plan was cleared only after complete recovery" ||
+	fail "${REPLAY_FILE} remained after complete recovery"
 
 # ==========================================================================
 echo ""

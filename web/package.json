@@ -8,6 +8,7 @@
     "build": "tsc -b --noEmit && vite build",
     "preview": "vite preview",
     "lint": "tsc -b --noEmit",
+    "lint:locales": "node scripts/check-locales.mjs",
     "fmt": "prettier --write .",
     "api:export": "cargo run --manifest-path ../CubeAPI/Cargo.toml -- --export-openapi ../openapi.yml",
     "api:generate": "openapi-typescript ../openapi.yml -o src/api/generated/schema.ts",

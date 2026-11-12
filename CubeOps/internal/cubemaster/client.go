@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/google/uuid"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -26,6 +27,66 @@ type CMError struct {
 
 func (e *CMError) Error() string {
 	return fmt.Sprintf("cubemaster error %d: %s", e.RetCode, e.RetMsg)
+}
+
+// HTTPError carries a CubeMaster failure that arrived as an HTTP status rather
+// than as a ret_code in a 200 body. Both shapes occur, and a caller that knows
+// only about CMError mis-handles this one silently: errors.As(&CMError) fails,
+// so the response arrives as an opaque error and collapses into a generic 502
+// regardless of what it said. Keeping it typed lets a caller ask the same
+// question of either shape.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("cubemaster returned %d: %s", e.Status, e.Body)
+}
+
+// IsNotFound reports a not-found that CubeMaster stated in its response
+// envelope, whatever status carried it — the status and the ret_code are chosen
+// independently on that side (meta's writeErr derives 130404 from
+// gorm.ErrRecordNotFound while the status comes from the call site), so keying
+// on one channel alone would make the answer depend on which one was used.
+//
+// A bare 404 with a body that is not one of CubeMaster's envelopes deliberately
+// does NOT count. CubeMaster states resource-not-found in the envelope; it does
+// not answer a missing resource with a bare HTTP 404. So an opaque 404 is
+// evidence about the *route* — a wrong base URL, a proxy in the path, gin's own
+// "404 page not found" — and treating it as a missing resource sends the caller
+// after the wrong fix while the real problem is that we never reached
+// CubeMaster at all.
+//
+// The same reasoning bounds the other end, and that boundary is deliberate: a
+// 5xx never counts, even when it carries a 130404 envelope — the one
+// combination of status and ret_code the paragraph above does not cover. Such a
+// response reaches callers as the opaque failure it always was, CubeMaster's
+// text included.
+func (e *HTTPError) IsNotFound() bool {
+	// A 5xx is the server saying it failed, not that the thing is missing. Even
+	// when such a body carries a not-found envelope, the caller cannot fix it by
+	// supplying something different, so classifying it as not-found turns a
+	// transient server failure into client-correctable advice.
+	if e.Status >= http.StatusInternalServerError {
+		return false
+	}
+	cmErr := CMError{RetCode: retCodeFromBody([]byte(e.Body))}
+	return cmErr.IsNotFound()
+}
+
+// retCodeFromBody extracts CubeMaster's business ret_code from a response body,
+// returning 0 when the body is not one of its envelopes.
+func retCodeFromBody(data []byte) int {
+	var envelope struct {
+		Ret struct {
+			RetCode int `json:"ret_code"`
+		} `json:"ret"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return 0
+	}
+	return envelope.Ret.RetCode
 }
 
 // IsNotFound returns true for CubeMaster "not found" ret codes.
@@ -129,19 +190,24 @@ func (c *Client) CreateSnapshot(ctx context.Context, body interface{}) (json.Raw
 	return c.post(ctx, "/cube/snapshot", body)
 }
 
+// GetSnapshot fetches a single snapshot via CubeMaster.
+func (c *Client) GetSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
+	return c.get(ctx, "/cube/snapshot/"+url.PathEscape(snapshotID))
+}
+
 // GetTemplate fetches template info from CubeMaster.
 func (c *Client) GetTemplate(ctx context.Context, templateID string) (json.RawMessage, error) {
-	return c.get(ctx, fmt.Sprintf("/cube/template/%s", templateID))
+	return c.get(ctx, "/cube/template/"+url.PathEscape(templateID))
 }
 
 // DeleteSnapshot deletes a snapshot via CubeMaster.
 func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
-	return c.deleteWithBody(ctx, fmt.Sprintf("/cube/snapshot/%s", snapshotID), map[string]interface{}{})
+	return c.deleteWithBody(ctx, "/cube/snapshot/"+url.PathEscape(snapshotID), map[string]interface{}{})
 }
 
 // RollbackSandbox rolls back a sandbox to a snapshot via CubeMaster.
 func (c *Client) RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error) {
-	return c.post(ctx, fmt.Sprintf("/cube/sandbox/%s/rollback", sandboxID), body)
+	return c.post(ctx, "/cube/sandbox/"+url.PathEscape(sandboxID)+"/rollback", body)
 }
 
 // UpdateSandbox sends a pause/resume action to CubeMaster.
@@ -219,12 +285,12 @@ func (c *Client) DeleteTemplate(ctx context.Context, body interface{}) (json.Raw
 
 // GetTemplateBuildStatus fetches the build status for a template build job.
 func (c *Client) GetTemplateBuildStatus(ctx context.Context, buildID string) (json.RawMessage, error) {
-	return c.get(ctx, fmt.Sprintf("/cube/template/build/%s/status", buildID))
+	return c.get(ctx, "/cube/template/build/"+url.PathEscape(buildID)+"/status")
 }
 
 // StartTemplateBuild starts (or retries) a template build job.
 func (c *Client) StartTemplateBuild(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error) {
-	return c.post(ctx, fmt.Sprintf("/cube/template/build/%s", buildID), body)
+	return c.post(ctx, "/cube/template/build/"+url.PathEscape(buildID), body)
 }
 
 // GetTemplateCompat fetches the template compatibility matrix.
@@ -396,7 +462,9 @@ func readResponse(resp *http.Response) (json.RawMessage, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("cubemaster returned %d: %s", resp.StatusCode, string(data))
+		// Typed; the message is byte-identical to the previous fmt.Errorf so
+		// logs and any operator greps keep working.
+		return nil, &HTTPError{Status: resp.StatusCode, Body: string(data)}
 	}
 	// Check CubeMaster business error code. CubeMaster uses ret_code=200 for
 	// success (and sometimes 0). Any other value is a failure, even when HTTP

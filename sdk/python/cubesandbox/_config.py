@@ -23,6 +23,11 @@ class Config:
     template_id: str | None = field(
         default_factory=lambda: os.environ.get("CUBE_TEMPLATE_ID")
     )
+    #: Template (ID or alias) used when ``Sandbox.create(mcp=...)`` is called
+    #: without an explicit template. Mirrors E2B's ``mcp-gateway`` default.
+    mcp_template_id: str = field(
+        default_factory=lambda: os.environ.get("CUBE_MCP_TEMPLATE_ID", "mcp-gateway")
+    )
     proxy_node_ip: str | None = field(
         default_factory=lambda: os.environ.get("CUBE_PROXY_NODE_IP")
     )
@@ -33,6 +38,11 @@ class Config:
         default_factory=lambda: os.environ.get("CUBE_SANDBOX_DOMAIN", "cube.app")
     )
     timeout: int = 300
+    #: Per-call HTTP timeout (s) for control-plane requests. Fast routes pass
+    #: this straight; the 7 long routes (pause/resume/connect, snapshot
+    #: create/rollback, template+snapshot delete) floor it via
+    #: ``max(request_timeout, BUDGET)`` so lowering it fail-fasts only the 16
+    #: fast routes (long routes stay at their CubeAPI budgets 160 s/280 s).
     request_timeout: float = 30.0
 
     def __post_init__(self) -> None:
@@ -69,10 +79,23 @@ class Config:
         return (
             f"Config(api_url={self.api_url!r}, api_key={masked!r}, "
             f"template_id={self.template_id!r}, "
+            f"mcp_template_id={self.mcp_template_id!r}, "
             f"proxy_node_ip={self.proxy_node_ip!r}, proxy_port={self.proxy_port!r}, "
             f"sandbox_domain={self.sandbox_domain!r}, timeout={self.timeout!r}, "
             f"request_timeout={self.request_timeout!r})"
         )
+
+
+# Long-route HTTP budgets mirroring CubeAPI's per-router timeouts
+# (CubeAPI/src/routes.rs): PAUSE_RESUME_ROUTE_TIMEOUT (120 s) for
+# pause/resume/connect, SNAPSHOT_LONG_ROUTE_TIMEOUT (240 s) for snapshot
+# create/rollback and template/snapshot deletes. Each is the route budget
+# plus headroom, and floors the per-call timeout via
+# max(cfg.request_timeout, BUDGET) so the default 30 s never preempts a
+# legitimately-slow op while a raised request_timeout wins. Mirrors
+# Sandbox.fork's FORK_REQUEST_TIMEOUT_S (1560 s + headroom).
+PAUSE_RESUME_REQUEST_TIMEOUT_S = 160.0
+SNAPSHOT_REQUEST_TIMEOUT_S = 280.0
 
 
 def _auth_headers(cfg: "Config") -> dict[str, str]:

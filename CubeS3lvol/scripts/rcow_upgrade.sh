@@ -26,15 +26,18 @@
 #    3. pin the rollback budget             the connect flags only reach a fresh
 #                                          connection, so the controllers an
 #                                          upgrade inherits are written to here
-#    4. rcow_flush_lvstore      push everything acknowledged to S3; online
-#    5. rcow_checkpoint_lvstore snapshot the chunk map and truncate the journal,
+#    4. rcow_flush_lvstore      optionally push acknowledged data to S3
+#    5. rcow_checkpoint_lvstore snapshot the chunk map and truncate the journal
 #                               which is what keeps the next attach short
 #    6. snapshot the layout     the file rcow_verify_active --expect compares to
-#    7. SIGKILL the target      a crash, not a shutdown: a crash is the one exit
+#    7. prepare hot upgrade     pause every subsystem, drain its namespace I/O,
+#                              and hold the flushers. Blobstore stays dirty so
+#                              the next attach recovers it.
+#    8. SIGKILL the target      a crash, not a shutdown: a crash is the one exit
 #                               guaranteed to leave the namespace in place and
 #                               drive the host into error recovery
-#    8. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
-#    9. drop the marker         the intent is spent once the target it names is
+#    9. clear four leftovers    pidfile, RPC socket, its .lock, cpu locks
+#   10. drop the marker         the intent is spent once the target it names is
 #                               gone; until then it stays, so a refused attempt
 #                               still reads as a hot one to the next stop
 #
@@ -111,23 +114,106 @@ still this process's"
 	exit 1
 }
 
+# A failure after the prepare succeeded must not reuse fail_live's reassurance:
+# the target was not signalled, but the data plane *is* quiesced, and if the
+# prepare RPC timed out client-side the server may well have completed it
+# (g_hot_prepare_done is deliberately sticky). Try the resume-all escape hatch,
+# then say what state the target is really in.
+fail_live_prepared()
+{
+	rcow_err "$*"
+	rcow_resume_subsystems
+	rcow_err "the target (pid ${TGT_PID}) is still running and was not \
+signalled; no residue was removed. The WAL is intact, but the prepare above may \
+have quiesced the data plane. Tried to resume every RCOW subsystem: if the log \
+does not confirm that, the target must be restarted."
+	exit 1
+}
+
+# Release a hot prepare that will not be followed by the kill. Best effort: the
+# caller is already on its way out, so a failure is reported rather than
+# escalated. A refusal now exits non-zero (the RPC answers with the envelope's
+# two keys), so a node still frozen is warned about instead of being reported as
+# resumed.
+rcow_resume_subsystems()
+{
+	local out
+
+	if out="$(rcow_rpc rcow_resume_subsystems '{}' 2>&1)"; then
+		rcow_log "resumed RCOW subsystems (undoing the prepare)"
+	else
+		rcow_warn "could not resume RCOW subsystems: ${out}"
+		rcow_warn "the target may still be quiesced; restart it to be sure"
+	fi
+}
+
+# EXIT hook for the window between a successful prepare and the kill.
+#
+# The named failure paths in this script all resume before they exit, but an
+# uncaught death -- OOM killer, `timeout`, systemd -- does not go through any of
+# them, and leaves the target running with its data plane quiesced and nobody to
+# undo it. PREPARED is set only once the prepare has actually succeeded, so this
+# is inert on every path before that.
+#
+# Deliberately not resetting the trap: an exit is an exit, and this runs once.
+rcow_undo_prepare_on_exit()
+{
+	local rc=$?
+
+	[ "${PREPARED:-0}" -eq 1 ] || return "${rc}"
+	rcow_warn "exiting with the target prepared but not killed (rc=${rc}); \
+resuming it so the data plane is not left frozen"
+	rcow_resume_subsystems
+	return "${rc}"
+}
+
 # rcow_flush_lvstore and rcow_checkpoint_lvstore answer -EBUSY while another of
 # their kind is running -- they do not queue. That is "come back later", not a
 # failure, so back off and retry within the stop budget. Anything else is fatal,
 # except an outcome the caller names in $4: that one is survivable by
 # construction, and retrying it would only spend the budget to arrive here again.
+#
+# HOT_DEADLINE is one window for every online step and the kill that follows,
+# the same way rcow_stop.sh spends RCOW_STOP_TIMEOUT. A fresh window per step
+# is five of those budgets end to end, which is longer than the unit's
+# TimeoutStopSec, and a stop systemd kills mid-prepare can leave the data plane
+# quiesced. KILL_RESERVE stays unused by the RPCs so the SIGKILL still has time
+# to be observed.
+HOT_DEADLINE=0
+KILL_RESERVE=10
+
+hot_remaining()
+{
+	local r=$((HOT_DEADLINE - SECONDS))
+
+	[ "${r}" -lt 0 ] && r=0
+	printf '%s' "${r}"
+}
+
+hot_rpc_remaining()
+{
+	local r=$((HOT_DEADLINE - KILL_RESERVE - SECONDS))
+
+	[ "${r}" -lt 0 ] && r=0
+	printf '%s' "${r}"
+}
+
 hot_online_op()
 {
 	local label="$1" method="$2" params="$3" tolerate="${4:-}"
-	local out delay=2 deadline=$((SECONDS + RCOW_STOP_TIMEOUT))
+	local out delay=2
 
 	while :; do
 		# rcow_rpc defaults to RCOW_RPC_TIMEOUT, which is longer than this
 		# script's whole budget, so a call that hangs would outlive the deadline
 		# the retry loop is watching. What is left of that budget is also this
 		# call's ceiling.
-		local left=$((deadline - SECONDS))
-		[ "${left}" -lt 1 ] && left=1
+		local left nap
+		left="$(hot_rpc_remaining)"
+		if [ "${left}" -lt 1 ]; then
+			rcow_err "${label}: the ${RCOW_STOP_TIMEOUT}s stop budget is spent"
+			return 1
+		fi
 		if out="$(RCOW_RPC_TIMEOUT="${left}" rcow_rpc "${method}" "${params}" 2>&1)"; then
 			rcow_log "${label}: done"
 			return 0
@@ -138,13 +224,16 @@ hot_online_op()
 		fi
 		case "${out}" in
 		*[Bb][Uu][Ss][Yy]*)
-			if [ "${SECONDS}" -ge "${deadline}" ]; then
-				rcow_err "${label}: still busy after \
-$((RCOW_STOP_TIMEOUT))s: ${out}"
+			left="$(hot_rpc_remaining)"
+			if [ "${left}" -lt 1 ]; then
+				rcow_err "${label}: still busy when the \
+${RCOW_STOP_TIMEOUT}s stop budget ran out: ${out}"
 				return 1
 			fi
-			rcow_warn "${label}: busy, retrying in ${delay}s"
-			sleep "${delay}"
+			nap="${delay}"
+			[ "${nap}" -gt "${left}" ] && nap="${left}"
+			rcow_warn "${label}: busy, retrying in ${nap}s"
+			sleep "${nap}"
 			delay=$((delay * 2))
 			[ "${delay}" -gt 30 ] && delay=30
 			;;
@@ -178,7 +267,8 @@ if [ -z "${INSTANCES}" ]; then
 lvstore are left as they are"
 	hot_clear_residue
 	# The intent is spent: the target it names is not there to be restarted.
-	rm -f "${RCOW_HOT_MARKER}"
+	rm -f "${RCOW_HOT_MARKER}" ||
+		rcow_die "cannot clear spent lifecycle marker ${RCOW_HOT_MARKER}"
 	exit 0
 fi
 
@@ -256,18 +346,28 @@ pause budget is the kernel's default, not ${RCOW_CTRL_LOSS_TMO}s" ;;
 esac
 
 # ==========================================================================
-rcow_step "flush: everything acknowledged into S3"
 LVS_JSON="$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")"
 
+# One budget from here through the kill. Each step used to start its own
+# RCOW_STOP_TIMEOUT window, so flush + checkpoint + snapshot + prepare + kill
+# could outlive TimeoutStopSec and be killed with the data plane still quiesced.
+HOT_DEADLINE=$((SECONDS + RCOW_STOP_TIMEOUT))
+
 # The flush is a lever on the length of the paused window, not a precondition for
-# the restart: what it cannot push is in the WAL and gets replayed. -ETIMEDOUT
-# (-110) is what a sandbox that keeps writing produces -- its overlay never goes
-# clean, so the drain runs out of time -- and refusing the upgrade there would
-# make every busy sandbox un-upgradable. The same reading is taken on the destroy
-# path, in s3_bs_dev_flusher_drained(). The checkpoint below still runs, so what
-# the pause pays for is a longer replay, and that is reported, not hidden.
-hot_online_op "flush" rcow_flush_lvstore "${LVS_JSON}" '"code": -110' ||
-	fail_live "could not flush the lvstore"
+# the restart: what it cannot push is in the WAL and gets replayed. Under a write
+# load the overlay never goes clean, so a bounded drain still waits out every
+# in-flight GET+PUT after the deadline and adds that to the pause. RCOW_HOT_FLUSH_MS=0
+# skips it: checkpoint, then SIGKILL. Idle lvstores can still pass a positive
+# deadline to shrink replay.
+if [ "${RCOW_HOT_FLUSH_MS}" -eq 0 ]; then
+	rcow_step "flush: skipped (RCOW_HOT_FLUSH_MS=0); WAL replay covers the tail"
+else
+	rcow_step "flush: everything acknowledged into S3"
+	hot_online_op "flush" rcow_flush_lvstore \
+		"$(printf '{"lvs_name":"%s","timeout_ms":%s}' \
+			"${RCOW_LVS_NAME}" "${RCOW_HOT_FLUSH_MS}")" '"code": -110' ||
+		fail_live "could not flush the lvstore"
+fi
 
 # ==========================================================================
 rcow_step "checkpoint: chunk map to S3, journal truncated"
@@ -278,9 +378,13 @@ hot_online_op "checkpoint" rcow_checkpoint_lvstore "${LVS_JSON}" ||
 rcow_step "layout snapshot to ${RCOW_HOT_SNAPSHOT}"
 
 # Clamped like the online ops above, and for the same reason: rcow_rpc defaults to
-# RCOW_RPC_TIMEOUT, which outlives this script's per-step budget. This one does not
-# retry, so the budget is its ceiling outright.
-if ! RCOW_RPC_TIMEOUT="${RCOW_STOP_TIMEOUT}" \
+# RCOW_RPC_TIMEOUT, which outlives this script's budget. This one does not retry,
+# so whatever the shared budget has left is its ceiling outright.
+SNAP_LEFT="$(hot_rpc_remaining)"
+if [ "${SNAP_LEFT}" -lt 1 ]; then
+	fail_live "the ${RCOW_STOP_TIMEOUT}s stop budget was spent before the layout snapshot"
+fi
+if ! RCOW_RPC_TIMEOUT="${SNAP_LEFT}" \
 	rcow_rpc rcow_get_bdev '{}' >"${RCOW_HOT_SNAPSHOT}.tmp" 2>/dev/null; then
 	rm -f "${RCOW_HOT_SNAPSHOT}.tmp"
 	fail_live "could not capture the active layout"
@@ -307,41 +411,80 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 fi
 
 # ==========================================================================
+# The identity is captured before the prepare, while the process is known to be
+# the target, and the poll below compares against this copy rather than asking
+# rcow_pid_is_target, which resolves the path RCOW_TGT_BIN names. An upgrade is
+# exactly when that path stops resolving -- the old binary lives in a versioned
+# directory that gets renamed -- and a surviving target read as gone is the one
+# mistake this script must not make: the caller would start a replacement over a
+# WAL the old process still holds.
+#
+# It is resolved *here*, above the prepare rather than below it, because reading
+# it needs no quiesce and is the only step between the prepare and the kill that
+# can fail on its own. Doing it first leaves the prepare as the last thing that
+# can fail before the kill, so no window is left with the target quiesced and
+# this script unwilling to go on.
+TGT_EXE="$(rcow_pid_exe "${TGT_PID}")" || :
+if [ -z "${TGT_EXE}" ]; then
+	# An empty capture is the one answer the poll below cannot tell apart from a
+	# failed read, and reading a live target as gone is the mistake just named.
+	# Refuse rather than clean up after a process that may still hold the WAL --
+	# the same posture as the unreachable-target branch above. The target is
+	# untouched and unquiesced, so this is still fail_live's case, not the
+	# prepared one.
+	fail_live "cannot read the identity of pid ${TGT_PID}; nothing was signalled \
+and no residue was removed"
+fi
+
+# ==========================================================================
+# This is the last RPC the old process may answer. It globally quiesces every
+# RCOW namespace, so all data-plane I/O that reached the target has completed,
+# and holds the flushers. Blobstore is left dirty: the replacement attach
+# recovers it. A live clean-sync can persist a used-blob mask that the next
+# load cannot open, and then a volume is missing. It intentionally does not
+# resume the subsystems. The host keeps the same namespaces while commands
+# queue, and the SIGKILL below turns that pause into the normal reconnect
+# window. Nothing after this point may fail without first undoing the quiesce --
+# see fail_live_prepared. That includes this script dying: fail_live_prepared
+# covers the failures it can see, not an OOM kill or a `timeout` around it, so
+# the hold is released from an EXIT trap too.
+rcow_step "prepare: quiesce namespaces; blobstore stays dirty"
+PREPARED=0
+trap 'rcow_undo_prepare_on_exit' EXIT
+# Set before the RPC, not after it returns. The server can finish the quiesce
+# and then the client can be killed (or time out) before the assignment below
+# used to run; the EXIT hook would then leave the data plane frozen. A resume
+# of a prepare that has not quiesced yet is a no-op the target already accepts.
+PREPARED=1
+# The configured suspend has to fit what the shared budget still has, minus a
+# few seconds so the server returns the timeout before the client gives up and
+# the two disagree about whether the prepare happened.
+PREPARE_LEFT="$(hot_rpc_remaining)"
+PREPARE_SUSPEND="${RCOW_HOT_PREPARE_SUSPEND_MS}"
+if [ "${PREPARE_LEFT}" -lt 5 ]; then
+	fail_live_prepared "the ${RCOW_STOP_TIMEOUT}s stop budget was spent before the hot prepare"
+fi
+if [ "$((PREPARE_SUSPEND / 1000))" -ge "$((PREPARE_LEFT - 4))" ]; then
+	PREPARE_SUSPEND=$(((PREPARE_LEFT - 4) * 1000))
+fi
+hot_online_op "hot prepare" rcow_prepare_hot_upgrade \
+	"{\"suspend_timeout_ms\":${PREPARE_SUSPEND}}" ||
+	fail_live_prepared "could not prepare the target for hot upgrade"
+
+# ==========================================================================
 rcow_step "killing the target"
 
 # SIGKILL, not SIGTERM: the kernel closes the socket with an RST, which the host
 # can only read as a link failure, and a link failure is what makes it keep the
 # namespace and block I/O until the peer returns. A graceful stop's ordering is
 # SPDK's to decide and may announce the removal.
-#
-# The identity is captured here, while the process is known to be the target, and
-# the poll compares against this copy rather than asking rcow_pid_is_target, which
-# resolves the path RCOW_TGT_BIN names. An upgrade is exactly when that path stops
-# resolving -- the old binary lives in a versioned directory that gets renamed --
-# and a surviving target read as gone is the one mistake this script must not
-# make: the caller would start a replacement over a WAL the old process still
-# holds.
-TGT_EXE="$(rcow_pid_exe "${TGT_PID}")" || :
-if [ -z "${TGT_EXE}" ]; then
-	# An empty capture is the one answer the poll below cannot tell apart from a
-	# failed read, and reading a live target as gone is the mistake just named.
-	# Refuse rather than clean up after a process that may still hold the WAL --
-	# the same posture as the unreachable-target branch above. Not fail_live,
-	# whose second line asserts the target is running: that is the very thing
-	# this branch cannot confirm.
-	rcow_err "cannot read the identity of pid ${TGT_PID}; nothing was signalled \
-and no residue was removed"
-	exit 1
-fi
-
 if ! kill -KILL "${TGT_PID}" 2>/dev/null; then
 	rcow_warn "pid ${TGT_PID} could not be signalled; it may already have \
 exited, which is confirmed below"
 fi
 
 GONE=0
-DEADLINE=$((SECONDS + RCOW_STOP_TIMEOUT))
-while [ "${SECONDS}" -lt "${DEADLINE}" ]; do
+while [ "$(hot_remaining)" -gt 0 ]; do
 	# No exe at all, or a different one: the process has exited, or the pid has
 	# been handed to something else. Either way nothing holds the lvstore now.
 	EXE_NOW="$(rcow_pid_exe "${TGT_PID}")"
@@ -353,20 +496,41 @@ while [ "${SECONDS}" -lt "${DEADLINE}" ]; do
 done
 
 if [ "${GONE}" -ne 1 ]; then
-	rcow_die "pid ${TGT_PID} survived SIGKILL for ${RCOW_STOP_TIMEOUT}s; \
-something outside this script is holding it, and the target is still alive"
+	# A target that survived SIGKILL is still holding its namespaces, and the
+	# prepare left them paused: a host attached to them queues I/O for as long
+	# as the process lives. Undo the quiesce before giving up, so the node is not
+	# left frozen for an operator to restart by hand.
+	rcow_warn "pid ${TGT_PID} survived SIGKILL until the ${RCOW_STOP_TIMEOUT}s \
+stop budget ran out; something outside this script is holding it, and the \
+target is still alive"
+	# Resumed here rather than left to the EXIT hook: this branch has the
+	# operator-facing message, and the hook would only repeat the call.
+	rcow_resume_subsystems
+	PREPARED=0
+	rcow_die "pid ${TGT_PID} survived SIGKILL; the target is still alive. The \
+RCOW subsystems were resumed, so data-plane I/O can proceed, but this node was \
+not upgraded and the target must be restarted to finish or abandon the upgrade"
 fi
 rcow_log "target pid ${TGT_PID} is gone"
+
+# The quiesce ended with the process, so the exit hook has nothing to undo from
+# here on. Cleared before anything else can fail (the marker, the residue).
+PREPARED=0
 
 # The intent is spent: this is the moment it was recorded for. Clearing it here
 # rather than where the stop script read it is what leaves a refused attempt
 # looking like a hot one to the next stop, instead of a planned teardown.
-rm -f "${RCOW_HOT_MARKER}"
+rm -f "${RCOW_HOT_MARKER}" ||
+	rcow_die "target is gone but the spent lifecycle marker ${RCOW_HOT_MARKER} \
+could not be removed; refusing to continue so the orchestrator can restore the \
+outgoing build"
 
 # ==========================================================================
 rcow_step "cleaning up"
 
-hot_clear_residue
+hot_clear_residue ||
+	rcow_die "target is gone but its runtime residue could not be removed; \
+refusing to continue so the orchestrator can restore the outgoing build"
 
 rcow_log "hot stop complete. The layout is in ${RCOW_HOT_SNAPSHOT}; \
 ${RCOW_ACTIVE_FILE}, ${RCOW_BSTORE_FILE} and the WAL image were left untouched"

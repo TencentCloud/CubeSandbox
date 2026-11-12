@@ -485,10 +485,6 @@ test_keys(void)
 	/* The chunks stay under the source's prefix. They are the source's data, a
 	 * zero-copy export writes none of them, and where they are comes out of the
 	 * manifest rather than out of a caller's parameter. */
-	s3_export_chunk_prefix("srclvs", TEST_UUID, key, sizeof(key));
-	check_str("chunk prefix", key,
-		  "srclvs/exports/3f2504e0-4f89-11d3-9a0c-0305e82c3301/");
-
 	/* Fixed width and lower case hex, so a listing of the prefix comes back in
 	 * chunk order. */
 	s3_export_chunk_key("srclvs", TEST_UUID, 0, key, sizeof(key));

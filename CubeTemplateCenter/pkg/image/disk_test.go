@@ -95,7 +95,7 @@ func TestOrphanLoopCandidates(t *testing.T) {
 	}
 }
 
-// setupStreamingFakes puts fake truncate/mkfs.ext4/mount/umount/resize2fs on
+// setupStreamingFakes puts fake truncate/mkfs.ext4/mount/umount/resize2fs/e2fsck on
 // PATH (each appending its argv to a trace file) and lets the streaming build
 // believe loop mounts are usable. The caller installs its own `losetup` fake,
 // which is where every interesting behaviour lives.
@@ -111,9 +111,12 @@ func setupStreamingFakes(t *testing.T) (binDir, tracePath, ext4Path string) {
 	t.Setenv("FAKE_STORE", store)
 	t.Setenv("FAKE_STATE", filepath.Join(binDir, "state"))
 
-	for _, name := range []string{"truncate", "mkfs.ext4", "mount", "umount", "resize2fs"} {
+	for _, name := range []string{"truncate", "mkfs.ext4", "mount", "umount", "resize2fs", "e2fsck"} {
 		installFakeCommand(t, binDir, name, `echo "`+name+` $*" >> "$FAKE_TRACE"`)
 	}
+	// Leave an actual file for the post-shrink stat, without requiring ext4 tools.
+	installFakeCommand(t, binDir, "truncate", `echo "truncate $*" >> "$FAKE_TRACE"
+printf data > "$3"`)
 
 	patches := gomonkey.NewPatches()
 	patches.ApplyFuncReturn(canUseLoopMount, true)
@@ -162,12 +165,112 @@ func traceCount(lines []string, prefix string) int {
 	return n
 }
 
+func TestStreamingVerifiesBeforeAndAfterShrink(t *testing.T) {
+	binDir, tracePath, ext4Path := setupStreamingFakes(t)
+	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in --find) echo /dev/loop9 ;; esac`)
+
+	if err := runStreamingBuild(t, ext4Path); err != nil {
+		t.Fatalf("streaming build failed: %v", err)
+	}
+
+	lines := traceLines(t, tracePath)
+	if got := traceCount(lines, "e2fsck -fy"); got != 1 {
+		t.Fatalf("repair calls = %d, want 1: %v", got, lines)
+	}
+	preCheck := traceIndex(lines, "e2fsck -fy")
+	resize := traceIndex(lines, "resize2fs -M")
+	align := traceIndex(lines, "truncate -s 2097152")
+	postCheck := traceIndex(lines, "e2fsck -fn")
+	if preCheck < 0 || resize <= preCheck || align <= resize || postCheck <= align {
+		t.Fatalf("expected repair, shrink, align, then read-only verification: %v", lines)
+	}
+	if traceIndex(lines, "mkfs.ext4 -F -b 4096 -O ^has_journal") < 0 {
+		t.Fatalf("streaming mkfs must use DAX-compatible 4KiB blocks without a journal: %v", lines)
+	}
+}
+
+func TestStreamingFailsWhenResize2fsFails(t *testing.T) {
+	binDir, _, ext4Path := setupStreamingFakes(t)
+	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in --find) echo /dev/loop9 ;; esac`)
+	installFakeCommand(t, binDir, "resize2fs", `echo "resize2fs $*" >> "$FAKE_TRACE"
+echo "resize failed" >&2
+exit 1`)
+
+	err := runStreamingBuild(t, ext4Path)
+	if err == nil || !strings.Contains(err.Error(), "resize2fs shrink failed") {
+		t.Fatalf("unexpected resize failure: %v", err)
+	}
+}
+
+func TestShrinkAndAlignUsesActualSize(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		size      int64
+		remove    bool
+		wantTrunc string
+		wantErr   string
+	}{
+		{name: "unaligned size above estimate", size: 3*1024*1024 + 4096, wantTrunc: "truncate -s 4194304"},
+		{name: "already aligned", size: 4 * 1024 * 1024},
+		{name: "missing image", remove: true, wantErr: "stat shrunk ext4 image failed"},
+		{name: "empty image", size: 0, wantErr: "is empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, tracePath, ext4Path := setupStreamingFakes(t)
+			if err := os.MkdirAll(filepath.Dir(ext4Path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// Resize is a no-op fake. Supply an actual file so both build paths'
+			// shared finalization is checked against FileInfo, not an estimate.
+			if !tc.remove {
+				if err := os.WriteFile(ext4Path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Truncate(ext4Path, tc.size); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := shrinkAndAlign(context.Background(), ext4Path)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected %q, got %v", tc.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("finalizing ext4 image failed: %v", err)
+			}
+			lines := traceLines(t, tracePath)
+			wantCalls := 0
+			if tc.wantTrunc != "" {
+				wantCalls++
+				if traceIndex(lines, tc.wantTrunc) <= traceIndex(lines, "resize2fs -M") {
+					t.Fatalf("expected alignment using actual size after shrink: %v", lines)
+				}
+			}
+			if got := traceCount(lines, "truncate "); got != wantCalls {
+				t.Fatalf("truncate calls = %d, want %d: %v", got, wantCalls, lines)
+			}
+			wantChecks := 0
+			if tc.wantErr == "" {
+				wantChecks = 1
+			}
+			if got := traceCount(lines, "e2fsck -fn"); got != wantChecks {
+				t.Fatalf("final verification calls = %d, want %d: %v", got, wantChecks, lines)
+			}
+		})
+	}
+}
+
 // TestStreamingUnmountsBeforeDetach guards the actual leak: detaching a device
 // that is still mounted fails EBUSY and pins it for the lifetime of the host.
 func TestStreamingUnmountsBeforeDetach(t *testing.T) {
 	binDir, tracePath, ext4Path := setupStreamingFakes(t)
 	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
-case "$1" in --find) echo /dev/loop9 ;; esac`)
+case "$1" in
+--find) echo /dev/loop9 ;;
+--detach) [ "$#" -eq 2 ] && [ "$2" = /dev/loop9 ] || exit 1 ;;
+esac`)
 
 	if err := runStreamingBuild(t, ext4Path); err != nil {
 		t.Fatalf("streaming build failed: %v", err)
@@ -181,6 +284,9 @@ case "$1" in --find) echo /dev/loop9 ;; esac`)
 	}
 	if umountAt > detachAt {
 		t.Fatalf("detach ran before umount (would fail EBUSY and leak the device): %v", lines)
+	}
+	if traceCount(lines, "losetup --detach") != 1 || traceIndex(lines, "losetup --detach /dev/loop9") < 0 {
+		t.Fatalf("expected one successful detach using the device as its argument: %v", lines)
 	}
 }
 
@@ -219,16 +325,61 @@ case "$1" in
 --detach) echo "device or resource busy" >&2; exit 1 ;;
 esac`)
 
-	if err := runStreamingBuild(t, ext4Path); err != nil {
-		t.Fatalf("streaming build failed: %v", err)
+	if err := runStreamingBuild(t, ext4Path); err == nil {
+		t.Fatal("expected streaming build to fail when the mount is stuck")
 	}
 
 	lines := traceLines(t, tracePath)
+	if traceIndex(lines, "e2fsck ") >= 0 || traceIndex(lines, "resize2fs -M") >= 0 {
+		t.Fatalf("must not modify or verify an image still mounted: %v", lines)
+	}
 	if got := traceCount(lines, "umount -l"); got != 1 {
 		t.Fatalf("lazy umount attempts = %d, want 1", got)
 	}
 	if got := traceCount(lines, "losetup --detach"); got != 1 {
 		t.Fatalf("detach attempts = %d, want 1 (mount is stuck, retrying is pointless)", got)
+	}
+}
+
+func TestStreamingFailsWhenLazyUmountDetachNeverSucceeds(t *testing.T) {
+	binDir, tracePath, ext4Path := setupStreamingFakes(t)
+	installFakeCommand(t, binDir, "umount", `echo "umount $*" >> "$FAKE_TRACE"
+case "$1" in -l) exit 0 ;; *) echo "target is busy" >&2; exit 1 ;; esac`)
+	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in
+--find) echo /dev/loop9 ;;
+--detach) echo "device or resource busy" >&2; exit 1 ;;
+esac`)
+
+	err := runStreamingBuild(t, ext4Path)
+	if err == nil || !strings.Contains(err.Error(), "cannot shrink ext4 image") {
+		t.Fatalf("expected unsafe-unmount failure, got %v", err)
+	}
+	lines := traceLines(t, tracePath)
+	if traceCount(lines, "umount -l") != 1 || traceCount(lines, "losetup --detach") != 5 {
+		t.Fatalf("expected lazy unmount and exhausted detach retries: %v", lines)
+	}
+	if traceIndex(lines, "e2fsck ") >= 0 || traceIndex(lines, "resize2fs -M") >= 0 {
+		t.Fatalf("must not modify or verify an image after unsafe unmount: %v", lines)
+	}
+}
+
+func TestStreamingShrinksAfterNormalUmountDespiteDetachFailure(t *testing.T) {
+	binDir, tracePath, ext4Path := setupStreamingFakes(t)
+	installFakeCommand(t, binDir, "losetup", `echo "losetup $*" >> "$FAKE_TRACE"
+case "$1" in
+--find) echo /dev/loop9 ;;
+--detach) echo "device or resource busy" >&2; exit 1 ;;
+esac`)
+	if err := runStreamingBuild(t, ext4Path); err != nil {
+		t.Fatalf("normal unmount makes offline shrinking safe: %v", err)
+	}
+	lines := traceLines(t, tracePath)
+	if traceCount(lines, "umount -l") != 0 || traceCount(lines, "losetup --detach") != 5 {
+		t.Fatalf("expected normal unmount and exhausted detach retries: %v", lines)
+	}
+	if traceIndex(lines, "resize2fs -M") <= traceIndex(lines, "umount ") {
+		t.Fatalf("expected shrinking after normal unmount: %v", lines)
 	}
 }
 
@@ -274,7 +425,7 @@ case "$1" in --find) echo /dev/loop9 ;; esac`)
 	}
 
 	lines := traceLines(t, tracePath)
-	if traceIndex(lines, "losetup --detach -- /dev/loop9") < 0 {
+	if traceIndex(lines, "losetup --detach /dev/loop9") < 0 {
 		t.Fatalf("allocated device must be detached even though it was never mounted: %v", lines)
 	}
 	if traceIndex(lines, "umount ") >= 0 {
@@ -301,7 +452,7 @@ esac`)
 	if got := traceCount(lines, "losetup --find"); got != 2 {
 		t.Fatalf("losetup --find attempts = %d, want 2 (retry after reclaim)", got)
 	}
-	if traceIndex(lines, "losetup --detach -- /dev/loop3") < 0 {
+	if traceIndex(lines, "losetup --detach /dev/loop3") < 0 {
 		t.Fatalf("expected the orphaned device to be detached, got %v", lines)
 	}
 }

@@ -7,34 +7,48 @@ use uuid::Uuid;
 
 use super::validate_allow_out_domains_require_deny_all;
 use crate::{
-    constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK},
+    constants::{ENVD_VERSION_ANNOTATION, ENVD_VERSION_FALLBACK, TEMPLATE_ALIAS_ANNOTATION},
     cubemaster::{
         datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeEgressRule,
-        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeMasterClient,
-        CubeMasterError, CubeNetworkConfig, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
-        SandboxLogsRequest, SandboxNetworkRequest, SandboxRefreshRequest, SandboxStatus,
-        SandboxTimeoutRequest, SandboxUpdateRequest, VolumeSpec,
+        CubeEgressRuleAction, CubeEgressRuleInject, CubeEgressRuleMatch, CubeHTTPGet,
+        CubeLivenessProbe, CubeMasterClient, CubeMasterError, CubeNetworkConfig, CubeProbeHandler,
+        CubeRestartStatus, CubeTCPSocket, DeleteSandboxRequest, ForkSandboxRequest,
+        ListSandboxRequest, RestartBackoffConfig, SandboxInfo, SandboxLogsRequest,
+        SandboxNetworkRequest, SandboxRefreshRequest, SandboxStatus, SandboxTimeoutRequest,
+        SandboxUpdateRequest, VolumeSpec,
     },
     error::{AppError, AppResult},
     models::{
-        EgressRule, EgressRuleMatch, LogLevel as ModelLogLevel, NewSandbox, Sandbox,
-        SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig, SandboxLog, SandboxLogEntry,
-        SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig, SandboxOnTimeout, SandboxState,
-        SandboxVolumeMount,
+        normalize_request, EgressRule, EgressRuleMatch, ForkError, ForkRequest, ForkResponse,
+        ForkResult, LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff,
+        RestartStatus, Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig,
+        SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
+        SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
     },
 };
 
 const RET_CODE_OK: i32 = 0;
 const RET_CODE_HTTP_OK: i32 = 200;
 const RET_CODE_NOT_FOUND: i32 = 130404;
+const RET_CODE_NOT_FOUND_AT_CUBELET: i32 = 130406;
 const RET_CODE_CONFLICT: i32 = 130409;
+/// `errorcode.PreConditionFailed`: the request is impossible in the current
+/// state (e.g. a cold boot whose guest artifacts are missing on this node).
+/// It is a 409, not a server fault: retrying the same node cannot succeed.
+const RET_CODE_PRECONDITION: i32 = 130568;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
+/// Sentinel for a fork result with neither sandbox nor ret (130502 is
+/// unassigned; 130500 is GrpcError in the shared enum).
+const RET_CODE_UNKNOWN_DERIVE: i32 = 130502;
 const HOSTDIR_MOUNT_KEY: &str = "host-mount";
 const ENV_VAR_NAME_MAX_LEN: usize = 256;
 const ENV_VAR_VALUE_MAX_LEN: usize = 4096;
 const MASK_REQUEST_HOST_MAX_LEN: usize = 512;
 const MASK_REQUEST_HOST_PORT_PLACEHOLDER: &str = "${PORT}";
+const MCP_MAX_SERVERS: usize = 64;
+const MCP_SERVER_NAME_MAX_LEN: usize = 128;
+const MCP_GITHUB_PREFIX: &str = "github/";
 
 /// Environment variable names that may compromise sandbox isolation if injected
 /// at the runtime level (loader overrides, language runtime paths).
@@ -97,6 +111,9 @@ impl SandboxService {
             filter: None,
         };
 
+        let state_filter = parse_state_filter(state_filter)?;
+        let metadata_filter = parse_metadata_filter(metadata_filter)?;
+
         let resp = self
             .cubemaster
             .list_sandboxes(&req)
@@ -105,36 +122,226 @@ impl SandboxService {
 
         ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
 
-        let state_filter = parse_state_filter(state_filter);
         Ok(resp
             .sandboxes
             .into_iter()
             .map(from_cubemaster_info)
-            .filter(|sb| filter_by_metadata(sb.metadata.as_ref(), metadata_filter))
-            .filter(|sb| state_filter.as_ref().is_none_or(|state| &sb.state == state))
+            .filter(|sb| {
+                metadata_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.matches(sb.metadata.as_ref()))
+            })
+            .filter(|sb| {
+                state_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.matches(&sb.state))
+            })
             .collect())
+    }
+
+    /// One page of `GET /v2/sandboxes` plus the cursor for the following page.
+    ///
+    /// CubeMaster paginates its sandbox list over *nodes* — `start_idx`/`size`
+    /// select a window of healthy nodes and every sandbox on those nodes is
+    /// returned, while `Total` counts nodes rather than sandboxes (see
+    /// `CubeMaster/pkg/service/sandbox/sandbox_list.go`, which resolves the
+    /// window through `localcache.RangeDBHost`). Those fields therefore cannot
+    /// express sandbox-level pagination, and forwarding a client offset into
+    /// `start_idx` would silently page over the wrong unit.
+    ///
+    /// So the page is cut here, over the filtered sandbox set: the backend is
+    /// walked until it has covered every node, and the cursor names the last
+    /// `sandbox_id` it served (a keyed cursor). That keeps the page boundary
+    /// aligned with what the client actually sees, which matters because
+    /// `metadata`/`state` filtering happens on this side and would otherwise
+    /// shift the window under the client's feet.
+    ///
+    /// Walking the node windows instead of asking for one huge window is
+    /// deliberate. A window that stops short of the last node makes CubeMaster
+    /// treat the response as a non-final node page, and it only appends
+    /// shimless paused rows on the final one
+    /// (`shouldAppendShimlessPauseRows`), so a short window would silently drop
+    /// exactly the sandboxes the `state=paused` filter exists to find. The
+    /// window stays bounded because each one costs a cubelet `List` RPC per
+    /// node; the loop stops as soon as the backend reports the last node.
+    pub async fn list_v2(
+        &self,
+        metadata_filter: Option<&str>,
+        state_filter: Option<&str>,
+        next_token: Option<&str>,
+        limit: i32,
+    ) -> AppResult<SandboxListPage> {
+        let after_id = parse_sandbox_list_cursor(next_token)?;
+        // Parsed before the node walk so a bad `state` or `metadata` costs no cluster sweep.
+        let state_filter =
+            parse_state_filter(state_filter)?.unwrap_or_else(StateFilter::listed_by_default);
+        let metadata_filter = parse_metadata_filter(metadata_filter)?;
+
+        let mut matching: Vec<crate::models::ListedSandbox> = Vec::new();
+        // CubeMaster's own all-pages walker dedups by `sandbox_id`
+        // (`cubemastercli/commands/cubebox/list.go`), because a tombstone the
+        // origin node reported on an earlier page reappears on the last one.
+        // Belt-and-braces here: a duplicate would be counted twice by the
+        // cursor offset, so a paging client would see the same sandbox twice.
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut node_window_start = 1;
+        // Bound the walk rather than trusting the backend's cursor alone. A
+        // cluster whose node row ids have drifted far above its node count can
+        // make the cursor advance by more than one window per round without
+        // ever reporting a short window, so the loop needs a stop that does not
+        // depend on `size`. Without it the request runs until
+        // `DEFAULT_ROUTE_TIMEOUT` (30 s, `routes.rs`) kills it and the client
+        // gets a generic timeout with no page and no way to tell that apart
+        // from a slow backend. Exceeding the budget is reported as a
+        // `ServiceUnavailable` with a `Retry-After`, so it fails predictably.
+        let mut nodes_covered = 0usize;
+        loop {
+            let req = ListSandboxRequest {
+                request_id: new_request_id(),
+                instance_type: self.instance_type.clone(),
+                // `start_idx` is 1-based over nodes; CubeMaster rewrites a 0
+                // into 1 and rejects a negative one.
+                start_idx: Some(node_window_start),
+                // Must be positive: CubeMaster answers `size <= 0` with
+                // MasterParamsError.
+                size: Some(SANDBOX_LIST_NODE_WINDOW),
+                host_id: None,
+                filter: None,
+            };
+
+            let resp = self
+                .cubemaster
+                .list_sandboxes(&req)
+                .await
+                .map_err(params_error_or_internal)?;
+
+            ensure_create_result(resp.ret.ret_code, resp.ret.ret_msg)?;
+
+            // Read the two fields that decide whether the walk continues before
+            // `sandboxes` is moved out of the response below.
+            let covered_nodes = resp.size.filter(|s| *s > 0);
+            let backend_cursor = resp.end_idx.filter(|e| *e > 0);
+
+            matching.extend(
+                resp.sandboxes
+                    .into_iter()
+                    .map(from_cubemaster_info)
+                    .filter(|sb| {
+                        metadata_filter
+                            .as_ref()
+                            .is_none_or(|filter| filter.matches(sb.metadata.as_ref()))
+                    })
+                    .filter(|sb| state_filter.matches(&sb.state))
+                    .filter(|sb| seen_ids.insert(sb.sandbox_id.clone()))
+                    .map(|sb| {
+                        if state_filter.fold_pausing {
+                            report_pausing_as_paused(sb)
+                        } else {
+                            sb
+                        }
+                    }),
+            );
+
+            // Advance on the backend's own cursor, not on the window size.
+            // `IndexByPage` matches `start_idx` against each node's `Index`
+            // (`Index: int(elem.ID)`), so ids carry the gaps left by deleted
+            // node rows and the walk cannot assume `start + window` skips
+            // exactly one window — on a sparse cluster it lands back inside
+            // the window just returned and re-lists the same sandboxes.
+            // `end_idx` is the Index of the last node the window covered, so
+            // `end_idx + 1` is the next node's position in *both* branches
+            // (`node.go`). The size test below stays as the termination rule:
+            // a short window is the last one, and `size == 0` means the cursor
+            // ran past the end.
+            //
+            // A missing, zero or negative `end_idx` means the backend did not
+            // report a cursor at all, so there is nothing to advance on and
+            // the loop must stop rather than spin on the same window forever.
+            let keeps_walking = match (covered_nodes, backend_cursor) {
+                (Some(covered), Some(end_idx)) if covered >= SANDBOX_LIST_NODE_WINDOW => {
+                    node_window_start = end_idx + 1;
+                    true
+                }
+                _ => false,
+            };
+
+            // Budget the walk rather than trusting the backend's cursor alone.
+            // A cluster whose node row ids have drifted far above its node
+            // count can advance the cursor by more than one window per round
+            // without ever reporting a short window, so the loop needs a stop
+            // that does not depend on `size`. Without it the request runs until
+            // `DEFAULT_ROUTE_TIMEOUT` (30 s, `routes.rs`) kills it and the
+            // client gets a generic timeout with no page and no way to tell
+            // that apart from a slow backend. Exceeding the budget is reported
+            // as a `ServiceUnavailable` with a `Retry-After`, so it fails
+            // predictably instead of as a timeout.
+            nodes_covered = nodes_covered.saturating_add(covered_nodes.unwrap_or(0) as usize);
+            if nodes_covered > SANDBOX_LIST_MAX_NODES {
+                return Err(AppError::ServiceUnavailable {
+                    message: format!(
+                        "sandbox list spans more than {SANDBOX_LIST_MAX_NODES} nodes; \
+                         narrow the request with a metadata or state filter"
+                    ),
+                    retry_after: 30,
+                });
+            }
+
+            if !keeps_walking {
+                break;
+            }
+        }
+
+        // The page boundary is keyed, not positional. Sorting gives the walk a
+        // stable order, and the cursor below names the last `sandbox_id` the
+        // client has seen rather than an offset. A positional offset is
+        // recomputed against a fresh snapshot on every call, so a sandbox
+        // created or deleted before the boundary shifts it and a later page
+        // silently repeats or skips an item. A keyed cursor has no such shift:
+        // the next page resumes after an id, and membership changes on either
+        // side of that id only add or remove what the client would have seen
+        // anyway.
+        matching.sort_by(|a, b| a.sandbox_id.cmp(&b.sandbox_id));
+
+        // `partition_point` finds the first sandbox strictly after the cursor
+        // id, so the next page never re-serves the boundary item itself.
+        let start = match after_id.as_deref() {
+            Some(after) => matching.partition_point(|sb| sb.sandbox_id.as_str() <= after),
+            None => 0,
+        };
+
+        let total = matching.len();
+        let page: Vec<crate::models::ListedSandbox> = matching
+            .into_iter()
+            .skip(start)
+            .take(limit.max(1) as usize)
+            .collect();
+
+        let next_token = match start + page.len() {
+            consumed if consumed < total => page
+                .last()
+                .map(|sb| encode_sandbox_list_cursor(&sb.sandbox_id)),
+            _ => None,
+        };
+
+        Ok(SandboxListPage {
+            items: page,
+            next_token,
+        })
     }
 
     pub async fn get_sandbox(&self, sandbox_id: &str) -> AppResult<SandboxDetail> {
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
-        let summary = self.fetch_sandbox_summary(sandbox_id, &d.host_id).await?;
-        let started_at = summary
-            .as_ref()
-            .and_then(|s| s.started_at.as_ref().cloned())
-            .or(d.started_at)
-            .unwrap_or_else(chrono::Utc::now);
+        let started_at = d.started_at.unwrap_or_else(chrono::Utc::now);
         // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
         // no end instant) instead of collapsing it onto started_at, which
         // would read as "already expired".
-        let end_at = summary
-            .as_ref()
-            .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at);
+        let end_at = d.end_at;
 
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let alias = template_alias_from_annotations(&d.annotations);
         Ok(SandboxDetail {
             template_id: d.template_id,
-            alias: None,
+            alias,
             sandbox_id: d.sandbox_id,
             client_id: d.host_id,
             started_at,
@@ -149,6 +356,56 @@ impl SandboxService {
             metadata: optional_metadata(d.labels),
             state: sandbox_state_from_status(d.status),
             volume_mounts: map_volume_mounts(&d.volume_mounts),
+            restart_status: map_restart_status(d.restart_status),
+            configured_qos: d.configured_qos.map(Into::into),
+        })
+    }
+
+    /// Resolve the exposed-port endpoint for one container port.
+    ///
+    /// The endpoint is always host_port (hostIP:hostPort). CubeVS hairpin
+    /// makes that form reachable from same-node sandboxes as well, so no
+    /// caller-address based mode selection is performed.
+    pub async fn get_exposed_port_endpoint(
+        &self,
+        sandbox_id: &str,
+        container_port: i32,
+    ) -> AppResult<crate::models::ExposedPortEndpoint> {
+        if container_port <= 0 {
+            return Err(AppError::BadRequest(format!(
+                "containerPort {} is invalid",
+                container_port
+            )));
+        }
+        let resp = self
+            .cubemaster
+            .get_sandbox_exposed_port(sandbox_id, container_port)
+            .await
+            .map_err(map_exposed_port_err(sandbox_id, container_port))?;
+        let item = resp
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))?;
+        if item.exposed_port_endpoint.is_empty() {
+            return Err(AppError::NotFound(format!(
+                "sandbox {} has no exposed-port mapping for container port {}",
+                sandbox_id, container_port
+            )));
+        }
+        let is_host_port = item.exposed_port_mode == "host_port";
+        Ok(crate::models::ExposedPortEndpoint {
+            sandbox_id: sandbox_id.to_string(),
+            container_port,
+            mode: item.exposed_port_mode,
+            endpoint: item.exposed_port_endpoint,
+            host_ip: is_host_port
+                .then_some(item.host_ip)
+                .filter(|s| !s.is_empty()),
+            host_port: is_host_port
+                .then_some(item.exposed_port_host_port)
+                .filter(|p| *p > 0),
+            sandbox_ip: (!item.sandbox_ip.is_empty()).then_some(item.sandbox_ip),
         })
     }
 
@@ -164,15 +421,25 @@ impl SandboxService {
             metadata,
             distribution_scope,
             env_vars,
+            mcp,
             volume_mounts,
             backend,
+            restart_policy,
+            restart_backoff,
+            liveness_probe,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
             validate_env_vars(env_vars)?;
         }
+        if let Some(mcp) = mcp.as_ref() {
+            validate_mcp_config(mcp)?;
+        }
         if let Some(mounts) = volume_mounts.as_ref() {
             validate_unique_volume_mount_names(mounts)?;
+        }
+        if let Some(probe) = liveness_probe.as_ref() {
+            validate_liveness_probe(probe)?;
         }
         let mut annotations = HashMap::from([
             (
@@ -271,23 +538,36 @@ impl SandboxService {
             auto_pause,
             auto_resume,
             backend,
+            restart_policy,
+            restart_backoff: restart_backoff.map(to_restart_backoff),
+            liveness_probe: liveness_probe.as_ref().map(to_liveness_probe),
         };
 
         let resp = self
             .cubemaster
             .create_sandbox(&req)
             .await
-            .map_err(params_error_or_internal)?;
+            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
 
-        resp.ret.into_result().map_err(internal_error)?;
+        // Belt-and-suspenders: parse_response already flattens every non-success
+        // ret_code into CubeMasterError::Api on the transport path above, so the
+        // envelope here is necessarily a success and into_result() is a no-op today.
+        // It is kept only so the mapping stays correct if parse_response is ever
+        // relaxed to pass a non-success envelope through; the functional 130404/409
+        // mapping lives on the transport error above.
+        resp.ret
+            .into_result()
+            .map_err(|e| map_create_cubemaster_err(e, &template_id))?;
 
         let envd_version = envd_version_from_annotations(&resp.ext_info);
+        let alias = template_alias_from_annotations(&resp.ext_info);
         Ok(self.sandbox_response(
             template_id,
             resp.sandbox_id,
             resp.request_id,
             envd_version,
             resp.traffic_access_token,
+            alias,
         ))
     }
 
@@ -334,11 +614,34 @@ impl SandboxService {
         sandbox_id: &str,
         timeout: Option<i32>,
     ) -> AppResult<Sandbox> {
-        let resp = self
+        let resp = match self
             .cubemaster
             .update_sandbox(&self.build_update_request(sandbox_id, "resume", timeout))
             .await
-            .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+        {
+            Ok(resp) => resp,
+            // 130490 means "already running" only if the sandbox really is;
+            // Cubelet also returns it on a lifecycle-lock conflict while the
+            // sandbox is still paused, which must stay retryable.
+            Err(CubeMasterError::Api { ret_code, ret_msg })
+                if ret_code == RET_CODE_TASK_STATE_INVALID =>
+            {
+                let d = self.fetch_sandbox_detail(sandbox_id).await?;
+                if d.status == SandboxStatus::Running {
+                    return Err(AppError::Conflict(ret_msg));
+                }
+                return Err(AppError::ServiceUnavailable {
+                    message: format!(
+                        "sandbox {} is still {}; retry resume after 2 seconds ({})",
+                        sandbox_id,
+                        sandbox_status_label(&d.status),
+                        ret_msg
+                    ),
+                    retry_after: 2,
+                });
+            }
+            Err(e) => return Err(map_update_cubemaster_err(e, sandbox_id)),
+        };
 
         ensure_update_result(
             resp.ret.ret_code,
@@ -349,6 +652,7 @@ impl SandboxService {
 
         let d = self.fetch_sandbox_detail(sandbox_id).await?;
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let alias = template_alias_from_annotations(&d.annotations);
         // resume/connect paths reload the sandbox via fetch_sandbox_detail,
         // which does not surface the traffic_access_token. The token only
         // matters at create time (so the caller can persist it); afterward
@@ -359,6 +663,7 @@ impl SandboxService {
             d.host_id,
             envd_version,
             None,
+            alias,
         ))
     }
 
@@ -369,22 +674,66 @@ impl SandboxService {
     ) -> AppResult<Sandbox> {
         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
 
+        // A sandbox whose guest/container has exited (or failed) cannot serve
+        // envd traffic. Returning connection info for it told clients the
+        // sandbox was usable while CubeProxy was already timing out against the
+        // dead backend, leaving callers stuck retrying a zombie.
+        //
+        // A sandbox mid-pause cannot land here: Cubelet stamps PausingAt before
+        // its pause flow can exit the shim and State() prefers PausingAt over
+        // FinishedAt (Cubelet/services/cubebox/pause_cow.go), so pause and
+        // failed-pause windows surface as `Pausing`/`Paused`/`Unknown`, which
+        // still take the connect paths below.
         if d.status == SandboxStatus::Paused {
             let resume_timeout = timeout.filter(|timeout| {
                 should_extend_connect_timeout(d.end_at.clone(), *timeout, chrono::Utc::now())
             });
-            let resp = self
+            // A concurrent resume (CLM auto-resume on dataplane traffic, or
+            // another connect) may win the race; CubeMaster then reports the
+            // sandbox as already running, which is exactly what connect wants.
+            match self
                 .cubemaster
                 .update_sandbox(&self.build_update_request(sandbox_id, "resume", resume_timeout))
                 .await
-                .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
-
-            ensure_update_result(
-                resp.ret.ret_code,
-                resp.ret.ret_msg,
-                sandbox_id,
-                "is already running",
-            )?;
+            {
+                Ok(resp) => ensure_update_result(
+                    resp.ret.ret_code,
+                    resp.ret.ret_msg,
+                    sandbox_id,
+                    "is already running",
+                )?,
+                Err(CubeMasterError::Api { ret_code, ret_msg })
+                    if ret_code == RET_CODE_TASK_STATE_INVALID =>
+                {
+                    // 130490 also covers a transient lifecycle-lock conflict
+                    // on Cubelet, where the sandbox is still paused. Only the
+                    // live state tells the two apart.
+                    d = self.fetch_sandbox_detail(sandbox_id).await?;
+                    if d.status != SandboxStatus::Running {
+                        return Err(AppError::ServiceUnavailable {
+                            message: format!(
+                                "sandbox {} is still {} after a concurrent lifecycle operation; retry connect after 2 seconds ({})",
+                                sandbox_id,
+                                sandbox_status_label(&d.status),
+                                ret_msg
+                            ),
+                            retry_after: 2,
+                        });
+                    }
+                    // The winning resume did not carry our timeout, but it may
+                    // have set a longer deadline of its own; never shorten it.
+                    if let Some(timeout) = timeout {
+                        if should_extend_connect_timeout(
+                            d.end_at.clone(),
+                            timeout,
+                            chrono::Utc::now(),
+                        ) {
+                            self.set_timeout(sandbox_id, timeout).await?;
+                        }
+                    }
+                }
+                Err(e) => return Err(map_update_cubemaster_err(e, sandbox_id)),
+            }
 
             d = self.fetch_sandbox_detail(sandbox_id).await?;
         } else if d.status == SandboxStatus::Running {
@@ -400,22 +749,114 @@ impl SandboxService {
             if let Some(timeout) = timeout {
                 // Preserve a known longer deadline during the short
                 // CREATED/PAUSING transition. Missing metadata is left alone
-                // because it also represents never-timeout sandboxes; terminal
-                // states such as Stopped remain read-only Connect operations.
+                // because it also represents never-timeout sandboxes.
                 if should_extend_connect_timeout(d.end_at.clone(), timeout, chrono::Utc::now()) {
                     self.set_timeout(sandbox_id, timeout).await?;
                 }
             }
         }
 
+        if matches!(&d.status, SandboxStatus::Stopped | SandboxStatus::Error) {
+            return Err(AppError::Conflict(format!(
+                "sandbox {} is not connectable in state '{}'",
+                sandbox_id,
+                sandbox_status_label(&d.status)
+            )));
+        }
+
         let envd_version = envd_version_from_annotations(&d.annotations);
+        let alias = template_alias_from_annotations(&d.annotations);
         Ok(self.sandbox_response(
             d.template_id,
             sandbox_id.to_string(),
             d.host_id,
             envd_version,
             None,
+            alias,
         ))
+    }
+
+    /// POST /sandboxes/{sandboxID}/fork — derive `count` running copies from
+    /// one server-side snapshot.
+    ///
+    /// Forwards to CubeMaster and re-shapes each result into `{ sandbox |
+    /// error }`. Per-fork failures are independent and stay as array entries,
+    /// never a whole-request error. The source detail is fetched once (not per
+    /// fork) to seed `template_id`/`envd_version`.
+    pub async fn fork(&self, sandbox_id: &str, body: ForkRequest) -> AppResult<ForkResponse> {
+        if !(1..=100).contains(&body.count) {
+            return Err(AppError::BadRequest(format!(
+                "count must be between 1 and 100, got {}",
+                body.count
+            )));
+        }
+        // Source lookup seeds template/envd lineage and fails fast with 404.
+        let source = self.fetch_sandbox_detail(sandbox_id).await?;
+        let envd_version = envd_version_from_annotations(&source.annotations);
+        let alias = template_alias_from_annotations(&source.annotations);
+        let mode = normalize_request(body.mode.as_deref(), None, None)
+            .map_err(|e| AppError::BadRequest(e.message()))?;
+        if mode == SnapshotMode::FsOnly {
+            // Fork derives from a fresh fs-only snapshot, so the same
+            // control-plane preflight applies before any work starts.
+            super::snapshots::ensure_filesystem_only_supported(&self.cubemaster).await?;
+        }
+
+        let req = ForkSandboxRequest {
+            request_id: new_request_id(),
+            count: body.count,
+            timeout: body.timeout,
+            mode: Some(mode.as_str().to_string()),
+        };
+        let resp = self
+            .cubemaster
+            .fork_sandbox(sandbox_id, &req)
+            .await
+            .map_err(|e| map_fork_request_err(e, sandbox_id))?;
+
+        // parse_response already turned any non-zero top-level ret into an
+        // error before `Ok` here, so `resp.results` is only populated once the
+        // snapshot + derivation fan-out itself succeeded. Per-fork failures
+        // remain embedded as `ret` on individual elements.
+        if resp.results.len() != body.count as usize {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "fork expected {} results, got {}",
+                body.count,
+                resp.results.len()
+            )));
+        }
+        let results = resp
+            .results
+            .into_iter()
+            .map(|item| match item.sandbox {
+                Some(fb) => ForkResult {
+                    sandbox: Some(self.sandbox_response(
+                        source.template_id.clone(),
+                        fb.sandbox_id,
+                        fb.host_id,
+                        envd_version.clone(),
+                        fb.traffic_access_token,
+                        alias.clone(),
+                    )),
+                    error: None,
+                },
+                None => {
+                    let (code, message) = match item.ret {
+                        Some(ret) => (ret.ret_code, ret.ret_msg),
+                        None => (
+                            RET_CODE_UNKNOWN_DERIVE,
+                            "fork derivation produced neither sandbox nor error".to_string(),
+                        ),
+                    };
+                    ForkResult {
+                        sandbox: None,
+                        error: Some(ForkError::new(code, message)),
+                    }
+                }
+            })
+            .collect();
+
+        Ok(results)
     }
 
     pub async fn get_logs(
@@ -583,10 +1024,13 @@ impl SandboxService {
             .cubemaster
             .get_sandbox(sandbox_id, &self.instance_type)
             .await
-            .map_err(|e| sandbox_not_found_or_internal(e, sandbox_id))?;
+            .map_err(|e| map_sandbox_detail_err(e, sandbox_id))?;
 
         if !is_success_ret_code(resp.ret.ret_code) {
-            if resp.ret.ret_code == RET_CODE_NOT_FOUND {
+            if matches!(
+                resp.ret.ret_code,
+                RET_CODE_NOT_FOUND | RET_CODE_NOT_FOUND_AT_CUBELET
+            ) {
                 return Err(AppError::NotFound(format!(
                     "sandbox {} not found",
                     sandbox_id
@@ -599,38 +1043,6 @@ impl SandboxService {
             .ok_or_else(|| AppError::NotFound(format!("sandbox {} not found", sandbox_id)))
     }
 
-    async fn fetch_sandbox_summary(
-        &self,
-        sandbox_id: &str,
-        host_id: &str,
-    ) -> AppResult<Option<SandboxInfo>> {
-        if host_id.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let req = ListSandboxRequest {
-            request_id: new_request_id(),
-            instance_type: self.instance_type.clone(),
-            start_idx: None,
-            size: None,
-            host_id: Some(host_id.to_string()),
-            filter: None,
-        };
-
-        let resp = self
-            .cubemaster
-            .list_sandboxes(&req)
-            .await
-            .map_err(internal_error)?;
-
-        resp.ret.into_result().map_err(internal_error)?;
-
-        Ok(resp
-            .sandboxes
-            .into_iter()
-            .find(|sandbox| sandbox.sandbox_id == sandbox_id))
-    }
-
     fn sandbox_response(
         &self,
         template_id: String,
@@ -638,11 +1050,12 @@ impl SandboxService {
         client_id: String,
         envd_version: String,
         traffic_access_token: Option<String>,
+        alias: Option<String>,
     ) -> Sandbox {
         Sandbox {
             template_id,
             sandbox_id,
-            alias: None,
+            alias,
             client_id,
             envd_version,
             envd_access_token: None,
@@ -747,6 +1160,104 @@ fn validate_env_vars(env_vars: &HashMap<String, String>) -> AppResult<()> {
     Ok(())
 }
 
+/// Validate the E2B-compatible `mcp` option: an object keyed by MCP server
+/// name whose values are per-server configuration objects. The gateway inside
+/// the sandbox owns the server catalog, so built-in server names and their
+/// properties are not checked here; only the GitHub / custom-command shape
+/// (`runCmd`, `installCmd`, `envs`) is.
+fn validate_mcp_config(mcp: &serde_json::Value) -> AppResult<()> {
+    let bad = |msg: String| Err(AppError::BadRequest(msg));
+    let servers = match mcp {
+        serde_json::Value::Null => return Ok(()),
+        serde_json::Value::Object(servers) => servers,
+        _ => return bad("mcp must be an object keyed by MCP server name".to_string()),
+    };
+    if servers.len() > MCP_MAX_SERVERS {
+        return bad(format!(
+            "mcp configures {} servers; at most {MCP_MAX_SERVERS} are allowed",
+            servers.len()
+        ));
+    }
+    let no_config = serde_json::Map::new();
+    for (name, config) in servers {
+        if name.is_empty() || name.len() > MCP_SERVER_NAME_MAX_LEN {
+            return bad(format!("invalid mcp server name length: {name:?}"));
+        }
+        if name.chars().any(char::is_control) {
+            return bad(format!(
+                "mcp server name contains control characters: {name:?}"
+            ));
+        }
+        let config = match config {
+            // The gateway treats null as {}, so it gets the same checks.
+            serde_json::Value::Null => &no_config,
+            serde_json::Value::Object(config) => config,
+            _ => {
+                return bad(format!(
+                    "mcp server {name:?} configuration must be an object"
+                ))
+            }
+        };
+        let is_github = name.starts_with(MCP_GITHUB_PREFIX);
+        if is_github {
+            let parts: Vec<&str> = name[MCP_GITHUB_PREFIX.len()..].split('/').collect();
+            let valid_part = |p: &&str| {
+                !p.is_empty()
+                    && *p != "."
+                    && *p != ".."
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            };
+            if parts.len() != 2 || !parts.iter().all(valid_part) {
+                return bad(format!(
+                    "mcp server {name:?} must be named github/<owner>/<repo>"
+                ));
+            }
+        }
+        if !is_github && !config.contains_key("runCmd") {
+            continue;
+        }
+        match config.get("runCmd") {
+            Some(serde_json::Value::String(cmd)) if !cmd.trim().is_empty() => {}
+            _ => {
+                return bad(format!(
+                    "mcp server {name:?} requires a non-empty string runCmd"
+                ))
+            }
+        }
+        if let Some(install) = config.get("installCmd") {
+            if !install.is_string() {
+                return bad(format!("mcp server {name:?} installCmd must be a string"));
+            }
+        }
+        if let Some(envs) = config.get("envs") {
+            let Some(envs) = envs.as_object() else {
+                return bad(format!("mcp server {name:?} envs must be an object"));
+            };
+            for (key, value) in envs {
+                let bytes = key.as_bytes();
+                let valid_name = bytes
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                    && bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+                if !valid_name {
+                    return bad(format!(
+                        "mcp server {name:?} env var name must match [a-zA-Z_][a-zA-Z0-9_]*: {key:?}"
+                    ));
+                }
+                if !value.is_string() {
+                    return bad(format!(
+                        "mcp server {name:?} env var {key:?} must be a string"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Each volume (`volumeMounts[].name`) may be mounted at most once per sandbox.
 fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResult<()> {
     let mut seen = HashSet::with_capacity(mounts.len());
@@ -761,6 +1272,32 @@ fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResul
     Ok(())
 }
 
+// ResolveExposedPortEndpoint failures all describe the same client-visible
+// condition — this (sandbox, port) pair has no usable endpoint: the port was
+// not declared via the template's expose-port list, or the sandbox has no
+// proxy metadata at all. Surface them as 404, not a retryable-looking 500.
+// A bare 130404 ("sandbox id not found") is 404 regardless of the message.
+fn map_exposed_port_err(
+    sandbox_id: &str,
+    container_port: i32,
+) -> impl Fn(CubeMasterError) -> AppError {
+    let sandbox_id = sandbox_id.to_string();
+    move |e| match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_msg, .. }
+            if ret_msg.contains("container port") || ret_msg.contains("proxy metadata") =>
+        {
+            AppError::NotFound(format!(
+                "sandbox {} container port {} is not exposed: {}",
+                sandbox_id, container_port, ret_msg
+            ))
+        }
+        other => internal_error(other),
+    }
+}
+
 fn internal_error(error: impl std::fmt::Display) -> AppError {
     AppError::Internal(anyhow::anyhow!(error.to_string()))
 }
@@ -769,6 +1306,11 @@ fn internal_error(error: impl std::fmt::Display) -> AppError {
 // the envelope reaches the caller, so a rejection of the client's own input has to be
 // classified here — the ret.into_result()/ensure_* checks never observe it.
 fn params_error_or_internal(e: CubeMasterError) -> AppError {
+    if let CubeMasterError::Api { ret_code, ret_msg } = &e {
+        if *ret_code == RET_CODE_PRECONDITION {
+            return AppError::Conflict(ret_msg.clone());
+        }
+    }
     if e.is_invalid_path_parameter() || e.is_params_error() {
         // Same reasoning as templates::map_err: the caller sent something invalid, so
         // this is a 400. Reporting it as 500 misleads clients into retrying a request
@@ -777,6 +1319,54 @@ fn params_error_or_internal(e: CubeMasterError) -> AppError {
         AppError::BadRequest(e.to_string())
     } else {
         internal_error(e)
+    }
+}
+
+// parse_response raises CubeMasterError::Api before the create envelope is
+// visible, so business codes must be classified here rather than by the typed
+// ret.into_result() check further down (which, for the same reason, never
+// observes a non-success ret_code). create_sandbox applies this mapper on both
+// the transport error and the into_result() envelope path as belt-and-suspenders.
+// Restoring from a deleted / tombstoned snapshot returns 130404: it must surface
+// as 404 so the SDK raises TemplateNotFoundError, not a generic 500 that clients
+// would keep retrying and that would charge a client-caused not-found against the
+// server error-rate SLI. The only reachable create-time 130404 is a template /
+// snapshot lookup miss: CubeMaster maps just templatecenter.ErrTemplateNotFound to
+// 130404 (sandbox_create.go), and every other create-phase failure is downgraded to
+// 130400 or surfaces as ErrorCode_Unknown (-1) → 500. In particular an unresolvable
+// volume is a plain error that ret.FromError turns into -1, never 130404, so a
+// create 404 always names a template/snapshot.
+fn map_create_cubemaster_err(e: CubeMasterError, template_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_NOT_FOUND => {
+            // Name the missing template/snapshot the client sent (mirroring the delete
+            // path's "sandbox {id} not found"), then append CubeMaster's reason when it
+            // relayed one. The backend reason ("failed to get template param from store:
+            // template not found") never carries the requested id, so prefixing lets an
+            // SDK-version-neutral classifier that keys off the message (the e2e e2b
+            // adapter) identify the resource, while keeping "template" in the message so
+            // the SDK substring classifier still raises TemplateNotFoundError.
+            let detail = if ret_msg.trim().is_empty() {
+                format!("template {} not found", template_id)
+            } else {
+                format!("template {} not found: {}", template_id, ret_msg)
+            };
+            AppError::NotFound(detail)
+        }
+        // A create-time 130409 is not necessarily about the template: the run phase
+        // relays Cubelet's ret_code verbatim and Cubelet also defines Conflict=130409.
+        // A non-blank ret_msg is relayed as-is; the blank fallback names the requested
+        // template/snapshot id only as the create request's subject, not as a claim
+        // that the template itself is the conflicting resource.
+        CubeMasterError::Api { ret_code, ret_msg } if ret_code == RET_CODE_CONFLICT => {
+            let detail = if ret_msg.trim().is_empty() {
+                format!("template {} conflict", template_id)
+            } else {
+                ret_msg
+            };
+            AppError::Conflict(detail)
+        }
+        other => params_error_or_internal(other),
     }
 }
 
@@ -791,6 +1381,20 @@ fn ensure_create_result(ret_code: i32, ret_msg: String) -> AppResult<()> {
         return Err(AppError::Conflict(ret_msg));
     }
     Err(AppError::Internal(anyhow::anyhow!(ret_msg)))
+}
+
+// CubeMaster returns NotFoundAtCubelet when a cached route reaches a Cubelet
+// that successfully answers with no sandbox. Keep this detail-only: other
+// resources use different not-found contracts, and transport failures are 5xx.
+fn map_sandbox_detail_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, .. }
+            if matches!(ret_code, RET_CODE_NOT_FOUND | RET_CODE_NOT_FOUND_AT_CUBELET) =>
+        {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        other => params_error_or_internal(other),
+    }
 }
 
 fn sandbox_not_found_or_internal(e: CubeMasterError, sandbox_id: &str) -> AppError {
@@ -866,6 +1470,23 @@ fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
     }
 }
 
+/// Map a fork-call CubeMaster error onto an `AppError` (404→NotFound,
+/// conflict→Conflict, params/validation→400, else internal).
+fn map_fork_request_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
+    match e {
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
+            AppError::NotFound(format!("sandbox {} not found", sandbox_id))
+        }
+        CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_CONFLICT => {
+            AppError::Conflict(format!(
+                "sandbox {} cannot be forked (state conflict)",
+                sandbox_id
+            ))
+        }
+        _ => params_error_or_internal(e),
+    }
+}
+
 fn ensure_update_result(
     ret_code: i32,
     ret_msg: String,
@@ -907,12 +1528,25 @@ pub(crate) fn envd_version_from_annotations(annotations: &HashMap<String, String
         .unwrap_or_else(|| ENVD_VERSION_FALLBACK.to_string())
 }
 
+/// Resolve the reported `alias` from a sandbox annotation map; `None` when the
+/// sandbox has no template alias (snapshots and legacy sandboxes).
+pub(crate) fn template_alias_from_annotations(
+    annotations: &HashMap<String, String>,
+) -> Option<String> {
+    annotations
+        .get(TEMPLATE_ALIAS_ANNOTATION)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
 pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandbox {
     use crate::models::ListedSandbox;
 
     let now = chrono::Utc::now();
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
     let envd_version = envd_version_from_annotations(&s.annotations);
+    let alias = template_alias_from_annotations(&s.annotations);
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
     let started_at = s
@@ -922,7 +1556,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
 
     ListedSandbox {
         template_id,
-        alias: None,
+        alias,
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
         started_at,
@@ -943,7 +1577,30 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         state: sandbox_state_from_str(&s.status),
         envd_version,
         volume_mounts: map_volume_mounts(&s.volume_mounts),
+        restart_status: map_restart_status(s.restart_status),
     }
+}
+
+fn map_restart_status(status: Option<CubeRestartStatus>) -> Option<RestartStatus> {
+    let status = status?;
+    if status.restart_policy.is_empty()
+        && status.restart_state.is_empty()
+        && status.restart_count == 0
+        && status.last_exit_code.is_none()
+    {
+        return None;
+    }
+    Some(RestartStatus {
+        restart_policy: status.restart_policy,
+        restart_state: status.restart_state,
+        restart_count: status.restart_count,
+        last_exit_code: status.last_exit_code,
+        last_exit_reason: (!status.last_exit_reason.is_empty()).then_some(status.last_exit_reason),
+        last_restart_at: status.last_restart_at,
+        last_successful_restart_at: status.last_successful_restart_at,
+        last_failed_restart_at: status.last_failed_restart_at,
+        next_restart_at: status.next_restart_at,
+    })
 }
 
 pub(crate) fn map_volume_mounts(
@@ -969,53 +1626,254 @@ pub(crate) fn map_volume_mounts(
     }
 }
 
-pub(crate) fn filter_by_metadata(
-    metadata: Option<&HashMap<String, String>>,
-    query: Option<&str>,
-) -> bool {
-    let Some(query) = query else {
-        return true;
-    };
-    let Some(metadata) = metadata else {
-        return false;
+/// One page of `GET /v2/sandboxes` plus the cursor that continues it.
+#[derive(Debug)]
+pub(crate) struct SandboxListPage {
+    pub(crate) items: Vec<crate::models::ListedSandbox>,
+    /// `None` once the page holds the last matching sandbox.
+    pub(crate) next_token: Option<String>,
+}
+
+/// Prefix that marks a well-formed sandbox-list cursor. Kept opaque to clients:
+/// only the `sandbox_id` inside is meaningful, and the prefix lets a truncated
+/// or foreign token be rejected instead of being read as "start over", which
+/// would silently restart pagination — the exact bug this replaces.
+const SANDBOX_LIST_CURSOR_PREFIX: &str = "sbx-after-";
+
+/// Node window requested from CubeMaster per round while collecting sandboxes
+/// for v2 pagination. CubeMaster's `start_idx`/`size` window selects *nodes*
+/// and every sandbox on those nodes is returned, so this bounds the cubelet
+/// fan-out per request; `list_v2` walks further windows until the backend
+/// reports the last node.
+const SANDBOX_LIST_NODE_WINDOW: i32 = 100;
+
+/// Total nodes `list_v2` is willing to walk for one request. The walk costs a
+/// cubelet `List` RPC per node (serialized per node by CubeMaster's
+/// `CubeletListLock`) and sits behind the default 30 s route timeout, so a
+/// cluster wider than this fails with a `ServiceUnavailable` that names the
+/// cause instead of a generic timeout the client cannot interpret. Past this
+/// point the caller should narrow the request with a `metadata`/`state` filter
+/// rather than paging through an ever-growing cluster.
+const SANDBOX_LIST_MAX_NODES: usize = 10_000;
+
+/// Encode the cursor that continues after `sandbox_id`. The token names the
+/// last item the client has seen; the next page starts at the first sandbox
+/// strictly after it.
+pub(crate) fn encode_sandbox_list_cursor(sandbox_id: &str) -> String {
+    format!("{SANDBOX_LIST_CURSOR_PREFIX}{sandbox_id}")
+}
+
+/// Decode a client-supplied cursor into the `sandbox_id` it resumes after.
+///
+/// An empty or whitespace-only token means "start from the beginning", matching
+/// how `nextToken=` is treated elsewhere in the API. Anything that carries the
+/// prefix but no id, or no prefix at all, is a client error rather than a
+/// silent restart.
+pub(crate) fn parse_sandbox_list_cursor(token: Option<&str>) -> AppResult<Option<String>> {
+    let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
     };
 
-    for pair in query.split('&') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if metadata.get(key).is_none_or(|existing| existing != value) {
-                return false;
-            }
+    match token.strip_prefix(SANDBOX_LIST_CURSOR_PREFIX) {
+        Some(after_id) if !after_id.is_empty() => Ok(Some(after_id.to_string())),
+        _ => Err(AppError::BadRequest(format!(
+            "nextToken is malformed: {token:?} is not a pagination cursor"
+        ))),
+    }
+}
+
+/// Sandboxes selected by a `metadata` query, under every reading the value allows.
+#[derive(Debug)]
+struct MetadataFilter(Vec<HashMap<String, String>>);
+
+impl MetadataFilter {
+    fn matches(&self, metadata: Option<&HashMap<String, String>>) -> bool {
+        let Some(metadata) = metadata else {
+            return false;
+        };
+        self.0.iter().any(|terms| {
+            terms
+                .iter()
+                .all(|(key, value)| metadata.get(key) == Some(value))
+        })
+    }
+}
+
+/// How a key or value may have been encoded: as written, once (`urlencode`, `+` is a space),
+/// or twice (E2B's SDKs). Each yields one reading of the whole filter.
+const METADATA_DECODERS: [fn(&str) -> String; 3] = [as_written, form_decode, percent_decode_twice];
+
+/// Parse `metadata` into `key=value` terms and read it under every encoding it may use.
+/// Any reading may match, so literal `%XX` values keep working; no `key=value` shape is a 400.
+fn parse_metadata_filter(value: Option<&str>) -> AppResult<Option<MetadataFilter>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    // E2B's JS SDK sends `metadata: {}` as an empty string (`URLSearchParams({}).toString()`),
+    // the same "no terms" request as omitting `metadata` outright; treat it as no filter.
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    // Split before decoding, so an encoded `&` or `=` can never separate terms.
+    let Some(pairs) = value
+        .split('&')
+        .map(|pair| pair.split_once('='))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Err(AppError::BadRequest(
+            "metadata must be key=value pairs joined by '&'".to_string(),
+        ));
+    };
+
+    let mut readings: Vec<HashMap<String, String>> = Vec::new();
+    for decode in METADATA_DECODERS {
+        let reading = pairs
+            .iter()
+            .map(|(key, value)| (decode(key), decode(value)))
+            .collect();
+        if !readings.contains(&reading) {
+            readings.push(reading);
+        }
+    }
+    Ok(Some(MetadataFilter(readings)))
+}
+
+fn as_written(text: &str) -> String {
+    text.to_string()
+}
+
+/// Form-style decoding: `+` is a space, and `%2B` is a literal `+`.
+fn form_decode(text: &str) -> String {
+    percent_decode(&text.replace('+', " "))
+}
+
+fn percent_decode_twice(text: &str) -> String {
+    percent_decode(&percent_decode(text))
+}
+
+/// Percent-decoding only; a malformed escape is kept as written.
+fn percent_decode(text: &str) -> String {
+    percent_encoding::percent_decode_str(text)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Longest part of a rejected `state` token echoed back in the 400 message.
+const STATE_TOKEN_ECHO_MAX: usize = 32;
+
+/// Backend states selected by a `state` query value, plus whether `pausing` folds to `paused`.
+#[derive(Debug, PartialEq, Eq)]
+struct StateFilter {
+    states: Vec<SandboxState>,
+    /// E2B has no `pausing`, so it folds to `paused` unless the caller asked for `pausing` itself.
+    fold_pausing: bool,
+}
+
+impl StateFilter {
+    /// What a list without `state` returns: the E2B pair, with `pausing` counted as paused.
+    fn listed_by_default() -> Self {
+        Self {
+            states: vec![
+                SandboxState::Running,
+                SandboxState::Paused,
+                SandboxState::Pausing,
+            ],
+            fold_pausing: true,
         }
     }
 
-    true
+    fn matches(&self, state: &SandboxState) -> bool {
+        self.states.contains(state)
+    }
 }
 
-fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
-    match value {
-        Some("running") => Some(SandboxState::Running),
-        Some("paused") => Some(SandboxState::Paused),
-        _ => None,
+/// E2B has no `pausing` state, so a pausing sandbox is reported as paused.
+fn report_pausing_as_paused(
+    mut sandbox: crate::models::ListedSandbox,
+) -> crate::models::ListedSandbox {
+    if sandbox.state == SandboxState::Pausing {
+        sandbox.state = SandboxState::Paused;
     }
+    sandbox
+}
+
+/// Parse the comma-separated `state` query; any invalid token rejects the whole request.
+fn parse_state_filter(value: Option<&str>) -> AppResult<Option<StateFilter>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let mut states = Vec::new();
+    let mut fold_pausing = true;
+    for token in value.split(',') {
+        let token = token.trim().to_lowercase();
+        let selected: &[SandboxState] = match token.as_str() {
+            "running" => &[SandboxState::Running],
+            // E2B's `paused` also covers a sandbox that is still pausing.
+            "paused" => &[SandboxState::Paused, SandboxState::Pausing],
+            // A caller naming `pausing` wants the Cube-native state, so it stays visible.
+            "pausing" => {
+                fold_pausing = false;
+                &[SandboxState::Pausing]
+            }
+            // `stopped`/`error` alias the whole `unknown` bucket, which also holds creating sandboxes.
+            "unknown" | "stopped" | "error" => &[SandboxState::Unknown],
+            _ => {
+                let shown: String = token.chars().take(STATE_TOKEN_ECHO_MAX).collect();
+                return Err(AppError::BadRequest(format!(
+                    "invalid state {shown:?}; allowed values: running, paused, pausing, unknown, stopped, error"
+                )));
+            }
+        };
+        states.extend_from_slice(selected);
+    }
+    Ok(Some(StateFilter {
+        states,
+        fold_pausing,
+    }))
 }
 
 fn is_success_ret_code(ret_code: i32) -> bool {
     matches!(ret_code, RET_CODE_OK | RET_CODE_HTTP_OK)
 }
 
+/// Wire label for a backend status, used in client-facing lifecycle errors.
+fn sandbox_status_label(status: &SandboxStatus) -> &'static str {
+    match status {
+        SandboxStatus::Running => "running",
+        SandboxStatus::Paused => "paused",
+        SandboxStatus::Pausing => "pausing",
+        SandboxStatus::Stopped => "stopped",
+        SandboxStatus::Error => "error",
+        SandboxStatus::Unknown => "unknown",
+    }
+}
+
 fn sandbox_state_from_status(status: SandboxStatus) -> SandboxState {
     match status {
-        SandboxStatus::Paused => SandboxState::Paused,
         SandboxStatus::Running => SandboxState::Running,
-        _ => SandboxState::Running,
+        SandboxStatus::Paused => SandboxState::Paused,
+        SandboxStatus::Pausing => SandboxState::Pausing,
+        // CONTAINER_EXITED arrives as `Stopped`; `CONTAINER_CREATED` and
+        // `CONTAINER_UNKNOWN` (a state the node could not read, e.g. a shim
+        // probe timeout or a failed pause binding) also land here. Defaulting
+        // them to `Running` reported a dead or unreadable sandbox as alive.
+        // CubeOps already folds created/exited/stopped and unrecognised values
+        // into `unknown` (CubeOps/internal/translator/translator.go), so CubeAPI
+        // keeps the same public vocabulary instead of adding a new state.
+        SandboxStatus::Stopped | SandboxStatus::Error | SandboxStatus::Unknown => {
+            SandboxState::Unknown
+        }
     }
 }
 
 fn sandbox_state_from_str(status: &str) -> SandboxState {
     match status.to_lowercase().as_str() {
+        "running" => SandboxState::Running,
         "paused" => SandboxState::Paused,
         "pausing" => SandboxState::Pausing,
-        _ => SandboxState::Running,
+        _ => SandboxState::Unknown,
     }
 }
 
@@ -1253,24 +2111,73 @@ fn map_egress_rule(rule: &EgressRule) -> CubeEgressRule {
     }
 }
 
+fn to_restart_backoff(b: RestartBackoff) -> RestartBackoffConfig {
+    RestartBackoffConfig {
+        initial_interval_second: b.initial_interval_second,
+        max_interval_second: b.max_interval_second,
+        multiplier: b.multiplier,
+        max_restarts: b.max_restarts,
+        jitter: b.jitter,
+        stable_duration_second: b.stable_duration_second,
+    }
+}
+
+fn validate_liveness_probe(p: &LivenessProbe) -> AppResult<()> {
+    let handlers = p.http_get.is_some() as u8 + p.tcp_socket.is_some() as u8;
+    if handlers != 1 {
+        return Err(AppError::BadRequest(
+            "livenessProbe must set exactly one of httpGet or tcpSocket".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn to_liveness_probe(p: &LivenessProbe) -> CubeLivenessProbe {
+    let http_get = p.http_get.as_ref().map(|h| CubeHTTPGet {
+        path: h.path.clone(),
+        port: h.port,
+    });
+    let tcp_socket = p
+        .tcp_socket
+        .as_ref()
+        .map(|t| CubeTCPSocket { port: t.port });
+    let probe_handler = if http_get.is_some() || tcp_socket.is_some() {
+        Some(CubeProbeHandler {
+            http_get,
+            tcp_socket,
+        })
+    } else {
+        None
+    };
+    CubeLivenessProbe {
+        probe_handler,
+        initial_delay_second: p.initial_delay_second,
+        period_second: p.period_second,
+        failure_threshold: p.failure_threshold,
+        probe_timeout_second: p.probe_timeout_second,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::{
-        build_cube_network_config, filter_by_metadata, from_cubemaster_info,
-        map_delete_cubemaster_err, map_volume_mounts, resolve_lifecycle_flags,
+        build_cube_network_config, from_cubemaster_info, map_delete_cubemaster_err,
+        map_volume_mounts, parse_metadata_filter, parse_state_filter, resolve_lifecycle_flags,
+        sandbox_state_from_status, sandbox_state_from_str, template_alias_from_annotations,
         validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
         RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
+    use crate::constants::TEMPLATE_ALIAS_ANNOTATION;
     use crate::cubemaster::{
         CreateSandboxRequest, CubeMasterClient, CubeMasterError, CubeVolumeMount,
-        ListSandboxResponse, SandboxInfo, SandboxUpdateRequest,
+        ListSandboxResponse, SandboxInfo, SandboxStatus, SandboxUpdateRequest,
     };
     use crate::error::AppError;
     use crate::models::{
-        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, NewSandbox,
+        EgressRule, EgressRuleAction, EgressRuleInject, EgressRuleMatch, ForkRequest, NewSandbox,
         SandboxAutoResume, SandboxLifecycleConfig, SandboxNetworkConfig, SandboxOnTimeout,
         SandboxState, SandboxVolumeMount,
     };
@@ -1285,15 +2192,11 @@ mod tests {
     use tokio::sync::Mutex;
 
     async fn spawn_fake_cubemaster(app: Router) -> SandboxService {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener addr");
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("server should run");
-        });
         SandboxService::new(
-            CubeMasterClient::new(format!("http://{}", addr), reqwest::Client::new()),
+            CubeMasterClient::new(
+                crate::services::test_support::serve(app).await,
+                reqwest::Client::new(),
+            ),
             "cubebox".to_string(),
             "cube.app".to_string(),
         )
@@ -1303,6 +2206,22 @@ mod tests {
         Json(serde_json::json!({
             "requestID": "req-1",
             "ret": { "ret_code": ret_code, "ret_msg": ret_msg }
+        }))
+    }
+
+    /// GET /cube/sandbox/info envelope carrying one sandbox in the given
+    /// CubeMaster status code (1 = running, 2 = exited/stopped, 4 = pausing,
+    /// 5 = paused).
+    fn sandbox_detail_envelope(status: i32) -> Json<Value> {
+        Json(serde_json::json!({
+            "RequestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "" },
+            "data": [{
+                "sandbox_id": "sbx-1",
+                "status": status,
+                "host_id": "host-1",
+                "template_id": "tpl-1"
+            }]
         }))
     }
 
@@ -1326,6 +2245,9 @@ mod tests {
             mcp: None,
             volume_mounts: None,
             backend: None,
+            restart_policy: None,
+            restart_backoff: None,
+            liveness_probe: None,
         }
     }
 
@@ -1335,6 +2257,385 @@ mod tests {
             "expected BadRequest carrying the backend reason, got {err:?}"
         );
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    // An abnormally exited sandbox is reported by Cubelet as CONTAINER_EXITED,
+    // which CubeMaster surfaces as status 2 / `Stopped`. Mapping that (or a
+    // status CubeAPI cannot classify) onto `Running` made GET and connect claim
+    // a dead sandbox was alive.
+    #[test]
+    fn sandbox_state_from_status_keeps_terminal_states_out_of_running() {
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Running),
+            SandboxState::Running
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Paused),
+            SandboxState::Paused
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Pausing),
+            SandboxState::Pausing
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Stopped),
+            SandboxState::Unknown
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Error),
+            SandboxState::Unknown
+        );
+        assert_eq!(
+            sandbox_state_from_status(SandboxStatus::Unknown),
+            SandboxState::Unknown
+        );
+    }
+
+    #[test]
+    fn sandbox_state_from_str_keeps_terminal_states_out_of_running() {
+        assert_eq!(sandbox_state_from_str("running"), SandboxState::Running);
+        assert_eq!(sandbox_state_from_str("paused"), SandboxState::Paused);
+        assert_eq!(sandbox_state_from_str("pausing"), SandboxState::Pausing);
+        assert_eq!(sandbox_state_from_str("stopped"), SandboxState::Unknown);
+        assert_eq!(sandbox_state_from_str("error"), SandboxState::Unknown);
+        assert_eq!(sandbox_state_from_str(""), SandboxState::Unknown);
+    }
+
+    #[test]
+    fn parse_state_filter_accepts_every_exposed_state() {
+        let states = |value: &str| {
+            parse_state_filter(Some(value))
+                .expect("valid state")
+                .expect("a filter")
+                .states
+        };
+
+        assert_eq!(states("running"), vec![SandboxState::Running]);
+        assert_eq!(
+            states("paused"),
+            vec![SandboxState::Paused, SandboxState::Pausing]
+        );
+        assert_eq!(states("pausing"), vec![SandboxState::Pausing]);
+        assert_eq!(states("unknown"), vec![SandboxState::Unknown]);
+        // The connect 409 quotes the backend label, so both stay as aliases of `unknown`.
+        assert_eq!(states("stopped"), vec![SandboxState::Unknown]);
+        assert_eq!(states("Error"), vec![SandboxState::Unknown]);
+        assert!(parse_state_filter(None).expect("no state").is_none());
+    }
+
+    #[test]
+    fn parse_state_filter_folds_pausing_only_when_the_caller_does_not_name_it() {
+        let fold = |value: &str| {
+            parse_state_filter(Some(value))
+                .expect("valid state")
+                .expect("a filter")
+                .fold_pausing
+        };
+        assert!(fold("running"));
+        assert!(fold("paused"));
+        assert!(fold("running,paused"));
+        assert!(!fold("pausing"));
+        assert!(!fold("paused,pausing"));
+        assert!(!fold("running,pausing,paused"));
+    }
+
+    #[test]
+    fn parse_state_filter_accepts_comma_separated_values() {
+        let filter = parse_state_filter(Some(" Running, paused "))
+            .expect("valid state")
+            .expect("a filter");
+        assert!(filter.matches(&SandboxState::Running));
+        assert!(filter.matches(&SandboxState::Paused));
+        assert!(filter.matches(&SandboxState::Pausing));
+        assert!(!filter.matches(&SandboxState::Unknown));
+    }
+
+    #[test]
+    fn parse_state_filter_rejects_the_whole_value_on_any_bad_token() {
+        // One valid token must not rescue the request: E2B answers 400 for the whole value.
+        for value in [
+            "running,pause",
+            "bogus",
+            "",
+            "running,",
+            ",running",
+            "running,,paused",
+        ] {
+            match parse_state_filter(Some(value)) {
+                Err(AppError::BadRequest(message)) => {
+                    assert!(message.contains("allowed values"), "got: {message}")
+                }
+                other => panic!("state={value:?} should be a bad request, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_state_filter_truncates_the_echoed_token() {
+        let long = "x".repeat(500);
+        match parse_state_filter(Some(&long)) {
+            Err(AppError::BadRequest(message)) => assert!(message.len() < 200, "got: {message}"),
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_exited_sandbox_instead_of_returning_ok() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(move || async move { sandbox_detail_envelope(2) }),
+        ))
+        .await;
+
+        let err = service
+            .connect_sandbox("sbx-1", None)
+            .await
+            .expect_err("a stopped sandbox must not report a successful connect");
+        assert!(
+            matches!(err, AppError::Conflict(ref m) if m.contains("stopped")),
+            "expected a conflict naming the terminal state, got {err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn connect_checks_status_after_resume() {
+        for (status_after_resume, should_reject) in [(1, false), (2, true)] {
+            let status = Arc::new(Mutex::new(5));
+            let service = spawn_fake_cubemaster(
+                Router::new()
+                    .route(
+                        "/cube/sandbox/info",
+                        get(|State(status): State<Arc<Mutex<i32>>>| async move {
+                            sandbox_detail_envelope(*status.lock().await)
+                        }),
+                    )
+                    .route(
+                        "/cube/sandbox/update",
+                        post(move |State(status): State<Arc<Mutex<i32>>>| async move {
+                            *status.lock().await = status_after_resume;
+                            ret_envelope(0, "ok")
+                        }),
+                    )
+                    .with_state(status),
+            )
+            .await;
+
+            let result = service.connect_sandbox("sbx-1", None).await;
+            if should_reject {
+                let err = result.expect_err("a sandbox that exited after resume must not connect");
+                assert!(matches!(err, AppError::Conflict(ref m) if m.contains("stopped")));
+                assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+            } else {
+                assert_eq!(
+                    result
+                        .expect("a resumed running sandbox should connect")
+                        .sandbox_id,
+                    "sbx-1"
+                );
+            }
+        }
+    }
+
+    // Another resume (CLM auto-resume on dataplane traffic) won the race, so
+    // CubeMaster answers ours with TaskStateInvalid "already running". Connect
+    // must succeed and still apply its timeout; plain resume keeps its 409.
+    #[tokio::test]
+    async fn connect_treats_lost_resume_race_as_success() {
+        #[derive(Clone)]
+        struct Fake {
+            status: Arc<Mutex<i32>>,
+            timeouts: Arc<Mutex<Vec<Value>>>,
+        }
+        let fake = Fake {
+            status: Arc::new(Mutex::new(5)),
+            timeouts: Arc::new(Mutex::new(Vec::new())),
+        };
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|State(f): State<Fake>| async move {
+                        let mut body = sandbox_detail_envelope(*f.status.lock().await).0;
+                        body["data"][0]["end_at"] = Value::from(
+                            (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+                        );
+                        Json(body)
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|State(f): State<Fake>| async move {
+                        *f.status.lock().await = 1;
+                        ret_envelope(
+                            RET_CODE_TASK_STATE_INVALID,
+                            "sandbox sbx-1 is already running",
+                        )
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/timeout",
+                    post(
+                        |State(f): State<Fake>, Json(body): Json<Value>| async move {
+                            f.timeouts.lock().await.push(body);
+                            ret_envelope(0, "ok")
+                        },
+                    ),
+                )
+                .with_state(fake.clone()),
+        )
+        .await;
+
+        let sandbox = service
+            .connect_sandbox("sbx-1", Some(120))
+            .await
+            .expect("connect should succeed when a concurrent resume already won");
+        assert_eq!(sandbox.sandbox_id, "sbx-1");
+        let timeouts = fake.timeouts.lock().await;
+        assert_eq!(timeouts.len(), 1);
+        assert_eq!(timeouts[0]["timeout"], 120);
+        drop(timeouts);
+
+        // Explicit resume on a sandbox that is already running: the fake
+        // reports 130490 and the re-read sees running, so this is 409. The
+        // still-paused (lock conflict) case is 503, covered below.
+        *fake.status.lock().await = 1;
+        let err = service
+            .resume_sandbox("sbx-1", None)
+            .await
+            .expect_err("explicit resume of a running sandbox stays an error");
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    // The winning resume may have set a longer deadline (for example
+    // connect(3600) or never-timeout) than the one seen while paused. The
+    // losing connect must not cut it back.
+    #[tokio::test]
+    async fn connect_lost_resume_race_does_not_shorten_winner_timeout() {
+        #[derive(Clone)]
+        struct Fake {
+            status: Arc<Mutex<i32>>,
+            end_secs: Arc<Mutex<i64>>,
+            timeouts: Arc<Mutex<Vec<Value>>>,
+        }
+        let fake = Fake {
+            status: Arc::new(Mutex::new(5)),
+            end_secs: Arc::new(Mutex::new(10)),
+            timeouts: Arc::new(Mutex::new(Vec::new())),
+        };
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|State(f): State<Fake>| async move {
+                        let mut body = sandbox_detail_envelope(*f.status.lock().await).0;
+                        body["data"][0]["end_at"] = Value::from(
+                            (chrono::Utc::now()
+                                + chrono::Duration::seconds(*f.end_secs.lock().await))
+                            .to_rfc3339(),
+                        );
+                        Json(body)
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|State(f): State<Fake>| async move {
+                        // The winner resumed it with connect(3600).
+                        *f.status.lock().await = 1;
+                        *f.end_secs.lock().await = 3600;
+                        ret_envelope(
+                            RET_CODE_TASK_STATE_INVALID,
+                            "sandbox sbx-1 is already running",
+                        )
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/timeout",
+                    post(
+                        |State(f): State<Fake>, Json(body): Json<Value>| async move {
+                            f.timeouts.lock().await.push(body);
+                            ret_envelope(0, "ok")
+                        },
+                    ),
+                )
+                .with_state(fake.clone()),
+        )
+        .await;
+
+        service
+            .connect_sandbox("sbx-1", Some(60))
+            .await
+            .expect("connect should succeed when a concurrent resume already won");
+        assert!(fake.timeouts.lock().await.is_empty());
+    }
+
+    // Cubelet also answers 130490 when its per-sandbox lifecycle lock is
+    // busy; the sandbox is still paused. Connect must not report success or
+    // apply the timeout, and must stay retryable.
+    #[tokio::test]
+    async fn connect_does_not_succeed_when_130490_leaves_sandbox_paused() {
+        let timeouts = Arc::new(Mutex::new(0usize));
+        let t = timeouts.clone();
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|| async { sandbox_detail_envelope(5) }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|| async {
+                        ret_envelope(
+                            RET_CODE_TASK_STATE_INVALID,
+                            "sandbox lifecycle operation is in progress; retry Resume after 2 seconds",
+                        )
+                    }),
+                )
+                .route(
+                    "/cube/sandbox/timeout",
+                    post(move || {
+                        let t = t.clone();
+                        async move {
+                            *t.lock().await += 1;
+                            ret_envelope(0, "ok")
+                        }
+                    }),
+                ),
+        )
+        .await;
+
+        let err = service
+            .connect_sandbox("sbx-1", Some(120))
+            .await
+            .expect_err("connect must not succeed while the sandbox is still paused");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
+        assert_eq!(*timeouts.lock().await, 0);
+
+        // Explicit resume must not claim "already running" (409) either.
+        let err = service
+            .resume_sandbox("sbx-1", None)
+            .await
+            .expect_err("resume must not succeed while the sandbox is still paused");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
+    }
+
+    #[tokio::test]
+    async fn connect_still_succeeds_for_running_sandbox() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(move || async move { sandbox_detail_envelope(1) }),
+        ))
+        .await;
+
+        let sandbox = service
+            .connect_sandbox("sbx-1", None)
+            .await
+            .expect("a running sandbox should connect");
+        assert_eq!(sandbox.sandbox_id, "sbx-1");
     }
 
     // CubeMaster returns MasterParamsError (130400) when the request itself is
@@ -1361,6 +2662,123 @@ mod tests {
             .await
             .expect_err("rejected create should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    // Restoring from a snapshot that was deleted/tombstoned makes CubeMaster fail
+    // getTemplateParam with 130404 ("template not found"). That must surface as a
+    // 404 so the SDK raises TemplateNotFoundError, not a generic 500 that clients
+    // would keep retrying and that would charge a client-caused not-found against
+    // the server error-rate SLI. Regression for the sdk_compat lifecycle contract
+    // test_delete_referenced_snapshot_retires_new_use_but_keeps_runtime_alive.
+    #[tokio::test]
+    async fn create_sandbox_maps_cubemaster_not_found_to_not_found() {
+        let reason = "failed to get template param from store: template not found";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130404, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("restoring a deleted snapshot must not succeed");
+        match err {
+            AppError::NotFound(ref message) => {
+                // The 404 body prefixes the requested template/snapshot id (mirroring the
+                // delete path) and appends CubeMaster's reason. The reason already carries
+                // "template not found", so the SDKs still classify it as
+                // TemplateNotFoundError.
+                assert_eq!(*message, format!("template tpl-1 not found: {reason}"));
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    // The only reachable create-time 130404 is a template/snapshot lookup miss, and
+    // CubeMaster's reason never names the id the client sent
+    // ("failed to get template param from store: template not found"). The 404 body
+    // must therefore prefix the requested id — mirroring the delete path's
+    // "sandbox {id} not found" — so an SDK-version-neutral classifier keyed off the
+    // message (the e2e e2b adapter) can identify the missing resource, while the
+    // relayed reason keeps "template" in the message for the SDK substring classifier.
+    #[tokio::test]
+    async fn create_sandbox_not_found_names_requested_resource() {
+        let reason = "failed to get template param from store: template not found";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130404, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("restoring a deleted snapshot must not succeed");
+        match err {
+            AppError::NotFound(ref message) => {
+                assert!(
+                    message.contains("tpl-1"),
+                    "the 404 body must name the requested resource, got {message:?}"
+                );
+                assert!(
+                    message.contains(reason),
+                    "the backend reason must be relayed, got {message:?}"
+                );
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    // A template in a conflicting state (130409) must surface as 409, mirroring
+    // the delete/update paths, instead of a generic 500. The conflict arm returns
+    // the backend reason verbatim so the client sees why creation was refused.
+    #[tokio::test]
+    async fn create_sandbox_maps_cubemaster_conflict_to_conflict() {
+        let reason = "template is still building";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || async move { ret_envelope(130409, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .create_sandbox(probe_sandbox())
+            .await
+            .expect_err("a conflicting template must not create a sandbox");
+        match err {
+            AppError::Conflict(ref message) => assert_eq!(message, reason),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    // When CubeMaster returns an empty ret_msg, both branches must fall back to a
+    // synthesized detail that still names the template, rather than an empty body.
+    #[tokio::test]
+    async fn create_sandbox_synthesizes_detail_when_cubemaster_message_is_blank() {
+        for (ret_code, expected) in [
+            (130404, "template tpl-1 not found"),
+            (130409, "template tpl-1 conflict"),
+        ] {
+            let service = spawn_fake_cubemaster(Router::new().route(
+                "/cube/sandbox",
+                post(move || async move { ret_envelope(ret_code, "   ") }),
+            ))
+            .await;
+
+            let err = service
+                .create_sandbox(probe_sandbox())
+                .await
+                .expect_err("a rejected create must not succeed");
+            let message = match err {
+                AppError::NotFound(m) | AppError::Conflict(m) => m,
+                other => panic!("ret_code {ret_code} expected NotFound/Conflict, got {other:?}"),
+            };
+            assert_eq!(message, expected, "ret_code {ret_code} fallback detail");
+        }
     }
 
     #[tokio::test]
@@ -1417,6 +2835,372 @@ mod tests {
             .await
             .expect_err("rejected refresh should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn list_sandboxes_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "limit is out of range";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .list(None, None, i32::MAX)
+            .await
+            .expect_err("rejected list should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn get_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "invalid sandbox id";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .get_sandbox("../invalid")
+            .await
+            .expect_err("rejected detail request should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn detail_and_connect_map_cubelet_absence_to_not_found() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(|| async { ret_envelope(130406, "NotFoundAtCubelet") }),
+        ))
+        .await;
+
+        let detail_err = service
+            .get_sandbox("sb-stale-route")
+            .await
+            .expect_err("detail of an absent runtime should fail");
+        assert_eq!(detail_err.into_response().status(), StatusCode::NOT_FOUND);
+
+        let connect_err = service
+            .connect_sandbox("sb-stale-route", None)
+            .await
+            .expect_err("connect to an absent runtime should fail");
+        assert_eq!(connect_err.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn detail_keeps_cubelet_request_failure_internal() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/info",
+            get(|| async { ret_envelope(130595, "Cubelet request failed") }),
+        ))
+        .await;
+
+        let err = service
+            .get_sandbox("sb-upstream-failure")
+            .await
+            .expect_err("a Cubelet request failure must remain internal");
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn paused_sandbox_detail_uses_info_create_at() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "status": 5,
+                    "create_at": 1_700_000_000_000_000_000i64,
+                    "containers": [{
+                        "container_id": "sb-paused",
+                        "type": "sandbox",
+                        "create_at": 1_700_000_060_000_000_000i64
+                    }]
+                }]
+            }))
+        }
+
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+
+        let detail = service
+            .get_sandbox("sb-paused")
+            .await
+            .expect("detail should succeed");
+        let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+            .expect("valid sandbox creation time");
+        assert_eq!(detail.started_at, expected);
+    }
+
+    #[tokio::test]
+    async fn paused_sandbox_detail_falls_back_to_container_create_at() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-paused",
+                    "host_id": "host-1",
+                    "status": 5,
+                    "containers": [{
+                        "container_id": "sb-paused",
+                        "type": "sandbox",
+                        "create_at": 1_700_000_060_000_000_000i64
+                    }]
+                }]
+            }))
+        }
+
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+
+        let detail = service
+            .get_sandbox("sb-paused")
+            .await
+            .expect("detail should succeed");
+        let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_060, 0)
+            .expect("valid container creation time");
+        assert_eq!(detail.started_at, expected);
+    }
+
+    #[tokio::test]
+    async fn kill_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "invalid delete filter";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            delete(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .kill_sandbox("../invalid")
+            .await
+            .expect_err("rejected delete should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn get_logs_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "log limit is out of range";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/logs",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .get_logs("sbx-1", None, i32::MAX)
+            .await
+            .expect_err("rejected logs request should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn update_network_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "network policy is invalid";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/network",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .update_network("sbx-1", None, None)
+            .await
+            .expect_err("rejected network update should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn pause_sandbox_maps_cubemaster_params_error_to_bad_request() {
+        let reason = "sandbox id is invalid";
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/update",
+            post(move || async move { ret_envelope(130400, reason) }),
+        ))
+        .await;
+
+        let err = service
+            .pause_sandbox("../invalid")
+            .await
+            .expect_err("rejected lifecycle update should not succeed");
+        assert_bad_request(err, reason);
+    }
+
+    // Mock the source-detail lookup and /fork: one fork succeeds, one errors.
+    #[tokio::test]
+    async fn fork_sandbox_assembles_independent_sandbox_and_error_elements() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-src",
+                    "host_id": "host-src",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "annotations": { "cube.master.components.envd.version": "2.3.4" },
+                    "containers": [{ "container_id": "sb-src", "type": "sandbox" }]
+                }]
+            }))
+        }
+        async fn fork_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-fork",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "results": [
+                    { "sandbox": {
+                        "sandbox_id": "sb-f1",
+                        "sandbox_ip": "10.0.0.1",
+                        "host_id": "host-f1",
+                        "host_ip": "10.0.0.9",
+                        "traffic_access_token": "tok-1",
+                        "ext_info": {}
+                    }},
+                    { "ret": { "ret_code": 130409, "ret_msg": "derivation rejected" } }
+                ]
+            }))
+        }
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/sb-src/fork", post(fork_handler)),
+        )
+        .await;
+
+        let results = service
+            .fork(
+                "sb-src",
+                ForkRequest {
+                    count: 2,
+                    timeout: None,
+                    mode: None,
+                },
+            )
+            .await
+            .expect("fork should succeed as a request");
+
+        assert_eq!(results.len(), 2);
+        let first = &results[0];
+        let sb = first.sandbox.as_ref().expect("first fork should succeed");
+        assert!(first.error.is_none());
+        assert_eq!(sb.sandbox_id, "sb-f1");
+        assert_eq!(sb.template_id, "tpl-1");
+        assert_eq!(sb.client_id, "host-f1");
+        assert_eq!(sb.envd_version, "2.3.4");
+        assert_eq!(sb.traffic_access_token.as_deref(), Some("tok-1"));
+        assert_eq!(sb.domain.as_deref(), Some("cube.app"));
+
+        let second = &results[1];
+        assert!(second.sandbox.is_none());
+        let err = second.error.as_ref().expect("second fork should error");
+        assert_eq!(err.code, 130409);
+        assert_eq!(err.message, "derivation rejected");
+    }
+
+    // A short/long result array is a protocol violation from CubeMaster and
+    // must fail at the gateway, not surface as a client protocol error.
+    #[tokio::test]
+    async fn fork_sandbox_rejects_result_count_mismatch() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-src",
+                    "host_id": "host-src",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "containers": [{ "container_id": "sb-src", "type": "sandbox" }]
+                }]
+            }))
+        }
+        async fn fork_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-fork",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "results": [
+                    { "sandbox": {
+                        "sandbox_id": "sb-f1",
+                        "sandbox_ip": "10.0.0.1",
+                        "host_id": "host-f1",
+                        "host_ip": "10.0.0.9",
+                        "traffic_access_token": "tok-1",
+                        "ext_info": {}
+                    }}
+                ]
+            }))
+        }
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route("/cube/sandbox/info", get(info_handler))
+                .route("/cube/sandbox/sb-src/fork", post(fork_handler)),
+        )
+        .await;
+
+        let err = service
+            .fork(
+                "sb-src",
+                ForkRequest {
+                    count: 2,
+                    timeout: None,
+                    mode: None,
+                },
+            )
+            .await
+            .expect_err("a short result array must be rejected");
+        assert!(
+            matches!(err, AppError::Internal(ref e) if e.to_string().contains("expected 2 results, got 1")),
+            "expected Internal, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_sandbox_rejects_count_out_of_range() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-src",
+                    "host_id": "host-src",
+                    "status": 1,
+                    "template_id": "tpl-1",
+                    "containers": [{ "container_id": "sb-src", "type": "sandbox" }]
+                }]
+            }))
+        }
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+
+        for bad in [0, -1, 101, 500] {
+            let err = service
+                .fork(
+                    "sb-src",
+                    ForkRequest {
+                        count: bad,
+                        timeout: None,
+                        mode: None,
+                    },
+                )
+                .await
+                .expect_err("out-of-range count must be rejected");
+            assert!(
+                matches!(err, AppError::BadRequest(ref m) if m.contains("count must be between 1 and 100")),
+                "expected BadRequest for count={bad}, got {err:?}"
+            );
+        }
     }
 
     // Negative control: genuine backend faults must keep counting as 5xx, and
@@ -1878,20 +3662,137 @@ mod tests {
         assert!(mapped[0].read_only);
     }
 
+    /// Whether `sandbox_metadata` is selected by the raw `metadata` query value.
+    fn metadata_selects(query: &str, sandbox_metadata: &[(&str, &str)]) -> bool {
+        let stored: HashMap<String, String> = sandbox_metadata
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        parse_metadata_filter(Some(query))
+            .expect("valid metadata")
+            .expect("a filter")
+            .matches(Some(&stored))
+    }
+
     #[test]
     fn metadata_filter_matches_all_pairs() {
-        let metadata = HashMap::from([
-            ("user".to_string(), "alice".to_string()),
-            ("app".to_string(), "prod".to_string()),
-        ]);
+        let stored = [("user", "alice"), ("app", "prod")];
 
-        assert!(filter_by_metadata(Some(&metadata), Some("user=alice")));
-        assert!(filter_by_metadata(
-            Some(&metadata),
-            Some("user=alice&app=prod")
+        assert!(metadata_selects("user=alice", &stored));
+        assert!(metadata_selects("user=alice&app=prod", &stored));
+        assert!(!metadata_selects("user=bob", &stored));
+        assert!(!metadata_selects("user=alice&app=dev", &stored));
+        assert!(!metadata_selects("missing=x", &stored));
+
+        let filter = parse_metadata_filter(Some("user=alice"))
+            .expect("valid metadata")
+            .expect("a filter");
+        assert!(!filter.matches(None));
+        assert!(parse_metadata_filter(None).expect("no metadata").is_none());
+    }
+
+    #[test]
+    fn metadata_filter_reads_what_the_e2b_sdks_send() {
+        // Strings captured from e2b's Python and JS SDKs, as the server sees them after HTTP decoding.
+        for (query, key, value) in [
+            ("k=a%2520b%2Fc", "k", "a b/c"),
+            ("k=a%2520b%252Fc", "k", "a b/c"),
+            ("k=%25E4%25B8%25AD%25E6%2596%2587", "k", "中文"),
+            ("k=x%253Dy", "k", "x=y"),
+            ("k=a%2526b", "k", "a&b"),
+            ("k=50%2525", "k", "50%"),
+            ("k=a%252Bb", "k", "a+b"),
+            ("k=http%25253A%25252F%25252Fx", "k", "http%3A%2F%2Fx"),
+            ("ke%2520y=va%2520l", "ke y", "va l"),
+        ] {
+            assert!(metadata_selects(query, &[(key, value)]), "{query}");
+            assert!(!metadata_selects(query, &[(key, "other")]), "{query}");
+        }
+        assert!(metadata_selects(
+            "a=1&b=two%2520words",
+            &[("a", "1"), ("b", "two words")]
         ));
-        assert!(!filter_by_metadata(Some(&metadata), Some("user=bob")));
-        assert!(!filter_by_metadata(None, Some("user=alice")));
+    }
+
+    #[test]
+    fn metadata_filter_keeps_single_layer_callers_working() {
+        // Older callers send the value once-encoded, so what arrives is the value itself.
+        for (query, key, value) in [
+            ("k=a b/c", "k", "a b/c"),
+            ("k=中文", "k", "中文"),
+            ("k=x=y", "k", "x=y"),
+            ("k=50%", "k", "50%"),
+            ("k=a+b", "k", "a+b"),
+            ("k=%zz", "k", "%zz"),
+            ("k=100%25", "k", "100%25"),
+            ("k=http%3A%2F%2Fx", "k", "http%3A%2F%2Fx"),
+        ] {
+            assert!(metadata_selects(query, &[(key, value)]), "{query}");
+        }
+    }
+
+    #[test]
+    fn metadata_filter_splits_before_decoding_so_an_encoded_separator_stays_in_the_value() {
+        // Callers that encode once (`urlencode`, `encodeURIComponent`) escape `&` and `=` in a value.
+        for (query, value) in [
+            ("note=a%26b", "a&b"),
+            ("note=a%26b%3Dc", "a&b=c"),
+            ("note=a%2526b", "a&b"),
+            ("note=a%2526b%253Dc", "a&b=c"),
+        ] {
+            assert!(metadata_selects(query, &[("note", value)]), "{query}");
+            assert!(!metadata_selects(query, &[("note", "a")]), "{query}");
+        }
+        // The encoded `=` must not turn the value into a second term.
+        for query in ["note=a%26b%3Dc", "note=a%2526b%253Dc"] {
+            assert!(
+                !metadata_selects(query, &[("note", "a"), ("b", "c")]),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_filter_reads_plus_as_a_space_when_form_encoded() {
+        // `urlencode({"note": "a b/c"})` sends `a+b%2Fc`, and `%2B` is still a literal plus.
+        assert!(metadata_selects("note=a+b%2Fc", &[("note", "a b/c")]));
+        assert!(metadata_selects("note=a%2Bb", &[("note", "a+b")]));
+        assert!(!metadata_selects("note=a%2Bb", &[("note", "a b")]));
+        // A literal `+` sent as written still matches itself.
+        assert!(metadata_selects("note=a+b", &[("note", "a+b")]));
+    }
+
+    #[test]
+    fn metadata_filter_accepts_every_reading_of_an_ambiguous_value() {
+        // `a%2520b` is `a b` for E2B, `a%20b` for a once-encoded caller, and itself as written.
+        for value in ["a b", "a%20b", "a%2520b"] {
+            assert!(
+                metadata_selects("note=a%2520b", &[("note", value)]),
+                "{value}"
+            );
+        }
+        assert!(!metadata_selects("note=a%2520b", &[("note", "a  b")]));
+    }
+
+    #[test]
+    fn metadata_filter_rejects_a_value_that_is_not_key_value_pairs() {
+        for query in ["foo", "env=prod&foo", "a=1&&b=2", "a=1&", "&"] {
+            match parse_metadata_filter(Some(query)) {
+                Err(AppError::BadRequest(message)) => {
+                    assert!(message.contains("key=value"), "got: {message}")
+                }
+                other => panic!("metadata={query:?} should be a bad request, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_filter_treats_an_empty_value_as_no_filter() {
+        // E2B's JS SDK serializes `metadata: {}` as `URLSearchParams({}).toString()`, i.e. `""`;
+        // that is zero terms requested, the same as the caller omitting `metadata` altogether.
+        assert!(parse_metadata_filter(Some(""))
+            .expect("empty metadata is not a bad request")
+            .is_none());
     }
 
     #[test]
@@ -2141,6 +4042,62 @@ mod tests {
     }
 
     #[test]
+    fn catch_all_accepts_inject_and_custom_port() {
+        let plain = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                host: Some("*".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("catch-all without inject should pass");
+        assert!(plain.is_some());
+
+        let mut leaking = network_with_match(EgressRuleMatch {
+            host: Some("*".to_string()),
+            ..Default::default()
+        });
+        leaking.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        let cfg = build_cube_network_config(None, Some(&leaking))
+            .expect("catch-all inject should pass")
+            .expect("config");
+        let inject = cfg.rules[0].action.inject.as_ref().expect("inject");
+        assert_eq!(inject[0].header, "Authorization");
+        assert_eq!(inject[0].secret, "sek");
+
+        let mut wildcard = network_with_match(EgressRuleMatch {
+            host: Some("*.example.com".to_string()),
+            ..Default::default()
+        });
+        wildcard.rules.as_mut().unwrap()[0].action.inject = Some(vec![EgressRuleInject {
+            header: "Authorization".to_string(),
+            secret: "sek".to_string(),
+            format: None,
+        }]);
+        build_cube_network_config(None, Some(&wildcard))
+            .expect("wildcard domain inject should still pass");
+
+        let cfg = build_cube_network_config(
+            None,
+            Some(&network_with_match(EgressRuleMatch {
+                sni: Some("*".to_string()),
+                port: Some(8443),
+                scheme: Some("https".to_string()),
+                ..Default::default()
+            })),
+        )
+        .expect("custom catch-all port should pass")
+        .expect("config");
+        assert_eq!(cfg.rules[0].r#match.port, Some(8443));
+        assert_eq!(cfg.rules[0].r#match.scheme.as_deref(), Some("https"));
+        assert_eq!(cfg.rules[0].r#match.sni.as_deref(), Some("*"));
+    }
+
+    #[test]
     fn egress_match_port_requires_scheme() {
         let err = build_cube_network_config(
             None,
@@ -2266,12 +4223,62 @@ mod tests {
             annotations: HashMap::new(),
             labels: HashMap::new(),
             volume_mounts: vec![],
+            restart_status: None,
         });
 
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.cpu_milli, None);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn template_alias_from_annotations_reads_trimmed_value() {
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            TEMPLATE_ALIAS_ANNOTATION.to_string(),
+            "  python-runtime  ".to_string(),
+        );
+        assert_eq!(
+            template_alias_from_annotations(&annotations),
+            Some("python-runtime".to_string())
+        );
+    }
+
+    #[test]
+    fn template_alias_from_annotations_ignores_blank_and_absent() {
+        let mut blank = HashMap::new();
+        blank.insert(TEMPLATE_ALIAS_ANNOTATION.to_string(), "   ".to_string());
+        assert_eq!(template_alias_from_annotations(&blank), None);
+        assert_eq!(template_alias_from_annotations(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn listed_sandbox_surfaces_template_alias_annotation() {
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            TEMPLATE_ALIAS_ANNOTATION.to_string(),
+            "python-runtime".to_string(),
+        );
+        let listed = from_cubemaster_info(SandboxInfo {
+            sandbox_id: "sb-alias".to_string(),
+            host_id: "host-1".to_string(),
+            status: "running".to_string(),
+            started_at: None,
+            create_at: 0,
+            end_at: None,
+            cpu_count: 1,
+            memory_mb: 1024,
+            cpu_milli: 0,
+            memory_mib: 0,
+            template_id: "tpl-1".to_string(),
+            annotations,
+            labels: HashMap::new(),
+            volume_mounts: vec![],
+            restart_status: None,
+        });
+
+        assert_eq!(listed.alias.as_deref(), Some("python-runtime"));
     }
 
     #[test]
@@ -2291,6 +4298,7 @@ mod tests {
             annotations: HashMap::new(),
             labels: HashMap::new(),
             volume_mounts: vec![],
+            restart_status: None,
         });
 
         assert_eq!(listed.cpu_count, 0);
@@ -2330,6 +4338,57 @@ mod tests {
             .all(|sandbox| sandbox.state == SandboxState::Paused));
     }
 
+    // The list path reaches `sandbox_state_from_str` through the CubeMaster
+    // response deserializer, so cover that whole path and not just the mapper.
+    // Status 2 is CONTAINER_EXITED and 3 is CONTAINER_UNKNOWN; both fold into
+    // the public `unknown` state (CubeOps maps them the same way). A creating
+    // sandbox is the case whose wire shape is not the number: CubeMaster's
+    // `SandboxBriefData.Status` is `omitempty`, so CONTAINER_CREATED (0) is
+    // serialised without the field at all. `sb-creating` pins that shape,
+    // where the deserializer yields an empty string and the mapper has to fall
+    // back to `unknown`.
+    #[test]
+    fn listed_sandbox_maps_terminal_container_states_from_cubemaster_list() {
+        let payload = serde_json::json!({
+            "requestID": "req-1",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "data": [{
+                "sandbox_id": "sb-exited",
+                "host_id": "host-1",
+                "status": 2,
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-creating",
+                "host_id": "host-1",
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-unknown",
+                "host_id": "host-1",
+                "status": 3,
+                "template_id": "tpl-1"
+            }, {
+                "sandbox_id": "sb-running",
+                "host_id": "host-1",
+                "status": 1,
+                "template_id": "tpl-1"
+            }]
+        });
+
+        let response: ListSandboxResponse =
+            serde_json::from_value(payload).expect("list response should deserialize");
+        let states: HashMap<_, _> = response
+            .sandboxes
+            .into_iter()
+            .map(from_cubemaster_info)
+            .map(|sandbox| (sandbox.sandbox_id, sandbox.state))
+            .collect();
+
+        assert_eq!(states.get("sb-exited"), Some(&SandboxState::Unknown));
+        assert_eq!(states.get("sb-creating"), Some(&SandboxState::Unknown));
+        assert_eq!(states.get("sb-unknown"), Some(&SandboxState::Unknown));
+        assert_eq!(states.get("sb-running"), Some(&SandboxState::Running));
+    }
+
     /// CubeMaster keys lifecycle metadata off these exact JSON field names —
     /// `auto_pause` / `auto_resume`. If they ever rename or get dropped during
     /// serialization the auto-pause sidecar silently treats every new sandbox
@@ -2352,6 +4411,9 @@ mod tests {
             auto_pause: false,
             auto_resume: false,
             backend: None,
+            restart_policy: None,
+            restart_backoff: None,
+            liveness_probe: None,
         };
 
         // Both false → both fields are omitted (skip_serializing_if = Not::not).
@@ -2474,6 +4536,9 @@ mod tests {
             auto_pause: false,
             auto_resume: false,
             backend: None,
+            restart_policy: None,
+            restart_backoff: None,
+            liveness_probe: None,
         }
     }
 
@@ -2684,6 +4749,9 @@ mod tests {
                 mcp: None,
                 volume_mounts: None,
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2771,6 +4839,9 @@ mod tests {
                 mcp: None,
                 volume_mounts: None,
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2849,6 +4920,9 @@ mod tests {
                 mcp: None,
                 volume_mounts: None,
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2930,6 +5004,9 @@ mod tests {
                     },
                 ]),
                 backend: None,
+                restart_policy: None,
+                restart_backoff: None,
+                liveness_probe: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -3214,6 +5291,123 @@ mod tests {
     }
 
     #[test]
+    fn mcp_config_accepts_e2b_shapes() {
+        for config in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"duckduckgo": {}, "arxiv": {"storagePath": "/"}, "time": null}),
+            serde_json::json!({"futureServer": {"anyOption": [1, 2, {"nested": true}]}}),
+            serde_json::json!({
+                "github/acme/weather-mcp": {
+                    "installCmd": "npm install",
+                    "runCmd": "npm run start",
+                    "envs": {"API_TOKEN": "secret", "_X": ""}
+                }
+            }),
+            serde_json::json!({"local-tools": {"runCmd": "python3 /opt/server.py"}}),
+        ] {
+            super::validate_mcp_config(&config)
+                .unwrap_or_else(|e| panic!("{config} should be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn mcp_config_rejects_invalid_shapes() {
+        let too_many: serde_json::Map<String, Value> = (0..=super::MCP_MAX_SERVERS)
+            .map(|i| (format!("s{i}"), serde_json::json!({})))
+            .collect();
+        for (config, expected) in [
+            (serde_json::json!(["duckduckgo"]), "must be an object keyed"),
+            (serde_json::json!("duckduckgo"), "must be an object keyed"),
+            (
+                serde_json::json!({"duckduckgo": true}),
+                "configuration must be an object",
+            ),
+            (serde_json::json!({"": {}}), "invalid mcp server name"),
+            (serde_json::json!({"bad\nname": {}}), "control characters"),
+            (Value::Object(too_many), "at most"),
+            (
+                serde_json::json!({"github/acme": {"runCmd": "x"}}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/../repo": {"runCmd": "x"}}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/a/b/c": {"runCmd": "x"}}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/acme": null}),
+                "github/<owner>/<repo>",
+            ),
+            (
+                serde_json::json!({"github/a/b": {}}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"github/a/b": null}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": " "}}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"custom": {"runCmd": 1}}),
+                "non-empty string runCmd",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "installCmd": ["npm"]}}),
+                "installCmd must be a string",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "envs": ["A=1"]}}),
+                "envs must be an object",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "envs": {"A-B": "1"}}}),
+                "env var name must match",
+            ),
+            (
+                serde_json::json!({"github/a/b": {"runCmd": "x", "envs": {"A": 1}}}),
+                "must be a string",
+            ),
+        ] {
+            let err = super::validate_mcp_config(&config)
+                .expect_err(&format!("{config} should be rejected"));
+            assert!(
+                matches!(err, AppError::BadRequest(ref m) if m.contains(expected)),
+                "{config}: expected BadRequest containing {expected:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_rejects_invalid_mcp_before_calling_cubemaster() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox",
+            post(move || {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { ret_envelope(0, "ok") }
+            }),
+        ))
+        .await;
+
+        let mut body = probe_sandbox();
+        body.mcp = Some(serde_json::json!([1, 2]));
+        let err = service
+            .create_sandbox(body)
+            .await
+            .expect_err("invalid mcp should be rejected");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn volume_mounts_reject_duplicate_names() {
         use crate::models::SandboxVolumeMount;
 
@@ -3319,5 +5513,798 @@ mod tests {
         let mounts: Vec<crate::models::SandboxVolumeMount> = vec![];
         let has_mounts = !mounts.is_empty();
         assert!(!has_mounts, "no mounts → containers should stay empty");
+    }
+
+    // ── GET /v2/sandboxes cursor pagination ────────────────────────────────
+    //
+    // `nextToken` used to be declared by ListSandboxesV2Query and then dropped:
+    // the handler never read it and the service hardcoded `start_idx: Some(0)`,
+    // so every page returned the first `limit` items and clients could never
+    // reach past it.
+    //
+    // CubeMaster's own `start_idx`/`size` window is expressed in *nodes*, not
+    // sandboxes (ListSandbox → localcache.RangeDBHost), and `Total` counts
+    // healthy nodes, so those fields cannot express sandbox-level pagination.
+    // The pagination therefore has to be completed over the sandbox set inside
+    // CubeAPI.
+
+    fn list_page() -> Json<Value> {
+        // `from_cubemaster_info` projects CubeMaster's `labels` onto the listed
+        // sandbox's `metadata`, so the filter input has to be sent as labels.
+        // Five sandboxes: sb-0/sb-2/sb-4 carry team=alpha, sb-1/sb-3 team=beta.
+        // `size` below the node-window bound marks this as the final window, so
+        // the collection loop stops after one round.
+        Json(serde_json::json!({
+            "requestID": "req-list",
+            "ret": { "ret_code": 0, "ret_msg": "ok" },
+            "size": 1,
+            "data": (0..5).map(|i| serde_json::json!({
+                "sandbox_id": format!("sb-{i}"),
+                "host_id": "host-1",
+                "status": 1,
+                "template_id": "tpl-1",
+                "labels": { "team": if i % 2 == 0 { "alpha" } else { "beta" } }
+            })).collect::<Vec<_>>()
+        }))
+    }
+
+    async fn list_service() -> SandboxService {
+        spawn_fake_cubemaster(
+            Router::new().route("/cube/sandbox/list", post(|| async { list_page() })),
+        )
+        .await
+    }
+
+    /// CubeMaster's window is over nodes, so a cluster wider than one window
+    /// needs several rounds. Stopping at the first window would silently drop
+    /// every sandbox on the remaining nodes — and, because CubeMaster only
+    /// appends shimless paused rows on the *last* node page, it would also hide
+    /// the paused sandboxes the `state=paused` filter exists to find.
+    #[tokio::test]
+    async fn list_v2_walks_every_node_window_before_paging() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|Json(body): Json<Value>| async move {
+                let start = body["start_idx"].as_i64().unwrap_or(0);
+                match start {
+                    // First window: full — 100 of 100 nodes, so more remain.
+                    // `end_idx` is the last covered node's Index, which is what
+                    // the walker advances on (`IndexByPage`, `node.go`).
+                    1 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": 100,
+                        "end_idx": 100,
+                        "data": [
+                            { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" },
+                            { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    // Second window: short — the last one.
+                    101 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": 2,
+                        "end_idx": 102,
+                        "data": [
+                            { "sandbox_id": "sb-3", "host_id": "h3", "status": 1, "template_id": "t" },
+                            { "sandbox_id": "sb-4", "host_id": "h4", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    other => panic!("unexpected node window start: {other}"),
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("a single page should hold every sandbox");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sb-1", "sb-2", "sb-3", "sb-4"],
+            "both node windows must be walked before the sandbox-level page is cut"
+        );
+        assert!(
+            page.next_token.is_none(),
+            "nothing is left once every node window has been walked"
+        );
+    }
+
+    /// `end_idx` is a node *row id* (`Index: int(elem.ID)`), so deleted node
+    /// rows leave gaps and it is not comparable with the healthy-node count
+    /// CubeMaster also reports. An implementation that stopped on
+    /// `end_idx < total` would call this full window final and silently drop
+    /// every sandbox on the remaining nodes — the regression this test pins.
+    /// Advancing on `end_idx + 1` is still correct here: the ids are sparse,
+    /// so the cursor lands at 600, which is exactly the window that would have
+    /// been skipped.
+    #[tokio::test]
+    async fn list_v2_keeps_walking_when_node_ids_are_sparse() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|Json(body): Json<Value>| async move {
+                let start = body["start_idx"].as_i64().unwrap_or(0);
+                match start {
+                    // Full window, but its ids (500..599) already exceed the
+                    // healthy-node count of 120 — the shape that defeats an
+                    // `end_idx < total` termination test. The healthy-node
+                    // count is deliberately not deserialized by this PR, so
+                    // only `end_idx`/`size` reach the walker.
+                    1 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 599,
+                        "total": 120,
+                        "size": 100,
+                        "data": [
+                            { "sandbox_id": "sb-1", "host_id": "h1", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    // The window that would have been skipped: the cursor
+                    // advanced to 600, past the gap in node ids.
+                    600 => Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "end_idx": 620,
+                        "total": 120,
+                        "size": 20,
+                        "data": [
+                            { "sandbox_id": "sb-2", "host_id": "h2", "status": 1, "template_id": "t" }
+                        ]
+                    })),
+                    other => panic!("unexpected node window start: {other}"),
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("both windows must be collected");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sb-1", "sb-2"],
+            "a full window must be followed by another even when its node ids \
+             already exceed the healthy-node count"
+        );
+    }
+
+    /// `IndexByPage` matches `start_idx` against each node's `Index` (a row id
+    /// left with gaps by deleted nodes), and returns the *last covered node's
+    /// Index* as `end_idx` (`node.go`, pinned by `node_test.go`). So advancing
+    /// by the window size re-reads nodes whenever ids carry gaps, and the same
+    /// sandboxes come back twice — inflating `total`, and counted twice by the
+    /// cursor offset so a paging client sees repeats. Advancing on the backend
+    /// cursor (`end_idx + 1`) is correct in both `IndexByPage` branches.
+    ///
+    /// The mock below reproduces the real semantics: `start_idx` selects the
+    /// first node whose `Index >= start_idx`, `end_idx` is that window's last
+    /// node Index, and a `start_idx` that resolves inside an already-returned
+    /// window is *legal* — it yields an empty window, which is how the backend
+    /// signals "past the end". The previous advance logic asks exactly that.
+    #[tokio::test]
+    async fn list_v2_does_not_repeat_sandboxes_when_node_ids_are_sparse() {
+        // 120 live nodes whose ids start at 500: a single gap of 499 rows is
+        // enough to make `+= window` land back inside the previous window.
+        let node_ids: Vec<i64> = (500..620).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    // `IndexByPage`: first node with Index >= start, then the
+                    // next `window` nodes; end_idx is the last one's Index.
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    if covered.is_empty() {
+                        return Json(serde_json::json!({
+                            "requestID": "req-list",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "size": 0,
+                            "end_idx": 0,
+                            "data": []
+                        }));
+                    }
+                    let end_idx = *covered.last().expect("window is non-empty");
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let page = service
+            .list_v2(None, None, None, 500)
+            .await
+            .expect("every sandbox should be reachable");
+
+        let ids: Vec<&str> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "sparse node ids must not re-read a window: got {ids:?}"
+        );
+        assert_eq!(
+            ids.len(),
+            120,
+            "every node's sandbox should be listed exactly once, got {ids:?}"
+        );
+    }
+
+    /// The result-set assertions above cannot tell a correct advance from a
+    /// wrong one: `seen_ids` hides the repeats and every window is eventually
+    /// reached either way, so `+= window` and `end_idx + 1` both produce the
+    /// same 120 sandboxes. What separates them is the *round count* — with node
+    /// row ids starting at 500, `+= window` asks for 1, 101, 201, 301, 401,
+    /// 501, 601 and fans out seven windows' worth of cubelet RPCs, while
+    /// `end_idx + 1` asks for exactly 1 and 601. That difference is what makes
+    /// a churned cluster with high node ids usable, so the requested sequence
+    /// is asserted here.
+    #[tokio::test]
+    async fn list_v2_advances_the_window_on_the_backend_cursor() {
+        // Records every `start_idx` the walk asks CubeMaster for.
+        let seen_starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let node_ids: Vec<i64> = (500..620).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+        let recorder = seen_starts.clone();
+
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                let seen_starts = seen_starts.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    seen_starts.lock().expect("mutex").push(start);
+
+                    // Same `IndexByPage` model as the test above.
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    let end_idx = covered.last().copied().unwrap_or(0);
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        service
+            .list_v2(None, None, None, 500)
+            .await
+            .expect("every sandbox should be reachable");
+
+        let starts = recorder.lock().expect("mutex");
+        assert_eq!(
+            *starts,
+            vec![1, 600],
+            "the walk must advance on the backend cursor (end_idx + 1), not on a \
+             fixed window stride — a stride re-reads the same window once node \
+             row ids drift above the window size"
+        );
+    }
+
+    /// The walk is bounded by `SANDBOX_LIST_MAX_NODES` rather than by the
+    /// backend's cursor alone, so a cluster (or a misbehaving backend) that
+    /// keeps reporting full windows fails with a clear error instead of running
+    /// until the route timeout turns it into a generic 500-ish failure with no
+    /// page at all.
+    #[tokio::test]
+    async fn list_v2_stops_when_the_walk_exceeds_the_node_budget() {
+        // Node ids 1..=N, always reporting a full window: `size` never drops
+        // below the window, so only the budget can end the loop.
+        let node_ids: Vec<i64> = (1..=super::SANDBOX_LIST_MAX_NODES as i64 + 500).collect();
+        let window = super::SANDBOX_LIST_NODE_WINDOW as usize;
+
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(body): Json<Value>| {
+                let node_ids = node_ids.clone();
+                async move {
+                    let start = body["start_idx"].as_i64().unwrap_or(0);
+                    let covered: Vec<i64> = node_ids
+                        .iter()
+                        .copied()
+                        .skip_while(|id| *id < start)
+                        .take(window)
+                        .collect();
+                    let end_idx = covered.last().copied().unwrap_or(0);
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": covered.len(),
+                        "end_idx": end_idx,
+                        "data": covered
+                            .iter()
+                            .map(|id| serde_json::json!({
+                                "sandbox_id": format!("sb-{id}"),
+                                "host_id": format!("h{id}"),
+                                "status": 1,
+                                "template_id": "t"
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let err = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect_err("a walk past the node budget must not return a page");
+
+        assert!(
+            matches!(err, AppError::ServiceUnavailable { .. }),
+            "expected a ServiceUnavailable naming the budget, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("nodes") && message.contains("filter"),
+            "the error should name the budget and the way to narrow the request, \
+             got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_first_page_is_limited_and_reports_a_next_cursor() {
+        let service = list_service().await;
+
+        let page = service
+            .list_v2(None, None, None, 2)
+            .await
+            .expect("first page should list");
+
+        assert_eq!(page.items.len(), 2, "limit must cap the returned page");
+        assert_eq!(page.items[0].sandbox_id, "sb-0");
+        assert_eq!(page.items[1].sandbox_id, "sb-1");
+        assert!(
+            page.next_token.is_some(),
+            "more items remain, so a continuation cursor must be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_second_page_differs_from_the_first() {
+        let service = list_service().await;
+
+        let first = service.list_v2(None, None, None, 2).await.expect("page 1");
+        let cursor = first.next_token.expect("page 1 must hand back a cursor");
+        let second = service
+            .list_v2(None, None, Some(&cursor), 2)
+            .await
+            .expect("page 2");
+
+        assert_eq!(second.items.len(), 2);
+        assert_eq!(second.items[0].sandbox_id, "sb-2");
+        assert_eq!(second.items[1].sandbox_id, "sb-3");
+        assert_ne!(
+            first.items[0].sandbox_id, second.items[0].sandbox_id,
+            "the cursor must advance the window instead of repeating page 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_final_page_omits_the_cursor() {
+        let service = list_service().await;
+
+        let page = service
+            .list_v2(None, None, None, 10)
+            .await
+            .expect("single page covering every sandbox");
+
+        assert_eq!(page.items.len(), 5, "only 5 sandboxes exist");
+        assert!(
+            page.next_token.is_none(),
+            "nothing is left, so no continuation cursor may be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_rejects_a_malformed_cursor() {
+        let service = list_service().await;
+
+        let err = service
+            .list_v2(None, None, Some("not-a-cursor"), 2)
+            .await
+            .expect_err("a malformed cursor must not be silently ignored");
+
+        match err {
+            AppError::BadRequest(message) => {
+                assert!(
+                    message.contains("nextToken"),
+                    "the error should name the offending parameter, got: {message}"
+                );
+            }
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+    }
+
+    /// A keyed cursor survives a membership change between pages. If a sandbox
+    /// *before* the boundary is deleted after page 1, an offset cursor would
+    /// shift (skip the wrong item), but a keyed cursor resumes after the last
+    /// seen id and still serves every remaining sandbox exactly once.
+    #[tokio::test]
+    async fn list_v2_cursor_is_stable_when_an_item_is_deleted_between_pages() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let calls_for_handler = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move |Json(_body): Json<Value>| {
+                let calls = calls_for_handler.clone();
+                async move {
+                    let mut n = calls.lock().expect("mutex");
+                    *n += 1;
+                    // Page 1 sees four sandboxes; sb-0 is deleted before page 2.
+                    let ids: Vec<&str> = match *n {
+                        1 => vec!["sb-0", "sb-1", "sb-2", "sb-3"],
+                        _ => vec!["sb-1", "sb-2", "sb-3"],
+                    };
+                    Json(serde_json::json!({
+                        "requestID": "req-list",
+                        "ret": { "ret_code": 0, "ret_msg": "ok" },
+                        "size": 1,
+                        "data": ids.into_iter().map(|id| serde_json::json!({
+                            "sandbox_id": id,
+                            "host_id": "h",
+                            "status": 1,
+                            "template_id": "t"
+                        })).collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let first = service.list_v2(None, None, None, 2).await.expect("page 1");
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|s| s.sandbox_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sb-0", "sb-1"]
+        );
+        let cursor = first.next_token.expect("sb-2 and sb-3 remain");
+
+        let second = service
+            .list_v2(None, None, Some(&cursor), 2)
+            .await
+            .expect("page 2");
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|s| s.sandbox_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sb-2", "sb-3"],
+            "a keyed cursor must not skip sb-2 when sb-0 disappears between pages"
+        );
+        assert!(second.next_token.is_none(), "nothing remains after sb-3");
+    }
+
+    #[tokio::test]
+    async fn list_v2_metadata_filter_paginates_over_matching_items_only() {
+        // The filter is applied after CubeMaster answers, so a page boundary has
+        // to be computed over the *filtered* set. Paging over the raw set would
+        // let a filter hide items that the client was told were on the next page.
+        let service = list_service().await;
+
+        let first = service
+            .list_v2(Some("team=alpha"), None, None, 2)
+            .await
+            .expect("filtered page 1");
+
+        assert_eq!(first.items.len(), 2, "sb-0, sb-2 and sb-4 match team=alpha");
+        assert!(
+            first.items.iter().all(|sb| sb.sandbox_id != "sb-1"),
+            "a non-matching sandbox must never appear on a filtered page"
+        );
+
+        let cursor = first.next_token.expect("a third match remains");
+        let second = service
+            .list_v2(Some("team=alpha"), None, Some(&cursor), 2)
+            .await
+            .expect("filtered page 2");
+
+        assert_eq!(
+            second.items.len(),
+            1,
+            "only sb-4 is left after sb-0 and sb-2"
+        );
+        assert_eq!(second.items[0].sandbox_id, "sb-4");
+        assert!(second.next_token.is_none(), "the filtered set is exhausted");
+    }
+
+    #[tokio::test]
+    async fn list_v2_metadata_filter_accepts_the_e2b_sdk_encoding() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-list",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
+                    "data": [
+                        { "sandbox_id": "sb-special", "host_id": "h", "status": 1, "template_id": "t",
+                          "labels": { "owner": "a b/c" } },
+                        { "sandbox_id": "sb-plain", "host_id": "h", "status": 1, "template_id": "t",
+                          "labels": { "owner": "other" } }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+
+        for query in ["owner=a%2520b%2Fc", "owner=a b/c"] {
+            let page = service
+                .list_v2(Some(query), None, None, 10)
+                .await
+                .expect("filtered page");
+            let ids: Vec<_> = page.items.iter().map(|sb| sb.sandbox_id.as_str()).collect();
+            assert_eq!(ids, ["sb-special"], "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_v2_rejects_bad_metadata_before_asking_cubemaster() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { ret_envelope(0, "ok") }
+            }),
+        ))
+        .await;
+
+        match service.list_v2(Some("env"), None, None, 10).await {
+            Err(AppError::BadRequest(message)) => assert!(message.contains("key=value")),
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn list_v2_state_filter_paginates_over_matching_items_only() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-list",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
+                    "data": [
+                        { "sandbox_id": "sb-run-1", "host_id": "h", "status": 1, "template_id": "t" },
+                        { "sandbox_id": "sb-paused-1", "host_id": "h", "status": 5, "template_id": "t" },
+                        { "sandbox_id": "sb-run-2", "host_id": "h", "status": 1, "template_id": "t" },
+                        { "sandbox_id": "sb-paused-2", "host_id": "h", "status": 5, "template_id": "t" }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+
+        let first = service
+            .list_v2(None, Some("paused"), None, 1)
+            .await
+            .expect("paused page 1");
+
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].sandbox_id, "sb-paused-1");
+
+        let cursor = first.next_token.expect("a second paused sandbox remains");
+        let second = service
+            .list_v2(None, Some("paused"), Some(&cursor), 1)
+            .await
+            .expect("paused page 2");
+
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].sandbox_id, "sb-paused-2");
+        assert!(
+            second.next_token.is_none(),
+            "both paused sandboxes are listed"
+        );
+    }
+
+    /// One sandbox per CubeMaster status: 1 running, 2 exited, 3 unknown, 4 pausing, 5 paused.
+    async fn spawn_every_status_cubemaster() -> SandboxService {
+        spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-list",
+                    "ret": { "ret_code": 0, "ret_msg": "ok" },
+                    "size": 1,
+                    "data": [
+                        { "sandbox_id": "sb-1-running", "host_id": "h", "status": 1, "template_id": "t" },
+                        { "sandbox_id": "sb-2-exited", "host_id": "h", "status": 2, "template_id": "t" },
+                        { "sandbox_id": "sb-3-unknown", "host_id": "h", "status": 3, "template_id": "t" },
+                        { "sandbox_id": "sb-4-pausing", "host_id": "h", "status": 4, "template_id": "t" },
+                        { "sandbox_id": "sb-5-paused", "host_id": "h", "status": 5, "template_id": "t" }
+                    ]
+                }))
+            }),
+        ))
+        .await
+    }
+
+    async fn list_v2_ids_and_states(
+        service: &SandboxService,
+        state: Option<&str>,
+    ) -> Vec<(String, SandboxState)> {
+        service
+            .list_v2(None, state, None, 100)
+            .await
+            .expect("list_v2")
+            .items
+            .into_iter()
+            .map(|sb| (sb.sandbox_id, sb.state))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_keeps_every_backend_state_as_the_detail_endpoint_reports_it() {
+        let service = spawn_every_status_cubemaster().await;
+
+        let listed: Vec<_> = service
+            .list(None, None, 100)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|sb| (sb.sandbox_id, sb.state))
+            .collect();
+
+        // v1 is the Cube-native view the Cube SDKs read: `pausing` and `unknown` stay visible.
+        assert_eq!(
+            listed,
+            vec![
+                ("sb-1-running".to_string(), SandboxState::Running),
+                ("sb-2-exited".to_string(), SandboxState::Unknown),
+                ("sb-3-unknown".to_string(), SandboxState::Unknown),
+                ("sb-4-pausing".to_string(), SandboxState::Pausing),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_without_state_returns_only_states_an_e2b_client_can_parse() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, None).await,
+            vec![
+                ("sb-1-running".to_string(), SandboxState::Running),
+                ("sb-4-pausing".to_string(), SandboxState::Paused),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_paused_filter_includes_pausing_and_reports_it_as_paused() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("paused")).await,
+            vec![
+                ("sb-4-pausing".to_string(), SandboxState::Paused),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_pausing_filter_reports_the_state_the_caller_asked_for() {
+        let service = spawn_every_status_cubemaster().await;
+
+        // Naming `pausing` selects the Cube-native state and keeps its label.
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("pausing")).await,
+            vec![("sb-4-pausing".to_string(), SandboxState::Pausing)]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_pausing_wins_the_label_when_mixed_with_paused() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("paused,pausing")).await,
+            vec![
+                ("sb-4-pausing".to_string(), SandboxState::Pausing),
+                ("sb-5-paused".to_string(), SandboxState::Paused),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_accepts_several_states_in_one_filter() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("running,paused")).await,
+            list_v2_ids_and_states(&service, None).await
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_unknown_filter_still_reaches_sandboxes_outside_the_default_set() {
+        let service = spawn_every_status_cubemaster().await;
+
+        assert_eq!(
+            list_v2_ids_and_states(&service, Some("unknown")).await,
+            vec![
+                ("sb-2-exited".to_string(), SandboxState::Unknown),
+                ("sb-3-unknown".to_string(), SandboxState::Unknown),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_rejects_a_bad_state_before_asking_cubemaster() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/list",
+            post(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { ret_envelope(0, "ok") }
+            }),
+        ))
+        .await;
+
+        match service.list_v2(None, Some("running,pause"), None, 10).await {
+            Err(AppError::BadRequest(message)) => assert!(message.contains("pause")),
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

@@ -12,6 +12,7 @@
 #include "icmp.h"
 #include "jhash.h"
 #include "map.h"
+#include "metrics.h"
 #include "skb.h"
 #include "tcp.h"
 #include "tcp_reset.h"
@@ -232,6 +233,9 @@ enum tcp_nat_result {
 	TCP_NAT_OK,
 	TCP_NAT_RESET,
 	TCP_L7PROXY_OK,
+	/* SNATed same-host port-mapping access: from_cube loops the packet back
+	 * into the primary NIC ingress instead of using the packed ifindex. */
+	TCP_HAIRPIN_OK,
 };
 
 /* do_tcp_nat() returns a 64-bit value that encodes both the status enum
@@ -288,6 +292,35 @@ static __always_inline struct snat_ip *pick_snat_ip_port(__u32 mvm_ip, const str
 	}
 
 	return NULL;
+}
+
+/* Returns true if ip is one of this node's own SNAT addresses (the primary
+ * NIC address is checked separately by the caller). A port-mapping reply
+ * destined to a local SNAT address belongs to a same-host hairpin connection
+ * and must loop back through the primary NIC ingress instead of egressing
+ * the wire. */
+static __always_inline bool is_snat_ip(__u32 ip)
+{
+	struct snat_ip *snat_ip;
+
+	_Static_assert(MAX_SNAT_IPS == 4, "is_snat_ip() is unrolled for exactly 4 slots");
+
+/* snat_iplist is a small fixed-size ARRAY; probe each slot with a constant
+ * index. Written unrolled: a runtime loop here trips the verifier's jump
+ * complexity limit inside from_cube, and clang refuses to unroll it. */
+#define IS_SNAT_IP_SLOT(idx)						\
+	({								\
+		__u32 i_ = (idx);					\
+		snat_ip = bpf_map_lookup_elem(&snat_iplist, &i_);	\
+		snat_ip && snat_ip->ip == ip;				\
+	})
+
+	if (IS_SNAT_IP_SLOT(0) || IS_SNAT_IP_SLOT(1) ||
+	    IS_SNAT_IP_SLOT(2) || IS_SNAT_IP_SLOT(3))
+		return true;
+	return false;
+
+#undef IS_SNAT_IP_SLOT
 }
 
 /* Reserve the reverse-flow key for an L7 proxy session. L7 traffic is not
@@ -364,6 +397,7 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct snat_ip *snat_ip;
+	struct snat_ip local_endpoint = {};
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct icmphdr *l4;
@@ -414,9 +448,22 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 	if (classify_egress_flow(skb->ingress_ifindex, key.dst_ip,
 				 key.dst_port, key.protocol) == FLOW_REJECT)
 		return 0;
-	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
-	if (!snat_ip || !snat_ip->ip || !snat_id)
-		return 0;
+	if (key.dst_ip == nodenic_ip) {
+		/* Keep the sandbox address. A SNAT pool address is the node IP. */
+		if (!create_l7_ingress_session(&key))
+			return 0;
+		local_endpoint.ifindex = cubegw0_ifindex;
+		local_endpoint.ip = key.src_ip;
+		snat_ip = &local_endpoint;
+		snat_id = key.src_port;
+	} else {
+		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_id);
+		if (!snat_ip || !snat_ip->ip || !snat_id) {
+			update_metrics(mvm_meta->ip, 0, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_SNAT_ALLOC_FAIL);
+			return 0;
+		}
+	}
 	ok = create_icmp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_id,
 				  policy_version);
 	if (!ok)
@@ -426,6 +473,10 @@ static __always_inline __u32 do_icmp_nat(struct __sk_buff *skb, struct mvm_meta 
 		return 0;
 
 do_nat:
+	/* Node-local: caller injects this ifindex into cube-dev. No header rewrite. */
+	if (sess->node_ifindex == cubegw0_ifindex)
+		return sess->node_ifindex;
+
 	old_saddr = l3->saddr;
 	new_saddr = sess->node_ip;
 	old_id = l4->un.echo.id;
@@ -481,6 +532,7 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct snat_ip *snat_ip;
+	struct snat_ip local_endpoint = {};
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *l4;
@@ -523,9 +575,22 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 	if (classify_egress_flow(skb->ingress_ifindex, key.dst_ip,
 				 key.dst_port, key.protocol) == FLOW_REJECT)
 		return 0;
-	snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
-	if (!snat_ip || !snat_ip->ip || !snat_port)
-		return 0;
+	if (key.dst_ip == nodenic_ip) {
+		/* Keep the sandbox address. A SNAT pool address is the node IP. */
+		if (!create_l7_ingress_session(&key))
+			return 0;
+		local_endpoint.ifindex = cubegw0_ifindex;
+		local_endpoint.ip = key.src_ip;
+		snat_ip = &local_endpoint;
+		snat_port = key.src_port;
+	} else {
+		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
+		if (!snat_ip || !snat_ip->ip || !snat_port) {
+			update_metrics(mvm_meta->ip, 0, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_SNAT_ALLOC_FAIL);
+			return 0;
+		}
+	}
 	ok = create_udp_sessions(skb, &key, now, skb->ingress_ifindex, snat_ip, snat_port,
 				 policy_version);
 	if (!ok)
@@ -535,6 +600,10 @@ static __always_inline __u32 do_udp_nat_inline(struct __sk_buff *skb,
 		return 0;
 
 do_nat:
+	/* Node-local: caller injects this ifindex into cube-dev. No header rewrite. */
+	if (sess->node_ifindex == cubegw0_ifindex)
+		return sess->node_ifindex;
+
 	old_saddr = l3->saddr;
 	new_saddr = sess->node_ip;
 	old_sport = l4->source;
@@ -596,6 +665,19 @@ static __noinline __attribute__((noinline)) __u32 do_udp_nat(struct __sk_buff *s
 	return do_udp_nat_inline(skb, mvm_meta);
 }
 
+/* Node-local delivery returns cubegw0_ifindex. That packet is injected into
+ * cube-dev ingress. egress_redirect_flags is 0 in direct mode, so it cannot
+ * be used here. Must stay __always_inline: from_cube() has a tail call.
+ */
+static __always_inline int redirect_egress(__u32 ifindex)
+{
+	__u64 flags = egress_redirect_flags;
+
+	if (ifindex == cubegw0_ifindex)
+		flags = BPF_F_INGRESS;
+	return bpf_redirect(ifindex, flags);
+}
+
 /* Inline version: redirects on UDP NAT success. Used by from_cube(), which
  * cannot make bpf-to-bpf calls (see do_udp_nat_inline()'s comment).
  */
@@ -604,9 +686,14 @@ static __always_inline int finish_udp_nat_inline(struct __sk_buff *skb,
 {
 	__u32 dst_ifindex = do_udp_nat_inline(skb, mvm_meta);
 
-	if (dst_ifindex)
-		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+	if (dst_ifindex) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_FORWARDED);
+		return redirect_egress(dst_ifindex);
+	}
 
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+		      SANDBOX_METRIC_DROP);
 	return TC_ACT_SHOT;
 }
 
@@ -615,9 +702,14 @@ static __always_inline int finish_udp_nat(struct __sk_buff *skb, struct mvm_meta
 {
 	__u32 dst_ifindex = do_udp_nat(skb, mvm_meta);
 
-	if (dst_ifindex)
-		return bpf_redirect(dst_ifindex, egress_redirect_flags);
+	if (dst_ifindex) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_FORWARDED);
+		return redirect_egress(dst_ifindex);
+	}
 
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+		      SANDBOX_METRIC_DROP);
 	return TC_ACT_SHOT;
 }
 
@@ -672,14 +764,14 @@ static __always_inline __u64 do_tcp_nat(struct __sk_buff *skb, struct mvm_meta *
 		sess = bpf_map_lookup_elem(&egress_sessions, &key);
 		if (sess) {
 			if (sess->state == TCP_CONNTRACK_CLOSE || sess->state == TCP_CONNTRACK_TIME_WAIT) {
-				/* L7 sessions use an identity reverse tuple, so immediately
-				 * replacing a terminal session would let delayed packets from
-				 * the old connection mutate the new session. Keep the old pair
-				 * until the userspace reaper removes it and reject premature
-				 * tuple reuse. Ordinary SNAT sessions remain safe to recreate
-				 * because they allocate a fresh reverse-side source port.
+				/* Identity reverse tuples (L7 and node-local) must not be
+				 * replaced immediately: a delayed packet from the old connection
+				 * would mutate the new session. Keep the old pair until the
+				 * userspace reaper removes it. Ordinary SNAT allocates a fresh
+				 * reverse-side source port and can be recreated.
 				 */
-				if (sess->packet_class == L7PROXY_PACKET)
+				if (sess->packet_class == L7PROXY_PACKET ||
+				    sess->node_ifindex == cubegw0_ifindex)
 					return TCP_NAT_PACK(0, TCP_NAT_RESET);
 
 				/* guest kernel reuse source port too fast */
@@ -716,6 +808,28 @@ do_create:
 		return TCP_NAT_PACK(0, TCP_NAT_RESET);
 	case FLOW_SNAT:
 	default:
+		if (key.dst_ip == nodenic_ip) {
+			__u16 host_dport = key.dst_port;
+
+			if (bpf_map_lookup_elem(&remote_port_mapping, &host_dport)) {
+				/* Same-host nodeIP:hostPort access: take the ordinary
+				 * SNAT path, flagged so every packet of the flow returns
+				 * TCP_HAIRPIN_OK and loops back for from_world's
+				 * port-mapping DNAT. */
+				packet_class = HAIRPIN_PACKET;
+			} else {
+				/* Node-local delivery to an unmapped node-IP port
+				 * injects into cube-dev. Keep the sandbox address. A
+				 * SNAT pool address is the node IP. */
+				if (!create_l7_ingress_session(&key))
+					return TCP_NAT_DROP;
+				l7_endpoint.ifindex = cubegw0_ifindex;
+				l7_endpoint.ip = key.src_ip;
+				snat_ip = &l7_endpoint;
+				snat_port = key.src_port;
+				goto create_session;
+			}
+		}
 		create_snat = true;
 		goto prepare_snat;
 	}
@@ -761,19 +875,31 @@ do_update:
 		return rst ? TCP_NAT_DROP : TCP_NAT_RESET;
 	}
 
-	if (sess->packet_class == L7PROXY_PACKET)
+	/* L7 and node-local sessions are delivered to cube-dev. Skip the
+	 * external L2 rewrite that prepare_snat does for ordinary SNAT.
+	 */
+	if (sess->packet_class == L7PROXY_PACKET ||
+	    sess->node_ifindex == cubegw0_ifindex)
 		goto update_existing;
 
 prepare_snat:
 	/* Resolve external L2 before allocating or mutating TCP session state.
 	 * prepare_egress_l2 never drops the packet (unresolved on-link falls back
-	 * to the gateway MAC), so session state can be installed right after. */
-	prepare_egress_l2(skb, l2, key.dst_ip);
+	 * to the gateway MAC), so session state can be installed right after.
+	 * Same-host hairpin packets (dst == nodenic_ip) skip this: their L2 is
+	 * rewritten by from_world's tcp_nat_proxy after the ingress loopback,
+	 * and resolving L2 for the node's own address would pollute the
+	 * direct_neigh cache and trigger pointless neighbor scans. */
+	if (key.dst_ip != nodenic_ip)
+		prepare_egress_l2(skb, l2, key.dst_ip);
 
 	if (create_snat) {
 		snat_ip = pick_snat_ip_port(mvm_meta->ip, &key, &snat_port);
-		if (!snat_ip || !snat_ip->ip || !snat_port)
+		if (!snat_ip || !snat_ip->ip || !snat_port) {
+			update_metrics(mvm_meta->ip, 0, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_SNAT_ALLOC_FAIL);
 			return TCP_NAT_DROP;
+		}
 		goto create_session;
 	}
 
@@ -800,6 +926,10 @@ do_nat:
 		skb->mark = (skb->mark & ~cube_l7_mark_mask) | l7_mark;
 		return TCP_NAT_PACK(sess->node_ifindex, TCP_L7PROXY_OK);
 	}
+
+	/* Node-local: caller injects cubegw0 into cube-dev. No header rewrite. */
+	if (sess->node_ifindex == cubegw0_ifindex)
+		return TCP_NAT_PACK(sess->node_ifindex, TCP_NAT_OK);
 
 	old_saddr = l3->saddr;
 	new_saddr = sess->node_ip;
@@ -836,6 +966,11 @@ do_nat:
 	if (err)
 		return TCP_NAT_DROP;
 
+	/* Hairpin: the packet is SNATed but must loop back into the primary NIC
+	 * ingress for from_world's port-mapping DNAT; the packed ifindex is
+	 * unused for this status. */
+	if (sess->packet_class == HAIRPIN_PACKET)
+		return TCP_NAT_PACK(0, TCP_HAIRPIN_OK);
 	return TCP_NAT_PACK(sess->node_ifindex, TCP_NAT_OK);
 }
 
@@ -944,7 +1079,14 @@ int dns_finish(struct __sk_buff *skb)
 	if (!matched)
 		return finish_udp_nat(skb, mvm_meta);
 
-	dns_track_allowed_query(skb, state, matched, qname_hash);
+	/* Matched but not tracked: drop. Delivering the query would let the
+	 * guest cache the answer, and the response would never be learned.
+	 */
+	if (!dns_track_allowed_query(skb, state, matched, qname_hash)) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
+		return TC_ACT_SHOT;
+	}
 	return finish_udp_nat(skb, mvm_meta);
 }
 
@@ -960,6 +1102,7 @@ int from_cube(struct __sk_buff *skb)
 	struct nat_session *sess;
 	struct session_key pmkey = {};
 	struct mvm_meta *mvm_meta;
+	__be32 vm_ip;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct tcphdr *l4;
@@ -984,17 +1127,27 @@ int from_cube(struct __sk_buff *skb)
 	mvm_meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &ifindex);
 	if (!mvm_meta)
 		return TC_ACT_SHOT;
+	/* Spill the sandbox address before later map lookups invalidate mvm_meta.
+	 * Port-mapping session keys use this address, not the shared inner IP. */
+	vm_ip = mvm_meta->ip;
 
 	ret = pull_headers(skb, &l2, &l3);
-	if (ret != TC_ACT_OK)
+	if (ret != TC_ACT_OK) {
+		if (ret == TC_ACT_SHOT)
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 		return ret;
+	}
 
 	daddr = l3->daddr;
 	proto = l3->protocol;
 
 	err = snat(skb, l3, mvm_meta->ip);
-	if (err)
+	if (err) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
+	}
 
 	if (daddr == mvm_gateway_ip) {
 		/* Filter traffic to cubegw0:
@@ -1004,105 +1157,188 @@ int from_cube(struct __sk_buff *skb)
 		case IPPROTO_ICMP:
 			break;
 		case IPPROTO_TCP:
-			if (!__pull_headers(skb, &l2, &l3, &l4))
+			if (!__pull_headers(skb, &l2, &l3, &l4)) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
-			if (l4->syn && !l4->ack)
+			}
+			if (l4->syn && !l4->ack) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
+			}
 			break;
 		default:
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
 		}
 
 		ret = pull_headers(skb, &l2, &l3);
-		if (ret != TC_ACT_OK)
+		if (ret != TC_ACT_OK) {
+			if (ret == TC_ACT_SHOT)
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 			return ret;
+		}
 
 		err = dnat(skb, l3, cubegw0_ip);
-		if (err)
+		if (err) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_FORWARDED);
 		return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
 	}
 
 	if (proto == IPPROTO_TCP) {
-		if (!__pull_headers(skb, &l2, &l3, &l4))
+		if (!__pull_headers(skb, &l2, &l3, &l4)) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 
 		mvm_port.ifindex = ifindex;
 		mvm_port.listen_port = l4->source;
 		host_port = bpf_map_lookup_elem(&local_port_mapping, &mvm_port);
 		if (host_port) {
-			if (l4->syn && !l4->ack)
+			/* Spill the reply destination before snat_tcp() invalidates
+			 * the packet pointers; it decides the redirect below. */
+			__be32 reply_daddr = l3->daddr;
+
+			if (l4->syn && !l4->ack) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return TC_ACT_SHOT;
+			}
 
 			/* A port_mapping session whose gen differs from the VM's current
 			 * mvm_meta->version is stale (the sandbox was rolled back); reset
 			 * the guest side so the application unblocks. A miss forwards
 			 * statelessly (today's behaviour). port_mapping sessions have no
-			 * ingress entry. */
-			port_mapping_key(&pmkey, l3->daddr, l4->dest, l4->source);
+			 * ingress entry. The key uses the sandbox-assigned address: the
+			 * shared mvm_inner_ip cannot tell two sandboxes apart. */
+			port_mapping_key(&pmkey, vm_ip, l3->daddr, l4->dest, l4->source);
 			sess = bpf_map_lookup_elem(&egress_sessions, &pmkey);
 			if (sess && session_is_stale(sess)) {
 				bpf_map_delete_elem(&egress_sessions, &pmkey);
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
 				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
 			}
 
-			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
-			if (err)
-				return TC_ACT_SHOT;
+			if (sess) {
+				/* Port mapping conntrack orientation: the guest VM server is
+				 * IP_CT_DIR_REPLY, while the outside client is IP_CT_DIR_ORIGINAL. */
+				bool syn = l4->syn;
+				bool ack = l4->ack;
+				bool fin = l4->fin;
+				bool rst = l4->rst;
+				__u64 now = bpf_ktime_get_ns();
 
+				update_session(IP_CT_DIR_REPLY, sess, now, syn, ack, fin, rst);
+			}
+
+			err = snat_tcp(skb, ifindex, l2, l3, l4, l4->source, *host_port);
+			if (err) {
+				update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+					      SANDBOX_METRIC_DROP);
+				return TC_ACT_SHOT;
+			}
+
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
+
+			/* Same-host hairpin reply: when the peer address is one of
+			 * this node's own SNAT addresses, the connection was opened
+			 * by a local sandbox via nodeIP:hostPort (do_tcp_nat flags
+			 * the forward path TCP_HAIRPIN_OK). Loop the reply back
+			 * into the primary NIC ingress so from_world/tcp_nat_session
+			 * can reverse the SNAT; egressing the wire would rely on
+			 * switch hairpinning, which most networks do not provide.
+			 * reply_daddr must be spilled before snat_tcp(): the
+			 * csum/store helpers above invalidate all packet pointers
+			 * for the verifier. */
+			if (reply_daddr == nodenic_ip || is_snat_ip(reply_daddr))
+				return bpf_redirect(nodenic_ifindex, BPF_F_INGRESS);
 			return bpf_redirect(nodenic_ifindex, 0);
 		}
 	}
 
 	ret = pull_headers(skb, &l2, &l3);
-	if (ret != TC_ACT_OK)
+	if (ret != TC_ACT_OK) {
+		if (ret == TC_ACT_SHOT)
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 		return ret;
+	}
 
-	if (!should_do_nat(l3))
+	if (!should_do_nat(l3)) {
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
-
-	if (l3->daddr == nodenic_ip) {
-		/* This branch bypasses do_*_nat() and therefore the policy
-		 * check applied there. Enforce the unified egress policy
-		 * inline. TCP callers get an RST to match the guest-visible
-		 * behavior of the do_tcp_nat() path; UDP/ICMP silently drop.
-		 * dport is 0 because the original check was port-agnostic.
-		 */
-		switch (classify_egress_flow(ifindex, daddr, 0, proto)) {
-		case FLOW_REJECT:
-			if (proto == IPPROTO_TCP)
-				return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
-			return TC_ACT_SHOT;
-		default:
-			return bpf_redirect(cubegw0_ifindex, BPF_F_INGRESS);
-		}
 	}
 
 	if (proto == IPPROTO_TCP) {
 		tcp_ret = do_tcp_nat(skb, mvm_meta);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK)
-			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), egress_redirect_flags);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK)
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_HAIRPIN_OK) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
+			/* Same-host nodeIP:hostPort access: do_tcp_nat SNATed the
+			 * packet; loop it back into the primary NIC ingress, where
+			 * from_world's tcp_nat_proxy applies the port-mapping DNAT.
+			 * The target must be nodenic_ifindex: the DNAT gate is tied
+			 * to the primary NIC (nodenic.bpf.c do_tcp_nat()), and under
+			 * route-aware egress the SNAT device is cubeRouter. */
+			return bpf_redirect(nodenic_ifindex, BPF_F_INGRESS);
+		}
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_OK) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
+			return redirect_egress(TCP_NAT_IFINDEX(tcp_ret));
+		}
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_L7PROXY_OK) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
 			return bpf_redirect(TCP_NAT_IFINDEX(tcp_ret), BPF_F_INGRESS);
-		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET)
+		}
+		if (TCP_NAT_STATUS(tcp_ret) == TCP_NAT_RESET) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return tcp_send_reset(skb, skb->ingress_ifindex, mvm_inner_ip);
+		}
+		update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_SHOT;
 	}
 
 	/* Unresolved on-link destinations fall back to the gateway MAC inside
-	 * prepare_egress_l2 (no drop/probe), so the packet always forwards. */
-	prepare_egress_l2(skb, l2, daddr);
+	 * prepare_egress_l2 (no drop/probe), so the packet always forwards.
+	 * Node-local delivery is injected into cube-dev with the guest L2 header.
+	 */
+	if (daddr != nodenic_ip)
+		prepare_egress_l2(skb, l2, daddr);
 
 	if (proto == IPPROTO_UDP) {
-		if (!__pull_headers_udp(skb, &l2, &l3, &udp))
+		if (!__pull_headers_udp(skb, &l2, &l3, &udp)) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_SHOT;
+		}
 
 		if (udp->dest == DNS_PORT && dns_policy_enabled(mvm_meta) &&
 		    dns_payload_offset(l3, udp, &dns_off)) {
 			ret = dns_handle_query(skb, dns_off, ifindex);
-			if (ret != CUBE_DNS_PASS)
+			if (ret != CUBE_DNS_PASS) {
+				if (ret == TC_ACT_SHOT)
+					update_metrics(mvm_meta->ip, skb->len,
+						      SANDBOX_METRIC_EGRESS,
+						      SANDBOX_METRIC_DROP);
 				return ret;
+			}
 		}
 
 		return finish_udp_nat_inline(skb, mvm_meta);
@@ -1110,10 +1346,15 @@ int from_cube(struct __sk_buff *skb)
 
 	if (proto == IPPROTO_ICMP) {
 		dst_ifindex = do_icmp_nat(skb, mvm_meta);
-		if (dst_ifindex)
-			return bpf_redirect(dst_ifindex, egress_redirect_flags);
+		if (dst_ifindex) {
+			update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+				      SANDBOX_METRIC_FORWARDED);
+			return redirect_egress(dst_ifindex);
+		}
 	}
 
+	update_metrics(mvm_meta->ip, skb->len, SANDBOX_METRIC_EGRESS,
+		      SANDBOX_METRIC_DROP);
 	return TC_ACT_SHOT;
 }
 

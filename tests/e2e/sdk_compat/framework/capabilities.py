@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 LIFECYCLE = "lifecycle"
+# Data-plane liveness probe (Sandbox.is_running / isRunning).
+IS_RUNNING = "is_running"
 COMMANDS = "commands"
 FILESYSTEM = "filesystem"
 FILESYSTEM_EXTENDED = "filesystem_extended"
@@ -12,6 +16,10 @@ CODE_INTERPRETER = "code_interpreter"
 PAUSE_RESUME = "pause_resume"
 SET_TIMEOUT = "set_timeout"
 ROLLBACK_CLONE = "rollback_clone"
+# E2B added Sandbox.fork in 2.46.4; the suite's validated e2b range
+# (2.21.0-2.37.1, see e2b-versions.txt) predates it, so fork stays
+# CubeSandbox-only until the range catches up.
+FORK = "fork"
 NETWORK_ALLOW_DENY = "network_allow_deny"
 # In-place egress policy replacement on a running sandbox, including
 # re-evaluation of already-established connections.
@@ -25,12 +33,27 @@ NETWORK_DNS_ALLOW = "network_dns_allow"
 NETWORK_ALWAYS_DENIED = "network_always_denied"
 # CubeEgress L7 rules: inject, first-match, deny, TLS MITM, SNI/host.
 NETWORK_L7_EGRESS = "network_l7_egress"
+# Sandbox access to a service bound on the node IP (direct and via CubeEgress).
+NETWORK_NODE_LOCAL = "network_node_local"
 # Template CubeNetworkConfig merged with per-create network options.
 NETWORK_TEMPLATE_MERGE = "network_template_merge"
+# Sandbox-to-sandbox data plane: CubeProxy Host routing between sandboxes and
+# node host-port mapping (same-host hairpin included), with egress policy
+# enforced on the hairpin path.
+NETWORK_SANDBOX_TO_SANDBOX = "network_sandbox_to_sandbox"
 PLATFORM_LIFECYCLE = "platform_lifecycle"
 HOST_MOUNT = "host_mount"
 VOLUME_PLUGIN = "volume_plugin"
 AUTH_SIMPLE_KEY = "auth_simple_key"
+# E2B-compatible `mcp` create option served by the in-sandbox mcp-gateway.
+MCP_GATEWAY = "mcp_gateway"
+# Node-local restart policy (Never / OnFailure / Always) and restartStatus.
+RESTART_POLICY = "restart_policy"
+# Filesystem-only snapshots (rootfs + metadata, no guest memory) and cold boot
+# from them. `Sandbox.create_snapshot(mode=...)` is part of the SDK; `fork` has
+# no mode argument yet and the negative cases must read the raw HTTP status, so
+# those calls go through the API.
+FILESYSTEM_ONLY_SNAPSHOT = "filesystem_only_snapshot"
 
 COMMON_CAPABILITIES = frozenset(
     {LIFECYCLE, COMMANDS, FILESYSTEM, FILESYSTEM_EXTENDED, RUN_CODE}
@@ -42,9 +65,11 @@ E2B_CAPABILITIES = frozenset(
         CODE_INTERPRETER,
         PAUSE_RESUME,
         SET_TIMEOUT,
+        IS_RUNNING,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,
+        MCP_GATEWAY,
     }
 )
 
@@ -54,20 +79,27 @@ CUBESANDBOX_CAPABILITIES = frozenset(
         CODE_INTERPRETER,
         PAUSE_RESUME,
         SET_TIMEOUT,
+        IS_RUNNING,
         ROLLBACK_CLONE,
+        FORK,
         NETWORK_ALLOW_DENY,
         NETWORK_PUBLIC_ACCESS,
         NETWORK_MASK_REQUEST_HOST,
         NETWORK_DNS_ALLOW,
         NETWORK_ALWAYS_DENIED,
         NETWORK_L7_EGRESS,
+        NETWORK_NODE_LOCAL,
         NETWORK_TEMPLATE_MERGE,
+        NETWORK_SANDBOX_TO_SANDBOX,
         NETWORK_DYNAMIC_UPDATE,
         PLATFORM_LIFECYCLE,
         HOST_MOUNT,
         VOLUME_PLUGIN,
         AUTH_SIMPLE_KEY,
         NETWORK_L7_CUSTOM_PORT,
+        MCP_GATEWAY,
+        RESTART_POLICY,
+        FILESYSTEM_ONLY_SNAPSHOT,
     }
 )
 
@@ -83,3 +115,18 @@ BACKEND_CAPABILITIES = {
 def capabilities_for_backend(backend: str) -> frozenset[str]:
     """Return the capability set a backend supports (empty for unknown)."""
     return BACKEND_CAPABILITIES.get(backend, frozenset())
+
+
+def require_capabilities(backend: str, *capabilities: str) -> None:
+    """Skip when ``backend`` lacks any of ``capabilities``; tests that create
+    the sandbox themselves must call this first."""
+    missing = [
+        capability
+        for capability in capabilities
+        if capability not in capabilities_for_backend(backend)
+    ]
+    if missing:
+        pytest.skip(
+            f"backend {backend!r} does not support capability "
+            f"{', '.join(repr(capability) for capability in missing)}"
+        )

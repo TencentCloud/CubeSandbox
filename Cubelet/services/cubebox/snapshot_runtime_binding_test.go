@@ -8,80 +8,63 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
-func TestSetRuntimeSnapshotBindingLabels(t *testing.T) {
+func TestSetRuntimeSnapshotBinding(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{}
-	attachedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 
-	setRuntimeSnapshotBindingLabels(cb, "snap-1", attachedAt)
+	setRuntimeSnapshotBinding(cb, "snap-1")
 
-	if got := cb.Labels[constants.MasterAnnotationRuntimeSnapshotID]; got != "snap-1" {
+	if got := cb.RuntimeBaseID(); got != "snap-1" {
 		t.Fatalf("runtime snapshot id = %q, want snap-1", got)
-	}
-	if got := cb.Labels[constants.MasterAnnotationRuntimeSnapshotAttachedAt]; got != attachedAt.Format(time.RFC3339Nano) {
-		t.Fatalf("runtime snapshot attached at = %q, want %q", got, attachedAt.Format(time.RFC3339Nano))
 	}
 }
 
-func TestSetRuntimeSnapshotBindingLabelsSkipsEmptyID(t *testing.T) {
+func TestSetRuntimeSnapshotBindingSkipsEmptyID(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{}
-	setRuntimeSnapshotBindingLabels(cb, "", time.Now().UTC())
-	if len(cb.Labels) != 0 {
-		t.Fatalf("expected no labels when snapshot id empty, got %v", cb.Labels)
+	setRuntimeSnapshotBinding(cb, "")
+	if cb.RuntimeBaseID() != "" {
+		t.Fatalf("empty snapshot id must not bind a base, got %q", cb.RuntimeBaseID())
 	}
 }
 
 func TestPersistRuntimeSnapshotBindingUpdatesDurableBaseline(t *testing.T) {
-	attachedAt := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{
-		ID:     "sandbox",
-		Labels: map[string]string{constants.MasterAnnotationRuntimeSnapshotID: "previous"},
-	}}
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
+	setRuntimeSnapshotBinding(cb, "previous")
 	syncer := &guestMetricsEpochSyncerFake{}
 
-	require.NoError(t, persistRuntimeSnapshotBinding(
-		context.Background(), syncer, cb, "next", attachedAt,
-	))
+	require.NoError(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, "next"))
 	require.Equal(t, []string{"sandbox"}, syncer.syncIDs)
-	require.Equal(t, "next", cb.Labels[constants.MasterAnnotationRuntimeSnapshotID])
-	require.Equal(t, attachedAt.Format(time.RFC3339Nano), cb.Labels[constants.MasterAnnotationRuntimeSnapshotAttachedAt])
+	require.Equal(t, "next", cb.RuntimeBaseID())
 }
 
-func TestPersistRuntimeSnapshotBindingRestoresLabelsOnFailure(t *testing.T) {
-	previousLabels := map[string]string{
-		constants.MasterAnnotationRuntimeSnapshotID:         "previous",
-		constants.MasterAnnotationRuntimeSnapshotAttachedAt: "previous-time",
-		"unrelated": "preserved",
-	}
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{
-		ID:     "sandbox",
-		Labels: previousLabels,
-	}}
+func TestPersistRuntimeSnapshotBindingRestoresLineageOnFailure(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
+	cb.BindRestoreBase("previous-restore")
+	setRuntimeSnapshotBinding(cb, "previous")
+	previous := cb.MemoryLineageCopy()
 	syncer := &guestMetricsEpochSyncerFake{err: errors.New("bolt write failed")}
 
 	err := persistRuntimeSnapshotBinding(
-		context.Background(), syncer, cb, "next", time.Now().UTC(),
+		context.Background(), syncer, cb, "next",
 	)
 	require.ErrorContains(t, err, "persist runtime snapshot binding")
 	require.Equal(t, []string{"sandbox"}, syncer.syncIDs)
-	require.Equal(t, previousLabels, cb.Labels)
+	require.Equal(t, previous, cb.MemoryLineageCopy())
 }
 
 // A destination collision after the dirty bitmap is cleared must not reuse
 // the sealed memory of an older package with the same ID.
 func TestFailedCommitDoesNotResolveOldDestinationBaseline(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
-	setRuntimeSnapshotBindingLabels(cb, "T", time.Now())
+	setRuntimeSnapshotBinding(cb, "T")
 	syncer := &guestMetricsEpochSyncerFake{}
-	require.NoError(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, runtimeSnapshotBindingInvalidID, time.Now()))
+	require.NoError(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, ""))
 	oldBase, oldRestore := resolveBaseMemoryObjectFn, resolveRestoreBaseMemoryObjectFn
 	oldCreate := createMemoryVolumeFor
 	oldImported := getImportedSandboxMemoryFor
@@ -117,12 +100,12 @@ func TestFailedCommitDoesNotResolveOldDestinationBaseline(t *testing.T) {
 	// Failure to publish a completed package must leave the durable invalid
 	// baseline in memory too, so the next commit follows the same safe fallback.
 	syncer.err = errors.New("baseline publication unavailable")
-	require.Error(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, "new", time.Now()))
-	require.Equal(t, runtimeSnapshotBindingInvalidID, resolveBaseSnapshotID(cb))
+	require.Error(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, "new"))
+	require.Equal(t, "", resolveBaseSnapshotID(cb))
 	_, snapshotType, err = prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "next", 4096, "s3")
 	require.NoError(t, err)
 	require.Equal(t, snapshotTypeFull, snapshotType)
 	syncer.err = nil
-	require.NoError(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, "new", time.Now()))
+	require.NoError(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, "new"))
 	require.Equal(t, "new", resolveBaseSnapshotID(cb))
 }

@@ -84,6 +84,19 @@ cp /path/to/vmlinux deploy/one-click/assets/kernel-artifacts/
 
 默认文件名为 `vmlinux`。可通过环境变量 `ONE_CLICK_CUBE_KERNEL_VMLINUX` 覆盖路径。
 
+> **架构说明 —— `vmlinux` 是通用名称。** 在 **x86_64** 上，客户机内核确实是原始的
+> ELF `vmlinux`。在 **aarch64** 上，客户机内核是 `make arch/arm64/boot/Image`
+> 产出的 PE/COFF 格式 boot Image——发布资产 `vmlinux-arm64` 就是以历史名称
+> `vmlinux` 发布的该 Image，VMM 通过其 PE loader 加载。原始 ELF `vmlinux`
+> （内核构建树里未剥离的链接器输出）无法在 aarch64 上启动，会在 VM 启动时
+> 被拒绝并报出指明文件与本要求的错误。获取正确产物的最简单方式是使用仓库内
+> 的辅助目标，它会为两种架构构建正确的镜像并以 `vmlinux` 名称安装：
+>
+> ```bash
+> # 本机架构构建；交叉构建加 KERNEL_TARGET_ARCH=aarch64
+> make guest-kernel KERNEL_SRC=/path/to/linux KERNEL_TARGET_ARCH=aarch64
+> ```
+
 ### 1.2 执行构建
 
 如需覆盖构建选项，先复制构建环境模板，然后在仓库根目录执行：
@@ -254,6 +267,23 @@ sudo ./down.sh
 ```
 
 该命令会停止所有宿主机进程（cubelet、cubemaster、cube-api）、Docker 容器（CubeProxy、CoreDNS、MySQL、Redis），并回滚 `cube.app` 的 DNS 路由配置。
+
+### 卸载
+
+完整卸载会删除 CubeSandbox 服务、容器、数据卷、网络配置、运行数据和日志，已有模板、沙箱及快照数据也会被删除。执行前请先备份需要保留的数据。
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+确认检查通过且不再需要卸载脚本和安装包后，最后手动删除保留的工具目录：
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> 该卸载脚本不会删除 Cube 相关的 Docker 镜像，如果需要删除，可以根据脚本提示手动删除。
 
 ### 升级或重新安装
 

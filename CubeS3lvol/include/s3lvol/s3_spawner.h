@@ -89,13 +89,7 @@ void *s3_spawner_run_task(void *(*task_fn)(void *), void *arg);
 
 /**
  * Create a thread via the spawner, so the new thread inherits the wide
- * affinity. Behaviour matches `pthread_create()`: 0 on success.
- */
-int s3_spawner_pthread_create(pthread_t *thread,
-			      void *(*start_routine)(void *), void *arg);
-
-/**
- * The fire-and-forget variant of `s3_spawner_pthread_create()`.
+ * affinity. The call returns as soon as the request is queued.
  *
  * Returns immediately after submitting; the reactor does not block on the
  * spawner round trip. The actual pthread_create happens on the spawner in the

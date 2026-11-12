@@ -410,7 +410,7 @@ function AboutSection() {
       <div className="flex gap-3">
         {[
           { label: 'GitHub', href: 'https://github.com/tencentcloud/CubeSandbox' },
-          { label: t('about.docs'), href: 'https://github.com/tencentcloud/CubeSandbox/wiki' },
+          { label: t('about.docs'), href: 'https://cubesandbox.com/zh/' },
         ].map(({ label, href }) => (
           <a
             key={label}

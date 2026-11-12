@@ -46,6 +46,11 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "opts nil")
 	}
 
+	// A restart already knows its sandbox ID. Do not mint a new one.
+	if workflow.ReuseFor(opts).CubeboxMeta && opts.SandboxID != "" {
+		return nil
+	}
+
 	// Resume-from-pause (and other same-ID recreate paths) pass an explicit
 	// sandbox ID via annotation so the new shim/task reuses the caller's ID.
 	if desired := desiredSandboxID(opts); desired != "" {

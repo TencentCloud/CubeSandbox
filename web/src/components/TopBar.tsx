@@ -58,7 +58,7 @@ export function TopBar() {
           {t('github')}
         </a>
         <a
-          href="https://github.com/tencentcloud/CubeSandbox/wiki"
+          href="https://cubesandbox.com/zh/"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.06] transition-colors"

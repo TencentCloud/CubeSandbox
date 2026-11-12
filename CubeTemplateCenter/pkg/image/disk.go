@@ -57,7 +57,8 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	if err := runCommand(ctx, "", "truncate", "-s", strconv.FormatInt(estimatedSizeBytes, 10), ext4Path); err != nil {
 		return fmt.Errorf("truncate ext4 image for streaming: %w", err)
 	}
-	if err := runCommand(ctx, "", "mkfs.ext4", "-F", ext4Path); err != nil {
+	// Journaling is unnecessary for the published read-only overlay lower layer.
+	if err := runCommand(ctx, "", "mkfs.ext4", "-F", "-b", "4096", "-O", "^has_journal", ext4Path); err != nil {
 		return fmt.Errorf("mkfs.ext4 for streaming: %w", err)
 	}
 
@@ -72,6 +73,8 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 	var loopDevice string
 	var mounted bool
 	var mountStuck bool
+	var unmountedNormally bool
+	var loopDetached bool
 	var unmountOnce sync.Once
 	var detachOnce sync.Once
 	detachLoop := func() {
@@ -92,7 +95,9 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 				if attempt > 0 {
 					time.Sleep(200 * time.Millisecond)
 				}
-				if err = runCommand(cleanupCtx, "", "losetup", "--detach", "--", loopDevice); err == nil {
+				// losetup --detach takes the loop device directly.
+				if err = runCommand(cleanupCtx, "", "losetup", "--detach", loopDevice); err == nil {
+					loopDetached = true
 					return
 				}
 			}
@@ -116,6 +121,8 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 						mountStuck = true
 						log.G(ctx).Warnf("lazy umount %s also failed, loop device will leak: %v", mountPoint, lazyErr)
 					}
+				} else {
+					unmountedNormally = true
 				}
 			})
 		}
@@ -203,45 +210,15 @@ func createExt4ImageStreaming(ctx context.Context, source *PreparedSource, workD
 
 	// 5. Unmount and detach (via cleanup).
 	cleanup()
-
-	// 6. Shrink the ext4 filesystem to minimum size (best-effort).
-	if err := runCommand(cleanupCtx, "", "resize2fs", "-M", ext4Path); err != nil {
-		log.G(ctx).Warnf("resize2fs -M failed (best-effort, using original size): %v", err)
+	// A lazy umount only removes the mount from the namespace. Until detach
+	// succeeds the kernel may still use the filesystem, and fsck on the regular
+	// backing file cannot reliably detect that. Fail before modifying the image
+	// so BuildExt4 can re-export through Phase 1 instead.
+	if mountStuck || (!unmountedNormally && !loopDetached) {
+		return fmt.Errorf("cannot shrink ext4 image: normal unmount failed and lazy unmount with loop detach did not complete")
 	}
 
-	// 7. Round the image file UP to a pmem-compatible size. The microVM boots the
-	// rootfs as a virtio-pmem device whose backing-file size MUST be a multiple of
-	// 2 MiB, else the host device manager rejects it ("PmemSizeNotAligned"). Phase-1
-	// sizing gets this for free (it aligns up to a 256 MiB boundary); the streaming
-	// path shrinks with resize2fs -M, which truncates the file to the exact
-	// filesystem length (not 2 MiB-aligned). Align that apparent size up here —
-	// rounding UP never cuts into live filesystem blocks; the small tail is just
-	// unused device space. Use the apparent size (fi.Size(), the fs logical length
-	// after resize2fs -M), NOT the physically-allocated block count, which can be
-	// smaller than the fs length for a minimized image and would truncate below it.
-	const pmemAlignmentBytes = int64(2 * 1024 * 1024)
-	fsSize := estimatedSizeBytes
-	haveActualSize := false
-	if fi, statErr := os.Stat(ext4Path); statErr != nil {
-		log.G(ctx).Warnf("stat %s for pmem alignment failed, using estimated size %d (may over-provision guest address space): %v", ext4Path, estimatedSizeBytes, statErr)
-	} else if fi.Size() > 0 {
-		fsSize = fi.Size()
-		haveActualSize = true
-		if fi.Size() > estimatedSizeBytes {
-			log.G(ctx).Warnf("stat %s reported size %d exceeding estimate %d (unexpected); using the actual size for pmem alignment", ext4Path, fi.Size(), estimatedSizeBytes)
-		}
-	}
-	alignedSize := alignUp(fsSize, pmemAlignmentBytes)
-	// Skip the truncate only when the real file size is already exactly aligned. If
-	// the stat failed we must still truncate: the file sits at resize2fs -M's length
-	// (very likely unaligned) and estimatedSizeBytes is only a fallback target.
-	if !haveActualSize || alignedSize != fsSize {
-		if err := runCommand(cleanupCtx, "", "truncate", "-s", strconv.FormatInt(alignedSize, 10), ext4Path); err != nil {
-			log.G(ctx).Warnf("truncate to pmem-aligned size %d failed: %v", alignedSize, err)
-		}
-	}
-
-	return nil
+	return shrinkAndAlign(cleanupCtx, ext4Path)
 }
 
 // artifactStoreDirOf returns the artifact store root for an ext4 image path,
@@ -302,7 +279,7 @@ func reclaimOrphanLoopDevices(ctx context.Context, storeDir string) int {
 	}
 	reclaimed := 0
 	for _, name := range orphanLoopCandidates(string(out), storeDir) {
-		if err := runCommand(ctx, "", "losetup", "--detach", "--", name); err != nil {
+		if err := runCommand(ctx, "", "losetup", "--detach", name); err != nil {
 			log.G(ctx).Debugf("orphan loop device %s not reclaimable (likely still in use): %v", name, err)
 			continue
 		}

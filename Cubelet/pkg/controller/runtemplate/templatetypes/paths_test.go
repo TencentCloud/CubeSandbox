@@ -60,6 +60,9 @@ func TestInventoryVersionKey(t *testing.T) {
 	// Non-digest component versions pass through.
 	assert.Equal(t, "0.6.0-test1", InventoryVersionKey("0.6.0-test1"))
 	assert.Equal(t, "", InventoryVersionKey(""))
+	for _, invalid := range []string{"..", "../..", "..@invalid", ".@invalid"} {
+		assert.Empty(t, InventoryVersionKey(invalid), invalid)
+	}
 	assert.Equal(t, "", InventoryVersionKey("@@@"))
 	assert.Equal(t, "", InventoryVersionKey("sha256:short"))
 	assert.Equal(t, "sha256-aaaaaaaaaaaa", InventoryVersionKey("v0.6.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))

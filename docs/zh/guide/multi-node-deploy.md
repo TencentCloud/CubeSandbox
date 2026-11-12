@@ -39,9 +39,14 @@
 - **物理机或裸金属服务器**（不支持嵌套虚拟化）
 - **x86_64** 或 **aarch64**（ARM64）架构，**已启用 KVM**（`ls /dev/kvm`）
 - **Docker** 已安装并运行
+- 所有集群节点（包括控制节点和所有计算节点）均已启用**时间同步**，可使用 `chrony`、`ntpd`、`systemd-timesyncd`、PTP 或其他合适的时间同步方案
 - 到控制节点的**网络连通性**（默认需访问 `CubeOps` 的 `3010` 端口进行节点注册；使用内置 MinIO 时还需访问 `9000` 端口）
 
-完整要求列表请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
+控制节点的前置条件请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
+
+:::: warning 保持节点时间同步
+如果计算节点的时间落后于控制节点，其心跳时间可能看起来已超过 15 秒的过期窗口，导致该节点被标记为不健康，模板也不会下发到该节点。时间恢复同步后，CubeMaster 通常会自动补齐缺失的模板副本；如需立即触发重新下发，可执行 [template redo](./cubemaster-scheduler-config.md#扩容后的-template-redo)。
+::::
 
 ## 第一步：准备发布包
 
@@ -184,6 +189,7 @@ scheduler:
 | --- | --- | :---: | :---: |
 | CubeSandbox SDK + `CUBE_PROXY_NODE_IP` | Python、Go 和 Node.js SDK | 不需要 | 不需要 |
 | CubeProxy 路径模式 | curl、后端服务、通用 HTTP 客户端 | 不需要 | 不需要 |
+| E2B header 模式 | 固定地址下使用官方 E2B SDK | 不需要 | 不需要 |
 | 泛域名 DNS | 生产环境、浏览器、SPA、官方 E2B SDK | 需要 | 不需要 |
 | E2B 开发 sidecar | 本地没有 DNS，但必须使用官方 E2B SDK | 不需要 | 需要 |
 
@@ -216,6 +222,18 @@ curl http://10.0.0.5/sandbox/abc123/49999/health
 
 路径模式不需要 DNS 或证书配置，并支持 WebSocket 升级。但它不适合使用 `/static/app.js` 等根绝对路径加载资源的 SPA，此类应用应使用泛域名 DNS。
 
+### 固定地址下的 E2B SDK：header 模式
+
+当请求的 Host 不带 `<port>-<sandbox-id>.<domain>` 路由属性时，CubeProxy 会回退到官方 E2B 路由 header：`E2b-Sandbox-Id`（必填）和 `E2b-Sandbox-Port`（可选，默认为 envd 端口 `49983`）。官方 E2B SDK 将 `E2B_SANDBOX_URL` 作为数据面网关地址，并在沙箱数据面请求上携带这些路由 header，因此可以直接按 IP 指向 CubeProxy：
+
+```bash
+export E2B_API_URL="http://<cubeapi地址>:<api端口>"
+export E2B_SANDBOX_URL="http://<cubeproxy地址>:<http端口>"
+export E2B_API_KEY="<your-api-key>"
+```
+
+Host 路由保持优先，存量泛域名流量不受影响。与路径模式一样，header 模式在明文端口上把整条数据面暴露给所有能访问 CubeProxy 的请求方，请仅在可信网络中使用。
+
 ### 生产环境和浏览器访问：泛域名 DNS
 
 Host 模式使用 `<端口>-<sandbox-id>.<域名>` 格式的沙箱域名。需要配置指向 CubeProxy 的泛域名 A 记录：
@@ -236,7 +254,7 @@ TLS 和 DNS 的完整配置请参阅 [HTTPS 证书与域名解析](./https-and-d
 
 ### 官方 E2B SDK 无泛域名 DNS：开发 sidecar
 
-官方 E2B SDK 没有 CubeSandbox SDK 的 IP 直连选项。本地开发环境无法配置泛域名 DNS 时，可以使用 [E2B 开发 sidecar 示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)：
+只有读取 `E2B_SANDBOX_URL` 的 E2B SDK 版本才能直连固定地址（见上文 [header 模式](#固定地址下的-e2b-sdkheader-模式)）。对于不支持该配置的 SDK 版本，可以使用 [E2B 开发 sidecar 示例](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)：
 
 ```bash
 cd examples/e2b-dev-sidecar
@@ -270,6 +288,25 @@ sudo ./down.sh
 ```
 
 计算节点模式下，该命令只会停止 `cubelet`，不影响控制面或其他计算节点。
+
+### 卸载
+
+集群中的控制节点和计算节点需要分别执行卸载。卸载会删除当前节点上的 CubeSandbox 服务、容器、数据卷、网络配置、运行数据和日志；卸载控制节点还会删除集群中的模板、沙箱及快照数据。执行前请先备份需要保留的数据，并按[节点相关操作](./node-operations.md)先隔离和清理待移除的计算节点。
+
+在每个需要卸载的节点执行：
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+确认检查通过且不再需要卸载脚本和安装包后，最后手动删除保留的工具目录：
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> 该卸载脚本不会删除 Cube 相关的 Docker 镜像，如果需要删除，可以根据脚本提示手动删除。
 
 ### 重新安装
 

@@ -7,6 +7,7 @@
 local utils = require "utils"
 local sb = require "sandbox_backend"
 local state = require "sandbox_state"
+local activity = require "activity"
 local request_host = require "request_host"
 
 local uri = ngx.var.uri or ""
@@ -37,6 +38,11 @@ ngx.req.set_uri(rest, false)
 -- Auto-pause gate: if the sandbox is currently paused, ask CLM to resume it
 -- before we attempt backend resolution. No-op when the sandbox isn't tracked.
 state.gate(ins_id)
+
+-- Stamp activity at request start too: log_phase stamps only after the
+-- response ends, so a request longer than the idle timeout would otherwise
+-- look idle while it is still in flight and be paused mid-request.
+activity.touch(ins_id)
 
 local host_ip, host_port, mask_request_host = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip

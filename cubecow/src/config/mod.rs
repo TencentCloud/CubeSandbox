@@ -61,12 +61,30 @@ pub struct ReflinkConfig {
     /// Default: `/var/lib/cubecow/reflink`.
     #[serde(default = "default_reflink_root_dir")]
     pub root_dir: PathBuf,
+    /// How a snapshot or volume-from-snapshot copies its source file.
+    /// See [`CloneMethod`]. Default: `ficlone`.
+    #[serde(default)]
+    pub clone_method: CloneMethod,
+}
+
+/// File clone primitive used by the reflink backend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneMethod {
+    /// `FICLONE` ioctl (xfs `reflink=1`, Btrfs, OCFS2).
+    #[default]
+    Ficlone,
+    /// `copy_file_range(2)` over the whole file. Only O(1) on
+    /// filesystems that implement it as a metadata clone (JuiceFS);
+    /// elsewhere it is a full in-kernel data copy.
+    CopyFileRange,
 }
 
 impl Default for ReflinkConfig {
     fn default() -> Self {
         Self {
             root_dir: default_reflink_root_dir(),
+            clone_method: CloneMethod::default(),
         }
     }
 }

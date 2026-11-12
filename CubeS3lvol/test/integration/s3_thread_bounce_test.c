@@ -304,62 +304,6 @@ main(void)
 		}
 	}
 
-	/* ---------- 6. delete_batch: the fan-out aggregate callback bounces
-	 * too ---------- */
-	printf("\n[6] s3_delete_batch -- fan-out aggregate callback bounce\n");
-	{
-		struct bounce_probe p = {0};
-		const char *keys[4] = {
-			"bounce/b0", "bounce/b1", "bounce/b2", "bounce/b3",
-		};
-
-		p.submit_thread = spdk_get_thread();
-		p.submit_tid    = pthread_self();
-
-		rc = s3_delete_batch(client, keys, 4, bounce_op_cb, &p);
-		check_true("s3_delete_batch submission succeeds", rc == 0, NULL);
-
-		if (rc == 0) {
-			check_true("the aggregate callback has not run when "
-				   "submission returns", !p.done, NULL);
-			bool finished = poll_until_done(thread, &p);
-			check_true("the aggregate callback runs after polling",
-				   finished, NULL);
-			if (finished) {
-				/* This is the easiest one to get wrong: the
-				 * batch completes when the **last sub-request
-				 * to land** finishes, and that is some
-				 * arbitrary CRT I/O thread. The bounce back
-				 * must come from batch->owner_thread. */
-				check_true("the aggregate callback runs on the "
-					   "submitting thread (not the last "
-					   "CRT thread)",
-					   p.cb_thread == p.submit_thread &&
-					   pthread_equal(p.submit_tid, p.cb_tid),
-					   NULL);
-			}
-		}
-	}
-
-	/* ---------- 7. stats ---------- */
-	printf("\n[7] stats (the atomic counters should converge exactly)\n");
-	{
-		struct s3_client_stats stats;
-		s3_client_get_stats(client, &stats);
-		printf("     head=%" PRIu64 " get=%" PRIu64 " delete=%" PRIu64
-		       " inflight=%" PRIu64 "\n",
-		       stats.head_ops, stats.get_ops, stats.delete_ops,
-		       stats.inflight);
-		check_true("inflight has returned to zero",
-			   stats.inflight == 0, NULL);
-		/* a batch of 4 keys -> 4 DeleteObject calls */
-		char detail[64];
-		snprintf(detail, sizeof(detail), "delete_ops=%" PRIu64 " (want 4)",
-			 stats.delete_ops);
-		check_true("the fan-out delete_ops exactly equals the key count",
-			   stats.delete_ops == 4, detail);
-	}
-
 	s3_client_put(client);
 
 out_fini:

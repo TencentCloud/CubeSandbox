@@ -6,6 +6,7 @@ All CubeSandbox release artifacts live on one [Releases page](https://github.com
 | --- | --- | --- |
 | Standard deployment ([Quick Start](./quickstart.md), [bare-metal](./bare-metal-deploy.md)) | Nothing | [Standard deployment](#standard-deployment-nothing-to-download) |
 | PVM deployment (cloud server without `/dev/kvm`) | The PVM host kernel package (rpm/deb) | [PVM deployment](#pvm-deployment-download-the-host-kernel-package) |
+| Offline deployment | The bundle, container images, OS packages | [Offline Deployment](./offline-deploy.md) |
 | Building the bundle yourself / swapping kernel or image | Guest kernels, guest image | [Self-build](#self-build-downloading-guest-kernels-and-image) |
 
 ::: tip Just following the Quick Start?

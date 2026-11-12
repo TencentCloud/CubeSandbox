@@ -128,7 +128,9 @@ func TestDetachedSnapshotWorkContextPreservesLongDeadline(t *testing.T) {
 }
 
 func TestResolveBaseSnapshotIDPriority(t *testing.T) {
-	t.Run("runtime label wins over annotations", func(t *testing.T) {
+	// Metadata (labels and create-request annotations) is never a memory
+	// base; only the lineage is.
+	t.Run("metadata alone yields no base", func(t *testing.T) {
 		cb := &cubeboxstore.CubeBox{
 			Metadata: cubeboxstore.Metadata{
 				Labels: map[string]string{
@@ -140,10 +142,10 @@ func TestResolveBaseSnapshotIDPriority(t *testing.T) {
 				},
 			},
 		}
-		assert.Equal(t, "rollback-snap", resolveBaseSnapshotID(cb))
+		assert.Empty(t, resolveBaseSnapshotID(cb))
 	})
 
-	t.Run("create-time runtime annotation beats template id", func(t *testing.T) {
+	t.Run("bound runtime base wins", func(t *testing.T) {
 		cb := &cubeboxstore.CubeBox{
 			Metadata: cubeboxstore.Metadata{
 				Annotations: map[string]string{
@@ -152,18 +154,8 @@ func TestResolveBaseSnapshotIDPriority(t *testing.T) {
 				},
 			},
 		}
-		assert.Equal(t, "create-time-snap", resolveBaseSnapshotID(cb))
-	})
-
-	t.Run("falls back to template id", func(t *testing.T) {
-		cb := &cubeboxstore.CubeBox{
-			Metadata: cubeboxstore.Metadata{
-				Annotations: map[string]string{
-					constants.MasterAnnotationAppSnapshotTemplateID: "tpl-original",
-				},
-			},
-		}
-		assert.Equal(t, "tpl-original", resolveBaseSnapshotID(cb))
+		setRuntimeSnapshotBinding(cb, "rollback-snap")
+		assert.Equal(t, "rollback-snap", resolveBaseSnapshotID(cb))
 	})
 
 	t.Run("returns empty when no binding", func(t *testing.T) {

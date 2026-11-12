@@ -115,19 +115,17 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 }
 
 func (s *Sandbox) readFile(ctx context.Context, path string, options ...fileRequestOption) (string, error) {
-	if err := s.ensureClient(); err != nil {
-		return "", err
-	}
-
-	query := newEnvdFileQuery(path, options...)
-	req, err := s.newEnvdRequest(ctx, http.MethodGet, "/files", query, nil)
+	raw, err := s.readFileBytes(ctx, path, options...)
 	if err != nil {
 		return "", err
 	}
+	return string(raw), nil
+}
 
-	resp, err := s.client.dataHTTP.Do(req)
+func (s *Sandbox) readFileBytes(ctx context.Context, path string, options ...fileRequestOption) ([]byte, error) {
+	resp, err := s.doEnvdFileGet(ctx, path, options...)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -136,14 +134,44 @@ func (s *Sandbox) readFile(ctx context.Context, path string, options ...fileRequ
 		if message == "" {
 			message = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}
-		return "", fmt.Errorf("failed to read %s: %s", path, message)
+		return nil, fmt.Errorf("failed to read %s: %s", path, message)
 	}
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(raw), nil
+	return raw, nil
+}
+
+func (s *Sandbox) openFileStream(ctx context.Context, path string, options ...fileRequestOption) (io.ReadCloser, error) {
+	resp, err := s.doEnvdFileGet(ctx, path, options...)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		message := readErrorMessage(resp)
+		resp.Body.Close()
+		if message == "" {
+			message = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("failed to read %s: %s", path, message)
+	}
+	return resp.Body, nil
+}
+
+func (s *Sandbox) doEnvdFileGet(ctx context.Context, path string, options ...fileRequestOption) (*http.Response, error) {
+	if err := s.ensureClient(); err != nil {
+		return nil, err
+	}
+
+	query := newEnvdFileQuery(path, options...)
+	req, err := s.newEnvdRequest(ctx, http.MethodGet, "/files", query, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.client.dataHTTP.Do(req)
 }
 
 // writeFile uploads data through envd's POST /files API. It first tries a raw
@@ -495,21 +523,30 @@ type Watcher struct {
 	Events <-chan WatchEvent
 	Errors <-chan error
 
-	events chan WatchEvent
-	errs   chan error
-	ctx    context.Context
-	cancel context.CancelFunc
-	body   io.ReadCloser
-	once   sync.Once
+	events   chan WatchEvent
+	errs     chan error
+	ctx      context.Context
+	cancel   context.CancelFunc
+	body     io.ReadCloser
+	closeErr error
+	once     sync.Once
+}
+
+// closeBody closes the response body exactly once, whether the stream ended
+// naturally (readLoop) or was torn down early (Close).
+func (w *Watcher) closeBody() error {
+	w.once.Do(func() {
+		w.cancel()
+		if w.body != nil {
+			w.closeErr = w.body.Close()
+		}
+	})
+	return w.closeErr
 }
 
 // Close terminates the watcher and releases resources.
 func (w *Watcher) Close() error {
-	w.once.Do(func() {
-		w.cancel()
-		w.body.Close()
-	})
-	return nil
+	return w.closeBody()
 }
 
 type watchDirFrame struct {
@@ -568,7 +605,7 @@ func (s *Sandbox) watchDir(ctx context.Context, path string, options ...fileRequ
 func (w *Watcher) readLoop() {
 	defer close(w.events)
 	defer close(w.errs)
-	defer w.body.Close()
+	defer func() { _ = w.closeBody() }()
 
 	for {
 		flags, payload, err := readConnectEnvelope(w.body)

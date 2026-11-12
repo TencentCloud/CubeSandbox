@@ -40,7 +40,7 @@ Cube Sandbox 是一款**专为 AI Agent 打造的基础设施** —— 可托管
 | **部署密度** | 高 | 低 | **极致（单节点数千实例）** |
 | **Agent 托管** | 需自行搭建 | 需自行搭建 | **✅ 原生支持（AgentHub）** |
 | **自动暂停 / 恢复** | / | / | **✅ 平台托管（百毫秒级恢复）** |
-| **跨机暂停 / 恢复** | / | / | **✅ S3 后端（preview）** |
+| **跨机暂停 / 恢复** | / | / | **✅ JFS / S3 后端（preview）** |
 | **快照 / 克隆 / 回滚** | / | / | **✅ 亚秒级** |
 | **E2B SDK 兼容** | / | / | **✅ 即插即用** |
 
@@ -48,7 +48,7 @@ Cube Sandbox 是一款**专为 AI Agent 打造的基础设施** —— 可托管
 
 * [快速开始](./quickstart.md) — 用最短路径从零到运行沙箱。
 * [沙箱生命周期](./lifecycle.md) — 状态模型、自动暂停、自动恢复。
-* [跨机快照](./cross-node-snapshot.md) — S3 后端下在集群内任意节点恢复暂停沙箱或从快照创建沙箱。
+* [跨机迁移](./cross-node-snapshot/requirements.md) — 在其他兼容节点恢复暂停沙箱或从快照创建沙箱。
 * [数字助手（AgentHub）](./digital-assistant.md) — 托管和管理 AI Agent 实例。
 * [本地构建部署](./self-build-deploy.md) — 单机部署参考。
 * [多机集群部署](./multi-node-deploy.md) — 扩展到多机集群。

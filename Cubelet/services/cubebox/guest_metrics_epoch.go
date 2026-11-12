@@ -3,7 +3,6 @@ package cubebox
 import (
 	"context"
 	"fmt"
-	"maps"
 	"time"
 
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -100,29 +99,28 @@ func activateAndPersistRollbackGuestMetricsEpoch(
 		return fmt.Errorf("prepared guest metrics epoch is required")
 	}
 	previousEpoch := epoch.DeepCopy()
-	previousLabels := copyCubeBoxLabels(cb)
 	if err := cb.ActivatePreparedGuestMetricsEpoch(epoch.Generation); err != nil {
 		return err
 	}
-	setRuntimeSnapshotBindingLabels(cb, snapshotID, activatedAt)
-	setRuntimeRestoreBaseLabels(cb, snapshotID, activatedAt)
+	setRuntimeSnapshotBinding(cb, snapshotID)
+	setRuntimeRestoreBase(cb, snapshotID)
 	if err := syncer.SyncByID(ctx, cb.ID); err != nil {
-		if cb.RestoreGuestMetricsEpochIfCurrent(epoch.Generation, cubeboxstore.GuestMetricsEpochPending, previousEpoch) {
-			restoreCubeBoxLabels(cb, previousLabels)
-		}
+		// The VM has already been restored to snapshotID, so the persisted
+		// lineage is stale either way. Do NOT put the pre-rollback base back:
+		// the next Commit would treat it as a valid soft-dirty/pagemap_anon
+		// base and drop pages written since the rollback. Clearing forces a
+		// correct full capture.
+		//
+		// The clear is in-memory only and the durable row still holds the
+		// pre-rollback base. If this process dies before the next successful
+		// SyncByID, recovery reads the "prepared" epoch this rollback left
+		// behind and treats the lineage as untrusted (see
+		// ReconcileRecoveredMemoryLineage). That is what keeps the stale
+		// durable value from being reused; do not rely on the in-memory clear
+		// alone.
+		cb.RestoreGuestMetricsEpochIfCurrent(epoch.Generation, cubeboxstore.GuestMetricsEpochPending, previousEpoch)
+		cb.ClearRuntimeLineage()
 		return fmt.Errorf("persist activated guest metrics epoch for %s: %w", cb.ID, err)
 	}
 	return nil
-}
-
-func copyCubeBoxLabels(cb *cubeboxstore.CubeBox) map[string]string {
-	cb.MetaLock.Lock()
-	defer cb.MetaLock.Unlock()
-	return maps.Clone(cb.Labels)
-}
-
-func restoreCubeBoxLabels(cb *cubeboxstore.CubeBox, labels map[string]string) {
-	cb.MetaLock.Lock()
-	defer cb.MetaLock.Unlock()
-	cb.Labels = maps.Clone(labels)
 }

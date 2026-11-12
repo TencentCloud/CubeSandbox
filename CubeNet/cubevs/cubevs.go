@@ -166,14 +166,33 @@ type dnsQueryTrackKey struct {
 }
 
 // dnsQueryTrackValue mirrors struct dns_query_track_value on the BPF side.
-// Ports is copied from the matched dns_allow_value at query time so the
-// response handler can rebuild net_policy_value_v3 without a second lookup.
+//
+// Only ExpiresAtNS is read by the datapath: the response path just asks whether
+// a reply answers a query it tracked. Flags is written purely so a dump of
+// pending queries shows what each one matched. The (port, scheme) set the
+// matched rule carried is no longer copied here — the user-space learner
+// derives ports from its own domain index, so a policy update applies to
+// replies already in flight.
 type dnsQueryTrackValue struct {
 	ExpiresAtNS uint64
 	Flags       uint8
-	PortCount   uint8
-	Reserved    [6]uint8
-	Ports       [maxL7PortsPerHost]l7PortEntry
+	Reserved    [39]uint8
+}
+
+// dnsTrackRLState mirrors struct dns_track_rl_state in src/cubevs.h. Installed
+// per sandbox at AddTAPDevice time; the BPF side then enforces
+// DNS_TRACK_QPS_LIMIT tracked queries per second via a fixed window. A
+// catch-all rule matches every name, so the whole resolver burst shares this
+// budget. Over budget the matched query is dropped rather than answered: an
+// answered-but-untracked lookup is cached by the guest and then denied. The
+// Lock field is a bpf_spin_lock placeholder whose contents the kernel owns.
+// Zero-initialising everything is safe: the first BPF access sees
+// window_end_ns == 0 and opens a fresh window.
+type dnsTrackRLState struct {
+	Lock        uint32
+	Count       uint32
+	WindowEndNS uint64
+	Reserved    [2]uint64
 }
 
 const (
@@ -200,6 +219,22 @@ const (
 	maxL7PortsPerHost = 8
 	// Network policy value marker. Must match src/cubevs.h.
 	netPolicyValueStatic = 1
+	// Session packet classes. Must match enum packet_class in src/session.h.
+	packetClassSNAT        = uint8(0)
+	packetClassL7Proxy     = uint8(1)
+	packetClassPortMapping = uint8(2)
+	packetClassHairpin     = uint8(3)
+	// dnsEventPrefixLen is the size of struct dns_event_prefix, which precedes
+	// the raw Ethernet frame in every dns_events record:
+	//
+	//	[0:2]  frame_len (u16, little-endian)
+	//	[2:4]  reserved  (u16)
+	//	[4:8]  ifindex   (u32, little-endian)
+	//	[8:]   frame
+	dnsEventPrefixLen = 8
+	// dnsEventMaxFrame must match DNS_EVENT_MAX_FRAME in src/cubevs.h: a
+	// larger reply is not uploaded at all, so it is never truncated.
+	dnsEventMaxFrame = 2048
 	// programs that power CubeVS.
 	programNameFromEnvoy = "from_envoy"
 	programNameFromCube  = "from_cube"
@@ -223,6 +258,7 @@ const (
 	MapNameMVMIPToIfindex       = "mvmip_to_ifindex"
 	MapNameRemotePortMapping    = "remote_port_mapping"
 	MapNameLocalPortMapping     = "local_port_mapping"
+	MapNameSandboxMetrics       = "sandbox_metrics"
 	// MapNameAllowOut is the cube-v0.2.0 legacy migration source.
 	MapNameAllowOut      = "allow_out"
 	MapNameAllowOutV2    = "allow_out_v2" // legacy 16-byte policy value
@@ -231,6 +267,8 @@ const (
 	MapNameDNSAllow      = "dns_allow"    // legacy 8-byte DNS value
 	MapNameDNSAllowV2    = "dns_allow_v2" // current 40-byte DNS value
 	MapNameDNSQueryTrack = "dns_query_track"
+	MapNameDNSTrackRL    = "dns_track_rl"
+	MapNameDNSEvents     = "dns_events"
 	MapNameDirectNeigh   = "direct_neigh" // direct-mode on-link neighbor trigger/cache
 	// constants referenced by BPF programs.
 	globalNameMVMInnerIP           = "mvm_inner_ip"

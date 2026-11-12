@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -49,6 +50,66 @@ func (s *Sandbox) GetInfo(ctx context.Context) (*SandboxInfo, error) {
 		return nil, err
 	}
 	return &info, nil
+}
+
+// IsRunning reports whether the sandbox is currently running, matching E2B's
+// is_running API. It checks the control-plane state first so a paused sandbox
+// is answered without a data-plane probe (which would trigger auto-resume).
+func (s *Sandbox) IsRunning(ctx context.Context) (bool, error) {
+	info, err := s.GetInfo(ctx)
+	if err != nil {
+		if errors.Is(err, ErrSandboxNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.State == "paused" || info.State == "pausing" {
+		return false, nil
+	}
+
+	// Bound the probe so a half-open connection can't hang for proxy's 7206s.
+	ctx, cancel := context.WithTimeout(ctx, s.client.config.RequestTimeout)
+	defer cancel()
+
+	req, err := s.newEnvdRequest(ctx, http.MethodGet, "/health", nil, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := s.client.dataHTTP.Do(req)
+	if err != nil {
+		// Unreachable proxy / stale socket — sandbox not reachable.
+		return false, nil
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGone:
+		return false, nil
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return false, apiErrorFromResponse(resp)
+	}
+	return true, nil
+}
+
+// GetExposedPortEndpoint returns the hostIP:hostPort endpoint of a
+// template-declared exposed port. The endpoint works identically for
+// off-node, host-side, and in-sandbox callers (same-node sandbox callers are
+// served by CubeVS hairpin).
+func (s *Sandbox) GetExposedPortEndpoint(ctx context.Context, port int) (string, error) {
+	if err := s.ensureClient(); err != nil {
+		return "", err
+	}
+
+	path := fmt.Sprintf("/sandboxes/%s/exposed-ports/%d", url.PathEscape(s.SandboxID), port)
+	var endpoint struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := s.client.doJSON(ctx, http.MethodGet, path, nil, &endpoint, http.StatusOK); err != nil {
+		return "", err
+	}
+	return endpoint.Endpoint, nil
 }
 
 func (s *Sandbox) Pause(ctx context.Context, opts PauseOptions) error {

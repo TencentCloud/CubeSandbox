@@ -989,6 +989,7 @@ output "tcr_token_user" {
   sensitive = true
 }
 
+
 # MySQL outputs
 output "mysql_instance_id" {
   value = tencentcloud_mysql_instance.mysql.id

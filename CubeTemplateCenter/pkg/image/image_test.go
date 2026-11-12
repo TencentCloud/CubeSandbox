@@ -856,7 +856,7 @@ func TestOciLayoutImageRefUsesExplicitSourceTag(t *testing.T) {
 func TestEnsureArtifactBuildPreflightAllowsDockerlessWithoutDockerOrTar(t *testing.T) {
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir)
-	for _, cmd := range []string{"truncate", "cp", "skopeo", "umoci"} {
+	for _, cmd := range []string{"truncate", "cp", "skopeo", "umoci", "resize2fs", "e2fsck"} {
 		installFakeCommand(t, binDir, cmd, "exit 0")
 	}
 	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")
@@ -870,7 +870,7 @@ func TestEnsureArtifactBuildPreflightRequiresTarForDockerFallback(t *testing.T) 
 	disableNativeRootfsExport(t)
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir)
-	for _, cmd := range []string{"docker", "truncate", "cp", "skopeo"} {
+	for _, cmd := range []string{"docker", "truncate", "cp", "skopeo", "resize2fs", "e2fsck"} {
 		installFakeCommand(t, binDir, cmd, "exit 0")
 	}
 	installFakeCommand(t, binDir, "mkfs.ext4", "echo 'mkfs.ext4 help supports -d'")

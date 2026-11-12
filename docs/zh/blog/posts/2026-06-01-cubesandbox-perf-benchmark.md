@@ -20,6 +20,8 @@ CubeSandbox 面向 AI Agent 代码执行场景设计，极速冷启动和高并�
 
 **重要说明：所有测试数据与测试环境、测试场景高度相关。** 影响因子包含但不限于：Host 的 CPU、内存、IO 性能，以及 Sandbox 内部负载（例如 Sandbox 中运行的程序越复杂、脏页越多，Snapshot 制作耗时也随之上升）。实际部署时请结合自身硬件和负载情况进行评估。
 
+最新 CubeBench 性能数据请参阅 [CubeBench v0.7.3 基准测试报告](./2026-10-28-cubebench-073.md)。
+
 ---
 
 ## 二、测试环境
@@ -81,6 +83,54 @@ cubemastercli tpl list
 | **per** | 单次操作的均摊耗时（wall ÷ 本批操作数），用于并发场景 |
 
 所有时间单位均为**毫秒（ms）**。每轮测试开始前执行 **Warm-up**（首轮结果丢弃），消除 page cache 冷读干扰；并发测试的各轮次之间串行发起，无交叉并发。
+
+### 2.4 运行自动化基准测试脚本
+
+仓库提供了 [`tests/perf/cubebench.sh`](https://github.com/TencentCloud/CubeSandbox/blob/master/tests/perf/cubebench.sh)，可自动执行 3.2～4.6 节的全部测试场景，并将结果写入 Markdown 报告。请在 CubeSandbox 代码仓库中运行该脚本；运行机器需安装 `cubemastercli`、`cubeopscli`、`jq` 和 Python 3，并能访问 CubeMaster、CubeAPI 与 CubeProxy。3.x 测试还需要 `make` 和 Go，4.x 测试需要 `python3-venv`，并能访问所配置的 Python 软件包索引。
+
+> **破坏性操作警告：** 每项测试开始前，脚本都会删除目标集群**所有节点上的全部现有沙箱**。请仅在专用压测环境中运行。脚本启动前会要求输入 `yes`；只有在已明确授权清理时才应使用 `-y` 跳过确认。脚本不会删除已有模板，运行时新建的模板或快照也可能需要手动清理。
+
+测试前，应在**每个 Cubelet 节点**的动态配置中调高 `host.quota`，避免调度配额先于硬件成为测试上限。例如：
+
+```yaml
+host:
+  quota:
+    mcpu_limit: 1000000
+    mem_limit: "4096Gi"
+    mvm_limit: 2000
+    creation_concurrent_num: 0
+```
+
+修改后在每个节点执行 `systemctl restart cube-sandbox-cubelet.service` 使配置生效。上述配置允许压测过量使用主机资源，因此运行时应密切监控可用内存，特别是 3.3 节的密度测试。
+
+在仓库根目录执行：
+
+```bash
+# 查看可选测试章节和详细参数
+bash tests/perf/cubebench.sh sections
+bash tests/perf/cubebench.sh help
+
+# 执行全部测试；报告默认写入 /tmp/cubebench_<timestamp>.md
+bash tests/perf/cubebench.sh
+
+# 仅执行一个小节，或执行全部 4.x 小节
+bash tests/perf/cubebench.sh run 4.3
+bash tests/perf/cubebench.sh run 4
+
+# 指定报告路径
+OUTPUT_MD=/tmp/cubebench.md bash tests/perf/cubebench.sh run 3.2 4.1
+```
+
+默认配置连接 `127.0.0.1` 上的单机部署。集群部署需指定可访问的服务地址，并跳过 3.3 节；该节通过本机的 `free(1)` 测量内存，只适用于单节点部署：
+
+```bash
+CUBE_MASTER_IP=10.0.0.5 \
+CUBE_API_URL=http://10.0.0.5:3000 \
+CUBE_PROXY_NODE_IP=10.0.0.6 \
+bash tests/perf/cubebench.sh run 3.2 4
+```
+
+如果服务未使用默认端口，还需设置 `CUBE_MASTER_PORT`、`CUBE_OPS_IP`、`CUBE_OPS_PORT` 或 `CUBE_PROXY_PORT_HTTP`。如需使用国际镜像仓库，请设置 `CUBE_TEMPLATE_IMAGE=cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。测试模板和 Python 虚拟环境由脚本自动创建。
 
 ---
 

@@ -41,6 +41,7 @@ local function publish(premature, cfg, state)
         redis_port  = tonumber(cfg.redis_port) or 6379,
         redis_pd    = cfg.redis_pd,
         redis_index = tonumber(cfg.redis_index) or 0,
+        redis_cluster_nodes = cfg.redis_cluster_nodes,
         redis_master_name = cfg.redis_master_name,
         redis_sentinel_nodes = cfg.redis_sentinel_nodes,
         redis_sentinel_pd = cfg.redis_sentinel_pd,
@@ -98,7 +99,8 @@ function _M.setup(cfg)
         return
     end
     if (not cfg.redis_ip or cfg.redis_ip == "")
-        and (not cfg.redis_master_name or cfg.redis_master_name == "") then
+        and (not cfg.redis_master_name or cfg.redis_master_name == "")
+        and (not cfg.redis_cluster_nodes or cfg.redis_cluster_nodes == "") then
         ngx.log(ngx.ERR, "proxy_registry: redis endpoint is empty; timer not started")
         return
     end

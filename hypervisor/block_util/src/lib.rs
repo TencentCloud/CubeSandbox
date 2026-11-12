@@ -194,6 +194,7 @@ pub struct AlignedOperation {
     origin_ptr: u64,
     aligned_ptr: u64,
     size: usize,
+    data_offset: usize,
     layout: Layout,
 }
 
@@ -368,6 +369,7 @@ impl Request {
         let offset = (sector << SECTOR_SHIFT) as libc::off_t;
 
         let mut iovecs = Vec::new();
+        let mut data_offset = 0usize;
         for (data_addr, data_len) in &self.data_descriptors {
             if *data_len == 0 {
                 continue;
@@ -417,6 +419,7 @@ impl Request {
                     origin_ptr: origin_ptr.as_ptr() as u64,
                     aligned_ptr: aligned_ptr as u64,
                     size: *data_len as usize,
+                    data_offset,
                     layout,
                 });
 
@@ -430,6 +433,7 @@ impl Request {
                 iov_len: *data_len as libc::size_t,
             };
             iovecs.push(iovec);
+            data_offset = data_offset.saturating_add(*data_len as usize);
         }
 
         // Queue operations expected to be submitted.
@@ -474,18 +478,21 @@ impl Request {
         Ok(true)
     }
 
-    pub fn complete_async(&mut self) -> result::Result<(), Error> {
+    pub fn complete_async(&mut self, completed_data_bytes: usize) -> result::Result<(), Error> {
         for aligned_operation in self.aligned_operations.drain(..) {
             // We need to perform the copy after the data has been read inside
-            // the aligned buffer in case we're reading data in.
+            // the aligned buffer in case we're reading data in. A short read
+            // only initialized the completed prefix, so do not copy beyond it.
             if self.request_type == RequestType::In {
-                // Safe because origin buffer has been allocated with the
-                // proper size.
+                let completed = completed_data_bytes
+                    .saturating_sub(aligned_operation.data_offset)
+                    .min(aligned_operation.size);
+                // Safe because both buffers are valid for `completed` bytes.
                 unsafe {
                     std::ptr::copy(
                         aligned_operation.aligned_ptr as *const u8,
                         aligned_operation.origin_ptr as *mut u8,
-                        aligned_operation.size,
+                        completed,
                     )
                 };
             }
@@ -619,13 +626,32 @@ where
                 .map_err(AsyncIoError::ReadVectored)?;
 
             let mut r = 0;
-            for b in slices.iter_mut() {
-                r += file.read(b).map_err(AsyncIoError::ReadVectored)?;
+            'buffers: for b in slices.iter_mut() {
+                let mut read = 0;
+                while read < b.len() {
+                    let count = loop {
+                        match file.read(&mut b[read..]) {
+                            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                            result => break result.map_err(AsyncIoError::ReadVectored)?,
+                        }
+                    };
+                    if count == 0 {
+                        break 'buffers;
+                    }
+                    read += count;
+                    r += count;
+                }
             }
             r
         };
 
-        completion_list.push((user_data, result as i32));
+        let result = i32::try_from(result).map_err(|_| {
+            AsyncIoError::ReadVectored(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "byte count exceeds completion range",
+            ))
+        })?;
+        completion_list.push((user_data, result));
         eventfd.write(1).unwrap();
 
         Ok(())
@@ -654,12 +680,34 @@ where
 
             let mut r = 0;
             for b in slices.iter() {
-                r += file.write(b).map_err(AsyncIoError::WriteVectored)?;
+                let mut written = 0;
+                while written < b.len() {
+                    let count = loop {
+                        match file.write(&b[written..]) {
+                            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                            result => break result.map_err(AsyncIoError::WriteVectored)?,
+                        }
+                    };
+                    if count == 0 {
+                        return Err(AsyncIoError::WriteVectored(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )));
+                    }
+                    written += count;
+                    r += count;
+                }
             }
             r
         };
 
-        completion_list.push((user_data, result as i32));
+        let result = i32::try_from(result).map_err(|_| {
+            AsyncIoError::WriteVectored(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "byte count exceeds completion range",
+            ))
+        })?;
+        completion_list.push((user_data, result));
         eventfd.write(1).unwrap();
 
         Ok(())
@@ -696,6 +744,305 @@ pub enum ImageType {
     Qcow2,
     Raw,
     Vhdx,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AsyncAdaptor;
+    use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+    use std::sync::{Mutex, MutexGuard};
+    use vmm_sys_util::eventfd::EventFd;
+
+    struct ShortIo {
+        inner: Cursor<Vec<u8>>,
+        max_read: usize,
+        max_write: usize,
+        interrupted_reads: usize,
+        interrupted_writes: usize,
+    }
+
+    impl ShortIo {
+        fn new(data: Vec<u8>, max_read: usize, max_write: usize) -> Self {
+            Self {
+                inner: Cursor::new(data),
+                max_read,
+                max_write,
+                interrupted_reads: 0,
+                interrupted_writes: 0,
+            }
+        }
+
+        fn with_interrupts(mut self, reads: usize, writes: usize) -> Self {
+            self.interrupted_reads = reads;
+            self.interrupted_writes = writes;
+            self
+        }
+    }
+
+    impl Read for ShortIo {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.interrupted_reads > 0 {
+                self.interrupted_reads -= 1;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let len = buf.len().min(self.max_read);
+            self.inner.read(&mut buf[..len])
+        }
+    }
+
+    impl Write for ShortIo {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.interrupted_writes > 0 {
+                self.interrupted_writes -= 1;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let len = buf.len().min(self.max_write);
+            self.inner.write(&buf[..len])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl Seek for ShortIo {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    struct TestAdaptor {
+        file: Mutex<ShortIo>,
+    }
+
+    impl AsyncAdaptor<ShortIo> for TestAdaptor {
+        fn file(&mut self) -> MutexGuard<'_, ShortIo> {
+            self.file.lock().unwrap()
+        }
+    }
+
+    fn mutable_iovec(buf: &mut [u8]) -> libc::iovec {
+        libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        }
+    }
+
+    fn iovec(buf: &[u8]) -> libc::iovec {
+        libc::iovec {
+            iov_base: buf.as_ptr().cast_mut().cast(),
+            iov_len: buf.len(),
+        }
+    }
+
+    #[test]
+    fn test_async_adaptor_read_vectored_sync_handles_partial_reads() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(b"0123456789".to_vec(), 2, usize::MAX)),
+        };
+        let mut first = [0; 3];
+        let mut second = [0; 4];
+        let mut third = [0; 2];
+        let iovecs = vec![
+            mutable_iovec(&mut first),
+            mutable_iovec(&mut second),
+            mutable_iovec(&mut third),
+        ];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .read_vectored_sync(1, iovecs, 42, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(&first, b"123");
+        assert_eq!(&second, b"4567");
+        assert_eq!(&third, b"89");
+        assert_eq!(completions, vec![(42, 9)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_read_vectored_sync_stops_at_eof() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(b"abcde".to_vec(), 2, usize::MAX)),
+        };
+        let mut first = [b'_'; 3];
+        let mut second = [b'_'; 4];
+        let mut third = [b'_'; 2];
+        let iovecs = vec![
+            mutable_iovec(&mut first),
+            mutable_iovec(&mut second),
+            mutable_iovec(&mut third),
+        ];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .read_vectored_sync(0, iovecs, 43, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(&first, b"abc");
+        assert_eq!(&second, b"de__");
+        assert_eq!(&third, b"__");
+        assert_eq!(completions, vec![(43, 5)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_read_vectored_sync_retries_interrupted() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(b"abcdef".to_vec(), 2, usize::MAX).with_interrupts(1, 0)),
+        };
+        let mut buf = [0; 6];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .read_vectored_sync(
+                0,
+                vec![mutable_iovec(&mut buf)],
+                44,
+                &eventfd,
+                &mut completions,
+            )
+            .unwrap();
+
+        assert_eq!(&buf, b"abcdef");
+        assert_eq!(completions, vec![(44, 6)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_write_vectored_sync_handles_partial_writes() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(vec![b'_'; 12], usize::MAX, 2)),
+        };
+        let first = b"abc";
+        let second = b"defg";
+        let third = b"hi";
+        let iovecs = vec![iovec(first), iovec(second), iovec(third)];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .write_vectored_sync(1, iovecs, 44, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(
+            adaptor.file.lock().unwrap().inner.get_ref(),
+            b"_abcdefghi__"
+        );
+        assert_eq!(completions, vec![(44, 9)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_write_vectored_sync_retries_interrupted() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(vec![b'_'; 8], usize::MAX, 2).with_interrupts(0, 1)),
+        };
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        adaptor
+            .write_vectored_sync(1, vec![iovec(b"abcdef")], 45, &eventfd, &mut completions)
+            .unwrap();
+
+        assert_eq!(adaptor.file.lock().unwrap().inner.get_ref(), b"_abcdef_");
+        assert_eq!(completions, vec![(45, 6)]);
+        assert_eq!(eventfd.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_async_adaptor_write_vectored_sync_rejects_write_zero() {
+        let mut adaptor = TestAdaptor {
+            file: Mutex::new(ShortIo::new(Vec::new(), usize::MAX, 0)),
+        };
+        let iovecs = vec![iovec(b"abc")];
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut completions = Vec::new();
+
+        let err = adaptor
+            .write_vectored_sync(0, iovecs, 45, &eventfd, &mut completions)
+            .unwrap_err();
+
+        match err {
+            crate::async_io::AsyncIoError::WriteVectored(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::WriteZero)
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(completions.is_empty());
+        assert_eq!(
+            eventfd.read().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn complete_async_copies_only_completed_short_read_prefix() {
+        use super::{AlignedOperation, Request, RequestType, SECTOR_SIZE};
+        use std::alloc::{alloc_zeroed, Layout};
+        use vm_memory::GuestAddress;
+
+        // Two bounce buffers laid out consecutively in the request's data
+        // stream (data_offset 0 and `size`).
+        let size = SECTOR_SIZE as usize;
+        let layout = Layout::from_size_align(size, SECTOR_SIZE as usize).unwrap();
+
+        // Aligned (host bounce) buffers pre-filled with a stale sentinel to
+        // model uninitialized host memory that must not leak into the guest.
+        // SAFETY: layout has non-zero size; both buffers are freed by
+        // complete_async() via dealloc with the same layout.
+        let aligned0 = unsafe { alloc_zeroed(layout) };
+        let aligned1 = unsafe { alloc_zeroed(layout) };
+        assert!(!aligned0.is_null() && !aligned1.is_null());
+        // SAFETY: both allocations are valid for `size` bytes.
+        unsafe {
+            std::ptr::write_bytes(aligned0, 0xab, size);
+            std::ptr::write_bytes(aligned1, 0xcd, size);
+        }
+
+        // Guest-visible destination buffers, initially zeroed.
+        let mut origin0 = vec![0u8; size];
+        let mut origin1 = vec![0u8; size];
+
+        let mut request = Request {
+            request_type: RequestType::In,
+            sector: 0,
+            data_descriptors: Vec::new(),
+            status_addr: GuestAddress(0),
+            writeback: true,
+            aligned_operations: vec![
+                AlignedOperation {
+                    origin_ptr: origin0.as_mut_ptr() as u64,
+                    aligned_ptr: aligned0 as u64,
+                    size,
+                    data_offset: 0,
+                    layout,
+                },
+                AlignedOperation {
+                    origin_ptr: origin1.as_mut_ptr() as u64,
+                    aligned_ptr: aligned1 as u64,
+                    size,
+                    data_offset: size,
+                    layout,
+                },
+            ],
+        };
+
+        // Short read: the first buffer plus only 8 bytes of the second one
+        // were actually read from the backend.
+        request.complete_async(size + 8).unwrap();
+
+        // First buffer fully copied back.
+        assert!(origin0.iter().all(|&b| b == 0xab));
+        // Second buffer copied only up to the completed prefix; the remainder
+        // stays zero so stale host bytes are never exposed to the guest.
+        assert!(origin1[..8].iter().all(|&b| b == 0xcd));
+        assert!(origin1[8..].iter().all(|&b| b == 0));
+    }
 }
 
 const QCOW_MAGIC: u32 = 0x5146_49fb;

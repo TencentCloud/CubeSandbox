@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/crypto"
@@ -392,6 +393,19 @@ func (s *Store) DeleteAgentSnapshot(ctx context.Context, agentID, snapshotID str
 	return nil
 }
 
+// SoftDeleteAgentSnapshotsByInfraID soft-deletes every snapshot row backed by
+// the given infra snapshot id. Returns the number of rows removed.
+func (s *Store) SoftDeleteAgentSnapshotsByInfraID(ctx context.Context, snapshotID string) (int64, error) {
+	result := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_snapshot SET deleted_at = NOW() WHERE snapshot_id = ? AND deleted_at IS NULL`,
+		snapshotID,
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("soft-delete snapshots by infra id: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // AgentOperation matches the old Rust AgentOperationResponse.
 type AgentOperation struct {
 	OperationID   string  `json:"operationId"`
@@ -489,6 +503,11 @@ func (s *Store) ListAgentTemplates(ctx context.Context, limit, offset int) ([]Ag
 		tmpl.CreatedAt = nullStringPtr(created)
 		templates = append(templates, tmpl)
 	}
+	// An aborted iteration must not read as an empty registry: the default
+	// template selection treats an empty listing as "nothing is registered".
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
 	return templates, nil
 }
 
@@ -510,6 +529,49 @@ func (s *Store) GetAgentTemplate(ctx context.Context, templateID string) (*Agent
 		&tmpl.Recommended, &created,
 	); err != nil {
 		return nil, nil // not found
+	}
+	tmpl.PersistenceMode = nullStringPtr(persistenceMode)
+	tmpl.CreatedAt = nullStringPtr(created)
+	return &tmpl, nil
+}
+
+// GetRecommendedAgentTemplate returns the most recently registered template
+// flagged recommended, or nil when none is flagged.
+//
+// The flag is set only through PATCH /agenthub/templates/{templateID}
+// (AgentHubHandler.UpdateTemplate, which the Dashboard's per-template toggle
+// calls). Neither registration path writes it — RegisterMarketTemplate omits
+// the column and UpsertTemplateSQL hardcodes it false — so an install has no
+// recommended template until an operator marks one.
+//
+// created_at is selected raw, like ListAgentTemplates and GetAgentTemplate, so
+// the three return it in the same shape. That is safe on PostgreSQL too:
+// database/sql formats a time.Time into a *string destination as RFC 3339.
+// formatTimestamp is not a neutral substitute there — for this timestamp
+// without time zone column its "AT TIME ZONE 'UTC'" renders in the session time
+// zone, so a server not set to UTC gets a shifted value still labelled Z.
+func (s *Store) GetRecommendedAgentTemplate(ctx context.Context) (*AgentTemplate, error) {
+	row := s.db.WithContext(ctx).Raw(
+		`SELECT template_id, name, source_agent_id, source_snapshot_id,
+		        source_sandbox_id, model, version, persistence_mode,
+		        recommended, created_at
+		 FROM t_agenthub_template
+		 WHERE recommended = ? AND deleted_at IS NULL
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		true,
+	).Row()
+	var tmpl AgentTemplate
+	var persistenceMode, created sql.NullString
+	if err := row.Scan(
+		&tmpl.TemplateID, &tmpl.Name, &tmpl.SourceAgentID, &tmpl.SourceSnapshotID,
+		&tmpl.SourceSandboxID, &tmpl.Model, &tmpl.Version, &persistenceMode,
+		&tmpl.Recommended, &created,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get recommended template: %w", err)
 	}
 	tmpl.PersistenceMode = nullStringPtr(persistenceMode)
 	tmpl.CreatedAt = nullStringPtr(created)
@@ -579,6 +641,30 @@ func (s *Store) FindTemplateIDsByInfraID(ctx context.Context, infraID string) ([
 	return ids, rows.Err()
 }
 
+// cubeSnapshotIDPrefix is the prefix of every CubeMaster snapshot ID.
+const cubeSnapshotIDPrefix = "snap-"
+
+// CountTemplatesReferencingSnapshot counts live AgentHub templates built on the
+// snapshot, directly or via a live agenthub_state row rooted on it.
+func (s *Store) CountTemplatesReferencingSnapshot(ctx context.Context, snapshotID string) (int, error) {
+	query := `SELECT COUNT(*) FROM t_agenthub_template
+		 WHERE deleted_at IS NULL AND (source_snapshot_id = ?`
+	args := []any{snapshotID}
+	// Gate on the ID shape: rootfs_snapshot_id may hold a template ID.
+	if strings.HasPrefix(snapshotID, cubeSnapshotIDPrefix) {
+		query += ` OR source_snapshot_id IN (
+		   SELECT snapshot_id FROM t_agenthub_snapshot
+		   WHERE deleted_at IS NULL AND rootfs_snapshot_id = ?)`
+		args = append(args, snapshotID)
+	}
+	query += `)`
+	var n int
+	if err := s.db.WithContext(ctx).Raw(query, args...).Scan(&n).Error; err != nil {
+		return 0, fmt.Errorf("count templates referencing snapshot: %w", err)
+	}
+	return n, nil
+}
+
 // SoftDeleteAgentHubTemplate soft-deletes a single AgentHub template
 // registration by template_id and clears published_template_id on any
 // snapshots that referenced it. Used by the reverse-sync path; unlike
@@ -639,6 +725,19 @@ func (s *Store) SetBaseSnapshotID(ctx context.Context, agentID, snapshotID strin
 		`UPDATE t_agenthub_instance SET base_snapshot_id = ?, updated_at = NOW() WHERE agent_id = ? AND deleted_at IS NULL`,
 		snapshotID, agentID,
 	).Error
+}
+
+// ClearBaseSnapshotIDBySnapshotID clears base_snapshot_id on every live
+// instance pointing at the given snapshot. Returns rows affected.
+func (s *Store) ClearBaseSnapshotIDBySnapshotID(ctx context.Context, snapshotID string) (int64, error) {
+	result := s.db.WithContext(ctx).Exec(
+		`UPDATE t_agenthub_instance SET base_snapshot_id = NULL, updated_at = NOW() WHERE base_snapshot_id = ? AND deleted_at IS NULL`,
+		snapshotID,
+	)
+	if result.Error != nil {
+		return 0, fmt.Errorf("clear base snapshot id: %w", result.Error)
+	}
+	return result.RowsAffected, nil
 }
 
 // --- helpers ---

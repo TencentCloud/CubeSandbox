@@ -75,26 +75,28 @@ type SessionKeyDump struct {
 }
 
 type EgressSessionDump struct {
-	Key            SessionKeyDump `json:"key"`
-	AccessTimeNS   uint64         `json:"access_time_ns"`
-	ExpiresAtNS    uint64         `json:"expires_at_ns"`
-	ExpiresInNS    int64          `json:"expires_in_ns"`
-	ExpiresIn      string         `json:"expires_in"`
-	Expired        bool           `json:"expired"`
-	NodeIfindex    uint32         `json:"node_ifindex"`
-	NodeIP         string         `json:"node_ip"`
-	VMIfindex      uint32         `json:"vm_ifindex"`
-	VMIP           string         `json:"vm_ip"`
-	NodePort       uint16         `json:"node_port"`
-	VMPort         uint16         `json:"vm_port"`
-	State          string         `json:"state"`
-	StateRaw       uint8          `json:"state_raw"`
-	ActiveClose    bool           `json:"active_close"`
-	ActiveCloseRaw uint8          `json:"active_close_raw"`
-	PacketClass    string         `json:"packet_class"`
-	PacketClassRaw uint8          `json:"packet_class_raw"`
-	L7Scheme       string         `json:"l7_scheme"`
-	L7SchemeRaw    uint8          `json:"l7_scheme_raw"`
+	Key          SessionKeyDump `json:"key"`
+	AccessTimeNS uint64         `json:"access_time_ns"`
+	ExpiresAtNS  uint64         `json:"expires_at_ns"`
+	ExpiresInNS  int64          `json:"expires_in_ns"`
+	ExpiresIn    string         `json:"expires_in"`
+	Expired      bool           `json:"expired"`
+	NodeIfindex  uint32         `json:"node_ifindex"`
+	NodeIP       string         `json:"node_ip"`
+	VMIfindex    uint32         `json:"vm_ifindex"`
+	VMIP         string         `json:"vm_ip"`
+	NodePort     uint16         `json:"node_port"`
+	VMPort       uint16         `json:"vm_port"`
+	State        string         `json:"state"`
+	StateRaw     uint8          `json:"state_raw"`
+	// ActiveClose indicates whether the flow's initiator closed first.
+	// For SNAT and L7Proxy, this is the sandbox guest; for PortMapping, this is the external client.
+	ActiveClose    bool   `json:"active_close"`
+	ActiveCloseRaw uint8  `json:"active_close_raw"`
+	PacketClass    string `json:"packet_class"`
+	PacketClassRaw uint8  `json:"packet_class_raw"`
+	L7Scheme       string `json:"l7_scheme"`
+	L7SchemeRaw    uint8  `json:"l7_scheme_raw"`
 }
 
 type IngressSessionDump struct {
@@ -169,14 +171,13 @@ type DNSQueryTrackDump struct {
 	ExpiresInNS int64  `json:"expires_in_ns"`
 	ExpiresIn   string `json:"expires_in"`
 	Expired     bool   `json:"expired"`
-	L7Required  bool   `json:"l7_required"`
-	L3Allowed   bool   `json:"l3_allowed"`
-	Flags       uint8  `json:"flags"`
-	// L7 port tuples copied verbatim from the matched dns_allow_value so the
-	// response handler can rebuild net_policy_value_v3 without a second
-	// dns_allow lookup.
-	PortCount uint8             `json:"port_count"`
-	Ports     []L7PortEntryDump `json:"ports,omitempty"`
+	// Flags records what the query matched in dns_allow_v2. It is diagnostic
+	// only: the response path just needs to know the query was tracked, and
+	// the user-space learner reads the matched rule's ports from its own
+	// domain index rather than from the pending query.
+	L7Required bool  `json:"l7_required"`
+	L3Allowed  bool  `json:"l3_allowed"`
+	Flags      uint8 `json:"flags"`
 }
 
 // L7PortEntryDump is the JSON-friendly view of one (port, scheme) tuple.
@@ -712,8 +713,6 @@ func dumpDNSQueryTrack(opts DumpOptions, now uint64) (any, error) {
 			L7Required:  value.Flags&uint8(netPolicyFlagL7Required) != 0,
 			L3Allowed:   value.Flags&uint8(netPolicyFlagL3Allowed) != 0,
 			Flags:       value.Flags,
-			PortCount:   value.PortCount,
-			Ports:       l7PortEntriesToDump(value.Ports[:], value.PortCount),
 		})
 	}
 	return entries, wrapIterErr(iter.Err(), MapNameDNSQueryTrack)
@@ -918,10 +917,14 @@ func l7PortEntriesToDump(ports []l7PortEntry, count uint8) []L7PortEntryDump {
 
 func packetClassToString(class uint8) string {
 	switch class {
-	case 0:
+	case packetClassSNAT:
 		return "snat"
-	case 1:
+	case packetClassL7Proxy:
 		return "l7_proxy"
+	case packetClassPortMapping:
+		return "port_mapping"
+	case packetClassHairpin:
+		return "hairpin"
 	default:
 		return fmt.Sprintf("unknown(%d)", class)
 	}

@@ -6,6 +6,7 @@
 package config
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -123,7 +125,10 @@ type CommonConf struct {
 	// Named with a Value suffix to avoid colliding with the TemplateCenterAddr()
 	// method on Config. Access via Config.TemplateCenterAddr() which handles the
 	// env > yaml priority.
-	TemplateCenterAddrValue         string          `yaml:"template_center_addr"`
+	TemplateCenterAddrValue string `yaml:"template_center_addr"`
+	// DistributionWorkers is the max concurrency of one rootfs artifact
+	// distribution call. Default 4.
+	DistributionWorkers             int             `yaml:"distribution_workers"`
 	CollectSandboxMemoryWhitelist   []string        `yaml:"collect_sandbox_memory_whitelist"`
 	EnableAllCollectSandboxMemory   bool            `yaml:"enable_all_collect_sandbox_memory"`
 	FilterErrMsgErrorCode           map[int]bool    `yaml:"filter_err_msg_error_code"`
@@ -218,6 +223,9 @@ type RedisConf struct {
 	// must list one or more sentinel endpoints (host:port, comma-separated).
 	MasterName string `yaml:"master_name"`
 
+	// ClusterNodes enables native Redis Cluster; DB must be zero.
+	ClusterNodes string `yaml:"cluster_nodes"`
+
 	// SentinelNodes lists sentinel endpoints used when MasterName is set.
 	SentinelNodes string `yaml:"sentinel_nodes"`
 
@@ -267,6 +275,19 @@ type SchedulerConf struct {
 	ThirtpartyFilterInstanceType     map[string]bool                   `yaml:"thirtparty_filter_instance_type"`
 	InstanceTypeConf                 map[string]InstanceTypeConf       `yaml:"instance_type_conf"`
 	NodeAffinitySelectorAllowedKeys  []string                          `yaml:"node_affinity_selector_allowed_keys"`
+	// ProfileRouteLabelKeys is the allow-list of request labels that may be
+	// used by scheduler profile routes or sent to external scheduler plugins.
+	// Route labels not present in this list make the profile configuration
+	// invalid at scheduler startup.
+	ProfileRouteLabelKeys []string               `yaml:"profile_route_label_keys"`
+	Profiles              []SchedulerProfileConf `yaml:"profiles"`
+
+	// DisableFactoryProfiles opts out of the factory scheduler profile
+	// injection: when true and no scheduler policy is configured (profiles,
+	// filter and score all empty), the scheduler keeps the legacy empty-config
+	// behavior instead of injecting the built-in profiles. It is an explicit
+	// escape hatch for upgrades; new deployments should leave it off.
+	DisableFactoryProfiles bool `yaml:"disable_factory_profiles"`
 
 	// IgnoreRedisAllocation, when true, makes the scheduler ignore the
 	// per-node allocated CPU/Mem usage recorded in Redis (treat allocated as
@@ -488,6 +509,78 @@ type SchedulerFilterConf struct {
 	EnableFilters []string `yaml:"enable_filters"`
 }
 
+// SchedulerProfileConf selects and configures one scheduling pipeline. The
+// first matching non-default profile wins; an optional default profile is used
+// when no route matches. With no profiles configured, the scheduler compiles a
+// legacy profile from Filter, Score, PostScore and PrioritySelectNum.
+type SchedulerProfileConf struct {
+	Name      string                       `yaml:"name"`
+	Default   bool                         `yaml:"default"`
+	Route     SchedulerProfileRouteConf    `yaml:"route"`
+	Filters   []SchedulerProfilePluginConf `yaml:"filters"`
+	Scores    []SchedulerProfilePluginConf `yaml:"scores"`
+	Selection SchedulerSelectionConf       `yaml:"selection"`
+	Failure   SchedulerFailureConf         `yaml:"failure"`
+}
+
+type SchedulerProfileRouteConf struct {
+	InstanceTypes []string          `yaml:"instance_types"`
+	Labels        map[string]string `yaml:"labels"`
+}
+
+// SchedulerProfilePluginConf is shared by built-in Go, CEL expression and
+// external gRPC plugins. Type defaults to "go". External plugins use a Unix
+// socket by default, while tests and development may use a host:port target.
+type SchedulerProfilePluginConf struct {
+	Name                   string         `yaml:"name"`
+	Type                   string         `yaml:"type"`
+	Enabled                *bool          `yaml:"enabled"`
+	Weight                 float64        `yaml:"weight"`
+	DefaultScore           float64        `yaml:"default_score"`
+	Expr                   string         `yaml:"expr"`
+	SocketPath             string         `yaml:"socket_path"`
+	Timeout                time.Duration  `yaml:"timeout"`
+	CircuitBreakerFailures int            `yaml:"circuit_breaker_failures"`
+	CircuitBreakerCooldown time.Duration  `yaml:"circuit_breaker_cooldown"`
+	Args                   map[string]any `yaml:"args"`
+}
+
+type SchedulerSelectionConf struct {
+	TopN   int    `yaml:"top_n"`
+	Method string `yaml:"method"`
+}
+
+type SchedulerFailureConf struct {
+	Filter      string `yaml:"filter"`
+	Score       string `yaml:"score"`
+	NoCandidate string `yaml:"no_candidate"`
+}
+
+// ControlledProfileLabels returns a defensive copy containing only labels
+// explicitly allowed for profile routing. This prevents arbitrary user labels
+// from changing scheduler policy or leaking to external plugins.
+func (s *SchedulerConf) ControlledProfileLabels(labels map[string]string) map[string]string {
+	if s == nil || len(labels) == 0 || len(s.ProfileRouteLabelKeys) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(s.ProfileRouteLabelKeys))
+	for _, key := range s.ProfileRouteLabelKeys {
+		if key = strings.TrimSpace(key); key != "" {
+			allowed[key] = struct{}{}
+		}
+	}
+	out := make(map[string]string, len(allowed))
+	for key := range allowed {
+		if value, ok := labels[key]; ok {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 type PostScoreConf struct {
 	Disable              bool               `yaml:"disable"`
 	ParamFactor          float64            `yaml:"param_factor"`
@@ -566,9 +659,11 @@ type CubeletConf struct {
 	DestroyConcurentLimit int64                `yaml:"destroy_concurent_limit"`
 	ExposedPortList       []string             `yaml:"exposed_port_list"`
 	EnableExposedPort     bool                 `yaml:"enable_exposed_port"`
-	DisableRedisProxyPort bool                 `yaml:"disable_redis_proxy_port"`
-	MaxDelayInSecond      int64                `yaml:"max_delay_in_second"`
-	BackoffRetryDelay     time.Duration        `yaml:"backoff_retry_delay"`
+	// MaxRestartsCap clamps restart_backoff.max_restarts. 0 means no cap.
+	MaxRestartsCap        int32         `yaml:"max_restarts_cap"`
+	DisableRedisProxyPort bool          `yaml:"disable_redis_proxy_port"`
+	MaxDelayInSecond      int64         `yaml:"max_delay_in_second"`
+	BackoffRetryDelay     time.Duration `yaml:"backoff_retry_delay"`
 }
 
 type GrpcConf struct {
@@ -649,6 +744,12 @@ type SoftDeletePurgeConf struct {
 // configure the path; we'd rather try the canonical path than refuse
 // to start).
 const DefaultCubeEgressCAPath = "/etc/cube/ca/cube-root-ca.crt"
+
+// DefaultDistributionWorkers is the default max concurrency for pushing a
+// rootfs artifact to cubelet nodes (common.distribution_workers), matching
+// the historical hardcoded behavior. Exported so templatecenter can derive
+// its own fallback from this single source of truth.
+const DefaultDistributionWorkers = 4
 
 type AppHookConfig struct {
 	PrestartHookByEnvKeys map[string][]*types.Hook `yaml:"prestart_hook_by_env_keys"`
@@ -832,6 +933,10 @@ func preComHandleConf(config *Config) error {
 	if config.Common.AsyncTaskWorkerNum == 0 {
 		config.Common.AsyncTaskWorkerNum = runtime.NumCPU()
 	}
+	if config.Common.DistributionWorkers <= 0 {
+		// Template rootfs artifact distribution concurrency.
+		config.Common.DistributionWorkers = DefaultDistributionWorkers
+	}
 	if config.Common.DefaultHeadlessServiceNodesNum == 0 {
 		config.Common.DefaultHeadlessServiceNodesNum = 1
 	}
@@ -987,6 +1092,79 @@ func preHandOverhead(config *Config) error {
 	}
 	return nil
 }
+
+// preHandleScheduler fills in scheduler config defaults: node limits,
+// filter/score plugin parameters, selection algorithm names, etc.
+// schedulerFactoryYAML is the factory scheduler policy embedded in the binary
+// (three built-in profiles: burst_balance / template_reuse / mixed_binpack).
+// As the single source of truth, the default behavior referenced by
+// docs/guide/scheduler-plugin.md is defined by this file.
+//
+//go:embed scheduler_factory.yaml
+var schedulerFactoryYAML []byte
+
+// factoryProfileInjectWarnOnce keeps the behavior-change warning for
+// "empty-config factory injection" to one output per process: hot reloads
+// re-run injection repeatedly, and repeating this warn adds no value.
+var factoryProfileInjectWarnOnce sync.Once
+
+// injectFactorySchedulerProfiles injects the factory policy when the user has
+// configured no scheduling policy at all: scheduler.profiles and the legacy
+// scheduler.filter / scheduler.score / scheduler.postscore must all be empty,
+// and scheduler.disable_factory_profiles must not be set explicitly. If the
+// user configured any one of them, the factory policy is skipped entirely
+// (all-or-nothing) so the legacy compile path existing deployments rely on is
+// never overridden (profile.Compile ignores legacy when profiles are present).
+//
+// The factory YAML also carries the legacy score subtree: in profile mode it
+// does not participate in pipeline compilation, but the enable_weight_factors
+// of the built-in scorers (real_time_weighted_average / image_score) live only
+// in that legacy subtree; without them those scorers no-op (see
+// pkg/selector/score/realtimescore.go).
+func injectFactorySchedulerProfiles(config *Config) error {
+	sched := config.Scheduler
+	if sched.DisableFactoryProfiles {
+		CubeLog.Infof("scheduler.disable_factory_profiles is true; skipping factory scheduler profile injection, " +
+			"keeping the legacy empty-config scheduling behavior")
+		return nil
+	}
+	if len(sched.Profiles) != 0 || sched.Filter != nil || sched.Score != nil || sched.PostScore != nil {
+		return nil
+	}
+	var factory struct {
+		Scheduler struct {
+			ProfileRouteLabelKeys []string               `yaml:"profile_route_label_keys"`
+			Score                 *SchedulerScoreConf    `yaml:"score"`
+			Profiles              []SchedulerProfileConf `yaml:"profiles"`
+		} `yaml:"scheduler"`
+	}
+	if err := yaml.Unmarshal(schedulerFactoryYAML, &factory); err != nil {
+		return fmt.Errorf("unmarshal embedded factory scheduler profiles: %w", err)
+	}
+	if len(factory.Scheduler.Profiles) == 0 {
+		return errors.New("embedded factory scheduler profiles is empty")
+	}
+	sched.Profiles = factory.Scheduler.Profiles
+	sched.Score = factory.Scheduler.Score
+	if len(sched.ProfileRouteLabelKeys) == 0 {
+		sched.ProfileRouteLabelKeys = factory.Scheduler.ProfileRouteLabelKeys
+	}
+	names := make([]string, 0, len(sched.Profiles))
+	for _, profileConf := range sched.Profiles {
+		names = append(names, profileConf.Name)
+	}
+	// Injection changes placement for empty-config deployments and must be
+	// made visible to operators; the warn fires once per process via
+	// factoryProfileInjectWarnOnce.
+	factoryProfileInjectWarnOnce.Do(func() {
+		CubeLog.Warnf("no scheduler policy configured (scheduler.profiles/filter/score/postscore all empty); "+
+			"injecting factory scheduler profiles %v: placement now follows mandatory guards + factory scorers + spread selection, "+
+			"which differs from the legacy empty-config behavior; set scheduler.disable_factory_profiles: true "+
+			"or configure any of those keys explicitly to keep legacy scheduling", names)
+	})
+	return nil
+}
+
 func preHandleScheduler(config *Config) error {
 	if config.Scheduler == nil {
 		config.Scheduler = &WrapperSchedulerConf{}
@@ -1072,6 +1250,12 @@ func preHandleScheduler(config *Config) error {
 				}
 			}
 		}
+	}
+
+	// After factory injection, apply the score default-value pass; the injected
+	// config flows through the same path as user-provided config.
+	if err := injectFactorySchedulerProfiles(config); err != nil {
+		return err
 	}
 
 	preHandSchedulerScore(config)

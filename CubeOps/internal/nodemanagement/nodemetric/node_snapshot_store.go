@@ -25,6 +25,10 @@ func nodeSnapshotKey(nodeID string) string {
 // WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob. Best-effort:
 // errors are logged, not returned, so a Redis hiccup does not break registration.
 func WriteNodeSnapshot(snap *model.NodeSnapshot) {
+	if snap != nil && snap.NodeID != "" && writeNodeSnapshotHook != nil {
+		writeNodeSnapshotHook(snap)
+		return
+	}
 	if snap == nil || snap.NodeID == "" || pool == nil {
 		return
 	}
@@ -42,6 +46,9 @@ func WriteNodeSnapshot(snap *model.NodeSnapshot) {
 
 // ReadNodeSnapshot fetches a node snapshot from Redis. Returns (nil, nil) on miss.
 func ReadNodeSnapshot(nodeID string) (*model.NodeSnapshot, error) {
+	if nodeID != "" && readNodeSnapshotHook != nil {
+		return readNodeSnapshotHook(nodeID)
+	}
 	if nodeID == "" || pool == nil {
 		return nil, nil
 	}
@@ -59,6 +66,21 @@ func ReadNodeSnapshot(nodeID string) (*model.NodeSnapshot, error) {
 		return nil, fmt.Errorf("nodesnapshot: unmarshal: %w", err)
 	}
 	return &snap, nil
+}
+
+// Test hooks that replace the Redis snapshot store for single-node reads and
+// writes.
+var (
+	readNodeSnapshotHook  func(nodeID string) (*model.NodeSnapshot, error)
+	writeNodeSnapshotHook func(snap *model.NodeSnapshot)
+)
+
+// SetNodeSnapshotHooks registers test hooks for ReadNodeSnapshot and
+// WriteNodeSnapshot; cleanup restores the prior ones.
+func SetNodeSnapshotHooks(read func(nodeID string) (*model.NodeSnapshot, error), write func(snap *model.NodeSnapshot)) func() {
+	prevRead, prevWrite := readNodeSnapshotHook, writeNodeSnapshotHook
+	readNodeSnapshotHook, writeNodeSnapshotHook = read, write
+	return func() { readNodeSnapshotHook, writeNodeSnapshotHook = prevRead, prevWrite }
 }
 
 // scanNodeSnapshotsHook is set by tests to intercept Redis snapshot scans.
@@ -83,31 +105,38 @@ func ScanNodeSnapshots() ([]*model.NodeSnapshot, error) {
 	defer conn.Close()
 
 	var keys []string
-	cursor := 0
-	for {
-		// SCAN replies [cursor, [key ...]]; unpack the outer tuple first.
-		reply, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", nodeSnapshotKeyPrefix+"*", "COUNT", 200))
+	if clusterClient != nil {
+		var err error
+		keys, err = clusterClient.ScanKeys(nodeSnapshotKeyPrefix + "*")
 		if err != nil {
 			return nil, fmt.Errorf("nodesnapshot: redis SCAN: %w", err)
 		}
-		if len(reply) != 2 {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: unexpected reply shape: %v", reply)
+	} else {
+		cursor := 0
+		for {
+			// SCAN replies [cursor, [key ...]]; unpack the outer tuple first.
+			reply, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", nodeSnapshotKeyPrefix+"*", "COUNT", 200))
+			if err != nil {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: %w", err)
+			}
+			if len(reply) != 2 {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: unexpected reply shape: %v", reply)
+			}
+			next, err := redis.Int(reply[0], nil)
+			if err != nil {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse cursor: %w", err)
+			}
+			keysInBatch, err := redis.Strings(reply[1], nil)
+			if err != nil {
+				return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse keys: %w", err)
+			}
+			keys = append(keys, keysInBatch...)
+			if next == 0 {
+				break
+			}
+			cursor = next
 		}
-		next, err := redis.Int(reply[0], nil)
-		if err != nil {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse cursor: %w", err)
-		}
-		keysInBatch, err := redis.Strings(reply[1], nil)
-		if err != nil {
-			return nil, fmt.Errorf("nodesnapshot: redis SCAN: parse keys: %w", err)
-		}
-		keys = append(keys, keysInBatch...)
-		if next == 0 {
-			break
-		}
-		cursor = next
 	}
-
 	if len(keys) == 0 {
 		return nil, nil
 	}

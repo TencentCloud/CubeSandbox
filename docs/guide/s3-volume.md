@@ -28,6 +28,11 @@ Give a sandbox storage that **survives its lifecycle**: create a Volume → moun
 pip install 'cubesandbox>=0.6.0'
 ```
 
+This minimum is for basic Volume create/mount/delete. Dynamic S3 bindings through
+`private_data` require CubeAPI, all CubeMasters, and Cubelet ≥ 0.8.0 plus
+`cubesandbox` ≥ 0.8.0. Use `Volume.create_with_private_data` or
+`POST /v2/volumes`; the new path does not fall back to `/volumes`.
+
 ::: warning Use cubesandbox, not the official e2b SDK
 The official e2b Python SDK hardcodes requests to the e2b.cloud backend and **cannot target CubeSandbox**. Use `cubesandbox`.
 :::
@@ -81,7 +86,7 @@ with Sandbox.create(volume_mounts={"/data": VolumeMount(vol, read_only=True)}) a
     sb.files.read("/data/model.bin")
 ```
 
-### Use with cross-node snapshots
+### Use with cross-node migration
 
 An S3 Volume can be reattached when a sandbox is restored on another node because its data lives in shared object storage. This is separate from the VM snapshot backend:
 
@@ -90,7 +95,7 @@ An S3 Volume can be reattached when a sandbox is restored on another node becaus
 - FromSnap restores VM/rootfs state from the VM snapshot package, then attaches the existing Volume ID. Volume data is not rewound; the restored sandbox sees the Volume's current contents.
 - If the Volume was deleted, the target driver is missing, or S3 attach fails, sandbox creation fails before the VM starts.
 
-See [Cross-Node Snapshots](./cross-node-snapshot.md) for VM compatibility and placement requirements.
+See [Cross-Node Migration](./cross-node-snapshot/requirements.md) for VM compatibility and placement requirements.
 
 ---
 
@@ -184,7 +189,10 @@ Yes. Mount/unmount is driven by a **reference count** — you don't manage mount
 
 ### Does the bucket have to exist already?
 
-No. Create runs `head-bucket` first; it auto-creates the bucket if missing and reuses an existing one — no `s3:CreateBucket` permission needed when the bucket already exists.
+For a legacy volume using the configured bucket, Create checks the bucket and
+creates it if missing. For every dynamic volume, the resolved bucket must
+already exist, including when `private_data.bucket` is omitted and the plugin
+uses the configured `BUCKET`. Dynamic Create never creates a bucket.
 
 ---
 

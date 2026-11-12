@@ -22,6 +22,9 @@ const (
 
 // Config keeps the embedded network runtime settings aligned with Cubelet.
 type Config struct {
+	// OperatorAllowOut is layered onto every installed policy, never persisted as caller state.
+	OperatorAllowOut []string
+
 	// Host and sandbox network identity. EthName must be provided by Cubelet; the
 	// rest are defaults for the mvm-facing gateway and inner interface.
 	EthName        string

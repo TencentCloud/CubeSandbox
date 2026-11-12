@@ -35,14 +35,14 @@ COMPOSE_FILE="${PROXY_DIR}/docker-compose.yaml"
 #   3. default    → int.tencentcloudcr.com (overseas/international)
 #
 # The image is published by CubeProxy/Makefile's `make push` to both
-# registries under the same :v0.7.2 tag; either default resolves
+# registries under the same :v0.8.0-rc2 tag; either default resolves
 # to whatever the operator most recently published.
 #
 # Compatibility: CUBE_PROXY_IMAGE_TAG is deprecated (local compose build era).
 # A non-default leftover value is honored once with a warning; the old default
 # cube-proxy:one-click is ignored so upgrades adopt the pre-published image.
-CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.7.2"
-CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.7.2"
+CUBE_PROXY_IMAGE_INT_DEFAULT="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.8.0-rc2"
+CUBE_PROXY_IMAGE_CN_DEFAULT="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/cube-proxy:v0.8.0-rc2"
 if [[ -z "${CUBE_SANDBOX_CUBE_PROXY_IMAGE:-}" && -n "${CUBE_PROXY_IMAGE_TAG:-}" ]]; then
   if [[ "${CUBE_PROXY_IMAGE_TAG}" == "cube-proxy:one-click" ]]; then
     log "CUBE_PROXY_IMAGE_TAG=cube-proxy:one-click is deprecated and ignored; set CUBE_SANDBOX_CUBE_PROXY_IMAGE or MIRROR to select the pre-published cube-proxy image"
@@ -62,10 +62,16 @@ CUBE_PROXY_CONTAINER_NAME="${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
 CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-127.0.0.1}"
 CUBE_PROXY_REDIS_PORT="${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
-CUBE_PROXY_REDIS_PASSWORD="${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
+CUBE_PROXY_REDIS_PASSWORD="${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_EXTERNAL_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}}"
+CUBE_PROXY_REDIS_CLUSTER_NODES="${CUBE_PROXY_REDIS_CLUSTER_NODES:-${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}}"
 CUBE_PROXY_REDIS_MASTER_NAME="${CUBE_PROXY_REDIS_MASTER_NAME:-${CUBE_EXTERNAL_REDIS_MASTER_NAME:-}}"
 CUBE_PROXY_REDIS_SENTINEL_NODES="${CUBE_PROXY_REDIS_SENTINEL_NODES:-${CUBE_EXTERNAL_REDIS_SENTINEL_NODES:-}}"
 CUBE_PROXY_REDIS_SENTINEL_PASSWORD="${CUBE_PROXY_REDIS_SENTINEL_PASSWORD:-${CUBE_EXTERNAL_REDIS_SENTINEL_PASSWORD:-}}"
+
+if [[ -n "${CUBE_PROXY_REDIS_CLUSTER_NODES}" ]]; then
+  [[ -z "${CUBE_PROXY_REDIS_MASTER_NAME}" && -z "${CUBE_PROXY_REDIS_SENTINEL_NODES}" ]] || die "Redis Cluster cannot use Sentinel"
+fi
+
 CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-443}"
 CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 CUBE_PROXY_GRPC_PORT="${CUBE_PROXY_GRPC_PORT:-9090}"
@@ -123,6 +129,10 @@ CUBE_PROXY_REDIS_DB="$(normalize_redis_db \
   "${CUBE_EXTERNAL_REDIS_DB:-${CUBE_PROXY_REDIS_DB:-${CUBE_PROXY_REGISTRY_REDIS_DB:-0}}}" \
   "CUBE_EXTERNAL_REDIS_DB/CUBE_PROXY_REDIS_DB")"
 CUBE_PROXY_REGISTRY_REDIS_DB="${CUBE_PROXY_REDIS_DB}"
+if [[ -n "${CUBE_PROXY_REDIS_CLUSTER_NODES}" ]]; then
+  [[ "${CUBE_PROXY_REDIS_DB}" == "0" ]] || die "Redis Cluster requires DB 0"
+fi
+CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES="${CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES:-${CUBE_PROXY_REDIS_CLUSTER_NODES}}"
 CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME="${CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME:-${CUBE_PROXY_REDIS_MASTER_NAME}}"
 CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES="${CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES:-${CUBE_PROXY_REDIS_SENTINEL_NODES}}"
 CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD="${CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD:-${CUBE_PROXY_REDIS_SENTINEL_PASSWORD}}"
@@ -201,6 +211,7 @@ render_template_atomic \
   -e "s/__CUBE_PROXY_REDIS_IP__/$(escape_sed "${CUBE_PROXY_REDIS_IP}" '/')/g" \
   -e "s/__CUBE_PROXY_REDIS_PORT__/$(escape_sed "${CUBE_PROXY_REDIS_PORT}" '/')/g" \
   -e "s/__CUBE_PROXY_REDIS_PASSWORD__/$(escape_sed "${CUBE_PROXY_REDIS_PASSWORD}" '/')/g" \
+  -e "s/__CUBE_PROXY_REDIS_CLUSTER_NODES__/$(escape_sed "${CUBE_PROXY_REDIS_CLUSTER_NODES}" '/')/g" \
   -e "s/__CUBE_PROXY_REDIS_MASTER_NAME__/$(escape_sed "${CUBE_PROXY_REDIS_MASTER_NAME}" '/')/g" \
   -e "s/__CUBE_PROXY_REDIS_SENTINEL_NODES__/$(escape_sed "${CUBE_PROXY_REDIS_SENTINEL_NODES}" '/')/g" \
   -e "s/__CUBE_PROXY_REDIS_SENTINEL_PASSWORD__/$(escape_sed "${CUBE_PROXY_REDIS_SENTINEL_PASSWORD}" '/')/g" \
@@ -242,6 +253,7 @@ render_template_atomic \
   -e "s#__CUBE_PROXY_REGISTRY_REDIS_PORT__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_PORT}" '#')#g" \
   -e "s#__CUBE_PROXY_REGISTRY_REDIS_PASSWORD__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_PASSWORD}" '#')#g" \
   -e "s#__CUBE_PROXY_REGISTRY_REDIS_DB__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_DB}" '#')#g" \
+  -e "s#__CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_CLUSTER_NODES}" '#')#g" \
   -e "s#__CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_MASTER_NAME}" '#')#g" \
   -e "s#__CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES}" '#')#g" \
   -e "s#__CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD__#$(escape_sed "${CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD}" '#')#g"

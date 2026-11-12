@@ -35,8 +35,8 @@ flowchart LR
 | --- | --- |
 | CubeAPI | 接收 SDK/API 请求，映射网络配置，并转成 CubeMaster 请求。 |
 | CubeMaster | 将模板里的网络配置和本次创建请求里的网络配置合并，然后调度到 Cubelet 内置 network runtime。 |
-| Cubelet 内置 network runtime | 把 `CubeNetworkConfig` 转成 CubeVS 可理解的 `MVMOptions`；从 L7 `rules` 中抽取网络可达目标；注册或更新 TAP 的 eBPF map。 |
-| CubeVS | 运行在宿主机 eBPF 数据面。负责 per-sandbox L3/L4 allow/deny、配置域名的 DNS A 记录学习、session/NAT、TCP RST 拒绝，以及是否把流量送到 L7 代理。 |
+| Cubelet 内置 network runtime | 把 `CubeNetworkConfig` 转成 CubeVS 可理解的 `MVMOptions`；从 L7 `rules` 中抽取网络可达目标；注册或更新 TAP 的 eBPF map。它也在受控域名的 DNS 投递路径上：学习 A 记录，再把应答注入回 TAP。Cubelet 停机期间，这些域名的 DNS 会被阻断。 |
+| CubeVS | 运行在宿主机 eBPF 数据面。负责 per-sandbox L3/L4 allow/deny、跟踪已配置域名的 DNS 查询、session/NAT、TCP RST 拒绝，以及是否把流量送到 L7 代理。受控域名上可学习的应答不在这里转发，由 Cubelet 投递。 |
 | CubeEgress | 透明 HTTP/HTTPS 代理。只处理被 CubeVS 标记为需要 L7 检查的 TCP/80、TCP/443 流量，执行完整 `rules`。 |
 
 一个关键点是：**出站策略的主动判断发生在沙箱流量进入 TAP 后的 `from_cube` 方向**。宿主机网卡上的 `from_world` 方向主要处理已有会话的回包反向 NAT、端口映射流量，以及 DNS 响应学习；它不是出站 allow/deny 的主判断入口。
@@ -138,8 +138,8 @@ network={
 
 - `name`：规则名，用于审计和模板合并。
 - `match.scheme`：`http` 或 `https`。
-- `match.sni`：TLS SNI。支持普通域名和 `*.` 通配域名。
-- `match.host`：HTTP Host。支持域名、`host:port`、IPv4、IPv4 CIDR 和 `*.` 通配域名。
+- `match.sni`：TLS SNI。支持普通域名、`*.` 通配域名，以及单独的 `*`。
+- `match.host`：HTTP Host。支持域名、`host:port`、IPv4、IPv4 CIDR、`*.` 通配域名，以及单独的 `*`。
 - `match.method`：HTTP 方法列表，方法之间是 OR。
 - `match.path`：默认精确匹配；尾部 `*` 表示前缀匹配，例如 `/v1/*`。
 - `action.allow`：`true` 放行，`false` 拒绝。
@@ -153,6 +153,14 @@ CubeVS 只会从 `rules[].match.sni` 和 `rules[].match.host` 抽取网络可达
 
 因此，当 `allow_internet_access=false` 时，每条需要真正访问外部 HTTP/HTTPS 服务的 L7 规则都应该包含 `host` 或 `sni`。只写 `method` 和 `path` 的规则可能永远到不了 CubeEgress，因为网络层不知道该允许哪个目的 IP。
 :::
+
+### 通配 `*`
+
+`host="*"` 或 `sni="*"` 匹配所有域名。它和 `*.example.com` 不同，后者仍然只匹配子域。
+
+把它和 `allow_internet_access=false` 一起用。沙箱通过 DNS A 查询解析出的每个名字都会被学习，这些地址上放行的端口和其它 L7 目标相同。规则写了 `port` 就打开该端口；没写 `port` 时按 scheme 取默认端口（`http` → 80，`https` → 443）；`port` 和 `scheme` 都没写则打开 TCP/80 和 TCP/443。没有发出 DNS 查询的连接不会放行，包括沙箱里已经缓存的地址和直接填写的公网 IP。
+
+`*` 可以带凭证注入，校验和具名主机相同。精确域名和 `*.example.com` 仍然优先于 `*`。
 
 ## 控制面合并与下发流程
 
@@ -291,7 +299,8 @@ curl -X PUT "$CUBE_API/sandboxes/$SANDBOX_ID/network" \
 
 有两点需要提前规划：
 
-- **已经学到的 DNS IP 会比产生它的域名规则活得更久。** 从 `allow_out` 里删掉一个域名后，新的 IP 会立刻停止被学习，但此前已为它学到的 IP 会一直放行到 DNS TTL 过期。要想及时收回对某个域名的访问，需要配合 `allow_internet_access=false` 的策略和较短的解析 TTL。
+- **删掉一个域名会收回它教过的地址。** 更新生效时这些 IP 离开 allow map，除非另一个仍生效的名字还持有同一地址。这只在同时有 deny-all 或其它拒绝规则时才会阻断流量；默认放行时，删掉学习行并不会拒绝这个 IP。
+- **快照丢失后接管的行是例外。** 它们从现网 map 抄回，没有 QName，之后撤销域名不会删掉它们，会留到各自的到期时间。接管时把到期时间截到 24 小时，因为旧的内核学习器只限制了 TTL 下限，map 里的行可能带很长的过期时间。
 - **更新在多个平面之间不是事务性的。** 先更新 CubeEgress，再更新 CubeVS，最后才写持久化状态，因此中途失败时沙箱所处的状态不会比「新旧策略的并集」更宽松。重放同一个请求即可收敛；Cubelet 重启后会重新应用最后一次成功持久化的策略。
 
 ## `from_cube` 如何判断和转发
@@ -429,14 +438,21 @@ DNS 响应从外部回来时，先进入宿主机网卡上的 `from_world`：
 1. `from_world` 通过 `ingress_sessions` 找到对应 UDP session。
 2. 如果这是 DNS server 端口 `53` 的响应，会先调用 DNS 响应学习逻辑。
 3. 只有 `ifindex_to_mvmmeta[].dns_policy_flags` 带 learning flag 时才执行学习，并且响应必须匹配之前 `dns_query_track` 中的 pending query。
-4. 只学习 IPv4 A 记录；AAAA / IPv6 不会写入 `allow_out_v2`。
-5. 最多处理响应中的前 `8` 个 answer。
-6. 学到的 IP 以 `/32` 写入 `allow_out_v2[ifindex]`，`expires_at_ns` 按 DNS TTL 计算。
-7. 如果原 DNS allow 规则带 `L7_REQUIRED`，学习出的 IP 也继承这个标记。
-8. 学习完成或失败后，pending query 会被删除。
-9. 响应包继续做反向 NAT，返回沙箱。
+4. 只有正向的 IPv4 A 应答可以学习。AAAA / IPv6 不会写入 `allow_out_v2`。
+5. 数据面在反向 NAT 之后给应答分类：
+   - 对不上已跟踪的查询：转发给沙箱。
+   - 跟踪过，但没有可缓存的地址（NXDOMAIN、NODATA、其它非成功 rcode，或 TC=1）：转发给沙箱。客户机必须看到否定结果，也必须看到截断位，解析器才能回退到 TCP。
+   - 跟踪过且可以学习：不转发，把帧交给 Cubelet。
+6. Cubelet 解析应答，把学到的 IP 以 `/32` 写入 `allow_out_v2[ifindex]`，`expires_at_ns` 取自 DNS TTL；域名规则带 `L7_REQUIRED` 时，学到的 IP 也继承这个标记。然后把帧注入沙箱 TAP。注入之前，沙箱看不到这条应答。
+7. 应答被分类时，pending query 会被删除。
 
 如果同一个 IP 已经是静态 `allow_out`，DNS 学习不会把它变成会过期的临时条目；静态条目会保持不过期，同时合并 flags。
+
+::: warning Cubelet 是受控域名 DNS 的硬依赖
+受控域名是命中 `dns_allow` 规则的名字：`allow_out` 里的域名、L7 的 `host` 或 `sni`、`*.suffix` 通配，以及 `*` 兜底。这类名字上可以学习的正向应答会从内核路径上拿掉，只有 Cubelet 写入 allow 条目并把帧注入回 TAP。
+
+Cubelet 停机期间，这些应答会被丢弃，受控域名的 DNS 失败。装了 `*` 兜底时，所有名字都是受控域名。没有命中任何规则的名字不会被跟踪，DNS 仍走普通 UDP 转发。NXDOMAIN、NODATA、其它非成功应答和截断应答仍由数据面转发。静态 IP/CIDR 规则和已经学到的地址留在内核 map 里，发往这些地址的流量会持续到学习条目的 TTL 到期。受控域名的新解析要等 Cubelet 重新运行才会成功。
+:::
 
 ### DNS 回收
 

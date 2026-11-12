@@ -1,0 +1,66 @@
+name: Web Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-check.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web Check
+    # The web build is arch-independent, so unlike fmt-check there is no need
+    # for an arm64 leg.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run lint
+
+      - name: Build (tsc + vite)
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+
+      - name: Check locale key parity
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run lint:locales

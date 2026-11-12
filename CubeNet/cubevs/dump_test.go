@@ -12,8 +12,9 @@ func TestSessionClassificationStrings(t *testing.T) {
 		value uint8
 		want  string
 	}{
-		{0, "snat"},
-		{1, "l7_proxy"},
+		{packetClassSNAT, "snat"},
+		{packetClassL7Proxy, "l7_proxy"},
+		{packetClassPortMapping, "port_mapping"},
 		{9, "unknown(9)"},
 	} {
 		if got := packetClassToString(tt.value); got != tt.want {

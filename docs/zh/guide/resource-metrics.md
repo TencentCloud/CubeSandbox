@@ -6,7 +6,7 @@ Cubelet 为运行中的 Cube 沙箱提供 CPU 和内存指标。一键安装默�
 http://<cubelet-node>:9998/v1/metrics/resource
 ```
 
-该端点与 Cubelet 通用指标端点 `/v1/metrics` 相互独立。现有的 containerd cgroup monitor 仍保持启用，并可继续通过 `/v1/metrics` 导出通用 `container_*` 指标；本文介绍的 Cube 原生沙箱指标由独立链路采集，并通过 `/v1/metrics/resource` 导出。
+该端点与 Cubelet 通用指标端点 `/v1/metrics` 相互独立。`/v1/metrics` 不导出通用 `container_*` 指标。本文的沙箱指标单独采集，由 `/v1/metrics/resource` 提供。
 
 Cubelet 在后台定期采集所选统计视角的资源数据，并将最新结果缓存在内存中。Prometheus 抓取时只读取缓存，不会在 HTTP 请求过程中同步访问所有沙箱。因此，抓取请求不会额外触发与沙箱数量成比例的运行时 RPC；但响应体大小和序列化开销仍会随时间序列数量增长。
 
@@ -130,6 +130,20 @@ scrape_configs:
 
 将目标地址替换为各 Cubelet 节点在可信管理网络中的地址。
 
+也可以用 one-click 安装器的 `scrape-job` 模式生成该任务，不必手写。该模式只输出
+文件，不安装任何组件：
+
+```bash
+# 当前节点，取自 CUBE_SANDBOX_NODE_IP 或默认路由
+CUBE_OBSERVABILITY_CLUSTER_ID=cubesandbox \
+  ./deploy/one-click/observability/install.sh prometheus scrape-job
+
+# 或每行一个目标地址，'#' 开头为注释
+CUBE_METRICS_NODE_LIST=./nodes.txt \
+CUBE_METRICS_PROM_CONFIG=./cubesandbox-prometheus-scrape.yml \
+  ./deploy/one-click/observability/install.sh prometheus scrape-job
+```
+
 使用独立抓取任务后，可以单独调整资源指标的抓取间隔、超时时间和 `metric_relabel_configs`，而不会影响 Cubelet 通用指标。
 
 资源指标端点最多同时处理两个抓取请求。超过该上限的请求会返回 HTTP 503，以避免多个大响应同时占用 Cubelet 的 CPU 和内存。正常的单个 Prometheus 抓取任务不会触发该限制；如果出现 503，应检查是否有多个 Prometheus 实例或手工请求同时抓取同一节点。
@@ -158,9 +172,9 @@ curl -fsS http://127.0.0.1:9998/v1/metrics/resource | \
 2. 重启 Cubelet；
 3. 确认沙箱内的 `cube-agent` 兼容资源指标能力版本 `1`。
 
-端点返回 HTTP 200 但响应体为空不一定表示故障。以下情况都会产生空结果：
+端点返回 HTTP 200 但没有逐沙箱资源序列不一定表示故障。以下情况都可能只剩节点聚合 Gauge，或在未启用 `host_sandbox` 时产生空结果：
 
-- 节点上没有运行中的沙箱；
+- 节点上没有可采样的运行中沙箱；
 - 插件已禁用；
 - Cubelet 尚未完成首次采样。
 
@@ -169,6 +183,17 @@ curl -fsS http://127.0.0.1:9998/v1/metrics/resource | \
 Cubelet 仅导出 Counter 和 Gauge 类型的基础指标。CPU 使用核数以及 CPU、内存使用率等派生值由 Prometheus 查询计算。
 
 CPU 和内存上限仅在 cgroup 配置了有限值时导出。未配置上限时，不会使用 `0` 或某个极大值代替。当前内存用量不受此限制，只要对应统计视角可用就会导出。
+
+### 节点聚合指标
+
+启用 `host_sandbox` 时，Cubelet 始终导出下面两个不带动态标签的 Gauge，包括值为 `0` 的情况：
+
+| 指标                                              | 类型  | 单位与说明                                                       |
+| ------------------------------------------------- | ----- | ---------------------------------------------------------------- |
+| `cubesandbox_node_sandbox_count`                  | Gauge | HostSandbox 采样器当前清单中的沙箱总数。                         |
+| `cubesandbox_node_sandbox_available_count`        | Gauge | 当前状态为 `HostSandboxAvailable`、资源样本可用的沙箱数。        |
+
+采集系统可在抓取时附加 `cluster`、`node` 标签，用于按集群和单机聚合。`available_count` 是资源采样可用性口径，不是完整业务状态的 `running` 实例数；它会受到暂停、采集错误和 `stale_after` 的影响。两个指标也不包含沙箱 ID 列表，不能替代控制面或 CubeBox Store inventory。
 
 ### `host_sandbox` 指标
 
@@ -210,7 +235,7 @@ CPU 和内存上限仅在 cgroup 配置了有限值时导出。未配置上限�
 | `cubesandbox_guest_workload_memory_current_bytes`            | Gauge   | 当前计入工作负载 cgroup 的内存字节数。             |
 | `cubesandbox_guest_workload_memory_limit_bytes`              | Gauge   | 配置的有限内存上限，单位为字节。                   |
 | `cubesandbox_guest_workload_memory_failures_total`           | Counter | 当前统计周期内发生的内存限制失败次数。             |
-| `cubesandbox_guest_workload_metrics_epoch`                   | Gauge   | 当前统计周期的序号。                               |
+| `cubesandbox_guest_workload_metrics_epoch`                   | Gauge   | 当前统计周期的序号。恢复运行后可能重复，应使用开始时间作为窗口身份。 |
 | `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` | Gauge   | 当前统计周期的开始时间，使用 Unix 时间戳秒数表示。 |
 
 ## PromQL 示例
@@ -301,10 +326,10 @@ increase(cubesandbox_guest_workload_memory_failures_total[5m])
 
 ### 识别统计周期变化
 
-以下查询返回最近 5 分钟内已有时间序列的统计周期变化次数，可用于标记回滚等统计窗口切换：
+以下查询返回最近 5 分钟内已有时间序列的新统计窗口次数，可用于标记回滚、暂停/恢复运行等统计窗口切换。统计周期开始时间在每个新窗口都会变化，而序号在恢复运行后可能重复：
 
 ```promql
-changes(cubesandbox_guest_workload_metrics_epoch[5m])
+changes(cubesandbox_guest_workload_metrics_epoch_start_time_seconds[5m])
 ```
 
 ## 生命周期语义
@@ -336,15 +361,17 @@ CPU 使用时间和内存限制失败次数来自 cgroup 累计计数器。制�
 | 创建快照或提交模板               | 保持当前统计周期。                                           |
 | 回滚                             | 回滚期间停止导出；完成后创建新的统计周期，累计指标重新从 `0` 开始。如果运行时恢复请求发出后失败，新统计周期会保持准备状态，`guest_workload` 将继续不可用，直到后续回滚成功，或删除并重建沙箱。 |
 | 暂停                             | 保持当前统计周期，但停止导出指标，而不是导出 `0`。           |
-| 恢复运行                         | 继续暂停前的统计周期。                                       |
+| 恢复运行                         | 创建新的统计周期，累计指标重新从 `0` 开始；在首次成功采样建立新基线前保持不可用。 |
 | 删除                             | 删除缓存和对应指标序列。                                     |
 | Cubelet 重启                     | 从持久化状态恢复统计周期和基线，不重新计算已有窗口。         |
 
+`guest_workload` 的累计指标只在一个统计周期内有效。从暂停恢复时即使还原了沙箱内存，也会创建新的统计周期，因此这些计数不是沙箱生命周期总量。`host_sandbox` 的窗口不同，见下文宿主机侧生命周期。统计周期序号在恢复运行后可能回退，例如从 2 回退到 1。应使用 `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` 识别窗口，不要按序号排序。
+
 如果生命周期元数据发生瞬时故障，导致运行中的沙箱暂时没有持久化 fresh 统计周期，`guest_workload` 采集器会先重新建立并持久化 pending 统计周期，再继续采集。恢复失败时仍保持不可用，并在后续采集周期重试。
 
-Prometheus 不理解 Cubelet 的统计周期语义。只有累计值实际下降时，`rate()` 和 `increase()` 才会按照计数器重置处理。
+Prometheus 不理解 Cubelet 的统计周期语义。只有累计值实际下降时，`rate()` 和 `increase()` 才会按照计数器重置处理。查询时应覆盖所需时间范围，并用统计周期指标标注重置点。
 
-需要可靠识别回滚或新统计窗口时，应查询：
+需要识别回滚或新的统计窗口时，应查询以下指标，并以开始时间判断窗口，而不是比较序号：
 
 - `cubesandbox_guest_workload_metrics_epoch`
 - `cubesandbox_guest_workload_metrics_epoch_start_time_seconds`
@@ -368,7 +395,7 @@ Prometheus 不理解 Cubelet 的统计周期语义。只有累计值实际下降
 
 资源端点只保存最新样本，不保存历史；发生在两次 Prometheus 抓取之间的短时内存峰值不会被保留。CPU 速率查询窗口内应包含多个成功写入 Prometheus 的样本。
 
-两个间隔都不会减少活跃时间序列数量。显式设置 `export_scopes = ["all"]` 时，单容器沙箱最多导出 22 条时间序列；如需减少序列数量，应调整 `export_scopes` 或使用 Prometheus `metric_relabel_configs`。
+两个间隔都不会减少活跃时间序列数量。显式设置 `export_scopes = ["all"]` 时，单容器沙箱最多导出 22 条时间序列，节点另外固定导出 2 条聚合 Gauge；如需减少序列数量，应调整 `export_scopes` 或使用 Prometheus `metric_relabel_configs`。
 :::
 
 ## 升级旧模板和快照
@@ -399,7 +426,7 @@ Prometheus 不理解 Cubelet 的统计周期语义。只有累计值实际下降
 | 现象                                      | 常见原因与处理方式                                           |
 | ----------------------------------------- | ------------------------------------------------------------ |
 | 无法连接 `9998`                           | 确认 `cube-sandbox-cubelet.service` 正常运行，并检查监听地址、防火墙和安全组。 |
-| HTTP 200，但没有任何 `cubesandbox_*` 指标 | 确认插件为 `enabled = true`，节点上存在状态为 `Up` 的沙箱，并等待至少一个 `collection_interval`。暂停的沙箱不会导出指标。 |
+| HTTP 200，但没有逐沙箱 `cubesandbox_*` 指标 | 确认插件为 `enabled = true`，节点上存在状态为 `Up` 的沙箱，并等待至少一个 `collection_interval`。暂停的沙箱不会导出逐沙箱资源序列；启用 `host_sandbox` 时应仍能看到两个节点聚合 Gauge。 |
 | 配置了 `guest_workload`，但没有对应指标   | 确认 `export_scopes` 为 `["guest_workload"]` 或 `["all"]`。如果配置正确，通常是沙箱内的 `cube-agent` 未声明资源指标能力版本 `1`；镜像构建模板可执行 template `redo`。如果模板兼容但问题仍然存在，检查 Cubelet 业务日志中的 `Task.Stats` 错误。 |
 | 原有指标突然消失                          | 沙箱可能已暂停或删除；也可能是连续采集失败后，样本年龄超过了 `stale_after`。 |
 | 新沙箱没有 `host_sandbox` 指标            | Cubelet 可能在创建阶段已耗尽宿主机 cgroup 分配基线的读取尝试。检查 Cubelet 日志中的 `capture host metrics baseline`，修复持续存在的宿主机 cgroup 读取问题后重新创建沙箱。 |

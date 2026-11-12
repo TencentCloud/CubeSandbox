@@ -496,7 +496,7 @@ func convergeResumeStateAfterOpaqueRestore(sb *cubeboxstore.CubeBox, attachedAt 
 	if sb == nil {
 		return
 	}
-	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(sb, attachedAt)
+	invalidateRuntimeSnapshotBindingsAfterOpaqueRestore(sb)
 	for _, c := range sb.AllContainers() {
 		if c.Status == nil {
 			continue

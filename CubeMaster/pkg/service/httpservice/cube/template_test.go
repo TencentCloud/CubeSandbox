@@ -14,10 +14,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -53,6 +57,75 @@ func TestConstructCreateReqPreservesDistributionScope(t *testing.T) {
 		t.Fatalf("constructCreateReq failed: %v", err)
 	}
 	assert.Equal(t, []string{"node-a", "10.0.0.2"}, got.DistributionScope)
+}
+
+func TestConstructCreateReqScrubsClientSuppliedAlias(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cube/sandbox", strings.NewReader(`{
+		"requestID":"req-alias",
+		"annotations":{
+			"cube.master.appsnapshot.template.id":"template-1"
+		},
+		"labels":{
+			"cube.master.appsnapshot.template.alias":"forged",
+			"user.label":"keep-me"
+		}
+	}`))
+
+	got, err := constructCreateReq(req)
+	if err != nil {
+		t.Fatalf("constructCreateReq failed: %v", err)
+	}
+	if _, ok := got.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias]; ok {
+		t.Fatal("client-supplied alias label must be scrubbed")
+	}
+	assert.Equal(t, "keep-me", got.Labels["user.label"])
+}
+
+func TestCreateTemplateRejectsCallerSuppliedNetworkQosAnnotation(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/cube/template", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{"cube.master.net":"{}"}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createTemplate(req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+}
+
+func TestCreateTemplateRejectsCallerSuppliedBlockIOQosAnnotation(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/cube/template", strings.NewReader(`{
+		"requestID":"req-qos",
+		"annotations":{"cube.master.blk.qos":"{}"}
+	}`))
+	rt := &CubeLog.RequestTrace{}
+	resp := createTemplate(req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
+	assert.Contains(t, got.Ret.RetMsg, "template-managed")
+	assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode)
+}
+
+func TestFilesystemQosAnnotationRemainsCallerManaged(t *testing.T) {
+	const filesystemQos = `{"bandwidth": {"size": 1024}}`
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		constants.CubeAnnotationsFSQos: filesystemQos,
+	}}
+
+	assert.NoError(t, rejectCallerSuppliedQos(req))
+	sanitized := sanitizeTemplateCreateRequest(req)
+	assert.Equal(t, filesystemQos, sanitized.Annotations[constants.CubeAnnotationsFSQos])
+	sanitized.Annotations[constants.CubeAnnotationsFSQos] = "changed"
+	assert.Equal(t, filesystemQos, req.Annotations[constants.CubeAnnotationsFSQos])
 }
 
 func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
@@ -171,6 +244,10 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 			InstanceType: "cubebox",
 			Version:      "v2",
 			Status:       "READY",
+			ConfiguredQos: &qos.Config{
+				Network: &qos.NetworkConfig{BandwidthMbps: 100, PacketsPerSecond: 5000},
+				BlockIO: &qos.BlockIOConfig{ThroughputMiBps: 64, IOPS: 1000},
+			},
 		}, nil
 	}
 	getTemplateRequestFn = func(ctx context.Context, templateID string) (*types.CreateCubeSandboxReq, error) {
@@ -178,6 +255,8 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 			Request: &types.Request{RequestID: "req-preview"},
 			Annotations: map[string]string{
 				constants.CubeAnnotationAppSnapshotTemplateID: templateID,
+				constants.CubeAnnotationsNetWork:              `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`,
+				constants.CubeAnnotationsBlkQos:               `{"bandwidth":{"size":67108864,"refill_time":1000}}`,
 			},
 		}, nil
 	}
@@ -193,7 +272,13 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
 	if assert.NotNil(t, got.CreateRequest) {
 		assert.Equal(t, "tpl-include", got.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+		assert.NotContains(t, got.CreateRequest.Annotations, constants.CubeAnnotationsNetWork)
+		assert.NotContains(t, got.CreateRequest.Annotations, constants.CubeAnnotationsBlkQos)
 	}
+	assert.Equal(t, uint32(100), got.ConfiguredQos.Network.BandwidthMbps)
+	assert.Equal(t, uint32(5000), got.ConfiguredQos.Network.PacketsPerSecond)
+	assert.Equal(t, uint32(64), got.ConfiguredQos.BlockIO.ThroughputMiBps)
+	assert.Equal(t, uint32(1000), got.ConfiguredQos.BlockIO.IOPS)
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 
@@ -606,4 +691,254 @@ func TestSetTemplateAliasHandler_400_OnMissingTemplateID(t *testing.T) {
 	}
 	assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode)
 	assert.Equal(t, "template_id is required", got.Ret.RetMsg)
+}
+
+// ── listTemplates: pagination + batch origin lookup ─────────────────────────
+
+// stubListTemplatesFns swaps the listTemplates/listReplicasForTemplates
+// indirection vars and records the paging options and requested template IDs.
+func stubListTemplatesFns(
+	t *testing.T,
+	result *templatecenter.TemplateListResult,
+	replicas map[string][]templatecenter.ReplicaStatus,
+	replicasErr error,
+) (gotOpts *templatecenter.TemplateListOptions, requestedIDs *[]string) {
+	t.Helper()
+	origList := listTemplatesFn
+	origReplicas := listReplicasForTemplatesFn
+	t.Cleanup(func() {
+		listTemplatesFn = origList
+		listReplicasForTemplatesFn = origReplicas
+	})
+	gotOpts = &templatecenter.TemplateListOptions{}
+	var requested []string
+	listTemplatesFn = func(ctx context.Context, opts templatecenter.TemplateListOptions) (*templatecenter.TemplateListResult, error) {
+		*gotOpts = opts
+		return result, nil
+	}
+	listReplicasForTemplatesFn = func(ctx context.Context, templateIDs []string) (map[string][]templatecenter.ReplicaStatus, error) {
+		requested = append(requested, templateIDs...)
+		if replicasErr != nil {
+			return nil, replicasErr
+		}
+		return replicas, nil
+	}
+	return gotOpts, &requested
+}
+
+func TestListTemplatesPaginationAndBatchOrigin(t *testing.T) {
+	result := &templatecenter.TemplateListResult{
+		Templates: []templatecenter.TemplateInfo{
+			{TemplateID: "tpl-a"},
+			{TemplateID: "tpl-b", OriginNodeID: "node-9"},
+		},
+		Total: 5,
+	}
+	replicas := map[string][]templatecenter.ReplicaStatus{
+		"tpl-a": {
+			{NodeID: "node-1", NodeIP: "10.0.0.1", Status: "FAILED"},
+			{NodeID: "node-2", NodeIP: "10.0.0.2", Status: "READY"},
+		},
+	}
+	gotOpts, requestedIDs := stubListTemplatesFns(t, result, replicas, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template?limit=2&offset=3", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := listTemplates(req, rt)
+
+	got, ok := resp.(*templateListResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Equal(t, 5, got.Total, "total must be the pre-pagination count")
+	assert.Equal(t, 2, len(got.Data))
+	assert.Equal(t, templatecenter.TemplateListOptions{Limit: 2, Offset: 3}, *gotOpts)
+	// localcache cannot resolve node-9 in tests, so both templates fall back.
+	assert.Equal(t, []string{"tpl-a", "tpl-b"}, *requestedIDs)
+	if got.Data[0].OriginNodeID != "node-2" || got.Data[0].OriginNodeIP != "10.0.0.2" {
+		t.Fatalf("tpl-a origin = %s/%s, want node-2/10.0.0.2", got.Data[0].OriginNodeID, got.Data[0].OriginNodeIP)
+	}
+	// tpl-b has no replica rows: its origin node id must be preserved as-is.
+	if got.Data[1].OriginNodeID != "node-9" {
+		t.Fatalf("tpl-b origin node = %s, want node-9", got.Data[1].OriginNodeID)
+	}
+	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestListTemplatesWithoutPagingParamsKeepsLegacyBehaviour(t *testing.T) {
+	result := &templatecenter.TemplateListResult{
+		Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
+	}
+	result.Total = len(result.Templates)
+	gotOpts, _ := stubListTemplatesFns(t, result, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := listTemplates(req, rt)
+
+	got, ok := resp.(*templateListResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Equal(t, templatecenter.TemplateListOptions{}, *gotOpts)
+	assert.Equal(t, 2, len(got.Data))
+	assert.Equal(t, 2, got.Total)
+}
+
+func TestListTemplatesLimitZeroMeansAll(t *testing.T) {
+	result := &templatecenter.TemplateListResult{
+		Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
+	}
+	result.Total = len(result.Templates)
+	gotOpts, _ := stubListTemplatesFns(t, result, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template?limit=0", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := listTemplates(req, rt)
+
+	got, ok := resp.(*templateListResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	// An explicit limit=0 must be equivalent to omitting the parameter.
+	assert.Equal(t, templatecenter.TemplateListOptions{}, *gotOpts)
+	assert.Equal(t, 2, len(got.Data))
+	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
+func TestListTemplatesRejectsInvalidPagingParams(t *testing.T) {
+	for _, rawQuery := range []string{"limit=-1", "limit=abc", "offset=-1", "offset=abc"} {
+		req := httptest.NewRequest(http.MethodGet, "/cube/template?"+rawQuery, nil)
+		rt := &CubeLog.RequestTrace{}
+		resp := listTemplates(req, rt)
+
+		got, ok := resp.(*templateListResponse)
+		if !ok {
+			t.Fatalf("[%s] unexpected response type %T", rawQuery, resp)
+		}
+		assert.Equal(t, int(errorcode.ErrorCode_MasterParamsError), got.Ret.RetCode, rawQuery)
+		assert.Equal(t, int64(errorcode.ErrorCode_MasterParamsError), rt.RetCode, rawQuery)
+	}
+}
+
+// TestListTemplatesBatchFallsBackWhenOriginNodeHasEmptyIP pins the producer/
+// consumer agreement: a template whose origin node exists in localcache but
+// carries an empty HostIP must still enter the batch lookup and show the
+// replica's IP (the pre-batching per-template behaviour).
+func TestListTemplatesBatchFallsBackWhenOriginNodeHasEmptyIP(t *testing.T) {
+	result := &templatecenter.TemplateListResult{
+		Templates: []templatecenter.TemplateInfo{
+			{TemplateID: "tpl-empty-ip", OriginNodeID: "node-empty"},
+			{TemplateID: "tpl-good-ip", OriginNodeID: "node-good"},
+		},
+	}
+	result.Total = len(result.Templates)
+	replicas := map[string][]templatecenter.ReplicaStatus{
+		"tpl-empty-ip": {
+			{NodeID: "node-1", NodeIP: "10.0.0.1", Status: "READY"},
+		},
+	}
+	gotOpts, requestedIDs := stubListTemplatesFns(t, result, replicas, nil)
+	_ = gotOpts
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetNode, func(id string) (*node.Node, bool) {
+		if id == "node-good" {
+			return &node.Node{InsID: id, IP: "10.0.0.9"}, true
+		}
+		if id == "node-empty" {
+			return &node.Node{InsID: id, IP: ""}, true
+		}
+		return nil, false
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := listTemplates(req, rt)
+
+	got, ok := resp.(*templateListResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	// Only the empty-IP template needs the fallback; the good one is skipped.
+	assert.Equal(t, []string{"tpl-empty-ip"}, *requestedIDs)
+	if got.Data[0].OriginNodeIP != "10.0.0.1" {
+		t.Fatalf("tpl-empty-ip origin ip = %q, want the replica IP 10.0.0.1", got.Data[0].OriginNodeIP)
+	}
+	if got.Data[1].OriginNodeIP != "10.0.0.9" || got.Data[1].OriginNodeID != "node-good" {
+		t.Fatalf("tpl-good-ip origin = %s/%s, want node-good/10.0.0.9",
+			got.Data[1].OriginNodeID, got.Data[1].OriginNodeIP)
+	}
+}
+
+// TestBatchReadyReplicaOriginsTrimsIDs pins the batch producer's ID handling:
+// template ids are trimmed before the batch query so the map lookup in the
+// consumer (also trimmed) cannot miss on padded ids.
+func TestBatchReadyReplicaOriginsTrimsIDs(t *testing.T) {
+	origReplicas := listReplicasForTemplatesFn
+	t.Cleanup(func() { listReplicasForTemplatesFn = origReplicas })
+	var requested []string
+	listReplicasForTemplatesFn = func(ctx context.Context, templateIDs []string) (map[string][]templatecenter.ReplicaStatus, error) {
+		requested = append(requested, templateIDs...)
+		return map[string][]templatecenter.ReplicaStatus{}, nil
+	}
+
+	infos := []templatecenter.TemplateInfo{
+		{TemplateID: "  tpl-padded  ", OriginNodeID: ""},
+		{TemplateID: "tpl-clean", OriginNodeID: ""},
+	}
+	if _, err := batchReadyReplicaOrigins(context.Background(), infos); err != nil {
+		t.Fatalf("batchReadyReplicaOrigins: %v", err)
+	}
+	assert.Equal(t, []string{"tpl-padded", "tpl-clean"}, requested)
+}
+
+func TestListTemplatesDegradesWhenBatchReplicaLookupFails(t *testing.T) {
+	result := &templatecenter.TemplateListResult{
+		Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-a"}},
+	}
+	result.Total = len(result.Templates)
+	stubListTemplatesFns(t, result, nil, errors.New("db down"))
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := listTemplates(req, rt)
+
+	got, ok := resp.(*templateListResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode,
+		"a batch lookup failure must degrade, not fail the list")
+	assert.Equal(t, 1, len(got.Data))
+	assert.Equal(t, "", got.Data[0].OriginNodeID)
+	assert.Equal(t, "", got.Data[0].OriginNodeIP)
+}
+
+func TestFirstReadyReplicaOriginFromList(t *testing.T) {
+	replicas := []templatecenter.ReplicaStatus{
+		{NodeID: "node-1", Status: "READY"},
+		{NodeID: "node-2", NodeIP: "10.0.0.2", Status: "FAILED"},
+		{NodeID: "node-3", NodeIP: "10.0.0.3", Status: "READY"},
+		{NodeID: "node-4", NodeIP: "10.0.0.4", Status: "READY"},
+	}
+	nodeID, nodeIP := firstReadyReplicaOriginFromList(replicas, "")
+	if nodeID != "node-3" || nodeIP != "10.0.0.3" {
+		t.Fatalf("got %s/%s, want node-3/10.0.0.3", nodeID, nodeIP)
+	}
+	// A pre-existing origin node id is preserved, only the IP is filled in.
+	nodeID, nodeIP = firstReadyReplicaOriginFromList(replicas, "node-keep")
+	if nodeID != "node-keep" || nodeIP != "10.0.0.3" {
+		t.Fatalf("got %s/%s, want node-keep/10.0.0.3", nodeID, nodeIP)
+	}
+	// No replicas: the origin id passes through untouched.
+	nodeID, nodeIP = firstReadyReplicaOriginFromList(nil, "node-keep")
+	if nodeID != "node-keep" || nodeIP != "" {
+		t.Fatalf("got %s/%s, want node-keep/empty", nodeID, nodeIP)
+	}
 }

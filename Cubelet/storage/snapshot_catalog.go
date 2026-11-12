@@ -119,12 +119,13 @@ type snapshotCatalogNS struct {
 
 var (
 	snapshotCatalogMu sync.RWMutex
-	// snapshotCatalogs keeps XFS and S3 catalogs in separate namespaces.
-	// Backend is chosen by the request (or which root was registered), never
-	// by a field inside catalog.json.
+	// snapshotCatalogs keeps XFS, S3 and jfs catalogs in separate
+	// namespaces. Backend is chosen by the request (or which root was
+	// registered), never by a field inside catalog.json.
 	snapshotCatalogs = map[string]*snapshotCatalogNS{
 		cow.BackendXFS: {index: map[string]*SnapshotCatalogEntry{}},
 		cow.BackendS3:  {index: map[string]*SnapshotCatalogEntry{}},
+		cow.BackendJFS: {index: map[string]*SnapshotCatalogEntry{}},
 	}
 )
 
@@ -275,6 +276,7 @@ func DeleteSnapshotCatalog(snapshotID string) {
 	if snapshotID == "" {
 		return
 	}
+	deleteJFSUploadTracker(snapshotID)
 	snapshotCatalogMu.Lock()
 	for _, ns := range snapshotCatalogs {
 		if ns != nil && ns.index != nil {
@@ -289,6 +291,9 @@ func DeleteSnapshotCatalogFor(backend, snapshotID string) {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {
 		return
+	}
+	if catalogBackendKey(backend) == cow.BackendJFS {
+		deleteJFSUploadTracker(snapshotID)
 	}
 	snapshotCatalogMu.Lock()
 	delete(catalogNSLocked(backend).index, snapshotID)

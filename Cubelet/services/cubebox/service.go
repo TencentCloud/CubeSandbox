@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -57,6 +58,16 @@ type ServicesConfig struct {
 
 	DeadContainerTTLStr string `toml:"dead_container_ttl"`
 	deadContainerTTL    time.Duration
+
+	// ShimIntentTTLStr bounds how long the "a shim may have been spawned"
+	// record may keep a sandbox's tap, IP and volumes allocated when no
+	// process can be found for it anywhere on the host. Every other piece of
+	// evidence is consulted first, so this only ever decides a record that
+	// names no live holder at all. "0"/"0s" disables the bound, which is the
+	// fail-closed behaviour: such a sandbox then stays undeletable until an
+	// operator clears it by hand.
+	ShimIntentTTLStr string `toml:"shim_intent_ttl"`
+	shimIntentTTL    time.Duration
 }
 
 var (
@@ -64,6 +75,12 @@ var (
 	defaultDestroyDeadline  = 60 * time.Second
 	defaultDeadContainerTTL = 1 * time.Hour
 	cleanerHeartBeat        = 10 * time.Second
+
+	// defaultShimIntentTTL is deliberately far longer than a create can take
+	// (defaultCreateDeadline): it only has to outlast a crash between writing
+	// the spawn intent and recording the shim's pid, and it is the point at
+	// which we stop believing such a record can still describe a live shim.
+	defaultShimIntentTTL = 10 * time.Minute
 
 	// createStuckThreshold bounds how long a sandbox may legitimately remain in
 	// the CONTAINER_CREATED transient before DeadGC is allowed to probe it. The
@@ -80,6 +97,30 @@ var (
 
 func defaultServiceConfig() *ServicesConfig {
 	return &ServicesConfig{}
+}
+
+// parseShimIntentTTL reads the shim-intent TTL. It accepts the bare "0"
+// spelling for "never age out" that time.ParseDuration rejects, and falls back
+// to the default rather than silently disabling the bound on a typo: an
+// unparsable value must not turn into the fail-closed setting by accident.
+func parseShimIntentTTL(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultShimIntentTTL
+	}
+	if raw == "0" {
+		return 0
+	}
+	t, err := time.ParseDuration(raw)
+	switch {
+	case err != nil || t < 0:
+		CubeLog.Warnf("invalid shim_intent_ttl %q, using %s", raw, defaultShimIntentTTL)
+		return defaultShimIntentTTL
+	case t == 0:
+		return 0 // "0s", "0m", ... all mean never age out
+	default:
+		return t
+	}
 }
 
 func init() {
@@ -121,6 +162,8 @@ func init() {
 				config.deadContainerTTL = t
 			}
 
+			config.shimIntentTTL = parseShimIntentTTL(config.ShimIntentTTLStr)
+
 			CubeLog.Infof("%v init config:%+v",
 				fmt.Sprintf("%v.%v", constants.CubeboxServicePlugin, constants.CubeboxServiceID), config)
 
@@ -138,6 +181,18 @@ func init() {
 				return nil, fmt.Errorf("not a cubebox manager")
 			}
 
+			// The destroy path refuses to reclaim a sandbox while its spawn
+			// intent is unresolved, and lives in the cubebox plugin; this
+			// plugin owns the cleanup policy, so hand the bound across rather
+			// than duplicating the configuration surface.
+			cb.SetShimIntentTTL(config.shimIntentTTL)
+			// Records written before Endpoint.ShimSpawnedAt existed have no age,
+			// and an unresolvable age is the one thing the TTL cannot bound.
+			// Stamp them now, before any cleanup can run, so they get a full
+			// TTL instead of blocking forever.
+			cb.BackfillShimIntentTimestamps(ic.Context)
+			CubeLog.Infof("shim-spawn intent TTL is %s (0 means never age out)", config.shimIntentTTL)
+
 			p, err := ic.GetByID(constants.WorkflowPlugin, constants.WorkflowID.ID())
 			if err != nil {
 				return nil, err
@@ -147,11 +202,13 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("not a workflow engine")
 			}
+			restarts := newRestartMgr(cb.cubeboxManger)
 			s := &service{
 				engine:                e,
 				cubeboxMgr:            cb,
 				cleaner:               newDeadContainerCleaner(config.deadContainerTTL),
-				eventMonitor:          newEventMonitor(cb),
+				eventMonitor:          newEventMonitor(cb, restarts),
+				restarts:              restarts,
 				config:                config,
 				events:                ep.(*exchange.Exchange),
 				numaNodeIndex:         0,
@@ -165,6 +222,9 @@ func init() {
 			// allocated-resource metrics so the cubelet heartbeat loop can
 			// pick it up without taking a hard dependency on this package.
 			resourcesource.Set(cb)
+			restarts.bind(s)
+			restarts.Recover()
+			restarts.startStatusReporter()
 
 			go func() {
 				CubeLog.Info("Start subscribing containerd event")
@@ -198,6 +258,7 @@ type service struct {
 	cubebox.UnimplementedCubeboxMgrServer
 	numaNodeIndex         uint32
 	sandboxLifecycleLocks *utils.ResourceLocks
+	restarts              *restartMgr
 
 	otherRuntime *ociRuntime
 }
@@ -233,6 +294,39 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 
 	return utils.InterfaceToString(tmpReq)
 }
+
+// gatePausedReplace refuses to start a resume that would replace a PAUSED
+// sandbox whose previous runtime may still be running.
+//
+// Everything the replacement does deletes the old sandbox's records, and that
+// row is the only place its shim identity survives: once it is gone nothing on
+// the host can match a still-running shim back to the sandbox, and the new
+// attempt is handed a tap/IP that is still in use.
+//
+// The check runs here, before the create flow allocates network and volume:
+// failing later would strand those allocations and, via failover, destroy the
+// paused sandbox the user asked to resume.
+func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil
+	}
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
+	if err != nil || sb == nil || sb.SandboxID != desired {
+		// No local record to replace: an ordinary create that happens to
+		// carry the annotation.
+		return nil
+	}
+	st := sb.GetStatus()
+	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
+		// lifecycle lock and its cleanup, and a live sandbox must not be
+		// touched; the create step rejects both as already exists.
+		return nil
+	}
+	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
+}
+
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 	rsp := &cubebox.RunCubeSandboxResponse{
 		RequestID: req.RequestID,
@@ -250,11 +344,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	// Cross-node restore: the disk describing what to run is not on this
 	// node yet, and the reads below expect it.
-	if err := prepareCrossNodeRestore(ctx, req); err != nil {
-		rsp.Ret.RetMsg = err.Error()
+	preparedCtx, prepareErr := prepareCrossNodeRestore(ctx, req)
+	if prepareErr != nil {
+		rsp.Ret.RetMsg = prepareErr.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
 		return rsp, nil
 	}
+	ctx = preparedCtx
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
 	if err := expandPauseSnapshotPackage(req); err != nil {
@@ -279,11 +375,25 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	SetRunCubeSandboxRequestDefaultValue(req)
+	if err := restartpolicy.Apply(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+
+	// Unknown mode values must fail rather than silently default to full.
+	mode, modeErr := parseCommitSnapshotMode(req.GetSnapshotMode())
+	if modeErr != nil {
+		rsp.Ret.RetMsg = modeErr.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
 
 	start := time.Now()
 	createInfo := &workflow.CreateContext{
-		ReqInfo:  req,
-		Failover: true,
+		ReqInfo:      req,
+		Failover:     true,
+		SnapshotMode: mode,
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 
@@ -354,13 +464,42 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	rt.Namespace = ns
 	ctx = namespaces.WithNamespace(ctx, ns)
+	// The gate has to run before the create flow allocates anything, and it
+	// needs the same namespace the flow would have used to resolve the old
+	// sandbox's shim.
+	if err := s.gatePausedReplace(ctx, req); err != nil {
+		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		return rsp, nil
+	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
+	armedID := ""
+	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
+		id := ""
+		if req.GetAnnotations() != nil {
+			id = strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+		}
+		if id == "" && constants.IsCubeRuntime(ctx) {
+			id = utils.GenerateID()
+			if req.Annotations == nil {
+				req.Annotations = map[string]string{}
+			}
+			req.Annotations[constants.MasterAnnotationDesiredSandboxID] = id
+		}
+		if id != "" {
+			createInfo.SandboxID = id
+			s.restarts.armCreate(id, req)
+			armedID = id
+		}
+	}
 	var createErr error
 	if constants.IsCubeRuntime(ctx) {
 		createErr = s.engine.Create(ctx, createInfo)
 	} else {
-
-		createInfo.SandboxID = utils.GenerateID()
+		if createInfo.SandboxID == "" {
+			createInfo.SandboxID = utils.GenerateID()
+		}
 		createErr = s.otherRuntime.Create(ctx, createInfo)
 	}
 
@@ -374,6 +513,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	if s.restarts != nil {
+		if armedID != "" {
+			s.restarts.finishCreate(armedID, ret.IsSuccessCode(rsp.Ret.RetCode))
+		} else if ret.IsSuccessCode(rsp.Ret.RetCode) {
+			s.restarts.Start(createInfo.SandboxID, req)
+		}
 	}
 	return rsp, nil
 }
@@ -545,6 +691,9 @@ func getAllocatedPort(createInfo *workflow.CreateContext) []*cubebox.PortMapping
 }
 
 func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+	if s.restarts != nil {
+		s.restarts.Stop(req.GetSandboxID())
+	}
 	rsp := &cubebox.DestroyCubeSandboxResponse{
 		RequestID: req.RequestID,
 		SandboxID: req.SandboxID,
@@ -1007,11 +1156,26 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 			for key, v := range cb.Labels {
 				cc.Labels[key] = v
 			}
+			if box.RestartState != "" || box.RestartCount > 0 || box.LastExitReason != "" {
+				cc.RestartStats = &cubebox.RestartStats{
+					RestartCount:            box.RestartCount,
+					LastSuccessfulRestartAt: box.LastSuccessfulRestartAt,
+					LastFailedRestartAt:     box.LastFailedRestartAt,
+					LastRestartAt:           box.LastRestartAt,
+					RestartState:            box.RestartState,
+					LastExitCode:            box.LastExitCode,
+					LastExitReason:          box.LastExitReason,
+					NextRestartAt:           box.NextRestartAt,
+				}
+			}
 		}
 		cb.Containers = append(cb.Containers, cc)
 	}
 	if opt != nil && opt.GetPrivateWithCubeboxStore() {
-		v, err := jsoniter.MarshalIndent(box, "", "    ")
+		// Serialize a deep copy: MemoryLineage is mutated concurrently by
+		// Commit/Pause under its own lock, and marshaling the live object
+		// would race with those writers and could emit a half-updated tree.
+		v, err := jsoniter.MarshalIndent(box.DeepCopy(), "", "    ")
 		if err != nil {
 			log.L.Errorf("marshal cubebox to json failed: %v", err)
 		}

@@ -73,7 +73,7 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 			}
 			if n.InsID != "" {
 				log.G(ctx).Debugf("syncAllFromDB: node=%s LocalTemplates=%v", n.InsID, n.LocalTemplates)
-				SyncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
+				l.syncNodeTemplates(ctx, n.InsID, n.LocalTemplates)
 			}
 			allFromDb[n.InsID] = struct{}{}
 		}

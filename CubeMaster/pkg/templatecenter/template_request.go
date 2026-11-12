@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
@@ -32,6 +33,22 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		constants.CubeAnnotationRootfsArtifactID:           artifact.ArtifactID,
 		constants.CubeAnnotationWritableLayerSize:          req.WritableLayerSize,
 		constants.CubeAnnotationTemplateSpecFingerprint:    artifact.TemplateSpecFingerprint,
+	}
+	if req.Qos != nil {
+		networkQosAnnotation, err := qos.MarshalNetworkAnnotation(req.Qos.Network)
+		if err != nil {
+			return nil, err
+		}
+		if networkQosAnnotation != "" {
+			annotations[constants.CubeAnnotationsNetWork] = networkQosAnnotation
+		}
+		blockIOQosAnnotation, err := qos.MarshalBlockIOAnnotation(req.Qos.BlockIO)
+		if err != nil {
+			return nil, err
+		}
+		if blockIOQosAnnotation != "" {
+			annotations[constants.CubeAnnotationsBlkQos] = blockIOQosAnnotation
+		}
 	}
 	if ShouldInjectEnvdIntoTemplate(req) {
 		annotations[constants.CubeAnnotationsInjectEnvd] = constants.CubeAnnotationsInjectEnvdOptIn
@@ -80,8 +97,8 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 		}
 	}
 	envs := envListToKeyValues(imageCfg.Env)
-	if req.ContainerOverrides != nil && req.ContainerOverrides.Envs != nil {
-		envs = req.ContainerOverrides.Envs
+	if req.ContainerOverrides != nil {
+		envs = mergeEnvOverrides(envs, req.ContainerOverrides.Envs)
 	}
 	workingDir := imageCfg.WorkingDir
 	if req.ContainerOverrides != nil && req.ContainerOverrides.WorkingDir != "" {
@@ -95,6 +112,11 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if req.ContainerOverrides != nil && req.ContainerOverrides.SecurityContext != nil {
 		securityContext = req.ContainerOverrides.SecurityContext
 		securityContext.ReadonlyRootfs = false
+		// A custom user only changes the container process; the build itself
+		// must stay privileged so the guest can set up its devices.
+		if securityContext.RunAsUser != nil || securityContext.RunAsUsername != "" {
+			securityContext.Privileged = true
+		}
 	}
 	if req.ContainerOverrides != nil && req.ContainerOverrides.VolumeMounts != nil {
 		for _, mount := range req.ContainerOverrides.VolumeMounts {
@@ -187,6 +209,40 @@ func envListToKeyValues(envs []string) []*types.KeyValue {
 		return out[i].Key < out[j].Key
 	})
 	return out
+}
+
+// mergeEnvOverrides layers template env overrides on top of the image ENV the
+// way `docker run -e` does: an override replaces the image value for the same
+// key, and image variables without an override are kept. Replacing the whole
+// list instead would silently drop settings the image depends on (LANG,
+// LC_ALL, LD_LIBRARY_PATH, ...) as soon as a single --env is passed.
+func mergeEnvOverrides(imageEnvs, overrides []*types.KeyValue) []*types.KeyValue {
+	if len(overrides) == 0 {
+		return imageEnvs
+	}
+	merged := make([]*types.KeyValue, 0, len(imageEnvs)+len(overrides))
+	index := make(map[string]int, len(imageEnvs)+len(overrides))
+	add := func(kv *types.KeyValue) {
+		if kv == nil {
+			return
+		}
+		if i, ok := index[kv.Key]; ok {
+			merged[i] = kv
+			return
+		}
+		index[kv.Key] = len(merged)
+		merged = append(merged, kv)
+	}
+	for _, kv := range imageEnvs {
+		add(kv)
+	}
+	for _, kv := range overrides {
+		add(kv)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Key < merged[j].Key
+	})
+	return merged
 }
 
 func defaultRLimit(overrides *types.ContainerOverrides) *types.RLimit {

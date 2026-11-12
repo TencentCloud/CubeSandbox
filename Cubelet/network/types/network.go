@@ -7,7 +7,11 @@ package types
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"strings"
 
 	"github.com/containerd/containerd/v2/pkg/oci"
 	jsoniter "github.com/json-iterator/go"
@@ -115,20 +119,108 @@ func (r *ShimNetReq) OCISpecOpts() oci.SpecOpts {
 }
 
 type NetRequest struct {
-	Mode    string
-	Qos     *NetQosConfig
-	Version uint64
+	// Mode is reserved for future transport modes. Version 1 rejects a
+	// non-empty value because no mode is defined yet.
+	Mode string `json:"Mode,omitempty"`
+	// Qos carries the network token buckets consumed by the VMM.
+	Qos *NetQosConfig `json:"Qos"`
+	// Version selects the payload schema. Version 0 predates the public QoS
+	// contract and is decoded permissively; version 1 is the canonical
+	// CubeMaster payload and is decoded strictly.
+	Version uint64 `json:"Version,omitempty"`
+}
+
+func (req *NetRequest) Validate() error {
+	if req == nil {
+		return errors.New("network request is nil")
+	}
+	if req.Version > 1 {
+		return fmt.Errorf("unsupported network request version %d", req.Version)
+	}
+	// Version 0 predates the public QoS contract and was decoded permissively.
+	// Keep accepting legacy no-op and partial buckets; the VMM disables a token
+	// bucket when either its size or refill time is zero.
+	if req.Version == 0 {
+		return nil
+	}
+	if req.Version == 1 && req.Mode != "" {
+		return fmt.Errorf("unsupported network request mode %q", req.Mode)
+	}
+	if req.Qos == nil {
+		return errors.New("network request version 1 requires Qos")
+	}
+	bandwidthEnabled, err := req.Qos.BandWidth.validate("Qos.BandWidth")
+	if err != nil {
+		return err
+	}
+	opsEnabled, err := req.Qos.OPS.validate("Qos.OPS")
+	if err != nil {
+		return err
+	}
+	if req.Version == 1 && !bandwidthEnabled && !opsEnabled {
+		return errors.New("network request must enable BandWidth or OPS")
+	}
+	return nil
 }
 
 type NetQosConfig struct {
-	BandWidth LimiterConfig
-	OPS       LimiterConfig
+	BandWidth LimiterConfig `json:"BandWidth"`
+	OPS       LimiterConfig `json:"OPS"`
 }
 
 type LimiterConfig struct {
-	Size         int
-	OneTimeBurst int
-	RefillTime   int
+	Size         int `json:"Size"`
+	OneTimeBurst int `json:"OneTimeBurst"`
+	RefillTime   int `json:"RefillTime"`
+}
+
+func (c LimiterConfig) validate(path string) (bool, error) {
+	if c.Size < 0 || c.OneTimeBurst < 0 || c.RefillTime < 0 {
+		return false, fmt.Errorf("%s values must not be negative", path)
+	}
+	if c.Size == 0 && c.OneTimeBurst == 0 && c.RefillTime == 0 {
+		return false, nil
+	}
+	if c.Size == 0 || c.RefillTime == 0 {
+		return false, fmt.Errorf("%s requires positive Size and RefillTime", path)
+	}
+	return true, nil
+}
+
+func DecodeNetRequest(raw string) (*NetRequest, error) {
+	legacy := &NetRequest{}
+	if err := json.Unmarshal([]byte(raw), legacy); err != nil {
+		return nil, err
+	}
+	if legacy.Version == 0 {
+		return legacy, nil
+	}
+	if legacy.Version > 1 {
+		return nil, fmt.Errorf("unsupported network request version %d", legacy.Version)
+	}
+
+	// Version 1 is the canonical payload emitted by CubeMaster. Decode it
+	// strictly so CubeMaster and Cubelet cannot silently disagree about a
+	// field; version 0 above remains permissive for legacy callers.
+	request := &NetRequest{}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(request); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("unexpected trailing JSON value")
+		}
+		return nil, err
+	}
+	if request.Qos == nil {
+		return nil, errors.New("network request requires Qos")
+	}
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	return request, nil
 }
 
 type PortMapping struct {

@@ -43,6 +43,7 @@ type TemplateReplica struct {
 	TemplateID        string `json:"template_id" gorm:"column:template_id"`
 	NodeID            string `json:"node_id" gorm:"column:node_id"`
 	NodeIP            string `json:"node_ip" gorm:"column:node_ip"`
+	TemplateVariantID string `json:"template_variant_id,omitempty" gorm:"column:template_variant_id"`
 	InstanceType      string `json:"instance_type" gorm:"column:instance_type"`
 	Spec              string `json:"spec" gorm:"column:spec"`
 	Status            string `json:"status" gorm:"column:status"`

@@ -78,6 +78,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
+#[cfg(target_arch = "aarch64")]
+use std::io::Read;
 use std::io::{self, Seek, SeekFrom, Write};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use std::mem::size_of;
@@ -120,6 +122,10 @@ pub enum Error {
 
     #[error("Cannot load the kernel into memory: {0}")]
     KernelLoad(#[source] linux_loader::loader::Error),
+
+    #[cfg(target_arch = "aarch64")]
+    #[error("Kernel image '{0}' is a raw ELF vmlinux; ARM64 direct boot requires the PE-format boot Image (built from arch/arm64/boot/Image)")]
+    ElfKernelImage(String),
 
     #[cfg(target_arch = "aarch64")]
     #[error("Cannot load the UEFI binary in memory: {0:?}")]
@@ -319,6 +325,73 @@ pub enum Error {
     Coredump(GuestDebuggableError),
 }
 pub type Result<T> = result::Result<T, Error>;
+
+fn build_cmdline(payload_cmdline: Option<&str>, additions: &[String]) -> Result<Cmdline> {
+    let mut cmdline = match payload_cmdline {
+        Some(payload_cmdline) => {
+            // Cmdline::try_from() separates init arguments but does not validate its input.
+            let mut validator =
+                Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::CmdLineCreate)?;
+            validator
+                .insert_str(payload_cmdline)
+                .map_err(Error::CmdLineInsertStr)?;
+            Cmdline::try_from(payload_cmdline, arch::CMDLINE_MAX_SIZE)
+                .map_err(Error::CmdLineCreate)?
+        }
+        None => Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::CmdLineCreate)?,
+    };
+
+    for addition in additions {
+        cmdline
+            .insert_str(addition)
+            .map_err(Error::CmdLineInsertStr)?;
+    }
+
+    Ok(cmdline)
+}
+
+#[cfg(test)]
+mod cmdline_tests {
+    use super::*;
+
+    fn cmdline_string(cmdline: Cmdline) -> String {
+        cmdline.as_cstring().unwrap().into_string().unwrap()
+    }
+
+    #[test]
+    fn test_build_cmdline_additions_precede_init_args() {
+        let additions = vec!["earlycon".to_string()];
+        let cmdline = build_cmdline(Some("console=x -- /init arg"), &additions).unwrap();
+
+        assert_eq!(cmdline_string(cmdline), "console=x earlycon -- /init arg");
+    }
+
+    #[test]
+    fn test_build_cmdline_additions_without_init_args() {
+        let additions = vec!["earlycon".to_string()];
+        let cmdline = build_cmdline(Some("console=x"), &additions).unwrap();
+
+        assert_eq!(cmdline_string(cmdline), "console=x earlycon");
+    }
+
+    #[test]
+    fn test_build_cmdline_preserves_additional_init_separators() {
+        let additions = vec!["earlycon".to_string()];
+        let cmdline = build_cmdline(Some("console=x -- /init -- arg"), &additions).unwrap();
+
+        assert_eq!(
+            cmdline_string(cmdline),
+            "console=x earlycon -- /init -- arg"
+        );
+    }
+
+    #[test]
+    fn test_build_cmdline_rejects_invalid_input() {
+        let error = build_cmdline(Some("console=x\nroot=x"), &[]).unwrap_err();
+
+        assert!(matches!(error, Error::CmdLineInsertStr(_)));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum VmState {
@@ -939,16 +1012,14 @@ impl Vm {
         payload: &PayloadConfig,
         #[cfg(target_arch = "aarch64")] device_manager: &Arc<Mutex<DeviceManager>>,
     ) -> Result<Cmdline> {
-        let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::CmdLineCreate)?;
-        if let Some(s) = payload.cmdline.as_ref() {
-            cmdline.insert_str(s).map_err(Error::CmdLineInsertStr)?;
-        }
-
         #[cfg(target_arch = "aarch64")]
-        for entry in device_manager.lock().unwrap().cmdline_additions() {
-            cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
-        }
-        Ok(cmdline)
+        let device_manager = device_manager.lock().unwrap();
+        #[cfg(target_arch = "aarch64")]
+        let additions = device_manager.cmdline_additions();
+        #[cfg(not(target_arch = "aarch64"))]
+        let additions: &[String] = &[];
+
+        build_cmdline(payload.cmdline.as_deref(), additions)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -963,13 +1034,13 @@ impl Vm {
     #[cfg(target_arch = "aarch64")]
     fn load_kernel(
         firmware: Option<File>,
-        kernel: Option<File>,
+        kernel: Option<(File, &std::path::Path)>,
         memory_manager: Arc<Mutex<MemoryManager>>,
     ) -> Result<EntryPoint> {
         let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
         let entry_addr = match (firmware, kernel) {
-            (None, Some(mut kernel)) => {
+            (None, Some((mut kernel, kernel_path))) => {
                 match linux_loader::loader::pe::PE::load(
                     mem.deref(),
                     Some(arch::layout::KERNEL_START),
@@ -981,6 +1052,14 @@ impl Vm {
                     // If failed, retry to load it as UEFI binary.
                     // As the UEFI binary is formatless, it must be the last option to try.
                     Err(linux_loader::loader::Error::Pe(InvalidImageMagicNumber)) => {
+                        // A raw ELF vmlinux is not a UEFI binary either; the
+                        // fall-through only surfaces as a confusing UefiTooBig.
+                        // Detect the ELF magic and name the artifact problem.
+                        if kernel_starts_with_elf_magic(&mut kernel) {
+                            return Err(Error::ElfKernelImage(
+                                kernel_path.to_string_lossy().into_owned(),
+                            ));
+                        }
                         Self::load_firmware(&kernel, memory_manager)?;
                         arch::layout::UEFI_START
                     }
@@ -1071,8 +1150,8 @@ impl Vm {
                 Self::load_kernel(Some(firmware), None, memory_manager)
             }
             (None, Some(kernel)) => {
-                let kernel = File::open(kernel).map_err(Error::KernelFile)?;
-                Self::load_kernel(None, Some(kernel), memory_manager)
+                let kernel_file = File::open(kernel).map_err(Error::KernelFile)?;
+                Self::load_kernel(None, Some((kernel_file, kernel.as_path())), memory_manager)
             }
             _ => Err(Error::InvalidPayload),
         }
@@ -2484,6 +2563,12 @@ impl Vm {
         self.memory_manager.lock().unwrap().snapshot_data()
     }
 
+    /// Reference the pause path holds past the Vm drop, deferring the
+    /// guest memory unmap and the KVM fd close past the pause reply.
+    pub(crate) fn memory_manager(&self) -> Arc<Mutex<MemoryManager>> {
+        self.memory_manager.clone()
+    }
+
     #[cfg(feature = "guest_debug")]
     pub fn debug_request(
         &mut self,
@@ -2811,6 +2896,34 @@ impl Snapshottable for Vm {
     }
 }
 
+/// Writes only `snapshot/config.json`, mirroring the config half of
+/// `Vm::send`. Used for snapshots without guest memory; the caller owns the
+/// destination directory lifecycle and any prior cleanup.
+pub fn write_vm_config_only(
+    snapshot_config: &SnapshotConfig,
+    vm_config: &Arc<Mutex<VmConfig>>,
+) -> std::result::Result<(), MigratableError> {
+    let mut snapshot_config_path = url_to_path(&snapshot_config.destination_url)?;
+    snapshot_config_path.push(SNAPSHOT_CONFIG_FILE);
+
+    let vm_config = serde_json::to_string(vm_config.lock().unwrap().deref())
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+
+    let mut snapshot_config_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(snapshot_config_path)
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    snapshot_config_file
+        .write(vm_config.as_bytes())
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    snapshot_config_file
+        .sync_all()
+        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    Ok(())
+}
+
 impl Transportable for Vm {
     fn send(
         &self,
@@ -2877,6 +2990,7 @@ impl Transportable for Vm {
                 destination_url: destination_url.clone(),
                 snapshot_type: config.snapshot_type,
                 memory_vol_url: config.memory_vol_url.clone(),
+                include_memory: true,
             };
             self.memory_manager
                 .lock()
@@ -3328,6 +3442,17 @@ mod tests {
     }
 }
 
+// Probe the first bytes of a guest kernel image for the ELF magic. The file
+// is rewound after probing, so a negative result leaves it ready for the
+// formatless UEFI fallback in Vm::load_kernel.
+#[cfg(target_arch = "aarch64")]
+fn kernel_starts_with_elf_magic(kernel: &mut File) -> bool {
+    let mut magic = [0u8; 4];
+    let probed = kernel.rewind().is_ok() && kernel.read_exact(&mut magic).is_ok();
+    let _ = kernel.rewind();
+    probed && magic == [0x7f, b'E', b'L', b'F']
+}
+
 #[cfg(target_arch = "aarch64")]
 #[cfg(test)]
 mod tests {
@@ -3477,4 +3602,34 @@ pub fn test_vm_snapshot_restore() {
 
     let vm_snapshot = get_vm_snapshot(&snapshot).map_err(Error::Restore).unwrap();
     println!("{:?}", vm_snapshot.clock.unwrap());
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn test_kernel_starts_with_elf_magic_detects_elf() {
+    let path = std::env::temp_dir().join("ut_vmm_kernel_elf.img");
+    std::fs::write(&path, [0x7f, b'E', b'L', b'F', 1, 2, 3, 4]).unwrap();
+
+    let mut kernel = File::open(&path).unwrap();
+    assert!(kernel_starts_with_elf_magic(&mut kernel));
+    // The probe must rewind so the formatless UEFI fallback still sees the
+    // whole file.
+    let mut first = [0u8; 4];
+    kernel.read_exact(&mut first).unwrap();
+    assert_eq!(first, [0x7f, b'E', b'L', b'F']);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn test_kernel_starts_with_elf_magic_accepts_pe_image() {
+    let path = std::env::temp_dir().join("ut_vmm_kernel_pe.img");
+    std::fs::write(&path, b"MZpe-placeholder-boot-image").unwrap();
+
+    let mut kernel = File::open(&path).unwrap();
+    assert!(!kernel_starts_with_elf_magic(&mut kernel));
+    let mut first = [0u8; 4];
+    kernel.read_exact(&mut first).unwrap();
+    assert_eq!(first, *b"MZpe");
+    let _ = std::fs::remove_file(&path);
 }

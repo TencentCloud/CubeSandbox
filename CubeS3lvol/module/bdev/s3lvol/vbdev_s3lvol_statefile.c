@@ -81,38 +81,58 @@ s3lvol_statefile_read(const char *path)
 	return buf;
 }
 
-/* Fsync the directory holding `path`, so the rename is durable and not merely
- * visible. Failure is logged but not fatal: the rename has already happened, so
- * the file is correct right now; only its survival across a power cut is in
- * question, and there is nothing better to do about it here. */
-static void
+/* Fsync the directory holding `path`, so the rename/unlink is durable and not
+ * merely visible. The mutation has already happened when this fails, but the
+ * caller must still know that it is not crash-safe: registry users retain their
+ * in-memory intent and can retry the same idempotent operation. */
+static int
 statefile_sync_dir(const char *path)
 {
 	char *dup;
 	const char *dir;
-	int fd;
+	const char *inject;
+	int fd, rc = 0;
 
 	dup = strdup(path);
 	if (!dup) {
-		return;
+		return -ENOMEM;
 	}
 
 	dir = dirname(dup);
 	fd = open(dir, O_RDONLY | O_DIRECTORY);
 	if (fd < 0) {
-		SPDK_WARNLOG("statefile: cannot open %s to fsync: %s\n", dir,
-			     strerror(errno));
+		rc = -errno;
+		SPDK_ERRLOG("statefile: cannot open %s to fsync: %s\n", dir,
+			    strerror(errno));
 		free(dup);
-		return;
+		return rc;
 	}
 
-	if (fsync(fd) != 0) {
-		SPDK_WARNLOG("statefile: fsync of %s failed: %s\n", dir,
-			     strerror(errno));
+	/* Test-only fault injection. It is deliberately scoped to the directory
+	 * sync, the failure that used to be swallowed. A positive errno makes one
+	 * call fail; the variable is consumed so the retry exercises recovery. */
+	inject = getenv("S3LVOL_TEST_STATEFILE_DIR_FSYNC_ERRNO");
+	if (inject && inject[0] != '\0') {
+		long err = strtol(inject, NULL, 10);
+
+		unsetenv("S3LVOL_TEST_STATEFILE_DIR_FSYNC_ERRNO");
+		if (err > 0 && err <= INT_MAX) {
+			errno = (int)err;
+			rc = -errno;
+		}
+	}
+
+	if (rc == 0 && fsync(fd) != 0) {
+		rc = -errno;
+	}
+	if (rc != 0) {
+		SPDK_ERRLOG("statefile: fsync of %s failed: %s\n", dir,
+			    strerror(-rc));
 	}
 
 	close(fd);
 	free(dup);
+	return rc;
 }
 
 int
@@ -179,8 +199,7 @@ s3lvol_statefile_write(const char *path, const char *content)
 		return rc;
 	}
 
-	statefile_sync_dir(path);
-	return 0;
+	return statefile_sync_dir(path);
 
 fail:
 	close(fd);
@@ -196,8 +215,7 @@ s3lvol_statefile_remove(const char *path)
 			    strerror(errno));
 		return -errno;
 	}
-	statefile_sync_dir(path);
-	return 0;
+	return statefile_sync_dir(path);
 }
 /* Small enough that a fixed table beats a list: there are exactly two state
  * files, and a third would be a design change rather than a configuration one. */

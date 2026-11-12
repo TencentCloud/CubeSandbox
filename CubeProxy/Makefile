@@ -1,4 +1,4 @@
-IMAGE_TAG           ?= v0.7.2
+IMAGE_TAG           ?= v0.8.0-rc2
 IMAGE_LOCAL         := cube-proxy
 
 # Base OpenResty image; overridable for private mirrors / pinned digests.
@@ -41,20 +41,29 @@ test:
 	bash tests/test_start.sh
 	bash tests/test_admin_access_log.sh
 	bash tests/test_lua_syntax.sh
-	@if command -v lua >/dev/null 2>&1; then \
+	@set -e; if command -v lua >/dev/null 2>&1; then \
 		lua tests/redis_iresty_sentinel_test.lua; \
+		lua tests/redis_cluster_test.lua; \
 		lua tests/backend_cache_test.lua; \
 		lua tests/sandbox_backend_cache_test.lua; \
 		lua tests/sandbox_route_lookup_test.lua; \
 		lua tests/request_host_test.lua; \
+		lua tests/rewrite_phase_route_test.lua; \
+		lua tests/path_rewrite_phase_route_test.lua; \
+		lua tests/activity_test.lua; \
 	elif command -v luajit >/dev/null 2>&1; then \
 		luajit tests/redis_iresty_sentinel_test.lua; \
+		luajit tests/redis_cluster_test.lua; \
 		luajit tests/backend_cache_test.lua; \
 		luajit tests/sandbox_backend_cache_test.lua; \
 		luajit tests/sandbox_route_lookup_test.lua; \
 		luajit tests/request_host_test.lua; \
+		luajit tests/rewrite_phase_route_test.lua; \
+		luajit tests/path_rewrite_phase_route_test.lua; \
+		luajit tests/activity_test.lua; \
 	else \
-		echo "skip lua unit tests (no lua/luajit): redis_iresty_sentinel_test.lua backend_cache_test.lua sandbox_backend_cache_test.lua sandbox_route_lookup_test.lua request_host_test.lua"; \
+		echo "lua or luajit is required: redis_iresty_sentinel_test.lua redis_cluster_test.lua backend_cache_test.lua sandbox_backend_cache_test.lua sandbox_route_lookup_test.lua request_host_test.lua rewrite_phase_route_test.lua path_rewrite_phase_route_test.lua activity_test.lua" >&2; \
+		exit 1; \
 	fi
 
 # Push the architecture-specific image to all registries.

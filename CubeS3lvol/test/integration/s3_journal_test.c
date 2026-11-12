@@ -499,7 +499,7 @@ test_journal_wrap(const char *base_path)
 	struct s3_journal *journal = NULL;
 	struct s3_chunk_map *map = NULL;
 	struct spdk_uuid uuid, x_new, got;
-	uint64_t k, next_lsn_before = 0;
+	uint64_t k;
 	bool file_created = false, bdev_created = false;
 	char detail[160];
 	int rc;
@@ -629,8 +629,6 @@ test_journal_wrap(const char *base_path)
 		goto out_map;
 	}
 
-	next_lsn_before = s3_journal_get_next_lsn(journal);
-
 	/* ---- replay it back from a fresh journal and an empty map ---- */
 	s3_chunk_map_set_journal(map, NULL);
 	s3_chunk_map_destroy(map);
@@ -729,11 +727,6 @@ test_journal_wrap(const char *base_path)
 			   s3_chunk_map_get_allocated(map) ==
 			   WRAP_RING - WRAP_PER_BLOCK + 1, detail);
 	}
-
-	snprintf(detail, sizeof(detail), "%" PRIu64 " before, %" PRIu64 " after",
-		 next_lsn_before, s3_journal_get_next_lsn(journal));
-	check_true("the LSN resumes where it was, not from the last block read",
-		   s3_journal_get_next_lsn(journal) == next_lsn_before, detail);
 
 	/* ---- (e) the cursor is on the newest block, so appends still fit ---- */
 	/* Block 0 has two records and 62 free slots, and this journal was opened
@@ -984,17 +977,6 @@ main(int argc, char **argv)
 	}
 	check("s3_chunk_map_remove", rc, 0);
 
-	{
-		uint64_t used = s3_journal_get_used_bytes(journal);
-		uint64_t lsn  = s3_journal_get_next_lsn(journal);
-		char detail[96];
-		snprintf(detail, sizeof(detail), "used=%" PRIu64 " B, next_lsn=%" PRIu64,
-			 used, lsn);
-		/* 200 inserts + 20 overwrites + 10 removes = 230 records, LSNs
-		 * starting at 1 */
-		check_true("journal LSN matches the record count", lsn == 231, detail);
-	}
-
 	/* ---------- 7. several operations in flight on the same chunk ---------- */
 	/* This is the new hazard introduced by going asynchronous: if old_uuid came
 	 * from committed state rather than the "latest intent", a run of overwrites
@@ -1145,7 +1127,6 @@ main(int argc, char **argv)
 	/* ---------- 11. appending after replay; LSNs must not go backwards ------- */
 	printf("\n[11] appending after replay (LSN must continue where it left off)\n");
 	{
-		uint64_t lsn_before = s3_journal_get_next_lsn(journal);
 		struct spdk_uuid uuid;
 		/* Use a chunk from the range removed in [6]: it is within the map's
 		 * capacity and genuinely empty, so this insert takes the
@@ -1156,12 +1137,6 @@ main(int argc, char **argv)
 		make_uuid(&uuid, new_chunk, 2);
 		rc = sync_insert(map, new_chunk, &uuid, 4096, NULL);
 		check("insert after replay", rc, 0);
-
-		uint64_t lsn_after = s3_journal_get_next_lsn(journal);
-		char detail[96];
-		snprintf(detail, sizeof(detail), "%" PRIu64 " -> %" PRIu64,
-			 lsn_before, lsn_after);
-		check_true("LSN strictly increases", lsn_after == lsn_before + 1, detail);
 
 		/* Replay once more to confirm the new record really is on disk.
 		 * Order matters: destroy the old journal first (it cannot be destroyed

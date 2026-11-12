@@ -109,9 +109,6 @@ spec:
           node_ds="$(kget "{{ include "cube.nodeDaemonSetAPIPath" . }}/${ns}/daemonsets/{{ include "cube.nodeName" . }}")"
           printf '%s\n' "${node_ds}" | grep -Eq '"numberReady"[[:space:]]*:[[:space:]]*[1-9]'
           printf '%s\n' "${node_ds}" | grep -Eq '"desiredNumberScheduled"[[:space:]]*:[[:space:]]*[1-9]'
-          {{- end }}
-
-          {{- if .Values.cubeEgress.enabled }}
           echo '[health-test] check CubeEgress containers by name in CubeNode pods'
           pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-node")"
           # Extract container names precisely instead of grepping the whole JSON,
@@ -478,6 +475,9 @@ spec:
           test -e /dev/kvm
           test -d {{ .Values.hostPaths.dataCubelet | quote }}
           test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
+          {{- if .Values.cubeJuiceFS.enabled }}
+          awk '$2 == {{ .Values.cubeJuiceFS.mountPath | quote }} && $3 == "fuse.juicefs" { found=1 } END { exit !found }' /proc/mounts
+          {{- end }}
       volumeMounts:
         - name: dev
           mountPath: /dev
@@ -485,6 +485,9 @@ spec:
         - name: data-cubelet
           mountPath: {{ .Values.hostPaths.dataCubelet }}
           readOnly: true
+          {{- if .Values.cubeJuiceFS.enabled }}
+          mountPropagation: HostToContainer
+          {{- end }}
         - name: tmp-cube
           mountPath: {{ .Values.hostPaths.tmpCube }}
           readOnly: true

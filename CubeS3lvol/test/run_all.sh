@@ -50,7 +50,9 @@
 #  Environment:
 #    S3LVOL_TEST_BUCKET   override the bucket taken from s3.cfg
 #    S3LVOL_SKIP_HOT_UPGRADE=1
-#                         skip the two disruptive hot-upgrade suites
+#                         skip the disruptive hot-upgrade suites
+#    S3LVOL_SKIP_HOT_UPGRADE_NEGATIVE=1
+#                         skip only the destructive negative hot-upgrade suite
 #    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #                         used as-is when set; otherwise read from s3.cfg
 #
@@ -124,6 +126,34 @@ report_skip()
 	[ "${asked}" -eq 1 ] || SKIPPED_BY_CHOICE=0
 }
 
+# Print what a failed suite actually said, inline.
+#
+# The "see <log>" path in the FAIL line is only useful while the tree is still on
+# this machine. In CI the runner goes away with the container, so a failure that
+# reports a /tmp path and nothing else costs a whole re-run just to learn which
+# assertion broke -- exactly what happened the first time this suite ran on CI.
+# Both failure shapes are covered: assertion failures (grep the [FAIL] lines) and
+# suites that died before printing anything (show the tail, which is where the
+# cause is). Bounded, so a suite that prints a thousand of either does not bury
+# the summary printed after it.
+report_failed_assertions()
+{
+	local log="$1" line
+
+	while IFS= read -r line; do
+		printf '        %s\n' "${line}"
+	done < <(grep -E '^[[:space:]]*\[FAIL\]' "${log}" 2>/dev/null | head -20)
+}
+
+report_log_tail()
+{
+	local log="$1" line
+
+	while IFS= read -r line; do
+		printf '        %s\n' "${line}"
+	done < <(tail -15 "${log}" 2>/dev/null)
+}
+
 # Run one suite, keep its output, report the one line that matters.
 run_suite()
 {
@@ -149,6 +179,7 @@ run_suite()
 		       "${name}" "${rc}" "${elapsed}" "${log}"
 		SUITES_BAD=$((SUITES_BAD + 1))
 		FAILED_NAMES="${FAILED_NAMES}  ${name}: produced no summary (see ${log})"$'\n'
+		report_log_tail "${log}"
 		return 1
 	fi
 
@@ -191,6 +222,8 @@ run_suite()
 	       "${name}" "${f}" "$((p + f))" "${rc}" "${elapsed}" "${log}"
 	SUITES_BAD=$((SUITES_BAD + 1))
 	FAILED_NAMES="${FAILED_NAMES}  ${name}: ${f} assertion(s) failed (see ${log})"$'\n'
+	report_failed_assertions "${log}"
+
 	return 1
 }
 
@@ -259,14 +292,16 @@ S3_ARGS=(-e "${ENDPOINT}" -b "${BUCKET}" -r "${REGION}")
 # RPC socket, touches the host's nvme controllers and the shared registries, so
 # it needs root, credentials and the box to itself -- not CI-able as wired.
 if [ "${MODE}" = list ]; then
+	echo "offline tools:       s3_bucket_selftest isa_baseline rpc_py38_compat replay_registry"
 	echo "offline integration: spawner thread_bounce journal wal cache flush export"
 	echo "                     statefile local_dev checkpoint export_swap export_read"
 	echo "                     copy_xml pending_persist active_nsid"
 	echo "with S3:             s3_client_test s3_bs_dev_test"
-	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
+	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport shared_chain import_fanout"
 	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
 	echo "                     agent_template cubecow_client snapdelete pending_delete"
-	echo "                     fs hot_upgrade hot_upgrade_negative guards activation"
+	echo "                     fs hot_upgrade hot_upgrade_orchestrator hot_upgrade_negative"
+	echo "                     guards activation"
 	echo "                     control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
@@ -333,16 +368,19 @@ echo "--- offline tools"
 run_suite s3_bucket_selftest python3 ./test/tools/s3_bucket.py --self-test
 run_suite isa_baseline ./test/tools/test_isa_baseline.sh
 run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh
+run_suite replay_registry bash ./test/tools/test_replay_registry.sh
 run_suite lvs_identity ./test/tools/test_lvs_identity.sh
+run_suite bstore_recovery ./test/tools/test_bstore_recovery.sh
 run_suite tgt_cpumask ./test/tools/test_tgt_cpumask.sh
 echo ""
 
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
-	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
+	 s3_cache_test s3_flush_test s3_writeback_test s3_export_test s3_statefile_test \
 	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
-	 s3_export_read_test s3_copy_xml_test s3_pending_persist_test \
-	 s3_active_nsid_test; do
+	 s3_export_read_test s3_preheat_test s3_copy_xml_test s3_pending_persist_test \
+	 s3_active_nsid_test s3_dynamic_json_test s3_bstore_test \
+	 s3_registry_persist_test s3_owner_test s3_nvmf_state_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""
@@ -444,9 +482,9 @@ else:
 if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
 	for t in dataplane recovery snapshot export srcdel selfimport derived \
-		 decouple_queue snapshot_cancel snapshot_converge agent_template \
-		 cubecow_client snapdelete pending_delete fs hot_upgrade \
-		 hot_upgrade_negative guards activation control; do
+		 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
+		 import_fanout preheat cubecow_client snapdelete pending_delete fs hot_upgrade \
+		 hot_upgrade_orchestrator hot_upgrade_negative guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
 else
@@ -454,9 +492,9 @@ else
 	if [ -n "${BLOCKER}" ]; then
 		echo "--- dataplane"
 		for t in dataplane recovery snapshot export srcdel selfimport derived \
-			 decouple_queue snapshot_cancel snapshot_converge agent_template \
-			 cubecow_client snapdelete pending_delete fs hot_upgrade \
-			 hot_upgrade_negative guards activation control; do
+			 decouple_queue snapshot_cancel snapshot_converge agent_template shared_chain \
+			 import_fanout preheat cubecow_client snapdelete pending_delete fs hot_upgrade \
+			 hot_upgrade_orchestrator hot_upgrade_negative guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
 	else
@@ -480,6 +518,18 @@ else
 		# Next to export, whose manifests it consumes.
 		run_suite run_selfimport_test.sh \
 			./test/dataplane/run_selfimport_test.sh
+		# One hidden snapshot per (lvstore, export). decouple:false still joins
+		# it; decoupling one user lvol covers every clone on that lvstore.
+		run_suite run_shared_chain_test.sh \
+			./test/dataplane/run_shared_chain_test.sh
+		# 10 and 50 concurrent imports of one export. decouple:false must all
+		# join the hidden template; decouple:true must copy that template once.
+		run_suite run_import_fanout_test.sh \
+			./test/dataplane/run_import_fanout_test.sh
+		# Four exports imported in one burst, so their template preheats
+		# overlap, then concurrent cold reads of the clones hit the cache.
+		run_suite run_preheat_test.sh \
+			./test/dataplane/run_preheat_test.sh
 		# Handing on an imported volume without copying it: three lvstores in
 		# turn, so that what the last one reads has to resolve against two
 		# prefixes at once. Next to selfimport because it is the other half of
@@ -533,12 +583,19 @@ else
 		# still get the last word on whether the machine was left tidy.
 		if [ "${S3LVOL_SKIP_HOT_UPGRADE:-0}" = 1 ]; then
 			report_skip "run_hot_upgrade_test.sh" "not requested" 1
+			report_skip "run_hot_upgrade_orchestrator_test.sh" "not requested" 1
 			report_skip "run_hot_upgrade_negative_test.sh" "not requested" 1
 		else
 			run_suite run_hot_upgrade_test.sh \
 				./test/dataplane/run_hot_upgrade_test.sh "${S3_ARGS[@]}"
-			run_suite run_hot_upgrade_negative_test.sh \
-				./test/dataplane/run_hot_upgrade_negative_test.sh "${S3_ARGS[@]}"
+			run_suite run_hot_upgrade_orchestrator_test.sh \
+				./test/dataplane/run_hot_upgrade_orchestrator_test.sh
+			if [ "${S3LVOL_SKIP_HOT_UPGRADE_NEGATIVE:-0}" = 1 ]; then
+				report_skip "run_hot_upgrade_negative_test.sh" "not requested" 1
+			else
+				run_suite run_hot_upgrade_negative_test.sh \
+					./test/dataplane/run_hot_upgrade_negative_test.sh "${S3_ARGS[@]}"
+			fi
 		fi
 		# Its whole point is that it does not disturb host state, so it is
 		# safe anywhere in the order; kept next to fs because both are recent.

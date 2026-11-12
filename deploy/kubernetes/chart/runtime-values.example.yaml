@@ -23,6 +23,8 @@ cubeProxy:
   domain: "cube.app"
   tls:
     mode: selfSigned   # trial; production: existingSecret or certManager
+    # selfSigned:
+    #   rotateOnSanChange: true   # re-issue cert (and CA) when domain/dnsNames change
   # TKE only (when using values-tke.yaml LoadBalancer):
   # service:
   #   annotations:
@@ -63,6 +65,8 @@ mysql:
 #   password: "replace-me-pg-password"
 #   database: cube_mvp
 redis:
+  # External native Cluster: leave host/Sentinel empty and use db: 0.
+  # clusterNodes: "redis-1.example:6379,redis-2.example:6379,redis-3.example:6379"
   host: ""
   password: "replace-me-redis-password"
   # External Redis Sentinel (skips chart-managed redis). Example:
@@ -76,7 +80,8 @@ redis:
 # default StorageClass. Chart does NOT create a StorageClass unless you merge
 # values-tke.yaml (or set storageClass.create=true yourself).
 #
-# Pin all four PVCs to one existing SC (e.g. local-path / gp3 / premium-rwo):
+# Pin the chart's stateful PVCs, including the optional JuiceFS Redis PVC, to
+# one existing SC (e.g. local-path / gp3 / premium-rwo):
 # persistence:
 #   storageClassName: local-path
 #
@@ -131,6 +136,26 @@ redis:
 # Production with a pre-mounted XFS volume at /data/cubelet:
 #         enabled: false
 
+# Optional: shared JuiceFS backend for cross-node templates and snapshots.
+# Copy this block into the runtime-values.yaml passed to Helm. This switch
+# deploys a dedicated JuiceFS Redis StatefulSet/PVC; it never uses Cube's
+# application Redis. Object data uses the dedicated cube-jfs bucket in the
+# chart-managed MinIO.
+# cubeJuiceFS:
+#   enabled: true
+#
+# External services:
+# cubeJuiceFS:
+#   enabled: true
+#   metadata:
+#     url: redis://redis.example.com:6379/0
+#     existingSecret: cube-jfs-meta       # key: meta-password
+#     secretRevision: initial             # bump whenever that Secret rotates
+#   storage:
+#     type: s3
+#     bucket: https://bucket.example.com/cube-jfs
+#     existingSecret: cube-jfs-object     # keys: access-key, secret-key
+
 # Optional: mirror the official Cube images into a private registry
 # (only official Cube TCR hosts are rewritten):
 # global:
@@ -140,5 +165,5 @@ redis:
 # images:
 #   ops:
 #     repository: my-mirror.example.com/cube-sandbox/cube-ops
-#     tag: v0.7.2
+#     tag: v0.8.0-rc2
 #     pullPolicy: Always

@@ -16,8 +16,22 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
+
+var redoTemplateInUse = isTemplateInUse
+
+func ensureRedoTemplateNotInUse(ctx context.Context, templateID, instanceType string) error {
+	inUse, err := redoTemplateInUse(ctx, templateID, instanceType)
+	if err != nil {
+		return fmt.Errorf("check template references before redo: %w", err)
+	}
+	if inUse {
+		return ErrTemplateInUse
+	}
+	return nil
+}
 
 func normalizeRedoTemplateImageRequest(req *types.RedoTemplateFromImageReq) (*types.RedoTemplateFromImageReq, error) {
 	if req == nil {
@@ -82,6 +96,73 @@ func failedRedoScope(replicas []models.TemplateReplica) []string {
 		}
 	}
 	return failedScope
+}
+
+func jfsRedoVariantIDs(templateID string, targets []*node.Node) []string {
+	variantIDs := make([]string, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if target == nil || target.HostFacts == nil {
+			continue
+		}
+		variantID, _, ok := hostcompat.TemplateVariantID(
+			templateID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
+		)
+		if !ok {
+			continue
+		}
+		if _, ok := seen[variantID]; ok {
+			continue
+		}
+		seen[variantID] = struct{}{}
+		variantIDs = append(variantIDs, variantID)
+	}
+	return variantIDs
+}
+
+func markJFSRedoReplicaRowsUnavailable(ctx context.Context, templateID string, targets []*node.Node) error {
+	variantIDs := jfsRedoVariantIDs(templateID, targets)
+	if len(variantIDs) == 0 {
+		return nil
+	}
+	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND template_variant_id IN ?", templateID, variantIDs).
+		Updates(map[string]any{
+			"status":        ReplicaStatusFailed,
+			"phase":         ReplicaPhaseSnapshotting,
+			"error_message": "JFS template variant redo in progress",
+		}).Error
+}
+
+func deleteJFSRedoReplicaRows(ctx context.Context, templateID string, targets []*node.Node) error {
+	variantIDs := jfsRedoVariantIDs(templateID, targets)
+	if len(variantIDs) == 0 {
+		return nil
+	}
+	return store.db.WithContext(ctx).Unscoped().Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND template_variant_id IN ?", templateID, variantIDs).
+		Delete(&models.TemplateReplica{}).Error
+}
+
+func prepareRedoTemplateReplicas(ctx context.Context, templateID, instanceType string, existingReplicas []models.TemplateReplica, targets []*node.Node, backend string) error {
+	if err := ensureRedoTemplateNotInUse(ctx, templateID, instanceType); err != nil {
+		return err
+	}
+	backend = pinnedCleanupBackend(backend)
+	if constants.IsJFSBackend(backend) {
+		if err := markJFSRedoReplicaRowsUnavailable(ctx, templateID, targets); err != nil {
+			return fmt.Errorf("mark old JFS template variant replicas unavailable before redo: %w", err)
+		}
+	}
+	if err := cleanupTemplateReplicasOnNodes(ctx, templateID, existingReplicas, targets, backend); err != nil {
+		return fmt.Errorf("cleanup template replicas before redo snapshot: %w", err)
+	}
+	if constants.IsJFSBackend(backend) {
+		if err := deleteJFSRedoReplicaRows(ctx, templateID, targets); err != nil {
+			return fmt.Errorf("delete old JFS template variant replicas before redo: %w", err)
+		}
+	}
+	return nil
 }
 
 func marshalRedoScope(scope []string) string {
@@ -151,6 +232,14 @@ func resolveRedoTargets(instanceType string, req *types.RedoTemplateFromImageReq
 		return nil, ErrNoFailedTemplateReplicas
 	}
 	failedSet := make(map[string]struct{}, len(failedScope))
+	failedVariants := make(map[string]struct{}, len(replicas))
+	for _, replica := range replicas {
+		if replicaNeedsRedo(replica) {
+			if variantID := strings.TrimSpace(replica.TemplateVariantID); variantID != "" {
+				failedVariants[variantID] = struct{}{}
+			}
+		}
+	}
 	for _, item := range failedScope {
 		if strings.TrimSpace(item) == "" {
 			continue
@@ -161,6 +250,17 @@ func resolveRedoTargets(instanceType string, req *types.RedoTemplateFromImageReq
 	for _, target := range targets {
 		if target == nil {
 			continue
+		}
+		if target.HostFacts != nil && len(failedVariants) > 0 {
+			variantID, _, ok := hostcompat.TemplateVariantID(
+				req.TemplateID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
+			)
+			if ok {
+				if _, failed := failedVariants[variantID]; failed {
+					filtered = append(filtered, target)
+					continue
+				}
+			}
 		}
 		if _, ok := failedSet[target.ID()]; ok {
 			filtered = append(filtered, target)
@@ -412,7 +512,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			return
 		}
 	}
-	generatedReq, err := generateTemplateCreateRequest(ctx, &workingReq, artifact, imageCfg, downloadBaseURL)
+	generatedReq, err := generateTemplateCreateRequest(ctx, withResolvedTemplateUser(&workingReq, resolvedTemplateUserFromArtifact(artifact)), artifact, imageCfg, downloadBaseURL)
 	if err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return
@@ -457,11 +557,12 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		resumePhase = JobPhaseSnapshotting
 	}
 
-	if err := cleanupTemplateReplicasOnNodes(ctx, req.TemplateID, existingReplicas, readyTargets, pinnedCleanupBackend(storageBackendFromCreate(generatedReq))); err != nil {
-		failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, fmt.Sprintf("cleanup template replicas before redo snapshot failed: %v", err))
+	jfsVariantRedo := constants.IsJFSBackend(storageBackendFromCreate(generatedReq))
+	if err := prepareRedoTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, existingReplicas, readyTargets, storageBackendFromCreate(generatedReq)); err != nil {
+		failRedoTemplateImageJob(ctx, jobID, JobPhaseSnapshotting, err.Error())
 		return
 	}
-	storedReq, err := normalizeStoredTemplateRequest(generatedReq)
+	storedReq, err := normalizeStoredTemplateRequest(generatedReq, jfsVariantRedo)
 	if err != nil {
 		failRedoTemplateImageJob(ctx, jobID, resumePhase, err.Error())
 		return

@@ -19,6 +19,10 @@ export CUBE_PROXY_NODE_IP=<cubeproxy-node-ip>
 export CUBE_PROXY_PORT_HTTP=80
 export CUBE_PROXY_SCHEME=http
 export CUBE_SANDBOX_DOMAIN=cube.app
+
+# Template tried first when CreateOptions.MCP is set and TemplateID is empty;
+# CUBE_TEMPLATE_ID is used if it does not exist.
+export CUBE_MCP_TEMPLATE_ID=mcp-gateway
 ```
 
 `NewConfigFromEnv` also accepts `E2B_API_URL` and `E2B_API_KEY`; `CUBE_API_URL` and `CUBE_API_KEY` take precedence.
@@ -131,6 +135,7 @@ Consume output via **either** `Output()` **or** `Wait(onData)`, not both — the
 ```go
 // Read & write
 content, err := sb.Files().Read(ctx, "/etc/hosts")
+png, err := sb.Files().ReadBytes(ctx, "/tmp/chart.png")
 err = sb.Files().Write(ctx, "/tmp/hello.txt", []byte("hi"))
 
 // Execute all filesystem operations as a specific sandbox user.
@@ -166,7 +171,9 @@ for ev := range watcher.Events {
 | Method | Description |
 |---|---|
 | `ForUser(user)` | Return an immutable view that runs all filesystem operations as `user` |
-| `Read(ctx, path)` | Download file content via `GET /files` |
+| `Read(ctx, path)` | Download file content as text via `GET /files` (e2b `format=text`) |
+| `ReadBytes(ctx, path)` | Download raw bytes (e2b `format=bytes`) |
+| `ReadStream(ctx, path)` | Stream download; caller must `Close` (e2b `format=stream`) |
 | `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
 | `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
 | `List(ctx, path)` | List directory entries via `ListDir` RPC |
@@ -187,14 +194,22 @@ snaps, nextToken, err := client.ListSnapshots(ctx, cubesandbox.ListSnapshotsOpti
 	Limit:     100,
 })
 
-err = client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id
+deleted, err := client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id?snapshot_only=true
+// `deleted` is false when the snapshot no longer exists; a name may be passed
+// instead of an ID. Only snapshots are matched, never templates; several
+// same-named snapshots return an error (HTTP 409), so use the `snap-` ID.
 
 _, err = sb.Rollback(ctx, snap.SnapshotID) // POST /sandboxes/:id/rollback
 
 clones, err := sb.Clone(ctx, cubesandbox.CloneOptions{N: 3, Concurrency: 3})
+
+// One server-side call: the backend snapshots sb once and derives N copies.
+forks, err := sb.Fork(ctx, cubesandbox.ForkOptions{Count: cubesandbox.IntPtr(3)})
 ```
 
-`Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+`DeleteSnapshot` accepts a snapshot ID or name and returns `(deleted bool, err error)`; `deleted` is `false` when the snapshot does not exist. `Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+
+`Fork` returns exactly `Count` entries — each a `ForkResult` with the derived `Sandbox` or that fork's error — so partial success keeps copies without failing the call (unlike `Clone`). `Count` is 1..100, default 1 (`IntPtr` for a value, nil = default); `Timeout` is a `time.Duration` idle TTL per fork. The temporary snapshot is server-managed.
 
 ## Volumes
 
@@ -222,6 +237,35 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 
 err = client.DeleteVolume(ctx, "my-data") // DELETE /volumes/:id
 ```
+
+For opaque plugin input, use the separate creation method (requires support in
+CubeAPI, every serving CubeMaster, and the plugin; existing `CreateVolume` calls are unchanged):
+
+```go
+volume, err := client.CreateVolumeWithPrivateData(ctx, cubesandbox.CreateVolumeWithPrivateDataOptions{
+	Name:        "my-data",
+	Driver:      "my-storage",
+	PrivateData: `{"bucket":"my-bucket","prefix":"work/","cred_ref":"account-7"}`,
+}) // POST /v2/volumes
+```
+
+The `private_data` create API requires CubeAPI, every serving CubeMaster, and
+Cubelet at **0.8.0 or newer**, a plugin that supports this protocol, and the Go
+SDK at **0.8.0 or newer**.
+`PrivateData` must be valid UTF-8, limited to 1024 bytes, contain no NUL, and
+contain no characters outside the BMP. Invalid input is rejected before any
+HTTP request. Valid input is passed unchanged.
+Use credential references, never plaintext credentials. Empty strings are
+forwarded; API versions without `/v2/volumes` return an error without a legacy fallback.
+The returned `VolumeInfo` works with the existing query, delete and mount APIs.
+
+Upgrade order: check or upgrade the Controller/Node plugins for Create input A
+and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,
+then deploy the new CubeAPI and begin using this method. A new API connected to
+an old Master can return 201 while silently dropping A; the old Master also omits
+B on Destroy. The SDK does not detect this mixed-version deployment. Keep compatible
+Masters serving existing A/B-dependent volumes during any rollback. See the
+[plugin upgrade guide](../../docs/guide/volume-plugin.md#private_data-upgrade-order).
 
 Deleting a volume does not auto-detach it: destroy the sandboxes using it first, otherwise the server refuses with an error matching `ErrVolumeInUse`. A delete of a missing volume matches `ErrVolumeNotFound`, so idempotent cleanup can ignore that case:
 
@@ -256,6 +300,21 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 })
 ```
 
+## Is Running
+
+`Sandbox.IsRunning` checks the control-plane `state` first: `paused`/`pausing`
+return `false` without touching the data plane (so a probe never auto-resumes
+the sandbox). For `running`/`unknown` it probes envd `GET /health` on port
+49983, returning `false` on 404/502/503/410 and on transport errors, raising
+only on server errors such as 403/500.
+
+```go
+ok, err := sb.IsRunning(ctx)
+if err != nil {
+	panic(err)
+}
+```
+
 ## Pause And Connect
 
 ```go
@@ -272,6 +331,21 @@ _ = resumed
 ```
 
 `Sandbox.Resume` is available for compatibility but deprecated; prefer `Client.Connect`.
+
+## MCP Gateway (Preview)
+
+Set `MCP` to start an E2B-compatible MCP gateway inside the sandbox. It needs a template that ships `mcp-gateway`; when `TemplateID` is empty, the alias `mcp-gateway` is tried first (override with `CUBE_MCP_TEMPLATE_ID` or `Config.MCPTemplateID`), then `CUBE_TEMPLATE_ID` if that template does not exist. An error matching `ErrTemplateNotFound` is returned when neither exists. A failed start returns an error wrapping `ErrMCPGateway` and kills the sandbox. See [MCP Gateway](../../docs/guide/mcp-gateway.md).
+
+```go
+sb, err := client.Create(ctx, cubesandbox.CreateOptions{
+	MCP: cubesandbox.MCPServers{"duckduckgo": map[string]any{}},
+})
+if err != nil {
+	return err
+}
+url := sb.GetMCPURL()               // streamable HTTP endpoint
+token, err := sb.GetMCPToken(ctx)   // send as "Authorization: Bearer <token>"
+```
 
 ## Network Policy
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-/usr/local/bin/cube-proxy-iptables-init.sh}"
+INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-/usr/local/bin/cube-egress-iptables-init.sh}"
 INGRESS_IFACE="${CUBE_INGRESS_IFACE:-cube-dev}"
 REAPPLY_INTERVAL_SECONDS="${CUBE_EGRESS_NET_REAPPLY_INTERVAL_SECONDS:-30}"
 INITIAL_WAIT_SECONDS="${CUBE_EGRESS_NET_INITIAL_WAIT_SECONDS:-300}"

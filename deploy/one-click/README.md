@@ -171,7 +171,7 @@ One-click does not create an extra global `configs/` layer on the target machine
   - `cubelet_conf.default_timeout_insec`: cluster default sandbox idle TTL when the client omits `timeout`; unset or `<= 0` means **no cluster-wide idle timeout** (shipped default `-1`). See [lifecycle — Operational Notes](../../docs/guide/lifecycle.md#cluster-default-idle-timeout-default_timeout_insec).
 - `Cubelet/config/` → `Cubelet/config/`
 - `Cubelet/dynamicconf/` → `Cubelet/dynamicconf/`
-- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-proxy-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
+- `CUBE_L7_MARK_{HTTP,HTTPS,MASK}` (env) → `/etc/cubeegress/l7-marks.conf` — the L7 egress skb->mark values shared by Cubelet's embedded network runtime eBPF dataplane (which stamps `skb->mark`) and the `cube-egress-iptables-init` TPROXY rules (which match it). Both read the same file, and both validate the values (`HTTP != HTTPS`, bits confined to the mask). See `env.example` for the shipped defaults and how to override them.
 - `CubeAPI/bin/cube-api` → `/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api`
 - `support/` → `/usr/local/services/cubetoolbox/support/`
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
@@ -189,6 +189,46 @@ cd cube-sandbox-one-click-<version>
 cp env.example .env
 sudo ./install.sh
 ```
+
+### Online Install and Optional Components
+
+`online-install.sh` is only the delivery wrapper for the one-click release. It
+downloads and extracts the bundle, then executes the same bundled `install.sh`;
+it is not a separate deployment topology. For a piped install, pass optional
+component switches through the process environment, matching bundled MinIO:
+
+```bash
+# Control node: keep bundled MinIO enabled and enable the full observability stack
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      CUBE_SANDBOX_MINIO_ENABLED=1 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+
+# Compute node: never installs MinIO; installs only OTel Collector
+curl -fsSL https://raw.githubusercontent.com/tencentcloud/CubeSandbox/master/deploy/one-click/online-install.sh \
+  | sudo env \
+      ONE_CLICK_DEPLOY_ROLE=compute \
+      ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10 \
+      ONE_CLICK_ENABLE_OBSERVABILITY=1 \
+      bash
+```
+
+`CUBE_SANDBOX_MINIO_ENABLED` and `ONE_CLICK_ENABLE_OBSERVABILITY` are desired
+state switches persisted to `.one-click.env`. Prometheus, Loki, and
+Elasticsearch endpoint variables configure destinations but do not enable
+monitoring on their own. For
+extracted local installs, edit the switch directly in `.env`; for piped online
+installs, pass it through `sudo env` as shown above. The node Collector only
+collects Cubelet sandbox resource metrics and `stdout`/`stderr` logs from
+`/data/cubelet/log/<sandbox-id>/{stdout,stderr}`.
+
+Select the log backend with `CUBE_LOGS_BACKEND=loki|elasticsearch`. Loki is the
+current and forward-looking default; choose Elasticsearch for an existing ES
+platform or richer full-text search. The installer activates one log backend
+at a time and does not duplicate logs by default.
+See the [observability guide](../../docs/guide/observability.md) for component
+versions, Collector configuration, external backends, and operations.
 
 The one-click installation path is fixed at `/usr/local/services/cubetoolbox`.
 
@@ -244,17 +284,26 @@ inherit one.
     to describe its own on-disk formats, or one whose scripts predate the rename
     to `rcow_upgrade.sh`: the target is **stopped and started** — an
     interruption, for that one upgrade only. `install.sh` says why.
-  - **Every upgrade after that** is done **in place**: the target is flushed and
+  - **Every upgrade after that** is done **in place**: the target is
     checkpointed online, killed outright, and the replacement rebuilds the same
     NQN/(subsys, nsid)/UUID grid, so the host reconnects to the same
-    `/dev/nvmeXnY` and a sandbox's I/O only pauses (about 40s). The initiator is
-    never disconnected and the lvstore never unloaded. This runs
+    `/dev/nvmeXnY` and a sandbox's I/O only pauses (about 8s). The initiator is
+    never disconnected and the lvstore never unloaded. Anything the checkpoint
+    could not push is in the shared-memory write-back ring, not the disk WAL,
+    and the replacement replays that ring. A node reboot loses records that
+    have not reached S3. The pre-kill flush is skipped by default
+    (`RCOW_HOT_FLUSH_MS=0`). Once the new process is serving, or has attached
+    the lvstore, the script refuses to roll back onto the previous binary.
+    This runs
     `cube-s3lvol-hot-upgrade.sh` **before** the rest of the install stops
-    anything, because an online flush needs both the running target and the S3
-    endpoint.
+    anything, because the prepare and the layout snapshot both need the running
+    target and the S3 endpoint.
   - A swap that does not come back with the layout intact is **rolled back** to
-    the previous version; `install.sh` still finishes the rest and then exits
-    non-zero. The node is complete but on the old s3lvol.
+    the previous version only when the new process never started serving and
+    never attached the lvstore. After either of those, the script leaves the
+    new build running. `install.sh` still finishes the rest and then exits
+    non-zero. When a rollback did run, the node is complete but on the old
+    s3lvol.
   - `wal_bdev.img` is **never overwritten** (created only on first install; its
     size fixes the journal/WAL layout), and the `RCOW_*` settings in
     `.one-click.env` are merged and kept across the upgrade.
@@ -285,6 +334,11 @@ inherit one.
   tool — no awscli. A hand-written `s3.cfg` without the one-click sentinel
   is left alone. There is **no fallback** from the old `/data/cubelet/cos.cfg`;
   rename it and switch to the new field names.
+- **Shared-memory sizing**: `RCOW_WRITEBACK_MB` controls the payload ring
+  reserved in `/dev/shm` for the lvstore (default 4096 MiB, range 64–4096).
+  `S3LVOL_WRITEBACK_TOTAL_MB` is the target-wide cap (default 8192 MiB).
+  The installer persists both values and startup refuses before launching the
+  target when tmpfs cannot reserve the requested ring.
 
 ### Digital Assistant Environment Variables
 
@@ -311,7 +365,7 @@ Set at minimum the following in `.env`:
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
 ```
 
 If the control node runs bundled MinIO (or any S3 backend), copy `CUBE_S3_*` from
@@ -364,6 +418,10 @@ During installation, runtime files are prepared in this directory and the follow
 - `mysql:8.0`
 - `redis:7-alpine`
 - `minio` (S3-compatible volume backend; explicit via `CUBE_SANDBOX_MINIO_ENABLED`, default on)
+
+### External native Redis Cluster
+
+Set `CUBE_EXTERNAL_REDIS_CLUSTER_NODES` to comma-separated `host:port` seed endpoints, set `CUBE_EXTERNAL_REDIS_DB=0`, and clear fixed standalone Redis and Sentinel settings. The deployment scripts connect to an existing Cluster. See the [configuration and migration guide](../../docs/guide/redis-cluster.md) for component settings, consistency limits, and rollout checks.
 
 ### Using an external MySQL / PostgreSQL / Redis
 
@@ -483,8 +541,8 @@ TCP 9000 from compute to the control node if using bundled MinIO:
 
 ```bash
 ONE_CLICK_DEPLOY_ROLE=compute
-ONE_CLICK_CONTROL_PLANE_IP=10.0.0.11
-CUBE_S3_ENDPOINT=http://10.0.0.11:9000
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
+CUBE_S3_ENDPOINT=http://10.0.0.10:9000
 CUBE_S3_ACCESS_KEY_ID=cubeminio
 CUBE_S3_SECRET_ACCESS_KEY=<from control .one-click.env>
 CUBE_S3_BUCKET=cube-volumes
@@ -554,6 +612,7 @@ Required commands:
 - `sed`
 - `pgrep`
 - `date`
+- `openssl` (hard dependency of cube-egress-prepare.sh for generating the CubeEgress root CA; may be absent on minimal/cloud images such as OpenCloudOS 9 minimal — install with `dnf install -y openssl` or `apt-get install -y openssl`)
 
 Conditional commands:
 
@@ -606,6 +665,7 @@ Required commands:
 - `date`
 - `ip`
 - `awk`
+- `openssl` (hard dependency of cube-egress-prepare.sh for generating the CubeEgress root CA; may be absent on minimal/cloud images such as OpenCloudOS 9 minimal — install with `dnf install -y openssl` or `apt-get install -y openssl`)
 
 One-of-two commands:
 
@@ -771,7 +831,7 @@ export TENCENTCLOUD_TKE_NODE_COUNT=2              # TKE worker nodes (default 2)
 export TENCENTCLOUD_COMPUTE_INSTANCE_TYPE=SA9.MEDIUM8
 export TENCENTCLOUD_USE_TCR=false                 # default: public pre-built images
 export TENCENTCLOUD_USE_CFS=false                 # default: no CFS, cubemaster single replica
-export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.7.2
+export TENCENTCLOUD_CUBE_IMAGE_TAG=v0.8.0-rc2
 ```
 
 For non-interactive / CI runs, also set these (without a TTY the interactive

@@ -119,10 +119,22 @@ scripts/rcow_purge.sh          # delete the whole lvstore back to a clean state 
 `rcow_start.sh` is idempotent: if already running it tells you and exits rather
 than starting a second instance.
 
-`rcow_upgrade.sh` is the upgrade path and not a general stop. It flushes and
-checkpoints the lvstore online, pins the initiator timeouts the pause depends on,
-then kills the target so the host keeps its namespaces and only pauses I/O,
-leaving the state for a replacement to pick up.
+`rcow_upgrade.sh` is the upgrade path and not a general stop. It checkpoints the
+lvstore online, pins the initiator timeouts the pause depends on, then kills the
+target so the host keeps its namespaces and only pauses I/O, leaving the state
+for a replacement to pick up.
+
+The pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`): acknowledged
+writes that have not reached S3 sit in the shared-memory write-back ring, and
+the replacement attach on the same node replays that ring. The ring is not the
+disk WAL. A node reboot loses records that have not reached S3. Once the new
+process is serving, or has attached the lvstore, `cube-s3lvol-hot-upgrade.sh`
+refuses to roll back: those writes exist only in the new process's ring, and
+the previous binary cannot replay them. Setting `RCOW_HOT_FLUSH_MS` to a
+positive value restores the pre-kill flush as a drain deadline, which shortens
+the replay at the cost of waiting out in-flight GET+PUT (under a write load the
+overlay never goes clean, so the drain runs to its deadline and returns
+`-ETIMEDOUT`).
 
 `--candidate <binary>` is required on a real run: it is the binary the upgrade
 will start, and the version gate refuses if the two builds cannot share the
@@ -170,11 +182,15 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
-| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports promote this default to 4096, `0` disables tuning |
+| `RCOW_WRITEBACK_MB` | `4096` | `/dev/shm` payload-ring capacity per lvstore; 64–4096 MiB |
+| `S3LVOL_WRITEBACK_TOTAL_MB` | `8192` | process-wide cap for all write-back rings; must be at least `RCOW_WRITEBACK_MB` |
+| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports (at least 20% of chunks present) promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
 | `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
 | `RCOW_RPC_SOCK` | `/var/run/s3lvol.sock` | |
+| `RCOW_HOT_FLUSH_MS` | `0` | `rcow_upgrade.sh` only: the pre-kill flush deadline. `0` skips the flush, leaving the tail for the replacement attach to replay; a positive value restores it as a drain deadline (usually `-ETIMEDOUT` under a write load) |
+| `RCOW_HOT_PREPARE_SUSPEND_MS` | `60000` | `rcow_upgrade.sh` only: how long the hot prepare waits for each flusher to go idle before abandoning the hold and failing the prepare. Raise it on a slow backend; must stay below `RCOW_STOP_TIMEOUT` (the client would otherwise time out first) |
 
 ### Node identity and the owner marker
 
@@ -233,6 +249,35 @@ scripts/s3lvol_rpc.py rcow_get_lvstores    # list all lvstores and lvols
 
 (`rcow_pending_load_hold` exists only so tests can park pending-delete registry
 HEAD/GET around unload; it is not an operations RPC.)
+
+**Hot upgrade** (`rcow_upgrade.sh` drives these; nothing else should):
+
+```sh
+scripts/s3lvol_rpc.py rcow_prepare_hot_upgrade '{"suspend_timeout_ms":60000}'
+scripts/s3lvol_rpc.py rcow_resume_subsystems
+scripts/s3lvol_rpc.py rcow_resume_flushers
+```
+
+- `prepare_hot_upgrade` quiesces every RCOW namespace and holds the flushers. The
+  subsystems **stay paused on success**, so the caller must terminate the target
+  immediately afterwards -- that pause is what preserves the host's namespace
+  layout across the restart. `suspend_timeout_ms` (optional, default from
+  `RCOW_HOT_PREPARE_SUSPEND_MS`) bounds how long each hold may take; on expiry
+  the prepare fails and unwinds itself.
+- `resume_subsystems` undoes a prepare that will not be followed by the kill:
+  it releases the flushers, lifts the namespace pause and clears the sticky
+  "prepared" state. **This is the escape hatch** for the window between a
+  successful prepare and the kill (an unreadable target binary, a SIGKILL that
+  does not land, the script itself being killed). A reply of
+  `bool_value: false` (exit 1) means a prepare was still in flight and **nothing
+  was resumed** -- the node may still be frozen.
+- `resume_flushers` releases uploads only; it does **not** lift the namespace
+  pause, so it cannot undo a prepare. It is the attach-side milestone call.
+
+`rcow_flush_lvstore` and `rcow_checkpoint_lvstore` answer `-EBUSY` while a hot
+prepare is in flight, as does `rcow_unload_lvstore`: a drain or an unload during
+the pause would break the guarantee the prepare was taken for. Retry once the
+prepare settles.
 
 The parameter names are deliberately chosen; the easy mistakes to make when
 copying them:
@@ -349,6 +394,13 @@ default 1 MiB chunk size, including during attach. Set it to `0` for disk-only
 cache operation. `rcow_get_lvstores` exposes native RAM/disk hit, miss,
 populate, eviction, residency and byte counters, plus separate imported-object
 cache and CopyObject-alias counters under each lvstore's `write_path`.
+
+The write-back payload ring is different from the cache: its complete configured
+size is reserved in `/dev/shm` during create/attach so running out later cannot
+SIGBUS the target. `rcow_start.sh` checks the available tmpfs capacity before
+starting the target and passes `RCOW_WRITEBACK_MB` to both RPC paths. Reduce the
+value on smaller nodes; acknowledged records that have not reached S3 are lost
+on a node reboot because `/dev/shm` is not persistent.
 
 Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `RCOW_LOG_DIR`). The CRT log level is set with

@@ -52,11 +52,11 @@
       "description": "Preinstalled Chromium, ready for web automation."
     },
     "openclaw-lite": {
-      "name": "龙虾助手 · Lite",
+      "name": "OpenClaw · Lite",
       "description": "Lightweight OpenClaw assistant image — faster to pull and smaller on disk, ideal for chat-first assistants without the full browser toolchain."
     },
     "openclaw-aio": {
-      "name": "龙虾助手 · All-in-One",
+      "name": "OpenClaw · All-in-One",
       "description": "Full OpenClaw AI Agent platform with browser automation, code execution, and multi-model access bundled in."
     },
     "cubesandbox-base": {

@@ -154,20 +154,36 @@ function fallbackCopy(text: string, cb: (ok: boolean) => void) {
   }
 }
 
+type TranslateFn = (...args: any[]) => string;
+
 /**
  * Translate a template-deletion API error into a human-friendly message.
+ * `t` is expected to be bound to the caller's namespace
+ * (`templates` or `templateDetail`), which both define the `errors` block.
  * Falls back to the raw error message if no known pattern matches.
  */
-export function formatDeleteError(err: unknown): string {
+export function formatDeleteError(err: unknown, t: TranslateFn): string {
   const raw = err instanceof Error ? err.message : String(err);
   if (/template is still in use/i.test(raw)) {
-    return '该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。';
+    return t('errors.templateInUse');
   }
   if (/build job is still active|attempt in progress/i.test(raw)) {
-    return '模板正在构建中，请等待构建完成后再删除。';
+    return t('errors.buildInProgress');
   }
   if (/cleanup locator is missing/i.test(raw)) {
-    return '模板清理信息不完整，无法自动删除，请联系管理员。';
+    return t('errors.cleanupMissing');
+  }
+  if (/snapshot is referenced by/i.test(raw)) {
+    return t('errors.snapshotReferenced');
+  }
+  if (/snapshot .* is still creating/i.test(raw)) {
+    return t('errors.snapshotCreating');
+  }
+  if (/snapshot .* is already deleting/i.test(raw)) {
+    return t('errors.snapshotDeleting');
+  }
+  if (/active snapshot operation/i.test(raw)) {
+    return t('errors.snapshotBusy');
   }
   return raw;
 }

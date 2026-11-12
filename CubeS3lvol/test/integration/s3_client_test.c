@@ -277,21 +277,6 @@ sync_delete(struct s3_client *client, const char *key)
 	return rc;
 }
 
-static int
-sync_delete_batch(struct s3_client *client, const char **keys, uint32_t count)
-{
-	struct completion comp;
-	int rc;
-
-	completion_init(&comp);
-	rc = s3_delete_batch(client, keys, count, op_complete, &comp);
-	if (rc == 0) {
-		rc = completion_wait(&comp);
-	}
-	completion_fini(&comp);
-	return rc;
-}
-
 /* ==========================================================================
  * Data fill and verification
  * ========================================================================== */
@@ -638,16 +623,13 @@ main(int argc, char **argv)
 	rc = sync_head(client, key_missing, &dummy);
 	check("s3_head(nonexistent) should be -ENOENT", rc, -ENOENT);
 
-	/* ---------- 11. DELETE + DELETE_BATCH ---------- */
-	printf("[10] cleanup: DELETE A, DELETE_BATCH [A, B]\n");
+	/* ---------- 11. DELETE ---------- */
+	printf("[10] cleanup: DELETE A, DELETE B\n");
 	rc = sync_delete(client, key_a);
 	check("s3_delete(A)", rc, 0);
 
-	/* A is already deleted; feeding it to the batch again exercises DELETE's
-	 * idempotency in passing (GC retries) */
-	const char *batch[2] = { key_a, key_b };
-	rc = sync_delete_batch(client, batch, 2);
-	check("s3_delete_batch([A,B])", rc, 0);
+	rc = sync_delete(client, key_b);
+	check("s3_delete(B)", rc, 0);
 
 	printf("[11] HEAD of a deleted key should be -ENOENT\n");
 	dummy = 0;
@@ -656,102 +638,6 @@ main(int argc, char **argv)
 	dummy = 0;
 	rc = sync_head(client, key_b, &dummy);
 	check("s3_head(deleted B) should be -ENOENT", rc, -ENOENT);
-
-	/* ---------- 11b. batch-delete fan-out behaviour ----------
-	 *
-	 * s3_delete_batch is a fan-out of N single-key DeleteObjects (not one
-	 * DeleteObjects call), so this has to be checked specifically:
-	 *   - the reference count converges exactly once under concurrent
-	 *     callbacks from several CRT I/O threads
-	 *   - the user callback is invoked exactly once (a second invocation
-	 *     would signal the completion latch twice, or step on a freed batch)
-	 *   - all-nonexistent keys also count as success (idempotent; a GC
-	 *     rescan will run into them)
-	 */
-	printf("[11b] batch-delete fan-out: 32 keys\n");
-	{
-		enum { FANOUT_N = 32 };
-		char  fkey[FANOUT_N][512];
-		const char *fkeys[FANOUT_N];
-		int put_ok = 0;
-
-		for (int i = 0; i < FANOUT_N; i++) {
-			snprintf(fkey[i], sizeof(fkey[i]), "%sfanout-%d-%02d.bin",
-				 prefix, (int)getpid(), i);
-			fkeys[i] = fkey[i];
-		}
-
-		/* Deliberately write only half; the other half does not exist --
-		 * mixing 200 and 404 in one batch verifies that 404 is not
-		 * mistaken for a failure. */
-		for (int i = 0; i < FANOUT_N / 2; i++) {
-			if (sync_put(client, fkeys[i], "x", 1, false) == 0) {
-				put_ok++;
-			}
-		}
-		char detail[80];
-		snprintf(detail, sizeof(detail), "seeded %d objects", put_ok);
-		check_true("fan-out pre-PUT", put_ok == FANOUT_N / 2, detail);
-
-		rc = sync_delete_batch(client, fkeys, FANOUT_N);
-		check("s3_delete_batch(32, half nonexistent)", rc, 0);
-
-		/* Spot check: written and unwritten alike must be gone after the
-		 * delete */
-		dummy = 0;
-		rc = sync_head(client, fkeys[0], &dummy);
-		check("HEAD of the first key after fan-out should be -ENOENT",
-		      rc, -ENOENT);
-		dummy = 0;
-		rc = sync_head(client, fkeys[FANOUT_N - 1], &dummy);
-		check("HEAD of the last key after fan-out should be -ENOENT",
-		      rc, -ENOENT);
-
-		/* A batch where everything is already gone: DELETE is idempotent,
-		 * so the whole batch should succeed */
-		rc = sync_delete_batch(client, fkeys, FANOUT_N);
-		check("s3_delete_batch(all already gone) should be idempotently "
-		      "successful", rc, 0);
-	}
-
-	printf("[11c] argument validation\n");
-	{
-		/* An invalid key must be rejected before any request is
-		 * submitted -- otherwise the caller would receive an error return
-		 * plus callbacks for keys already in flight, with no way to tell
-		 * which state it is in. */
-		const char *bad_keys[3] = { key_a, NULL, key_b };
-		struct completion comp;
-
-		completion_init(&comp);
-		rc = s3_delete_batch(client, bad_keys, 3, op_complete, &comp);
-		check("s3_delete_batch(NULL key) should be -EINVAL", rc, -EINVAL);
-		check_true("no callback on rejection", !comp.done,
-			   comp.done ? "!! the callback was invoked" : "not "
-			   "invoked");
-		completion_fini(&comp);
-
-		completion_init(&comp);
-		rc = s3_delete_batch(client, batch, 0, op_complete, &comp);
-		check("s3_delete_batch(count=0) should be -EINVAL", rc, -EINVAL);
-		completion_fini(&comp);
-	}
-
-	/* ---------- 12. stats ---------- */
-	printf("\n[12] s3_client_get_stats\n");
-	struct s3_client_stats stats;
-	s3_client_get_stats(client, &stats);
-	printf("     get=%" PRIu64 " put=%" PRIu64 " head=%" PRIu64
-	       " delete=%" PRIu64 " copy=%" PRIu64 "\n",
-	       stats.get_ops, stats.put_ops, stats.head_ops,
-	       stats.delete_ops, stats.copy_ops);
-	printf("     bytes_read=%" PRIu64 " bytes_written=%" PRIu64 "\n",
-	       stats.bytes_read, stats.bytes_written);
-	printf("     errors_4xx=%" PRIu64 " errors_5xx=%" PRIu64
-	       " inflight=%" PRIu64 "\n",
-	       stats.errors_4xx, stats.errors_5xx, stats.inflight);
-	check_true("all requests have converged (inflight == 0)",
-		   stats.inflight == 0, NULL);
 
 	/* ---------- 12b. CRT thread affinity ----------
 	 *

@@ -64,6 +64,7 @@ def expect_create_rejected(
     metadata: dict[str, str],
     *,
     role: str,
+    create_options: dict | None = None,
 ) -> str:
     """Attempt a create expected to fail; return the error text.
 
@@ -75,6 +76,7 @@ def expect_create_rejected(
             backend,
             config,
             metadata={"test_role": role, **metadata},
+            create_options=create_options,
         )
     except Exception as exc:  # noqa: BLE001 - the rejection is the assertion
         return str(exc)

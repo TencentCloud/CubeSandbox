@@ -28,6 +28,11 @@ func (l *backofffilter) ID() string {
 	return constants.SelectorBackoffFilterID
 }
 
+// Select is the fallback filter (the degraded path after main filtering
+// fails): it returns an empty list when no backoff affinity selector is
+// configured or the instance type disables backoff filtering; otherwise it
+// re-picks nodes under relaxed conditions, checking only backoff affinity,
+// the MVM cap and the three disk usage thresholds.
 func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	sconf := config.GetConfig().Scheduler
 	if sconf == nil {
@@ -88,8 +93,6 @@ func (l *backofffilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error
 	}
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), newNodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), newNodes.Len())
 	}
 	return newNodes, nil
 }

@@ -1,0 +1,1649 @@
+{
+  "id": null,
+  "uid": "cubesandbox-sandbox",
+  "title": "CubeSandbox · Sandbox Metrics",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "style": "dark",
+  "timezone": "browser",
+  "tags": [
+    "cubesandbox",
+    "metrics",
+    "sandbox"
+  ],
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "Cluster metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-cluster",
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Node metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-node",
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Logs",
+      "type": "link",
+      "url": "/d/cubesandbox-logs?var-cluster=${cluster:percentencode}&var-node=${node:percentencode}&var-sandbox_id=${sandbox_id:percentencode}",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "current": {},
+        "options": [],
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "skipUrlSync": false
+      },
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "query": {
+          "query": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes|cubesandbox_guest_workload_memory_current_bytes\",job=\"cubesandbox-resource\"}, cluster)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes|cubesandbox_guest_workload_memory_current_bytes\",job=\"cubesandbox-resource\"}, cluster)",
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "options": [],
+        "skipUrlSync": false,
+        "current": {}
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "query": {
+          "query": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes|cubesandbox_guest_workload_memory_current_bytes\",job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\"}, node)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values({__name__=~\"cubesandbox_node_sandbox_count|cubesandbox_host_sandbox_memory_current_bytes|cubesandbox_guest_workload_memory_current_bytes\",job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\"}, node)",
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "options": [],
+        "skipUrlSync": false,
+        "current": {}
+      },
+      {
+        "name": "sandbox_id",
+        "label": "Sandbox",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "query": {
+          "query": "label_values({__name__=~\"cubesandbox_host_sandbox_memory_current_bytes|cubesandbox_guest_workload_memory_current_bytes\",job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\"}, sandbox_id)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values({__name__=~\"cubesandbox_host_sandbox_memory_current_bytes|cubesandbox_guest_workload_memory_current_bytes\",job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\"}, sandbox_id)",
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "options": [],
+        "skipUrlSync": false,
+        "current": {}
+      },
+      {
+        "name": "container_id",
+        "label": "Guest container",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource"
+        },
+        "query": {
+          "query": "label_values(cubesandbox_guest_workload_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}, container_id)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values(cubesandbox_guest_workload_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}, container_id)",
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "multi": true,
+        "includeAll": true,
+        "options": [],
+        "skipUrlSync": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "allValue": ".*"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "About",
+      "type": "text",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "description": "### Sandbox resource metrics\nHost Sandbox measures the host cgroup (including runtime); Guest Workload measures the workload inside the sandbox. These are sandbox resource totals, **not physical node/cluster capacity**, and must not be added together. CPU rates are cores; throttled time is seconds/second. Limits are sums of exported finite limits, not physical capacity. No sample is not zero. Guest rates exclude observed epoch-change windows; they are not exact rollback accounting. Dropdowns are scoped by cluster → node → sandbox → guest container, and refresh with the selected time range. Node inventory counters are node context, not a sandbox running-state count.",
+      "options": {
+        "mode": "markdown",
+        "content": "### Sandbox resource metrics\nHost Sandbox measures the host cgroup (including runtime); Guest Workload measures the workload inside the sandbox. These are sandbox resource totals, **not physical node/cluster capacity**, and must not be added together. CPU rates are cores; throttled time is seconds/second. Limits are sums of exported finite limits, not physical capacity. No sample is not zero. Guest rates exclude observed epoch-change windows; they are not exact rollback accounting. Dropdowns are scoped by cluster → node → sandbox → guest container, and refresh with the selected time range. Node inventory counters are node context, not a sandbox running-state count."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Inventory and sample coverage",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "description": "",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 3,
+      "title": "Node context: sandbox inventory / available samples",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (cluster,node) (cubesandbox_node_sandbox_count{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\"}))",
+          "legendFormat": "Inventory",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(max by (cluster,node) (cubesandbox_node_sandbox_available_count{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\"}))",
+          "legendFormat": "Available samples",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Host / guest sampled workloads",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"})",
+          "legendFormat": "Host samples",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "count(cubesandbox_guest_workload_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"})",
+          "legendFormat": "Guest samples",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Host Sandbox · CPU",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "description": "",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 6,
+      "title": "CPU usage / exported limit",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "Usage",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(cubesandbox_host_sandbox_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"})",
+          "legendFormat": "Finite limit",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "CPU utilization · positive-limit samples only",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "description": "Usage and denominator include only identities with an exported positive CPU limit.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum((rate(cubesandbox_host_sandbox_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]) and on (cluster,node,sandbox_id) (cubesandbox_host_sandbox_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"} > 0))) / sum(((cubesandbox_host_sandbox_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"} > 0) and on (cluster,node,sandbox_id) rate(cubesandbox_host_sandbox_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval])))",
+          "legendFormat": "Utilization",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "CPU user / system usage",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_user_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "User",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_system_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "System",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "CPU throttled time rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_throttled_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "Throttled s/s",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "CPU scheduling / throttled periods per second",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "Periods/s",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cubesandbox_host_sandbox_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "Throttled periods/s",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "CPU throttled-period ratio",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(rate(cubesandbox_host_sandbox_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval])) / (sum(rate(cubesandbox_host_sandbox_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval])) > 0)",
+          "legendFormat": "Throttled periods",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Host Sandbox · Memory",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "description": "",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 13,
+      "title": "Memory current / exported finite limit",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"})",
+          "legendFormat": "Current",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"})",
+          "legendFormat": "Finite limit",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Memory utilization · positive-limit samples only",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum((cubesandbox_host_sandbox_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"} and on (cluster,node,sandbox_id) (cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"} > 0))) / sum((cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"} > 0))",
+          "legendFormat": "Utilization",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Memory limit failures · observed rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "description": "Cgroup memory limit failures are not a count of OOM kills.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cubesandbox_host_sandbox_memory_failures_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"}[$__rate_interval]))",
+          "legendFormat": "Failures/s",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Exported CPU / memory limit coverage",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(cubesandbox_host_sandbox_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"})",
+          "legendFormat": "CPU limits",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "count(cubesandbox_host_sandbox_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\"})",
+          "legendFormat": "Memory limits",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "Guest Workload · CPU",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "description": "",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 18,
+      "title": "CPU usage / exported limit",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 57
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "Usage {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (container_id) (cubesandbox_guest_workload_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"})",
+          "legendFormat": "Finite limit {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "title": "CPU utilization · positive-limit samples only",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 57
+      },
+      "description": "Usage and denominator include only identities with an exported positive CPU limit.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum by (container_id) (((rate(cubesandbox_guest_workload_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)) and on (cluster,node,sandbox_id,container_id) (cubesandbox_guest_workload_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"} > 0))) / sum by (container_id) (((cubesandbox_guest_workload_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"} > 0) and on (cluster,node,sandbox_id,container_id) (rate(cubesandbox_guest_workload_cpu_usage_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0))))",
+          "legendFormat": "Utilization {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "title": "CPU user / system usage",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_user_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "User {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_system_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "System {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "title": "CPU throttled time rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_throttled_seconds_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "Throttled s/s {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "title": "CPU scheduling / throttled periods per second",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "Periods/s {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "Throttled periods/s {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "title": "CPU throttled-period ratio",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_throttled_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0))) / (sum by (container_id) ((rate(cubesandbox_guest_workload_cpu_periods_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0))) > 0)",
+          "legendFormat": "Throttled periods {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "title": "Guest Workload · Memory",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "description": "",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 25,
+      "title": "Memory current / exported finite limit",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) (cubesandbox_guest_workload_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"})",
+          "legendFormat": "Current {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (container_id) (cubesandbox_guest_workload_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"})",
+          "legendFormat": "Finite limit {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 26,
+      "title": "Memory utilization · positive-limit samples only",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum by (container_id) ((cubesandbox_guest_workload_memory_current_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"} and on (cluster,node,sandbox_id,container_id) (cubesandbox_guest_workload_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"} > 0))) / sum by (container_id) ((cubesandbox_guest_workload_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"} > 0))",
+          "legendFormat": "Utilization {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "title": "Memory limit failures · observed rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "description": "Cgroup memory limit failures are not a count of OOM kills.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) ((rate(cubesandbox_guest_workload_memory_failures_total{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) unless on (cluster,node,sandbox_id,container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__rate_interval]) > 0)))",
+          "legendFormat": "Failures/s {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "title": "Exported CPU / memory limit coverage",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(cubesandbox_guest_workload_cpu_limit_cores{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"})",
+          "legendFormat": "CPU limits",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "expr": "count(cubesandbox_guest_workload_memory_limit_bytes{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"})",
+          "legendFormat": "Memory limits",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "title": "Guest lifecycle · current epoch",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 98
+      },
+      "description": "",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 30,
+      "title": "Current guest epoch generation",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
+      "description": "Generation is an identity-local gauge, never sum generations across workloads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} / {{container_id}}",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sandbox_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open details",
+                    "url": "/d/cubesandbox-sandbox?var-cluster=${__data.fields.cluster}&var-node=${__data.fields.node}&var-sandbox_id=${__data.fields.sandbox_id}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 31,
+      "title": "Guest epoch start time",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 * cubesandbox_guest_workload_metrics_epoch_start_time_seconds{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}",
+          "legendFormat": "{{node}} / {{sandbox_id}} / {{container_id}}",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sandbox_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open details",
+                    "url": "/d/cubesandbox-sandbox?var-cluster=${__data.fields.cluster}&var-node=${__data.fields.node}&var-sandbox_id=${__data.fields.sandbox_id}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 32,
+      "title": "Guest epoch age",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 115
+      },
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - cubesandbox_guest_workload_metrics_epoch_start_time_seconds{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}",
+          "legendFormat": "{{sandbox_id}} / {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "title": "Observed guest epoch changes in selected range",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 115
+      },
+      "description": "Only changes visible in the sampled series; not a total of newly created sandboxes or exact rollback events.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container_id) (changes(cubesandbox_guest_workload_metrics_epoch{job=\"cubesandbox-resource\",cluster=~\"${cluster:regex}\",node=~\"${node:regex}\",sandbox_id=~\"${sandbox_id:regex}\",container_id=~\"${container_id:regex}\"}[$__range]))",
+          "legendFormat": "Observed changes {{container_id}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sample / not exported",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

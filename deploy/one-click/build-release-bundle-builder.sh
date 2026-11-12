@@ -30,6 +30,9 @@ LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v
 : "${ONE_CLICK_DIST_VERSION:=${CUBE_VERSION_FROM_ENV:-${LATEST_RELEASE_TAG:-$(latest_git_revision "${ROOT_DIR}")}}}"
 export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME ONE_CLICK_DIST_VERSION
 
+# Fail before the expensive component build when the host cannot build WebUI.
+# A caller supplying a prebuilt dist does not need npm.
+require_web_build_prerequisites "${ONE_CLICK_WEB_DIST_DIR:-}"
 require_cmd docker
 require_cmd make
 
@@ -59,10 +62,12 @@ go_version_ldflags() {
 CUBEMASTER_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
 CUBELET_VERSION_PKG="github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
 CUBEOPS_VERSION_PKG="github.com/tencentcloud/CubeSandbox/CubeOps/internal/version"
+OPSAGENT_VERSION_PKG="github.com/tencentcloud/CubeSandbox/OpsAgent/internal/version"
 
 CUBEMASTER_LDFLAGS="$(go_version_ldflags "${CUBEMASTER_VERSION_PKG}")"
 CUBELET_LDFLAGS="$(go_version_ldflags "${CUBELET_VERSION_PKG}")"
 CUBEOPS_LDFLAGS="$(go_version_ldflags "${CUBEOPS_VERSION_PKG}")"
+OPSAGENT_LDFLAGS="$(go_version_ldflags "${OPSAGENT_VERSION_PKG}")"
 
 PREBUILT_DIR="/workspace/deploy/one-click/.work/prebuilt"
 mkdir -p "${PREBUILT_DIR}"
@@ -359,6 +364,14 @@ track_cubeops() {
   go build -ldflags "${CUBEOPS_LDFLAGS}" -o "${PREBUILT_DIR}/cubeopscli" ./cmd/cubeopscli
 }
 
+track_ops_agent() {
+  # Static (no cgo) so it runs on one-click hosts (Ubuntu 20.04 / glibc 2.31).
+  cd /workspace/OpsAgent
+  go mod download
+  CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" \
+    go build -trimpath -ldflags "${OPSAGENT_LDFLAGS}" -o "${PREBUILT_DIR}/ops-agent" ./cmd/ops-agent
+}
+
 track_volume_s3() {
   # S3 Volume plugin (examples/volume/s3): standalone Go module, statically
   # linked so it runs on one-click hosts (Ubuntu 20.04 / glibc 2.31). Built in
@@ -453,6 +466,7 @@ queue_track cubemaster track_cubemaster
 queue_track templatecenter track_templatecenter
 queue_track netstack   track_netstack
 queue_track cubeops    track_cubeops
+queue_track ops-agent  track_ops_agent
 queue_track volume-s3 track_volume_s3
 
 run_tracks
@@ -479,6 +493,7 @@ for artifact in \
   cube-api \
   cubeops \
   cubeopscli \
+  ops-agent \
   cubevsmapdump \
   cube-agent \
   cube-init \
@@ -502,6 +517,7 @@ ONE_CLICK_CUBECLI_BIN="${PREBUILT_DIR}/cubecli" \
 ONE_CLICK_CUBE_API_BIN="${PREBUILT_DIR}/cube-api" \
 ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
 ONE_CLICK_CUBE_OPS_CLI_BIN="${PREBUILT_DIR}/cubeopscli" \
+ONE_CLICK_OPS_AGENT_BIN="${PREBUILT_DIR}/ops-agent" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \

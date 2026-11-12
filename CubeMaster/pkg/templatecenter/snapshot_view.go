@@ -33,6 +33,7 @@ type SnapshotInfo struct {
 	OriginHostFactsJSON       string                             `json:"origin_host_facts_json,omitempty"`
 	StorageBackend            string                             `json:"storage_backend,omitempty"`
 	Backend                   string                             `json:"backend,omitempty"`
+	Mode                      string                             `json:"mode,omitempty"`
 	RemoteStatus              string                             `json:"remote_status,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64                             `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                             `json:"last_error,omitempty"`
@@ -338,7 +339,10 @@ func matchesSnapshotRecordListOptions(rec *models.SnapshotRecord, opts ListSnaps
 	if opts.SandboxID != "" && !strings.EqualFold(strings.TrimSpace(rec.OriginSandboxID), opts.SandboxID) {
 		return false
 	}
-	if opts.Name != "" && !strings.EqualFold(strings.TrimSpace(rec.DisplayName), opts.Name) {
+	// E2B-compatible: name matches display name or snapshot ID.
+	if opts.Name != "" &&
+		!strings.EqualFold(strings.TrimSpace(rec.DisplayName), opts.Name) &&
+		!strings.EqualFold(strings.TrimSpace(rec.SnapshotID), opts.Name) {
 		return false
 	}
 	if opts.Backend != "" && !strings.EqualFold(strings.TrimSpace(rec.Backend), opts.Backend) {

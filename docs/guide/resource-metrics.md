@@ -6,7 +6,7 @@ Cubelet exposes CPU and memory metrics for running Cube sandboxes. One-click ins
 http://<cubelet-node>:9998/v1/metrics/resource
 ```
 
-This endpoint is separate from Cubelet's generic `/v1/metrics` endpoint. The existing containerd cgroup monitor remains enabled and may continue to expose its generic `container_*` families under `/v1/metrics`; the Cube-native sandbox metrics below are collected and exported independently under `/v1/metrics/resource`.
+This endpoint is separate from Cubelet's generic `/v1/metrics` endpoint. `/v1/metrics` does not export generic `container_*` metrics. The sandbox metrics below are collected and exported separately at `/v1/metrics/resource`.
 
 Cubelet periodically collects resource data for the selected scopes in the background and caches the latest results in memory. A Prometheus scrape reads only this cache and does not synchronously contact every sandbox. The scrape therefore does not trigger runtime RPCs proportional to the number of sandboxes, although response size and serialization cost still grow with the exported series count.
 
@@ -126,6 +126,20 @@ scrape_configs:
 
 Replace the target with each Cubelet node's address on the trusted management network.
 
+To generate this job instead of writing it by hand, run the one-click installer
+in `scrape-job` mode. It only writes a file and installs nothing:
+
+```bash
+# Current node, taken from CUBE_SANDBOX_NODE_IP or the default route
+CUBE_OBSERVABILITY_CLUSTER_ID=cubesandbox \
+  ./deploy/one-click/observability/install.sh prometheus scrape-job
+
+# Or one target per line, '#' starts a comment
+CUBE_METRICS_NODE_LIST=./nodes.txt \
+CUBE_METRICS_PROM_CONFIG=./cubesandbox-prometheus-scrape.yml \
+  ./deploy/one-click/observability/install.sh prometheus scrape-job
+```
+
 A separate job allows scrape intervals, timeouts, and `metric_relabel_configs` to be tuned without changing Cubelet's generic metrics job.
 
 The resource endpoint processes at most two scrapes concurrently. Requests above this limit receive HTTP 503 so overlapping large responses cannot consume unbounded Cubelet CPU and memory. A normal single Prometheus scrape job does not hit this limit. If 503 responses occur, check for duplicate Prometheus jobs or concurrent manual scrapes of the same node.
@@ -154,13 +168,24 @@ To export `guest_workload`:
 2. Restart Cubelet.
 3. Confirm that the sandbox's `cube-agent` supports resource metrics capability version `1`.
 
-HTTP 200 with an empty response does not necessarily indicate a failure. The endpoint is empty when the node has no running sandbox, the plugin is disabled, or Cubelet has not completed its first sample.
+HTTP 200 without per-sandbox resource series does not necessarily indicate a failure. When `host_sandbox` is enabled, the endpoint can contain only the node aggregate gauges. With other scope settings it can be empty when there is no sampleable running sandbox, the plugin is disabled, or Cubelet has not completed its first sample.
 
 ## Base metric families
 
 Cubelet exports only counters and gauges. Prometheus queries derive CPU cores used and CPU or memory utilization percentages.
 
 CPU and memory limit metrics are exported only when the cgroup has a finite limit. Cubelet does not substitute `0` or a large sentinel for an unlimited value. Current memory remains available whenever the corresponding scope is available.
+
+### Node aggregate metrics
+
+When `host_sandbox` is enabled, Cubelet always exports these gauges without dynamic labels, including when their value is `0`:
+
+| Metric | Type | Unit and meaning |
+| --- | --- | --- |
+| `cubesandbox_node_sandbox_count` | Gauge | Total sandboxes currently present in the HostSandbox sampler inventory. |
+| `cubesandbox_node_sandbox_available_count` | Gauge | Sandboxes whose current HostSandbox resource sample is available. |
+
+The scraper can attach `cluster` and `node` labels for cluster-level and per-node aggregation. `available_count` measures resource-sample availability, not the complete business `running` state; pause, collection errors, and `stale_after` can affect it. These gauges do not enumerate sandbox IDs and do not replace the control-plane or CubeBox Store inventory.
 
 ### `host_sandbox` metrics
 
@@ -202,7 +227,7 @@ Cumulative metrics are scoped to the current metrics epoch and exclude history i
 | `cubesandbox_guest_workload_memory_current_bytes` | Gauge | Current bytes charged to the workload cgroup. |
 | `cubesandbox_guest_workload_memory_limit_bytes` | Gauge | Finite workload memory limit in bytes. |
 | `cubesandbox_guest_workload_memory_failures_total` | Counter | Memory-limit failures during the current metrics epoch. |
-| `cubesandbox_guest_workload_metrics_epoch` | Gauge | Current metrics epoch generation. |
+| `cubesandbox_guest_workload_metrics_epoch` | Gauge | Current metrics epoch generation. It can repeat across a resume; use the epoch start time as the window identity. |
 | `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` | Gauge | Metrics epoch start time as Unix seconds. |
 
 ## PromQL examples
@@ -293,10 +318,10 @@ increase(cubesandbox_guest_workload_memory_failures_total[5m])
 
 ### Detect metrics epoch changes
 
-This query returns the number of epoch changes for existing series during the last five minutes and can mark rollback or other accounting-window changes:
+This query returns the number of new metrics windows for existing series during the last five minutes and can mark rollback, pause/resume, or other accounting-window changes. The epoch start time changes on every new window, while the generation can repeat after a resume:
 
 ```promql
-changes(cubesandbox_guest_workload_metrics_epoch[5m])
+changes(cubesandbox_guest_workload_metrics_epoch_start_time_seconds[5m])
 ```
 
 ## Lifecycle semantics
@@ -325,15 +350,17 @@ This removes inherited history and represents post-rollback data as a new accoun
 | Snapshot creation or template commit | Keeps the current metrics epoch. |
 | Rollback | Stops exporting during rollback, then creates a new metrics epoch whose cumulative metrics restart from `0`. If runtime restore fails after dispatch, the new epoch stays prepared and `guest_workload` remains unavailable until a later rollback succeeds or the sandbox is deleted and recreated. |
 | Pause | Keeps the current metrics epoch but stops exporting instead of emitting `0`. |
-| Resume | Continues the metrics epoch that existed before pause. |
+| Resume | Creates a new metrics epoch; cumulative metrics restart from `0` and `guest_workload` stays unavailable until the first successful sample establishes the new baseline. |
 | Delete | Removes cached samples and metric series. |
 | Cubelet restart | Restores the persisted metrics epoch and baseline instead of recalculating the existing window. |
 
+`guest_workload` cumulative metrics are scoped to one metrics epoch. Resume creates a new epoch even when guest memory is restored, so these counters do not represent a sandbox-lifetime total. `host_sandbox` follows a different window; see its lifecycle below. The epoch generation can decrease across a resume. Use `cubesandbox_guest_workload_metrics_epoch_start_time_seconds` as the window identity and do not order windows by generation.
+
 If a lifecycle metadata failure temporarily leaves a running sandbox without a persisted fresh metrics epoch, the `guest_workload` sampler recreates and persists the missing pending epoch before collecting it. A failed recovery remains unavailable and is retried on a later collection cycle.
 
-Prometheus does not understand Cubelet's metrics epoch semantics. `rate()` and `increase()` treat an epoch transition as a counter reset only when the cumulative value actually decreases.
+Prometheus does not understand Cubelet's metrics epoch semantics. `rate()` and `increase()` treat an epoch transition as a counter reset only when the cumulative value actually decreases. Use a query range that covers the desired window, and use the epoch metrics to annotate the resets.
 
-Use these metrics when an application must reliably identify rollback or another accounting-window change:
+Use these metrics to identify a rollback or another accounting-window change. Compare the start time rather than the generation:
 
 - `cubesandbox_guest_workload_metrics_epoch`
 - `cubesandbox_guest_workload_metrics_epoch_start_time_seconds`
@@ -357,7 +384,7 @@ The current release does not export an exact memory peak scoped to a metrics epo
 
 The resource endpoint stores only the latest sample and no history. Short memory peaks between Prometheus scrapes are not retained. A CPU rate window should contain multiple samples successfully written to Prometheus.
 
-Neither interval reduces the number of active series. With `export_scopes = ["all"]`, one fully populated single-container sandbox exports at most 22 series. To reduce series count, change `export_scopes` or use Prometheus `metric_relabel_configs`.
+Neither interval reduces the number of active series. With `export_scopes = ["all"]`, one fully populated single-container sandbox exports at most 22 series, plus two fixed node aggregate gauges. To reduce series count, change `export_scopes` or use Prometheus `metric_relabel_configs`.
 :::
 
 ## Upgrading old templates and snapshots
@@ -388,7 +415,7 @@ At runtime, CubeShim also validates the resource metrics capability version retu
 | Symptom | Common cause and action |
 | --- | --- |
 | Cannot connect to port `9998` | Confirm that `cube-sandbox-cubelet.service` is running, then check the listener address, firewall, and security-group rules. |
-| HTTP 200 but no `cubesandbox_*` metrics | Confirm `enabled = true`, verify that the node has a sandbox in the `Up` state, and wait at least one `collection_interval`. Paused sandboxes do not export metrics. |
+| HTTP 200 but no per-sandbox `cubesandbox_*` metrics | Confirm `enabled = true`, verify that the node has a sandbox in the `Up` state, and wait at least one `collection_interval`. Paused sandboxes do not export per-sandbox resource series; when `host_sandbox` is enabled, the two node aggregate gauges should still be present. |
 | `guest_workload` is configured but no guest metrics appear | Confirm that `export_scopes` is `["guest_workload"]` or `["all"]`. If it is, the sandbox's `cube-agent` usually has not declared resource metrics capability version `1`; run template `redo` for an image-built template. If the template is compatible, inspect Cubelet's `Task.Stats` errors. |
 | Existing metrics suddenly disappear | The sandbox may have been paused or deleted, or repeated collection failures may have made the latest sample older than `stale_after`. |
 | A new sandbox has no `host_sandbox` metrics | Cubelet may have exhausted the assignment-baseline read attempts during creation. Inspect the Cubelet log for `capture host metrics baseline`, correct the persistent host cgroup read failure, and recreate the sandbox. |

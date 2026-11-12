@@ -6,9 +6,12 @@ package cube
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +89,7 @@ func dealCubeboxReqTemplateByLocalConfig(ctx context.Context, reqInOut *types.Cr
 		reqInOut.NetworkType = templateReq.NetworkType
 	}
 
+	sandbox.CopyTemplateRestartFields(templateReq, reqInOut)
 	log.G(ctx).Infof("Successfully dealCubeboxReqTemplateByLocalConfig: %s", utils.InterfaceToString(reqInOut))
 	return nil
 }
@@ -151,6 +155,9 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 	}
 	if !isContainerReqWhiteTag("Prestop") {
 		ctr.Prestop = templateCtr.Prestop
+	}
+	if ctr.LivenessProbe == nil {
+		ctr.LivenessProbe = templateCtr.LivenessProbe
 	}
 
 	return nil
@@ -238,6 +245,19 @@ func applyTemplateImageSpec(imageSpecIn *types.ImageSpec, imageSpecOut *types.Im
 	}
 }
 
+// applySnapshotTemplateAnnotationsAndLabels preserves the placement-selected
+// shim while copying the saved snapshot request. Static operator configuration
+// uses the ordinary merge and keeps its component override precedence.
+func applySnapshotTemplateAnnotationsAndLabels(reqIn, reqOut *types.CreateCubeSandboxReq) {
+	key := constants.CubeAnnotationComponentCubeShimVersion
+	selected, bound := reqOut.Annotations[key]
+	applyTemplateAnnotationsAndLabels(reqIn, reqOut)
+	delete(reqOut.Annotations, key)
+	if bound {
+		reqOut.Annotations[key] = selected
+	}
+}
+
 //go:noinline
 func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut *types.CreateCubeSandboxReq) {
 	if reqIn.Annotations != nil {
@@ -266,6 +286,13 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 			reqOut.Labels = make(map[string]string)
 		}
 		reqOut.Labels[constants.CubeAnnotationComponentEnvdVersion] = v
+	}
+	// Mirror the alias onto labels so sandbox reads can promote it back.
+	if v := strings.TrimSpace(reqOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]); v != "" {
+		if reqOut.Labels == nil {
+			reqOut.Labels = make(map[string]string)
+		}
+		reqOut.Labels[constants.CubeAnnotationAppSnapshotTemplateAlias] = v
 	}
 }
 
@@ -390,9 +417,13 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 	templateID, hasTemplateID := reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 
 	if !hasTemplateID && config.GetConfig().Common.EnableAGSColdStartSwitch {
-		return handleColdStartCompatibility(reqInOut)
+		if err := handleColdStartCompatibility(reqInOut); err != nil {
+			return err
+		}
+		return sandbox.ValidateRestartLiveness(reqInOut)
 	}
 
+	var mergeErr error
 	if constants.GetAppSnapshotVersion(reqInOut.Annotations) == templatecenter.DefaultTemplateVersion {
 		// Alias resolution: only on the template-center / v2 path. Resolving
 		// before the version split would break non-v2 requests that carry a
@@ -406,10 +437,14 @@ func dealCubeboxCreateReqWithTemplate(ctx context.Context, reqInOut *types.Creat
 				reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
 			}
 		}
-		return dealCubeboxCreateReqWithTemplateCenter(ctx, templateID, reqInOut)
+		mergeErr = dealCubeboxCreateReqWithTemplateCenter(ctx, templateID, reqInOut)
+	} else {
+		mergeErr = dealCubeboxReqTemplateByLocalConfig(ctx, reqInOut)
 	}
-
-	return dealCubeboxReqTemplateByLocalConfig(ctx, reqInOut)
+	if mergeErr != nil {
+		return mergeErr
+	}
+	return sandbox.ValidateRestartLiveness(reqInOut)
 }
 
 func handleColdStartCompatibility(reqInOut *types.CreateCubeSandboxReq) error {
@@ -451,7 +486,14 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 	constants.NormalizeAppSnapshotAnnotations(templateReq.Annotations)
 	stageStart = time.Now()
-	if !skipTemplateLocalityReady(ctx, templateID) {
+	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
+	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
+	if err != nil {
+		return fmt.Errorf("failed to resolve template kind: %w", err)
+	}
+	shared := sharedJFSTemplate(templateReq, templateKind)
+	stageStart = time.Now()
+	if !shared && !skipTemplateLocalityReady(ctx, templateID) {
 		err = templatecenter.EnsureTemplateLocalityReady(ctx, templateID, reqInOut.InstanceType)
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
 		if err != nil {
@@ -459,12 +501,6 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		}
 	} else {
 		templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveLocality, time.Since(stageStart))
-	}
-	stageStart = time.Now()
-	templateKind, err := templatecenter.GetTemplateKind(ctx, templateID)
-	templatecenter.ReportResolveStageMetric(ctx, constants.ActionTemplateResolveKind, time.Since(stageStart))
-	if err != nil {
-		return fmt.Errorf("failed to resolve template kind: %w", err)
 	}
 	// Pause-produced snaps (Kind=pause_snapshot) are internal Resume artifacts:
 	// invisible on Snapshot List/Info and not usable to create a new sandbox.
@@ -481,7 +517,16 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}()
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
 		pinToOrigin := snapshotRestoreHasRawHostMount(reqInOut, templateReq)
-		if err := bindSnapshotCreateReplicaWithHostMount(ctx, templateID, reqInOut, pinToOrigin); err != nil {
+		src, err := bindSnapshotCreateReplicaForCreate(ctx, templateID, reqInOut, pinToOrigin)
+		if err != nil {
+			return err
+		}
+		if src != nil && src.Mode.IsFsOnly() {
+			// The package holds the rootfs only, so the template's recorded
+			// external mounts cannot be honoured. Drop them; the caller's own
+			// declarations are mounted on the guest by Cubelet.
+			stripSnapshotExternalMounts(templateReq)
+		} else if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
 			return err
 		}
 	}
@@ -491,12 +536,24 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		log.G(ctx).Infof("getTemplateParam success:template=%s %s", templateID, summarizeTemplateRequest(templateReq))
 	}
 
-	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
+		applySnapshotTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	} else {
+		applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	}
+	if reqInOut.Annotations == nil {
+		reqInOut.Annotations = make(map[string]string)
+	}
+	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
+	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+	if policy := strings.TrimSpace(templateReq.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy]); policy != "" {
+		reqInOut.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = policy
+	}
 	if err := templatecenter.InheritCreateBackendFromTemplate(reqInOut, templateReq); err != nil {
 		return err
 	}
 	if !strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
-		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut); err != nil {
+		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut, shared); err != nil {
 			return err
 		}
 	}
@@ -529,12 +586,197 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	if reqInOut.Annotations != nil && reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "" {
 		reqInOut.Labels[constants.CubeAnnotationAppSnapshotTemplateID] = reqInOut.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 	}
+	sandbox.CopyTemplateRestartFields(templateReq, reqInOut)
 	if log.IsDebug() {
 		log.G(ctx).Debugf("dealCubeboxCreateReqWithTemplateCenter success:%s", utils.InterfaceToString(reqInOut))
 	} else {
 		log.G(ctx).Infof("dealCubeboxCreateReqWithTemplateCenter success:template=%s %s", templateID, summarizeTemplateRequest(reqInOut))
 	}
 	return nil
+}
+
+type snapshotPluginVolumeMount struct {
+	Name          string `json:"name"`
+	ContainerPath string `json:"container_path"`
+	Readonly      bool   `json:"readonly,omitempty"`
+}
+
+// reconcileSnapshotPluginVolumes lets E2B clients re-send the volumeMounts a
+// snapshot already carries. The snapshot's memory image has the mounts baked
+// in, so the request must match them exactly; identical declarations are
+// dropped from the request so each volume is declared once after the
+// template merge, and any difference is rejected instead of silently ignored.
+func reconcileSnapshotPluginVolumes(snapshotID string, req, templateReq *types.CreateCubeSandboxReq) error {
+	if req == nil || templateReq == nil {
+		return nil
+	}
+	snapshotMounts, err := parseSnapshotPluginVolumeMounts(templateReq.Annotations[sandbox.AnnotationPluginVolumeMounts])
+	if err != nil {
+		return fmt.Errorf("snapshot %s: parse stored plugin-volume-mounts: %w", snapshotID, err)
+	}
+	if len(snapshotMounts) == 0 {
+		return nil
+	}
+	requestMounts, err := parseSnapshotPluginVolumeMounts(req.Annotations[sandbox.AnnotationPluginVolumeMounts])
+	if err != nil {
+		return fmt.Errorf("parse plugin-volume-mounts: %w", err)
+	}
+	if len(requestMounts) == 0 {
+		return nil
+	}
+	if !maps.Equal(snapshotMounts, requestMounts) {
+		return fmt.Errorf("snapshot %s: volumeMounts must match the snapshot's volume mounts when restoring (snapshot=%s, request=%s)",
+			snapshotID, describeSnapshotPluginVolumeMounts(snapshotMounts), describeSnapshotPluginVolumeMounts(requestMounts))
+	}
+	kept := req.Volumes[:0]
+	for _, volume := range req.Volumes {
+		if volume != nil {
+			if _, ok := snapshotMounts[strings.TrimSpace(volume.Name)]; ok {
+				continue
+			}
+		}
+		kept = append(kept, volume)
+	}
+	req.Volumes = kept
+	delete(req.Annotations, sandbox.AnnotationPluginVolumeMounts)
+	return nil
+}
+
+// externalVolumeNames lists the volumes in req that a filesystem-only package
+// does not carry: plugin volumes (declared by the plugin-volume-mounts
+// annotation, by an explicit plugin source, or by having no source at all) and
+// raw host directories.
+//
+// Sandbox-local sources (emptyDir, sandboxPath, image) stay: they belong to the
+// sandbox spec rather than to a node, and the rootfs scratch volume every create
+// carries is one of them. They are not a promise that a caller can add a new
+// mount this way -- the create API only accepts names that resolve to volumes.
+func externalVolumeNames(req *types.CreateCubeSandboxReq) []string {
+	if req == nil {
+		return nil
+	}
+	declared := map[string]struct{}{}
+	if mounts, err := parseSnapshotPluginVolumeMounts(req.Annotations[sandbox.AnnotationPluginVolumeMounts]); err == nil {
+		for name := range mounts {
+			declared[name] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	var names []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for _, volume := range req.Volumes {
+		if volume == nil {
+			continue
+		}
+		name := strings.TrimSpace(volume.Name)
+		source := volume.VolumeSource
+		if source == nil || source.PluginVolume != nil || source.HostDirVolumeSources != nil {
+			add(name)
+			continue
+		}
+		if _, ok := declared[name]; ok {
+			add(name)
+		}
+	}
+	// A mount declared by the annotation but missing from Volumes still leaves a
+	// container reference behind; name it so the strip can drop that reference.
+	for name := range declared {
+		add(name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// stripSnapshotExternalMounts removes every external mount the origin sandbox
+// recorded from a filesystem-only template: the volumes, the container mounts
+// that reference them, and the annotations that would inject them again. Doing
+// all three keeps the merged request free of dangling mount references.
+//
+// Only the template side is touched; mounts the caller declares are honoured by
+// Cubelet.
+func stripSnapshotExternalMounts(templateReq *types.CreateCubeSandboxReq) {
+	if templateReq == nil {
+		return
+	}
+	drop := map[string]struct{}{}
+	for _, name := range externalVolumeNames(templateReq) {
+		drop[name] = struct{}{}
+	}
+	if len(drop) > 0 {
+		kept := templateReq.Volumes[:0]
+		for _, volume := range templateReq.Volumes {
+			if volume != nil {
+				if _, ok := drop[strings.TrimSpace(volume.Name)]; ok {
+					continue
+				}
+			}
+			kept = append(kept, volume)
+		}
+		templateReq.Volumes = kept
+
+		for _, ctr := range templateReq.Containers {
+			if ctr == nil {
+				continue
+			}
+			keptMounts := ctr.VolumeMounts[:0]
+			for _, mount := range ctr.VolumeMounts {
+				if mount != nil {
+					if _, ok := drop[strings.TrimSpace(mount.GetName())]; ok {
+						continue
+					}
+				}
+				keptMounts = append(keptMounts, mount)
+			}
+			ctr.VolumeMounts = keptMounts
+		}
+	}
+	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeMounts)
+	delete(templateReq.Annotations, sandbox.AnnotationPluginVolumeSources)
+	delete(templateReq.Annotations, sandbox.AnnotationHostDirMount)
+}
+
+func parseSnapshotPluginVolumeMounts(raw string) (map[string]snapshotPluginVolumeMount, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var entries []snapshotPluginVolumeMount
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, err
+	}
+	out := make(map[string]snapshotPluginVolumeMount, len(entries))
+	for _, entry := range entries {
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.ContainerPath = filepath.Clean(entry.ContainerPath)
+		if _, ok := out[entry.Name]; ok {
+			return nil, fmt.Errorf("volume %q is duplicated", entry.Name)
+		}
+		out[entry.Name] = entry
+	}
+	return out, nil
+}
+
+func describeSnapshotPluginVolumeMounts(mounts map[string]snapshotPluginVolumeMount) string {
+	names := slices.Sorted(maps.Keys(mounts))
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		m := mounts[name]
+		part := name + ":" + m.ContainerPath
+		if m.Readonly {
+			part += ":ro"
+		}
+		parts = append(parts, part)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 func snapshotRestoreHasRawHostMount(req, templateReq *types.CreateCubeSandboxReq) bool {
@@ -599,19 +841,33 @@ func bindSnapshotCreateReplica(ctx context.Context, snapshotID string, reqInOut 
 }
 
 func bindSnapshotCreateReplicaWithHostMount(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) error {
+	_, err := bindSnapshotCreateReplicaForCreate(ctx, snapshotID, reqInOut, pinToOrigin)
+	return err
+}
+
+// bindSnapshotCreateReplicaForCreate places the sandbox and returns the
+// restore source it used; nil on the legacy local fallback. A filesystem-only
+// source is never pinned to its origin.
+func bindSnapshotCreateReplicaForCreate(ctx context.Context, snapshotID string, reqInOut *types.CreateCubeSandboxReq, pinToOrigin bool) (*templatecenter.RestoreSource, error) {
+	delete(reqInOut.Annotations, constants.CubeAnnotationComponentCubeShimVersion)
 	if err := ensureSnapshotReadyForNewUseFn(ctx, snapshotID); err != nil {
-		return err
+		return nil, err
 	}
 	if src, err := getSnapshotRestoreSourceFn(ctx, snapshotID); err == nil && src != nil {
-		return bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
+		// The package carries no memory or mounts; the caller re-declares them,
+		// so the origin node is not a dependency.
+		if src.Mode.IsFsOnly() {
+			pinToOrigin = false
+		}
+		return src, bindSnapshotCreateReplicaWithPlacement(ctx, snapshotID, reqInOut, src, pinToOrigin)
 	} else if err != nil && !errors.Is(err, templatecenter.ErrSnapshotNotFound) &&
 		!errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized) {
-		return err
+		return nil, err
 	}
 	if pinToOrigin {
-		return fmt.Errorf("snapshot %s with host mount requires origin restore metadata", snapshotID)
+		return nil, fmt.Errorf("snapshot %s with host mount requires origin restore metadata", snapshotID)
 	}
-	return bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
+	return nil, bindSnapshotCreateReplicaLocal(ctx, snapshotID, reqInOut)
 }
 
 // fromSnapshotPlacement pins FromSnap to the snapshot origin unless the
@@ -637,6 +893,10 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 	if reqInOut != nil {
 		requestedScope = append([]string(nil), reqInOut.DistributionScope...)
 	}
+	kind := restoreplace.MemoryRestore
+	if src.Mode.IsFsOnly() {
+		kind = restoreplace.FilesystemColdBoot
+	}
 	return decideRestorePlacementFn(ctx, restoreplace.Input{
 		SnapshotID:          src.SnapshotID,
 		Backend:             src.Backend,
@@ -648,6 +908,7 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 		ReqRes:              reqRes,
 		RequestedScope:      requestedScope,
 		PinToOrigin:         pinToOrigin,
+		Kind:                kind,
 	})
 }
 
@@ -675,6 +936,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 		selectedNodeID = strings.TrimSpace(placement.NodeIP)
 	}
 	reqInOut.DistributionScope = []string{selectedNodeID}
+	reqInOut.SnapshotMode = src.Mode.String()
 
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}
@@ -692,7 +954,9 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 
 	if placement.CrossNode {
 		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
-		reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		if constants.IsS3Backend(src.Backend) {
+			reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+		}
 		if resolved := templateResolveResultFromContext(ctx); resolved != nil {
 			resolved.ChosenReplica = templatecenter.ReplicaStatus{
 				NodeID:       placement.NodeID,
@@ -761,8 +1025,15 @@ func bindSnapshotCreateReplicaLocal(ctx context.Context, snapshotID string, reqI
 // cubelet resolves memory_vol/memory_kind/rootfs_vol from its local catalog
 // keyed by CubeAnnotationAppSnapshotTemplateID. v5: the legacy physical
 // memory_vol/memory_kind annotation keys no longer exist as constants.
-func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq) error {
+//
+// A shared jfs template has one replica, the node that built it. Any node
+// can create from it, so the replica only supplies component versions and
+// the scheduler may place the sandbox on a node without a local copy.
+func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqInOut *types.CreateCubeSandboxReq, shared bool) error {
 	preferredNodeID := preferredDistributionNodeID(reqInOut)
+	if shared {
+		preferredNodeID = ""
+	}
 	replica, err := resolveTemplateReadyReplicaFn(ctx, templateID, preferredNodeID)
 	if err != nil {
 		return fmt.Errorf("template %s has no bindable ready replica: %w", templateID, err)
@@ -770,8 +1041,25 @@ func bindAppSnapshotTemplateReplica(ctx context.Context, templateID string, reqI
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = map[string]string{}
 	}
+	if shared {
+		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
+	}
 	injectReplicaComponentVersionAnnotations(reqInOut.Annotations, replica)
 	return nil
+}
+
+// sharedJFSTemplate reports whether templateReq is an AppSnapshot template
+// stored on jfs: built once on the volume every node mounts. User snapshots
+// keep their own cross-node rules.
+func sharedJFSTemplate(templateReq *types.CreateCubeSandboxReq, kind string) bool {
+	if templateReq == nil || strings.EqualFold(kind, templatecenter.TemplateKindSnapshot) {
+		return false
+	}
+	backend := templateReq.Backend
+	if strings.TrimSpace(backend) == "" && templateReq.Annotations != nil {
+		backend = templateReq.Annotations[constants.CubeAnnotationStorageBackend]
+	}
+	return constants.IsJFSBackend(backend)
 }
 
 func injectReplicaComponentVersionAnnotations(annotations map[string]string, replica templatecenter.ReplicaStatus) {
@@ -790,6 +1078,8 @@ func injectReplicaComponentVersionAnnotations(annotations map[string]string, rep
 	set(constants.CubeAnnotationComponentCubeImageVersion, replica.GuestImageVersion)
 	set(constants.CubeAnnotationComponentCubeAgentVersion, replica.AgentVersion)
 	set(constants.CubeAnnotationComponentCubeKernelVersion, replica.KernelVersion)
+	// Snapshot callers clear untrusted shim pins before selecting a replica.
+	// Ordinary templates keep the operator pin merged into the request.
 	set(constants.CubeAnnotationComponentCubeShimVersion, replica.ShimVersion)
 }
 

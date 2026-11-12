@@ -9,7 +9,7 @@
 #   protoc v28.3 + protoc-gen-go v1.36.11 + protoc-gen-go-grpc v1.6.1
 
 PROTO_PKGS = services/cubebox services/errorcode services/images \
-             services/snapshot services/volumeplugin types
+             services/schedulerplugin services/snapshot services/volumeplugin types
 
 PROTOC_INCLUDE_FLAGS=-I=. -I=./third_party
 PROTOC_GO_FLAGS=--go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative

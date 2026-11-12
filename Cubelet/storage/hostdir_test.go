@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
 
@@ -201,10 +203,40 @@ func TestDefaultRunHostDirCommandTimeoutKillsProcessGroup(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(time.Second)
-	for utils.ProcessAlive(pid) {
+	id := utils.ProcessIdentity{Pid: pid}
+	for id.Status() != utils.LivenessGone {
 		if time.Now().After(deadline) {
 			t.Fatalf("child process %d still alive after timeout", pid)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestValidateHostDirSourceName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		wantErr bool
+	}{
+		{name: "hostdir-0"},
+		{name: "sdk-cold-start-host"},
+		{name: "..", wantErr: true},
+		{name: ".", wantErr: true},
+		{name: "", wantErr: true},
+		{name: "team/member", wantErr: true},
+		{name: `team\member`, wantErr: true},
+		{name: "/abs", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateHostDirSourceName(tt.name)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
 	}
 }

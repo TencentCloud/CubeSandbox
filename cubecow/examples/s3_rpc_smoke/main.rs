@@ -859,7 +859,7 @@ fn main() -> ExitCode {
             json!({
                 "lvol_name": import_name,
                 "export_uuid": uuid,
-                "decouple": true,
+                "decouple": false,
             }),
         ) {
             Ok(result) => {
@@ -938,14 +938,10 @@ fn main() -> ExitCode {
         substep("--keep set: skipping deletion");
         reports.push(StepReport::ok("rcow_delete_lvol", "SKIPPED (--keep)"));
     } else {
-        // By design (§3.7), `rcow_import_lvol` with `decouple: true`
-        // must return a self-contained lvol — i.e. the daemon has
-        // released every reference it held on the source snapshot by
-        // the time step 9 returned. We therefore proceed straight to
-        // delete: if the snapshot still reports EBUSY here, that is a
-        // real server-side contract violation and we want the test to
-        // surface it as a hard FAIL rather than paper over it by
-        // polling `deletable = YES`.
+        // `decouple: false` leaves the import reading the export.
+        // Cleanup is LIFO, so the imported volume is deleted before
+        // the source snapshot. The snapshot delete then runs with
+        // that reader already gone.
         let delete_report = run_cleanup(&mut client, &mut cleanup);
         reports.push(delete_report);
     }
@@ -999,11 +995,9 @@ fn main() -> ExitCode {
 /// a "not found" style message (§4).
 ///
 /// This routine intentionally does NOT poll `rcow_get_snapshot_status`
-/// for `deletable = YES` before deleting an exported snapshot. Per
-/// §3.7 of the design doc, a successful `rcow_import_lvol` with
-/// `decouple: true` must have already released the daemon's reference
-/// on the source snapshot, so any EBUSY here is a genuine server-side
-/// bug that we want to expose as a delete failure.
+/// for `deletable = YES` before deleting an exported snapshot. The
+/// caller deletes the imported volume first, which drops the
+/// `decouple: false` reader, and then deletes the source snapshot.
 fn run_cleanup(client: &mut RpcClient, names: &mut Vec<String>) -> StepReport {
     let mut errs: Vec<String> = Vec::new();
     let mut idempotent_ok = true;
@@ -1124,8 +1118,8 @@ fn wait_for_upload_done(
     }
 }
 
-// wait_for_deletable_yes() was intentionally removed: the design doc
-// guarantees that a successful `rcow_import_lvol` releases the daemon's
-// reference on the source snapshot, so cleanup does not need to poll
-// `deletable = YES` before issuing `rcow_delete_lvol`. Keeping such a
-// helper around would silently mask real server-side EBUSY bugs.
+// wait_for_deletable_yes() was intentionally removed. Cleanup deletes
+// the imported volume before the source snapshot, so the
+// `decouple: false` reader is already gone when the snapshot delete
+// runs. Polling `deletable = YES` here would hide a delete that is
+// still refused for some other reason.

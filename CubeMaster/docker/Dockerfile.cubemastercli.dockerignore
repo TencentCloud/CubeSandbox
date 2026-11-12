@@ -16,6 +16,8 @@
 !pkgs/cubedb/**
 !pkgs/proto
 !pkgs/proto/**
+!pkgs/redisx
+!pkgs/redisx/**
 !Cubelet
 !Cubelet/**
 !CubeOps

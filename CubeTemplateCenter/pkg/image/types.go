@@ -6,6 +6,7 @@ package image
 
 import (
 	"context"
+	"errors"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
@@ -31,6 +32,12 @@ type BuildOptions struct {
 	// A non-nil error aborts the build.
 	PostRootfsExport func(ctx context.Context, rootfsDir string) error
 }
+
+// ErrPostExportPermanent marks a PostRootfsExport failure that depends only
+// on the image content (for example an unknown template user). Rebuilding
+// through another export path cannot fix it, so BuildExt4 fails at once
+// instead of falling back.
+var ErrPostExportPermanent = errors.New("permanent post-export failure")
 
 type BuildResult struct {
 	Ext4Path  string

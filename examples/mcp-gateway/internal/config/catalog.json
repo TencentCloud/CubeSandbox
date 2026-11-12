@@ -1,0 +1,43 @@
+{
+  "duckduckgo": {
+    "description": "Web search through DuckDuckGo.",
+    "command": [["uvx", "duckduckgo-mcp-server"]],
+    "install": [["uv", "tool", "install", "duckduckgo-mcp-server"]]
+  },
+  "arxiv": {
+    "description": "Search, download, and read arXiv papers.",
+    "command": [["uvx", "arxiv-mcp-server"], ["--storage-path", "{{storagePath}}"]],
+    "install": [["uv", "tool", "install", "arxiv-mcp-server"]],
+    "properties": {
+      "storagePath": {"type": "string"}
+    }
+  },
+  "fetch": {
+    "description": "Fetch web pages and convert them to Markdown.",
+    "command": [["uvx", "mcp-server-fetch"]],
+    "install": [["uv", "tool", "install", "mcp-server-fetch"]]
+  },
+  "time": {
+    "description": "Current time and time zone conversion.",
+    "command": [["uvx", "mcp-server-time"]],
+    "install": [["uv", "tool", "install", "mcp-server-time"]]
+  },
+  "filesystem": {
+    "description": "Read and write files under the configured directories.",
+    "command": [["npx", "-y", "@modelcontextprotocol/server-filesystem"], ["{{paths}}"]],
+    "install": [["npm", "cache", "add", "@modelcontextprotocol/server-filesystem"]],
+    "properties": {
+      "paths": {"type": "array", "required": true}
+    }
+  },
+  "memory": {
+    "description": "Knowledge-graph based persistent memory.",
+    "command": [["npx", "-y", "@modelcontextprotocol/server-memory"]],
+    "install": [["npm", "cache", "add", "@modelcontextprotocol/server-memory"]]
+  },
+  "sequentialthinking": {
+    "description": "Structured step-by-step problem solving.",
+    "command": [["npx", "-y", "@modelcontextprotocol/server-sequential-thinking"]],
+    "install": [["npm", "cache", "add", "@modelcontextprotocol/server-sequential-thinking"]]
+  }
+}

@@ -42,6 +42,13 @@ spec:
       app.kubernetes.io/component: templatecenter
   template:
     metadata:
+      annotations:
+        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-templatecenter/conf.yaml") . | sha256sum }}
+        {{- if and .Values.trustedCACerts.enabled .Values.trustedCACerts.certs (not .Values.trustedCACerts.existingConfigMap) }}
+        # Inline CA changes require a restart; operator-owned ConfigMaps do not
+        # have a checksum because their contents are outside the release.
+        checksum/trusted-ca: {{ .Values.trustedCACerts.certs | toJson | sha256sum }}
+        {{- end }}
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: templatecenter
@@ -96,6 +103,16 @@ spec:
             privileged: true
           env:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
+            {{- if .Values.trustedCACerts.enabled }}
+            # Private-CA trust for outbound TLS (image registries behind a
+            # private CA). Go reads SSL_CERT_DIR as the directory-candidate
+            # list: listing the ConfigMap mount first ADDS the mounted
+            # certificates while the system bundle file candidate
+            # (/etc/ssl/certs/ca-certificates.crt) stays active, so
+            # publicly-trusted registries keep working. Verified on Go 1.25.
+            - name: SSL_CERT_DIR
+              value: /etc/cube/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs
+            {{- end }}
             # All CUBE_TEMPLATE_CENTER_*: the pre-rename CUBE_TC_* /
             # CUBEMASTER_* spellings still work as a fallback and log a
             # deprecation notice. See CubeTemplateCenter/pkg/tcconfig.
@@ -180,12 +197,15 @@ spec:
               mountPath: /usr/local/services/cubetoolbox/CubeTemplateCenter/conf.yaml
               subPath: conf.yaml
               readOnly: true
-          {{- if .Values.cubeEgress.enabled }}
+          {{- if .Values.trustedCACerts.enabled }}
+            - name: trusted-ca
+              mountPath: /etc/cube/trusted-ca
+              readOnly: true
+          {{- end }}
             # Read by the --with-cube-ca bake, which is what TC does before mkfs.
             - name: cube-egress-ca
               mountPath: /etc/cube/ca
               readOnly: true
-          {{- end }}
             - name: cube-templatecenter-log
               mountPath: /data/log/CubeTemplateCenter
             - name: cube-master-storage
@@ -198,11 +218,14 @@ spec:
         - name: cube-templatecenter-config
           secret:
             secretName: {{ include "cube.templateCenterConfigSecretName" . }}
-      {{- if .Values.cubeEgress.enabled }}
+      {{- if .Values.trustedCACerts.enabled }}
+        - name: trusted-ca
+          configMap:
+            name: {{ .Values.trustedCACerts.existingConfigMap | default (include "cube.trustedCaConfigMapName" .) }}
+      {{- end }}
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
-      {{- end }}
         - name: cube-templatecenter-log
           emptyDir: {}
         # The SAME volume CubeMaster mounts. hostPath and PVC are both honoured so

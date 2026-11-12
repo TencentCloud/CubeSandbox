@@ -72,8 +72,8 @@ typedef void (*s3_get_cb)(void *cb_arg, uint64_t bytes_read, int status);
  * 0 when queued; in the latter case cb_fn is invoked on the submitting SPDK
  * thread once ownership is transferred.  The owner must release exactly once.
  * If that bounce cannot be queued, the callback is not run on the releaser's
- * thread: acquire_ex invokes cancel_fn there instead, while the compatibility
- * wrapper drops that notification. The token is then given to the next waiter.
+ * thread: acquire_ex invokes cancel_fn there instead. The token is then given
+ * to the next waiter.
  *
  * Low-priority users (read-ahead) never queue and leave one token available
  * for demand; they receive -EAGAIN when no opportunistic token is available.
@@ -83,8 +83,6 @@ typedef void (*s3_get_token_cancel_cb)(void *cb_arg, int status);
 
 #define S3_WHOLE_GET_MAX_INFLIGHT 256
 
-int s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
-			       void *cb_arg);
 int s3_whole_get_token_acquire_ex(bool low_priority, s3_get_token_cb cb_fn,
 				  s3_get_token_cancel_cb cancel_fn,
 				  void *cb_arg);
@@ -209,12 +207,6 @@ int s3_delete(struct s3_client *client, const char *key,
 	      s3_op_cb cb, void *cb_arg);
 
 /**
- * Batch delete. Used by GC.
- */
-int s3_delete_batch(struct s3_client *client, const char **keys, uint32_t count,
-		    s3_op_cb cb, void *cb_arg);
-
-/**
  * Server-side copy (CopyObject); data never crosses the client's network.
  *
  * Purpose: because cluster_size == chunk_size == 1 MiB in this design, clusters
@@ -223,8 +215,8 @@ int s3_delete_batch(struct s3_client *client, const char **keys, uint32_t count,
  *
  * Used by decouple ingest: same-bucket CopyObject of export chunks into the
  * destination lvstore's data/ prefix, so materialise does not GET+WAL the
- * bytes. Export-prefix materialisation (copying into exports/ before deleting
- * a referenced snapshot) was rejected -- see lib/s3bsdev/s3_gc.c.
+ * bytes. Copying into exports/ before deleting a referenced snapshot was
+ * rejected: importers cache the manifest, so that rewrite would not reach them.
  *
  * CopyObject can return HTTP 200 with `<Error>` in the body (S3 keeps the
  * connection alive during a long server-side copy). The status code alone is
@@ -236,33 +228,5 @@ int s3_copy_object(struct s3_client *client,
 		   const char *src_bucket, const char *src_key,
 		   const char *dst_key,
 		   s3_op_cb cb, void *cb_arg);
-
-/**
- * List objects. Used by GC scans and export manifest enumeration.
- */
-int s3_list_objects(struct s3_client *client, const char *prefix,
-		    const char *continuation_token,
-		    void (*entry_cb)(void *ctx, const char *key, uint64_t size),
-		    void *entry_ctx, s3_op_cb cb, void *cb_arg);
-
-/* ==========================================================================
- * Observability
- * ========================================================================== */
-
-struct s3_client_stats {
-	uint64_t  get_ops;
-	uint64_t  put_ops;
-	uint64_t  head_ops;
-	uint64_t  delete_ops;
-	uint64_t  copy_ops;
-	uint64_t  bytes_read;
-	uint64_t  bytes_written;
-	uint64_t  errors_4xx;
-	uint64_t  errors_5xx;
-	uint64_t  retries;
-	uint64_t  inflight;
-};
-
-void s3_client_get_stats(struct s3_client *client, struct s3_client_stats *stats);
 
 #endif /* S3LVOL_CLIENT_H */

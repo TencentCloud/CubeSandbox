@@ -10,8 +10,10 @@ on:
       - 'CubeOps/**'
       - 'pkgs/cubedb/**'
       - 'pkgs/blobstore/**'
+      - 'pkgs/redisx/**'
       - 'pkgs/CubeLog/**'
       - 'pkgs/proto/**'
+      - 'pkgs/sandboxrestart/**'
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
@@ -28,8 +30,10 @@ on:
       - 'CubeOps/**'
       - 'pkgs/cubedb/**'
       - 'pkgs/blobstore/**'
+      - 'pkgs/redisx/**'
       - 'pkgs/CubeLog/**'
       - 'pkgs/proto/**'
+      - 'pkgs/sandboxrestart/**'
       - 'Cubelet/**'
       - 'CubeShim/**'
       - 'agent/**'
@@ -65,7 +69,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3]
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3, OpsAgent]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -110,6 +114,11 @@ jobs:
             make_target: cube-volume-s3
             expected_bins: |
               _output/bin/cube-volume-s3
+          # ops-agent: standalone Go module (own go.mod, replace => ../pkgs/CubeLog).
+          - component: OpsAgent
+            make_target: ops-agent
+            expected_bins: |
+              _output/bin/ops-agent
 
     steps:
       - name: Checkout
@@ -236,6 +245,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Six images build on one runner and the docker-container driver keeps
+      # every layer in /var/lib/docker, which overruns the default disk.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

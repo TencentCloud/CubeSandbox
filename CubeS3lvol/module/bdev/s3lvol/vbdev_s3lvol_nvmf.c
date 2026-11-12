@@ -41,6 +41,7 @@ struct nvmf_op_ctx {
 	char      bdev_name[SPDK_LVOL_NAME_MAX + SPDK_LVS_NAME_MAX + 2];
 	uint32_t  nsid;
 	bool      removing;
+	struct spdk_nvmf_ns_opts ns_opts;
 
 	/* Result of the mutation, reported after the resume completes. */
 	int       status;
@@ -110,12 +111,55 @@ nvmf_op_failback_resumed(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
 	nvmf_op_done(ctx, ctx->status != 0 ? ctx->status : -EIO);
 }
 
+/* Restore the namespace mutation, then submit one more resume. This covers both
+ * an asynchronous resume failure after add and the synchronous submission
+ * failure after add/remove. A retry must see the same namespace layout it saw
+ * before the operation, never a half-applied nsid. */
+static void
+nvmf_op_rollback_and_resume(struct spdk_nvmf_subsystem *subsystem,
+			    struct nvmf_op_ctx *ctx, int resume_status)
+{
+	uint32_t restored;
+	int rc;
+
+	if (ctx->status == 0) {
+		if (ctx->removing) {
+			restored = spdk_nvmf_subsystem_add_ns_ext(
+				subsystem, ctx->bdev_name, &ctx->ns_opts,
+				sizeof(ctx->ns_opts), NULL);
+			if (restored != ctx->nsid) {
+				SPDK_ERRLOG("subsystem '%s': rollback could not restore "
+					    "nsid %" PRIu32 " for bdev '%s'\n",
+					    spdk_nvmf_subsystem_get_nqn(subsystem),
+					    ctx->nsid, ctx->bdev_name);
+				resume_status = -EIO;
+			}
+		} else if (ctx->nsid != 0 &&
+			   spdk_nvmf_subsystem_remove_ns(subsystem,
+							ctx->nsid) != 0) {
+			SPDK_ERRLOG("subsystem '%s': rollback could not remove nsid "
+				    "%" PRIu32 "\n",
+				    spdk_nvmf_subsystem_get_nqn(subsystem),
+				    ctx->nsid);
+			resume_status = -EIO;
+		}
+	}
+
+	ctx->status = resume_status;
+	rc = spdk_nvmf_subsystem_resume(subsystem, nvmf_op_failback_resumed, ctx);
+	if (rc != 0) {
+		SPDK_ERRLOG("subsystem '%s' stays paused after rollback: %s\n",
+			    spdk_nvmf_subsystem_get_nqn(subsystem),
+			    spdk_strerror(-rc));
+		nvmf_op_done(ctx, resume_status);
+	}
+}
+
 static void
 nvmf_op_add_resumed(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
 		    int status)
 {
 	struct nvmf_op_ctx *ctx = cb_arg;
-	int rc;
 
 	if (status == 0) {
 		nvmf_op_done(ctx, ctx->status);
@@ -129,21 +173,32 @@ nvmf_op_add_resumed(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
 		SPDK_ERRLOG("subsystem '%s' failed to resume after adding nsid "
 			    "%" PRIu32 "; rolling the namespace back\n",
 			    spdk_nvmf_subsystem_get_nqn(subsystem), ctx->nsid);
+		nvmf_op_rollback_and_resume(subsystem, ctx, status);
+		return;
+	}
 
-		if (spdk_nvmf_subsystem_remove_ns(subsystem, ctx->nsid) != 0) {
-			SPDK_ERRLOG("rollback of nsid %" PRIu32 " failed too\n",
-				    ctx->nsid);
-		}
-		ctx->status = status;
+	nvmf_op_done(ctx, status);
+}
 
-		rc = spdk_nvmf_subsystem_resume(subsystem, nvmf_op_failback_resumed,
-						ctx);
-		if (rc != 0) {
-			SPDK_ERRLOG("subsystem '%s' stays paused: %s\n",
-				    spdk_nvmf_subsystem_get_nqn(subsystem),
-				    spdk_strerror(-rc));
-			nvmf_op_done(ctx, status);
-		}
+static void
+nvmf_op_remove_resumed(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
+		       int status)
+{
+	struct nvmf_op_ctx *ctx = cb_arg;
+
+	if (status == 0) {
+		nvmf_op_done(ctx, ctx->status);
+		return;
+	}
+
+	/* A successful remove followed by an asynchronous resume failure must be
+	 * rolled back just like an add. Otherwise retry observes the namespace as
+	 * already gone even though the operation reported failure. */
+	if (ctx->status == 0) {
+		SPDK_ERRLOG("subsystem '%s' failed to resume after removing nsid "
+			    "%" PRIu32 "; restoring the namespace\n",
+			    spdk_nvmf_subsystem_get_nqn(subsystem), ctx->nsid);
+		nvmf_op_rollback_and_resume(subsystem, ctx, status);
 		return;
 	}
 
@@ -171,15 +226,34 @@ nvmf_op_paused(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int status)
 	}
 
 	if (ctx->removing) {
+		struct spdk_nvmf_ns *ns;
+		struct spdk_bdev *bdev;
+
+		ns = spdk_nvmf_subsystem_get_ns(subsystem, ctx->nsid);
+		bdev = ns ? spdk_nvmf_ns_get_bdev(ns) : NULL;
+		if (!ns || !bdev) {
+			ctx->status = -ENOENT;
+			SPDK_ERRLOG("subsystem '%s': cannot snapshot nsid %" PRIu32
+				    " before removal\n",
+				    spdk_nvmf_subsystem_get_nqn(subsystem),
+				    ctx->nsid);
+			resume_cb = nvmf_op_resumed;
+			goto resume;
+		}
+		snprintf(ctx->bdev_name, sizeof(ctx->bdev_name), "%s",
+			 spdk_bdev_get_name(bdev));
+		spdk_nvmf_ns_get_opts(ns, &ctx->ns_opts, sizeof(ctx->ns_opts));
+
 		ctx->status = spdk_nvmf_subsystem_remove_ns(subsystem, ctx->nsid);
 		if (ctx->status != 0) {
 			SPDK_ERRLOG("subsystem '%s': cannot remove nsid %" PRIu32
 				    ": %s\n", spdk_nvmf_subsystem_get_nqn(subsystem),
 				    ctx->nsid, spdk_strerror(-ctx->status));
 		}
-		/* Nothing to roll back on the remove path: a removal that failed
-		 * changed nothing. */
-		resume_cb = nvmf_op_resumed;
+		/* A successful removal is provisional until the asynchronous resume
+		 * completes; restore it if resume fails. */
+		resume_cb = ctx->status == 0 ? nvmf_op_remove_resumed :
+			    nvmf_op_resumed;
 	} else {
 		struct spdk_nvmf_ns_opts ns_opts;
 
@@ -209,15 +283,17 @@ nvmf_op_paused(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int status)
 		resume_cb = nvmf_op_add_resumed;
 	}
 
+resume:
 	rc = spdk_nvmf_subsystem_resume(subsystem, resume_cb, ctx);
 	if (rc != 0) {
-		/* The resume could not even be submitted. The subsystem stays
-		 * paused -- this is the one outcome with no recovery from here. */
-		SPDK_ERRLOG("subsystem '%s' stays paused, resume could not be "
-			    "submitted: %s\n",
+		/* Submission failed synchronously. Restore a successful mutation and
+		 * retry resume so the operation is both retryable and does not strand
+		 * every namespace on this subsystem. */
+		SPDK_ERRLOG("subsystem '%s' resume could not be submitted: %s; "
+			    "rolling back and retrying resume\n",
 			    spdk_nvmf_subsystem_get_nqn(subsystem),
 			    spdk_strerror(-rc));
-		nvmf_op_done(ctx, rc);
+		nvmf_op_rollback_and_resume(subsystem, ctx, rc);
 	}
 }
 
@@ -239,6 +315,276 @@ nvmf_find_subsystem(const char *nqn)
 	}
 
 	return spdk_nvmf_tgt_find_subsystem(tgt, nqn);
+}
+
+struct nvmf_pause_all_ctx {
+	struct spdk_nvmf_subsystem **subsystems;
+	size_t count;
+	size_t index;
+	int status;
+	s3lvol_nvmf_state_cb cb_fn;
+	void *cb_arg;
+};
+
+static void
+nvmf_pause_all_done(struct nvmf_pause_all_ctx *ctx, int status)
+{
+	s3lvol_nvmf_state_cb cb_fn = ctx->cb_fn;
+	void *cb_arg = ctx->cb_arg;
+
+	free(ctx->subsystems);
+	free(ctx);
+	if (cb_fn) {
+		cb_fn(cb_arg, status);
+	}
+}
+
+static void nvmf_pause_all_rollback_next(struct nvmf_pause_all_ctx *ctx);
+
+static void
+nvmf_pause_all_rollback_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
+			   int status)
+{
+	struct nvmf_pause_all_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_ERRLOG("subsystem '%s' failed to resume after hot-prepare pause "
+			    "failed: %s\n", spdk_nvmf_subsystem_get_nqn(subsystem),
+			    spdk_strerror(-status));
+	}
+	nvmf_pause_all_rollback_next(ctx);
+}
+
+static void
+nvmf_pause_all_rollback_next(struct nvmf_pause_all_ctx *ctx)
+{
+	int rc;
+
+	while (ctx->index > 0) {
+		struct spdk_nvmf_subsystem *subsystem = ctx->subsystems[--ctx->index];
+
+		rc = spdk_nvmf_subsystem_resume(subsystem,
+					       nvmf_pause_all_rollback_cb, ctx);
+		if (rc == 0) {
+			return;
+		}
+		SPDK_ERRLOG("subsystem '%s' resume could not be submitted after "
+			    "hot-prepare pause failed: %s\n",
+			    spdk_nvmf_subsystem_get_nqn(subsystem),
+			    spdk_strerror(-rc));
+	}
+
+	nvmf_pause_all_done(ctx, ctx->status);
+}
+
+static void nvmf_pause_all_next(struct nvmf_pause_all_ctx *ctx);
+
+static void
+nvmf_pause_all_paused(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
+		      int status)
+{
+	struct nvmf_pause_all_ctx *ctx = cb_arg;
+
+	if (status != 0) {
+		SPDK_ERRLOG("subsystem '%s' failed to pause for hot upgrade: %s\n",
+			    spdk_nvmf_subsystem_get_nqn(subsystem),
+			    spdk_strerror(-status));
+		ctx->status = status;
+		nvmf_pause_all_rollback_next(ctx);
+		return;
+	}
+
+	ctx->index++;
+	nvmf_pause_all_next(ctx);
+}
+
+static void
+nvmf_pause_all_next(struct nvmf_pause_all_ctx *ctx)
+{
+	struct spdk_nvmf_subsystem *subsystem;
+	int rc;
+
+	if (ctx->index == ctx->count) {
+		nvmf_pause_all_done(ctx, 0);
+		return;
+	}
+
+	subsystem = ctx->subsystems[ctx->index];
+
+	/* Pause every namespace of this subsystem, not "the subsystem".
+	 *
+	 * SPDK_NVME_GLOBAL_NS_TAG (0xFFFFFFFF) is not the same trap as nsid 0 --
+	 * see nvmf_op_start() for that one. Checked against the pinned SPDK,
+	 * d64c4fa89233397460e2e4ff55a1c69b8e498598: lib/nvmf/nvmf.c:2021 has an
+	 * explicit `nsid == SPDK_NVME_GLOBAL_NS_TAG` branch that marks every
+	 * namespace PAUSING, and :2042 a second one that yields the callback until
+	 * every namespace's io_outstanding reaches zero. So unlike 0 (which wraps
+	 * to UINT32_MAX in `nsid - 1 < num_ns` and quiesces nothing), this really
+	 * is a complete quiesce -- which the hot-upgrade path relies on, since it
+	 * SIGKILLs on the strength of it.
+	 *
+	 * The count below makes the dependency self-checking: "0 namespaces" would
+	 * be the silent version of the old bug. */
+	{
+		struct spdk_nvmf_ns *ns;
+		uint32_t ns_count = 0;
+
+		for (ns = spdk_nvmf_subsystem_get_first_ns(subsystem); ns != NULL;
+		     ns = spdk_nvmf_subsystem_get_next_ns(subsystem, ns)) {
+			ns_count++;
+		}
+		SPDK_NOTICELOG("hot prepare: quiescing %" PRIu32 " namespace(s) on "
+			       "subsystem '%s'\n", ns_count,
+			       spdk_nvmf_subsystem_get_nqn(subsystem));
+	}
+
+	rc = spdk_nvmf_subsystem_pause(subsystem, SPDK_NVME_GLOBAL_NS_TAG,
+				       nvmf_pause_all_paused, ctx);
+	if (rc == 0) {
+		return;
+	}
+
+	SPDK_ERRLOG("subsystem '%s' pause could not be submitted for hot upgrade: "
+		    "%s\n", spdk_nvmf_subsystem_get_nqn(subsystem),
+		    spdk_strerror(-rc));
+	ctx->status = rc;
+	nvmf_pause_all_rollback_next(ctx);
+}
+
+int
+s3lvol_nvmf_pause_all(s3lvol_nvmf_state_cb cb_fn, void *cb_arg)
+{
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_tgt *tgt;
+	struct nvmf_pause_all_ctx *ctx;
+	size_t count = 0;
+
+	tgt = spdk_nvmf_get_first_tgt();
+	if (!tgt) {
+		return -ENODEV;
+	}
+
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem;
+	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		if (strncmp(spdk_nvmf_subsystem_get_nqn(subsystem), RCOW_NQN_PREFIX,
+			    strlen(RCOW_NQN_PREFIX)) == 0) {
+			count++;
+		}
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		return -ENOMEM;
+	}
+	ctx->subsystems = calloc(count ? count : 1, sizeof(*ctx->subsystems));
+	if (!ctx->subsystems) {
+		free(ctx);
+		return -ENOMEM;
+	}
+	ctx->count = count;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	count = 0;
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem;
+	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		if (strncmp(spdk_nvmf_subsystem_get_nqn(subsystem), RCOW_NQN_PREFIX,
+			    strlen(RCOW_NQN_PREFIX)) == 0) {
+			ctx->subsystems[count++] = subsystem;
+		}
+	}
+
+	nvmf_pause_all_next(ctx);
+	return 0;
+}
+
+static void nvmf_resume_all_next(struct nvmf_pause_all_ctx *ctx);
+
+static void
+nvmf_resume_all_resumed(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
+			int status)
+{
+	struct nvmf_pause_all_ctx *ctx = cb_arg;
+
+	if (status != 0 && ctx->status == 0) {
+		ctx->status = status;
+		SPDK_ERRLOG("subsystem '%s' failed to resume after hot prepare: %s\n",
+			    spdk_nvmf_subsystem_get_nqn(subsystem),
+			    spdk_strerror(-status));
+	}
+	ctx->index++;
+	nvmf_resume_all_next(ctx);
+}
+
+static void
+nvmf_resume_all_next(struct nvmf_pause_all_ctx *ctx)
+{
+	struct spdk_nvmf_subsystem *subsystem;
+	int rc;
+
+	while (ctx->index < ctx->count) {
+		subsystem = ctx->subsystems[ctx->index];
+		rc = spdk_nvmf_subsystem_resume(subsystem, nvmf_resume_all_resumed,
+					       ctx);
+		if (rc == 0) {
+			return;
+		}
+		if (ctx->status == 0) {
+			ctx->status = rc;
+		}
+		SPDK_ERRLOG("subsystem '%s' resume could not be submitted after hot "
+			    "prepare: %s\n", spdk_nvmf_subsystem_get_nqn(subsystem),
+			    spdk_strerror(-rc));
+		ctx->index++;
+	}
+
+	nvmf_pause_all_done(ctx, ctx->status);
+}
+
+int
+s3lvol_nvmf_resume_all(s3lvol_nvmf_state_cb cb_fn, void *cb_arg)
+{
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_tgt *tgt;
+	struct nvmf_pause_all_ctx *ctx;
+	size_t count = 0;
+
+	tgt = spdk_nvmf_get_first_tgt();
+	if (!tgt) {
+		return -ENODEV;
+	}
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem;
+	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		if (strncmp(spdk_nvmf_subsystem_get_nqn(subsystem), RCOW_NQN_PREFIX,
+			    strlen(RCOW_NQN_PREFIX)) == 0) {
+			count++;
+		}
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		return -ENOMEM;
+	}
+	ctx->subsystems = calloc(count ? count : 1, sizeof(*ctx->subsystems));
+	if (!ctx->subsystems) {
+		free(ctx);
+		return -ENOMEM;
+	}
+	ctx->count = count;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	count = 0;
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem;
+	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		if (strncmp(spdk_nvmf_subsystem_get_nqn(subsystem), RCOW_NQN_PREFIX,
+			    strlen(RCOW_NQN_PREFIX)) == 0) {
+			ctx->subsystems[count++] = subsystem;
+		}
+	}
+
+	nvmf_resume_all_next(ctx);
+	return 0;
 }
 
 static int

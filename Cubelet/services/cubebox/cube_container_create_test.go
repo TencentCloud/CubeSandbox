@@ -6,12 +6,17 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	jsoniter "github.com/json-iterator/go"
@@ -20,19 +25,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
+	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
 	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
@@ -1207,6 +1216,57 @@ func TestGenContainerLabels(t *testing.T) {
 	}
 }
 
+func TestWritableLayerSubdirKeepsTemplateUpperOnRestart(t *testing.T) {
+	tpl := "tpl-cec4d42f71324052936a586e"
+	restart := &workflow.CreateContext{
+		IsRestart: true,
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+			},
+		},
+	}
+	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", "0"))
+	assert.Equal(t, "disk/"+tpl+"_1", writableLayerSubdir(restart, "sandbox-id", "1"))
+	assert.Equal(t, "disk/"+tpl+"_0", writableLayerSubdir(restart, "sandbox-id", ""))
+
+	variant := tpl + "-hf1-deadbeef"
+	variantRestart := &workflow.CreateContext{
+		IsRestart: true,
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+				constants.MasterAnnotationJFSTemplateVariantID:  variant,
+			},
+		},
+	}
+	assert.Equal(t, "disk/"+variant+"_0", writableLayerSubdir(variantRestart, "sandbox-id", "0"))
+
+	coldBoot := &workflow.CreateContext{
+		IsRestart:             true,
+		SnapshotWritableLayer: "disk/tpl-from-the-snapshot_0",
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+				constants.MasterAnnotationJFSTemplateVariantID:  variant,
+			},
+		},
+	}
+	assert.Equal(t, "disk/tpl-from-the-snapshot_0", writableLayerSubdir(coldBoot, "sandbox-id", "0"))
+
+	plain := &workflow.CreateContext{IsRestart: true, ReqInfo: &cubebox.RunCubeSandboxRequest{}}
+	assert.Equal(t, "disk/sandbox-id", writableLayerSubdir(plain, "sandbox-id", "0"))
+
+	firstBoot := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{
+			Annotations: map[string]string{
+				constants.MasterAnnotationAppSnapshotTemplateID: tpl,
+			},
+		},
+	}
+	assert.Equal(t, "disk/sandbox-id", writableLayerSubdir(firstBoot, "sandbox-id", "0"))
+}
+
 func TestTransformError(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1239,4 +1299,427 @@ func TestTransformError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadShimStartTimeReturnsLiveProcessIdentity(t *testing.T) {
+	got, err := readShimStartTime(context.Background(), "shim-self", os.Getpid())
+	require.NoError(t, err)
+	assert.NotZero(t, got, "a start time is what pins the recorded pid to one incarnation")
+}
+
+// A pid that can never be read must fail the create rather than persist
+// PidStartTime 0, which would leave the record ambiguous for its whole life.
+func TestReadShimStartTimeRetriesThenFails(t *testing.T) {
+	start := time.Now()
+	_, err := readShimStartTime(context.Background(), "shim-dead", 1000000000)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1000000000")
+	assert.GreaterOrEqual(t, time.Since(start), 2*shimIdentityRetryDelay,
+		"the read must be retried, not abandoned on the first failure")
+}
+
+func TestReadShimStartTimeHonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := readShimStartTime(ctx, "shim-dead", 1000000000)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// A handled create failure must put the endpoint back to "nothing was
+// spawned", or the record blocks cleanup forever.
+func TestWithdrawShimIntentClearsRecordWhenNoHolderExists(t *testing.T) {
+	withShimBundles(t, t.TempDir()) // a bundle that names no live process
+
+	sb := newCubeboxWithStatusForTest("sb-withdraw", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()}
+	mgr := &fakeCubeboxAPI{cb: sb}
+
+	(&local{cubeboxManger: mgr}).withdrawShimIntent(context.Background(), sb, sb.FirstContainer())
+
+	assert.False(t, sb.Endpoint.ShimSpawned)
+	assert.True(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Zero(t, sb.Endpoint.Pid)
+	assert.Zero(t, sb.Endpoint.PidStartTime)
+	assert.Equal(t, 1, mgr.saveCalls, "the rollback has to reach the store, not just the in-memory record")
+}
+
+// A live process found through the bundle is real evidence that a shim is
+// running: the intent must stay, because it is what keeps destroy from
+// releasing the resources that process holds.
+func TestWithdrawShimIntentKeepsRecordWhileAHolderIsAlive(t *testing.T) {
+	live := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, live.Pid)
+	withShimBundles(t, bundle)
+
+	sb := newCubeboxWithStatusForTest("sb-keep-intent", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()}
+	mgr := &fakeCubeboxAPI{cb: sb}
+
+	(&local{cubeboxManger: mgr}).withdrawShimIntent(context.Background(), sb, sb.FirstContainer())
+
+	assert.True(t, sb.Endpoint.ShimSpawned, "declaring the sandbox unspawned would leak the tap and IP it holds")
+	assert.False(t, sb.Endpoint.ShimSpawnedAt.IsZero(), "its age must keep accruing towards the TTL")
+	assert.Zero(t, mgr.saveCalls, "nothing to persist while the intent stands")
+}
+
+// fakeContainerdContainer stands in for the container the create flow builds
+// its task on. Embedding the interface keeps the fake down to the one method
+// the flow reaches before it fails.
+type fakeContainerdContainer struct {
+	containerd.Container
+	err       error
+	onNewTask func()
+}
+
+func (f fakeContainerdContainer) NewTask(context.Context, cio.Creator, ...containerd.NewTaskOpts) (containerd.Task, error) {
+	if f.onNewTask != nil {
+		f.onNewTask()
+	}
+	return nil, f.err
+}
+
+// The intent has to be durable before a shim can exist, because a crash in
+// between leaves a process nothing on the host can match back to the sandbox.
+// This drives the real create step rather than the bookkeeping helpers, so the
+// ordering itself is covered, not just the code that writes the record.
+func TestRunContainerPersistsShimIntentBeforeTheSpawn(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-intent-order", cubeboxstore.Status{StartedAt: 1})
+	// A previous incarnation left a full endpoint behind. It has to be dropped
+	// at the same time the intent is written: keeping it would let the destroy
+	// path check a dead pid, find it gone, and clear the sandbox while the shim
+	// started below is alive.
+	staleAt := time.Now().Add(-time.Hour)
+	sb.Endpoint = sandboxstore.Endpoint{
+		Address:       "old-endpoint",
+		Version:       1,
+		Pid:           4242,
+		PidStartTime:  99,
+		ShimSpawned:   true,
+		ShimSpawnedAt: staleAt,
+	}
+	ci := sb.FirstContainer()
+	ci.IsPod = true
+	// No orphan shim on this host: keep the reap off the real /proc.
+	withFakeShimEnv(t, t.TempDir(), true)
+
+	mgr := &fakeCubeboxAPI{cb: sb}
+	spawnErr := errors.New("spawn refused by the test")
+	var savesAtSpawn int
+	var endpointAtSpawn sandboxstore.Endpoint
+	l := &local{
+		cubeboxManger: mgr,
+		newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+			return fakeContainerdContainer{
+				err: spawnErr,
+				onNewTask: func() {
+					savesAtSpawn = mgr.saveCalls
+					endpointAtSpawn = sb.Endpoint
+				},
+			}, nil
+		},
+	}
+
+	err := l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), spawnErr.Error(),
+		"the spawn failure is what the create has to report")
+
+	assert.Equal(t, 1, savesAtSpawn, "the intent must reach the store before the spawn, not after it")
+	assert.True(t, endpointAtSpawn.ShimSpawned)
+	assert.Zero(t, endpointAtSpawn.Pid, "the previous incarnation's pid must not survive into the new attempt")
+	assert.Zero(t, endpointAtSpawn.PidStartTime)
+	assert.True(t, endpointAtSpawn.ShimSpawnedAt.After(staleAt),
+		"the intent must be stamped now: its age is the only thing that bounds the refusal")
+
+	// The spawn failed with no shim to show for it, so the intent is the only
+	// trace left and has to be reconciled away.
+	assert.False(t, sb.Endpoint.ShimSpawned, "a handled failure must not leave a record that blocks cleanup")
+	assert.True(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Equal(t, 2, mgr.saveCalls)
+}
+
+// A failed NewTask leaves the shim containerd started running, because the
+// dead-shim cleanup cannot chdir into the bundle it has just removed. The
+// create step has to reap it: for the pod, and for a workload container too,
+// whose shim containerd starts with the container's own id.
+func TestRunContainerReapsOrphanShimOnFailedNewTask(t *testing.T) {
+	for _, isPod := range []bool{true, false} {
+		t.Run(map[bool]string{true: "pod", false: "workload container"}[isPod], func(t *testing.T) {
+			sb := newCubeboxWithStatusForTest("sb-reap", cubeboxstore.Status{StartedAt: 1})
+			ci := sb.FirstContainer()
+			ci.IsPod = isPod
+			if !isPod {
+				ci.ID = "ctr-reap"
+			}
+			root := t.TempDir()
+			writeFakeProc(t, root, 100001, testShimBin, shimServerArgv(ci.ID)...)
+			writeFakeProc(t, root, 100002, testShimBin, shimServerArgv("sb-other")...)
+			deletes, _ := withFakeShimEnv(t, root, true)
+
+			l := &local{
+				cubeboxManger: &fakeCubeboxAPI{cb: sb},
+				newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+					return fakeContainerdContainer{err: errors.New("create failed")}, nil
+				},
+			}
+			require.Error(t, l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{}))
+
+			require.Len(t, *deletes, 1, "the orphan shim of this container must be deleted")
+			assert.Contains(t, (*deletes)[0].Args, ci.ID)
+			_, err := os.Stat(filepath.Join(root, "100002"))
+			assert.NoError(t, err, "a shim of another id must be left alone")
+		})
+	}
+}
+
+// Once containerd has removed the bundle, withdrawShimIntent cannot see a
+// surviving shim through the pid files. The reap result is the only evidence,
+// and it must keep the intent so the destroy path does not release resources
+// the shim still holds.
+func TestRunContainerKeepsIntentWhenOrphanShimSurvives(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-reap-survivor", cubeboxstore.Status{StartedAt: 1})
+	ci := sb.FirstContainer()
+	ci.IsPod = true
+	root := t.TempDir()
+	writeFakeProc(t, root, 100001, testShimBin, shimServerArgv(ci.ID)...)
+	withFakeShimEnv(t, root, false)
+	killOrphanShim = func(utils.ProcessIdentity) error { return errors.New("EPERM") }
+
+	mgr := &fakeCubeboxAPI{cb: sb}
+	l := &local{
+		cubeboxManger: mgr,
+		newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+			return fakeContainerdContainer{err: errors.New("create failed")}, nil
+		},
+	}
+	require.Error(t, l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{}))
+
+	assert.True(t, sb.Endpoint.ShimSpawned, "a surviving shim must keep the intent")
+	assert.False(t, sb.Endpoint.ShimSpawnedAt.IsZero())
+	assert.Equal(t, 1, mgr.saveCalls, "only the intent itself may be saved")
+}
+
+func TestRunContainerFailsBeforeSpawnWhenIntentSaveFails(t *testing.T) {
+	sb := newCubeboxWithStatusForTest("sb-intent-save", cubeboxstore.Status{StartedAt: 1})
+	ci := sb.FirstContainer()
+	ci.IsPod = true
+
+	var newTaskCalls int
+	mgr := &fakeCubeboxAPI{cb: sb, saveErr: errors.New("disk full")}
+	l := &local{
+		cubeboxManger: mgr,
+		newContainerFn: func(context.Context, string, ...containerd.NewContainerOpts) (containerd.Container, error) {
+			return fakeContainerdContainer{
+				err:       errors.New("should not spawn"),
+				onNewTask: func() { newTaskCalls++ },
+			}, nil
+		},
+	}
+
+	err := l.runContainer(context.Background(), sb, ci, nil, cubeconfig.Runtime{})
+	require.Error(t, err)
+	assert.True(t, ret.IsErrorCode(err, errorcode.ErrorCode_UpdateLocalMetaDataFailed))
+	assert.Contains(t, err.Error(), "record shim intent")
+	assert.Zero(t, newTaskCalls, "a shim must not be spawned when the intent never became durable")
+	assert.Equal(t, 1, mgr.saveCalls)
+}
+
+func TestWithdrawShimIntentKeepsRecordWhenBundlePidIsUnreadable(t *testing.T) {
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, 4242)
+	withShimBundles(t, bundle)
+	previous := readBundleProcessIdentity
+	readBundleProcessIdentity = func(int) (utils.ProcessIdentity, error) {
+		return utils.ProcessIdentity{}, errors.New("stat unreadable")
+	}
+	t.Cleanup(func() { readBundleProcessIdentity = previous })
+
+	spawnedAt := time.Now()
+	sb := newCubeboxWithStatusForTest("sb-unreadable", cubeboxstore.Status{StartedAt: 1})
+	sb.Endpoint = sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: spawnedAt}
+	mgr := &fakeCubeboxAPI{cb: sb}
+
+	(&local{cubeboxManger: mgr}).withdrawShimIntent(context.Background(), sb, sb.FirstContainer())
+
+	assert.True(t, sb.Endpoint.ShimSpawned, "an unreadable pid is not proof the shim is gone")
+	assert.True(t, spawnedAt.Equal(sb.Endpoint.ShimSpawnedAt))
+	assert.Zero(t, mgr.saveCalls, "keeping the intent must not rewrite the record")
+}
+
+func TestPersistCreateResult(t *testing.T) {
+	prior := errors.New("run container failed")
+	saveErr := errors.New("disk full")
+
+	assert.NoError(t, persistCreateResult("sb", nil, nil))
+	assert.ErrorIs(t, persistCreateResult("sb", prior, nil), prior)
+	assert.ErrorIs(t, persistCreateResult("sb", prior, saveErr), prior,
+		"a save failure must not hide the error that already failed the create")
+
+	err := persistCreateResult("sb-1", nil, saveErr)
+	require.Error(t, err)
+	assert.True(t, ret.IsErrorCode(err, errorcode.ErrorCode_UpdateLocalMetaDataFailed))
+	assert.Contains(t, err.Error(), "persist sandbox sb-1")
+	assert.Contains(t, err.Error(), "disk full")
+}
+
+// A missing guest artifact is a precondition the client can act on, so the
+// stable identifier inside CBRI's message must survive. Every other CBRI code
+// keeps the endpoint's historical generic 400 instead of leaking through.
+func TestCBRIcreateErrorKeepsOnlyThePrecondition(t *testing.T) {
+	precondition := ret.Err(errorcode.ErrorCode_PreConditionFailed,
+		"snapshot_filesystem_only_guest_runtime_mismatch: cube-agent/v2")
+	got := cbriCreateError(precondition)
+	if !ret.IsErrorCode(got, errorcode.ErrorCode_PreConditionFailed) {
+		t.Fatalf("precondition was rewritten to %v, want it preserved", got)
+	}
+	if !strings.Contains(got.Error(), "snapshot_filesystem_only_guest_runtime_mismatch") {
+		t.Fatalf("stable identifier lost: %v", got)
+	}
+
+	snapshotMissing := ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
+	got = cbriCreateError(snapshotMissing)
+	if !ret.IsErrorCode(got, errorcode.ErrorCode_InvalidParamFormat) {
+		t.Fatalf("unmapped CBRI code %v must keep the historical 400", got)
+	}
+
+	got = cbriCreateError(errors.New("boom"))
+	if !ret.IsErrorCode(got, errorcode.ErrorCode_InvalidParamFormat) {
+		t.Fatalf("plain error must keep the historical 400, got %v", got)
+	}
+}
+
+func TestHostDirRootfsMounts(t *testing.T) {
+	t.Parallel()
+
+	const shareDir = "/data/cubelet/hostdir/sandbox/rw"
+	storageInfo := &storage.StorageInfo{
+		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"writable": {VolumeName: "writable", ShareDir: shareDir, BindPath: shareDir + "/writable"},
+			"readonly": {VolumeName: "readonly", ShareDir: shareDir, BindPath: shareDir + "/readonly", ReadOnly: true},
+		},
+	}
+	containerReq := &cubebox.ContainerConfig{VolumeMounts: []*cubebox.VolumeMounts{
+		{Name: "writable", ContainerPath: "/mnt/rw"},
+		{Name: "readonly", ContainerPath: "/mnt/ro", Readonly: true},
+	}}
+
+	tests := []struct {
+		name      string
+		flowOpts  *workflow.CreateContext
+		container *cubebox.ContainerConfig
+		want      []virtiofs.CubeRootfsMount
+	}{
+		{
+			name:      "no workflow context",
+			container: containerReq,
+		},
+		{
+			name:      "no storage info",
+			flowOpts:  &workflow.CreateContext{},
+			container: containerReq,
+		},
+		{
+			name: "memory restore reconnects to the running container",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo: &cubebox.RunCubeSandboxRequest{
+					InstanceType: cubebox.InstanceType_cubebox.String(),
+					Annotations: map[string]string{
+						constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
+					},
+				},
+				StorageInfo: storageInfo,
+			},
+			container: containerReq,
+		},
+		{
+			name: "template build has its mounts cleared by the shim",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo: &cubebox.RunCubeSandboxRequest{
+					InstanceType: cubebox.InstanceType_cubebox.String(),
+					Annotations: map[string]string{
+						constants.MasterAnnotationAppSnapshotTemplateID: "tpl-1",
+						constants.MasterAnnotationsAppSnapshotCreate:    "true",
+					},
+				},
+				StorageInfo: storageInfo,
+			},
+			container: containerReq,
+		},
+		{
+			name: "cold boot binds the volumes into the new container",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo:     &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}},
+				StorageInfo: storageInfo,
+			},
+			container: containerReq,
+			want: []virtiofs.CubeRootfsMount{
+				{
+					VirtiofsID:     constants.PropagationVirtioRo,
+					VirtiofsSource: "readonly",
+					ContainerDest:  "/mnt/ro",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO, constants.MountOptReadOnly},
+				},
+				{
+					VirtiofsID:     constants.PropagationVirtioRw,
+					VirtiofsSource: "writable",
+					ContainerDest:  "/mnt/rw",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO},
+				},
+			},
+		},
+		{
+			name: "restart cold boots the same way",
+			flowOpts: &workflow.CreateContext{
+				ReqInfo:     &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}},
+				StorageInfo: storageInfo,
+				IsRestart:   true,
+			},
+			container: containerReq,
+			want: []virtiofs.CubeRootfsMount{
+				{
+					VirtiofsID:     constants.PropagationVirtioRo,
+					VirtiofsSource: "readonly",
+					ContainerDest:  "/mnt/ro",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO, constants.MountOptReadOnly},
+				},
+				{
+					VirtiofsID:     constants.PropagationVirtioRw,
+					VirtiofsSource: "writable",
+					ContainerDest:  "/mnt/rw",
+					Type:           constants.MountTypeBind,
+					Options:        []string{constants.MountOptBindRO},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mounts, err := hostDirRootfsMounts(context.Background(), tt.flowOpts, tt.container)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, mounts)
+		})
+	}
+}
+
+func TestHostDirRootfsMountsFailsOnAnUnusableBackend(t *testing.T) {
+	t.Parallel()
+
+	flowOpts := &workflow.CreateContext{
+		ReqInfo: &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{}},
+		StorageInfo: &storage.StorageInfo{HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"outside": {VolumeName: "outside", ShareDir: "/share", BindPath: "/elsewhere/outside"},
+		}},
+	}
+	mounts, err := hostDirRootfsMounts(context.Background(), flowOpts, &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{{Name: "outside", ContainerPath: "/mnt/outside"}},
+	})
+	require.ErrorContains(t, err, "unusable bind path")
+	require.Nil(t, mounts)
 }

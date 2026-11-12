@@ -4,10 +4,20 @@
 # Holds a plaintext secret: keep it root-owned and chmod 600.
 
 # Access key pair with read/write permission on BUCKET.
+# Optional when every volume passes a cred_ref in private_data; a volume that
+# uses neither these keys nor a credential reference fails with a clear error.
 ACCESS_KEY_ID=<your-access-key-id>
 SECRET_ACCESS_KEY=<your-secret-access-key>
 
-# Bucket that holds every volume, one prefix per volume: volumes/<volume_id>/
+# Optional. Where credentials come from: static (default) uses the keys above;
+# instance_role uses the EC2 instance role through IMDS instead. With
+# instance_role, remove both keys and use an AWS ENDPOINT (*.amazonaws.com).
+# CREDENTIALS=instance_role
+
+# Legacy/default bucket. Volumes created without private_data live here, one
+# prefix per volume: volumes/<volume_id>/. Also the fallback bucket for a
+# private_data descriptor that omits "bucket".
+# Optional in a dynamic-only deployment; dynamic buckets must already exist.
 BUCKET=my-cube-volumes
 
 # Required. The S3-compatible endpoint URL of your storage provider:
@@ -25,6 +35,39 @@ ENDPOINT=https://<your-s3-endpoint>
 # Quote the value so bash `source` keeps multiple options as one assignment.
 # MinIO (and bucket names containing dots) usually need path-style addressing:
 # S3FS_EXTRA_OPTS='-ouse_path_request_style'
+
+# Optional. auto (default), path or virtual. The control-plane client and s3fs
+# use the same mode. Without it, a path-style flag in S3FS_EXTRA_OPTS implies
+# path. An explicit mode, including auto, cannot be combined with that flag in
+# the same file. A reference can override ADDRESSING_STYLE, but mount
+# options are configured only here; S3FS_EXTRA_OPTS in a reference is rejected.
+# ADDRESSING_STYLE=auto
+
+# Dynamic volumes: credential reference files live here, one per cred_ref:
+#   <CREDENTIALS_DIR>/<cred_ref>.conf
+# Keep the directory and files root-owned, mode 0600. Each file contains:
+#   ACCESS_KEY_ID=...
+#   SECRET_ACCESS_KEY=...
+#   ENDPOINT=...            # optional, defaults to ENDPOINT above
+#   REGION=...              # optional, defaults to REGION above
+#   ADDRESSING_STYLE=path   # optional: auto, path or virtual; see above
+# The same files must exist on every CubeMaster and Cubelet host.
+# CREDENTIALS_DIR=/etc/cube/s3-credentials
+# Or set CUBE_S3_CREDENTIALS_DIR in the service environment.
+
+# Dynamic volumes require a pre-existing bucket and an empty prefix. Existing
+# data is not adopted because CubeMaster may call Destroy(B) to roll back a
+# failed create. The platform must authorize cred_ref/bucket/prefix, assign
+# unique non-overlapping prefixes, serialize conflicting creates, and delay
+# prefix reuse until Destroy completes. The plugin does not provide distributed
+# coordination or a delete fence. Legacy volumes keep using the global keys.
+
+# Dynamic volumes get their own s3fs passwd file named
+# .passwd-s3fs-dynamic-<volume_id> in this directory. The name differs from
+# the legacy per-bucket file so the two can never collide. Keep it outside the
+# mounted tree and root-owned, mode 0600. Default /etc/cube;
+# CUBE_S3_PASSWD_DIR overrides it.
+# PASSWD_DIR=/etc/cube
 
 # FUSE mount base is passed by Cubelet on attach (--volume-base-dir,
 # default /data/cube-shared/volume). host_path must be under it, e.g.

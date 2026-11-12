@@ -17,6 +17,7 @@
   "fields": {
     "templateID": "模板 ID",
     "alias": "别名",
+    "backend": "存储后端",
     "status": "状态",
     "instanceType": "实例类型",
     "version": "版本",
@@ -67,6 +68,7 @@
   },
   "building": "模板正在构建中，请稍后刷新。",
   "buildFailed": "模板构建失败。",
+  "buildFailedDeleteHint": "该模板构建失败，无法查看详情，但你可以将其删除。",
   "network": {
     "allowed": "允许",
     "blocked": "禁止"
@@ -100,5 +102,10 @@
   "createdAt": "创建于",
   "imageCopied": "镜像地址已复制",
   "exposedPorts": "暴露端口",
-  "probePath": "探针路径和端口"
+  "probePath": "探针路径和端口",
+  "errors": {
+    "templateInUse": "该模板当前有沙箱实例正在使用，请先销毁所有关联沙箱后再删除。",
+    "buildInProgress": "模板正在构建中，请等待构建完成后再删除。",
+    "cleanupMissing": "模板清理信息不完整，无法自动删除，请联系管理员。"
+  }
 }
