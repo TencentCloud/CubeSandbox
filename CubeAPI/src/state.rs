@@ -14,8 +14,18 @@ use std::sync::Arc;
 /// on every request, so real data must live behind Arc.
 #[derive(Clone)]
 pub struct AppState {
-    /// Per-API-key rate limiter (token bucket).
+    /// Per-API-key rate limiter (token bucket) shared by all request classes.
+    /// Used as fallback for classes without a dedicated limiter.
     pub rate_limiter: Arc<DefaultKeyedRateLimiter<String>>,
+
+    /// Optional per-API-key rate limiter for read requests (GET/HEAD).
+    /// When `None`, read requests fall back to `rate_limiter`.
+    pub read_rate_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+
+    /// Optional per-API-key rate limiter for write requests
+    /// (POST/PUT/PATCH/DELETE). When `None`, write requests fall back to
+    /// `rate_limiter`.
+    pub write_rate_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
 
     /// Shared reqwest connection pool.
     pub http_client: reqwest::Client,
@@ -36,8 +46,9 @@ impl AppState {
     /// The `logger` is built externally (in `main.rs`) because `FileLogger::new`
     /// is async and requires the Tokio runtime to be running.
     pub async fn new(config: crate::config::ServerConfig, logger: ArcLogger) -> Self {
-        let quota = Quota::per_second(NonZeroU32::new(config.rate_limit_per_sec.max(1)).unwrap());
-        let rate_limiter = Arc::new(RateLimiter::keyed(quota));
+        let rate_limiter = keyed_rate_limiter(config.rate_limit_per_sec);
+        let read_rate_limiter = config.rate_limit_read_per_sec.map(keyed_rate_limiter);
+        let write_rate_limiter = config.rate_limit_write_per_sec.map(keyed_rate_limiter);
 
         let http_client = reqwest::Client::builder()
             .pool_max_idle_per_host(100)
@@ -50,10 +61,19 @@ impl AppState {
 
         Self {
             rate_limiter,
+            read_rate_limiter,
+            write_rate_limiter,
             http_client,
             services,
             logger,
             config: Arc::new(config),
         }
     }
+}
+
+/// Build a per-second keyed token bucket; values below 1 clamp to 1 so the
+/// quota is always valid.
+fn keyed_rate_limiter(per_sec: u32) -> Arc<DefaultKeyedRateLimiter<String>> {
+    let quota = Quota::per_second(NonZeroU32::new(per_sec.max(1)).unwrap());
+    Arc::new(RateLimiter::keyed(quota))
 }

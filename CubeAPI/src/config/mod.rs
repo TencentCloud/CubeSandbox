@@ -22,6 +22,18 @@ pub struct ServerConfig {
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_sec: u32,
 
+    /// Optional rate limit for read requests (GET/HEAD): max requests per
+    /// second per API key. Env var: RATE_LIMIT_READ_PER_SEC.
+    /// When unset, read requests use `rate_limit_per_sec`.
+    #[serde(default)]
+    pub rate_limit_read_per_sec: Option<u32>,
+
+    /// Optional rate limit for write requests (POST/PUT/PATCH/DELETE): max
+    /// requests per second per API key. Env var: RATE_LIMIT_WRITE_PER_SEC.
+    /// When unset, write requests use `rate_limit_per_sec`.
+    #[serde(default)]
+    pub rate_limit_write_per_sec: Option<u32>,
+
     /// CubeMaster base URL, e.g. "http://10.0.0.1:8080". Env var: CUBE_MASTER_ADDR (default "http://127.0.0.1:8089")
     #[serde(default = "default_cubemaster_url")]
     pub cubemaster_url: String,
@@ -128,6 +140,8 @@ impl Default for ServerConfig {
             log_level: default_log_level(),
             worker_threads: default_worker_threads(),
             rate_limit_per_sec: default_rate_limit(),
+            rate_limit_read_per_sec: None,
+            rate_limit_write_per_sec: None,
             cubemaster_url: default_cubemaster_url(),
             instance_type: default_instance_type(),
             sandbox_domain: default_sandbox_domain(),
