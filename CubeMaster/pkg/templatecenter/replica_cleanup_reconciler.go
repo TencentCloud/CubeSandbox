@@ -93,17 +93,12 @@ func reconcileOrphanReplicaCleanups(ctx context.Context) error {
 	logger.Warnf("found %d orphan replica cleanup(s) left by earlier deletes; retrying cubelet cleanup", len(rows))
 
 	for _, row := range rows {
-		locator := templateCleanupLocator{
-			NodeID:            row.NodeID,
-			NodeIP:            row.NodeIP,
-			TemplateVariantID: row.TemplateVariantID,
-		}
 		// Re-resolve the address from the live node cache: the stored IP may
 		// predate a re-deployment, while the node id is the stable identity.
-		if row.NodeID != "" {
-			if n, ok := localcache.GetNode(row.NodeID); ok && n != nil && n.HostIP() != "" {
-				locator.NodeIP = n.HostIP()
-			}
+		locator := templateCleanupLocator{
+			NodeID:            row.NodeID,
+			NodeIP:            localcache.ResolveNodeIP(row.NodeID, row.NodeIP),
+			TemplateVariantID: row.TemplateVariantID,
 		}
 		// Backend hint is empty: the definition row (which carried it) is
 		// gone by construction, and cubelet derives the physical layout from

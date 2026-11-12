@@ -575,3 +575,36 @@ func TestReclaimTimedOutSnapshotRecordNoJob(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusDeleted, snapFields["status"])
 }
+
+// TestRefreshSnapshotStorageStateDialsCurrentNodeIP verifies that the storage
+// metrics refresh dials the node's current registered address, not the IP
+// recorded before its cube-node pod was recreated.
+func TestRefreshSnapshotStorageStateDialsCurrentNodeIP(t *testing.T) {
+	resetSnapshotStorageCachesForTest(t)
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(localcache.GetNode, func(id string) (*node.Node, bool) {
+		if id == "node-1" {
+			return &node.Node{InsID: "node-1", IP: "10.0.0.44"}, true
+		}
+		return nil, false
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
+	var dialed []string
+	patches.ApplyFunc(cubelet.GetStorageMetrics, func(ctx context.Context, addr string,
+		req *cubeboxv1.GetStorageMetricsRequest) (*cubeboxv1.GetStorageMetricsResponse, error) {
+		dialed = append(dialed, addr)
+		return &cubeboxv1.GetStorageMetricsResponse{
+			Ret:     &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+			NodeId:  "node-1",
+			Metrics: healthyMetrics(),
+		}, nil
+	})
+
+	if _, err := refreshSingleSnapshotStorageState(context.Background(), "node-1", "10.0.0.43"); err != nil {
+		t.Fatalf("refreshSingleSnapshotStorageState: %v", err)
+	}
+	require.Equal(t, []string{"10.0.0.44"}, dialed)
+}

@@ -301,7 +301,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 		}
 		for _, model := range replicas {
 			replica := replicaModelToStatus(model)
-			hostIP := resolveNodeIP(replica.NodeID, replica.NodeIP)
+			hostIP := localcache.ResolveNodeIP(replica.NodeID, replica.NodeIP)
 			if hostIP == "" {
 				err := fmt.Errorf("snapshot %s replica on node %s has no reachable node address", rec.SnapshotID, firstNonEmpty(replica.NodeID, replica.NodeIP))
 				reconcileErr = errors.Join(reconcileErr, err)
@@ -453,7 +453,7 @@ func refreshSnapshotStorageMetrics(ctx context.Context) error {
 }
 
 func refreshSingleSnapshotStorageState(ctx context.Context, nodeID, nodeIP string) (snapshotStorageState, error) {
-	hostIP := resolveNodeIP(nodeID, nodeIP)
+	hostIP := localcache.ResolveNodeIP(nodeID, nodeIP)
 	if hostIP == "" {
 		return snapshotStorageState{}, fmt.Errorf("missing node address")
 	}
@@ -557,19 +557,6 @@ func derivedUsagePct(metrics map[string]uint64) uint64 {
 		used = total
 	}
 	return used * 100 / total
-}
-
-func resolveNodeIP(nodeID, nodeIP string) string {
-	if strings.TrimSpace(nodeIP) != "" {
-		return strings.TrimSpace(nodeIP)
-	}
-	if strings.TrimSpace(nodeID) == "" {
-		return ""
-	}
-	if node, ok := localcache.GetNode(nodeID); ok && node != nil {
-		return strings.TrimSpace(node.HostIP())
-	}
-	return ""
 }
 
 func firstNonEmpty(values ...string) string {
