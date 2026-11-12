@@ -41,7 +41,7 @@ For the full runtime layout (shim + guest image + agent.ext4 + kernel), use `./b
 
 - Build / deployment host: Linux is recommended. macOS is supported for the Tencent Cloud Terraform deployer (`terraform/tencentcloud/create.sh` and `destroy.sh`), including the default macOS Bash 3.2 environment.
 - Windows: native `cmd.exe` / PowerShell execution is not supported. Use WSL2 (Ubuntu or another Linux distribution) when running the shell scripts from Windows.
-- Target machines: the one-click runtime expects Linux with systemd and Docker/containerd support. The Tencent Cloud Terraform deployer creates Linux CVMs/TKE resources and configures them through SSH.
+- Target machines: the one-click runtime expects Linux with systemd and Docker/containerd support. The Tencent Cloud Terraform deployer creates Linux CVMs/TKE resources and configures them through SSH. The cube-egress-net bounded wait and its init-failure retries live inside the start wrapper, so no systemd version constraint is introduced (units must not set `Restart=` on `Type=oneshot`: systemd < 244, e.g. RHEL/CentOS/OpenCloudOS 8, refuses such units at load time).
 
 ## Build Inputs
 
