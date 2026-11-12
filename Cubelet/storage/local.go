@@ -1580,7 +1580,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
 	}
 	if workflow.RetainFor(opts).Storage {
-		// Repair the retained rootfs before the next cold boot.
+		// The guest crashed without unmounting. Repair the retained ext4 and
+		// confirm it is clean before the next cold boot; a torn directory
+		// entry fails the guest before it can listen.
 		return l.repairRetainedRootfs(ctx, opts.SandboxID)
 	}
 	log.G(ctx).Debugf("Destroy doing")

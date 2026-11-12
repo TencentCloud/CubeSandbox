@@ -27,8 +27,9 @@ import (
 
 // maxRetainedDestroyAttempts bounds host-side cleanup retries after a
 // restart destroy fails. Uncorrected ext4 errors (exit bit 4) and disks
-// still dirty after three fsck passes stop immediately; operational fsck
-// failures still use this counter.
+// still dirty after three fsck passes stop immediately. Operational
+// e2fsck failures, including exit 8 and a per-pass timeout, use this
+// counter.
 const maxRetainedDestroyAttempts int32 = 3
 
 type restartClass int

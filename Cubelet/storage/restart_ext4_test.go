@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,6 +255,30 @@ func TestRepairExt4AfterCrashStopsWhenContextCanceled(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("passes = %d, want 1", n)
+	}
+}
+
+func TestRepairExt4AfterCrashPerPassTimeoutIsDeadlineExceeded(t *testing.T) {
+	path := writeFakeExt4(t)
+	prev := restartExt4RepairTimeout
+	restartExt4RepairTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { restartExt4RepairTimeout = prev })
+
+	restore := stubExt4Fsck(t, func(passCtx context.Context, argv []string) (string, string, error) {
+		<-passCtx.Done()
+		return "", "killed", exitStatus(-1)
+	})
+	defer restore()
+
+	err := repairExt4AfterCrash(context.Background(), path)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want DeadlineExceeded", err)
+	}
+	if errors.Is(err, ErrExt4RepairUnrecoverable) {
+		t.Fatal("per-pass timeout must stay retryable")
+	}
+	if strings.Contains(err.Error(), "exit -1") {
+		t.Fatalf("timeout reported as an fsck exit code: %v", err)
 	}
 }
 

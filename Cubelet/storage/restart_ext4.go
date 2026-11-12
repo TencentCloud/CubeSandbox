@@ -19,11 +19,13 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
-// ErrExt4RepairUnrecoverable stops the restart. Another pass will not fix the disk.
+// ErrExt4RepairUnrecoverable stops the restart: e2fsck left errors on the
+// disk (exit bit 4), or ext4RepairMaxPasses did not reach a clean result.
 var ErrExt4RepairUnrecoverable = errors.New("ext4 repair unrecoverable")
 
 // Per-pass cap when the caller context has no tighter deadline.
-const restartExt4RepairTimeout = 60 * time.Second
+// Tests shorten this.
+var restartExt4RepairTimeout = 60 * time.Second
 
 // Recheck until the disk is clean, then boot.
 const ext4RepairMaxPasses = 3
@@ -70,7 +72,8 @@ func (l *local) repairRetainedRootfs(ctx context.Context, sandboxID string) erro
 	return repaired
 }
 
-// The one rootfs disk a restart may fsck.
+// Cubecow rootfs is only sb-<sandboxID>-rootfs-genN. A node that does not
+// use cubecow still has a default-medium ext4 with no volume name.
 func retainedRootfsTargets(sandboxID string, vols map[string]*BackendFileInfo) ([]*BackendFileInfo, error) {
 	prefix := fmt.Sprintf("sb-%s-rootfs-gen", sandboxID)
 	var cow []*BackendFileInfo
@@ -96,7 +99,7 @@ func retainedRootfsTargets(sandboxID string, vols map[string]*BackendFileInfo) (
 	return plain, nil
 }
 
-// Exit 1 or 2 changed the disk and may be followed by another check.
+// Exit 1, 2, or 3 (1|2) changed the disk and needs another check.
 func ext4RepairAccepted(exitCode int) bool {
 	if exitCode <= 0 || ext4RepairUnrecoverable(exitCode) {
 		return false
@@ -105,6 +108,9 @@ func ext4RepairAccepted(exitCode int) bool {
 		exitCode&^(ext4ExitCorrected|ext4ExitReboot) == 0
 }
 
+// e2fsck runs under the caller context. A destroy deadline or a sibling
+// step cancels it with SIGKILL; that attempt stays retryable and the next
+// destroy runs e2fsck -fy again.
 func repairExt4AfterCrash(ctx context.Context, path string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -128,18 +134,24 @@ func repairExt4AfterCrash(ctx context.Context, path string) error {
 		}
 		passCtx, cancel := context.WithTimeout(ctx, restartExt4RepairTimeout)
 		stdout, stderr, err := runExt4Fsck(passCtx, []string{"e2fsck", "-fy", path})
+		passErr := passCtx.Err()
 		cancel()
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, ctxErr, trimFsckOutput(stdout), trimFsckOutput(stderr))
+		}
+		if passErr != nil {
+			return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, passErr, trimFsckOutput(stdout), trimFsckOutput(stderr))
 		}
 		code, ok := ext4FsckExitCode(err)
 		if !ok {
 			return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, err, trimFsckOutput(stdout), trimFsckOutput(stderr))
 		}
-		log.G(ctx).Warnf("restart repair ext4 %s pass %d/%d exit %d: %s", path, pass, ext4RepairMaxPasses, code, trimFsckOutput(stdout))
+		line := fmt.Sprintf("restart repair ext4 %s pass %d/%d exit %d: %s", path, pass, ext4RepairMaxPasses, code, trimFsckOutput(stdout))
 		if code == 0 {
+			log.G(ctx).Infof("%s", line)
 			return nil
 		}
+		log.G(ctx).Warnf("%s", line)
 		lastCode, lastOut, lastErr = code, stdout, stderr
 		if ext4RepairUnrecoverable(code) {
 			return fmt.Errorf("%w: e2fsck %s exit %d stdout=%s stderr=%s", ErrExt4RepairUnrecoverable, path, code, trimFsckOutput(stdout), trimFsckOutput(stderr))
@@ -176,7 +188,8 @@ func ext4RepairUnrecoverable(exitCode int) bool {
 	return exitCode > 0 && exitCode&ext4ExitLeftDirty != 0
 }
 
-// Skip anything that is not ext4.
+// hasExt4Superblock reads the little-endian magic at offset 0x438.
+// A non-ext4 retained disk must not be passed to e2fsck -fy.
 func hasExt4Superblock(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
