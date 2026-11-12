@@ -77,6 +77,17 @@ func TestManagedArtifactDir(t *testing.T) {
 	if managedArtifactDir(root) {
 		t.Fatalf("expected root %q recognized as NOT managed (RemoveAll would wipe the whole store)", root)
 	}
+
+	// A directory under the root that symlinks elsewhere is NOT managed: the
+	// lexical path looks fine, but any unlink through it hits the target.
+	outsideDir := t.TempDir()
+	link := filepath.Join(root, "rfs-symlink")
+	if err := os.Symlink(outsideDir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if managedArtifactDir(link) {
+		t.Fatalf("expected symlink %q -> %q recognized as NOT managed", link, outsideDir)
+	}
 }
 
 func TestDeleterEmptyArtifactID(t *testing.T) {
