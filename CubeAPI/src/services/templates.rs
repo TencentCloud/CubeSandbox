@@ -11,13 +11,14 @@ use crate::{
         CreateTemplateFromImageReq, CreateTemplateResources, CubeMasterClient, CubeMasterError,
         CubeQosConfig, DnsConfig, HttpGetAction, Probe, ProbeHandler, RedoTemplateReq,
         TemplateCompatAdoptRequest, TemplateDeleteRequest, TemplateInt64Value, TemplateJob,
-        TemplateJobResponse, TemplateSecurityContext,
+        TemplateJobResponse, TemplateLifecycleCommands, TemplateSecurityContext,
     },
     error::{AppError, AppResult},
     models::{
         CreateTemplateRequest, RebuildTemplateRequest, TemplateAliasLookupResponse,
         TemplateBuildJob, TemplateBuildStatus, TemplateCompatMatrixView, TemplateCompatRowView,
-        TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
+        TemplateCompatSummaryView, TemplateDetail, TemplateLifecycle, TemplateLifecycleHook,
+        TemplateNodeCompatView, TemplateSummary,
     },
 };
 
@@ -140,6 +141,7 @@ impl TemplateService {
         let cube_network_config = build_template_cube_network_config(&body)?;
         let alias = template_alias_from_request(&body);
         let qos = build_template_qos(&body)?;
+        let lifecycle = build_template_lifecycle(body.lifecycle.as_ref())?;
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -164,6 +166,7 @@ impl TemplateService {
             qos,
             with_cube_ca: body.with_cube_ca,
             backend: non_empty_option(body.backend),
+            lifecycle,
         };
 
         let resp = self
@@ -647,6 +650,42 @@ fn build_template_container_overrides(
     }))
 }
 
+fn build_template_lifecycle(
+    lifecycle: Option<&TemplateLifecycle>,
+) -> AppResult<Option<TemplateLifecycleCommands>> {
+    let Some(lifecycle) = lifecycle else {
+        return Ok(None);
+    };
+    let post_start = template_hook_command("postStart", lifecycle.post_start.as_ref())?;
+    let pre_stop = template_hook_command("preStop", lifecycle.pre_stop.as_ref())?;
+    Ok(
+        (post_start.is_some() || pre_stop.is_some()).then_some(TemplateLifecycleCommands {
+            post_start,
+            pre_stop,
+        }),
+    )
+}
+
+fn template_hook_command(
+    name: &str,
+    hook: Option<&TemplateLifecycleHook>,
+) -> AppResult<Option<Vec<String>>> {
+    let Some(hook) = hook else {
+        return Ok(None);
+    };
+    let command = &hook.exec.command;
+    if command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+        || command.iter().any(|arg| arg.contains('\0'))
+    {
+        return Err(AppError::BadRequest(format!(
+            "lifecycle.{name}.exec.command requires a non-blank executable and NUL-free arguments"
+        )));
+    }
+    Ok(Some(command.clone()))
+}
+
 fn parse_template_user(spec: &str) -> AppResult<TemplateSecurityContext> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -839,6 +878,7 @@ mod tests {
             registry_password: Some("pass".to_string()),
             command: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
             args: Some(vec!["sleep infinity".to_string()]),
+            lifecycle: None,
             dns: Some(vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()]),
             allow_out: Some(vec!["172.67.0.0/16".to_string()]),
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
@@ -872,6 +912,36 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("filesystem-qos")
         );
+    }
+
+    #[test]
+    fn build_template_lifecycle_validates_and_forwards_argv() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "nginx",
+            "lifecycle": {
+                "postStart": {"exec": {"command": ["/bin/init", ""]}},
+                "preStop": {"exec": {"command": ["/bin/flush"]}}
+            }
+        }))
+        .unwrap();
+        let wire = build_template_lifecycle(req.lifecycle.as_ref()).unwrap();
+        assert_eq!(
+            serde_json::to_value(wire).unwrap(),
+            serde_json::json!({"post_start": ["/bin/init", ""], "pre_stop": ["/bin/flush"]})
+        );
+
+        for command in [vec![], vec![" "], vec!["/bin/init", "bad\0arg"]] {
+            let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+                "image": "nginx",
+                "lifecycle": {"postStart": {"exec": {"command": command}}}
+            }))
+            .unwrap();
+            assert!(matches!(
+                build_template_lifecycle(req.lifecycle.as_ref()),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        assert!(build_template_lifecycle(None).unwrap().is_none());
     }
 
     #[test]

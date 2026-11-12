@@ -600,6 +600,7 @@ func checkAndGetContainers(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 			},
 			Sysctls:     cnt.Sysctls,
 			Annotations: map[string]string{},
+			Lifecycle:   cnt.Lifecycle,
 		}
 		if err := checkAndGetImageSpec(c, cnt); err != nil {
 			return err

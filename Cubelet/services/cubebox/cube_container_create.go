@@ -462,6 +462,9 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			if err != nil {
 				return fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
 			}
+			if err := runTemplatePostStart(param.ctxTmp, flowOpts, param.ci); err != nil {
+				return err
+			}
 			if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
 				return err
 			}

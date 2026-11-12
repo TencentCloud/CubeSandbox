@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func unmarshalTemplateImageJobRequest(payload string) (*types.CreateTemplateFromImageReq, error) {
@@ -71,6 +72,10 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
+
+		// Artifact metadata also stores the generated create request used by
+		// replica backfill, so templates with different hooks cannot share it.
+		Lifecycle *cubeboxv1.TemplateLifecycleCommands `json:"lifecycle,omitempty"`
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
 		SourceImageDigest:       sourceImageDigest,
@@ -81,6 +86,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ContainerOverrides:      req.ContainerOverrides,
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 		EnvdBinarySHA256:        envdSHA,
+		Lifecycle:               req.Lifecycle,
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])

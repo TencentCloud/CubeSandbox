@@ -63,6 +63,30 @@ cubemastercli tpl create-from-image \
 
 The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
 
+### Configure container lifecycle hooks
+
+Use the optional `lifecycle` field in the CubeAPI `POST /templates` request to run commands when a sandbox starts or is gracefully deleted. You can configure either hook or both. In each `exec.command` array, the first element is an executable available in the image and the remaining elements are its arguments. The command runs as the container user.
+
+```json
+{
+  "image": "registry.example.com/my-app:latest",
+  "writableLayerSize": "1G",
+  "lifecycle": {
+    "postStart": {
+      "exec": { "command": ["/usr/local/bin/init-workspace"] }
+    },
+    "preStop": {
+      "exec": { "command": ["/usr/local/bin/flush-workspace"] }
+    }
+  }
+}
+```
+
+- `postStart` runs in each new sandbox, including one created from a template snapshot, before it becomes ready. The command has up to 10 seconds to finish. A nonzero exit status or a timeout causes sandbox creation to fail and starts cleanup.
+- `preStop` runs during graceful deletion while the guest can still execute commands. The hook and the wait for the main process to exit after `SIGTERM` share up to 5 seconds. A shorter deletion deadline can reduce that time. Cubelet logs hook failures and timeouts and continues deletion. A deletion retry skips a hook that has already been attempted.
+
+The hooks are skipped during template snapshot builds and when an existing sandbox is paused or resumed. The `lifecycle.onTimeout` and `lifecycle.autoResume` fields in sandbox creation requests control idle behavior.
+
 ## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.

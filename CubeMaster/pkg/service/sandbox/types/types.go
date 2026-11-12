@@ -370,6 +370,8 @@ type Container struct {
 	Prestop     *PreStop          `json:"prestop,omitempty"`
 	Poststop    *PostStop         `json:"poststop,omitempty"`
 
+	Lifecycle *cubeboxv1.TemplateLifecycleCommands `json:"lifecycle,omitempty"`
+
 	Id    string `json:"id,omitempty"`
 	Hooks *Hooks `json:"hooks,omitempty"`
 }
@@ -729,6 +731,8 @@ type CreateTemplateFromImageReq struct {
 	Qos                *qos.Config         `json:"qos,omitempty"`
 	ContainerOverrides *ContainerOverrides `json:"container_overrides,omitempty"`
 	Wait               bool                `json:"wait,omitempty"`
+
+	Lifecycle *cubeboxv1.TemplateLifecycleCommands `json:"lifecycle,omitempty"`
 
 	// WithCubeCA controls whether CubeMaster bakes the host-side
 	// CubeEgress root CA into the template's rootfs. *bool gives a

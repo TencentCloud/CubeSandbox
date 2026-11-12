@@ -405,6 +405,36 @@ func TestBuildTemplateSpecFingerprintUsesExposedPorts(t *testing.T) {
 	}
 }
 
+func TestTemplateLifecycleCommandsReachStoredCreateRequest(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		TemplateID:        "tpl-hooks",
+		WritableLayerSize: "1Gi",
+	}
+	withoutHooks := buildTemplateSpecFingerprint(req, "sha256:image")
+	req.Lifecycle = &cubeboxv1.TemplateLifecycleCommands{
+		PostStart: []string{"/bin/init"},
+		PreStop:   []string{"/bin/flush"},
+	}
+	withHooks := buildTemplateSpecFingerprint(req, "sha256:image")
+	if withoutHooks == withHooks {
+		t.Fatal("artifact requests with different lifecycle commands must not share a fingerprint")
+	}
+	generated, err := generateTemplateCreateRequest(context.Background(), req, &models.RootfsArtifact{}, DockerImageConfig{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := normalizeStoredTemplateRequest(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := stored.Containers[0].Lifecycle
+	if !reflect.DeepEqual(hooks.GetPostStart(), req.Lifecycle.GetPostStart()) ||
+		!reflect.DeepEqual(hooks.GetPreStop(), req.Lifecycle.GetPreStop()) {
+		t.Fatalf("stored lifecycle commands = %v, want %v", hooks, req.Lifecycle)
+	}
+}
+
 func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
 	reqA := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},

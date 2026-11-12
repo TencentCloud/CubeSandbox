@@ -1689,6 +1689,11 @@ components:
           type:
           - string
           - 'null'
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TemplateLifecycle'
+            description: Commands run inside sandboxes created from this template.
         memory:
           type:
           - integer
@@ -2986,6 +2991,44 @@ components:
           type:
           - string
           - 'null'
+    TemplateLifecycle:
+      type: object
+      properties:
+        postStart:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TemplateLifecycleHook'
+            description: |-
+              Runs before a newly created sandbox becomes ready. Failure or timeout
+              aborts creation. The command has up to 10 seconds to finish.
+        preStop:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TemplateLifecycleHook'
+            description: |-
+              Runs during graceful deletion and shares up to 5 seconds with graceful
+              shutdown. Failures are logged and deletion continues.
+      additionalProperties: false
+    TemplateLifecycleExec:
+      type: object
+      required:
+      - command
+      properties:
+        command:
+          type: array
+          items:
+            type: string
+          description: Executable and arguments. No shell is added implicitly.
+          minItems: 1
+      additionalProperties: false
+    TemplateLifecycleHook:
+      type: object
+      required:
+      - exec
+      properties:
+        exec:
+          $ref: '#/components/schemas/TemplateLifecycleExec'
+      additionalProperties: false
     TemplateNodeCompatView:
       type: object
       required:

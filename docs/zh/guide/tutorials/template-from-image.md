@@ -63,6 +63,30 @@ cubemastercli tpl create-from-image \
 
 `POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
+### 配置容器生命周期钩子
+
+通过 CubeAPI 的 `POST /templates` 请求体中的可选字段 `lifecycle`，可以在沙箱启动或优雅删除时执行命令。可以只配置一个钩子，也可以同时配置两个。`exec.command` 数组的首项是镜像中可用的可执行程序，其余各项是传给该程序的参数。命令以容器用户身份运行。
+
+```json
+{
+  "image": "registry.example.com/my-app:latest",
+  "writableLayerSize": "1G",
+  "lifecycle": {
+    "postStart": {
+      "exec": { "command": ["/usr/local/bin/init-workspace"] }
+    },
+    "preStop": {
+      "exec": { "command": ["/usr/local/bin/flush-workspace"] }
+    }
+  }
+}
+```
+
+- `postStart` 在每个新沙箱就绪前执行，包括从模板快照创建的沙箱。命令最多运行 10 秒。如果命令返回非零退出码或超时，沙箱创建失败并开始清理。
+- `preStop` 在优雅删除期间、guest 仍可执行命令时运行。钩子执行和发送 `SIGTERM` 后等待主进程退出共用最多 5 秒。删除请求剩余时间较短时，这个时限也会缩短。Cubelet 会记录钩子的失败和超时，并继续删除。重试删除时会跳过已尝试执行的钩子。
+
+构建模板快照或暂停、恢复已有沙箱时会跳过这两个钩子。沙箱创建请求中的 `lifecycle.onTimeout` 和 `lifecycle.autoResume` 用于控制空闲时的行为。
+
 ## 第三步 — 监控进度
 
 有两种方式跟踪构建任务。
