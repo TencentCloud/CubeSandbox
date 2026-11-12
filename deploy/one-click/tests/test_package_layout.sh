@@ -387,8 +387,10 @@ test_env_templates_are_split() {
   if grep -E '^[[:space:]]*(#[[:space:]]*)?ONE_CLICK_[A-Z0-9_]+_BUILD_MODE=' "${env_example}" >/dev/null; then
     fail "env.example must not contain ONE_CLICK_*_BUILD_MODE keys"
   fi
-  if grep -E '^[[:space:]]*(#[[:space:]]*)?ONE_CLICK_[A-Z0-9_]+_BIN=' "${env_example}" >/dev/null; then
-    fail "env.example must not contain ONE_CLICK_*_BIN keys"
+  # logrotate is a host runtime dependency, not a component build input.
+  if grep -E '^[[:space:]]*(#[[:space:]]*)?ONE_CLICK_[A-Z0-9_]+_BIN=' "${env_example}" |
+      grep -vE '^[[:space:]]*(#[[:space:]]*)?ONE_CLICK_LOGROTATE_BIN=' >/dev/null; then
+    fail "env.example must not contain component ONE_CLICK_*_BIN keys"
   fi
 
   grep -q '^ONE_CLICK_CUBEMASTER_BUILD_MODE=' "${build_example}" \

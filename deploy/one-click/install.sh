@@ -1709,7 +1709,7 @@ remove_obsolete_templatecenter_unit() {
   systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
-# Ship CubeShim/VMM host logrotate (#1290). Keep this unconditional: the
+# Ship host logrotate policies. Keep this unconditional: the
 # default one-click machine is a control+compute node, and
 # cube-sandbox-control.target also starts cubelet, so control-role nodes can
 # write these logs too. Soft-fail: never block the role target.
@@ -1719,8 +1719,8 @@ install_cubeshim_logrotate() {
     log "WARN: logrotate installer missing (${install_script}); skipping"
     return 0
   fi
-  bash "${install_script}" \
-    || log "WARN: cube-shim/vmm log rotation was not installed; continuing without it"
+  ONE_CLICK_ENABLE_S3LVOL="${ONE_CLICK_ENABLE_S3LVOL}" bash "${install_script}" \
+    || log "WARN: host log rotation was not installed; continuing without it"
 }
 
 install_systemd_units() {

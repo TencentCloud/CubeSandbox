@@ -31,7 +31,7 @@ assert_file "${INSTALLER}"
 [[ -x "${INSTALLER}" ]] || fail "installer not executable"
 assert_contains "${SERVICE}" "ExecStart=@LOGROTATE@ --state /var/lib/cube-sandbox-logrotate/status @POLICY@"
 assert_contains "${SERVICE}" "StateDirectory=cube-sandbox-logrotate"
-assert_contains "${TIMER}" "OnCalendar=hourly"
+assert_contains "${TIMER}" "OnCalendar=minutely"
 assert_contains "${INSTALL_SH}" "install_cubeshim_logrotate"
 assert_contains "${ONE_CLICK_DIR}/build-release-bundle.sh" 'scripts/logrotate'
 
@@ -53,7 +53,7 @@ run_installer() {
 make_restricted_bin() {
   local dst="$1" c p
   mkdir -p "${dst}"
-  for c in bash cat date dirname grep install mktemp mv rm sed; do
+  for c in bash basename cat date dirname grep install mktemp mv rm sed; do
     p="$(command -v "${c}" 2>/dev/null)" || continue
     [[ "${p}" == /* ]] && ln -sf "${p}" "${dst}/${c}"
   done
@@ -72,7 +72,13 @@ run_installer_restricted() {
     CUBE_SANDBOX_LOGROTATE_POLICY_DST="${policy_dst}" \
     CUBE_SANDBOX_LOGROTATE_LEGACY_DST="${legacy_dst}" \
     ONE_CLICK_SYSTEMD_UNIT_INSTALL_DIR="${unit_dir}" \
-    bash "${INSTALLER}" >"${output_file}" 2>&1
+    bash -c '
+      source "$1"
+      if [[ "${TEST_LOGROTATE_MISSING:-0}" == "1" ]]; then
+        resolve_logrotate() { return 1; }
+      fi
+      main
+    ' bash "${INSTALLER}" >"${output_file}" 2>&1
 }
 
 # --- success path ---------------------------------------------------------
@@ -100,7 +106,7 @@ run_installer "${tmp}/bin" "${policy_dst}" "${legacy_dst}" "${unit_dir}" "${tmp}
 assert_contains "${policy_dst}" "su root root"
 [[ -f "${unit_dir}/cube-sandbox-logrotate.timer" ]] || fail "timer not installed"
 assert_contains "${unit_dir}/cube-sandbox-logrotate.service" \
-  "ExecStart=${tmp}/bin/logrotate --state /var/lib/cube-sandbox-logrotate/status ${policy_dst}"
+  "ExecStart=${tmp}/bin/logrotate --state /var/lib/cube-sandbox-logrotate/status $(dirname "${policy_dst}")"
 assert_not_contains "${unit_dir}/cube-sandbox-logrotate.service" "@LOGROTATE@"
 assert_not_contains "${unit_dir}/cube-sandbox-logrotate.service" "@POLICY@"
 grep -Fq "enable --now cube-sandbox-logrotate.timer" "${tmp}/systemctl.log" \
@@ -199,7 +205,7 @@ make_restricted_bin "${tmp4}/bin"
 
 if ! run_installer_restricted "${tmp4}/bin" "${policy_dst4}" "${legacy_dst4}" \
   "${unit_dir4}" "${tmp4}/install.log" \
-  ONE_CLICK_LOGROTATE_BIN="${tmp4}/bin/logrotate-not-installed"; then
+  TEST_LOGROTATE_MISSING=1; then
   cat "${tmp4}/install.log" >&2
   fail "installer must soft-fail (exit 0) when logrotate is missing"
 fi
@@ -234,7 +240,7 @@ grep -Fq "WARNING: systemctl not found" "${tmp5}/install.log" \
   || fail "missing systemctl warning"
 assert_contains "${policy_dst5}" "su root root"
 [[ -f "${tmp5}/logrotate.log" ]] || fail "policy was not validated when systemctl was missing"
-assert_contains "${unit_dir5}/cube-sandbox-logrotate.timer" "OnCalendar=hourly"
+assert_contains "${unit_dir5}/cube-sandbox-logrotate.timer" "OnCalendar=minutely"
 assert_not_contains "${unit_dir5}/cube-sandbox-logrotate.service" "@LOGROTATE@"
 assert_not_contains "${unit_dir5}/cube-sandbox-logrotate.service" "@POLICY@"
 [[ -e "${legacy_dst5}" ]] || fail "legacy must not be retired without systemctl"

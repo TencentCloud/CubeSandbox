@@ -248,6 +248,10 @@ if [ -s "${RCOW_LOG}" ]; then
 	mv "${RCOW_LOG}" "${OLD_LOG}" ||
 		rcow_die "could not move the previous log ${RCOW_LOG} to ${OLD_LOG}"
 	rcow_log "previous run's log moved to ${OLD_LOG}"
+	if [ -n "${RCOW_LOG_RESTART_RETAIN:-}" ]; then
+		"${SELF_DIR}/prune_restart_logs.py" "${RCOW_LOG}" "${RCOW_LOG_RESTART_RETAIN}" ||
+			rcow_log "WARNING: restart log retention failed; continuing startup"
+	fi
 fi
 
 : >>"${RCOW_LOG}" || rcow_die "cannot write ${RCOW_LOG}"
