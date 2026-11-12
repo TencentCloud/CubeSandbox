@@ -5,6 +5,7 @@
 package build
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -19,7 +20,9 @@ import (
 // not duplicated across call sites.
 //
 // Returns (nil, false) when S3 is not configured or the client cannot be
-// constructed — callers fall back to local-disk behavior in that case.
+// constructed. Absent or incomplete S3 credentials retain local-disk behavior.
+// Build rejects cached initialization errors from NewClient or AnnounceIfFS;
+// those failures do not fall back to local disk.
 func SharedS3Client() (*s3store.Client, bool) {
 	return sharedS3.instance()
 }
@@ -30,6 +33,7 @@ type s3ClientFactory struct {
 	once    sync.Once
 	client  *s3store.Client
 	enabled bool
+	initErr error
 }
 
 func (f *s3ClientFactory) instance() (*s3store.Client, bool) {
@@ -53,7 +57,8 @@ func (f *s3ClientFactory) init() {
 		FSRoot:         configenv.ResolveArtifactFSRoot(),
 	}
 	if err := blobstore.AnnounceIfFS(cfg.FSRoot, backend); err != nil {
-		slog.Error("storage backend consistency check failed", "error", err)
+		f.initErr = fmt.Errorf("configured artifact store (backend=%s) failed to open: %w", backend, err)
+		slog.Error("artifact store initialization failed; template builds will be rejected", "backend", backend, "error", err)
 		return
 	}
 	if backend != "fs" && !s3.Enabled {
@@ -64,13 +69,8 @@ func (f *s3ClientFactory) init() {
 	}
 	client, err := s3store.NewClient(cfg)
 	if err != nil {
-		if backend == "fs" {
-			slog.Error("fs artifact store failed to open", "error", err, "root", cfg.FSRoot)
-			return
-		}
-		slog.Warn("storage backend degraded",
-			"requested", "s3", "effective", "local-disk",
-			"reason", err.Error())
+		f.initErr = fmt.Errorf("configured artifact store (backend=%s) failed to open: %w", backend, err)
+		slog.Error("artifact store initialization failed; template builds will be rejected", "backend", backend, "error", err)
 		return
 	}
 	f.client = client
