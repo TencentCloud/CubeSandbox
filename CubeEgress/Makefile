@@ -1,4 +1,4 @@
-IMAGE_TAG              ?= v0.8.0-rc4
+IMAGE_TAG              ?= v0.8.0
 IMAGE_LOCAL            := cube-egress
 CUBE_VERSION           ?= $(IMAGE_TAG)
 CUBE_COMMIT            ?= $(shell git rev-parse HEAD | cut -c1-8)
