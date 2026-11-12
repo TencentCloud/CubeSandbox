@@ -121,4 +121,6 @@ assert_recreate_change_detected egress \
   --set cubeEgress.adminPort=9092
 assert_recreate_change_detected s3lvol \
   --set cubeS3lvol.enabled=true
+assert_recreate_change_detected dev-shm \
+  --set-string hostPaths.devShm=/run/cube-shm
 echo "Big Pod template stability guard passed"
