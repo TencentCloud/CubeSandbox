@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -253,10 +254,12 @@ func defaultConfig() *CubeConfig {
 }
 
 type local struct {
-	client    *containerd.Client
-	localTask tasks.TasksClient
-	config    *CubeConfig
-	shims     *v2.ShimManager
+	// Serialize quota inspection with publishing CREATED records, not VM startup.
+	admissionMu sync.Mutex
+	client      *containerd.Client
+	localTask   tasks.TasksClient
+	config      *CubeConfig
+	shims       *v2.ShimManager
 
 	criImage       *cubeimages.CubeImageService
 	cbriManager    cbri.APIManager
