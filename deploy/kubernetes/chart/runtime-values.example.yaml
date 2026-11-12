@@ -165,5 +165,5 @@ redis:
 # images:
 #   ops:
 #     repository: my-mirror.example.com/cube-sandbox/cube-ops
-#     tag: v0.8.0-rc2
+#     tag: v0.8.0-rc3
 #     pullPolicy: Always
