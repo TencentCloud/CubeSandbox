@@ -1,0 +1,29 @@
+name: Interpreter Example Test
+
+on:
+  pull_request:
+    paths:
+      - 'examples/run-code-env-inheritance/**'
+      - '.github/workflows/interpreter-example-test.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'examples/run-code-env-inheritance/**'
+      - '.github/workflows/interpreter-example-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install interpreter test dependencies
+        run: python -m pip install fastapi==0.119.0 uvicorn==0.38.0 httpx==0.28.1 websockets==15.0.1
+      - name: Run startup and environment regression tests
+        run: PYTHONPATH=examples/run-code-env-inheritance/lightweight-code-interpreter python -m unittest discover -s examples/run-code-env-inheritance/tests -v
