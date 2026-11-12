@@ -792,6 +792,7 @@ When enabled, the sidecar:
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
 - uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
+- reports ready only once this node's lvstore is attached (`rcow_lvstore_attached`); the startup probe only waits for the target to answer, so a long journal/WAL replay keeps the Pod unready instead of restarting it. Neither probe calls `rcow_get_lvstores`, which walks every lvol on the single RPC thread, and there is no liveness probe, because a restart runs `rcow_stop` and disconnects every NVMe namespace;
 - reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
   per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
 - uses the host's memory-backed `/dev/shm` for the default 4 GiB write-back

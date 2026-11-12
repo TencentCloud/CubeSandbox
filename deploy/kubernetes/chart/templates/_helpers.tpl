@@ -1638,8 +1638,40 @@ false
 {{- end -}}
 {{- end -}}
 
-{{- define "cube.s3lvolProbeCommand" -}}
-sock={{ include "cube.s3lvolSocketPath" . }}; test -S "${sock}" && python3 /opt/s3lvol/scripts/s3lvol_rpc.py --sock "${sock}" --timeout 5 rcow_get_lvstores >/dev/null
+{{/*
+cube-s3lvol probes. Neither calls rcow_get_lvstores, which walks every lvol,
+snapshot and clone on the single RPC thread and stalls cubelet's s3lvol RPCs.
+
+Startup only waits for the target to answer (rcow_get_build_info is
+SPDK_RPC_RUNTIME). Attach replays the journal and WAL and has no useful upper
+bound, and a failed startup probe restarts the container, whose TERM path runs
+rcow_stop and disconnects every NVMe namespace.
+
+Readiness passes only when rcow_lvstore_attached answers true for this node's
+lvstore, named as in cube-s3lvol-entrypoint.sh (s3lvol_derived_lvs_name)
+unless cubeS3lvol.lvsName pins it. A readiness failure restarts nothing.
+*/}}
+{{- define "cube.s3lvolProbeRPC" -}}
+sock={{ include "cube.s3lvolSocketPath" . | quote }}
+test -S "${sock}" || exit 1
+rpc() { python3 /opt/s3lvol/scripts/s3lvol_rpc.py --sock "${sock}" --timeout {{ .Values.cubeS3lvol.probes.rpcTimeoutSeconds | default 5 }} "$@"; }
+{{- end -}}
+
+{{- define "cube.s3lvolStartupProbeCommand" -}}
+{{ include "cube.s3lvolProbeRPC" . }}
+rpc rcow_get_build_info >/dev/null
+{{- end -}}
+
+{{- define "cube.s3lvolReadinessProbeCommand" -}}
+{{ include "cube.s3lvolProbeRPC" . }}
+{{- if .Values.cubeS3lvol.lvsName }}
+lvs={{ .Values.cubeS3lvol.lvsName | quote }}
+{{- else }}
+[[ -n "${NODE_NAME:-}" ]] || exit 1
+lvs="rcow-$(printf '%s' "${NODE_NAME}" | sha256sum | cut -c1-8)"
+{{- end }}
+attached="$(rpc rcow_lvstore_attached "{\"lvs_name\":\"${lvs}\"}")" || exit 1
+[[ "${attached}" == true ]] || { echo "lvstore ${lvs} is not attached" >&2; exit 1; }
 {{- end -}}
 
 {{/* Big Pod grace = max(cubeNode, cubeS3lvol) terminationGracePeriodSeconds. */}}
