@@ -1140,6 +1140,34 @@ func TestFilesListReturnsEmptySliceForEmptyDir(t *testing.T) {
 	}
 }
 
+func TestFilesMisrouted200HTMLReturnsRoutingDiagnostic(t *testing.T) {
+	for _, contentType := range []string{"text/html; charset=utf-8", "text/plain"} {
+		t.Run(contentType, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", contentType)
+				fmt.Fprint(w, "<!DOCTYPE html><html><body>Portal</body></html>")
+			}))
+			defer server.Close()
+
+			host, port := serverHostPort(t, server.URL)
+			client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+			sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+			removeErr := sb.Files().Remove(context.Background(), "/x")
+			_, listErr := sb.Files().List(context.Background(), "/x")
+			for method, err := range map[string]error{"Remove": removeErr, "ListDir": listErr} {
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) || apiErr.StatusCode != 0 {
+					t.Fatalf("%s: err=%v, want *APIError without an HTTP error status", method, err)
+				}
+				if !strings.Contains(err.Error(), method) || !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+					t.Fatalf("%s: err=%v, want method and routing hint", method, err)
+				}
+			}
+		})
+	}
+}
+
 func TestFilesListMisrouted404HTMLReturnsRoutingDiagnostic(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

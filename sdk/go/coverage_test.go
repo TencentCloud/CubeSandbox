@@ -833,15 +833,6 @@ func TestValidateConnectResponse(t *testing.T) {
 		t.Fatalf("validateConnectResponse(404 text template)=%v, want cleared classification and proxy hint", err404TextTemplate)
 	}
 
-	resp302 := &http.Response{
-		StatusCode: http.StatusFound,
-		Header:     http.Header{"Location": []string{"https://portal.example/login"}},
-		Body:       io.NopCloser(strings.NewReader("")),
-	}
-	if err := validateConnectResponse(resp302); err == nil || !strings.Contains(err.Error(), "https://portal.example/login") {
-		t.Fatalf("validateConnectResponse(302)=%v, want redirect location", err)
-	}
-
 	resp500Text := &http.Response{
 		StatusCode: http.StatusInternalServerError,
 		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
@@ -923,6 +914,33 @@ func TestValidateConnectResponse(t *testing.T) {
 	}
 	if err := validateConnectResponse(respJSON); err != nil {
 		t.Fatalf("validateConnectResponse(application/json)=%v, want nil", err)
+	}
+}
+
+func TestValidateConnectResponseRedirectPath(t *testing.T) {
+	longPath := "/" + strings.Repeat("x", maxDiagnosticMsgLen)
+	for _, tc := range []struct {
+		location string
+		wantPath string
+	}{
+		{"https://user:password@internal.example/login?token=secret#fragment", "/login"},
+		{"/relative?token=secret", "/relative"},
+		{longPath, longPath[:maxDiagnosticMsgLen] + "..."},
+		{"https://internal.example/%zz?token=secret", ""},
+	} {
+		resp := &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{tc.location}},
+			Body:       io.NopCloser(strings.NewReader("")),
+		}
+		var apiErr *APIError
+		if err := validateConnectResponse(resp); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusFound {
+			t.Fatalf("validateConnectResponse(302)=%v, want *APIError with HTTP 302", err)
+		}
+		_, path, found := strings.Cut(apiErr.Message, "; redirect path ")
+		if path != tc.wantPath || found != (tc.wantPath != "") {
+			t.Fatalf("redirect diagnostic=%q, want path %q", apiErr.Message, tc.wantPath)
+		}
 	}
 }
 

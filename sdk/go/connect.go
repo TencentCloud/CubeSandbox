@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 )
@@ -25,6 +26,7 @@ const (
 	// maxRoutingPagePeekBytes bounds the error-body prefix buffered to tell a
 	// JSON API error document apart from an HTML/text routing page.
 	maxRoutingPagePeekBytes = 4096
+	maxDiagnosticMsgLen     = 200
 )
 
 type connectEndStream struct {
@@ -127,7 +129,7 @@ func looksLikeJSONErrorDocument(body []byte) bool {
 	return strings.TrimSpace(doc.Message) != "" || strings.TrimSpace(doc.Detail) != "" || strings.TrimSpace(doc.Err) != ""
 }
 
-// isRoutingPage reports whether an HTTP error response looks like a misrouted
+// isRoutingPage reports whether an HTTP response looks like a misrouted
 // Web UI / gateway page rather than a genuine API error: an HTML media type
 // or HTML-looking body, or a 404 with a non-empty text body that is not a
 // JSON API error document (e.g. Go's "404 page not found"). A genuine JSON API
@@ -136,13 +138,10 @@ func looksLikeJSONErrorDocument(body []byte) bool {
 // like truncated JSON are not positive evidence of a routing page either.
 func isRoutingPage(statusCode int, mediaType string, body []byte) bool {
 	trimmed := bytes.TrimSpace(body)
-	if looksLikeJSONErrorDocument(trimmed) {
-		return false
-	}
-	lowerBody := bytes.ToLower(trimmed)
-	bodyLooksHTML := bytes.HasPrefix(lowerBody, []byte("<!doctype")) || bytes.HasPrefix(lowerBody, []byte("<html"))
+	prefix := bytes.ToLower(trimmed[:min(len(trimmed), len("<!doctype"))])
+	bodyLooksHTML := bytes.HasPrefix(prefix, []byte("<!doctype")) || bytes.HasPrefix(prefix, []byte("<html"))
 	if mediaType == "text/html" || bodyLooksHTML {
-		return true
+		return !looksLikeJSONErrorDocument(trimmed)
 	}
 	if statusCode != http.StatusNotFound || !strings.HasPrefix(mediaType, "text/") {
 		return false
@@ -167,6 +166,17 @@ func misroutedHTMLDiagnostic(resp *http.Response) *APIError {
 		Kind:    apiErrorKindAPI,
 		Message: fmt.Sprintf("unexpected content-type %q (received HTML instead of Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service)", resp.Header.Get("Content-Type")),
 	}
+}
+
+func truncateDiagnostic(message string) string {
+	if len(message) <= maxDiagnosticMsgLen {
+		return message
+	}
+	end := maxDiagnosticMsgLen
+	for end > 0 && !utf8.RuneStart(message[end]) {
+		end--
+	}
+	return message[:end] + "..."
 }
 
 // validateConnectResponse ensures the HTTP response represents a valid Connect stream.
@@ -217,14 +227,7 @@ func validateConnectResponse(resp *http.Response) error {
 			return err
 		}
 		if routingPage {
-			const maxDiagnosticMsgLen = 200
-			if len(apiErr.Message) > maxDiagnosticMsgLen {
-				end := maxDiagnosticMsgLen
-				for end > 0 && !utf8.RuneStart(apiErr.Message[end]) {
-					end--
-				}
-				apiErr.Message = apiErr.Message[:end] + "..."
-			}
+			apiErr.Message = truncateDiagnostic(apiErr.Message)
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				apiErr.Message += "; received an HTML/text page instead of a Connect stream; check credentials or whether a portal is intercepting the request"
 			} else if resp.StatusCode >= http.StatusInternalServerError {
@@ -245,8 +248,12 @@ func validateConnectResponse(resp *http.Response) error {
 			// Defence in depth: the SDK's own HTTP clients follow redirects,
 			// so a 3xx only reaches validation when the caller supplies a
 			// custom client via WithHTTPClient with CheckRedirect disabled.
-			if location := resp.Header.Get("Location"); location != "" {
-				apiErr.Message += "; redirect to " + location
+			// Keep only the escaped path to avoid logging the authority,
+			// credentials, query parameters, or fragment.
+			if target, err := url.Parse(resp.Header.Get("Location")); err == nil {
+				if path := target.EscapedPath(); path != "" {
+					apiErr.Message += "; redirect path " + truncateDiagnostic(path)
+				}
 			}
 		}
 		return apiErr

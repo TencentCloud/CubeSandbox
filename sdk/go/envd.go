@@ -375,11 +375,17 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any,
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
-	if resp.StatusCode >= http.StatusBadRequest && isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
+	if isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
 		// A misrouted Web UI / gateway page must not masquerade as a
 		// filesystem error (e.g. Exists silently reporting "does not exist"):
 		// surface the routing diagnostic instead. Genuine envd errors are
 		// Connect JSON and keep their existing classification below.
+		if resp.StatusCode == http.StatusOK {
+			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, &APIError{
+				Kind:    apiErrorKindAPI,
+				Message: "received HTML instead of a Connect response; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service",
+			})
+		}
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		if verr := validateConnectResponse(resp); verr != nil {
 			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, verr)
