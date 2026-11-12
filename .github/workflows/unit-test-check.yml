@@ -20,6 +20,7 @@ on:
       - 'pkgs/sandboxrestart/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
+      - 'CubeEgress/**'
       - 'cubecow/**'
       - 'agent/**'
       - 'hypervisor/**'
@@ -48,6 +49,7 @@ on:
       - 'pkgs/sandboxrestart/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
+      - 'CubeEgress/**'
       - 'cubecow/**'
       - 'agent/**'
       - 'hypervisor/**'
@@ -87,6 +89,7 @@ on:
           - volume-cos-rpc
           - proto
           - cubebench
+          - cubeegress
 
 concurrency:
   group: unit-test-${{ github.event.pull_request.number || github.ref }}
@@ -157,6 +160,7 @@ jobs:
             add_component "volume-cos-rpc"
             add_component "proto"
             add_component "cubebench"
+            add_component "cubeegress"
           }
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -183,6 +187,7 @@ jobs:
               volume-cos-rpc) add_component "volume-cos-rpc" ;;
               proto) add_component "proto" ;;
               cubebench) add_component "cubebench" ;;
+              cubeegress) add_component "cubeegress" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
                 exit 1
@@ -323,6 +328,10 @@ jobs:
                   # component build above.
                   add_component "volume-cos-rpc"
                   ;;
+                CubeEgress/*)
+                  # Shell-based test set (see cubeegress-test in the Makefile).
+                  add_component "cubeegress"
+                  ;;
                 tests/perf/*)
                   add_component "cubebench"
                   ;;
@@ -363,6 +372,7 @@ jobs:
                     elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
                     elif . == "proto" then "Proto"
                     elif . == "cubebench" then "CubeBench"
+                    elif . == "cubeegress" then "CubeEgress"
                     else error("unsupported component: " + .)
                     end
                   ),
@@ -388,10 +398,11 @@ jobs:
                     elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"
                     elif . == "proto" then "proto-test"
                     elif . == "cubebench" then "cubebench-test"
+                    elif . == "cubeegress" then "cubeegress-test"
                     else error("unsupported component: " + .)
                     end
                   ),
-                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "redisx" and . != "proto" and . != "cubebench"),
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "redisx" and . != "proto" and . != "cubebench" and . != "cubeegress"),
                   run_mode: "root_make"
                 })
               | [
