@@ -128,6 +128,13 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 	snapshotPath := layout.Home
+	ctx, releaseMetadataWrite, err := storage.BeginS3PackageWrite(ctx, backend, rsp.TemplateID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	defer releaseMetadataWrite()
 	rsp.SnapshotPath = snapshotPath
 	tmpSnapshotPath := layout.TmpHome
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
@@ -856,6 +863,13 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 			}
 		}
 	}
+	releaseCleanup, err := storage.BeginS3PackageCleanup(ctx, backend, rsp.TemplateID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	defer releaseCleanup()
 	// Master asks every node to drop a shared jfs template, and a node
 	// without jfs never held one.
 	if entry == nil && backend == cow.BackendJFS && !cleanupJFSConfigured() {

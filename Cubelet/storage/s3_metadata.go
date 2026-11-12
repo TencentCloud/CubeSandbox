@@ -5,18 +5,20 @@
 package storage
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 
+	coremount "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/core/mount"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -70,11 +72,101 @@ var (
 	mountS3MetadataDevice      = mountS3MetadataDeviceImpl
 	unmountS3MetadataPath      = unmountS3MetadataPathImpl
 	s3MetadataIsMounted        = s3MetadataIsMountedImpl
+	s3MetadataMountSource      = s3MetadataMountSourceImpl
 
-	s3MetadataMu     sync.Mutex
-	s3MetadataMounts = map[string]string{} // snapshotID → current mount path
-	testS3MetadataKV s3MetadataKV
+	s3MetadataMu         sync.Mutex
+	s3MetadataMounts     = map[string]string{} // snapshotID → current mount path
+	s3MetadataOperations = map[string]*s3PackageOperation{}
+	testS3MetadataKV     s3MetadataKV
 )
+
+type s3PackageOperation struct {
+	kind string
+}
+
+type s3PackageWriteContextKey struct{}
+
+// BeginS3PackageWrite excludes heartbeat recovery and unrelated cleanup until
+// capture, sealing, publication and failure cleanup have finished. The returned
+// context lets the writer's own CleanupTemplate call reuse its guard.
+// Cancellation alone must not release the guard while filesystem work runs.
+func BeginS3PackageWrite(ctx context.Context, backend, snapshotID string) (context.Context, func(), error) {
+	operation, release, err := beginS3PackageOperation(ctx, backend, snapshotID, "write")
+	if err != nil || operation == nil {
+		return ctx, release, err
+	}
+	return context.WithValue(ctx, s3PackageWriteContextKey{}, operation), release, nil
+}
+
+// BeginS3PackageCleanup excludes writers and heartbeat recovery throughout
+// CleanupTemplate. A writer cleaning up its own package keeps its existing
+// guard; its deferred release still owns the full operation lifetime.
+// Low-level mount, seal and release helpers remain usable by the guard holder.
+func BeginS3PackageCleanup(ctx context.Context, backend, snapshotID string) (func(), error) {
+	_, release, err := beginS3PackageOperation(ctx, backend, snapshotID, "cleanup")
+	return release, err
+}
+
+func beginS3PackageOperation(ctx context.Context, backend, snapshotID, kind string) (*s3PackageOperation, func(), error) {
+	if !isS3CatalogBackend(backend) {
+		return nil, func() {}, nil
+	}
+	id := strings.TrimSpace(snapshotID)
+	if id == "" {
+		return nil, nil, fmt.Errorf("s3 metadata snapshot_id is required")
+	}
+	s3MetadataMu.Lock()
+	defer s3MetadataMu.Unlock()
+	if active, busy := s3MetadataOperations[id]; busy {
+		if kind == "cleanup" && active.kind == "write" && ctx.Value(s3PackageWriteContextKey{}) == active {
+			return active, func() {}, nil
+		}
+		return nil, nil, fmt.Errorf("s3 metadata package %s has an active %s operation; retry later", id, active.kind)
+	}
+	operation := &s3PackageOperation{kind: kind}
+	s3MetadataOperations[id] = operation
+	var once sync.Once
+	return operation, func() {
+		once.Do(func() {
+			s3MetadataMu.Lock()
+			delete(s3MetadataOperations, id)
+			s3MetadataMu.Unlock()
+		})
+	}, nil
+}
+
+// S3PackageOperationInProgress keeps inventory scans from publishing packages
+// while their metadata is being written or removed.
+func S3PackageOperationInProgress(snapshotID string) bool {
+	s3MetadataMu.Lock()
+	defer s3MetadataMu.Unlock()
+	_, busy := s3MetadataOperations[strings.TrimSpace(snapshotID)]
+	return busy
+}
+
+// ValidateS3PackageMetadata checks the mounted disk, not files left underneath
+// its mountpoint, before a template can be sealed and reported ready.
+func ValidateS3PackageMetadata(backend, mountPath string) error {
+	if !isS3CatalogBackend(backend) {
+		return nil
+	}
+	s3MetadataMu.Lock()
+	defer s3MetadataMu.Unlock()
+	if s3MetadataMountSource(mountPath) == "" {
+		return fmt.Errorf("snapshot metadata disk is not mounted at %s", mountPath)
+	}
+	for _, name := range []string{"config.json", "state.json"} {
+		path := filepath.Join(mountPath, "snapshot", name)
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read snapshot %s: %w", name, err)
+		}
+		if !json.Valid(body) {
+			return fmt.Errorf("snapshot %s is not valid JSON", name)
+		}
+	}
+	return nil
+}
 
 // S3MetadataVolumeName is the writable cubecow volume for one template /
 // pause / snapshot package metadata disk (cloned from the base snapshot).
@@ -379,6 +471,16 @@ func CloneS3MetadataFromParent(ctx context.Context, backend, parentID, childID, 
 // be a volume under the snap name; that name is used only when cloning
 // into s3-meta-<id> is not possible.
 func MountS3MetadataAt(ctx context.Context, backend, snapshotID, mountPath string) error {
+	return mountS3MetadataAt(ctx, backend, snapshotID, mountPath, false)
+}
+
+// MountS3MetadataForRecovery skips packages being written or cleaned up.
+// The check and mount share the same lock as BeginS3PackageWrite.
+func MountS3MetadataForRecovery(ctx context.Context, backend, snapshotID, mountPath string) error {
+	return mountS3MetadataAt(ctx, backend, snapshotID, mountPath, true)
+}
+
+func mountS3MetadataAt(ctx context.Context, backend, snapshotID, mountPath string, recovery bool) error {
 	if !isS3CatalogBackend(backend) {
 		return nil
 	}
@@ -397,6 +499,10 @@ func MountS3MetadataAt(ctx context.Context, backend, snapshotID, mountPath strin
 
 	s3MetadataMu.Lock()
 	defer s3MetadataMu.Unlock()
+	if operation, busy := s3MetadataOperations[id]; recovery && busy {
+		CubeLog.Debugf("skip s3 metadata recovery for %s: active %s operation", id, operation.kind)
+		return nil
+	}
 
 	name, err := store.ensureS3MetadataRWVolumeLocked(ctx, id)
 	if err != nil {
@@ -647,18 +753,38 @@ func mountS3MetadataLocked(snapshotID, devicePath, mountPath string) error {
 	if err := pathutil.ValidateNoTraversal(mountPath); err != nil {
 		return fmt.Errorf("invalid s3 metadata mount path: %w", err)
 	}
-	if prev := s3MetadataMounts[snapshotID]; prev != "" && filepath.Clean(prev) != filepath.Clean(mountPath) {
+	if err := os.MkdirAll(mountPath, 0o755); err != nil {
+		return fmt.Errorf("mkdir s3 metadata mount %s: %w", mountPath, err)
+	}
+	canonical, err := coremount.CanonicalizePath(mountPath)
+	if err != nil {
+		return fmt.Errorf("resolve s3 metadata mount %s: %w", mountPath, err)
+	}
+	mountPath = canonical
+	prev := s3MetadataMounts[snapshotID]
+	if prev != "" {
+		if resolved, err := coremount.CanonicalizePath(prev); err == nil {
+			prev = resolved
+		}
+	}
+	if prev != "" && filepath.Clean(prev) != mountPath {
 		if err := unmountS3MetadataPathIfMounted(prev); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(mountPath, 0o755); err != nil {
-		return fmt.Errorf("mkdir s3 metadata mount %s: %w", mountPath, err)
-	}
 	if s3MetadataIsMounted(mountPath) {
 		src := s3MetadataMountSource(mountPath)
+		if src == "" {
+			return fmt.Errorf("cannot identify mounted s3 metadata source at %s; refusing to unmount", mountPath)
+		}
 		want := filepath.Clean(strings.TrimSpace(devicePath))
-		if src != "" && (src == want || filepath.Base(src) == filepath.Base(want)) {
+		if resolved, err := filepath.EvalSymlinks(src); err == nil {
+			src = resolved
+		}
+		if resolved, err := filepath.EvalSymlinks(want); err == nil {
+			want = resolved
+		}
+		if src == want {
 			s3MetadataMounts[snapshotID] = filepath.Clean(mountPath)
 			return nil
 		}
@@ -676,8 +802,11 @@ func mountS3MetadataLocked(snapshotID, devicePath, mountPath string) error {
 
 func unmountS3MetadataPathIfMounted(mountPath string) error {
 	mountPath = strings.TrimSpace(mountPath)
-	if mountPath == "" {
+	if mountPath == "" || filepath.Clean(mountPath) == "." {
 		return nil
+	}
+	if resolved, err := coremount.CanonicalizePath(mountPath); err == nil {
+		mountPath = resolved
 	}
 	if !s3MetadataIsMounted(mountPath) {
 		return nil
@@ -839,32 +968,19 @@ func unmountS3MetadataPathImpl(mountPath string) error {
 }
 
 func s3MetadataIsMountedImpl(mountPath string) bool {
-	mountPath = filepath.Clean(strings.TrimSpace(mountPath))
-	if mountPath == "" || mountPath == "." {
+	mountPath = strings.TrimSpace(mountPath)
+	if mountPath == "" || filepath.Clean(mountPath) == "." {
 		return false
 	}
-	f, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
-		return s3MetadataIsMountedByDev(mountPath)
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 5 {
-			continue
-		}
-		if filepath.Clean(fields[4]) == mountPath {
-			return true
-		}
+	if s3MetadataMountSource(mountPath) != "" {
+		return true
 	}
 	return s3MetadataIsMountedByDev(mountPath)
 }
 
-// s3MetadataMountSource returns the mount source device for mountPath (e.g. /dev/nvme6n1), or "".
-func s3MetadataMountSource(mountPath string) string {
-	mountPath = filepath.Clean(strings.TrimSpace(mountPath))
-	if mountPath == "" || mountPath == "." {
+// s3MetadataMountSourceImpl resolves aliases before looking up the kernel mount.
+func s3MetadataMountSourceImpl(mountPath string) string {
+	if strings.TrimSpace(mountPath) == "" {
 		return ""
 	}
 	f, err := os.Open("/proc/self/mountinfo")
@@ -872,26 +988,23 @@ func s3MetadataMountSource(mountPath string) string {
 		return ""
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-		if len(fields) < 5 || filepath.Clean(fields[4]) != mountPath {
-			continue
-		}
-		// mountinfo: ... - fstype source superopts
-		sep := -1
-		for i, f := range fields {
-			if f == "-" {
-				sep = i
-				break
-			}
-		}
-		if sep >= 0 && sep+2 < len(fields) {
-			return filepath.Clean(fields[sep+2])
-		}
+	return s3MetadataMountSourceFrom(f, mountPath)
+}
+
+func s3MetadataMountSourceFrom(reader io.Reader, mountPath string) string {
+	mountPath = strings.TrimSpace(mountPath)
+	if mountPath == "" || filepath.Clean(mountPath) == "." {
+		return ""
 	}
-	return ""
+	mountPath, err := coremount.CanonicalizePath(strings.TrimSpace(mountPath))
+	if err != nil {
+		return ""
+	}
+	mounts, err := mountinfo.GetMountsFromReader(reader, mountinfo.SingleEntryFilter(mountPath))
+	if err != nil || len(mounts) == 0 {
+		return ""
+	}
+	return filepath.Clean(mounts[0].Source)
 }
 
 func s3MetadataIsMountedByDev(mountPath string) bool {

@@ -276,6 +276,20 @@ func replacedLivePauseSnapshotID(prev, newID string) string {
 	return prev
 }
 
+// Runtime and storage boundaries for pause failure-path regression tests.
+var (
+	pauseSnapshotSpec      = (*service).getCubeboxSnapshotSpec
+	pauseSnapshotLayout    = prepareSnapshotWorkLayout
+	pauseSnapshotRootfs    = storage.GetSandboxRootfsFor
+	pauseSnapshotMemory    = preparePauseMemoryArtifact
+	pausePrepareMetadata   = snapshotWorkLayout.prepareWork
+	pauseReleaseMetadata   = snapshotWorkLayout.releaseMetadata
+	pauseCleanupObjects    = cleanupCowSnapshotObjectsOn
+	pauseCommitRootfs      = storage.CommitRootfsFor
+	pauseDeactivateObjects = deactivateCowSnapshotObjectsOn
+	pauseFinalizePackage   = storage.FinalizeS3PackageSnapshots
+)
+
 // updateWithPauseCow pauses a running sandbox into a CubeCow-backed catalog
 // snapshot (same layout as CommitSandbox), packs sandbox_spec.json beside the
 // snapshot files, asks the shim to exit, then fully destroys the live sandbox.
@@ -338,7 +352,7 @@ func (s *service) updateWithPauseCow(
 		}()
 	}
 
-	spec, err := s.getCubeboxSnapshotSpec(ctx, req.SandboxID)
+	spec, err := pauseSnapshotSpec(s, ctx, req.SandboxID)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to get cubebox spec: %v", err)
@@ -357,19 +371,26 @@ func (s *service) updateWithPauseCow(
 	}
 
 	specDir := fmt.Sprintf("%dC%dM", resourceSpec.CPU, resourceSpec.Memory)
-	layout, err := prepareSnapshotWorkLayout(backend, storage.SnapshotKindPause, snapID, "", specDir)
+	layout, err := pauseSnapshotLayout(backend, storage.SnapshotKindPause, snapID, "", specDir)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid pause snapshot path: %v", err)
 		return rsp, nil
 	}
+	ctx, releaseMetadataWrite, err := storage.BeginS3PackageWrite(ctx, backend, snapID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	defer releaseMetadataWrite()
 	snapshotPath := layout.Home
 	tmpSnapshotPath := layout.TmpHome
 
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 	// Resolve live rootfs now; CommitRootfs runs *after* PauseToSnapshot so the
 	// disk snapshot matches the frozen memory (guest cannot write after pause).
-	sourceRootfs, err := storage.GetSandboxRootfsFor(ctx, backend, req.SandboxID, rootVolumeName)
+	sourceRootfs, err := pauseSnapshotRootfs(ctx, backend, req.SandboxID, rootVolumeName)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve sandbox rootfs: %v", err)
@@ -380,7 +401,7 @@ func (s *service) updateWithPauseCow(
 	// objects. Run them together so JuiceFS metadata latency is paid once on
 	// the pause critical path.
 	cleanupPreparedLayout := func() {
-		layout.releaseMetadata(ctx)
+		pauseReleaseMetadata(layout, ctx)
 		layout.discardTmpDir()
 		if !layout.usesTmpRename() {
 			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
@@ -396,12 +417,12 @@ func (s *service) updateWithPauseCow(
 	layoutReady := make(chan layoutPrepareResult, 1)
 	go func() {
 		start := time.Now()
-		layoutReady <- layoutPrepareResult{err: layout.prepareWork(ctx), duration: time.Since(start)}
+		layoutReady <- layoutPrepareResult{err: pausePrepareMetadata(layout, ctx), duration: time.Since(start)}
 	}()
 
 	// Own volume if this sandbox has one; otherwise the start template/snapshot.
 	memoryCloneStarted := time.Now()
-	memoryObject, snapshotType, err := preparePauseMemoryArtifact(ctx, stepLog, sb, snapID, prevLiveSnap, memorySizeBytes, backend)
+	memoryObject, snapshotType, err := pauseSnapshotMemory(ctx, stepLog, sb, snapID, prevLiveSnap, memorySizeBytes, backend)
 	stageTimings.MemoryCloneMS = durationMS(time.Since(memoryCloneStarted))
 	layoutResult := <-layoutReady
 	layoutErr := layoutResult.err
@@ -422,7 +443,7 @@ func (s *service) updateWithPauseCow(
 	}
 	if err := validateSnapshotMemoryObject(memoryObject, memorySizeBytes); err != nil {
 		cleanupPreparedLayout()
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, nil)
+		pauseCleanupObjects(ctx, stepLog, backend, memoryObject, nil)
 		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
@@ -432,7 +453,7 @@ func (s *service) updateWithPauseCow(
 	var rootfsObject *storage.CowSnapshotObject
 	cleanupArtifacts := func() {
 		cleanupPreparedLayout()
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		pauseCleanupObjects(ctx, stepLog, backend, memoryObject, rootfsObject)
 		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
 	}
 
@@ -544,7 +565,7 @@ func (s *service) updateWithPauseCow(
 	rootfsReady := make(chan rootfsCommitResult, 1)
 	go func() {
 		start := time.Now()
-		object, commitErr := storage.CommitRootfsFor(workCtx, backend, sourceRootfs, snapID)
+		object, commitErr := pauseCommitRootfs(workCtx, backend, sourceRootfs, snapID)
 		rootfsReady <- rootfsCommitResult{object: object, err: commitErr, duration: time.Since(start)}
 	}()
 	specWriteStarted := time.Now()
@@ -568,7 +589,7 @@ func (s *service) updateWithPauseCow(
 	}
 	packageFinalizeStarted := time.Now()
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
-	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
+	if err := pauseDeactivateObjects(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
 	}
 	if layout.usesTmpRename() {
@@ -605,7 +626,7 @@ func (s *service) updateWithPauseCow(
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
 	}
 	// S3: seal memory/metadata work volumes to RO snapshots before Upload.
-	if err := storage.FinalizeS3PackageSnapshots(workCtx, backend, snapID); err != nil {
+	if err := pauseFinalizePackage(workCtx, backend, snapID); err != nil {
 		_ = storage.UnmountS3Metadata(layout.MetaDir)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown,
