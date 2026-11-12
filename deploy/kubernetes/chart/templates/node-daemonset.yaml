@@ -397,6 +397,10 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.dev }}
             type: Directory
+        - name: dev-shm
+          hostPath:
+            path: {{ .Values.hostPaths.devShm }}
+            type: Directory
         - name: sys
           hostPath:
             path: {{ .Values.hostPaths.sys }}

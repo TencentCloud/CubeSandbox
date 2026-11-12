@@ -1463,6 +1463,8 @@ security:
 hostPaths:
   root: /
   dev: /dev
+  # Host /dev/shm for cubelet. Not /dev/shm/cube-s3lvol.
+  devShm: /dev/shm
   sys: /sys
   libModules: /lib/modules
   dataCubelet: /data/cubelet

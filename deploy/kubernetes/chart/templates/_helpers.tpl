@@ -1226,6 +1226,9 @@ Toolbox is mounted whole at the fixed path.
   mountPath: {{ .Values.hostPaths.bootstrapState }}
 - name: dev
   mountPath: /dev
+# Host /dev/shm.
+- name: dev-shm
+  mountPath: /dev/shm
 - name: sys
   mountPath: /sys
 - name: lib-modules
