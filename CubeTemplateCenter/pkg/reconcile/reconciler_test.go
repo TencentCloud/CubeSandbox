@@ -174,3 +174,11 @@ func TestCleanupPendingArtifactsNilDeleter(t *testing.T) {
 		t.Fatalf("expected nil for nil deleter, got %v", err)
 	}
 }
+
+// deferredArtifactPlacementCountFilter keeps the backstop from waiting forever
+// on placements CubeMaster deferred because their node is never coming back.
+func TestDeferredArtifactPlacementCountFilter(t *testing.T) {
+	if !strings.Contains(deferredArtifactPlacementCountFilter, "deferred_at = 0") {
+		t.Fatalf("placement count must ignore deferred rows, got %q", deferredArtifactPlacementCountFilter)
+	}
+}

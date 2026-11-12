@@ -10,9 +10,57 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
+
+func TestPlacementToNodeAddressResolution(t *testing.T) {
+	var live map[string]string // node id -> ip currently in the view
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetNode, func(id string) (*node.Node, bool) {
+		ip, ok := live[id]
+		if !ok {
+			return nil, false
+		}
+		return &node.Node{InsID: id, IP: ip}, true
+	})
+
+	cases := []struct {
+		name   string
+		live   map[string]string
+		p      *models.ArtifactNodePlacement
+		wantIP string // "" means nil result
+	}{
+		{"re-registered under a new ip uses the live address", map[string]string{"n1": "10.0.0.2"}, &models.ArtifactNodePlacement{NodeID: "n1", NodeIP: "10.0.0.1"}, "10.0.0.2"},
+		{"same ip in view", map[string]string{"n1": "10.0.0.1"}, &models.ArtifactNodePlacement{NodeID: "n1", NodeIP: "10.0.0.1"}, "10.0.0.1"},
+		{"absent from view falls back to the stored ip", nil, &models.ArtifactNodePlacement{NodeID: "n1", NodeIP: "10.0.0.1"}, "10.0.0.1"},
+		{"in view with empty live ip keeps the stored ip", map[string]string{"n1": ""}, &models.ArtifactNodePlacement{NodeID: "n1", NodeIP: "10.0.0.1"}, "10.0.0.1"},
+		{"empty stored ip uses the live address", map[string]string{"n1": "10.0.0.2"}, &models.ArtifactNodePlacement{NodeID: "n1"}, "10.0.0.2"},
+		{"nothing resolvable", nil, &models.ArtifactNodePlacement{NodeID: "n1"}, ""},
+		{"empty node id never consults the view", map[string]string{"": "10.0.0.9"}, &models.ArtifactNodePlacement{NodeIP: "10.0.0.1"}, "10.0.0.1"},
+		{"nil placement", nil, nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			live = c.live
+			got := placementToNode(c.p)
+			if c.wantIP == "" {
+				if got != nil {
+					t.Fatalf("want nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil || got.IP != c.wantIP {
+				t.Fatalf("want ip %s, got %+v", c.wantIP, got)
+			}
+		})
+	}
+}
 
 func TestCountArtifactReferencesRejectsLikeWildcards(t *testing.T) {
 	for _, artifactID := range []string{"rfs-bad%id", "rfs-bad_id"} {

@@ -191,7 +191,8 @@ func assertPGHeadSchema(t *testing.T, db *sql.DB) {
 		},
 		{
 			table:   "t_cube_artifact_node_placement",
-			columns: []string{"artifact_id", "node_id", "node_ip"},
+			columns: []string{"artifact_id", "node_id", "node_ip", "deferred_at"},
+			indexes: []string{"idx_placement_deferred"},
 		},
 		{
 			table: "t_cube_snapshot_runtime_active",

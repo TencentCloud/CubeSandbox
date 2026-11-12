@@ -252,6 +252,21 @@ objects with no CLEANUP_PENDING row left for the backstop.
 `ArtifactNodePlacement` rows record which nodes hold a copy; they drive both
 Phase 2 deletion and download locality.
 
+A node that stays absent from the node view for 15 minutes (the async
+operation timeout; health is ignored, only absence counts) is skipped in Phase
+2 so a dead node cannot pin the artifact in CLEANUP_PENDING forever. Its row is
+kept with `deferred_at` set while the other rows are dropped and TC is
+notified. Each artifact GC pass retries deferred rows whose node is back in
+the view, using the node's current address, and deletes a row only after a
+confirmed destroy. A node that never returns keeps its row. Legacy `ip:` ids
+are never treated as absent.
+
+Deferred rows are never reaped automatically: the row is the only record that
+the node may still hold the files, so dropping it by age would silently leak
+them if the node returns. Once a node is confirmed gone for good, an operator
+can release its rows with `DELETE FROM t_cube_artifact_node_placement WHERE
+deferred_at > 0 AND node_id = '<node-id>'`.
+
 ### 9.7 Shared artifact store
 
 TC writes the ext4 and CubeMaster serves it to cubelet over
