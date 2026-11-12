@@ -120,3 +120,34 @@ func TestGroupComponent(t *testing.T) {
 		t.Fatalf("empty agent=%+v", empty)
 	}
 }
+
+func TestGroupComponent_VersionOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"numeric beats lexical", []string{"v0.5.0", "v0.6.0"}, []string{"v0.6.0", "v0.5.0"}},
+		{"two-digit segment", []string{"v0.9.0", "v0.10.0"}, []string{"v0.10.0", "v0.9.0"}},
+		{"padded segment", []string{"v0.09.0", "v0.10.0"}, []string{"v0.10.0", "v0.09.0"}},
+		{"prerelease after release", []string{"v1.0.0-rc1", "v1.0.0"}, []string{"v1.0.0", "v1.0.0-rc1"}},
+		{"kernel hash stays lexical", []string{"sha256-aaa", "sha256-bbb"}, []string{"sha256-bbb", "sha256-aaa"}},
+		{"mixed forms do not panic", []string{"sha256-aaa", "v1.0.0"}, []string{"v1.0.0", "sha256-aaa"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items := make([]store.WarehouseItem, 0, len(tc.in))
+			for _, v := range tc.in {
+				items = append(items, store.WarehouseItem{Arch: ArchAMD64, Component: ComponentShim, Version: v})
+			}
+			got := GroupComponent(ComponentShim, items, nil, nil, false)
+			versions := make([]string, 0, len(got.Versions))
+			for _, g := range got.Versions {
+				versions = append(versions, g.Version)
+			}
+			if !reflect.DeepEqual(versions, tc.want) {
+				t.Errorf("versions=%v want %v", versions, tc.want)
+			}
+		})
+	}
+}

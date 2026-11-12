@@ -5,6 +5,7 @@ package warehouse
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
@@ -91,6 +92,7 @@ func GroupComponent(name string, items []store.WarehouseItem, installs []store.N
 		}
 		seen[item.Version] = append(seen[item.Version], item)
 	}
+	sort.SliceStable(order, func(i, j int) bool { return compareVersionDesc(order[i], order[j]) < 0 })
 	groups := make([]VersionGroup, 0, len(order))
 	for _, ver := range order {
 		arts := seen[ver]
@@ -169,6 +171,61 @@ func nodesMissingAny(items []store.WarehouseItem, installed map[coverageKey]map[
 		}
 	}
 	return count
+}
+
+// compareVersionDesc orders versions newest-first for display; forms that are not
+// numeric-led (kernel sha256- keys) fall back to lexical order.
+func compareVersionDesc(a, b string) int {
+	if c := compareVersion(a, b); c != 0 {
+		return -c
+	}
+	return strings.Compare(b, a)
+}
+
+// compareVersion compares the leading dot-separated numeric runs by value, then
+// the remaining suffix lexically. Non-numeric prefixes yield 0 so callers tie-break.
+func compareVersion(a, b string) int {
+	aNum, aRest := splitNumericRun(strings.TrimLeft(a, "vV"))
+	bNum, bRest := splitNumericRun(strings.TrimLeft(b, "vV"))
+	if aNum == "" || bNum == "" {
+		return 0
+	}
+	an, bn := strings.Split(aNum, "."), strings.Split(bNum, ".")
+	for i := 0; i < len(an) && i < len(bn); i++ {
+		if c := compareNumericSegment(an[i], bn[i]); c != 0 {
+			return c
+		}
+	}
+	if len(an) != len(bn) {
+		return len(an) - len(bn)
+	}
+	// A release outranks its prerelease: "1.0.0" > "1.0.0-rc1".
+	if aRest == "" && bRest != "" {
+		return 1
+	}
+	if bRest == "" && aRest != "" {
+		return -1
+	}
+	return strings.Compare(aRest, bRest)
+}
+
+// splitNumericRun splits a leading digits-and-dots run from the rest of the version.
+func splitNumericRun(v string) (num, rest string) {
+	i := 0
+	for i < len(v) && (v[i] >= '0' && v[i] <= '9' || v[i] == '.') {
+		i++
+	}
+	return v[:i], v[i:]
+}
+
+// compareNumericSegment compares two decimal segments by value, ignoring leading
+// zeros, so "010" equals "10" and "10" sorts above "9".
+func compareNumericSegment(a, b string) int {
+	a, b = strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+	if len(a) != len(b) {
+		return len(a) - len(b)
+	}
+	return strings.Compare(a, b)
 }
 
 func sortedKeys(set map[string]struct{}) []string {
