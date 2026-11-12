@@ -332,7 +332,7 @@ void s3_overlay_set_flush_policy(struct s3_overlay *ov,
  * Take the next chunk that needs flushing off the queue.
  *
  * \param force ignore the policy and take the oldest dirty chunk, whatever its
- *              age or fill. Required by a drain: "everything acknowledged is in
+ *              age or fill. Failure cooldowns still apply. Required by a drain: "everything acknowledged is in
  *              S3" cannot be satisfied by waiting.
  *
  * \return 0 with \c out_chunk_index set; -ENOENT when nothing is dirty;
@@ -348,7 +348,7 @@ int s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
  *
  * \return 0 and fills \c view; -ENOENT nothing dirty; -EBUSY a flush is already
  *         running on this chunk (per-chunk single flight is what serialises the
- *         read-modify-write).
+ *         read-modify-write); -EAGAIN waiting for WAL durability or retry cooldown.
  */
 int s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 			   struct s3_overlay_flush_view *view);
@@ -366,6 +366,13 @@ int s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 void s3_overlay_flush_merge(struct s3_overlay *ov,
 			    const struct s3_overlay_flush_view *view,
 			    void *chunk_buf);
+
+/* Arm a failed round's cooldown before flush_end requeues it. Returns the
+ * delay in microseconds, or zero if unmap already invalidated the round. */
+uint64_t s3_overlay_backoff_flush(struct s3_overlay *ov, uint64_t chunk_index,
+                                uint64_t epoch, uint64_t max_delay_us);
+/* Give an explicit drain an immediate attempt for every dirty chunk. */
+void s3_overlay_reset_flush_backoff(struct s3_overlay *ov);
 
 /**
  * End the flush round. On success the claimed blocks are released; on failure
