@@ -368,7 +368,7 @@ CubeSandbox 会按照 `OnFailure` 策略冷重启整个沙箱：
 | `Running` | 重启状态机空闲：创建成功或最近一次重启成功。**不代表沙箱正在运行**，是否在运行看 `state` |
 | `Restarting` | 正在重建：销毁旧 VM，再冷启动新 VM |
 | `BackOff` | 已退出，等待退避结束；`nextRestartAt` 是下次尝试时间 |
-| `GaveUp` | 达到 `maxRestarts`，或重建/销毁遇到不可恢复的失败，不再重试 |
+| `GaveUp` | 达到 `maxRestarts`，或重建/销毁遇到不可恢复的失败（包括保留的根盘经 `e2fsck` 仍无法修到干净），不再重试 |
 | `Succeeded` | 主进程正常退出（退出码 0），策略决定不重启（`Never`，或 `OnFailure` 且退出码为 0） |
 | `Failed` | 主进程异常退出，策略决定不重启（`Never` 下的任何失败） |
 

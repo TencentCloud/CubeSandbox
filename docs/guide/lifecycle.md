@@ -371,7 +371,7 @@ It does not change `state`, and it only appears when the policy is `OnFailure` /
 | `Running` | The restart state machine is idle: creation succeeded or the last restart succeeded. **It does not mean the sandbox is running**; check `state` for that |
 | `Restarting` | Rebuilding: destroy the old VM, then cold-start a new one |
 | `BackOff` | Exited and waiting for the backoff to elapse; `nextRestartAt` is the next attempt |
-| `GaveUp` | Reached `maxRestarts`, or a rebuild/destroy hit an unrecoverable failure; no more retries |
+| `GaveUp` | Reached `maxRestarts`, or a rebuild/destroy hit an unrecoverable failure (including a retained rootfs that `e2fsck` cannot bring back to clean); no more retries |
 | `Succeeded` | The main process exited cleanly (code 0) and the policy declines to restart (`Never`, or `OnFailure` with code 0) |
 | `Failed` | The main process exited abnormally and the policy declines to restart (any failure under `Never`) |
 
