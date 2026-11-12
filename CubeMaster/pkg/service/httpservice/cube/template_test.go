@@ -754,6 +754,9 @@ func TestListTemplatesPaginationAndBatchOrigin(t *testing.T) {
 	assert.Equal(t, 5, got.Total, "total must be the pre-pagination count")
 	assert.Equal(t, 2, len(got.Data))
 	assert.Equal(t, templatecenter.TemplateListOptions{Limit: 2, Offset: 3}, *gotOpts)
+	assert.Equal(t, 2, got.Limit)
+	assert.Equal(t, 3, got.Offset)
+	assert.False(t, got.HasMore)
 	// localcache cannot resolve node-9 in tests, so both templates fall back.
 	assert.Equal(t, []string{"tpl-a", "tpl-b"}, *requestedIDs)
 	if got.Data[0].OriginNodeID != "node-2" || got.Data[0].OriginNodeIP != "10.0.0.2" {
@@ -766,51 +769,95 @@ func TestListTemplatesPaginationAndBatchOrigin(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 
-func TestListTemplatesWithoutPagingParamsKeepsLegacyBehaviour(t *testing.T) {
-	result := &templatecenter.TemplateListResult{
-		Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
-	}
-	result.Total = len(result.Templates)
-	gotOpts, _ := stubListTemplatesFns(t, result, nil, nil)
+func TestListTemplatesKeepsLegacyBehaviour(t *testing.T) {
+	for _, query := range []string{"", "limit=0", "offset=1", "limit=0&offset=1", "skip_total=true"} {
+		t.Run(query, func(t *testing.T) {
+			infos := make([]templatecenter.TemplateInfo, templatecenter.MaxTemplateListLimit+1)
+			for i := range infos {
+				infos[i].TemplateID = fmt.Sprintf("tpl-%03d", i)
+			}
+			stubListTemplatesFns(t, nil, nil, nil)
+			var offsets []int
+			listTemplatesFn = func(_ context.Context, opts templatecenter.TemplateListOptions) (*templatecenter.TemplateListResult, error) {
+				assert.Equal(t, templatecenter.MaxTemplateListLimit, opts.Limit)
+				offsets = append(offsets, opts.Offset)
+				end := min(opts.Offset+opts.Limit, len(infos))
+				total := len(infos)
+				if opts.SkipTotal {
+					total = -1
+				}
+				return &templatecenter.TemplateListResult{
+					Templates: infos[opts.Offset:end], Total: total, HasMore: end < len(infos),
+				}, nil
+			}
 
-	req := httptest.NewRequest(http.MethodGet, "/cube/template", nil)
-	rt := &CubeLog.RequestTrace{}
-	resp := listTemplates(req, rt)
-
-	got, ok := resp.(*templateListResponse)
-	if !ok {
-		t.Fatalf("unexpected response type %T", resp)
+			req := httptest.NewRequest(http.MethodGet, "/cube/template?"+query, nil)
+			got := listTemplates(req, &CubeLog.RequestTrace{}).(*templateListResponse)
+			start := 0
+			if req.URL.Query().Get("offset") == "1" {
+				start = 1
+			}
+			assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+			assert.Equal(t, len(infos)-start, len(got.Data))
+			assert.Equal(t, infos[start].TemplateID, got.Data[0].TemplateID)
+			assert.Equal(t, infos[len(infos)-1].TemplateID, got.Data[len(got.Data)-1].TemplateID)
+			assert.Equal(t, 0, got.Limit)
+			assert.Equal(t, start, got.Offset)
+			assert.False(t, got.HasMore)
+			if req.URL.Query().Get("skip_total") == "true" {
+				assert.Equal(t, -1, got.Total)
+			} else {
+				assert.Equal(t, len(infos), got.Total)
+			}
+			if start == 0 {
+				assert.Equal(t, []int{0, templatecenter.MaxTemplateListLimit}, offsets)
+			} else {
+				assert.Equal(t, []int{1}, offsets)
+			}
+		})
 	}
-	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
-	assert.Equal(t, templatecenter.TemplateListOptions{}, *gotOpts)
-	assert.Equal(t, 2, len(got.Data))
-	assert.Equal(t, 2, got.Total)
 }
 
-func TestListTemplatesLimitZeroMeansAll(t *testing.T) {
-	result := &templatecenter.TemplateListResult{
-		Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
+func TestListAllTemplatePagesUsesBoundedQueries(t *testing.T) {
+	orig := listTemplatesFn
+	t.Cleanup(func() { listTemplatesFn = orig })
+	var got []templatecenter.TemplateListOptions
+	listTemplatesFn = func(_ context.Context, opts templatecenter.TemplateListOptions) (*templatecenter.TemplateListResult, error) {
+		got = append(got, opts)
+		if opts.Offset == 0 {
+			return &templatecenter.TemplateListResult{
+				Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-a"}, {TemplateID: "tpl-b"}},
+				Total:     3,
+			}, nil
+		}
+		return &templatecenter.TemplateListResult{
+			Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-c"}},
+			Total:     3,
+		}, nil
 	}
-	result.Total = len(result.Templates)
+	result, err := listAllTemplatePages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, 3, len(result.Templates))
+	assert.Equal(t, []templatecenter.TemplateListOptions{
+		{Limit: templatecenter.MaxTemplateListLimit},
+		{Limit: templatecenter.MaxTemplateListLimit, Offset: 2},
+	}, got)
+}
+
+func TestListTemplatesLightweightPaging(t *testing.T) {
+	result := &templatecenter.TemplateListResult{Templates: []templatecenter.TemplateInfo{{TemplateID: "tpl-page"}}, Total: -1, HasMore: true}
 	gotOpts, _ := stubListTemplatesFns(t, result, nil, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/cube/template?limit=0", nil)
-	rt := &CubeLog.RequestTrace{}
-	resp := listTemplates(req, rt)
-
-	got, ok := resp.(*templateListResponse)
-	if !ok {
-		t.Fatalf("unexpected response type %T", resp)
-	}
-	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
-	// An explicit limit=0 must be equivalent to omitting the parameter.
-	assert.Equal(t, templatecenter.TemplateListOptions{}, *gotOpts)
-	assert.Equal(t, 2, len(got.Data))
-	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+	rsp := listTemplates(httptest.NewRequest(http.MethodGet, "/cube/template?limit=1&skip_total=true", nil), &CubeLog.RequestTrace{}).(*templateListResponse)
+	assert.True(t, gotOpts.SkipTotal)
+	assert.Equal(t, -1, rsp.Total)
+	assert.True(t, rsp.HasMore)
+	assert.Equal(t, 1, len(rsp.Data))
 }
 
 func TestListTemplatesRejectsInvalidPagingParams(t *testing.T) {
-	for _, rawQuery := range []string{"limit=-1", "limit=abc", "offset=-1", "offset=abc"} {
+	for _, rawQuery := range []string{"limit=-1", "limit=abc", "offset=-1", "offset=abc", "skip_total=unknown"} {
 		req := httptest.NewRequest(http.MethodGet, "/cube/template?"+rawQuery, nil)
 		rt := &CubeLog.RequestTrace{}
 		resp := listTemplates(req, rt)
