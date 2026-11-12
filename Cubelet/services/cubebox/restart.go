@@ -26,10 +26,10 @@ import (
 )
 
 // maxRetainedDestroyAttempts bounds host-side cleanup retries after a
-// restart destroy fails. Each attempt already spends a full destroy
-// deadline, and shim Wait consumes that window, so three attempts are
-// minutes rather than a tight spin. e2fsck exit 4/8 does not use this
-// counter; that failure is deterministic and stops immediately.
+// restart destroy fails. Uncorrected ext4 errors (exit bit 4) and disks
+// still dirty after three fsck passes stop immediately. Operational
+// e2fsck failures, including exit 8 and a per-pass timeout, use this
+// counter.
 const maxRetainedDestroyAttempts int32 = 3
 
 type restartClass int
