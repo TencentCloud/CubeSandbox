@@ -14,9 +14,10 @@ jobs:
   build-and-publish:
     name: Build and publish to npm
     runs-on: ubuntu-latest
+    environment: CUBE_NPM_TOKEN # Must match the npm Trusted Publisher environment
     permissions:
       contents: read
-      id-token: write   # OIDC trusted publishing
+      id-token: write   # Required for npm OIDC trusted publishing
 
     steps:
       - name: Checkout (full history, blobless)
