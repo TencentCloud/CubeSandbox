@@ -1862,6 +1862,7 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 	_, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
 		Image:               "registry.example.com/app:latest",
 		WritableLayerSize:   "20Gi",
+		Backend:             "s3",
 		ExposedPorts:        []uint16{8080},
 		ProbePort:           &probePort,
 		ProbePath:           "/health",
@@ -1878,7 +1879,6 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 		DNS:                 []string{"8.8.8.8", "1.1.1.1"},
 		AllowOut:            []string{"172.67.0.0/16"},
 		DenyOut:             []string{"10.0.0.0/8"},
-		Backend:             "s3",
 		User:                "1000:1000",
 	})
 	if err != nil {
@@ -1887,6 +1887,7 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 
 	assertString(t, got, "image", "registry.example.com/app:latest")
 	assertString(t, got, "writableLayerSize", "20Gi")
+	assertString(t, got, "backend", "s3")
 	assertString(t, got, "networkType", "tap")
 	assertString(t, got, "backend", "s3")
 	assertString(t, got, "user", "1000:1000")
