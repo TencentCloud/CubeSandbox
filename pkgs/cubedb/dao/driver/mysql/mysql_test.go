@@ -5,6 +5,7 @@
 package mysql
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -56,8 +57,12 @@ func TestBuildDSNDefaults(t *testing.T) {
 		t.Fatal("ParseTime want true")
 	}
 	dsn := buildDSN(cfg)
-	if !strings.Contains(dsn, "charset=utf8") {
-		t.Fatalf("expected charset=utf8 in DSN, got %s", dsn)
+	params, err := url.ParseQuery(dsn[strings.LastIndexByte(dsn, '?')+1:])
+	if err != nil {
+		t.Fatalf("parse DSN parameters: %v", err)
+	}
+	if params.Get("charset") != "utf8mb4" {
+		t.Fatalf("charset = %q, want utf8mb4", params.Get("charset"))
 	}
 }
 
