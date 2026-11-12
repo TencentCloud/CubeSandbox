@@ -7,6 +7,7 @@ package localcache
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
@@ -149,6 +150,50 @@ func TestSyncAllFromDB_LoadErrorResetsStreak(t *testing.T) {
 		t.Fatal("expected error from loader")
 	}
 	assert.Zero(t, l.emptySyncStreak.Load(), "load error must reset streak to 0")
+}
+
+// TestSyncAllFromDB_SyncedFlagSetAfterCacheFilled guards against querying AbsentSince before the cache catches up with this round's nodes.
+func TestSyncAllFromDB_SyncedFlagSetAfterCacheFilled(t *testing.T) {
+	l := newTestLocal()
+	var syncedBeforeSecondRound bool
+	var node1CachedBeforeSecondRound bool
+	round := 0
+
+	withExternalNodeLoader(t, func(context.Context) ([]*node.Node, error) {
+		round++
+		if round == 2 {
+			syncedBeforeSecondRound = l.synced.Load()
+			_, node1CachedBeforeSecondRound = l.cache.Get("node-1")
+			return nil, nil
+		}
+		return []*node.Node{{InsID: "node-1"}, {InsID: "node-2"}}, nil
+	})
+	if err := l.syncAllFromDB(context.Background(), true); err != nil {
+		t.Fatalf("syncAllFromDB round 1: %v", err)
+	}
+	if err := l.syncAllFromDB(context.Background(), true); err != nil {
+		t.Fatalf("syncAllFromDB round 2: %v", err)
+	}
+
+	assert.True(t, syncedBeforeSecondRound, "synced must already be true once the first round's cache fill completed")
+	assert.True(t, node1CachedBeforeSecondRound, "the first round's nodes must be in the cache by the time synced is observed true")
+}
+
+// TestNodeIDsReturnsCacheKeys pins NodeIDs to cache keys, not InsID: an
+// InsID-less node is keyed by IP, so InsID would yield "" and match nothing.
+func TestNodeIDsReturnsCacheKeys(t *testing.T) {
+	loc := useTestLocal(t)
+	loc.addNodeCache(&node.Node{InsID: "node-1", IP: "10.0.0.1"})
+	loc.addNodeCache(&node.Node{IP: "10.0.0.2"}) // no InsID: keyed by IP
+
+	ids := NodeIDs()
+	sort.Strings(ids)
+	assert.Equal(t, []string{"10.0.0.2", "node-1"}, ids)
+	for _, id := range ids {
+		if _, ok := GetNode(id); !ok {
+			t.Fatalf("NodeIDs returned %q, which GetNode cannot resolve", id)
+		}
+	}
 }
 
 func TestDelNodeCacheRemovesTemplateLocality(t *testing.T) {

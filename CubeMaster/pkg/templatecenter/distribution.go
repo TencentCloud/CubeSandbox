@@ -365,7 +365,7 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 			// Record physical placement independently of the replica lifecycle so
 			// last-owner-cleanup / GC can later reach this node even after the
 			// replica row is removed (FIX-1).
-			if err := upsertArtifactNodePlacement(ctx, artifact.ArtifactID, target.ID(), target.HostIP()); err != nil {
+			if err := upsertArtifactNodePlacement(ctx, artifact.ArtifactID, target.ID(), target.HostIP(), req.InstanceType); err != nil {
 				// Non-fatal: placement is a cleanup optimisation, not a
 				// correctness gate for distribution. Backfill/GC reconcile later.
 				log.G(ctx).Warnf("record artifact placement %s on node %s failed: %v", artifact.ArtifactID, target.ID(), err)

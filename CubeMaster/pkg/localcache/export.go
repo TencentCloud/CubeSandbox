@@ -186,6 +186,19 @@ func cloneNodeWithCurrentHealth(n *node.Node, _ time.Time) *node.Node {
 	return n.Clone()
 }
 
+// NodeIDs returns every node id in the view as cache keys (node.ID()), which
+// is what GetNode accepts; health and absence state are ignored.
+func NodeIDs() []string {
+	elems := l.cache.Items()
+	ids := make([]string, 0, len(elems))
+	for k, v := range elems {
+		if _, ok := v.Object.(*node.Node); ok {
+			ids = append(ids, k)
+		}
+	}
+	return ids
+}
+
 func GetNodesByIp(ip string) (*node.Node, bool) {
 	elems := l.cache.Items()
 	now := time.Now()
