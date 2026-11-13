@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,7 +57,14 @@ func SetJFSTemplateVariantResolver(resolver JFSTemplateVariantResolver) {
 	jfsTemplateVariantResolver = resolver
 }
 
+const (
+	createDispatchPending int32 = iota
+	createDispatchStarted
+	createDispatchAborted
+)
+
 type createSandboxContext struct {
+	dispatchState    atomic.Int32
 	selctx           *selctx.SelectorCtx
 	directHost       bool
 	selectHost       *node.Node
@@ -133,6 +141,9 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		reschedule: true,
 		retryCost:  time.Duration(0),
 	}
+	// Seal queued work before handing the response to callers. A cancellation
+	// alone cannot prove that a scheduler worker has not crossed the RPC boundary.
+	defer func() { rsp.CreateNotStarted = createCtx.abortUndispatchedCreate() }()
 	// Record the create attempt on every return path (mock / param failure
 	// included); endTime stays zero on early returns and the helper falls
 	// back to now. The profile label reflects the pipeline that actually
@@ -365,7 +376,22 @@ func admitSelectedHost(selected *node.Node, getNode func(string) (*node.Node, bo
 	return current, nil
 }
 
+// abortUndispatchedCreate and beginCreateDispatch race on the same state. Once
+// an RPC may have reached a node, subsequent retries cannot make its result known.
+func (c *createSandboxContext) abortUndispatchedCreate() bool {
+	c.dispatchState.CompareAndSwap(createDispatchPending, createDispatchAborted)
+	return c.dispatchState.Load() == createDispatchAborted
+}
+
+func (c *createSandboxContext) beginCreateDispatch() bool {
+	c.dispatchState.CompareAndSwap(createDispatchPending, createDispatchStarted)
+	return c.dispatchState.Load() == createDispatchStarted
+}
+
 func (c *createSandboxContext) callCubelet() bool {
+	if !c.beginCreateDispatch() {
+		return false
+	}
 
 	localcache.IncrNodeConcurrent(c.selectHost)
 	defer func() {

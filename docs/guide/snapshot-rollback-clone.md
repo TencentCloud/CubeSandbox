@@ -62,6 +62,71 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
 
 A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id_or_name)` to clean up when it is no longer needed. It accepts either a snapshot ID or the name you passed to `create_snapshot`, and returns `True` when the snapshot was deleted or `False` when it did not exist. The SDK only matches snapshots, never templates: a name that matches no snapshot returns `False` even if a template alias has that name, and the template is left untouched. If a name matches several snapshots the call fails with HTTP 409 and nothing is deleted; use the `snap-` ID instead. This requires a CubeAPI that supports `snapshot_only`; older servers ignore it and still route a name that matches no snapshot to the template of that name.
 
+### Snapshot expiration
+
+`sb.create_snapshot(ttl_seconds=3600)` sets a lifetime of 3,600 seconds from
+the transition to READY. Omitted or zero means no expiration. Creation and
+listing return `SnapshotInfo.expires_at` (RFC 3339 UTC), or `None` without a TTL.
+The accepted range is 0 through 9,223,372,036 seconds.
+
+CubeAPI accepts `ttlSeconds` (also `ttl_seconds`) and returns `expiresAt`.
+CubeMaster uses `ttl_seconds` and `expires_at`; its CLI accepts `--ttl-seconds`.
+The Node SDK accepts `sb.createSnapshot("checkpoint", { ttlSeconds: 3600 })` and
+returns `expiresAt`. Go accepts
+`sb.CreateSnapshot(ctx, "checkpoint", cubesandbox.CreateSnapshotOptions{TTLSeconds: 3600})`
+and returns `ExpiresAt`. Existing calls remain valid.
+TTL requires SDK, CubeAPI and CubeMaster versions that support these fields;
+an older CubeAPI may ignore an unknown field. A newer CubeAPI reports a conflict
+if CubeMaster omits a requested expiration rather than claiming TTL is active.
+That error includes the created snapshot ID so the caller can explicitly delete
+it before retrying; a failed TTL check does not undo an already completed capture.
+
+Expiration rejects new restores and rollbacks immediately. Already accepted
+operations finish before retirement; running sandboxes keep their references.
+The five-minute reconciler retires the snapshot and starts physical cleanup only
+after runtime references drain. S3 may defer physical deletion further while
+clones or import leases still depend on its blocks. Logical deletion does not
+promise that disk space has already been reclaimed.
+
+Create and fork reserve a persistent `create_pending` reference before the node
+RPC. A rejection before dispatch releases it immediately, including a cancelled
+request that was still queued. Once an RPC has been attempted, an error or lost
+response keeps this protection. A successful node inventory converts an observed
+reservation into a runtime binding. An absent sandbox is eligible for release
+only after 24 hours, a successful inventory and an absence check on Master.
+Failed inventories and unhealthy nodes are never treated as proof of absence.
+
+For a permanently lost node, first fence it outside CubeSandbox so that old VMs
+and queued create requests cannot resume. Retire the snapshot, wait for the
+24-hour reservation grace, and use the CubeMaster administration CLI:
+
+```bash
+cubemastercli snapshot recover-create \
+  --snapshot-id snap-example --sandbox-id reserved-example \
+  --node-id retired-node --node-ip 192.0.2.10 \
+  --confirm-node-fenced --reason "Host powered off and prevented from restarting"
+```
+
+Supply the exact `node_id` and `node_ip` recorded in `t_cube_snapshot_runtime_active`
+(omit a flag only when that stored value is empty). The internal endpoint is
+`POST /cube/snapshot/{snapshot_id}/recover-create`; it is not exposed by CubeAPI.
+The operation refuses live snapshots, young reservations, healthy nodes, active
+snapshot jobs and sandboxes still known to Master. It removes only the matching
+`create_pending` binding and records the reason in runtime-reference history;
+ordinary runtime bindings stay protected. Repeating a completed recovery is safe.
+Physical cleanup proceeds on the next reconciliation pass.
+
+S3 deferred deletion is accepted only on the backend's successful acknowledgement
+(`bool_value: true`, with `deferred: true` when queued). An ordinary `busy` error,
+including one from an older backend without deferred acknowledgement, retains
+metadata for retry. Upgrade the S3 backend or remove the actual dependency;
+Master does not reinterpret an unacknowledged error as completed cleanup.
+
+Create and fork preserve lifecycle errors from snapshot resolution: expired or
+busy sources are conflicts, and deleted or missing sources are not-found. A
+malformed request remains a parameter error. Callers should check the error code
+instead of treating every rejected source as an invalid parameter.
+
 ### Filesystem-only snapshots
 
 Pass `mode="fs-only"` to capture the filesystem without guest memory. The guest

@@ -176,6 +176,11 @@ export interface ListSnapshotsOptions {
   config?: Config | ConfigOptions;
 }
 
+export interface CreateSnapshotOptions {
+  /** Lifetime from READY, in seconds. Zero or omitted means no expiration. */
+  ttlSeconds?: number;
+}
+
 const VALID_ON_TIMEOUT = ["kill", "pause"] as const;
 
 /** Fork request budget: CubeAPI's FORK_ROUTE_TIMEOUT (1560 s) plus headroom. */
@@ -894,8 +899,14 @@ export class Sandbox {
   }
 
   /** POST /sandboxes/:id/snapshots — create a snapshot; name must not start with tpl-/snap-. */
-  async createSnapshot(name?: string): Promise<SnapshotInfo> {
+  async createSnapshot(name?: string, options: CreateSnapshotOptions = {}): Promise<SnapshotInfo> {
     const payload: Record<string, unknown> = {};
+    if (options.ttlSeconds !== undefined) {
+      if (!Number.isSafeInteger(options.ttlSeconds) || options.ttlSeconds < 0 || options.ttlSeconds > 9_223_372_036) {
+        throw new RangeError("ttlSeconds must be an integer between 0 and 9223372036");
+      }
+      payload.ttlSeconds = options.ttlSeconds;
+    }
     if (name !== undefined) {
       payload.name = name;
     }

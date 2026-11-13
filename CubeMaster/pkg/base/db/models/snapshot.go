@@ -15,24 +15,25 @@ import (
 // t_cube_template_definition — templates stay on that table unchanged.
 type SnapshotRecord struct {
 	gorm.Model
-	SnapshotID                string `json:"snapshot_id" gorm:"column:snapshot_id"`
-	OriginSandboxID           string `json:"origin_sandbox_id" gorm:"column:origin_sandbox_id"`
-	OriginNodeID              string `json:"origin_node_id" gorm:"column:origin_node_id"`
-	OriginNodeIP              string `json:"origin_node_ip" gorm:"column:origin_node_ip"`
-	DisplayName               string `json:"display_name" gorm:"column:display_name"`
-	InstanceType              string `json:"instance_type" gorm:"column:instance_type"`
-	Version                   string `json:"version" gorm:"column:version"`
-	Status                    string `json:"status" gorm:"column:status"`
-	LastError                 string `json:"last_error" gorm:"column:last_error"`
-	RootfsSizeBytesAtSnapshot uint64 `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
-	OriginHostFactsJSON       string `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
-	RootfsArtifactID          string `json:"rootfs_artifact_id" gorm:"column:rootfs_artifact_id;index:idx_cube_snapshot_rootfs_artifact"`
-	CleanupArtifactIDsJSON    string `json:"-" gorm:"column:cleanup_artifact_ids_json"`
-	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
-	Backend                   string `json:"backend" gorm:"column:backend"`
-	Mode                      string `json:"mode" gorm:"column:mode"`
-	RemoteStatus              string `json:"remote_status" gorm:"column:remote_status"`
-	ExportUUIDs               string `json:"export_uuids" gorm:"column:export_uuids"`
+	SnapshotID                string     `json:"snapshot_id" gorm:"column:snapshot_id"`
+	OriginSandboxID           string     `json:"origin_sandbox_id" gorm:"column:origin_sandbox_id"`
+	OriginNodeID              string     `json:"origin_node_id" gorm:"column:origin_node_id"`
+	OriginNodeIP              string     `json:"origin_node_ip" gorm:"column:origin_node_ip"`
+	DisplayName               string     `json:"display_name" gorm:"column:display_name"`
+	InstanceType              string     `json:"instance_type" gorm:"column:instance_type"`
+	Version                   string     `json:"version" gorm:"column:version"`
+	Status                    string     `json:"status" gorm:"column:status"`
+	LastError                 string     `json:"last_error" gorm:"column:last_error"`
+	RootfsSizeBytesAtSnapshot uint64     `json:"rootfs_size_bytes_at_snapshot" gorm:"column:rootfs_size_bytes_at_snapshot"`
+	OriginHostFactsJSON       string     `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
+	RootfsArtifactID          string     `json:"rootfs_artifact_id" gorm:"column:rootfs_artifact_id;index:idx_cube_snapshot_rootfs_artifact"`
+	CleanupArtifactIDsJSON    string     `json:"-" gorm:"column:cleanup_artifact_ids_json"`
+	RequestJSON               string     `json:"request_json" gorm:"column:request_json"`
+	Backend                   string     `json:"backend" gorm:"column:backend"`
+	Mode                      string     `json:"mode" gorm:"column:mode"`
+	RemoteStatus              string     `json:"remote_status" gorm:"column:remote_status"`
+	ExportUUIDs               string     `json:"export_uuids" gorm:"column:export_uuids"`
+	ExpiresAt                 *time.Time `json:"expires_at,omitempty" gorm:"column:expires_at;index:idx_cube_snapshot_expires_at"`
 }
 
 func (SnapshotRecord) TableName() string {

@@ -126,12 +126,15 @@ func (r *CreateCubeSandboxReq) UnmarshalJSON(data []byte) error {
 }
 
 type CreateCubeSandboxRes struct {
-	RequestID string
-	Ret       *Ret   `json:"ret,omitempty"`
-	SandboxID string `json:"sandbox_id,omitempty"`
-	SandboxIP string `json:"sandbox_ip,omitempty"`
-	HostID    string `json:"host_id,omitempty"`
-	HostIP    string `json:"host_ip,omitempty"`
+	// CreateNotStarted certifies that no node RPC was issued and none can start
+	// after this response. Internal callers may release pre-create reservations.
+	CreateNotStarted bool `json:"-"`
+	RequestID        string
+	Ret              *Ret   `json:"ret,omitempty"`
+	SandboxID        string `json:"sandbox_id,omitempty"`
+	SandboxIP        string `json:"sandbox_ip,omitempty"`
+	HostID           string `json:"host_id,omitempty"`
+	HostIP           string `json:"host_ip,omitempty"`
 	// TrafficAccessToken is populated only when the request set
 	// CubeNetworkConfig.AllowPublicTraffic = false. Empty otherwise.
 	TrafficAccessToken string            `json:"traffic_access_token,omitempty"`

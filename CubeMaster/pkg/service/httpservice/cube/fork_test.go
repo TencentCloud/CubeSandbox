@@ -86,7 +86,7 @@ func stubForkCreateSeams(t *testing.T, reclaim *forkReclaimRecord) {
 	resolveSourceAliasFn = func(_ context.Context, _ string) string {
 		return ""
 	}
-	createSnapshotFn = func(_ context.Context, _, sandboxID, _, _, _, _ string, _ snapshotmode.Mode) (*types.TemplateImageJobInfo, error) {
+	createSnapshotFn = func(_ context.Context, _, sandboxID, _, _, _, _ string, _ snapshotmode.Mode, _ int64) (*types.TemplateImageJobInfo, error) {
 		return &types.TemplateImageJobInfo{
 			TemplateID: testForkSnapshotID,
 			SandboxID:  sandboxID,

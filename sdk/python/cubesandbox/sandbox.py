@@ -855,6 +855,7 @@ class Sandbox:
         name: str | None = None,
         *,
         mode: str | None = None,
+        ttl_seconds: int | None = None,
     ) -> SnapshotInfo:
         """POST /sandboxes/:sandboxID/snapshots — Create a snapshot (1.1).
 
@@ -871,6 +872,9 @@ class Sandbox:
                 with this name already exists the new build is attached to it
                 rather than creating a new template.  Must not start with
                 ``tpl-`` or ``snap-`` (HTTP 400).
+            ttl_seconds: Lifetime in seconds from READY; omitted or zero means
+                no expiration. Expiration refuses new use while existing
+                instances retain their storage references.
             mode: ``"full"`` (default) or ``"fs-only"``.  ``"filesystem"`` is
                 accepted as an alias for compatibility with E2B clients.
                 Whether the cluster can produce an fs-only artifact is decided
@@ -893,6 +897,10 @@ class Sandbox:
             payload["name"] = name
         if mode is not None:
             payload["mode"] = mode
+        if ttl_seconds is not None:
+            if type(ttl_seconds) is not int or not 0 <= ttl_seconds <= 9_223_372_036:
+                raise ValueError("ttl_seconds must be an integer between 0 and 9223372036")
+            payload["ttlSeconds"] = ttl_seconds
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshots",
             json=payload,

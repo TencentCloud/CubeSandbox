@@ -13,6 +13,7 @@ export {
   type RunCodeOptions,
   type PauseOptions,
   type ListSnapshotsOptions,
+  type CreateSnapshotOptions,
   type NetworkOptions,
   type UpdateNetworkOptions,
   type LifecycleOptions,

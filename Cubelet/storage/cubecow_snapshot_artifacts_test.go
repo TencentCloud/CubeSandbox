@@ -64,7 +64,7 @@ func TestCleanupObjectsStopsWhenRootfsSurvives(t *testing.T) {
 	assert.Empty(t, engine.deletedVolumes, "memory must survive a rootfs that refused to go")
 }
 
-func TestCleanupObjectsSweepsPastBusySnapshot(t *testing.T) {
+func TestCleanupObjectsKeepsPackageOnUnacceptedBusySnapshot(t *testing.T) {
 	engine := &fakeCowEngine{
 		deleteErrByName: map[string]error{
 			"tpl-3-rootfs": s3BusyDeleteError(),
@@ -72,20 +72,19 @@ func TestCleanupObjectsSweepsPastBusySnapshot(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	// Busy is s3lvol holding a reference this node cannot release, and it
-	// never clears. Honouring it strands the package forever, so the sweep
-	// records the leak and finishes.
+	// Only a successful deferred response proves that the backend accepted
+	// cleanup. A plain busy error must preserve the package for retry.
 	err := CleanupObjectsFor(context.Background(), "s3", []CowObjectRef{
 		{Name: "tpl-3-memory", Kind: CowKindVolume, Role: "memory"},
 		{Name: "tpl-3-rootfs", Kind: CowKindSnapshot, Role: "rootfs"},
 		{Name: "s3-meta-tpl-3-snap", Kind: CowKindSnapshot, Role: "metadata"},
 	})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"tpl-3-memory"}, engine.deletedVolumes)
-	assert.Equal(t, []string{"tpl-3-rootfs", "s3-meta-tpl-3-snap"}, engine.deletedSnapshots)
+	require.Error(t, err)
+	assert.Empty(t, engine.deletedVolumes)
+	assert.Equal(t, []string{"tpl-3-rootfs"}, engine.deletedSnapshots)
 }
 
-func TestCleanupObjectsDefersBusyVolume(t *testing.T) {
+func TestCleanupObjectsKeepsPackageOnBusyRootfsVolume(t *testing.T) {
 	engine := &fakeCowEngine{
 		deleteErrByName: map[string]error{
 			"sb-4-rootfs-gen0": s3BusyDeleteError(),
@@ -93,16 +92,14 @@ func TestCleanupObjectsDefersBusyVolume(t *testing.T) {
 	}
 	useTestCowStorage(t, engine)
 
-	// Volume busy is deferred to the backend. Cubelet warns and continues
-	// so Destroy / CleanupTemplate do not fail; leak detection greps
-	// "volume delete deferred" and does not count the name.
+	// A volume error is not an accepted deferred delete either.
 	err := CleanupObjectsFor(context.Background(), "s3", []CowObjectRef{
 		{Name: "sb-4-rootfs-gen0", Kind: CowKindVolume, Role: "rootfs"},
 		{Name: "sb-4-memory", Kind: CowKindVolume, Role: "memory"},
 	})
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.Contains(t, engine.deletedVolumes, "sb-4-rootfs-gen0")
-	assert.Contains(t, engine.deletedVolumes, "sb-4-memory")
+	assert.NotContains(t, engine.deletedVolumes, "sb-4-memory")
 }
 
 func s3BusyDeleteError() error {
