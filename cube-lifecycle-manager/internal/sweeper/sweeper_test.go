@@ -457,35 +457,58 @@ func TestSweeper_KillPreservesOwnershipOnUnknownError(t *testing.T) {
 }
 
 func TestSweeper_KillNotFoundEvictsRegistry(t *testing.T) {
-	reg := registry.New()
-	store := newFakeStore()
-	master := &fakeMaster{
-		failNextKill: true,
-		failKillErr: &cubemasterclient.APIError{
-			RetCode: cubemasterclient.RetCodeInvalidParamFormat,
-			RetMsg:  "key not found",
-		},
+	cases := []struct {
+		name    string
+		retCode int
+		retMsg  string
+	}{
+		{"sandbox id not found", cubemasterclient.RetCodeNotFound, "sandbox id not found"},
+		{"key not found", cubemasterclient.RetCodeInvalidParamFormat, "key not found"},
 	}
-	push := newFakePush()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registry.New()
+			store := newFakeStore()
+			master := &fakeMaster{
+				failNextKill: true,
+				failKillErr: &cubemasterclient.APIError{
+					RetCode: tc.retCode,
+					RetMsg:  tc.retMsg,
+				},
+			}
+			push := newFakePush()
 
-	now := time.Now()
-	seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
-		SandboxID: "sbx-killgone", InstanceType: "cubebox",
-		AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
-	}, now.Add(-10*time.Minute).UnixMilli())
+			now := time.Now()
+			seedEntry(t, reg, lifecycle.SandboxLifecycleMeta{
+				SandboxID: "sbx-killgone", InstanceType: "cubebox",
+				AutoPause: false, TimeoutSeconds: lifecycle.TimeoutSecondsPtr(60),
+			}, now.Add(-10*time.Minute).UnixMilli())
 
-	s := newTestSweeper(reg, store, master, push, now)
-	s.sweepOnce(context.Background())
+			s := newTestSweeper(reg, store, master, push, now)
+			s.sweepOnce(context.Background())
 
-	if reg.Get("sbx-killgone") != nil {
-		t.Fatal("registry entry should be evicted on not-found")
-	}
-	if got := push.deletedIDs(); len(got) != 1 || got[0] != "sbx-killgone" {
-		t.Fatalf("expected DeleteMeta(sbx-killgone), got %v", got)
-	}
-	triggered, failed := s.KillStats()
-	if triggered != 1 || failed != 0 {
-		t.Fatalf("not-found is success: triggered=%d failed=%d", triggered, failed)
+			if reg.Get("sbx-killgone") != nil {
+				t.Fatal("registry entry should be evicted on not-found")
+			}
+			if got := store.state("sbx-killgone"); got != lifecycle.StateKilled {
+				t.Fatalf("redis state should be killed on not-found, got %q", got)
+			}
+			if got := push.deletedIDs(); len(got) != 1 || got[0] != "sbx-killgone" {
+				t.Fatalf("expected DeleteMeta(sbx-killgone), got %v", got)
+			}
+			triggered, failed := s.KillStats()
+			if triggered != 1 || failed != 0 {
+				t.Fatalf("not-found is success: triggered=%d failed=%d", triggered, failed)
+			}
+
+			if err := store.ClearState(context.Background(), "sbx-killgone"); err != nil {
+				t.Fatal(err)
+			}
+			s.sweepOnce(context.Background())
+			if len(master.killCalls) != 1 {
+				t.Fatalf("evicted sandbox must not be retried after state expiry, got %v", master.killCalls)
+			}
+		})
 	}
 }
 
