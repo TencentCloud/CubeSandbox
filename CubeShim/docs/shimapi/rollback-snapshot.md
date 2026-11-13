@@ -51,6 +51,10 @@ caller  ──UpdateTaskRequest { id, annotations }──▶  CubeShim (ttrpc)
   "prefault": false,
 
   // [Optional] Enable dirty-log tracking after restore (default: false).
+  // Cubelet sends this from the host's host.memory.dirty_log setting. With it
+  // armed the next pause writes only the pages touched since this restore, so
+  // the destination memory blob must already hold the image being restored
+  // from (the caller clones the base first, as for an incremental snapshot).
   "dirty_log": false,
 
   // [Optional] Replace block devices after restore.
