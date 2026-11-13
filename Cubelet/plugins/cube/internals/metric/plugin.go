@@ -63,7 +63,7 @@ func init() {
 			}
 
 			plugins := ic.GetAll()
-			for name, p := range plugins {
+			for _, p := range plugins {
 				i, err := p.Instance()
 				if err != nil || i == nil {
 					continue
@@ -75,7 +75,7 @@ func init() {
 
 				CubeLog.Infof("register metric from plugin %q", p.Registration.ID)
 				if err := mp.RegisterMetrics(l.register); err != nil {
-					return nil, fmt.Errorf("plugin %q failed to register metric: %v", name, err)
+					return nil, fmt.Errorf("plugin %q failed to register metric: %v", p.Registration.ID, err)
 				}
 			}
 

@@ -7020,7 +7020,7 @@ var File_services_cubebox_v1_cubebox_proto protoreflect.FileDescriptor
 
 const file_services_cubebox_v1_cubebox_proto_rawDesc = "" +
 	"\n" +
-	"!services/cubebox/v1/cubebox.proto\x12\x1bcubelet.services.cubebox.v1\x1a%services/errorcode/v1/errorcode.proto\x1a\x1fservices/images/v1/images.proto\x1a+services/volumeplugin/v1/volumeplugin.proto\"a\n" +
+	"!services/cubebox/v1/cubebox.proto\x12\x1bcubelet.services.cubebox.v1\x1a%services/errorcode/v1/errorcode.proto\x1a'services/images/v1/cubelet_images.proto\x1a+services/volumeplugin/v1/volumeplugin.proto\"a\n" +
 	"\rSELinuxOption\x12\x12\n" +
 	"\x04user\x18\x01 \x01(\tR\x04user\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x12\n" +

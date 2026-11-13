@@ -4,6 +4,12 @@
 
 syntax = "proto3";
 
+// File is named cubelet_images.proto (not images.proto) so the registered
+// proto file path stays unique: github.com/containerd/containerd/api also
+// registers a different proto at services/images/v1/images.proto, and
+// protobuf-go panics on duplicate global file registration when both are
+// linked into one binary.
+
 package cubelet.services.images.v1;
 import "services/errorcode/v1/errorcode.proto";
 import "types/v1/images.proto";
