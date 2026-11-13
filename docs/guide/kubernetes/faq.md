@@ -225,7 +225,7 @@ Normal path (summary): ensure `pvm-not-ready` → drain dependent Pods → inval
 If stuck on wait-node-prep: first confirm bootstrap is Ready and the `/var/lib/cube-node-bootstrap/node-prep-ready` fingerprint. If the node never reboots after kernel swap, it usually lacks reboot permission or GRUB was not updated — log into the node, `reboot` manually, and check:
 
 ```bash
-uname -r     # Should contain cubesandbox.pvm.host (matches Chart default DESIRED_KERNEL_PATTERN)
+uname -r     # Should contain cubesandbox (matches Chart default DESIRED_KERNEL_PATTERN)
 cat /proc/cmdline | grep -o pti=off
 ```
 

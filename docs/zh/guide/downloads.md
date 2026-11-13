@@ -35,10 +35,10 @@ PVM 部署中，唯一需要手动下载的就是宿主机内核包 —— 装�
 
 1. 打开 [CubeSandbox Releases 页面](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases)，在过滤框输入 `kernel-release`，打开最新的一个
 2. 按你的发行版下载**内核主包**：
-   - RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）：`kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+   - RPM 系（OpenCloudOS、RHEL、CentOS、TencentOS、Fedora）：`kernel-*`、`kernel-core-*`、`kernel-modules-*`、`kernel-devel-*`、`kernel-headers-*` 五个包（均为 `*.cubesandbox.oc9.x86_64.rpm`）
    - DEB 系（Ubuntu、Debian）：`linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
 
-<small>资产列表中的 `kernel-headers-*`、`-dbg` 等为可选包，无需下载。</small>
+<small>资产列表中的 `bpftool-*`、`kernel-debuginfo-*`、`kernel-signing-keys-*`、`kernel-tools-*`、`perf-*`、`python3-perf-*` 及 DEB `-dbg` 等为可选包，无需下载。</small>
 
 已安装 GitHub CLI 的用户也可免找文件名、按通配直接下载，用法见[附录](#附录-url-规律-最新-tag-与版本-pin)。
 
@@ -81,7 +81,11 @@ gh release list --repo TencentCloud/CubeSandbox --limit 30 | grep kernel-release
 
 # 按通配下载（<tag> 替换为上面查到的最新 tag，无需知道精确文件名）
 gh release download <tag> --repo TencentCloud/CubeSandbox \
-  --pattern 'kernel-6*.x86_64.rpm'   # 或：--pattern 'linux-image-6*_amd64.deb'
+  --pattern 'kernel-6*.x86_64.rpm' \
+  --pattern 'kernel-core-6*.x86_64.rpm' \
+  --pattern 'kernel-modules-6*.x86_64.rpm' \
+  --pattern 'kernel-devel-6*.x86_64.rpm' \
+  --pattern 'kernel-headers-6*.x86_64.rpm'   # 或：--pattern 'linux-image-6*_amd64.deb'
 ```
 
 **版本 pin** —— 每个 `v*` 产品版本在 [`deploy/release-assets.yaml`](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/release-assets.yaml) 中记录打包所用的 kernel / guest-image tag（也写在包内 `release-manifest.json`），据此可查"我手里的包用的是哪个内核"。专属 tag 的发布节奏独立于产品版本，pin 可能落后于最新 tag —— **PVM 宿主机内核建议始终用最新 `kernel-release-*`**（含内核安全修复），无需与产品版本对齐。

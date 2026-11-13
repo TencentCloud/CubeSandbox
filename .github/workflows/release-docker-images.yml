@@ -695,26 +695,52 @@ jobs:
           gh release download "${KERNEL_PVM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/cube-pvm-host-dl \
-            --pattern "*.rpm" || true
+            --pattern "kernel-[0-9]*.rpm" \
+            --pattern "kernel-core-*.rpm" \
+            --pattern "kernel-modules-*.rpm" \
+            --pattern "kernel-devel-*.rpm" \
+            --pattern "kernel-headers-*.rpm" || true
           gh release download "${KERNEL_PVM_RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/cube-pvm-host-dl \
             --pattern "*.deb" || true
 
-          rpm_src=""
+          # kernel-core keeps the historical kernel-pvm-host.rpm name; the
+          # other packages are staged as kernel-pvm-host-<pkg>.rpm. Select one
+          # coherent version even if a rebuilt release retains older assets.
+          declare -A rpm_dest=(
+            [kernel]=kernel-pvm-host-meta.rpm
+            [core]=kernel-pvm-host.rpm
+            [modules]=kernel-pvm-host-modules.rpm
+            [devel]=kernel-pvm-host-devel.rpm
+            [headers]=kernel-pvm-host-headers.rpm
+          )
+          staged_rpms=()
           deb_src=""
           shopt -s nullglob
-          for f in /tmp/cube-pvm-host-dl/*.rpm; do
-            base="$(basename "${f}")"
-            case "${base}" in
-              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
-                case "${base}" in
-                  *headers*) continue ;;
-                esac
-                rpm_src="${f}"
-                break
-                ;;
-            esac
+          core_matches=(/tmp/cube-pvm-host-dl/kernel-core-[0-9]*.x86_64.rpm)
+          if [[ "${#core_matches[@]}" -eq 0 ]]; then
+            echo "missing PVM host kernel-core RPM on ${KERNEL_PVM_RELEASE_TAG}" >&2
+            ls -la /tmp/cube-pvm-host-dl >&2 || true
+            exit 1
+          fi
+          core_src="$(printf '%s\n' "${core_matches[@]}" | sort -V | tail -1)"
+          rpm_version="$(basename "${core_src}")"
+          rpm_version="${rpm_version#kernel-core-}"
+          rpm_version="${rpm_version%.x86_64.rpm}"
+          for pkg in kernel core modules devel headers; do
+            if [[ "${pkg}" == kernel ]]; then
+              src="/tmp/cube-pvm-host-dl/kernel-${rpm_version}.x86_64.rpm"
+            else
+              src="/tmp/cube-pvm-host-dl/kernel-${pkg}-${rpm_version}.x86_64.rpm"
+            fi
+            if [[ ! -f "${src}" ]]; then
+              echo "missing matching PVM host kernel-${pkg} RPM for ${rpm_version} on ${KERNEL_PVM_RELEASE_TAG}" >&2
+              ls -la /tmp/cube-pvm-host-dl >&2 || true
+              exit 1
+            fi
+            install -m 0644 "${src}" "cube-pvm-host-bootstrap-ctx/artifacts/${rpm_dest[${pkg}]}"
+            staged_rpms+=("$(basename "${src}")")
           done
           for f in /tmp/cube-pvm-host-dl/*.deb; do
             base="$(basename "${f}")"
@@ -730,15 +756,12 @@ jobs:
           done
           shopt -u nullglob
 
-          [[ -n "${rpm_src}" ]] \
-            || { echo "missing main PVM host kernel RPM on ${KERNEL_PVM_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
           [[ -n "${deb_src}" ]] \
             || { echo "missing main PVM host kernel DEB on ${KERNEL_PVM_RELEASE_TAG}" >&2; ls -la /tmp/cube-pvm-host-dl >&2 || true; exit 1; }
 
-          install -m 0644 "${rpm_src}" cube-pvm-host-bootstrap-ctx/artifacts/kernel-pvm-host.rpm
           install -m 0644 "${deb_src}" cube-pvm-host-bootstrap-ctx/artifacts/linux-image-pvm-host.deb
           echo "asset_tag=${KERNEL_PVM_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "staged rpm=$(basename "${rpm_src}") deb=$(basename "${deb_src}") from ${KERNEL_PVM_RELEASE_TAG}"
+          echo "staged rpms=${staged_rpms[*]} deb=$(basename "${deb_src}") from ${KERNEL_PVM_RELEASE_TAG}"
 
       - name: Build and push per-arch image
         uses: docker/build-push-action@v6

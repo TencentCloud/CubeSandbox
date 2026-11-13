@@ -3,8 +3,9 @@
 This directory stores the vetted kernel `.config` files consumed by the PVM
 build scripts:
 
-- `pvm_host` is used by `deploy/pvm/build-pvm-host-kernel-pkg.sh` to build the
-  host kernel package that enables `KVM_PVM`.
+- `pvm_host` is used by the DEB path in
+  `deploy/pvm/build-pvm-host-kernel-pkg.sh`. The RPM path uses the PVM kernel
+  tree's `dist/configs/generic-release`, which enables `CONFIG_KVM_PVM=m`.
 - `pvm_guest` is used by `deploy/pvm/build-pvm-guest-vmlinux.sh` to build the
   guest `vmlinux` consumed by CubeSandbox.
 

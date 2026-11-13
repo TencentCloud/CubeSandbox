@@ -53,7 +53,11 @@ ONE_CLICK_ARCH="${ONE_CLICK_ARCH:-amd64}"
 # Explicit ONE_CLICK_URL / PVM_KERNEL_*_URL overrides still win.
 MIRROR="${MIRROR:-}"
 ONE_CLICK_ARTIFACT="${ONE_CLICK_ARTIFACT:-cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}.tar.gz}"
-PVM_KERNEL_RPM_ARTIFACT="${PVM_KERNEL_RPM_ARTIFACT:-kernel-6.6.117_opencloudos9.cubesandbox.pvm.host_gbc75224fca7e-1.x86_64.rpm}"
+PVM_KERNEL_RPM_ARTIFACT="${PVM_KERNEL_RPM_ARTIFACT:-kernel-core-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
+PVM_KERNEL_META_RPM_ARTIFACT="${PVM_KERNEL_META_RPM_ARTIFACT:-kernel-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
+PVM_KERNEL_MODULES_RPM_ARTIFACT="${PVM_KERNEL_MODULES_RPM_ARTIFACT:-kernel-modules-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
+PVM_KERNEL_DEVEL_RPM_ARTIFACT="${PVM_KERNEL_DEVEL_RPM_ARTIFACT:-kernel-devel-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
+PVM_KERNEL_HEADERS_RPM_ARTIFACT="${PVM_KERNEL_HEADERS_RPM_ARTIFACT:-kernel-headers-6.6.117-45.16.cubesandbox.oc9.x86_64.rpm}"
 PVM_KERNEL_DEB_ARTIFACT="${PVM_KERNEL_DEB_ARTIFACT:-linux-image-6.6.117-opencloudos9.cubesandbox.pvm.host-gbc75224fca7e_6.6.117-gbc75224fca7e-1_amd64.deb}"
 case "${MIRROR}" in
   cn|CN|cnb|CNB)
@@ -72,6 +76,10 @@ ONE_CLICK_URL="${ONE_CLICK_URL:-${RELEASE_DOWNLOAD_BASE}/${ONE_CLICK_ARTIFACT}}"
 # deploy/release-assets.yaml), not the product VERSION / IMAGE_TAG.
 # Filled after load_release_asset_pins unless the operator set the URL.
 PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-}"
+PVM_KERNEL_META_RPM_URL="${PVM_KERNEL_META_RPM_URL:-}"
+PVM_KERNEL_MODULES_RPM_URL="${PVM_KERNEL_MODULES_RPM_URL:-}"
+PVM_KERNEL_DEVEL_RPM_URL="${PVM_KERNEL_DEVEL_RPM_URL:-}"
+PVM_KERNEL_HEADERS_RPM_URL="${PVM_KERNEL_HEADERS_RPM_URL:-}"
 PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-}"
 
 # Optional SHA256 checksums for the downloaded artifacts. When set, the
@@ -80,6 +88,10 @@ PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-}"
 # release-mirror tampering. Leave empty for interactive development builds.
 ONE_CLICK_SHA256="${ONE_CLICK_SHA256:-}"
 PVM_KERNEL_RPM_SHA256="${PVM_KERNEL_RPM_SHA256:-}"
+PVM_KERNEL_META_RPM_SHA256="${PVM_KERNEL_META_RPM_SHA256:-}"
+PVM_KERNEL_MODULES_RPM_SHA256="${PVM_KERNEL_MODULES_RPM_SHA256:-}"
+PVM_KERNEL_DEVEL_RPM_SHA256="${PVM_KERNEL_DEVEL_RPM_SHA256:-}"
+PVM_KERNEL_HEADERS_RPM_SHA256="${PVM_KERNEL_HEADERS_RPM_SHA256:-}"
 PVM_KERNEL_DEB_SHA256="${PVM_KERNEL_DEB_SHA256:-}"
 
 # Bake kernel packages into cube-pvm-host-bootstrap by default so delivery only
@@ -1019,13 +1031,31 @@ kernel_bm_release_tag() {
   esac
 }
 
+derive_pvm_rpm_url() {
+  local core_url="$1"
+  local package_name="$2"
+  [[ "${core_url}" == *kernel-core-* ]] || return 1
+  printf '%s%s-%s\n' "${core_url%%kernel-core-*}" "${package_name}" "${core_url##*kernel-core-}"
+}
+
 fill_pvm_host_package_urls() {
   local pvm_base
   load_release_asset_pins
   pvm_base="$(release_download_base_for_tag "${KERNEL_PVM_RELEASE_TAG}")"
   PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-${pvm_base}/${PVM_KERNEL_RPM_ARTIFACT}}"
+  PVM_KERNEL_META_RPM_URL="${PVM_KERNEL_META_RPM_URL:-$(derive_pvm_rpm_url "${PVM_KERNEL_RPM_URL}" kernel || true)}"
+  PVM_KERNEL_MODULES_RPM_URL="${PVM_KERNEL_MODULES_RPM_URL:-$(derive_pvm_rpm_url "${PVM_KERNEL_RPM_URL}" kernel-modules || true)}"
+  PVM_KERNEL_DEVEL_RPM_URL="${PVM_KERNEL_DEVEL_RPM_URL:-$(derive_pvm_rpm_url "${PVM_KERNEL_RPM_URL}" kernel-devel || true)}"
+  PVM_KERNEL_HEADERS_RPM_URL="${PVM_KERNEL_HEADERS_RPM_URL:-$(derive_pvm_rpm_url "${PVM_KERNEL_RPM_URL}" kernel-headers || true)}"
+  [[ -n "${PVM_KERNEL_META_RPM_URL}" && -n "${PVM_KERNEL_MODULES_RPM_URL}" \
+    && -n "${PVM_KERNEL_DEVEL_RPM_URL}" && -n "${PVM_KERNEL_HEADERS_RPM_URL}" ]] \
+    || fail "PVM_KERNEL_RPM_URL must name a kernel-core RPM, or all companion RPM URLs must be set"
   PVM_KERNEL_DEB_URL="${PVM_KERNEL_DEB_URL:-${pvm_base}/${PVM_KERNEL_DEB_ARTIFACT}}"
   PVM_KERNEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_RPM_URL}")"
+  PVM_KERNEL_META_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_META_RPM_URL}")"
+  PVM_KERNEL_MODULES_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_MODULES_RPM_URL}")"
+  PVM_KERNEL_DEVEL_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_DEVEL_RPM_URL}")"
+  PVM_KERNEL_HEADERS_RPM="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_HEADERS_RPM_URL}")"
   PVM_KERNEL_DEB="${DOWNLOAD_DIR}/$(basename "${PVM_KERNEL_DEB_URL}")"
   log "PVM host packages from dedicated Release ${KERNEL_PVM_RELEASE_TAG}"
 }
@@ -1323,9 +1353,17 @@ run_selected_builds() {
       pvm-startup-gate-reconcile.sh \
       pvm-startup-gate-preflight.sh
     if [[ "${INCLUDE_PVM_KERNEL_RPM}" == "1" ]]; then
-      log "downloading PVM host kernel rpm for bootstrap image"
+      log "downloading PVM host kernel/core/modules/devel/headers rpms for bootstrap image"
       download_file "${PVM_KERNEL_RPM_URL}" "${PVM_KERNEL_RPM}" file "${PVM_KERNEL_RPM_SHA256}"
+      download_file "${PVM_KERNEL_META_RPM_URL}" "${PVM_KERNEL_META_RPM}" file "${PVM_KERNEL_META_RPM_SHA256}"
+      download_file "${PVM_KERNEL_MODULES_RPM_URL}" "${PVM_KERNEL_MODULES_RPM}" file "${PVM_KERNEL_MODULES_RPM_SHA256}"
+      download_file "${PVM_KERNEL_DEVEL_RPM_URL}" "${PVM_KERNEL_DEVEL_RPM}" file "${PVM_KERNEL_DEVEL_RPM_SHA256}"
+      download_file "${PVM_KERNEL_HEADERS_RPM_URL}" "${PVM_KERNEL_HEADERS_RPM}" file "${PVM_KERNEL_HEADERS_RPM_SHA256}"
       cp "${PVM_KERNEL_RPM}" "${ctx}/artifacts/kernel-pvm-host.rpm"
+      cp "${PVM_KERNEL_META_RPM}" "${ctx}/artifacts/kernel-pvm-host-meta.rpm"
+      cp "${PVM_KERNEL_MODULES_RPM}" "${ctx}/artifacts/kernel-pvm-host-modules.rpm"
+      cp "${PVM_KERNEL_DEVEL_RPM}" "${ctx}/artifacts/kernel-pvm-host-devel.rpm"
+      cp "${PVM_KERNEL_HEADERS_RPM}" "${ctx}/artifacts/kernel-pvm-host-headers.rpm"
     fi
     if [[ "${INCLUDE_PVM_KERNEL_DEB}" == "1" ]]; then
       log "downloading PVM host kernel deb for bootstrap image"
@@ -1371,6 +1409,10 @@ SOURCE_TREE_DIR="${BUILD_ROOT}/source-tree"
 ONE_CLICK_DIRNAME="cube-sandbox-one-click-${VERSION}-${ONE_CLICK_ARCH}"
 ONE_CLICK_TAR="${DOWNLOAD_DIR}/${ONE_CLICK_DIRNAME}.tar.gz"
 PVM_KERNEL_RPM=""
+PVM_KERNEL_META_RPM=""
+PVM_KERNEL_MODULES_RPM=""
+PVM_KERNEL_DEVEL_RPM=""
+PVM_KERNEL_HEADERS_RPM=""
 PVM_KERNEL_DEB=""
 SANDBOX_PACKAGE_TAR="${EXTRACT_DIR}/${ONE_CLICK_DIRNAME}/assets/package/sandbox-package.tar.gz"
 PACKAGE_DIR="${BUILD_ROOT}/sandbox-package"

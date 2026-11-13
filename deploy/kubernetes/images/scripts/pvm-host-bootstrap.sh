@@ -12,10 +12,24 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 
 HOST_ROOT="${HOST_ROOT:-/host}"
 STATE_DIR="${STATE_DIR:-/var/lib/cube-node-bootstrap}"
-DESIRED_KERNEL_PATTERN="${DESIRED_KERNEL_PATTERN:-cubesandbox.pvm.host}"
+# Match the PVM RPM and DEB release suffixes without accepting unrelated
+# CubeSandbox kernels (for example a guest or bare-metal build).
+DESIRED_KERNEL_PATTERN="${DESIRED_KERNEL_PATTERN:-cubesandbox\.\(oc9\|pvm\.host\)}"
+# RPM_PATH is the kernel-core package. Install the matching kernel meta-package,
+# modules, and devel packages in one transaction so dependencies declared by
+# the meta-package are enforced. kernel-headers is not installonly, so it is
+# upgraded/replaced separately.
 RPM_PATH="${PVM_KERNEL_RPM_PATH:-/artifacts/kernel-pvm-host.rpm}"
+META_RPM_PATH="${PVM_KERNEL_META_RPM_PATH:-/artifacts/kernel-pvm-host-meta.rpm}"
+MODULES_RPM_PATH="${PVM_KERNEL_MODULES_RPM_PATH:-/artifacts/kernel-pvm-host-modules.rpm}"
+DEVEL_RPM_PATH="${PVM_KERNEL_DEVEL_RPM_PATH:-/artifacts/kernel-pvm-host-devel.rpm}"
+HEADERS_RPM_PATH="${PVM_KERNEL_HEADERS_RPM_PATH:-/artifacts/kernel-pvm-host-headers.rpm}"
 DEB_PATH="${PVM_KERNEL_DEB_PATH:-/artifacts/linux-image-pvm-host.deb}"
 RPM_URL="${PVM_KERNEL_RPM_URL:-}"
+META_RPM_URL="${PVM_KERNEL_META_RPM_URL:-}"
+MODULES_RPM_URL="${PVM_KERNEL_MODULES_RPM_URL:-}"
+DEVEL_RPM_URL="${PVM_KERNEL_DEVEL_RPM_URL:-}"
+HEADERS_RPM_URL="${PVM_KERNEL_HEADERS_RPM_URL:-}"
 DEB_URL="${PVM_KERNEL_DEB_URL:-}"
 PACKAGE_SOURCE="${PVM_KERNEL_PACKAGE_SOURCE:-image}"
 KERNEL_BOOT_ARGS="${KERNEL_BOOT_ARGS:-${PVM_KERNEL_BOOT_ARGS:-}}"
@@ -129,22 +143,79 @@ EOF
 # Only acquire the cluster reboot lease on paths that may reboot.
 # Do NOT acquire on the fast-success path (already on desired kernel).
 
+download_package() {
+  pkg_url="$1"
+  pkg_path="$2"
+  pkg_label="$3"
+  if [ -n "$pkg_url" ] && [ ! -f "$pkg_path" ]; then
+    log "downloading PVM host ${pkg_label} from ${pkg_url}"
+    pkg_tmp="${pkg_path}.tmp.$$"
+    if ! curl -fL --retry 3 -o "$pkg_tmp" "$pkg_url"; then
+      rm -f "$pkg_tmp"
+      return 1
+    fi
+    mv -f "$pkg_tmp" "$pkg_path"
+  fi
+}
+
+derive_rpm_url() {
+  core_url="$1"
+  package_name="$2"
+  case "$core_url" in
+    *kernel-core-*) printf '%s\n' "${core_url%%kernel-core-*}${package_name}-${core_url##*kernel-core-}" ;;
+    *) return 1 ;;
+  esac
+}
+
 install_kernel() {
   if [ "$PACKAGE_SOURCE" = "download" ]; then
     mkdir -p /artifacts
-    if [ -n "$RPM_URL" ] && [ ! -f "$RPM_PATH" ]; then
-      log "downloading PVM host kernel rpm from ${RPM_URL}"
-      curl -fL --retry 3 -o "$RPM_PATH" "$RPM_URL"
+    # Preserve the historical rpmUrl-only interface by deriving all companion
+    # package URLs from the kernel-core filename when explicit URLs are absent.
+    if [ -n "$RPM_URL" ]; then
+      META_RPM_URL="${META_RPM_URL:-$(derive_rpm_url "$RPM_URL" kernel || true)}"
+      MODULES_RPM_URL="${MODULES_RPM_URL:-$(derive_rpm_url "$RPM_URL" kernel-modules || true)}"
+      DEVEL_RPM_URL="${DEVEL_RPM_URL:-$(derive_rpm_url "$RPM_URL" kernel-devel || true)}"
+      HEADERS_RPM_URL="${HEADERS_RPM_URL:-$(derive_rpm_url "$RPM_URL" kernel-headers || true)}"
     fi
-    if [ -n "$DEB_URL" ] && [ ! -f "$DEB_PATH" ]; then
-      log "downloading PVM host kernel deb from ${DEB_URL}"
-      curl -fL --retry 3 -o "$DEB_PATH" "$DEB_URL"
-    fi
+    download_package "$RPM_URL" "$RPM_PATH" "kernel-core rpm"
+    download_package "$META_RPM_URL" "$META_RPM_PATH" "kernel meta rpm"
+    download_package "$MODULES_RPM_URL" "$MODULES_RPM_PATH" "kernel-modules rpm"
+    download_package "$DEVEL_RPM_URL" "$DEVEL_RPM_PATH" "kernel-devel rpm"
+    download_package "$HEADERS_RPM_URL" "$HEADERS_RPM_PATH" "kernel-headers rpm"
+    download_package "$DEB_URL" "$DEB_PATH" "kernel deb"
   fi
   if [ -f "$RPM_PATH" ] && host_sh 'command -v rpm >/dev/null 2>&1'; then
-    log "installing PVM host kernel rpm from ${RPM_PATH}"
+    rpm_files="/tmp/cube-pvm-host-kernel.rpm"
+    log "installing PVM host kernel-core rpm from ${RPM_PATH}"
     cp "$RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel.rpm)"
-    host_sh "rpm -ivh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel.rpm || rpm -Uvh --oldpackage --replacepkgs /tmp/cube-pvm-host-kernel.rpm"
+    if [ ! -f "$META_RPM_PATH" ]; then
+      fail "required kernel meta RPM not found: ${META_RPM_PATH}"
+    fi
+    log "installing PVM host kernel meta rpm from ${META_RPM_PATH}"
+    cp "$META_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-meta.rpm)"
+    rpm_files="${rpm_files} /tmp/cube-pvm-host-kernel-meta.rpm"
+    if [ ! -f "$MODULES_RPM_PATH" ]; then
+      fail "required kernel-modules RPM not found: ${MODULES_RPM_PATH}"
+    fi
+    log "installing PVM host kernel-modules rpm from ${MODULES_RPM_PATH}"
+    cp "$MODULES_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-modules.rpm)"
+    rpm_files="${rpm_files} /tmp/cube-pvm-host-kernel-modules.rpm"
+    if [ ! -f "$DEVEL_RPM_PATH" ]; then
+      fail "required kernel-devel RPM not found: ${DEVEL_RPM_PATH}"
+    fi
+    log "installing PVM host kernel-devel rpm from ${DEVEL_RPM_PATH}"
+    cp "$DEVEL_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-devel.rpm)"
+    rpm_files="${rpm_files} /tmp/cube-pvm-host-kernel-devel.rpm"
+    if [ ! -f "$HEADERS_RPM_PATH" ]; then
+      fail "required kernel-headers RPM not found: ${HEADERS_RPM_PATH}"
+    fi
+    log "installing PVM host kernel-headers rpm from ${HEADERS_RPM_PATH}"
+    cp "$HEADERS_RPM_PATH" "$(host_path /tmp/cube-pvm-host-kernel-headers.rpm)"
+    rpm_files="${rpm_files} /tmp/cube-pvm-host-kernel-headers.rpm"
+    # Keep versioned dependencies satisfiable by installing the complete set in
+    # one transaction; -U upgrades the non-installonly kernel-headers package.
+    host_sh "rpm -Uvh --oldpackage --replacepkgs ${rpm_files}"
   elif [ -f "$DEB_PATH" ]; then
     log "installing PVM host kernel deb from ${DEB_PATH}"
     cp "$DEB_PATH" "$(host_path /tmp/cube-pvm-host-kernel.deb)"
@@ -160,12 +231,13 @@ configure_bootloader() {
   boot_args="$(shell_quote "$KERNEL_BOOT_ARGS")"
   # Quote DESIRED_KERNEL_PATTERN so operator-supplied values (arriving via
   # bootstrap.pvmHostKernel.desiredKernelPattern in the chart) cannot inject
-  # shell metacharacters into the host shell interpreter.
+  # shell metacharacters into the host shell interpreter. Select with grep
+  # because this setting is a basic regular expression, not a shell glob.
   pattern="$(shell_quote "$DESIRED_KERNEL_PATTERN")"
   if [ -x "$(host_path /usr/sbin/grubby)" ]; then
-    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; PVM_DESIRED_PATTERN=${pattern}; pvm_kernel=\$(ls /boot/vmlinuz-*\"\${PVM_DESIRED_PATTERN}\"* 2>/dev/null | sort | tail -1); test -n \"\$pvm_kernel\"; grubby --set-default \"\$pvm_kernel\"; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then grubby --update-kernel \"\$pvm_kernel\" --args \"\$PVM_KERNEL_BOOT_ARGS\"; fi"
+    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; PVM_DESIRED_PATTERN=${pattern}; pvm_kernel=\$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -print 2>/dev/null | grep -e \"\$PVM_DESIRED_PATTERN\" | sort -V | tail -1); test -n \"\$pvm_kernel\"; grubby --set-default \"\$pvm_kernel\"; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then grubby --update-kernel \"\$pvm_kernel\" --args \"\$PVM_KERNEL_BOOT_ARGS\"; fi"
   elif [ -x "$(host_path /usr/sbin/update-grub)" ] || [ -x "$(host_path /usr/sbin/grub-mkconfig)" ]; then
-    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; PVM_DESIRED_PATTERN=${pattern}; pvm_kernel=\$(ls /boot/vmlinuz-*\"\${PVM_DESIRED_PATTERN}\"* 2>/dev/null | sed 's|/boot/vmlinuz-||' | sort | tail -1); test -n \"\$pvm_kernel\"; if [ -f /etc/default/grub ]; then sed -i \"s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\\\"Advanced options for Ubuntu>Ubuntu, with Linux \${pvm_kernel}\\\"|\" /etc/default/grub; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then sed -i \"s|^GRUB_CMDLINE_LINUX=\\\"\\(.*\\)\\\"|GRUB_CMDLINE_LINUX=\\\"\\1 \${PVM_KERNEL_BOOT_ARGS}\\\"|\" /etc/default/grub; else printf 'GRUB_CMDLINE_LINUX=\\\"%s\\\"\\n' \"\$PVM_KERNEL_BOOT_ARGS\" >> /etc/default/grub; fi; fi; fi; if command -v update-grub >/dev/null 2>&1; then update-grub; elif command -v grub-mkconfig >/dev/null 2>&1; then grub-mkconfig -o /boot/grub/grub.cfg; fi"
+    host_sh "PVM_KERNEL_BOOT_ARGS=${boot_args}; PVM_DESIRED_PATTERN=${pattern}; pvm_kernel=\$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -print 2>/dev/null | grep -e \"\$PVM_DESIRED_PATTERN\" | sed 's|/boot/vmlinuz-||' | sort -V | tail -1); test -n \"\$pvm_kernel\"; if [ -f /etc/default/grub ]; then sed -i \"s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\\\"Advanced options for Ubuntu>Ubuntu, with Linux \${pvm_kernel}\\\"|\" /etc/default/grub; if [ -n \"\$PVM_KERNEL_BOOT_ARGS\" ]; then if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then sed -i \"s|^GRUB_CMDLINE_LINUX=\\\"\\(.*\\)\\\"|GRUB_CMDLINE_LINUX=\\\"\\1 \${PVM_KERNEL_BOOT_ARGS}\\\"|\" /etc/default/grub; else printf 'GRUB_CMDLINE_LINUX=\\\"%s\\\"\\n' \"\$PVM_KERNEL_BOOT_ARGS\" >> /etc/default/grub; fi; fi; fi; if command -v update-grub >/dev/null 2>&1; then update-grub; elif command -v grub-mkconfig >/dev/null 2>&1; then grub-mkconfig -o /boot/grub/grub.cfg; fi"
   else
     fail "no supported bootloader tool found in host root"
   fi

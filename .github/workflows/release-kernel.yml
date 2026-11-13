@@ -308,7 +308,7 @@ jobs:
           dnf clean all
           rm -rf /var/cache/dnf/*
 
-      - name: Build RPM package
+      - name: Build RPM packages (dist-rpm)
         run: |
           WORK_DIR="${GITHUB_WORKSPACE}/pvm-host-build" \
           OUTPUT_DIR="${GITHUB_WORKSPACE}/pvm-host-build/output" \
@@ -316,6 +316,7 @@ jobs:
 
       - name: Verify package artifacts
         run: |
+          set -euo pipefail
           shopt -s nullglob
           packages=(pvm-host-build/output/*.rpm)
           if [[ "${#packages[@]}" -eq 0 ]]; then
@@ -323,6 +324,38 @@ jobs:
             exit 1
           fi
           ls -lh "${packages[@]}"
+          expected_packages=(
+            bpftool
+            bpftool-debuginfo
+            kernel
+            kernel-core
+            kernel-debuginfo
+            kernel-debuginfo-common
+            kernel-devel
+            kernel-headers
+            kernel-modules
+            kernel-signing-keys
+            kernel-source
+            kernel-tools
+            kernel-tools-debuginfo
+            kernel-tools-libs
+            kernel-tools-libs-devel
+            perf
+            perf-debuginfo
+            python3-perf
+            python3-perf-debuginfo
+          )
+          for package in "${expected_packages[@]}"; do
+            arch=x86_64
+            if [[ "${package}" == kernel-source ]]; then
+              arch=noarch
+            fi
+            matches=(pvm-host-build/output/"${package}"-[0-9]*.oc9."${arch}".rpm)
+            if [[ "${#matches[@]}" -ne 1 ]]; then
+              echo "expected exactly one ${package}-*.oc9.${arch}.rpm from dist-rpm, found ${#matches[@]}" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -358,19 +391,40 @@ jobs:
           test -f kernel-release-assets/vmlinux-arm64
           test -f kernel-release-assets/vmlinux-pvm-amd64
 
-          has_rpm=0
-          has_deb=0
-          for f in kernel-release-assets/*.rpm; do
-            base="$(basename "${f}")"
-            case "${base}" in
-              kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm)
-                case "${base}" in
-                  *headers*) ;;
-                  *) has_rpm=1 ;;
-                esac
-                ;;
-            esac
+          has_rpm=1
+          expected_packages=(
+            bpftool
+            bpftool-debuginfo
+            kernel
+            kernel-core
+            kernel-debuginfo
+            kernel-debuginfo-common
+            kernel-devel
+            kernel-headers
+            kernel-modules
+            kernel-signing-keys
+            kernel-source
+            kernel-tools
+            kernel-tools-debuginfo
+            kernel-tools-libs
+            kernel-tools-libs-devel
+            perf
+            perf-debuginfo
+            python3-perf
+            python3-perf-debuginfo
+          )
+          for package in "${expected_packages[@]}"; do
+            arch=x86_64
+            if [[ "${package}" == kernel-source ]]; then
+              arch=noarch
+            fi
+            matches=(kernel-release-assets/"${package}"-[0-9]*.oc9."${arch}".rpm)
+            if [[ "${#matches[@]}" -ne 1 ]]; then
+              echo "expected exactly one PVM host ${package}-*.oc9.${arch}.rpm, found ${#matches[@]}" >&2
+              has_rpm=0
+            fi
           done
+          has_deb=0
           for f in kernel-release-assets/*.deb; do
             base="$(basename "${f}")"
             case "${base}" in
