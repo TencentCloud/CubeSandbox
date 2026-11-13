@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -784,5 +785,126 @@ func assertNotExists(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to NOT exist", filepath.Base(path))
+	}
+}
+
+func TestStripSelinuxXattrsRoundTrip(t *testing.T) {
+	// Build a layer tar carrying: a file with a selinux PAX record plus a
+	// non-selinux xattr (both must survive processing minus the selinux
+	// one), a plain file, and a directory.
+	var src bytes.Buffer
+	tw := tar.NewWriter(&src)
+	withXattrs := &tar.Header{
+		Name: "usr/bin/tool",
+		Mode: 0o755,
+		Size: int64(len("payload-with-xattrs")),
+		PAXRecords: map[string]string{
+			"SCHILY.xattr.security.selinux": "system_u:object_r:container_file_t:s0",
+			"SCHILY.xattr.user.keep":        "keep-me",
+		},
+	}
+	if err := tw.WriteHeader(withXattrs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("payload-with-xattrs")); err != nil {
+		t.Fatal(err)
+	}
+	plain := &tar.Header{Name: "etc/config", Mode: 0o644, Size: int64(len("plain"))}
+	if err := tw.WriteHeader(plain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("plain")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "var/tmp", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil { // writes the trailer
+		t.Fatal(err)
+	}
+
+	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()))
+	got, err := io.ReadAll(filtered)
+	if err != nil {
+		t.Fatalf("read filtered stream: %v", err)
+	}
+	if err := filtered.Close(); err != nil {
+		t.Fatalf("close after EOF: %v", err)
+	}
+
+	tr := tar.NewReader(bytes.NewReader(got))
+	entries := 0
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("filtered stream is not a valid tar (entry %d): %v", entries, err)
+		}
+		entries++
+		switch hdr.Name {
+		case "usr/bin/tool":
+			if _, ok := hdr.PAXRecords["SCHILY.xattr.security.selinux"]; ok {
+				t.Fatal("security.selinux PAX record must be stripped")
+			}
+			if hdr.PAXRecords["SCHILY.xattr.user.keep"] != "keep-me" {
+				t.Fatalf("non-selinux xattr must survive, got PAXRecords=%v", hdr.PAXRecords)
+			}
+			body, err := io.ReadAll(tr)
+			if err != nil || string(body) != "payload-with-xattrs" {
+				t.Fatalf("content corrupted: %q err=%v", body, err)
+			}
+		case "etc/config":
+			body, err := io.ReadAll(tr)
+			if err != nil || string(body) != "plain" {
+				t.Fatalf("plain content corrupted: %q err=%v", body, err)
+			}
+		case "var/tmp":
+			if hdr.Typeflag != tar.TypeDir {
+				t.Fatalf("dir entry corrupted: typeflag=%q", hdr.Typeflag)
+			}
+		default:
+			t.Fatalf("unexpected entry %q in filtered stream", hdr.Name)
+		}
+	}
+	if entries != 3 {
+		t.Fatalf("expected 3 entries, got %d", entries)
+	}
+}
+
+func TestStripSelinuxXattrsClosesCleanlyOnEarlyClose(t *testing.T) {
+	// A consumer that stops reading before EOF (archive.Apply error path)
+	// must be able to Close the reader without hanging or panicking; this
+	// is the contract that prevents the filter goroutine from leaking.
+	var src bytes.Buffer
+	tw := tar.NewWriter(&src)
+	for i := 0; i < 64; i++ {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: fmt.Sprintf("file-%03d", i), Mode: 0o644, Size: 1 << 20,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(make([]byte, 1<<20)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()))
+	if _, err := io.CopyN(io.Discard, filtered, 4096); err != nil {
+		t.Fatalf("partial read: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = filtered.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked: filter goroutine does not observe early close")
 	}
 }

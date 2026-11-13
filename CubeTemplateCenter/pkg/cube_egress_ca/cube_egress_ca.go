@@ -50,6 +50,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 )
 
 // Result describes the outcome of a bake. Callers persist these onto
@@ -120,7 +122,16 @@ var anchorDirs = []string{
 	"usr/local/share/ca-certificates",  // Debian/Ubuntu
 	"etc/pki/ca-trust/source/anchors",  // RHEL/Fedora/CentOS
 	"etc/ca-certificates/trust-source", // Arch
+	"system/etc/security/cacerts",      // Android system trust store
 }
+
+// androidCacertsDir is the Android system trust store entry from
+// anchorDirs. Unlike the Linux anchor dirs (where update-ca-* parses any
+// PEM file), Android's conscrypt loads system CAs by their OpenSSL
+// subject-hash file name (<hash>.<n>, as produced by
+// `openssl x509 -subject_hash`), so the anchor copy in this directory
+// must be written under that name to be honoured at runtime.
+const androidCacertsDir = "system/etc/security/cacerts"
 
 // seedBundlePath is the bundle file we *create* from scratch when an
 // image has no trust store of its own (distroless / scratch). It is the
@@ -164,6 +175,12 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 		return Result{}, err
 	}
 	canonical := pem.EncodeToMemory(caBlock)
+	// parseCA already validated the block parses as x509; keep the parsed
+	// form for the Android anchor's subject-hash file name.
+	caCert, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		return Result{}, fmt.Errorf("cube_egress_ca: re-parse caPEM: %w", err)
+	}
 
 	res := Result{Fingerprint: fingerprint}
 	// caPresent tracks whether the CA already lives in some bundle/anchor
@@ -172,7 +189,10 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	caPresent := false
 
 	for _, rel := range bundleFiles {
-		full := filepath.Join(rootfsDir, rel)
+		full, err := resolveUnderRootfs(rootfsDir, rel)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: append %s: %w", rel, err)
+		}
 		written, reason, err := appendBundle(full, canonical, caBlock.Bytes)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: append %s: %w", rel, err)
@@ -190,8 +210,21 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	}
 
 	for _, rel := range anchorDirs {
-		full := filepath.Join(rootfsDir, rel)
-		written, reason, err := dropAnchor(full, canonical)
+		anchorName := AnchorFileName
+		if rel == androidCacertsDir {
+			// Android loads system CAs by subject-hash name; any other
+			// file name in this directory is silently ignored.
+			h, err := opensslSubjectHash(caCert)
+			if err != nil {
+				return res, fmt.Errorf("cube_egress_ca: drop anchor in %s: %w", rel, err)
+			}
+			anchorName = fmt.Sprintf("%08x.0", h)
+		}
+		full, err := resolveUnderRootfs(rootfsDir, rel)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: drop anchor in %s: %w", rel, err)
+		}
+		written, reason, err := dropAnchor(full, anchorName, canonical)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: drop anchor in %s: %w", rel, err)
 		}
@@ -213,7 +246,10 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	// (see package doc) and never clobbers an image's own roots because
 	// it only runs when nothing else matched.
 	if !res.Baked && !caPresent {
-		full := filepath.Join(rootfsDir, seedBundlePath)
+		full, err := resolveUnderRootfs(rootfsDir, seedBundlePath)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: seed %s: %w", seedBundlePath, err)
+		}
 		written, reason, err := seedBundle(full, canonical)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: seed %s: %w", seedBundlePath, err)
@@ -230,6 +266,38 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// resolveUnderRootfs joins rel onto rootfsDir and resolves symlinks in the
+// parent chain, verifying the result stays inside rootfsDir.
+//
+// Image rootfs trees may legitimately contain absolute symlinks (Android:
+// etc -> /system/etc) whose targets only exist inside the guest; resolving
+// them against the *build host* would read or write host files outside
+// rootfsDir. When the resolved parent does not exist on the host (the usual
+// case for such symlinks) the original joined path is returned unchanged so
+// callers keep treating the target as "missing"; a symlink chain that
+// resolves to an existing location outside rootfsDir is an error, so the
+// bake fails loudly instead of touching build-host files.
+func resolveUnderRootfs(rootfsDir, rel string) (string, error) {
+	full := filepath.Join(rootfsDir, rel)
+	cleanRoot, err := filepath.EvalSymlinks(rootfsDir)
+	if err != nil {
+		// The rootfs itself must exist (Bake stats it earlier); treat any
+		// failure as "cannot resolve" and fall through to the raw path.
+		return full, nil
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(full))
+	if err != nil {
+		// Missing parents are "missing", not errors — mirror the ENOENT
+		// handling of the underlying ReadFile/Stat callers.
+		return full, nil
+	}
+	resolved := filepath.Join(resolvedParent, filepath.Base(full))
+	if resolved != cleanRoot && !strings.HasPrefix(resolved, cleanRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q resolves to %q, outside the rootfs (symlink escape)", rel, resolved)
+	}
+	return resolved, nil
 }
 
 // parseCA validates that caPEM contains exactly one CERTIFICATE PEM
@@ -319,7 +387,7 @@ func appendBundle(full string, canonical, derNeedle []byte) (bool, string, error
 // Idempotent: if the file already exists with identical content, we
 // don't bump its mtime (the result is the same as a re-write but it's
 // nicer for diff/debug to leave it alone).
-func dropAnchor(dir string, canonical []byte) (bool, string, error) {
+func dropAnchor(dir, fileName string, canonical []byte) (bool, string, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -330,7 +398,7 @@ func dropAnchor(dir string, canonical []byte) (bool, string, error) {
 	if !info.IsDir() {
 		return false, "not a directory", nil
 	}
-	full := filepath.Join(dir, AnchorFileName)
+	full := filepath.Join(dir, fileName)
 	existing, err := os.ReadFile(full) // #nosec G304 — fixed basename
 	if err == nil && bytes.Equal(existing, canonical) {
 		return false, "present", nil
@@ -371,6 +439,13 @@ func seedBundle(full string, canonical []byte) (bool, string, error) {
 		return false, "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		// Distros whose /etc is a symlink (e.g. Android: /etc -> /system/etc)
+		// make MkdirAll fail with EEXIST. Anchor dirs cover those distros;
+		// skip seeding instead of failing the whole bake.
+		var pe *os.PathError
+		if errors.As(err, &pe) && errors.Is(pe.Err, syscall.EEXIST) {
+			return false, "seed skipped: parent path occupied (symlink?)", nil
+		}
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"
