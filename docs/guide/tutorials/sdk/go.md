@@ -66,6 +66,8 @@ func main() {
 - Pause and reconnect to sandboxes.
 - Configure node placement, remote proxy access, and L3/L4 or L7 egress policy.
 
+For detailed method descriptions and integration-test instructions, see the [Go SDK README](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/go/README.md).
+
 ## Streaming file uploads
 
 `Files.WriteFrom(ctx, path, src io.Reader)` uploads from a reader without
@@ -89,9 +91,13 @@ never retries it or follows redirects, since the reader may not be replayable.
 The caller retains ownership of the reader. The endpoint and proxy must accept
 unknown-length request bodies (chunked transfer for HTTP/1.1).
 
-With the standard HTTP transport, the method also waits for the request-write
-result. Custom transports remain responsible for reporting their own write
-errors; HTTP trace hooks are not required for them.
+With the standard HTTP transport, including wrappers that preserve its HTTP trace
+hooks, the method also waits for the request-write result. Custom transports need
+not implement tracing, but a transport that reports both `GotConn` and
+`WroteHeaders` must complete the lifecycle with `WroteRequest`. Without these
+hooks, it remains responsible for its own write-error contract. Set a context
+deadline or HTTP client `Timeout`: a missing completion callback can otherwise
+wait indefinitely. See the Go SDK README for the full transport contract.
 
 The earlier of the context deadline and an injected HTTP client's `Timeout`
 bounds the full operation, including the request-body completion wait. An
@@ -100,4 +106,7 @@ cancellation itself; ensure it has exited before reusing the source after an
 error. Uploads are not atomic: an error can leave a partial or truncated
 destination file. Existing `Write([]byte)` behavior is unchanged.
 
-For detailed method descriptions and integration-test instructions, see the [Go SDK README](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/go/README.md).
+This avoids buffering the entire file in the SDK. A custom transport or proxy may
+still buffer the request. The bundled CubeProxy configuration limits the entire
+request body to 256 MiB, including multipart framing; deployments can override
+this limit. `WriteFrom` does not change proxy buffering or upload size limits.

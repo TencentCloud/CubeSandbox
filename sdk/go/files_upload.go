@@ -41,7 +41,7 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 	}
 	defer body.Close()
 
-	writes := newUploadWriteObserver(httpClient.Transport)
+	writes := newUploadWriteObserver()
 	requestCtx := httptrace.WithClientTrace(ctx, writes.trace())
 	req, err := s.newEnvdRequest(requestCtx, http.MethodPost, "/files", newEnvdFileQuery(path, options...), body)
 	if err != nil {
@@ -101,18 +101,13 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 // network Write succeeded. Standard HTTP transports report that result through
 // WroteRequest, possibly after Do has already returned an early response.
 type uploadWriteObserver struct {
-	standard bool
-	conn     atomic.Bool
-	headers  atomic.Bool
-	result   chan error
+	conn    atomic.Bool
+	headers atomic.Bool
+	result  chan error
 }
 
-func newUploadWriteObserver(transport http.RoundTripper) *uploadWriteObserver {
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	_, standard := transport.(*http.Transport)
-	return &uploadWriteObserver{standard: standard, result: make(chan error, 1)}
+func newUploadWriteObserver() *uploadWriteObserver {
+	return &uploadWriteObserver{result: make(chan error, 1)}
 }
 
 func (w *uploadWriteObserver) trace() *httptrace.ClientTrace {
@@ -133,11 +128,6 @@ func (w *uploadWriteObserver) trace() *httptrace.ClientTrace {
 }
 
 func (w *uploadWriteObserver) wait(ctx context.Context) error {
-	if !w.standard {
-		// HTTP trace hooks are optional for custom transports. Do not make
-		// an injected RoundTripper depend on hooks it need not implement.
-		return nil
-	}
 	select {
 	case err := <-w.result:
 		return err
@@ -149,11 +139,15 @@ func (w *uploadWriteObserver) wait(ctx context.Context) error {
 		// remains the caller's responsibility.
 		return nil
 	}
+	// Observe the lifecycle even through an instrumentation wrapper. Testing
+	// the RoundTripper's concrete type would silently skip the write result
+	// of a wrapped standard transport. A transport that starts this lifecycle
+	// must finish it; a grace period cannot prove a pending Write succeeded.
 	select {
 	case err := <-w.result:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("request-write completion was not reported: %w", ctx.Err())
 	}
 }
 

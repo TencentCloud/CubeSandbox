@@ -22,8 +22,18 @@ import (
 )
 
 func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
-	for _, h2 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("http%d", map[bool]int{false: 1, true: 2}[h2]), func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		h2      bool
+		wrapped bool
+	}{
+		{name: "http1"},
+		{name: "http2", h2: true},
+		{name: "wrapped_http1", wrapped: true},
+		{name: "wrapped_http2", h2: true, wrapped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h2 := tc.h2
 			const payload = "content"
 			sourceEOF := make(chan struct{})
 			footerAttempt := make(chan struct{})
@@ -83,6 +93,11 @@ func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 					Conn: conn, sourceEOF: sourceEOF, attempted: footerAttempt,
 					response: responseWritten, abort: abort, packet: packet,
 				}, nil
+			}
+			if tc.wrapped {
+				// Instrumentation wrappers delegate to the real transport and
+				// must not disable its asynchronous request-write check.
+				sb.client.dataHTTP.Transport = roundTripFunc(transport.RoundTrip)
 			}
 			traceResult := make(chan error, 1)
 			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
@@ -270,6 +285,67 @@ func TestFilesWriteFromCustomTransportWithoutWriteTrace(t *testing.T) {
 			defer cancel()
 			if err := (&Sandbox{client: client, SandboxID: "custom-upload"}).Files().WriteFrom(ctx, "/tmp/file", strings.NewReader("content")); err != nil {
 				t.Fatalf("custom transport depended on an optional trace hook: %v", err)
+			}
+		})
+	}
+}
+
+func TestFilesWriteFromCustomTransportReportedWriteError(t *testing.T) {
+	want := errors.New("custom transport failed to write the request")
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		defer req.Body.Close()
+		if _, err := io.Copy(io.Discard, req.Body); err != nil {
+			return nil, err
+		}
+		httptrace.ContextClientTrace(req.Context()).WroteRequest(httptrace.WroteRequestInfo{Err: want})
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody}, nil
+	})
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: transport}))
+	defer client.Close()
+	err := (&Sandbox{client: client, SandboxID: "custom-upload"}).Files().WriteFrom(context.Background(), "/tmp/file", strings.NewReader("content"))
+	if !errors.Is(err, want) {
+		t.Fatalf("upload error=%v, want the reported write error", err)
+	}
+}
+
+func TestFilesWriteFromPartialTraceHonorsDeadline(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("registered_%v", registered), func(t *testing.T) {
+			conn, peer := net.Pipe()
+			defer conn.Close()
+			defer peer.Close()
+			custom := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				defer req.Body.Close()
+				trace := httptrace.ContextClientTrace(req.Context())
+				trace.GotConn(httptrace.GotConnInfo{Conn: conn})
+				trace.WroteHeaders()
+				if _, err := io.Copy(io.Discard, req.Body); err != nil {
+					return nil, err
+				}
+				// A missing final callback does not prove the write succeeded.
+				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody}, nil
+			})
+			var transport http.RoundTripper = custom
+			if registered {
+				standard := &http.Transport{}
+				standard.RegisterProtocol("http", custom)
+				transport = standard
+			}
+			client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: transport}))
+			defer client.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				result <- (&Sandbox{client: client, SandboxID: "partial-trace-upload"}).Files().WriteFrom(ctx, "/tmp/file", strings.NewReader("content"))
+			}()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "request-write completion") {
+					t.Fatalf("upload error=%v, want an explicit completion deadline error", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("partial trace outlived the context deadline")
 			}
 		})
 	}

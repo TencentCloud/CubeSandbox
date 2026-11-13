@@ -206,19 +206,32 @@ if err := sb.Files().WriteFrom(ctx, "/tmp/artifact.tar.gz", file); err != nil {
 empty files. It also supports `ForUser`. The endpoint and any proxy must accept
 unknown-length request bodies (chunked transfer for HTTP/1.1).
 
+This bounds buffering in the SDK, not in a custom transport or proxy. The bundled
+[CubeProxy configuration](../../CubeProxy/nginx.conf) sets `client_max_body_size
+256M`, which limits the entire request body, including multipart framing. It does
+not disable Nginx's default
+[request buffering](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_request_buffering).
+Deployment overrides may change either behavior; `WriteFrom` does not change them.
+
 The source is consumed once and never closed by the SDK. Unlike `Write`,
 `WriteFrom` does not attempt an octet-stream request followed by a multipart
 fallback, and it does not follow redirects. A rejected upload is returned as an
 error rather than replaying a potentially non-rewindable reader.
 
-For the standard `http.Transport`, `WriteFrom` checks source consumption and
-waits for the request-write result, so an early 2xx cannot hide an observed
-failure writing the multipart footer. Custom round trippers, including their
-protocol handlers, remain responsible for their own write-error contract;
-the SDK does not require them to implement HTTP trace hooks.
-Protocol handlers registered on `http.Transport` that announce both `GotConn`
-and `WroteHeaders` must also report `WroteRequest` to complete that observed
-write lifecycle.
+For the standard `http.Transport`, including wrappers that preserve its HTTP
+trace hooks, `WriteFrom` checks source consumption and waits for the request-write
+result, so an early 2xx cannot hide an observed failure writing the multipart
+footer. A reported `WroteRequest` error is also preserved for custom transports.
+Custom round trippers need not implement HTTP tracing. Without these hooks, they
+remain responsible for their own write-error contract. Any transport or registered
+protocol handler that announces both `GotConn` and `WroteHeaders` must also report
+`WroteRequest` to complete that observed write lifecycle. Wrappers must preserve
+the request context and forward the complete lifecycle if they forward these hooks.
+
+Set a context deadline or an injected HTTP client's `Timeout` to bound this wait.
+If a transport omits the final callback after announcing the lifecycle, the method
+returns a completion error when that deadline expires; without either bound it
+can wait indefinitely. It does not infer a successful write from a grace period.
 
 The earlier of the context deadline and the `Timeout` of an injected HTTP
 client bounds the full operation, including the request-body completion wait
@@ -479,3 +492,17 @@ export CUBE_PROXY_SCHEME=http
 export CUBE_SANDBOX_DOMAIN=cube.app
 go test -tags=integration -run Integration -count=1 ./...
 ```
+
+To verify streaming uploads through the configured CubeProxy and envd:
+
+```bash
+go test -tags=integration -run '^TestIntegrationFilesWriteFrom$' -v -count=1 -timeout=5m .
+```
+
+The selected template must provide `root` and `nobody`, as required by the
+filesystem user-isolation tests. This test uploads empty and binary files,
+truncates an existing file with an empty upload, checks a destination containing
+URL-special characters, and verifies ownership for both users. It reads back each
+destination specified by the `path` query (the multipart filename is `upload`)
+and checks its size and SHA-256. A skip due to an unset `CUBE_API_URL` / `E2B_API_URL`
+is not a successful live verification.

@@ -67,8 +67,18 @@ func (c *uploadDelayedWriteConn) Write(p []byte) (int, error) {
 }
 
 func TestFilesWriteFromCompleteHTTPBodyBeforeFinalEOFRead(t *testing.T) {
-	for _, h2 := range []bool{false, true} {
-		t.Run(fmt.Sprintf("http%d", map[bool]int{false: 1, true: 2}[h2]), func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		h2      bool
+		wrapped bool
+	}{
+		{name: "http1"},
+		{name: "http2", h2: true},
+		{name: "wrapped_http1", wrapped: true},
+		{name: "wrapped_http2", h2: true, wrapped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h2 := tc.h2
 			checked := make(chan error, 1)
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if (r.ProtoMajor == 2) != h2 {
@@ -102,6 +112,10 @@ func TestFilesWriteFromCompleteHTTPBodyBeforeFinalEOFRead(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			})
 			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second, true)
+			if tc.wrapped {
+				transport := sb.client.dataHTTP.Transport
+				sb.client.dataHTTP.Transport = roundTripFunc(transport.RoundTrip)
+			}
 			if err := sb.Files().WriteFrom(context.Background(), "/tmp/file", strings.NewReader("content")); err != nil {
 				t.Fatalf("complete upload failed: %v", err)
 			}

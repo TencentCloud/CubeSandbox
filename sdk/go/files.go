@@ -110,9 +110,12 @@ func (f *Files) Write(ctx context.Context, path string, data []byte) error {
 // the entire file. It does not retry or follow redirects, since src may not be
 // replayable. The caller owns src; WriteFrom never closes it.
 //
-// With the standard HTTP transport, WriteFrom also waits for the request-write
-// result. Custom transports are responsible for their own write-error contract;
-// they are not required to implement HTTP trace hooks.
+// With the standard HTTP transport, including wrappers that preserve its trace
+// hooks, WriteFrom also waits for the request-write result. Custom transports
+// need not implement tracing, but any transport that reports both GotConn and
+// WroteHeaders must complete the lifecycle with WroteRequest. Without those
+// hooks, a custom transport is responsible for its own write-error contract.
+// Use a context deadline or HTTP client Timeout to bound the completion wait.
 //
 // The earlier of ctx's deadline and an injected HTTP client's Timeout bounds
 // the full operation, including the request-body completion wait. Cancellation
