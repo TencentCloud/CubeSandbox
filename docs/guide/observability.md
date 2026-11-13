@@ -10,7 +10,8 @@ one-click environment file or in Helm values; there are no extra installer flags
 Collected by default:
 
 - Metrics: the `cubesandbox_*` resource metrics from Cubelet at
-  `127.0.0.1:9998/v1/metrics/resource`.
+  `127.0.0.1:9998/v1/metrics/resource`, plus the node network metrics from
+  `/v1/metrics/network` (see [Network Metrics](./network-metrics.md)).
 - Logs: sandbox `stdout` and `stderr` at
   `/data/cubelet/log/<sandbox-id>/{stdout,stderr}`.
 
@@ -37,6 +38,9 @@ This solution uses the following data from the current Cubelet:
 - Sandbox CPU and memory metrics from `/v1/metrics/resource`. Each per-sandbox
   series carries `sandbox_id`; `guest_workload` series also carry
   `container_id`.
+- Node network metrics (SNAT port pressure, sandbox traffic and drops) from
+  `/v1/metrics/network`, scraped by the same bundled stack as the resource
+  endpoint. See [Network Metrics](./network-metrics.md).
 - The node-level `cubesandbox_node_sandbox_count` and
   `cubesandbox_node_sandbox_available_count` gauges. Both return `0` when no
   sandbox is active.
@@ -600,7 +604,7 @@ pipelines according to the configured destinations:
 
 | Pipeline | Receiver | Input | Exporter |
 | --- | --- | --- | --- |
-| `metrics` | `prometheus` | Cubelet `/v1/metrics/resource` | `otlp_http/metrics` or `prometheus_remote_write` |
+| `metrics` | `prometheus` | Cubelet `/v1/metrics/resource` and `/v1/metrics/network` | `otlp_http/metrics` or `prometheus_remote_write` |
 | `logs/sandbox` | `filelog/sandbox` | `/data/cubelet/log/*/{stdout,stderr}` | `elasticsearch/logs` or `otlp_http/logs` |
 
 These names come from the systemd generator. Helm uses the equivalent
