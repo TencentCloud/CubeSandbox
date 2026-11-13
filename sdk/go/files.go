@@ -47,6 +47,7 @@ type fileReader interface {
 
 type fileWriter interface {
 	writeFile(context.Context, string, []byte, ...fileRequestOption) error
+	writeFileFrom(context.Context, string, io.Reader, ...fileRequestOption) error
 }
 
 type fileFiler interface {
@@ -103,6 +104,29 @@ func (f *Files) Write(ctx context.Context, path string, data []byte) error {
 		return fmt.Errorf("files is not attached to a sandbox")
 	}
 	return f.writer.writeFile(ctx, path, data, withUser(f.user))
+}
+
+// WriteFrom streams src to path in a single multipart upload without buffering
+// the entire file. It does not retry or follow redirects, since src may not be
+// replayable. The caller owns src; WriteFrom never closes it.
+//
+// With the standard HTTP transport, including wrappers that preserve its trace
+// hooks, WriteFrom also waits for the request-write result. Custom transports
+// need not implement tracing, but any transport that reports both GotConn and
+// WroteHeaders must complete the lifecycle with WroteRequest. Without those
+// hooks, a custom transport is responsible for its own write-error contract.
+// Use a context deadline or HTTP client Timeout to bound the completion wait.
+//
+// The earlier of ctx's deadline and an injected HTTP client's Timeout bounds
+// the full operation, including the request-body completion wait. Cancellation
+// cannot interrupt a Read blocked inside src. The caller must unblock such a
+// Read and ensure it has exited before reusing src after an error. An error
+// may leave a partial file in the sandbox; uploads are not atomic.
+func (f *Files) WriteFrom(ctx context.Context, path string, src io.Reader) error {
+	if f == nil || f.writer == nil {
+		return fmt.Errorf("files is not attached to a sandbox")
+	}
+	return f.writer.writeFileFrom(ctx, path, src, withUser(f.user))
 }
 
 // WriteFiles uploads multiple files. It stops at the first error and returns
