@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
@@ -317,7 +318,7 @@ func loadSandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxty
 	return tmplReq, nil
 }
 
-func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq, captured snapshotWebhook) error {
 	success := false
 	defer func() {
 		recordSnapshotCommitResult(success)
@@ -478,6 +479,12 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return err
 	}
 	success = true
+	lifecyclePublisher.Publish(webhook.TypeCheckpointed, sandboxID, captured.template, captured.fields)
+	// The snapshot row is READY and its replica registered, so this is the
+	// boundary template.lifecycle.snapshot.created is contracted to fire on --
+	// the same moment as checkpointed, but identified by the snapshot instead of
+	// the sandbox so a subscriber can correlate it with snapshot.deleted.
+	PublishSnapshotCreated(ctx, snapshotID, sandboxID, captured.template, firstNonEmpty(strings.TrimSpace(createReq.Backend), constants.SnapshotBackendXFS))
 	logger.Infof("snapshot create finished successfully")
 	return nil
 }
@@ -690,6 +697,7 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 		return err
 	}
 	success = true
+	PublishSnapshotRollback(ctx, snapshotID, sandboxID, newGen)
 	return nil
 }
 
@@ -860,6 +868,7 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 		return err
 	}
 	success = true
+	PublishSnapshotDeleted(ctx, snapshotID, "", "")
 	return nil
 }
 
@@ -1408,11 +1417,12 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 		"node_ip":     nodeIP,
 	})
 	defer cancel()
+	template, fields := webhook.PrepareLifecycle(req)
 	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID, displayName)
 	if err != nil {
 		return nil, err
 	}
-	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq); err != nil {
+	if err := runSnapshotCreateJob(jobCtx, info.JobID, sandboxID, nodeID, nodeIP, createReq, storedReq, snapshotWebhook{template, fields}); err != nil {
 		return nil, err
 	}
 	return finalizeSnapshotJobByID(ctx, info.JobID)

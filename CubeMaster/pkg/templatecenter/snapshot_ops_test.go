@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"gorm.io/gorm"
@@ -114,6 +115,17 @@ func TestBuildSnapshotRequestsUnnamedSnapshotHasNoAlias(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
+	publisher, err := webhook.NewBufferedPublisher(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetWebhookPublisher(publisher)
+	defer func() {
+		SetWebhookPublisher(nil)
+		if len(publisher.Events()) != 0 {
+			t.Fatal("reused request must not emit another checkpoint")
+		}
+	}()
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -157,6 +169,17 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
+	publisher, err := webhook.NewBufferedPublisher(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetWebhookPublisher(publisher)
+	defer func() {
+		SetWebhookPublisher(nil)
+		if len(publisher.Events()) != 0 {
+			t.Fatal("reused request must not emit another checkpoint")
+		}
+	}()
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -264,7 +287,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
 		return true, nil
 	})
-	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq, _ snapshotWebhook) error {
 		ran = true
 		return nil
 	})
@@ -572,7 +595,7 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 		SnapshotDir: "/data/snapshots/snap-1",
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}); err != nil {
+	}, snapshotWebhook{}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 
@@ -624,7 +647,7 @@ func TestRunSnapshotCreateJobPersistsS3RemoteUUIDs(t *testing.T) {
 		},
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}); err != nil {
+	}, snapshotWebhook{}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 	if persisted == nil {
@@ -672,7 +695,7 @@ func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T
 		},
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}); err != nil {
+	}, snapshotWebhook{}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 	if persisted == nil {
@@ -728,7 +751,7 @@ func TestRunSnapshotCreateJobRejectsMismatchedModeFromCubelet(t *testing.T) {
 		},
 	}, &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
-	}); err != nil {
+	}, snapshotWebhook{}); err != nil {
 		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
 	}
 	if persisted == nil {
@@ -754,7 +777,7 @@ func TestExecuteSnapshotCreateJobReturnsTerminalPersistenceError(t *testing.T) {
 	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
 		return true, nil
 	})
-	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+	patches.ApplyFunc(runSnapshotCreateJob, func(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq, _ snapshotWebhook) error {
 		return errors.New("persist ready status failed")
 	})
 

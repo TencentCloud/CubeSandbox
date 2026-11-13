@@ -284,8 +284,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		return nil, fmt.Errorf("remote build result is nil")
 	}
 	if err := result.Validate(); err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
+		_ = failTemplateImageJob(ctx, jobID, map[string]any{
 			"phase":         JobPhaseBuildingExt4,
 			"progress":      100,
 			"error_message": err.Error(),
@@ -317,8 +316,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	req, err := unmarshalTemplateImageJobRequest(job.RequestJSON)
 	if err != nil {
 		failErr := fmt.Errorf("decode job request snapshot: %w", err)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
+		_ = failTemplateImageJob(ctx, jobID, map[string]any{
 			"phase":         JobPhaseCreatingTemplate,
 			"progress":      100,
 			"error_message": failErr.Error(),
@@ -328,8 +326,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	if decodedID := strings.TrimSpace(req.TemplateID); decodedID != strings.TrimSpace(job.TemplateID) {
 		failErr := fmt.Errorf("decoded request template_id %q does not match job %s template_id %q; refusing to resume to avoid orphaning the template", decodedID, jobID, job.TemplateID)
 		log.G(ctx).Errorf("%v", failErr)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":        JobStatusFailed,
+		_ = failTemplateImageJob(ctx, jobID, map[string]any{
 			"phase":         JobPhaseCreatingTemplate,
 			"progress":      100,
 			"error_message": failErr.Error(),
@@ -355,8 +352,7 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 		}
 		failErr := fmt.Errorf("register remote artifact: %w", err)
 		logger.Errorf("%v", failErr)
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
+		_ = failTemplateImageJob(ctx, jobID, map[string]any{
 			"phase":           JobPhaseBuildingExt4,
 			"artifact_id":     result.ArtifactID,
 			"artifact_status": ArtifactStatusFailed,
@@ -418,9 +414,14 @@ func ContinueTemplateImageJobAfterRemoteBuild(ctx context.Context, continuation 
 	err := finishTemplateImageJobAfterArtifact(ctx, continuation.jobID, continuation.req, continuation.artifact, continuation.generatedReq, !continuation.adopted)
 	if err != nil {
 		logger.Errorf("resume step 3/3 failed: %v", err)
+		PublishTemplateBuildFailed(ctx, continuation.req.TemplateID, continuation.jobID,
+			continuation.req.SourceImageRef, continuation.req.InstanceType, "remote", err.Error())
 		return err
 	}
 	logger.Infof("resume step 3/3: template is READY")
+	PublishTemplateBuildCompleted(ctx, continuation.req.TemplateID, continuation.jobID,
+		continuation.req.SourceImageRef, continuation.req.InstanceType, "remote",
+		continuation.artifact.ArtifactID, 0)
 	return nil
 }
 

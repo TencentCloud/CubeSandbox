@@ -241,8 +241,7 @@ func resumeStuckBuiltJobs(ctx context.Context) error {
 				"build finished but the post-build step was lost (likely a CubeMaster restart) "+
 					"and cannot be replayed: %v. retry the build", err)
 			logger.Errorf("job %s: %s", job.JobID, msg)
-			if updErr := updateTemplateImageJob(ctx, job.JobID, map[string]any{
-				"status":        JobStatusFailed,
+			if updErr := failTemplateImageJob(ctx, job.JobID, map[string]any{
 				"progress":      100,
 				"error_message": msg,
 			}); updErr != nil {

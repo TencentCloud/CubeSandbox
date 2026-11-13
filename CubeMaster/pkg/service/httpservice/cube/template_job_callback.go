@@ -191,6 +191,13 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 			log.G(ctx).Errorf("template job status callback: update fail: job_id=%s err=%v", jobID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		} else if strings.EqualFold(newStatus, templatecenter.JobStatusFailed) {
+			// A builder-side build failure reaches CubeMaster through this
+			// callback, not through the resume pipeline, so the documented
+			// build.failed contract has to be published here as well. Only an
+			// applied transition publishes; a replayed report may re-emit,
+			// which matches the at-least-once delivery this system advertises.
+			templatecenter.PublishTemplateBuildFailedForJob(ctx, jobID)
 		}
 	} else {
 		if err := templatecenter.UpdateTemplateImageJob(ctx, jobID, values); err != nil {

@@ -129,7 +129,11 @@ func markForwardBuildJobFailed(ctx context.Context, jobID, msg string) {
 		"error_message": msg,
 	}); err != nil {
 		log.G(failCtx).Errorf("forward to templatecenter: mark job failed fail: job_id=%s err=%v", jobID, err)
+		return
 	}
+	// The build never reached the builder, but from a subscriber's point of view
+	// it is a terminal build failure and must be observable as one.
+	templatecenter.PublishTemplateBuildFailedForJob(failCtx, jobID)
 }
 
 func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdPayload *templatecenter.EnvdInjectionPayload) {
@@ -173,6 +177,13 @@ func forwardBuildJobToTemplateCenter(jobID string, req *types.CreateTemplateFrom
 		return
 	}
 	log.G(callCtx).Infof("build job forwarded to templatecenter: job_id=%s endpoint=%s", jobID, endpoint)
+
+	// Publish template build started event.
+	buildMode := "remote"
+	if req.InstanceType != "" {
+		buildMode = "remote:" + req.InstanceType
+	}
+	templatecenter.PublishTemplateBuildStarted(callCtx, req.TemplateID, jobID, req.SourceImageRef, req.InstanceType, buildMode)
 }
 
 // forwardRedoBuildJobToTemplateCenter forwards a redo job to CubeTemplateCenter.
@@ -239,4 +250,11 @@ func forwardRedoBuildJobToTemplateCenter(jobID string, downloadBaseURL string) {
 		return
 	}
 	log.G(callCtx).Infof("redo build job forwarded to templatecenter: job_id=%s endpoint=%s", jobID, endpoint)
+
+	// Publish template build started event for redo builds.
+	buildMode := "redo"
+	if createReq.InstanceType != "" {
+		buildMode = "redo:" + createReq.InstanceType
+	}
+	templatecenter.PublishTemplateBuildStarted(callCtx, createReq.TemplateID, jobID, createReq.SourceImageRef, createReq.InstanceType, buildMode)
 }
