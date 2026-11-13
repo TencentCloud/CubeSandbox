@@ -39,6 +39,10 @@ type HostFacts struct {
 	// Physical machine capacity the overcommit guards validate against.
 	CPUCount   int64 `json:"cpu_count,omitempty"`
 	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
+	// Effective Cubelet host.quota overcommit factors (historical defaults
+	// 2.0 / 1.25). Used by quotaDrift when mcpu_limit / mem_limit are unset.
+	CpuOvercommitFactor float64 `json:"cpu_overcommit_factor,omitempty"`
+	MemOvercommitFactor float64 `json:"mem_overcommit_factor,omitempty"`
 }
 
 // IsZero reports whether no meaningful host fact was collected.

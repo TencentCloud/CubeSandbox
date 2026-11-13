@@ -113,6 +113,10 @@ type QuotaHistoryEntry struct {
 type PhysicalTotals struct {
 	CpuTotal   int64 `json:"cpu_total"`
 	MemMBTotal int64 `json:"mem_mb_total"`
+	// Optional Cubelet-reported overcommit factors; zero means use historical
+	// defaults (CPU 2.0 / mem 1.25) when deriving expected auto quota.
+	CpuOvercommitFactor float64 `json:"cpu_overcommit_factor,omitempty"`
+	MemOvercommitFactor float64 `json:"mem_overcommit_factor,omitempty"`
 }
 
 // OpsAgentPushRequest is the push payload.

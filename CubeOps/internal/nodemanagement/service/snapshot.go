@@ -369,6 +369,12 @@ func mergeIncomingHostFacts(prev, incoming *model.HostFacts) *model.HostFacts {
 	if incoming.MemTotalMB == 0 {
 		out.MemTotalMB = prev.MemTotalMB
 	}
+	if incoming.CpuOvercommitFactor == 0 {
+		out.CpuOvercommitFactor = prev.CpuOvercommitFactor
+	}
+	if incoming.MemOvercommitFactor == 0 {
+		out.MemOvercommitFactor = prev.MemOvercommitFactor
+	}
 	out.KVMModuleScanned = false
 	return &out
 }

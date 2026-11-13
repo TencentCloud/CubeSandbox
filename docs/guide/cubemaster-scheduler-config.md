@@ -27,9 +27,14 @@ host:
     mem_limit: ""
     mvm_limit: 0
     creation_concurrent_num: 0
+    # Optional. Only used when mcpu_limit / mem_limit are unset.
+    # Defaults: cpu_overcommit_factor=2.0, mem_overcommit_factor=1.25.
+    # Set both to 1.0 for no overcommit while still auto-detecting host size.
+    # cpu_overcommit_factor: 2.0
+    # mem_overcommit_factor: 1.25
 ```
 
-A quota of `0` means Cubelet derives a default from host resources — it does not mean unlimited. Set these explicitly for load tests or high-density scenarios.
+A quota of `0` means Cubelet derives a default from host resources — it does not mean unlimited. Derived defaults multiply detected host CPU by `cpu_overcommit_factor` (historical default `2.0`) and host memory by `mem_overcommit_factor` (historical default `1.25`). Set the factors to `1.0` for no overcommit without hard-coding machine size, or set `mcpu_limit` / `mem_limit` explicitly for load tests or high-density scenarios.
 
 Terraform environment variables are in [Tencent Cloud Cluster Deployment](./tencentcloud-terraform-deploy.md); compute-node environment variables are in [Multi-Node Cluster Deployment](./multi-node-deploy.md).
 
@@ -140,7 +145,7 @@ Cubelet registers and reports status through CubeOps's `/internal/v1/node-agent`
 |----------------|--------|----------|
 | `instance_type` | Node identity | Request matching, template replica selection, per-type limits |
 | `cluster_label` | `host.scheduler_label` | Pool affinity and isolation |
-| `quota_cpu` / `quota_mem_mb` | `host.quota` or host-derived | Schedulable capacity for filtering and scoring |
+| `quota_cpu` / `quota_mem_mb` | `host.quota` absolute limits, or host CPU/mem × overcommit factors (defaults 2.0 / 1.25) | Schedulable capacity for filtering and scoring |
 | `max_mvm_num` | `host.quota.mvm_limit` or memory-derived | Single-node MVM cap |
 | `create_concurrent_num` | `host.quota.creation_concurrent_num` | Create concurrency; 0 falls back to CubeMaster's own limit |
 | usage / disk / cgroup metrics | Periodic reports | Utilization, disk watermark, scoring factors |

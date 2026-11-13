@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	goruntime "runtime"
@@ -591,6 +592,12 @@ func collectHostFactsReport() *masterclient.HostFacts {
 	if memMB, err := readHostMemoryTotalMB(); err == nil {
 		out.MemTotalMB = memMB
 	}
+	var hostCfg *config.HostConf
+	if cfg := config.GetConfig(); cfg != nil {
+		hostCfg = cfg.HostConf
+	}
+	out.CpuOvercommitFactor = effectiveCPUOvercommitFactor(hostCfg)
+	out.MemOvercommitFactor = effectiveMemOvercommitFactor(hostCfg)
 	if out.CPUVendor == "" && out.CPUModel == "" && out.CPUIDHash == "" &&
 		out.HostKernelRelease == "" && out.HostKernelFingerprint == "" && out.KVMAPIVersion == 0 &&
 		out.KVMModuleFingerprint == "" && out.KVMModuleTaint == "" &&
@@ -696,7 +703,7 @@ func resolveHostQuotaCPUMilli(hostCfg *config.HostConf, fallbacks ...int64) int6
 	if cpuCount <= 0 {
 		return 0
 	}
-	return int64(cpuCount) * 1000 * defaultHostQuotaCPUOvercommitFactor
+	return int64(math.Round(float64(cpuCount) * 1000 * effectiveCPUOvercommitFactor(hostCfg)))
 }
 
 func resolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
@@ -718,7 +725,25 @@ func resolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
 	if memMB <= 0 {
 		return 0
 	}
-	return roundUpFraction(memMB, defaultHostQuotaMemNumerator, defaultHostQuotaMemDenominator)
+	return int64(math.Ceil(float64(memMB) * effectiveMemOvercommitFactor(hostCfg)))
+}
+
+// effectiveCPUOvercommitFactor returns the CPU multiplier used when deriving
+// quota from host CPU count. Unset / non-positive keeps the historical 2.0x.
+func effectiveCPUOvercommitFactor(hostCfg *config.HostConf) float64 {
+	if hostCfg != nil && hostCfg.Quota.CpuOvercommitFactor > 0 {
+		return hostCfg.Quota.CpuOvercommitFactor
+	}
+	return float64(defaultHostQuotaCPUOvercommitFactor)
+}
+
+// effectiveMemOvercommitFactor returns the memory multiplier used when deriving
+// quota from host MemTotal. Unset / non-positive keeps the historical 1.25x (5/4).
+func effectiveMemOvercommitFactor(hostCfg *config.HostConf) float64 {
+	if hostCfg != nil && hostCfg.Quota.MemOvercommitFactor > 0 {
+		return hostCfg.Quota.MemOvercommitFactor
+	}
+	return float64(defaultHostQuotaMemNumerator) / float64(defaultHostQuotaMemDenominator)
 }
 
 func resolveHostMaxMvmNum(hostCfg *config.HostConf, quotaMemMB int64) int64 {

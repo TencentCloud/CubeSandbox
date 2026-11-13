@@ -391,6 +391,28 @@ func TestGetNodeQuotaViewDriftZeroFieldsConvergeToDefaults(t *testing.T) {
 	}
 }
 
+// Cubelet-reported overcommit factors must drive the zero-spec default so a
+// node with cpu/mem_overcommit_factor=1.0 does not permanently look drifted
+// against the historical 2.0 / 1.25 expectations.
+func TestGetNodeQuotaViewDriftHonorsReportedOvercommitFactors(t *testing.T) {
+	svc, fs := newTestService(t)
+	fs.regs["node-a"] = &store.NodeRegistration{
+		NodeID: "node-a",
+		HostFactsJSON: `{"cpu_count":16,"mem_total_mb":39799,` +
+			`"cpu_overcommit_factor":1.0,"mem_overcommit_factor":1.0}`,
+		QuotaCPU: 16000, QuotaMemMB: 39799, MaxMvmNum: 77,
+	}
+	fs.specs["node-a"] = &store.NodeQuotaSpec{NodeID: "node-a", Revision: 1, NodeManaged: true}
+
+	view, err := svc.GetNodeQuotaView(context.Background(), "node-a")
+	if err != nil {
+		t.Fatalf("get view: %v", err)
+	}
+	if view.Drift != model.DriftNone {
+		t.Fatalf("factor=1.0 heartbeat must not drift against 2.0/1.25 defaults: %+v", view)
+	}
+}
+
 // mvm's cubelet default is derived from the *effective* mem (the explicit
 // mem_limit when set), not straight from physical memory.
 func TestGetNodeQuotaViewDriftMvmDefaultUsesExplicitMemNotPhysical(t *testing.T) {

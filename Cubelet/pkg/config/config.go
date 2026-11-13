@@ -47,6 +47,16 @@ type HostConfigQuota struct {
 	MvmLimit              int    `yaml:"mvm_limit"`
 	CreationConcurrentNum int    `yaml:"creation_concurrent_num"`
 
+	// CpuOvercommitFactor multiplies detected host CPU when mcpu_limit is unset
+	// (or <= 0). Zero / omitted keeps the historical default of 2.0. Explicit
+	// mcpu_limit always wins and ignores this factor. Values must be > 0 when set.
+	CpuOvercommitFactor float64 `yaml:"cpu_overcommit_factor"`
+	// MemOvercommitFactor multiplies detected host memory when mem_limit is
+	// unset (or empty). Zero / omitted keeps the historical default of 1.25
+	// (5/4). Explicit mem_limit always wins and ignores this factor. Values
+	// must be > 0 when set.
+	MemOvercommitFactor float64 `yaml:"mem_overcommit_factor"`
+
 	// PausedResourceReleaseRatio is the paused-resource scheduling dial.
 	// Pausing a sandbox snapshots it to disk and shuts the MicroVM down, so its
 	// host CPU/RAM is already reclaimed; this ratio decides how much of that
@@ -187,6 +197,12 @@ func validate(cfg *Config) error {
 		}
 		if cfg.HostConf.Quota.CreationConcurrentNum < 0 {
 			return fmt.Errorf("invalid host.quota.creation_concurrent_num: must be >= 0")
+		}
+		if cfg.HostConf.Quota.CpuOvercommitFactor < 0 {
+			return fmt.Errorf("invalid host.quota.cpu_overcommit_factor: must be > 0 when set")
+		}
+		if cfg.HostConf.Quota.MemOvercommitFactor < 0 {
+			return fmt.Errorf("invalid host.quota.mem_overcommit_factor: must be > 0 when set")
 		}
 		if cfg.HostConf.GC.CodeExpirationTime != "" {
 			t, err := time.ParseDuration(cfg.HostConf.GC.CodeExpirationTime)

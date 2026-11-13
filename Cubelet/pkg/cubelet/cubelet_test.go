@@ -352,6 +352,9 @@ func TestApplyHostQuotaWithConfigPrefersConfiguredQuota(t *testing.T) {
 		Quota: config.HostConfigQuota{
 			Cpu: 3000,
 			Mem: "6Gi",
+			// Explicit absolute quotas ignore overcommit factors.
+			CpuOvercommitFactor: 9,
+			MemOvercommitFactor: 9,
 		},
 	})
 
@@ -364,6 +367,42 @@ func TestApplyHostQuotaWithConfigPrefersConfiguredQuota(t *testing.T) {
 	}
 	if memMB != 6144 {
 		t.Fatalf("expected configured mem quota 6144Mi, got %dMi", memMB)
+	}
+}
+
+func TestApplyHostQuotaWithConfigHonorsOvercommitFactors(t *testing.T) {
+	oldCPUCount := hostCPUCount
+	oldReadHostMemoryTotalMB := readHostMemoryTotalMB
+	t.Cleanup(func() {
+		hostCPUCount = oldCPUCount
+		readHostMemoryTotalMB = oldReadHostMemoryTotalMB
+	})
+
+	hostCPUCount = func() int { return 4 }
+	readHostMemoryTotalMB = func() (int64, error) { return 8192, nil }
+
+	node := &cubeletnodemeta.Node{
+		Status: cubeletnodemeta.NodeStatus{
+			Capacity:    map[corev1.ResourceName]resource.Quantity{},
+			Allocatable: map[corev1.ResourceName]resource.Quantity{},
+		},
+	}
+	applyHostQuotaWithConfig(node, &config.HostConf{
+		Quota: config.HostConfigQuota{
+			CpuOvercommitFactor: 1.0,
+			MemOvercommitFactor: 1.0,
+		},
+	})
+
+	cpuQuantity := node.Status.Capacity[corev1.ResourceCPU]
+	memQuantity := node.Status.Capacity[corev1.ResourceMemory]
+	cpu := cpuQuantity.MilliValue()
+	memMB := memQuantity.Value() / (1024 * 1024)
+	if cpu != 4000 {
+		t.Fatalf("expected 1.0x cpu quota 4000m, got %dm", cpu)
+	}
+	if memMB != 8192 {
+		t.Fatalf("expected 1.0x mem quota 8192Mi, got %dMi", memMB)
 	}
 }
 
