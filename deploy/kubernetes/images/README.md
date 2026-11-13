@@ -35,6 +35,7 @@ Pass one or more image names to build only those images (package download and
 ```bash
 ./deploy/kubernetes/images/build-cube-images.sh cubelet
 ./deploy/kubernetes/images/build-cube-images.sh cubelet cube-shim
+./deploy/kubernetes/images/build-cube-images.sh cube-egress-configurer cube-egress-proxy
 ```
 
 Run `./deploy/kubernetes/images/build-cube-images.sh --help` for the full image
@@ -246,6 +247,10 @@ behavior.
   `CubeEgress/scripts/cube-egress-iptables-init.sh` plus a small idempotent
   entrypoint that waits for `cube-dev`, applies rules, and removes them on
   termination.
+- `cube-egress-configurer` and `cube-egress-proxy` are built from
+  `EgressProxy/Dockerfile.configurer` and `EgressProxy/Dockerfile.proxy`.
+  `EgressProxy/` contains only source and image definitions; Kubernetes
+  resources remain under `deploy/kubernetes/chart`.
 - `cube-s3lvol` is the optional cube-node sidecar that runs the CubeS3lvol
   NVMe/TCP target (`s3lvol_tgt`). Context is the repository root; file is
   `deploy/kubernetes/images/cube-s3lvol/Dockerfile` (builder stage

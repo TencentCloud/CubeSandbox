@@ -1,0 +1,19 @@
+{{- $existing := lookup "v1" "Namespace" "" "cube-egress" -}}
+{{- $ownedByRelease := false -}}
+{{- if $existing -}}
+  {{- $annotations := default dict $existing.metadata.annotations -}}
+  {{- $ownedByRelease = and
+        (eq (default "" (index $annotations "meta.helm.sh/release-name")) .Release.Name)
+        (eq (default "" (index $annotations "meta.helm.sh/release-namespace")) .Release.Namespace) -}}
+{{- end -}}
+{{- if and .Values.egressProxy.enabled (or (not $existing) $ownedByRelease) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cube-egress
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    kubernetes.io/metadata.name: cube-egress
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}

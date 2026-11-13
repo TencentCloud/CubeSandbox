@@ -114,6 +114,16 @@ images:
     tag: v0.8.0
     pullPolicy: IfNotPresent
 
+  egressConfigurer:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-configurer
+    tag: v0.7.3
+    pullPolicy: IfNotPresent
+
+  egressProxy:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-proxy
+    tag: v0.7.3
+    pullPolicy: IfNotPresent
+
   cubeS3lvol:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-s3lvol
     tag: v0.8.0
@@ -875,6 +885,12 @@ cubeNode:
     # host-port preflight is not skipped by this — see
     # bootstrap.nodeInit.checkHostPorts.
     cidrSkipConflictCheck: false
+    cubeRouter:
+      # Required by egressProxy. CubeVS normalizes sandbox traffic to natIP
+      # and redirects it into the persistent host cube-router interface.
+      enabled: false
+      cidr: "172.20.0.0/24"
+      natIP: "172.20.0.2"
     # Guest MTU patched into Cubelet config.toml mvm_mtu
     # (CUBE_SANDBOX_NETWORK_MTU). The sandbox tap is created with this value and
     # the hypervisor advertises it to the guest over VIRTIO_NET_F_MTU, so it is
@@ -1242,6 +1258,25 @@ cubeEgress:
       memory: "64Mi"
     limits:
       memory: "128Mi"
+
+# Node-local veth EgressProxy. Off by default. When enabled, sandbox traffic
+# to clusterCIDRs is marked onto route table 100 and forwarded by primary and
+# standby Proxy Pods so user NetworkPolicy can see a Pod identity. That path
+# owns the same sandbox routing as cube-egress-net, so the chart omits the
+# TPROXY helper sidecar while leaving the cube-egress MITM sidecar in place.
+egressProxy:
+  enabled: false
+  # Only these original sandbox destinations are routed through EgressProxy.
+  # Explicitly configure every Kubernetes Pod and Service CIDR.
+  clusterCIDRs: []
+  # Dedicated routing table for EgressProxy. Table 100 belongs to CubeEgress
+  # (local default dev lo for L7 TPROXY), tables 101-110 are commonly taken by
+  # Cilium/kube-router, 200-252 by Calico/systemd-networkd, and 253-255 are
+  # reserved by the kernel. 10901 sits in the application-private high range
+  # and is adjacent to the fixed rule priority 10900. Override it if a node
+  # already uses this table; the Configurer refuses to touch foreign state and
+  # reports the conflict.
+  routeTable: 10901
 
 # Optional CubeS3lvol NVMe/TCP target sidecar (S3-backed cross-node snapshots)
 # in the cube-node Big Pod. Off by default, same as one-click. Enabling it

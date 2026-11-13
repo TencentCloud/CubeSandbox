@@ -65,6 +65,10 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            - name: CUBE_ROUTER_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeNode.network.cubeRouter.enabled | quote }}
+            - name: CUBE_ROUTER_CIDR
+              value: {{ .Values.cubeNode.network.cubeRouter.cidr | quote }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -231,6 +235,9 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        # cube-egress-net owns the CubeEgress L7 TPROXY rules on cube-dev.
+        # EgressProxy steers a disjoint mark space through its own routing
+        # table, so both data planes run side by side.
         - name: cube-egress-net
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.cubeEgressNet "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.cubeEgressNet.pullPolicy }}
