@@ -50,22 +50,34 @@ func TestKill_Success(t *testing.T) {
 }
 
 func TestKill_NotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"ret":{"ret_code":130483,"ret_msg":"key not found"}}`))
-	}))
-	defer srv.Close()
+	cases := []struct {
+		name     string
+		response string
+		retCode  int
+	}{
+		{"sandbox id not found", `{"ret":{"ret_code":130404,"ret_msg":"sandbox id not found"}}`, RetCodeNotFound},
+		{"key not found", `{"ret":{"ret_code":130483,"ret_msg":"key not found"}}`, RetCodeInvalidParamFormat},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer srv.Close()
 
-	c := New(srv.URL, time.Second)
-	err := c.Kill(context.Background(), "sbx-1", "cubebox", KillReasonRequest)
-	if err == nil {
-		t.Fatal("expected error for non-success ret_code")
-	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("expected *APIError, got %T", err)
-	}
-	if !apiErr.IsNotFound() {
-		t.Fatalf("expected IsNotFound()=true, got false (%+v)", apiErr)
+			c := New(srv.URL, time.Second)
+			err := c.Kill(context.Background(), "sbx-1", "cubebox", KillReasonRequest)
+			if err == nil {
+				t.Fatal("expected error for non-success ret_code")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected *APIError, got %T", err)
+			}
+			if apiErr.RetCode != tc.retCode || !apiErr.IsNotFound() {
+				t.Fatalf("expected NotFound ret_code=%d, got %+v", tc.retCode, apiErr)
+			}
+		})
 	}
 }
 
@@ -84,6 +96,29 @@ func TestKill_HTTPError(t *testing.T) {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		t.Fatalf("HTTP-level error should NOT be an *APIError, got %v", err)
+	}
+}
+
+func TestAPIError_IsNotFound(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *APIError
+		want bool
+	}{
+		{"nil", nil, false},
+		{"sandbox id not found", &APIError{RetCode: RetCodeNotFound}, true},
+		{"key not found", &APIError{RetCode: RetCodeInvalidParamFormat}, true},
+		{"success", &APIError{RetCode: RetCodeSuccess}, false},
+		{"master params error", &APIError{RetCode: RetCodeMasterParamsError, RetMsg: "key not found"}, false},
+		{"task state invalid", &APIError{RetCode: RetCodeTaskStateInvalid}, false},
+		{"unknown", &APIError{RetCode: -1}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.IsNotFound(); got != tc.want {
+				t.Fatalf("IsNotFound() = %v, want %v (%+v)", got, tc.want, tc.err)
+			}
+		})
 	}
 }
 
