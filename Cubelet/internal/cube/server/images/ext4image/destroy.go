@@ -52,6 +52,14 @@ func DestroyPmemArtifact(ctx context.Context, instanceType, artifactID string, i
 		return fmt.Errorf("invalid artifactID %q: %w", artifactID, err)
 	}
 
+	// Serialize with the downloader, which holds this lock while assembling
+	// <imagePath>.download; the key must match the one it locks on.
+	unlock, err := pmemFileLocks.LockContext(ctx, pmem.GetRawImageFilePath(instanceType, artifactID))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	if inUse != nil {
 		used, err := inUse(artifactID)
 		if err != nil {
