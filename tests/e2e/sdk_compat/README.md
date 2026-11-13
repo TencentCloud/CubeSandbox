@@ -17,6 +17,7 @@ Documentation:
 - [Framework design](docs/framework-design.md)
 - [Case authoring guide](docs/case-authoring.md)
 - [Test coverage and improvement plan](docs/test-coverage.md)
+- [Webhook lifecycle test runbook](../webhook/README.md) (in-memory delivery; separate receiver and platform evidence)
 - [中文 README](README_zh.md)
 - [中文框架设计](docs/zh/framework-design.md)
 - [中文用例编写指南](docs/zh/case-authoring.md)

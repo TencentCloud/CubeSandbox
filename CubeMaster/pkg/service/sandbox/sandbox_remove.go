@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -79,6 +80,13 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 			InstanceType:  req.InstanceType,
 		}
 	}
+	if lifecyclePublisher.Enabled() {
+		reason := req.KillReason
+		if reason == "" {
+			reason = webhook.KillReasonFromContext(ctx)
+		}
+		ctx = webhook.WithKillReason(ctx, reason)
+	}
 	t := &task.Task{
 		BaseInfo: task.BaseInfo{
 			InstanceType: req.InstanceType,
@@ -113,6 +121,8 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 		if req.Sync {
 			if err := callCubelet(ctx, t.CallEp, destroyReq); err != nil {
 				setSyncDestroyFailure(rsp, err)
+			} else if lifecyclePublisher.Enabled() {
+				lifecyclePublisher.PublishContext(ctx, webhook.TypeKilled, req.SandboxID, "", webhook.LifecycleFields{KillReason: webhook.KillReasonFromContext(ctx)})
 			}
 			return
 		}

@@ -37,6 +37,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -490,6 +491,9 @@ func (c *createSandboxContext) failover() {
 			CallEp:   rt.CalleeEndpoint,
 		}
 
+		if lifecyclePublisher.Enabled() {
+			t.Ctx = webhook.WithOrigin(t.Ctx, webhook.OriginCreateFailover)
+		}
 		if err := task.AddAsyncTask(t); err != nil {
 			log.G(c.ctx).Fatalf("failover_DestroySandbox error:%+v", err.Error())
 		}

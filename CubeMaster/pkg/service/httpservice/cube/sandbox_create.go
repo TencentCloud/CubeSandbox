@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -60,6 +61,10 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}))
 	resolveResult := &templateResolveResult{}
 	ctx = withTemplateResolveResult(ctx, resolveResult)
+	var metadata webhook.LifecycleFields
+	if sandbox.WebhooksEnabled() {
+		metadata = webhook.UserMetadata(req.Labels)
+	}
 
 	if err := createSandboxDealCubeboxCreateReqWithTemplateFn(ctx, req); err != nil {
 		retCode := errorcode.ErrorCode_MasterParamsError
@@ -101,6 +106,10 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				ret.ExtInfo = make(map[string]string)
 			}
 			ret.ExtInfo[constants.CubeAnnotationAppSnapshotTemplateAlias] = v
+		}
+		if sandbox.WebhooksEnabled() {
+			sandbox.PublishCreatedSandbox(ctx, req, ret.SandboxID, resolveResult.TemplateID,
+				strings.EqualFold(resolveResult.Kind, templatecenter.TemplateKindSnapshot), metadata)
 		}
 	}
 	rt.RetCode = int64(ret.Ret.RetCode)

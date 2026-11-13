@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 )
 
 // SetTimeout implements POST /cube/sandbox/timeout. It is the master-side
@@ -60,6 +61,9 @@ func SetTimeout(ctx context.Context, req *types.SetTimeoutRequest) (rsp *types.S
 
 	endAt := refreshTimeoutMeta(ctx, req.SandboxID, int(req.Timeout))
 	rsp.EndAt = endAt
+	if lifecyclePublisher.Enabled() && req.Timeout >= 0 && rsp.EndAt > 0 {
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, req.SandboxID, "", webhook.LifecycleFields{EndAtMS: rsp.EndAt})
+	}
 	return
 }
 
@@ -108,6 +112,9 @@ func Refresh(ctx context.Context, req *types.RefreshSandboxRequest) (rsp *types.
 
 	endAt := refreshTimeoutMeta(ctx, req.SandboxID, int(req.Duration))
 	rsp.EndAt = endAt
+	if lifecyclePublisher.Enabled() && rsp.EndAt > 0 {
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeUpdated, req.SandboxID, "", webhook.LifecycleFields{EndAtMS: rsp.EndAt})
+	}
 	return
 }
 
