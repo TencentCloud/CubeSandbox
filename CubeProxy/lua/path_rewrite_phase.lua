@@ -39,12 +39,12 @@ ngx.req.set_uri(rest, false)
 -- before we attempt backend resolution. No-op when the sandbox isn't tracked.
 state.gate(ins_id)
 
--- Stamp activity at request start too: log_phase stamps only after the
--- response ends, so a request longer than the idle timeout would otherwise
--- look idle while it is still in flight and be paused mid-request.
-activity.touch(ins_id)
-
 local host_ip, host_port, mask_request_host = sb.resolve_backend(ins_id, container_port)
 ngx.var.backend_ip = host_ip
 ngx.var.backend_port = host_port
 request_host.apply(mask_request_host, container_port)
+
+-- Count in-flight only after backend admission. Pre-proxy rejects must not
+-- pin the counter; log_phase finishes successful begins for the request
+-- lifetime (stream / WebSocket).
+activity.begin(ins_id)
