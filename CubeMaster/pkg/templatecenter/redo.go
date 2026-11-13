@@ -478,7 +478,7 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 	}); persistErr != nil {
 		// The raw error is logged by the helper; only the sanitized message
 		// reaches the job row, which the build-status API exposes.
-		jobErrMsg, _ := markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr, logger)
+		jobErrMsg, _ := markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseSnapshotting,

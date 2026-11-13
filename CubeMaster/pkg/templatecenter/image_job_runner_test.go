@@ -18,14 +18,6 @@ import (
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
-// nilLogger satisfies the logger interface used by
-// markDefinitionFailedOnPersistErr. It is safe because the test stubs
-// control publishTemplateStatusWithAlias and the helper only calls
-// Errorf when the stub returns a non-nil update error.
-type nilLogger struct{}
-
-func (nilLogger) Errorf(string, ...any) {}
-
 // TestMarkDefinitionFailedOnPersistErr_PublishesFailed verifies that when
 // replica persistence fails, the template definition is published as FAILED
 // with a sanitized error message, and the returned error is the original
@@ -46,7 +38,7 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
 	userMsg, err := markDefinitionFailedOnPersistErr(
-		context.Background(), "tpl-1", "job-1", 2, persistErr, nilLogger{},
+		context.Background(), "tpl-1", "job-1", 2, persistErr,
 	)
 
 	// Definition must be published as FAILED.
@@ -90,7 +82,7 @@ func TestMarkDefinitionFailedOnPersistErr_TemplateNotFound(t *testing.T) {
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
 	userMsg, err := markDefinitionFailedOnPersistErr(
-		context.Background(), "tpl-gone", "job-2", 1, persistErr, nilLogger{},
+		context.Background(), "tpl-gone", "job-2", 1, persistErr,
 	)
 
 	// ErrTemplateNotFound must be suppressed.
@@ -124,7 +116,7 @@ func TestMarkDefinitionFailedOnPersistErr_JoinsErrors(t *testing.T) {
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
 	userMsg, err := markDefinitionFailedOnPersistErr(
-		context.Background(), "tpl-1", "job-3", 3, persistErr, nilLogger{},
+		context.Background(), "tpl-1", "job-3", 3, persistErr,
 	)
 
 	// Both errors must be matchable through errors.Is.
@@ -169,7 +161,7 @@ func TestMarkDefinitionFailedOnPersistErr_SanitizesErrorMessage(t *testing.T) {
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
 	userMsg, _ := markDefinitionFailedOnPersistErr(
-		context.Background(), "tpl-1", "job-sanitize", 1, rawDBErr, nilLogger{},
+		context.Background(), "tpl-1", "job-sanitize", 1, rawDBErr,
 	)
 
 	// None of the raw DB error content should appear in either user-facing

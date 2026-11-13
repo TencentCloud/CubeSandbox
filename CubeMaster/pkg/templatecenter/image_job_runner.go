@@ -68,8 +68,12 @@ func distributionFailure(expected, ready int32, distErr error) error {
 //
 // builtFreshArtifact tells the failure paths whether this call owns the
 // artifact (and may therefore delete it) or merely reused an existing one.
-// The returned error mirrors what was written into the job row; the job status
-// is always persisted, so callers may simply log it.
+// The job status is always persisted, so callers may simply log the returned
+// error. The returned error is NOT what the job row holds: the job row's
+// error_message is exposed through the build-status API and may carry a
+// sanitized message (see markDefinitionFailedOnPersistErr), while the returned
+// error can wrap the raw cause (driver errors with internal hosts, table
+// names). Callers must only log it and never surface it to users.
 func finishTemplateImageJobAfterArtifact(
 	ctx context.Context,
 	jobID string,
@@ -157,7 +161,7 @@ func finishTemplateImageJobAfterArtifact(
 	// not be exposed through the build-status API.
 	jobErrMsg := ""
 	if persistErr != nil {
-		jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr, logger)
+		jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
 	} else {
 		// finalizeTemplateReplicas claims the alias *before* publishing the
 		// READY status so a client that sees READY can always resolve the
@@ -237,16 +241,15 @@ func markDefinitionFailedOnPersistErr(
 	templateID, jobID string,
 	readyTargetCount int,
 	persistErr error,
-	logger interface{ Errorf(string, ...any) },
 ) (userMsg string, err error) {
-	logger.Errorf("replica persist error for template %s: %v", templateID, persistErr)
+	log.G(ctx).Errorf("replica persist error, template=%s job=%s err=%v", templateID, jobID, persistErr)
 	userMsg = fmt.Sprintf(
 		"failed to persist replica records (%d target node(s)); see CubeMaster logs for job %s",
 		readyTargetCount, jobID,
 	)
 	err = persistErr
 	if _, _, updErr := publishTemplateStatusWithAlias(ctx, templateID, jobID, StatusFailed, userMsg); updErr != nil {
-		logger.Errorf("mark template definition FAILED after replica persist error: %v", updErr)
+		log.G(ctx).Errorf("mark template definition FAILED after replica persist error, template=%s job=%s err=%v", templateID, jobID, updErr)
 		if !errors.Is(updErr, ErrTemplateNotFound) {
 			err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
 			userMsg += "; template status could not be updated"
