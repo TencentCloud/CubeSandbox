@@ -75,6 +75,69 @@ func TestStampPauseSnapshotID(t *testing.T) {
 	}
 }
 
+func TestIsPauseBusyReject(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		msg  string
+		want bool
+	}{
+		{"sandbox pause forbidding, terminate exec tasks first", true},
+		{`Others("Other: update sandbox failed:sandbox pause forbidding, terminate exec tasks first")`, true},
+		{"PAUSE FORBIDDING", true},
+		{"terminate exec tasks first", true},
+		{"task pause failed: oom", false},
+		{"", false},
+	} {
+		if got := isPauseBusyReject(tc.msg); got != tc.want {
+			t.Fatalf("isPauseBusyReject(%q)=%v want %v", tc.msg, got, tc.want)
+		}
+	}
+}
+
+func TestClearLocalPauseAttemptRestoresRunning(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() { clearLocalPauseAttempt(nil) })
+
+	sb := newCubeboxWithStatusForTest("sb-busy", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+		PausingAt: time.Now().UnixNano(),
+		PausedAt:  time.Now().UnixNano(),
+		Unknown:   true,
+		Reason:    "PauseFailed",
+		Message:   "pause failed",
+	})
+	clearLocalPauseAttempt(sb)
+	st := sb.GetStatus().Get()
+	require.Equal(t, int64(0), st.PausingAt)
+	require.Equal(t, int64(0), st.PausedAt)
+	require.False(t, st.Unknown)
+	require.Empty(t, st.Reason)
+	require.Empty(t, st.Message)
+}
+
+func TestRestorePauseSnapshotStamp(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() { restorePauseSnapshotStamp(nil, "snap-x") })
+
+	prev := "snap-prev000000000000000000000001"
+	aborted := "snap-abort00000000000000000000001"
+	sb := newCubeboxWithStatusForTest("sb-stamp-restore", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	})
+	stampPauseSnapshotID(sb, prev)
+	stampPauseSnapshotID(sb, aborted)
+	require.Equal(t, aborted, stampedPauseSnapshotID(sb))
+
+	restorePauseSnapshotStamp(sb, prev)
+	require.Equal(t, prev, stampedPauseSnapshotID(sb))
+
+	stampPauseSnapshotID(sb, aborted)
+	restorePauseSnapshotStamp(sb, "")
+	require.Empty(t, stampedPauseSnapshotID(sb))
+	require.NotContains(t, sb.Labels, constants.MasterAnnotationPauseSnapshotID)
+	require.NotContains(t, sb.Annotations, constants.MasterAnnotationPauseSnapshotID)
+}
+
 func TestMarkPauseDestroyPending(t *testing.T) {
 	t.Parallel()
 	if markPauseDestroyPending(nil, "request-1") {

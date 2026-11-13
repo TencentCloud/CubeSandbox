@@ -139,6 +139,50 @@ func stampedPauseSnapshotID(sb *cubeboxstore.CubeBox) string {
 	return strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseSnapshotID])
 }
 
+// restorePauseSnapshotStamp rolls the pause.snapshot.id stamp back after a
+// pre-freeze busy reject so the CubeBox still names the live restore base
+// (prevLiveSnap). An empty prevLiveSnap clears the stamp entirely.
+func restorePauseSnapshotStamp(sb *cubeboxstore.CubeBox, prevLiveSnap string) {
+	if sb == nil {
+		return
+	}
+	prevLiveSnap = strings.TrimSpace(prevLiveSnap)
+	if prevLiveSnap != "" {
+		stampPauseSnapshotID(sb, prevLiveSnap)
+		return
+	}
+	clearPauseSnapshotStamp(sb)
+}
+
+func clearPauseSnapshotStamp(sb *cubeboxstore.CubeBox) {
+	if sb == nil {
+		return
+	}
+	key := constants.MasterAnnotationPauseSnapshotID
+	sb.MetaLock.Lock()
+	defer sb.MetaLock.Unlock()
+	if sb.Labels != nil {
+		next := make(map[string]string, len(sb.Labels))
+		for k, v := range sb.Labels {
+			if k == key {
+				continue
+			}
+			next[k] = v
+		}
+		sb.Labels = next
+	}
+	if sb.Annotations != nil {
+		next := make(map[string]string, len(sb.Annotations))
+		for k, v := range sb.Annotations {
+			if k == key {
+				continue
+			}
+			next[k] = v
+		}
+		sb.Annotations = next
+	}
+}
+
 func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 	if listCubeboxesForTest != nil {
 		return listCubeboxesForTest()
@@ -525,7 +569,16 @@ func (s *service) updateWithPauseCow(
 		shimUpdatePauseSnapshotAnnotation: string(cfgJSON),
 	})); err != nil {
 		cleanupArtifacts()
-		markLocalPauseFailed(sb, err)
+		// Shim rejects Pause while exec sessions are open *before* freezing
+		// the VM. That is retryable: clear the in-flight PausingAt markers,
+		// restore the previous pause.snapshot.id stamp (so lineage/GC still
+		// name the live restore base), and leave the sandbox RUNNING.
+		if isPauseBusyReject(err.Error()) {
+			clearLocalPauseAttempt(sb)
+			restorePauseSnapshotStamp(sb, prevLiveSnap)
+		} else {
+			markLocalPauseFailed(sb, err)
+		}
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
 		rsp.Ret.RetMsg = err.Error()
@@ -756,6 +809,39 @@ func markPauseDestroyPending(sb *cubeboxstore.CubeBox, requestID string) bool {
 	sb.UserMarkDeletedTime = &now
 	sb.DeleteRequestID = requestID
 	return true
+}
+
+// isPauseBusyReject reports a Shim preflight reject: open exec sessions
+// forbid Pause, and the MicroVM is still running. Matching the Shim wording
+// keeps Cubelet/Master aligned without a new wire error code.
+func isPauseBusyReject(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "pause forbidding") ||
+		strings.Contains(lower, "terminate exec tasks first")
+}
+
+// clearLocalPauseAttempt rolls back in-flight pause bookkeeping when Pause
+// never left the sandbox running (busy reject). Unlike markLocalPauseFailed,
+// this does not stamp Unknown / PauseFailed.
+func clearLocalPauseAttempt(sb *cubeboxstore.CubeBox) {
+	if sb == nil {
+		return
+	}
+	for _, c := range sb.AllContainers() {
+		if c == nil || c.Status == nil {
+			continue
+		}
+		_ = c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.PausingAt = 0
+			status.PausedAt = 0
+			status.Unknown = false
+			if status.Reason == "PauseFailed" {
+				status.Reason = ""
+				status.Message = ""
+			}
+			return status, nil
+		})
+	}
 }
 
 // markLocalPauseFailed records a terminal Pause failure without EXITED.

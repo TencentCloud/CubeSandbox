@@ -24,6 +24,54 @@ import (
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
+func TestIsPauseBusyReject(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		msg  string
+		want bool
+	}{
+		{"sandbox pause forbidding, terminate exec tasks first", true},
+		{`Others("Other: update sandbox failed:sandbox pause forbidding, terminate exec tasks first")`, true},
+		{"PAUSE FORBIDDING", true},
+		{"terminate exec tasks first", true},
+		{"task pause failed: oom", false},
+		{"", false},
+	} {
+		require.Equal(t, tc.want, isPauseBusyReject(tc.msg), tc.msg)
+	}
+}
+
+func TestFinalizePauseCubeletFailureBusyAborts(t *testing.T) {
+	var aborted, failed []string
+	patches := gomonkey.ApplyFunc(pausesnap.Abort, func(_ context.Context, sandboxID, snapshotID string) {
+		aborted = append(aborted, sandboxID+"/"+snapshotID)
+	})
+	defer patches.Reset()
+	patches.ApplyFunc(pausesnap.MarkFailed, func(_ context.Context, sandboxID, snapshotID, _ string) {
+		failed = append(failed, sandboxID+"/"+snapshotID)
+	})
+
+	finalizePauseCubeletFailure(context.Background(), "sb-1", "snap-1",
+		`Others("Other: update sandbox failed:sandbox pause forbidding, terminate exec tasks first")`)
+	require.Equal(t, []string{"sb-1/snap-1"}, aborted)
+	require.Empty(t, failed)
+}
+
+func TestFinalizePauseCubeletFailureOtherMarksFailed(t *testing.T) {
+	var aborted, failed []string
+	patches := gomonkey.ApplyFunc(pausesnap.Abort, func(_ context.Context, sandboxID, snapshotID string) {
+		aborted = append(aborted, sandboxID+"/"+snapshotID)
+	})
+	defer patches.Reset()
+	patches.ApplyFunc(pausesnap.MarkFailed, func(_ context.Context, sandboxID, snapshotID, _ string) {
+		failed = append(failed, sandboxID+"/"+snapshotID)
+	})
+
+	finalizePauseCubeletFailure(context.Background(), "sb-2", "snap-2", "rootfs commit failed")
+	require.Empty(t, aborted)
+	require.Equal(t, []string{"sb-2/snap-2"}, failed)
+}
+
 func TestValidatePauseResumeVolumesEmptyOK(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, validatePauseResumeVolumes(nil))

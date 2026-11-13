@@ -116,8 +116,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	// (node 1→0). Timeout / nil-response paths have no ext_info (do not adjust).
 	volrefcount.ApplyFromExtInfo(ctx, cubeRsp.GetExtInfo())
 	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-		// Definitive Cubelet failure: cannot Resume (delete only).
-		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, rsp.Ret.RetMsg)
+		finalizePauseCubeletFailure(ctx, req.SandboxID, snapID, rsp.Ret.RetMsg)
 		return rsp
 	}
 
@@ -150,6 +149,30 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 // JuiceFS writeback readiness tracked.
 func pauseNeedsRemoteStatusWatch(backend string) bool {
 	return constants.IsRemoteTrackedBackend(backend)
+}
+
+// isPauseBusyReject reports a Cubelet/Shim preflight reject: open exec
+// sessions forbid Pause while the MicroVM is still running. Matching the
+// Shim wording keeps Master aligned with Cubelet without a new wire code.
+func isPauseBusyReject(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "pause forbidding") ||
+		strings.Contains(lower, "terminate exec tasks first")
+}
+
+// finalizePauseCubeletFailure records a definitive Cubelet Pause failure.
+// Busy rejects are retryable (VM still running): drop the CREATING binding so
+// CLM/auto-pause can try again. Any other failure stays terminal FAILED.
+func finalizePauseCubeletFailure(ctx context.Context, sandboxID, snapID, msg string) {
+	if isPauseBusyReject(msg) {
+		log.G(ctx).Infof("pause busy reject; aborting binding sandbox=%s snap=%s: %s",
+			sandboxID, snapID, strings.TrimSpace(msg))
+		pausesnap.Abort(ctx, sandboxID, snapID)
+		return
+	}
+	// Definitive Cubelet failure after work may have started: cannot Resume
+	// (delete only).
+	pausesnap.MarkFailed(ctx, sandboxID, snapID, msg)
 }
 
 func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
