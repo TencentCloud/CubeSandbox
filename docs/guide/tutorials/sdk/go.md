@@ -60,10 +60,44 @@ func main() {
 
 - Execute code and shell commands.
 - Create, reconnect to, resize, and control interactive PTYs.
-- Perform complete filesystem operations and watch directories.
+- Perform complete filesystem operations, stream file uploads and downloads, and watch directories.
 - Create snapshots, roll back, and clone concurrently.
 - Manage persistent volumes and host-directory mounts.
 - Pause and reconnect to sandboxes.
 - Configure node placement, remote proxy access, and L3/L4 or L7 egress policy.
+
+## Streaming file uploads
+
+`Files.WriteFrom(ctx, path, src io.Reader)` uploads from a reader without
+buffering the entire file. For example, after opening a local artifact with
+`os.Open` (import `os`):
+
+```go
+file, err := os.Open("artifact.tar.gz")
+if err != nil {
+    panic(err)
+}
+defer file.Close()
+
+if err := sandbox.Files().WriteFrom(ctx, "/tmp/artifact.tar.gz", file); err != nil {
+    panic(err)
+}
+```
+
+`ForUser` also applies to this method. The SDK sends one multipart request and
+never retries it or follows redirects, since the reader may not be replayable.
+The caller retains ownership of the reader. The endpoint and proxy must accept
+unknown-length request bodies (chunked transfer for HTTP/1.1).
+
+With the standard HTTP transport, the method also waits for the request-write
+result. Custom transports remain responsible for reporting their own write
+errors; HTTP trace hooks are not required for them.
+
+The earlier of the context deadline and an injected HTTP client's `Timeout`
+bounds the full operation, including the request-body completion wait. An
+arbitrary blocked source `Read` must be unblocked by the caller or support
+cancellation itself; ensure it has exited before reusing the source after an
+error. Uploads are not atomic: an error can leave a partial or truncated
+destination file. Existing `Write([]byte)` behavior is unchanged.
 
 For detailed method descriptions and integration-test instructions, see the [Go SDK README](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/go/README.md).

@@ -175,6 +175,7 @@ for ev := range watcher.Events {
 | `ReadBytes(ctx, path)` | Download raw bytes (e2b `format=bytes`) |
 | `ReadStream(ctx, path)` | Stream download; caller must `Close` (e2b `format=stream`) |
 | `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
+| `WriteFrom(ctx, path, src)` | Stream an `io.Reader` in one multipart upload; caller owns the reader |
 | `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
 | `List(ctx, path)` | List directory entries via `ListDir` RPC |
 | `Stat(ctx, path)` | File/directory metadata via `Stat` RPC |
@@ -183,6 +184,56 @@ for ev := range watcher.Events {
 | `Rename(ctx, old, new)` | Move/rename via `Move` RPC |
 | `Remove(ctx, path)` | Delete file or directory via `Remove` RPC |
 | `WatchDir(ctx, path)` | Stream filesystem events (Connect streaming) |
+
+### Streaming uploads
+
+Use `WriteFrom` when the content is already available as an `io.Reader`, such
+as a local file. It buffers only multipart framing, not the entire file:
+
+```go
+file, err := os.Open("artifact.tar.gz")
+if err != nil {
+	panic(err)
+}
+defer file.Close()
+
+if err := sb.Files().WriteFrom(ctx, "/tmp/artifact.tar.gz", file); err != nil {
+	panic(err)
+}
+```
+
+`WriteFrom` uses `POST /files` with a streaming multipart body, including for
+empty files. It also supports `ForUser`. The endpoint and any proxy must accept
+unknown-length request bodies (chunked transfer for HTTP/1.1).
+
+The source is consumed once and never closed by the SDK. Unlike `Write`,
+`WriteFrom` does not attempt an octet-stream request followed by a multipart
+fallback, and it does not follow redirects. A rejected upload is returned as an
+error rather than replaying a potentially non-rewindable reader.
+
+For the standard `http.Transport`, `WriteFrom` checks source consumption and
+waits for the request-write result, so an early 2xx cannot hide an observed
+failure writing the multipart footer. Custom round trippers, including their
+protocol handlers, remain responsible for their own write-error contract;
+the SDK does not require them to implement HTTP trace hooks.
+Protocol handlers registered on `http.Transport` that announce both `GotConn`
+and `WroteHeaders` must also report `WroteRequest` to complete that observed
+write lifecycle.
+
+The earlier of the context deadline and the `Timeout` of an injected HTTP
+client bounds the full operation, including the request-body completion wait
+after a response arrives. Cancellation cannot interrupt a `Read` blocked
+inside an arbitrary source: use a reader that supports cancellation, or arrange
+to unblock it yourself. A blocked `Read` may outlive a failed call; ensure it
+has exited before reusing the source. A failed upload can leave a partial or
+truncated destination file; this API does not provide atomic writes or
+resumable uploads.
+
+Non-2xx responses return the HTTP rejection and any available server message,
+even if reading the error body subsequently times out. During successful-response
+completion, deadline errors and observed source/write errors are returned. A
+Go 1.22 legacy transport timeout may expose `net.Error.Timeout()` without
+wrapping `context.DeadlineExceeded`, matching the standard client's behavior.
 
 ## Snapshots, Clone, Rollback
 
