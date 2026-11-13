@@ -75,6 +75,28 @@ fmt.Println(result.Stdout, result.Stderr, result.ExitCode)
 
 `Commands.Run` starts `/bin/bash -l -c <command>` through envd's `process.Process/Start` API and returns stdout, stderr, and the `EndEvent` exit code. Callers are still responsible for treating untrusted shell input carefully.
 
+Use optional output callbacks to display progress from a long-running command:
+
+```go
+result, err := sb.Commands().Run(ctx, "go test -v ./...", cubesandbox.CommandOptions{
+    OnStdout: func(chunk string) { fmt.Print(chunk) },
+    OnStderr: func(chunk string) { fmt.Fprint(os.Stderr, chunk) },
+})
+if err != nil {
+    panic(err)
+}
+fmt.Println("exit code:", result.ExitCode)
+```
+
+Callbacks run synchronously as decoded chunks arrive, before `Run` returns;
+keep them short because a slow callback delays reading the stream. Chunks may
+contain partial lines or multiple lines. The command must flush its own output
+for progress to arrive promptly. `CommandResult` still contains the complete
+stdout and stderr, and omitting callbacks preserves the existing behavior.
+If a later stream error occurs, callbacks may already have received output even
+though `Run` returns an error. Callbacks do not change timeout, cancellation, or
+exit-code handling.
+
 ## PTY (interactive terminal)
 
 `sb.Pty()` opens a real pseudo-terminal for interactive programs that need a TTY — shells/REPLs, full-screen tools (`vim`, `top`), or agent-driven terminals. It mirrors the Python/Node `sandbox.pty` surface.
