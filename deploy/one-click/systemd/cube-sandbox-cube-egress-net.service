@@ -5,10 +5,20 @@ Wants=network-online.target
 Requires=cube-sandbox-cubelet.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+# No Restart=/StartLimit here on purpose: Restart= on Type=oneshot is a
+# load-time refusal on systemd < 244 (RHEL/CentOS 8 and OpenCloudOS 8 ship
+# 239), which would prevent the unit from running at all. Init-failure
+# retries live inside the start wrapper (CUBE_EGRESS_NET_INIT_RETRIES).
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# cubelet writes its PIDFile before its network plugin creates cube-dev, so
+# After=cubelet does not imply the interface exists. The start script waits
+# for it, bounded by CUBE_EGRESS_NET_WAIT_TIMEOUT (default 300s, the k8s
+# entrypoint's figure) and fails explicitly on timeout — install.sh's
+# `systemctl enable --now` must not hang forever (#2141). Note Type=oneshot
+# disables the start timeout by default; no TimeoutStartSec is set.
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
