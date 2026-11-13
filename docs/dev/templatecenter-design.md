@@ -66,6 +66,59 @@ Phase (`phase`) tracks the pipeline step (PULLING / BUILDING / UPLOADING /
 DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 (§3.5) then registers the artifact and distributes it.
 
+### 3.2a Definition states
+
+`t_cube_template_definitions.status` tracks the user-visible template
+lifecycle, independently of the build job row above.
+
+Initial state depends on the definition kind
+(`ensureTemplateDefinitionWithOptions`):
+
+- `kind=template` (image build / redo) starts at **PENDING**.
+- `kind=snapshot` (created from a sandbox snapshot) starts at **CREATING**.
+
+```
+PENDING  ─┬─→ READY             every replica READY
+(template)├─→ PARTIALLY_READY   at least one replica READY, at least one not
+          └─→ FAILED            no replica READY, replica persistence failed
+                                (persistErr), or a force delete interrupted
+                                the build
+
+CREATING ─┬─→ READY             snapshot committed
+(snapshot)└─→ FAILED            snapshot commit failed
+
+any state ──→ (row removed)     delete hard-deletes the definition and its
+                                replica rows; there is no DELETED state for
+                                definitions
+```
+
+READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
+a fresh aggregate status from the same summary rules.
+
+Invariants:
+
+- PENDING and CREATING are treated as an in-progress build by
+  `hasActiveDefinitionBuild`; a normal (non-force) delete is rejected with
+  `ErrTemplateAttemptInProgress`. A force delete first marks the definition FAILED
+  (`UpdateDefinitionStatus`) and then removes the row.
+- Every terminal build outcome must publish a status through
+  `publishTemplateStatusWithAlias`; writing only the job row's
+  `template_status` does not update the definition and leaves it stuck in
+  PENDING.
+- A definition row already marked DELETING suppresses the publish path
+  (`publishTemplateStatusWithAlias` returns `ErrTemplateNotFound`), so a
+  concurrent delete is never turned into a second failure.
+- Alias claim on publish is gated on `status != FAILED`: READY and
+  PARTIALLY_READY claim the requested alias, FAILED skips the claim. Skipping
+  the claim does not release an alias the template already holds. A manual
+  alias set (`SetTemplateAlias`) is stricter and requires READY.
+- Sandbox creation does not check the definition status. It only requires a
+  READY replica on a healthy node (`EnsureTemplateLocalityReady`), so the
+  definition status is a user-visible summary and not a scheduling gate.
+- `last_error` (definition) and `error_message` (job row) are both returned
+  by the API and must hold sanitized, user-readable text. Raw driver or DB
+  errors go to CubeMaster logs only.
+
 ### 3.3 Error mapping
 
 CubeMaster also exposes `POST /cube/template/migrate` (CLI spelling: `tpl merge`) to migrate a legacy READY template artifact from CubeMaster local disk into TC-managed storage. In operational documentation, the wording should stay consistent: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** The typical case is that historical artifacts still live on local disk and the cluster later enables `s3Backed=true`, so those artifacts must be migrated from local disk into S3-backed storage. If the same maintenance window also needs to repopulate target nodes, run `tpl redo` after `tpl merge` completes.
