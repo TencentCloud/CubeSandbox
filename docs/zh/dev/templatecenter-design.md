@@ -234,6 +234,10 @@ job 表没有 owner 列：TC 重启后，任何仍然存活的 TC 副本都可�
 
 `ArtifactNodePlacement` 行记录哪些节点持有副本，同时驱动删除 Phase 2 与下载就近性。
 
+节点持续从节点视图中缺失满 15 分钟（取异步操作超时；只看是否缺失，不看健康位）时，Phase 2 跳过它，避免失联节点让 artifact 永远停在 `CLEANUP_PENDING`。该节点的行会保留并写入 `deferred_at`，其余行照常删除并通知 TC。每轮 artifact GC 会对节点已回到视图的 deferred 行，用节点当前地址重试销毁，确认成功后才删行；节点一直不回来则该行一直保留。历史回填的 `ip:` 前缀 id 不会被判为缺失。
+
+deferred 行不会被自动回收：该行是"节点上可能仍有文件"的唯一记录，按时间删除会在节点回归时让这些文件静默泄漏。确认节点已永久下线后，运维可执行 `DELETE FROM t_cube_artifact_node_placement WHERE deferred_at > 0 AND node_id = '<node-id>'` 释放其行。
+
 ### 9.7 共享 artifact 存储
 
 TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供给 cubelet——两个进程必须看到同一份 artifact 字节，或者都能通过同一套 S3 路径 / presigned URL 找到它。

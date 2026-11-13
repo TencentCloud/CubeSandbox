@@ -16,6 +16,9 @@ type ArtifactNodePlacement struct {
 	NodeID     string `json:"node_id" gorm:"column:node_id;primaryKey"`
 	NodeIP     string `json:"node_ip" gorm:"column:node_ip"`
 	CreatedAt  int64  `json:"created_at" gorm:"column:created_at"`
+	// DeferredAt > 0: the node was absent past the grace period, so node-side
+	// cleanup was postponed and the artifact finalised without it.
+	DeferredAt int64 `json:"deferred_at" gorm:"column:deferred_at"`
 }
 
 func (ArtifactNodePlacement) TableName() string {

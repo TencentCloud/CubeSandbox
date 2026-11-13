@@ -149,12 +149,8 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			return err
 		}
 		if excludeTemplateID != "" {
-			// Rows with cleanup_required=true are kept: their cubelet-side
-			// cleanup failed earlier in the delete flow and the orphan-replica
-			// sweep retries it using the row's node identity. Deleting them
-			// here would lose the only durable record that the node still
-			// holds the template's data (same filter as
-			// cleanupTemplateMetadata).
+			// Rows with cleanup_required=true are kept: they are the only
+			// durable record that a node may still hold this template's data.
 			if err := tx.Unscoped().Table(constants.TemplateReplicaTableName).
 				Where("template_id = ? AND artifact_id = ? AND cleanup_required = ?", excludeTemplateID, artifactID, false).
 				Delete(&models.TemplateReplica{}).Error; err != nil {
@@ -196,7 +192,22 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 
 	// ── Phase 2 (no lock) ──────────────────────────────────────────────────────
 	allPhysicalOK := true
+	var deferredNodeIDs []string
+	phase2Now := time.Now()
 	for i := range nodes {
+		// Deferred rows are owned by the GC retry step, not re-attempted here.
+		// A node absent past the grace period joins them so this artifact can
+		// still finalise and release its pin instead of retrying forever.
+		if nodes[i].DeferredAt > 0 {
+			deferredNodeIDs = append(deferredNodeIDs, nodes[i].NodeID)
+			logger.Infof("artifact cleanup: node %s already deferred, GC will retry it", nodes[i].NodeID)
+			continue
+		}
+		if placementNodeAbsentLongEnough(&nodes[i], phase2Now) {
+			deferredNodeIDs = append(deferredNodeIDs, nodes[i].NodeID)
+			logger.Warnf("artifact cleanup: node %s absent past grace, node-side destroy deferred", nodes[i].NodeID)
+			continue
+		}
 		target := placementToNode(&nodes[i])
 		if target == nil {
 			// Can't resolve an address: treat as not-yet-cleaned so GC retries
@@ -262,7 +273,10 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 		if remaining > 0 || artifact.Status != ArtifactStatusCleanupPending {
 			return nil
 		}
-		if err := deleteArtifactNodePlacementsTx(tx, artifactID); err != nil {
+		if err := markArtifactNodePlacementsDeferredTx(tx, artifactID, deferredNodeIDs, time.Now().Unix()); err != nil {
+			return err
+		}
+		if err := deleteArtifactNodePlacementsTx(tx, artifactID, deferredNodeIDs); err != nil {
 			return err
 		}
 		finalized = true
@@ -289,16 +303,16 @@ func notifyTemplateCenterArtifactDelete(ctx context.Context, artifactID string) 
 	}
 }
 
-// placementToNode resolves a placement row to a node with a usable host ip,
-// falling back to the local node cache when the recorded ip is empty.
+// placementToNode resolves a placement row to a node, preferring the live
+// address by node id (the recorded ip may be stale after re-registration).
 func placementToNode(p *models.ArtifactNodePlacement) *node.Node {
 	if p == nil {
 		return nil
 	}
 	nodeID := strings.TrimSpace(p.NodeID)
 	nodeIP := strings.TrimSpace(p.NodeIP)
-	if nodeIP == "" && nodeID != "" {
-		if cached, ok := localcache.GetNode(nodeID); ok && cached != nil {
+	if nodeID != "" {
+		if cached, ok := localcache.GetNode(nodeID); ok && cached != nil && strings.TrimSpace(cached.HostIP()) != "" {
 			nodeIP = strings.TrimSpace(cached.HostIP())
 		}
 	}
