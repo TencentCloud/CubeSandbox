@@ -57,24 +57,41 @@ func EnsureSnapshotReadyForNewUse(ctx context.Context, snapshotID string) error 
 		if err != nil {
 			return err
 		}
-		if rec.ExpiresAt != nil && !rec.ExpiresAt.After(time.Now()) {
-			return fmt.Errorf("%w: %s expired at %s",
-				ErrSnapshotExpired, snapshotID, rec.ExpiresAt.UTC().Format(time.RFC3339))
-		}
-		if snapshotRejectsNewUse(rec.Status) {
-			return wrapSnapshotNotFound(snapshotID)
-		}
-		if !strings.EqualFold(strings.TrimSpace(rec.Status), StatusReady) {
-			return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, snapshotID, rec.Status)
-		}
-		return nil
+		return validateSnapshotNewUse(rec, time.Now())
 	})
 }
 
+// TTL is a READY admission constraint. A CREATING snapshot will re-anchor its
+// deadline when capture completes; retired snapshots retain not-found semantics.
+func validateSnapshotNewUse(rec *models.SnapshotRecord, now time.Time) error {
+	if rec == nil {
+		return ErrSnapshotNotFound
+	}
+	if snapshotRejectsNewUse(rec.Status) {
+		return wrapSnapshotNotFound(rec.SnapshotID)
+	}
+	if !strings.EqualFold(strings.TrimSpace(rec.Status), StatusReady) {
+		return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, rec.SnapshotID, rec.Status)
+	}
+	if rec.ExpiresAt != nil && !rec.ExpiresAt.After(now) {
+		return fmt.Errorf("%w: %s expired at %s", ErrSnapshotExpired, rec.SnapshotID, rec.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 func tombstoneSnapshotRecord(ctx context.Context, snapshotID string) error {
-	if err := updateSnapshotFields(ctx, snapshotID, map[string]any{
-		"status":     StatusDeleted,
-		"last_error": "",
+	if err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		rec, err := lockSnapshotRecordTx(tx, snapshotID)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(rec.Status, StatusCreating) || strings.EqualFold(rec.Status, StatusDeleting) {
+			return ErrTemplateAttemptInProgress
+		}
+		if err := rejectActiveSnapshotJobTx(tx, snapshotID); err != nil {
+			return err
+		}
+		return updateSnapshotFieldsTx(tx, snapshotID, map[string]any{"status": StatusDeleted, "last_error": ""})
 	}); err != nil {
 		return err
 	}
@@ -161,6 +178,12 @@ func expireOrphanSnapshotRuntimeRefsOn(ctx context.Context, rows []models.Snapsh
 			continue
 		}
 		for _, ref := range refs {
+			// A timed-out create may have reached Cubelet without reaching the
+			// Master's spec/cache. Only a successful node inventory can release
+			// this reservation; absence from Master is not sufficient evidence.
+			if ref.BindingType == SnapshotRuntimeBindingCreatePending {
+				continue
+			}
 			if sandboxExistsOnMasterFn(ctx, ref.SandboxID) {
 				continue
 			}
@@ -242,6 +265,9 @@ func beginTombstonePhysicalCleanup(ctx context.Context, snapshotID string) (stri
 		}
 		id, err := insertSnapshotDeleteJob(ctx, snapshotTombstoneRequestID+uuid.NewString(), snapshotID, rec.OriginNodeID, rec.InstanceType)
 		if err != nil {
+			if errors.Is(err, ErrTemplateInUse) || errors.Is(err, ErrTemplateAttemptInProgress) {
+				return nil
+			}
 			return err
 		}
 		jobID = id
@@ -281,6 +307,9 @@ func insertSnapshotDeleteJob(ctx context.Context, requestID, snapshotID, originN
 		RequestJSON:  string(payload),
 	}
 	if err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := fenceSnapshotCleanupTx(tx, snapshotID); err != nil {
+			return err
+		}
 		if err := tx.Table(constants.SnapshotTableName).
 			Where("snapshot_id = ?", snapshotID).
 			Updates(map[string]any{

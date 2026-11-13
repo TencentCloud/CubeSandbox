@@ -2286,4 +2286,71 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn incremental_snapshot_survives_base_deletion_and_later_writes() {
+        use std::os::unix::fs::FileExt;
+
+        let root = unique_root("incremental-expiry");
+        if !fs_supports_ficlone(&root.join("volumes")) {
+            assert!(
+                std::env::var_os("CUBECOW_REQUIRE_REFLINK_TESTS").is_none(),
+                "FICLONE is required for this run"
+            );
+            eprintln!("[skip] tmpdir does not support FICLONE");
+            return;
+        }
+        let engine = make_engine(&root);
+        let original = engine.create_volume("original", 3 * 4096).unwrap();
+        let original_file = OpenOptions::new()
+            .write(true)
+            .open(&original.device_path)
+            .unwrap();
+        original_file.write_all_at(&vec![0x11; 4096], 0).unwrap();
+        original_file.sync_all().unwrap();
+        drop(original_file);
+        engine
+            .create_snapshot_from_volume("original", "base", true)
+            .unwrap();
+        let incremental = engine
+            .create_volume_from_snapshot("base", "incremental")
+            .unwrap();
+        let delta = OpenOptions::new()
+            .write(true)
+            .open(&incremental.device_path)
+            .unwrap();
+        delta.write_all_at(&vec![0x22; 4096], 4096).unwrap();
+        delta.sync_all().unwrap();
+        engine
+            .create_snapshot_from_volume("incremental", "later", true)
+            .unwrap();
+
+        engine.delete_snapshot("base").unwrap();
+        engine.delete_volume("original").unwrap();
+        // Mutating the working volume must not change either inherited pages or
+        // captured delta pages in the surviving incremental snapshot.
+        delta.write_all_at(&vec![0x33; 3 * 4096], 0).unwrap();
+        delta.sync_all().unwrap();
+        drop(delta);
+        engine.delete_volume("incremental").unwrap();
+        let restored = engine
+            .create_volume_from_snapshot("later", "restored")
+            .unwrap();
+        let mut expected = vec![0; 3 * 4096];
+        expected[..4096].fill(0x11);
+        expected[4096..8192].fill(0x22);
+        assert_eq!(std::fs::read(&restored.device_path).unwrap(), expected);
+        // A second generation must remain self-contained after deleting its
+        // own source as well.
+        engine
+            .create_snapshot_from_volume("restored", "newest", true)
+            .unwrap();
+        engine.delete_snapshot("later").unwrap();
+        engine.delete_volume("restored").unwrap();
+        let final_volume = engine
+            .create_volume_from_snapshot("newest", "final")
+            .unwrap();
+        assert_eq!(std::fs::read(&final_volume.device_path).unwrap(), expected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -644,6 +644,7 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq, enab
 	// attachment timestamp into the new sandbox's request envelope. Physical
 	// memory-vol annotations were removed entirely in v5 (the constants no
 	// longer exist).
+	delete(cloned.Annotations, constants.CubeAnnotationDesiredSandboxID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(cloned.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
 	cloned.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] = templateID
@@ -986,6 +987,9 @@ func ensureRuntimeTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq) {
 	if req == nil {
 		return
 	}
+	// Older stored requests may still carry the source sandbox's reservation.
+	// A template or snapshot restore must choose a new identity.
+	delete(req.Annotations, constants.CubeAnnotationDesiredSandboxID)
 	if req.Request == nil {
 		req.Request = &sandboxtypes.Request{}
 	}

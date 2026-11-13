@@ -110,6 +110,22 @@ async function createSandbox(): Promise<Sandbox> {
 }
 
 describe("Sandbox.createSnapshot", () => {
+  it("round-trips TTL and expiration without changing existing calls", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      expect(JSON.parse(req.body.toString())).toEqual({ name: "ttl", ttlSeconds: 60 });
+      return { json: { snapshotID: "snap-ttl", expiresAt: "2030-01-01T00:00:00Z" } };
+    });
+    const snap = await sb.createSnapshot("ttl", { ttlSeconds: 60 });
+    expect(snap.expiresAt).toBe("2030-01-01T00:00:00Z");
+    const before = requests.length;
+    for (const ttlSeconds of [-1, 1.5, NaN, Infinity, 9_223_372_037]) {
+      await expect(sb.createSnapshot(undefined, { ttlSeconds })).rejects.toThrow(RangeError);
+    }
+    expect(requests.length).toBe(before);
+    sb.close();
+  });
+
   it("POSTs a name and parses the SnapshotInfo response", async () => {
     const sb = await createSandbox();
     setHandler((req) => {

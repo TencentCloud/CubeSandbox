@@ -39,8 +39,14 @@ impl SnapshotService {
         name: Option<String>,
         backend: Option<String>,
         mode: SnapshotMode,
+        ttl_seconds: Option<i64>,
     ) -> AppResult<SnapshotInfo> {
         validate_snapshot_name(name.as_deref())?;
+        if let Some(ttl) = ttl_seconds {
+            if !(0..=9_223_372_036).contains(&ttl) {
+                return Err(AppError::BadRequest("ttlSeconds is out of range".into()));
+            }
+        }
         if mode == SnapshotMode::FsOnly {
             ensure_filesystem_only_supported(&self.cubemaster).await?;
         }
@@ -48,6 +54,7 @@ impl SnapshotService {
         let req = CreateSnapshotRequest {
             request_id: request_id.clone(),
             sandbox_id: sandbox_id.to_string(),
+            ttl_seconds,
             display_name: name,
             backend,
             mode: Some(mode.as_str().to_string()),
@@ -65,6 +72,11 @@ impl SnapshotService {
                     )));
                 }
                 ensure_snapshot_ready(&resp.snapshot)?;
+                if ttl_seconds.unwrap_or(0) > 0 && resp.snapshot.expires_at.is_none() {
+                    return Err(AppError::Conflict(
+                        format!("snapshot_ttl_unsupported: snapshot {} was created without an expiration; delete it explicitly before retrying", resp.snapshot.snapshot_id),
+                    ));
+                }
                 // The recorded mode must match the request; a stale record is
                 // left in place to avoid racing the capture job.
                 let recorded = SnapshotMode::from_stored(&resp.snapshot.mode);
@@ -416,6 +428,7 @@ fn snapshot_resource_to_info(r: SnapshotResource) -> SnapshotInfo {
     SnapshotInfo {
         snapshot_id: r.snapshot_id,
         names,
+        expires_at: r.expires_at,
         backend,
         remote_status,
         mode: SnapshotMode::from_stored(&r.mode),
@@ -510,6 +523,7 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
     SnapshotListItem {
         snapshot_id: r.snapshot_id,
         names,
+        expires_at: r.expires_at,
         status: r.status,
         origin_sandbox_id: if r.origin_sandbox_id.is_empty() {
             None
@@ -583,6 +597,7 @@ mod tests {
     fn sample_snapshot(status: &str) -> SnapshotResource {
         SnapshotResource {
             snapshot_id: "snap-1".into(),
+            expires_at: None,
             names: vec!["snap-name".into()],
             display_name: "snap-name".into(),
             status: status.into(),
@@ -714,8 +729,14 @@ mod tests {
         // The fake has no routes, so any request would fail with Internal, not BadRequest.
         let svc = service_for(spawn_fake_cubemaster(axum::Router::new()).await);
         assert!(matches!(
-            svc.create("sb-1", Some("snap-x".into()), None, SnapshotMode::Full)
-                .await,
+            svc.create(
+                "sb-1",
+                Some("snap-x".into()),
+                None,
+                SnapshotMode::Full,
+                None
+            )
+            .await,
             Err(AppError::BadRequest(_))
         ));
     }
@@ -1017,7 +1038,7 @@ mod filesystem_only_gate_tests {
             crate::services::test_support::serve(app).await,
         );
         service
-            .create("sb-1", None, None, SnapshotMode::FsOnly)
+            .create("sb-1", None, None, SnapshotMode::FsOnly, None)
             .await
     }
 
@@ -1083,6 +1104,84 @@ mod filesystem_only_gate_tests {
         assert!(
             matches!(err, AppError::ServiceUnavailable { .. }),
             "{err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_ttl_tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+
+    #[tokio::test]
+    async fn ttl_reaches_master_and_expiration_reaches_client() {
+        let app = Router::new().route(
+            "/cube/snapshot",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                assert_eq!(body["ttl_seconds"], 60);
+                Json(
+                    serde_json::json!({"ret":{"ret_code":0,"ret_msg":"success"},"snapshot":{
+                        "snapshot_id":"snap-ttl","status":"READY","mode":"full",
+                        "expires_at":"2030-01-01T00:00:00Z"
+                    }}),
+                )
+            }),
+        );
+        let service = crate::services::test_support::snapshot_service(
+            crate::services::test_support::serve(app).await,
+        );
+        let info = service
+            .create("sb", None, None, SnapshotMode::Full, Some(60))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(info).unwrap()["expiresAt"],
+            "2030-01-01T00:00:00Z"
+        );
+    }
+
+    #[tokio::test]
+    async fn old_master_cannot_silently_drop_requested_ttl() {
+        let app = Router::new().route(
+            "/cube/snapshot",
+            post(|| async {
+                Json(
+                    serde_json::json!({"ret":{"ret_code":0,"ret_msg":"success"},"snapshot":{
+                        "snapshot_id":"snap-ttl","status":"READY","mode":"full"
+                    }}),
+                )
+            }),
+        );
+        let service = crate::services::test_support::snapshot_service(
+            crate::services::test_support::serve(app).await,
+        );
+        assert!(matches!(
+            service
+                .create("sb", None, None, SnapshotMode::Full, Some(60))
+                .await,
+            Err(AppError::Conflict(message)) if message.contains("snap-ttl") && message.contains("delete it explicitly")
+        ));
+        assert!(matches!(
+            service
+                .create("sb", None, None, SnapshotMode::Full, Some(-1))
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn request_aliases_and_list_expiration() {
+        for body in [r#"{"ttlSeconds":60}"#, r#"{"ttl_seconds":60}"#] {
+            let req: crate::models::CreateSnapshotRequest = serde_json::from_str(body).unwrap();
+            assert_eq!(req.ttl_seconds, Some(60));
+        }
+        let resource: SnapshotResource = serde_json::from_value(serde_json::json!({
+            "snapshot_id":"snap-ttl","expires_at":"2030-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(snapshot_resource_to_list_item(resource)).unwrap()["expiresAt"],
+            "2030-01-01T00:00:00Z"
         );
     }
 }

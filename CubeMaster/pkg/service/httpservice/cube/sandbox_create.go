@@ -62,11 +62,8 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	ctx = withTemplateResolveResult(ctx, resolveResult)
 
 	if err := createSandboxDealCubeboxCreateReqWithTemplateFn(ctx, req); err != nil {
-		retCode := errorcode.ErrorCode_MasterParamsError
-		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
-			retCode = errorcode.ErrorCode_NotFound
-		}
-		rsp.Ret.RetCode = int(retCode)
+		retCode := snapshotErrorCode(err)
+		rsp.Ret.RetCode = retCode
 		rsp.Ret.RetMsg = err.Error()
 		rt.RetCode = int64(retCode)
 		log.G(ctx).Error(err)
@@ -81,7 +78,14 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		log.G(ctx).Error(err)
 		return rsp
 	}
+	if err := reserveCreatedSandboxRuntimeRef(ctx, req); err != nil {
+		rsp.Ret.RetCode = snapshotErrorCode(err)
+		rsp.Ret.RetMsg = err.Error()
+		rt.RetCode = int64(rsp.Ret.RetCode)
+		return rsp
+	}
 	ret := createSandboxRunFn(ctx, req)
+	releaseUndispatchedSnapshotCreate(ctx, req, ret)
 	if ret != nil && ret.Ret != nil && ret.Ret.RetCode == int(errorcode.ErrorCode_Success) {
 		if err := registerCreatedSandboxRuntimeRef(ctx, req, ret); err != nil {
 			log.G(ctx).Warnf("register snapshot runtime ref after create failed: %v", err)
@@ -159,6 +163,10 @@ func constructCreateReq(r *http.Request) (*types.CreateCubeSandboxReq, error) {
 	if req.Annotations == nil {
 		req.Annotations = map[string]string{}
 	}
+	// These bindings are derived by Master, never selected by a public caller.
+	delete(req.Annotations, constants.CubeAnnotationRuntimeSnapshotID)
+	delete(req.Annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
+	delete(req.Annotations, constants.CubeAnnotationDesiredSandboxID)
 	// Snapshot mode is a property of the snapshot record, never client input.
 	// Master's internal builders set it after this function returns.
 	req.SnapshotMode = ""

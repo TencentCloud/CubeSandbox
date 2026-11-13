@@ -21,6 +21,13 @@ import (
 type SnapshotInfo struct {
 	SnapshotID string   `json:"snapshotID"`
 	Names      []string `json:"names"`
+	ExpiresAt  string   `json:"expiresAt,omitempty"`
+}
+
+// CreateSnapshotOptions extends snapshot creation without changing existing
+// CreateSnapshot(ctx, name) callers. TTLSeconds=0 keeps the snapshot indefinitely.
+type CreateSnapshotOptions struct {
+	TTLSeconds int64
 }
 
 // ListSnapshotsOptions filters the snapshot listing. Zero values are omitted.
@@ -88,14 +95,24 @@ func (c *cloneCleanup) startCleanupLocked(ready bool) bool {
 // CreateSnapshot captures the current sandbox state (POST
 // /sandboxes/:id/snapshots). The snapshot outlives the sandbox. An empty name
 // lets the server pick one. A name starting with tpl-/snap- is rejected (HTTP 400).
-func (s *Sandbox) CreateSnapshot(ctx context.Context, name string) (*SnapshotInfo, error) {
+func (s *Sandbox) CreateSnapshot(ctx context.Context, name string, options ...CreateSnapshotOptions) (*SnapshotInfo, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
+	}
+	if len(options) > 1 {
+		return nil, errors.New("at most one CreateSnapshotOptions value is allowed")
 	}
 	// Always send a JSON object body: the server deserializes into a
 	// CreateSnapshotRequest struct and rejects an empty/null body with 422,
 	// even though every field is optional. An empty name simply omits it.
 	payload := map[string]any{}
+	if len(options) == 1 {
+		ttl := options[0].TTLSeconds
+		if ttl < 0 || ttl > 9_223_372_036 {
+			return nil, errors.New("snapshot TTLSeconds is out of range")
+		}
+		payload["ttlSeconds"] = ttl
+	}
 	if name != "" {
 		payload["name"] = name
 	}

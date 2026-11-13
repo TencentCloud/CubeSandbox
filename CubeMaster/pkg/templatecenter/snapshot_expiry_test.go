@@ -141,6 +141,9 @@ func TestExpireSnapshotRecordGuards(t *testing.T) {
 
 			patches := gomonkey.NewPatches()
 			t.Cleanup(patches.Reset)
+			patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(context.Context, string) (*models.TemplateImageJob, error) {
+				return nil, gorm.ErrRecordNotFound
+			})
 			patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
 				return &models.SnapshotRecord{SnapshotID: "snap-1", Status: tc.status, ExpiresAt: tc.expiresAt}, nil
 			})
