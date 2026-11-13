@@ -313,7 +313,8 @@ export default withMermaid(defineConfig({
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
                 { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' },
-                { text: 'HeartbeatExpired (Clock Skew)', link: '/guide/troubleshooting/node-heartbeat-expired-clock-skew' }
+                { text: 'HeartbeatExpired (Clock Skew)', link: '/guide/troubleshooting/node-heartbeat-expired-clock-skew' },
+                { text: 'Go SDK Connect Stream Routing', link: '/guide/troubleshooting/sdk-connect-stream-routing' }
               ]
             },
             {
@@ -558,7 +559,8 @@ export default withMermaid(defineConfig({
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
                 { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' },
-                { text: 'HeartbeatExpired（时钟偏移）', link: '/zh/guide/troubleshooting/node-heartbeat-expired-clock-skew' }
+                { text: 'HeartbeatExpired（时钟偏移）', link: '/zh/guide/troubleshooting/node-heartbeat-expired-clock-skew' },
+                { text: 'Go SDK Connect 流路由', link: '/zh/guide/troubleshooting/sdk-connect-stream-routing' }
               ]
             },
             {

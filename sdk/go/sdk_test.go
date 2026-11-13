@@ -1355,6 +1355,108 @@ func TestFilesListReturnsEmptySliceForEmptyDir(t *testing.T) {
 	}
 }
 
+func TestFilesMisrouted200HTMLReturnsRoutingDiagnostic(t *testing.T) {
+	for _, contentType := range []string{"text/html; charset=utf-8", "text/plain"} {
+		t.Run(contentType, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", contentType)
+				fmt.Fprint(w, "<!DOCTYPE html><html><body>Portal</body></html>")
+			}))
+			defer server.Close()
+
+			host, port := serverHostPort(t, server.URL)
+			client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+			sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+			removeErr := sb.Files().Remove(context.Background(), "/x")
+			_, listErr := sb.Files().List(context.Background(), "/x")
+			for method, err := range map[string]error{"Remove": removeErr, "ListDir": listErr} {
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) || apiErr.StatusCode != 0 {
+					t.Fatalf("%s: err=%v, want *APIError without an HTTP error status", method, err)
+				}
+				if !strings.Contains(err.Error(), method) || !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+					t.Fatalf("%s: err=%v, want method and routing hint", method, err)
+				}
+			}
+		})
+	}
+}
+
+func TestFilesListMisrouted404HTMLReturnsRoutingDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>404 page not found</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	_, err := sb.Files().List(context.Background(), "/x")
+	if err == nil {
+		t.Fatal("List with misrouted 404 HTML returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	var nfe *NotFoundError
+	if errors.As(err, &nfe) {
+		t.Fatalf("err=%v, should not be NotFoundError", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want routing hint", err)
+	}
+	if !strings.Contains(err.Error(), "ListDir") {
+		t.Fatalf("err=%v, want method attribution", err)
+	}
+}
+
+func TestFilesExistsMisrouted404HTMLReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>404 page not found</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	exists, err := sb.Files().Exists(context.Background(), "/x")
+	if err == nil {
+		t.Fatal("Exists with misrouted 404 HTML returned nil error (silent false)")
+	}
+	if exists {
+		t.Fatal("Exists=true on misrouted page")
+	}
+}
+
+func TestFilesExistsGenuineJSON404StillNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"code":"not_found","message":"no such file"}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	sb := &Sandbox{client: client, SandboxID: "sb-fs"}
+
+	exists, err := sb.Files().Exists(context.Background(), "/x")
+	if err != nil {
+		t.Fatalf("Exists with genuine JSON 404 returned error: %v", err)
+	}
+	if exists {
+		t.Fatal("Exists=true for missing file")
+	}
+}
+
 func TestFilesStatReturnsFileEntry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/filesystem.Filesystem/Stat" {
@@ -2241,5 +2343,216 @@ func TestSetTimeoutServerError(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("StatusCode=%d, want 500", apiErr.StatusCode)
+	}
+}
+
+func TestCommandsRunHTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>Welcome to Web UI</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with HTML response returned nil error")
+	}
+	if !strings.Contains(err.Error(), "received HTML") {
+		t.Fatalf("err=%v, want HTML diagnostic message", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+	}
+}
+
+func TestCommandsRunNon200Status(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, `{"message":"bad gateway"}`)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with 502 returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode=%d, want 502", apiErr.StatusCode)
+	}
+}
+
+func TestWatchDirHTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>Proxy Error</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Files().WatchDir(context.Background(), "/tmp")
+	if err == nil {
+		t.Fatal("WatchDir with HTML response returned nil error")
+	}
+	if !strings.Contains(err.Error(), "received HTML") {
+		t.Fatalf("err=%v, want HTML diagnostic message", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+	}
+}
+
+func TestPtyCreateHTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>Welcome</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Pty().Create(context.Background(), PtySize{Rows: 24, Cols: 80}, PtyCreateOptions{})
+	if err == nil {
+		t.Fatal("Pty.Create with HTML response returned nil error")
+	}
+	if !strings.Contains(err.Error(), "received HTML") {
+		t.Fatalf("err=%v, want HTML diagnostic message", err)
+	}
+	if !strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
+		t.Fatalf("err=%v, want CUBE_PROXY_NODE_IP hint", err)
+	}
+}
+
+func TestCommandsRunNon200HTMLResponseDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>")
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err := sb.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with 502 HTML returned nil error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode=%d, want 502", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Message, "502 Bad Gateway") {
+		t.Fatalf("message=%q, want original gateway error", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Message, "unreachable") {
+		t.Fatalf("message=%q, want upstream-unreachable hint on 5xx", apiErr.Message)
+	}
+
+	// Also verify 404 HTML error page clears ErrSandboxNotFound classification
+	server404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>404 Not Found (Portal)</body></html>")
+	}))
+	defer server404.Close()
+
+	host404, port404 := serverHostPort(t, server404.URL)
+	client404 := NewClient(Config{
+		ProxyNodeIP:    host404,
+		ProxyPortHTTP:  port404,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb404 := &Sandbox{client: client404, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	_, err = sb404.Commands().Run(context.Background(), "echo hello", CommandOptions{Timeout: time.Second})
+	if err == nil {
+		t.Fatal("Commands.Run with 404 HTML returned nil error")
+	}
+	if errors.Is(err, ErrSandboxNotFound) {
+		t.Fatalf("err=%v should not be classified as ErrSandboxNotFound", err)
+	}
+	if !errors.As(err, &apiErr) || apiErr.Kind != apiErrorKindAPI {
+		t.Fatalf("apiErr.Kind=%q, want %q", apiErr.Kind, apiErrorKindAPI)
+	}
+}
+
+func TestCommandsRunOmittedContentTypeSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Force an empty header value so Header.Get returns "" without net/http sniffing
+		w.Header()["Content-Type"] = []string{""}
+		w.WriteHeader(http.StatusOK)
+		w.Write(connectEnvelope(0, `{"event":{"start":{"pid":100}}}`))
+		w.Write(connectEnvelope(0, fmt.Sprintf(`{"event":{"data":{"stdout":%q}}}`, base64.StdEncoding.EncodeToString([]byte("success\n")))))
+		w.Write(connectEnvelope(0, `{"event":{"end":{"exitCode":0,"exited":true}}}`))
+		w.Write(connectEnvelope(connectEndStreamFlag, `{}`))
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-proc", TemplateID: "tpl-test", EnvdAccessToken: "t"}
+
+	res, err := sb.Commands().Run(context.Background(), "echo success", CommandOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("Commands.Run without Content-Type header failed: %v", err)
+	}
+	if res.Stdout != "success\n" || res.ExitCode != 0 {
+		t.Fatalf("result=%+v, want stdout 'success\\n' and exitCode 0", res)
 	}
 }

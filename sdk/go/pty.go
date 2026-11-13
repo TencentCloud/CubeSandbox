@@ -124,6 +124,9 @@ func (p *Pty) Connect(ctx context.Context, pid int, opts PtyConnectOptions) (*Pt
 
 // Kill sends SIGKILL to the PTY process identified by pid. It reports false
 // (not an error) when the PID could not be found — e.g. it already exited.
+// Note: if the server answers 404 with an HTML or non-JSON text page (e.g. a
+// misrouted request), Kill returns a routing diagnostic error instead of
+// (false, nil); only JSON 404 responses keep the not-found shortcut.
 func (p *Pty) Kill(ctx context.Context, pid int) (bool, error) {
 	if p == nil || p.sandbox == nil {
 		return false, fmt.Errorf("pty is not attached to a sandbox")
@@ -386,10 +389,11 @@ func (p *Pty) openStream(ctx context.Context, method string, payload any, user s
 		}
 		return nil, err
 	}
-	if resp.StatusCode >= http.StatusBadRequest {
-		defer resp.Body.Close()
+	body := resp.Body
+	if err := validateConnectResponse(resp); err != nil {
+		defer body.Close()
 		control.disconnect()
-		return nil, apiErrorFromResponse(resp)
+		return nil, err
 	}
 
 	pid, err := readPtyStartPID(resp.Body, method, control)
@@ -444,10 +448,24 @@ func (p *Pty) unary(ctx context.Context, method string, payload any, allowNotFou
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
+			// A misrouted Web UI / gateway page must not masquerade as
+			// "not found" or a misclassified API error: report the routing
+			// diagnostic instead, keeping the "<method> failed: " prefix so
+			// the failing call is attributable in logs.
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			return false, fmt.Errorf("%s failed: %w", method, validateConnectResponse(resp))
+		}
 		if allowNotFound && isConnectNotFound(resp.StatusCode, body) {
 			return false, nil
 		}
 		return false, apiErrorFromStatus(resp.StatusCode, fmt.Sprintf("%s failed: %s", method, extractErrorMessage(body, resp.StatusCode)))
+	}
+	// A 200 text/html response means the request landed on a Web UI or portal
+	// page instead of CubeProxy; surface the routing diagnostic instead of
+	// reporting success on a misrouted page.
+	if diag := misroutedHTMLDiagnostic(resp); diag != nil {
+		return false, diag
 	}
 	return true, nil
 }

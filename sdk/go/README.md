@@ -409,6 +409,24 @@ cfg := cubesandbox.Config{
 client := cubesandbox.NewClient(cfg)
 ```
 
+If one of the covered Go SDK calls (`Commands.Run`, `Files.WatchDir`,
+`Pty.Create`/`Connect`, `Pty.Kill`/`Resize`/`SendStdin`,
+`Files.List`/`Stat`/`Exists`/`Remove`/`Rename`/`MakeDir`) returns an HTML/text
+page or invalid envelope, check
+the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
+Connect streams and unary PTY calls reject HTTP 200 responses labeled
+`text/html`. Filesystem RPCs also check the body for an HTML page on HTTP 200.
+On HTTP errors, the SDK treats HTML pages as routing errors and checks non-JSON
+`text/*` responses for misrouting only on 404. Routing errors clear the
+not-found classifications, while 401/403 responses keep `ErrAuthentication`.
+JSON API error documents keep their classification even when labeled `text/*`.
+`Pty.Kill` returns an error for a 404 HTML routing page. Non-200 routing page
+messages are truncated before the SDK appends the routing hint. For redirects
+surfaced by stream validation, the diagnostic includes only the truncated URL path.
+This diagnostic
+does not cover `RunCode`, which uses the separate Jupyter endpoint, nor the
+plain-HTTP `Files.Read`/`Files.Write` paths.
+
 ## Integration Tests
 
 Unit tests do not require a live service:

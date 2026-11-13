@@ -7,9 +7,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net/http"
+	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -18,6 +23,10 @@ const (
 	connectEndStreamFlag   = byte(0x02)
 	connectCompressedFlag  = byte(0x01)
 	maxConnectEnvelopeSize = 64 * 1024 * 1024
+	// maxRoutingPagePeekBytes bounds the error-body prefix buffered to tell a
+	// JSON API error document apart from an HTML/text routing page.
+	maxRoutingPagePeekBytes = 4096
+	maxDiagnosticMsgLen     = 200
 )
 
 type connectEndStream struct {
@@ -50,6 +59,9 @@ func readConnectEnvelope(r io.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 
+	if header[0]&^(connectCompressedFlag|connectEndStreamFlag) != 0 {
+		return 0, nil, fmt.Errorf("response is not a Connect envelope (first 5 bytes: %x); check whether CUBE_PROXY_NODE_IP is configured, the data-plane endpoint points to a web service, or the response was compressed", header)
+	}
 	size := binary.BigEndian.Uint32(header[1:])
 	if size > maxConnectEnvelopeSize {
 		return 0, nil, fmt.Errorf("Connect stream message too large: %d bytes", size)
@@ -81,4 +93,174 @@ func parseConnectEndStream(raw []byte) error {
 		return fmt.Errorf("%s: %s", end.Error.Code, message)
 	}
 	return fmt.Errorf("%s", message)
+}
+
+// responseMediaType returns the lower-cased media type of the response's
+// Content-Type header, or "" when the header is missing.
+func responseMediaType(resp *http.Response) string {
+	rawCT := resp.Header.Get("Content-Type")
+	if rawCT == "" {
+		return ""
+	}
+	if mt, _, err := mime.ParseMediaType(rawCT); err == nil {
+		return mt
+	}
+	return strings.ToLower(strings.TrimSpace(strings.Split(rawCT, ";")[0]))
+}
+
+// looksLikeJSONErrorDocument reports whether body is a JSON object carrying a
+// "message", "detail", or "error" string — the shapes API errors take in this
+// project (readErrorMessage extracts "message"/"detail"; CubeProxy and CubeOps
+// emit {"error": "..."}). Such a document is a genuine API error even when the
+// Content-Type header says text/*, so it keeps its error classification.
+func looksLikeJSONErrorDocument(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var doc struct {
+		Message string `json:"message"`
+		Detail  string `json:"detail"`
+		Err     string `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &doc); err != nil {
+		return false
+	}
+	return strings.TrimSpace(doc.Message) != "" || strings.TrimSpace(doc.Detail) != "" || strings.TrimSpace(doc.Err) != ""
+}
+
+// isRoutingPage reports whether an HTTP response looks like a misrouted
+// Web UI / gateway page rather than a genuine API error: an HTML media type
+// or HTML-looking body, or a 404 with a non-empty text body that is not a
+// JSON API error document (e.g. Go's "404 page not found"). A genuine JSON API
+// error document keeps the server's classification even when the Content-Type
+// header says text/* (including text/html); empty bodies and bodies that look
+// like truncated JSON are not positive evidence of a routing page either.
+func isRoutingPage(statusCode int, mediaType string, body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	prefix := bytes.ToLower(trimmed[:min(len(trimmed), len("<!doctype"))])
+	bodyLooksHTML := bytes.HasPrefix(prefix, []byte("<!doctype")) || bytes.HasPrefix(prefix, []byte("<html"))
+	if mediaType == "text/html" || bodyLooksHTML {
+		return !looksLikeJSONErrorDocument(trimmed)
+	}
+	if statusCode != http.StatusNotFound || !strings.HasPrefix(mediaType, "text/") {
+		return false
+	}
+	if len(trimmed) == 0 {
+		return false
+	}
+	// A body starting with '{' is either invalid JSON or a truncated document:
+	// not positive evidence of a routing page.
+	return trimmed[0] != '{'
+}
+
+// misroutedHTMLDiagnostic reports an HTTP 200 text/html response as a routing
+// diagnostic: a Connect stream is never labeled text/html, so such a response
+// means the request landed on a Web UI or portal page instead of CubeProxy.
+// It returns nil for anything else and never reads the body.
+func misroutedHTMLDiagnostic(resp *http.Response) *APIError {
+	if resp == nil || resp.StatusCode != http.StatusOK || responseMediaType(resp) != "text/html" {
+		return nil
+	}
+	return &APIError{
+		Kind:    apiErrorKindAPI,
+		Message: fmt.Sprintf("unexpected content-type %q (received HTML instead of Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service)", resp.Header.Get("Content-Type")),
+	}
+}
+
+func truncateDiagnostic(message string) string {
+	if len(message) <= maxDiagnosticMsgLen {
+		return message
+	}
+	end := maxDiagnosticMsgLen
+	for end > 0 && !utf8.RuneStart(message[end]) {
+		end--
+	}
+	return message[:end] + "..."
+}
+
+// validateConnectResponse ensures the HTTP response represents a valid Connect stream.
+// Non-200 responses are parsed into an APIError via apiErrorFromResponse, enriching
+// HTML and 404 text pages with actionable hints while clearing false error
+// classifications on 404 routing pages (preserving ErrAuthentication on 401/403 and
+// genuine JSON API error documents, which keep their classification even when served
+// with a text/* content type; a body that looks like truncated JSON is left
+// untouched rather than risk misclassification). Legitimate CubeProxy 404 responses (on both control and
+// data planes) arrive as JSON; an HTML or text 404 on a data-plane streaming endpoint
+// indicates the request was misrouted (e.g. to a web UI or a Go net/http.NotFound
+// gateway) rather than reaching CubeProxy.
+// Note: resp.Body is replaced during validation (with a wrapper over the peeked
+// prefix); the replacement's Close does not close the original body, so the caller
+// must keep a reference to the original in order to release the connection.
+// For 200 responses, text/html media types (such as from a misrouted Web UI or portal
+// landing page) are immediately rejected with an *APIError without blocking on body reads.
+// Other content types (and omitted headers) fall through to envelope parsing for maximum
+// proxy tolerance.
+func validateConnectResponse(resp *http.Response) error {
+	if resp == nil || resp.Body == nil {
+		return errors.New("nil response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		// Peek at a bounded prefix of the body so a genuine JSON API error
+		// document can be told apart from an HTML/text routing page without
+		// buffering a whole misrouted page into memory.
+		var peek []byte
+		peek, _ = io.ReadAll(io.LimitReader(resp.Body, maxRoutingPagePeekBytes))
+		routingPage := isRoutingPage(resp.StatusCode, responseMediaType(resp), peek)
+		if routingPage {
+			// Only the truncated prefix below is used; drop the rest of a
+			// possibly multi-megabyte page instead of buffering it.
+			resp.Body = io.NopCloser(bytes.NewReader(peek))
+		} else {
+			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), resp.Body))
+		}
+
+		var apiErr *APIError
+		if err := apiErrorFromResponse(resp); !errors.As(err, &apiErr) {
+			// apiErrorFromResponse always returns *APIError today; never fall
+			// through to nil, which would report an HTTP error as a valid
+			// stream.
+			if err == nil {
+				return apiErrorFromStatus(resp.StatusCode, "")
+			}
+			return err
+		}
+		if routingPage {
+			apiErr.Message = truncateDiagnostic(apiErr.Message)
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				apiErr.Message += "; received an HTML/text page instead of a Connect stream; check credentials or whether a portal is intercepting the request"
+			} else if resp.StatusCode >= http.StatusInternalServerError {
+				apiErr.Message += "; received an HTML error page instead of a Connect stream; the request may have reached CubeProxy but the upstream envd or sandbox node is unreachable"
+			} else {
+				apiErr.Message += "; response may be an HTML/text page instead of a Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service"
+			}
+			// A routing page carries no trustworthy classification: clear any
+			// sentinel kind the status/body heuristics assigned (e.g.
+			// apiErrorFromStatus promoting "not found" text on a 5xx page).
+			// Authentication failures keep theirs so callers can still
+			// detect credential problems.
+			if apiErr.Kind != apiErrorKindAuthentication {
+				apiErr.Kind = apiErrorKindAPI
+			}
+		}
+		if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+			// Defence in depth: the SDK's own HTTP clients follow redirects,
+			// so a 3xx only reaches validation when the caller supplies a
+			// custom client via WithHTTPClient with CheckRedirect disabled.
+			// Keep only the escaped path to avoid logging the authority,
+			// credentials, query parameters, or fragment.
+			if target, err := url.Parse(resp.Header.Get("Location")); err == nil {
+				if path := target.EscapedPath(); path != "" {
+					apiErr.Message += "; redirect path " + truncateDiagnostic(path)
+				}
+			}
+		}
+		return apiErr
+	}
+
+	if diag := misroutedHTMLDiagnostic(resp); diag != nil {
+		return diag
+	}
+	return nil
 }
