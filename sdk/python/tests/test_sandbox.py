@@ -2473,6 +2473,33 @@ class TestIPOverrideTransport:
         )
         self._handle(req)
 
+    def test_extensions_forwarded(self):
+        """request.extensions must survive the rebuild (#2213).
+
+        httpx passes per-request timeouts via extensions["timeout"]; the
+        proxied request without them applies no connect/read/write/pool
+        timeout, so commands.run(timeout=N) can block forever.
+        """
+        from cubesandbox._transport import IPOverrideTransport
+
+        timeout = {"timeout": httpx.Timeout(5.0, connect=2.0)}
+        req = httpx.Request(
+            "POST",
+            "http://49983-sb-test.cube.app/files",
+            params={"path": "/tmp/t.txt", "username": "root"},
+            content=b"hello",
+            extensions=dict(timeout),
+        )
+        transport = IPOverrideTransport("127.0.0.1", 1)
+        captured = {}
+        with patch.object(
+            httpx.HTTPTransport,
+            "handle_request",
+            lambda self, request: captured.setdefault("req", request),
+        ):
+            transport.handle_request(req)
+        assert captured["req"].extensions["timeout"] == timeout["timeout"]
+
 
 # ── close / __del__ ───────────────────────────────────────────────────────────
 
