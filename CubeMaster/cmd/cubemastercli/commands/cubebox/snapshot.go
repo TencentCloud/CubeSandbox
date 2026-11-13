@@ -128,6 +128,7 @@ var SnapshotCommand = cli.Command{
 		SnapshotListCommand,
 		SnapshotInfoCommand,
 		SnapshotDeleteCommand,
+		SnapshotRecoverCreateCommand,
 	},
 }
 

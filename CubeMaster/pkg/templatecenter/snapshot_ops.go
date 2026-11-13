@@ -372,6 +372,19 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	if backend := strings.TrimSpace(rec.Backend); backend != "" {
 		commitBackend = backend
 	}
+	// Read persisted TTL before any node-side work. Failure must never turn a
+	// provisional submit-time deadline into the deadline of a READY snapshot.
+	var ttl int64
+	if rec.ExpiresAt != nil {
+		var err error
+		ttl, err = snapshotCreateTTLSeconds(ctx, jobID)
+		if err != nil || ttl == 0 {
+			if err == nil {
+				err = errors.New("expiring snapshot has no positive TTL in its job")
+			}
+			return failSnapshotCreateJob(ctx, jobID, snapshotID, "", "", nil, err, commitBackend)
+		}
+	}
 	mode := snapshotmode.Normalize(rec.Mode)
 	commitRsp, err := cubelet.CommitSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
 		RequestID:    uuid.NewString(),
@@ -445,7 +458,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	// TTL means "usable for N seconds": anchor expiry to the CREATING→READY
 	// transition, not to the request submission (commit can take up to
 	// snapshotOperationTimeout, longer than a short TTL).
-	if ttl := snapshotCreateTTLSeconds(ctx, jobID); ttl > 0 {
+	if ttl > 0 {
 		snapUpdates["expires_at"] = time.Now().Add(time.Duration(ttl) * time.Second)
 	}
 	exportUUIDs := ""
@@ -554,18 +567,8 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 			}
 			return err
 		}
-		// Same TTL access boundary as EnsureSnapshotReadyForNewUse: an expired
-		// snapshot is refused for rollback immediately, not only after the
-		// reconciler tombstones it.
-		if rec.ExpiresAt != nil && !rec.ExpiresAt.After(time.Now()) {
-			return fmt.Errorf("%w: %s expired at %s",
-				ErrSnapshotExpired, snapshotID, rec.ExpiresAt.UTC().Format(time.RFC3339))
-		}
-		if snapshotRejectsNewUse(rec.Status) {
-			return wrapSnapshotNotFound(snapshotID)
-		}
-		if !strings.EqualFold(rec.Status, StatusReady) {
-			return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, snapshotID, rec.Status)
+		if err := validateSnapshotNewUse(rec, time.Now()); err != nil {
+			return err
 		}
 		// Rollback is a memory restore. A filesystem-only artifact has no
 		// memory to load, and its disk alone would reset the guest silently.
@@ -648,7 +651,19 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 			Progress:     0,
 			RequestJSON:  payload,
 		}
-		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			current, err := lockSnapshotRecordTx(tx, snapshotID)
+			if err != nil {
+				return err
+			}
+			if err := validateSnapshotNewUse(current, time.Now()); err != nil {
+				return err
+			}
+			if err := rejectActiveSnapshotJobTx(tx, snapshotID); err != nil {
+				return err
+			}
+			return tx.Table(constants.TemplateImageJobTableName).Create(record).Error
+		})
 	}); err != nil {
 		return nil, err
 	}
@@ -1594,18 +1609,24 @@ func snapshotJobFailedError(info *sandboxtypes.TemplateImageJobInfo) error {
 
 // snapshotCreateTTLSeconds reads the TTL the create job was submitted with,
 // from the persisted job payload (the same snapshotCreateJobRequest parse
-// path snapshotCreateRequestMatches uses). Best-effort: an unreadable job or
-// payload yields 0, which keeps the submit-time expires_at.
-func snapshotCreateTTLSeconds(ctx context.Context, jobID string) int64 {
+// path snapshotCreateRequestMatches uses). Missing or malformed data is an
+// error, distinct from the explicit no-expiration value.
+func snapshotCreateTTLSeconds(ctx context.Context, jobID string) (int64, error) {
 	record, err := getTemplateImageJobRecordByID(ctx, jobID)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("read snapshot TTL for job %s: %w", jobID, err)
+	}
+	if record == nil {
+		return 0, fmt.Errorf("snapshot job %s is missing", jobID)
 	}
 	var req snapshotCreateJobRequest
 	if err := json.Unmarshal([]byte(record.RequestJSON), &req); err != nil {
-		return 0
+		return 0, fmt.Errorf("decode snapshot TTL for job %s: %w", jobID, err)
 	}
-	return req.TTLSeconds
+	if req.TTLSeconds < 0 || req.TTLSeconds > maxSnapshotTTLSeconds {
+		return 0, errors.New("persisted snapshot TTL is out of range")
+	}
+	return req.TTLSeconds, nil
 }
 
 // snapshotCreateRequestMatches verifies idempotency: a re-arrival of the same

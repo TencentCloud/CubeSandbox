@@ -725,7 +725,8 @@ func TestRunSnapshotCreateJobAnchorsTTLExpiryAtReady(t *testing.T) {
 	})
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
 	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
-		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendXFS}, nil
+		expired := time.Now().Add(-time.Hour)
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendXFS, ExpiresAt: &expired}, nil
 	})
 	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
 		return &models.TemplateImageJob{JobID: jobID, RequestJSON: requestJSON}, nil
@@ -915,9 +916,10 @@ func TestValidateSnapshotMetricsRejectsMissingKeys(t *testing.T) {
 }
 
 func TestDeleteSnapshotTombstonesWhenRuntimeRefsExist(t *testing.T) {
-	oldDB := store.db
-	store.db = &gorm.DB{}
-	defer func() { store.db = oldDB }()
+	db := snapshotReservationTestDB(t)
+	if err := db.Create(&models.SnapshotRecord{SnapshotID: "snap-in-use", Status: StatusReady}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
@@ -959,7 +961,7 @@ func TestDeleteSnapshotTombstonesWhenRuntimeRefsExist(t *testing.T) {
 	countActiveSnapshotRuntimeRefsFn = func(ctx context.Context, snapshotID string) (int64, error) {
 		return 1, nil
 	}
-	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, snapshotID string, values map[string]any) error {
+	patches.ApplyFunc(updateSnapshotFieldsTx, func(tx *gorm.DB, snapshotID string, values map[string]any) error {
 		if status, ok := values["status"].(string); ok {
 			tombstoneStatus = status
 		}

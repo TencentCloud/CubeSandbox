@@ -62,6 +62,53 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
 
 快照的生命周期独立于沙箱：源沙箱被 `kill()` 之后，快照仍然可用。不再需要时，调用 `Sandbox.delete_snapshot(snapshot_id_or_name)` 手动清理。它既接受快照 ID，也接受创建快照时指定的名称，删除成功返回 `True`、快照不存在返回 `False`。SDK 只匹配快照、不会匹配模板：名称没有对应快照时返回 `False`，即使存在同名模板别名，模板也不会被删除；名称匹配多个快照时返回 HTTP 409 且不删除任何对象，请改用 `snap-` ID。该行为要求 CubeAPI 支持 `snapshot_only`，旧版服务端会忽略该参数，名称没有对应快照时仍会路由到同名模板。
 
+### 快照有效期
+
+`sb.create_snapshot(ttl_seconds=3600)` 表示从快照进入 READY 开始可用 3,600 秒。
+不传或传 0 表示不自动过期；范围为 0 到 9,223,372,036 秒。
+创建和列表结果的 `SnapshotInfo.expires_at` 返回 UTC RFC 3339 过期时间；无 TTL 时为 `None`。
+
+CubeAPI 请求字段为 `ttlSeconds`（也接受 `ttl_seconds`），响应为 `expiresAt`；
+CubeMaster 使用 `ttl_seconds`、`expires_at`，CLI 使用 `--ttl-seconds`。
+Node SDK 调用 `sb.createSnapshot("checkpoint", { ttlSeconds: 3600 })`，读取 `expiresAt`。
+Go SDK 调用 `sb.CreateSnapshot(ctx, "checkpoint", cubesandbox.CreateSnapshotOptions{TTLSeconds: 3600})`，读取 `ExpiresAt`。
+原有不传选项的调用保持兼容。
+TTL 需要同时升级 SDK、CubeAPI 和 CubeMaster 到支持该字段的版本；旧版 CubeAPI 可能忽略未知字段。
+新版 CubeAPI 若发现 CubeMaster 未返回所请求的过期时间，会报告冲突，不会宣告 TTL 已生效。
+错误中包含已创建的快照 ID，调用方可先显式删除再重试；TTL 校验失败不会撤销已经完成的捕获。
+
+到期后立即拒绝新的恢复和回滚请求；已受理的操作完成后再逻辑删除，现有运行实例继续持有引用。
+每五分钟运行的对账器负责退休快照，引用释放后才开始物理清理。
+S3 的克隆关系或跨节点导出租约可能继续推迟物理删除；逻辑删除不代表磁盘空间已经释放。
+
+创建和 fork 会在节点 RPC 前持久化 `create_pending` 预约。下发前被拒绝的请求立即释放预约，
+包括仍在排队时被取消的请求。只要尝试过节点 RPC，错误或响应丢失都会保留保护。
+成功盘点到实例后，预约转换为正式运行时引用；未观察到实例的预约，只有超过 24 小时、
+节点盘点成功且 Master 也确认实例不存在时才释放。盘点失败或节点不健康不代表实例不存在。
+
+节点永久丢失时，必须先在 CubeSandbox 外部完成隔离，确保旧 VM 和排队的创建请求不能恢复执行。
+将快照逻辑删除，等待预约满 24 小时，再由运维人员通过 CubeMaster CLI 恢复回收：
+
+```bash
+cubemastercli snapshot recover-create \
+  --snapshot-id snap-example --sandbox-id reserved-example \
+  --node-id retired-node --node-ip 192.0.2.10 \
+  --confirm-node-fenced --reason "Host powered off and prevented from restarting"
+```
+
+节点身份必须与 `t_cube_snapshot_runtime_active` 中记录的 `node_id`、`node_ip` 完全一致，
+仅当对应存储值为空时省略该参数。内部接口为 `POST /cube/snapshot/{snapshot_id}/recover-create`，
+不通过 CubeAPI 暴露。快照未退休、预约不足 24 小时、节点健康、存在进行中的快照操作，
+或 Master 仍记录该实例时，操作会被拒绝。成功后只释放匹配的 `create_pending` 预约，
+原因写入引用历史，正常运行时引用不受影响。重复恢复是幂等的，物理回收由下一轮对账继续完成。
+
+S3 只有返回明确的成功确认（`bool_value: true`，进入延迟队列时另有 `deferred: true`）才算接受删除。
+普通 `busy` 错误，包括不支持延迟确认的旧后端返回的错误，都会保留元数据供重试。
+需要升级 S3 后端或解除实际依赖，Master 不会将未确认的错误当作清理完成。
+
+创建和 fork 保留快照解析阶段的生命周期错误：过期或占用返回冲突，已删除或不存在返回未找到；
+请求格式问题仍返回参数错误。调用方应检查错误码，不要把所有源快照拒绝都当作参数错误。
+
 ### 仅文件系统快照（fs-only）
 
 给 `create_snapshot()` 传 `mode="fs-only"`，只捕获文件系统、不捕获 guest 内存。调用期间 guest 不会暂停，返回时即可继续读写。代价是：用它创建的沙箱会**冷启动**——文件都在，但所有进程都是新的。

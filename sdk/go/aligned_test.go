@@ -452,6 +452,36 @@ func TestSnapshotLifecycle(t *testing.T) {
 	}
 }
 
+func TestSnapshotTTLContract(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body["ttlSeconds"] != float64(60) {
+			t.Errorf("TTL body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"snapshotID":"snap-ttl","expiresAt":"2030-01-01T00:00:00Z"}`)
+	}))
+	defer server.Close()
+	sb := &Sandbox{client: NewClient(Config{APIURL: server.URL}), SandboxID: testSandboxID}
+	info, err := sb.CreateSnapshot(context.Background(), "", CreateSnapshotOptions{TTLSeconds: 60})
+	if err != nil || info.ExpiresAt != "2030-01-01T00:00:00Z" {
+		t.Fatalf("info=%#v err=%v", info, err)
+	}
+	for _, ttl := range []int64{-1, 9_223_372_037} {
+		if _, err := sb.CreateSnapshot(context.Background(), "", CreateSnapshotOptions{TTLSeconds: ttl}); err == nil {
+			t.Fatalf("invalid TTL %d accepted", ttl)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("invalid TTL reached server: %d requests", requests)
+	}
+}
+
 func TestDeleteSnapshotByNameNotFoundAndAmbiguous(t *testing.T) {
 	// Mirrors CubeAPI resolve_snapshot_delete_target: snap- id or name, 404 for unknown, 409 for ambiguous.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

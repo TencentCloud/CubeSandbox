@@ -47,6 +47,9 @@ func TestExpireSnapshotRecordTombstonesExpiredSnapshot(t *testing.T) {
 	expiredAt := now.Add(-time.Second)
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
+	patches.ApplyFunc(getActiveSnapshotJobByResourceID, func(context.Context, string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
 	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
 		return &models.SnapshotRecord{SnapshotID: "snap-expired", Status: StatusReady, ExpiresAt: &expiredAt}, nil
 	})
@@ -230,7 +233,7 @@ func TestEnsureSnapshotReadyForNewUseEnforcesTTL(t *testing.T) {
 		{"ready unexpired passes", &models.SnapshotRecord{SnapshotID: "snap-live", Status: StatusReady, ExpiresAt: &unexpired}, ""},
 		{"ready expired rejected", &models.SnapshotRecord{SnapshotID: "snap-expired", Status: StatusReady, ExpiresAt: &expired}, "expired"},
 		{"nil expiry passes", &models.SnapshotRecord{SnapshotID: "snap-forever", Status: StatusReady}, ""},
-		{"failed expired rejected", &models.SnapshotRecord{SnapshotID: "snap-failed", Status: StatusFailed, ExpiresAt: &expired}, "expired"},
+		{"failed status takes precedence", &models.SnapshotRecord{SnapshotID: "snap-failed", Status: StatusFailed, ExpiresAt: &expired}, "status FAILED"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

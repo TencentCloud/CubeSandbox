@@ -183,7 +183,18 @@ func expireSnapshotRecord(ctx context.Context, snapshotID string, now time.Time)
 		if !strings.EqualFold(rec.Status, StatusReady) && !strings.EqualFold(rec.Status, StatusFailed) {
 			return nil
 		}
-		return tombstoneSnapshotRecord(ctx, snapshotID)
+		// Let accepted operations finish before retiring their input. New use
+		// is already refused by the expiry admission check, even before this pass.
+		if _, err := getActiveSnapshotJobByResourceID(ctx, snapshotID); err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err := tombstoneSnapshotRecord(ctx, snapshotID); err != nil &&
+			!errors.Is(err, ErrTemplateAttemptInProgress) && !errors.Is(err, ErrSnapshotNotFound) {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -414,7 +425,7 @@ func reconcileSnapshotRuntimeRefs(ctx context.Context) error {
 		if nodeID == "" && nodeIP == "" {
 			continue
 		}
-		rsp := sandbox.ListSandbox(ctx, &sandboxtypes.ListCubeSandboxReq{
+		rsp := sandbox.ListSandboxWithFailOnError(ctx, &sandboxtypes.ListCubeSandboxReq{
 			RequestID:    uuid.NewString(),
 			HostID:       nodeID,
 			InstanceType: cubeboxv1.InstanceType_cubebox.String(),

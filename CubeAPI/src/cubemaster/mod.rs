@@ -1779,6 +1779,8 @@ pub struct CreateSnapshotRequest {
     pub request_id: String,
     pub sandbox_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
@@ -1792,6 +1794,8 @@ pub struct CreateSnapshotRequest {
 #[allow(dead_code)]
 pub struct SnapshotResource {
     pub snapshot_id: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub names: Vec<String>,
     #[serde(default)]

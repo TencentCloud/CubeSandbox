@@ -12,8 +12,8 @@ import uuid
 import pytest
 
 from adapters import create_adapter, create_adapter_with_capacity_retry
-from framework.assertions import assert_command_ok
-from framework.capabilities import ROLLBACK_CLONE
+from framework.assertions import assert_code_ok, assert_command_ok
+from framework.capabilities import ROLLBACK_CLONE, RUN_CODE
 from framework.cleanup import safe_kill
 from framework.lifecycle import wait_until
 
@@ -217,3 +217,66 @@ def test_list_snapshots_by_name_and_id(sdk_sandbox, sdk_e2e_config):
         )
     finally:
         sdk_sandbox.delete_snapshot(snapshot_id)
+
+
+@pytest.mark.requires_capability(RUN_CODE)
+@pytest.mark.requires_code_interpreter
+@pytest.mark.parametrize("delete_before_capture", [False, True], ids=["incremental", "missing-base-fallback"])
+def test_later_snapshot_survives_physical_base_cleanup(
+    sdk_sandbox, sdk_backend, sdk_e2e_config, delete_before_capture
+):
+    """Check inherited memory, changed memory and filesystem after base removal."""
+    path = f"/tmp/sdk-snapshot-chain-{sdk_sandbox.sandbox_id}.txt"
+    snapshots = []
+    restored = None
+    cleanup_errors = []
+    try:
+        sdk_sandbox.write_file(path, "base-filesystem")
+        assert_code_ok(sdk_sandbox.run_code(
+            "snapshot_chain_pages = [b'A' * 4096, b'B' * 4096]",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+        base = sdk_sandbox.create_snapshot()
+        snapshots.append(base)
+        sdk_sandbox.write_file(path, "later-filesystem")
+        assert_code_ok(sdk_sandbox.run_code(
+            "snapshot_chain_pages[1] = b'C' * 4096",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+        if delete_before_capture:
+            _wait_for_physical_cleanup(sdk_sandbox, base, timeout=sdk_e2e_config.default_timeout)
+            snapshots.remove(base)
+        later = sdk_sandbox.create_snapshot()
+        snapshots.append(later)
+        # Further changes must not leak into the captured memory or filesystem.
+        sdk_sandbox.write_file(path, "uncaptured-filesystem")
+        assert_code_ok(sdk_sandbox.run_code(
+            "snapshot_chain_pages[:] = [b'X' * 4096, b'Y' * 4096]",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+        assert not safe_kill(sdk_sandbox, sdk_e2e_config)
+        if not delete_before_capture:
+            _wait_for_physical_cleanup(sdk_sandbox, base, timeout=sdk_e2e_config.default_timeout)
+            snapshots.remove(base)
+        restored = create_adapter_with_capacity_retry(
+            sdk_backend, sdk_e2e_config,
+            metadata={"test_suite": "sdk_compat", "test_role": "incremental_after_base_cleanup"},
+            create_options={"template": later},
+        )
+        assert restored.read_file(path) == "later-filesystem"
+        assert_code_ok(restored.run_code(
+            "assert snapshot_chain_pages == [b'A' * 4096, b'C' * 4096]",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+    finally:
+        active_failure = sys.exc_info()[0] is not None
+        for sandbox in (restored, sdk_sandbox):
+            if sandbox is not None:
+                cleanup_errors.extend(safe_kill(sandbox, sdk_e2e_config))
+        for snapshot_id in reversed(snapshots):
+            try:
+                _wait_for_physical_cleanup(sdk_sandbox, snapshot_id, timeout=sdk_e2e_config.default_timeout)
+            except Exception as exc:  # noqa: BLE001 - preserve the original failure
+                cleanup_errors.append(exc)
+        if not active_failure:
+            assert not cleanup_errors, cleanup_errors

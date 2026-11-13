@@ -165,13 +165,15 @@ export class OutputMessage {
 export class SnapshotInfo {
   snapshotId: string;
   names: string[];
+  expiresAt?: string;
 
-  constructor(snapshotId: string, names: string[] = []) {
+  constructor(snapshotId: string, names: string[] = [], expiresAt?: string) {
     this.snapshotId = snapshotId;
     this.names = names;
+    this.expiresAt = expiresAt;
   }
 
   static fromDict(data: Record<string, any>): SnapshotInfo {
-    return new SnapshotInfo(data.snapshotID ?? "", data.names ?? []);
+    return new SnapshotInfo(data.snapshotID ?? "", data.names ?? [], data.expiresAt);
   }
 }
