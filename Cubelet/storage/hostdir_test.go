@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
@@ -239,4 +240,93 @@ func TestValidateHostDirSourceName(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestRemoveEmptyHostDirTreeRefusesNonDirectoryEntries(t *testing.T) {
+	base := t.TempDir()
+	sandboxDir := filepath.Join(base, "sb-nonempty")
+	volDir := filepath.Join(sandboxDir, "rw", "vol-0")
+	require.NoError(t, os.MkdirAll(volDir, 0755))
+
+	userFile := filepath.Join(volDir, "user-data.txt")
+	require.NoError(t, os.WriteFile(userFile, []byte("precious"), 0644))
+
+	err := removeEmptyHostDirTree(sandboxDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unexpected non-directory entry")
+	require.FileExists(t, userFile)
+}
+
+func TestCleanupHostDirVolumesUnmountsBindAndPreservesSourceData(t *testing.T) {
+	utils.SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	require.NoError(t, os.MkdirAll(hostDirBasePath, 0755))
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	srcDir := filepath.Join(tmp, "user-source")
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "sub"), 0755))
+	srcFile := filepath.Join(srcDir, "sub", "important.txt")
+	require.NoError(t, os.WriteFile(srcFile, []byte("do-not-delete"), 0644))
+
+	sandboxID := "bind-mount-sb"
+	bindDest := filepath.Join(hostDirBasePath, sandboxID, "rw", "vol 0")
+	require.NoError(t, os.MkdirAll(bindDest, 0755))
+
+	require.NoError(t, unix.Mount(srcDir, bindDest, "", unix.MS_BIND|unix.MS_REC, ""))
+	t.Cleanup(func() {
+		_ = unix.Unmount(bindDest, unix.MNT_DETACH)
+	})
+
+	// Stack a second bind mount on the same target to verify stacked-mount cleanup.
+	require.NoError(t, unix.Mount(srcDir, bindDest, "", unix.MS_BIND, ""))
+	t.Cleanup(func() {
+		_ = unix.Unmount(bindDest, unix.MNT_DETACH)
+	})
+
+	s := &local{}
+	info := &StorageInfo{
+		SandboxID: sandboxID,
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"vol/vol 0": {
+				VolumeName: "vol",
+				ShareDir:   filepath.Dir(bindDest),
+				BindPath:   bindDest,
+			},
+		},
+	}
+
+	require.NoError(t, s.cleanupHostDirVolumes(context.Background(), info))
+	require.NoDirExists(t, filepath.Join(hostDirBasePath, sandboxID))
+	require.FileExists(t, srcFile)
+
+	// Calling cleanup a second time must be idempotent.
+	require.NoError(t, s.cleanupHostDirVolumes(context.Background(), info))
+}
+
+func TestRemoveEmptyHostDirTreeRefusesActiveMountPoint(t *testing.T) {
+	utils.SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+	srcFile := filepath.Join(srcDir, "keep.txt")
+	require.NoError(t, os.WriteFile(srcFile, []byte("keep"), 0644))
+
+	sandboxDir := filepath.Join(tmp, "hostdir", "sb-active-mnt")
+	bindDest := filepath.Join(sandboxDir, "rw", "vol")
+	require.NoError(t, os.MkdirAll(bindDest, 0755))
+
+	require.NoError(t, unix.Mount(srcDir, bindDest, "", unix.MS_BIND, ""))
+	t.Cleanup(func() {
+		_ = unix.Unmount(bindDest, unix.MNT_DETACH)
+	})
+
+	// Even if removeEmptyHostDirTree is called while a mount is still active,
+	// it must refuse to traverse/delete the mount and leave source data intact.
+	err := removeEmptyHostDirTree(sandboxDir)
+	require.Error(t, err)
+	require.FileExists(t, srcFile)
 }
