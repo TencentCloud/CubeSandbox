@@ -1182,7 +1182,42 @@ where
     })
 }
 
+/// Fallback fd cleanup for kernels without `close_range` (or when a seccomp
+/// profile denies it): close every descriptor above stderr by listing
+/// /proc/self/fd.
+///
+/// The fd numbers are collected before any close: `read_dir` keeps its own
+/// directory fd open while iterating, and that fd also shows up in the
+/// listing — closing it mid-iteration makes the `ReadDir` drop path call
+/// `closedir` on an already-closed descriptor and panic. Collecting first
+/// leaves one harmless `EBADF` close for the now-released directory fd.
+fn close_fds_via_proc() {
+    let fds: Vec<i32> = match std::fs::read_dir("/proc/self/fd") {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_string_lossy().parse::<i32>().ok())
+            .filter(|n| *n > 2)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    for n in fds {
+        let _ = unsafe { libc::close(n) };
+    }
+}
+
 fn do_exec(args: &[String]) -> ! {
+    // Close every inherited descriptor above stdin/stdout/stderr so passfd
+    // log-forwarding pipes and dups do not leak into the container init.
+    // Android zygote aborts with "Unsupported st_mode for FD ... FIFO" when
+    // forking system_server if extra pipe fds are inherited.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let rc = libc::syscall(libc::SYS_close_range, 3usize, u32::MAX as usize, 0usize);
+        if rc < 0 {
+            // fallback for kernels without close_range: scan /proc/self/fd
+            close_fds_via_proc();
+        }
+    }
     let path = &args[0];
     let p = CString::new(path.to_string()).unwrap();
     let sa: Vec<CString> = args
@@ -2262,5 +2297,51 @@ mod tests {
         let invalid_env = format!("key={}", invalid_string);
         let env = valid_env(&invalid_env);
         assert_eq!(None, env);
+    }
+
+    #[test]
+    fn close_fds_via_proc_closes_high_fds_without_panicking() {
+        // The helper closes every descriptor above stderr in the calling
+        // process, so it must run in a forked child: the test harness keeps
+        // its own capture sockets open. The forked child also mirrors the
+        // real call site (do_exec runs after fork, right before execvp).
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                // Deliberately leak a few descriptors above stderr.
+                let mut opened: Vec<i32> = Vec::new();
+                for _ in 0..5 {
+                    if let Ok(f) = fs::File::open("/dev/null") {
+                        let fd = f.as_raw_fd();
+                        std::mem::forget(f);
+                        opened.push(fd);
+                    }
+                }
+                close_fds_via_proc();
+                // fcntl does not allocate descriptors, so the check itself
+                // is safe after everything above stderr has been closed.
+                let mut still_open = 0;
+                for fd in opened {
+                    if libc::fcntl(fd, libc::F_GETFD) != -1 {
+                        still_open += 1;
+                    }
+                }
+                libc::_exit(still_open);
+            }
+            let mut status: libc::c_int = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+            assert!(
+                libc::WIFEXITED(status),
+                "child did not exit cleanly (status {})",
+                status
+            );
+            let code = libc::WEXITSTATUS(status);
+            assert_eq!(
+                code, 0,
+                "child reported {} descriptors still open after close_fds_via_proc",
+                code
+            );
+        }
     }
 }
