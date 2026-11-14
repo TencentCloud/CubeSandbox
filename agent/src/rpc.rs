@@ -81,7 +81,7 @@ use crate::linux_abi::*;
 use crate::metrics::get_metrics;
 use crate::mount::add_virtiofs_storages;
 use crate::mount::{add_storages, baremount, STORAGE_HANDLER_LIST};
-use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
+use crate::namespace::{set_hostname_in_utsns, NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
 use crate::pci;
 use crate::random;
@@ -1372,6 +1372,40 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
                     ));
                 }
             };
+
+            // Memory restore keeps the snapshot UTS hostname (template build
+            // used a tpl-* short prefix). Re-apply the current sandbox short
+            // hostname so cubecli exec prompts match the instance ID.
+            {
+                let sandbox = self.sandbox.clone();
+                let mut s = sandbox.lock().await;
+                if !req.sandbox_id.is_empty() {
+                    s.id = req.sandbox_id.clone();
+                }
+                if !req.hostname.is_empty() {
+                    s.hostname = req.hostname.clone();
+                }
+            }
+            if !req.hostname.is_empty() {
+                let uts_path = {
+                    let sandbox = self.sandbox.clone();
+                    let s = sandbox.lock().await;
+                    s.shared_utsns.path.clone()
+                };
+                if let Err(e) = set_hostname_in_utsns(&uts_path, &req.hostname) {
+                    warn!(
+                        sl!(),
+                        "restore hostname in shared uts failed (path={}): {:?}", uts_path, e
+                    );
+                }
+                if let Err(e) = unistd::sethostname(req.hostname.as_str()) {
+                    warn!(sl!(), "restore hostname in root uts failed: {:?}", e);
+                }
+                if let Err(e) = fs::write("/etc/hostname", format!("{}\n", req.hostname)) {
+                    warn!(sl!(), "restore /etc/hostname write failed: {:?}", e);
+                }
+            }
+
             let duration_storage = start.elapsed().as_millis();
             info!(sl!(), "create sandbox!, add storage:{}ms", duration_storage);
             return Ok(Empty::new());

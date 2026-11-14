@@ -3,23 +3,67 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use nix::mount::MsFlags;
-use nix::sched::{unshare, CloneFlags};
+use nix::sched::{setns, unshare, CloneFlags};
 use nix::unistd::{getpid, gettid};
 use std::fmt;
 use std::fs;
 use std::fs::File;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 use crate::mount::{baremount, FLAGS};
-use slog::Logger;
+use slog::{warn, Logger};
+
+macro_rules! sl {
+    () => {
+        slog_scope::logger().new(o!("subsystem" => "namespace"))
+    };
+}
 
 const PERSISTENT_NS_DIR: &str = "/var/run/sandbox-ns";
 pub const NSTYPEIPC: &str = "ipc";
 pub const NSTYPEUTS: &str = "uts";
 pub const NSTYPEPID: &str = "pid";
+
+/// Set the hostname inside an existing persistent UTS namespace.
+///
+/// After a memory restore, CreateSandbox skips setup_shared_namespaces, so the
+/// UTS hostname frozen in the snapshot (often a tpl-* short prefix from
+/// template build) would otherwise stick. Call this with the new sandbox short
+/// ID so cubecli exec prompts match the instance the user targeted.
+pub fn set_hostname_in_utsns(ns_path: &str, hostname: &str) -> Result<()> {
+    if hostname.is_empty() {
+        return Ok(());
+    }
+    // Empty path is a no-op for callers that only have root UTS, but when a
+    // hostname was requested the restore path must not silently skip the
+    // shared UTS update that cubecli exec actually sees.
+    if ns_path.is_empty() {
+        warn!(
+            sl!(),
+            "set_hostname_in_utsns: empty uts ns path, skip shared uts update for hostname={}",
+            hostname
+        );
+        return Ok(());
+    }
+    let ns_path = ns_path.to_string();
+    let hostname = hostname.to_string();
+    let handle = std::thread::spawn(move || -> Result<()> {
+        let f = File::open(&ns_path).with_context(|| format!("open uts namespace {}", ns_path))?;
+        setns(f.as_raw_fd(), CloneFlags::CLONE_NEWUTS)
+            .with_context(|| format!("setns uts {}", ns_path))?;
+        nix::unistd::sethostname(hostname.as_str())
+            .with_context(|| format!("sethostname {}", hostname))?;
+        Ok(())
+    });
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("set_hostname_in_utsns thread panicked")),
+    }
+}
 
 #[instrument]
 pub fn get_current_thread_ns_path(ns_type: &str) -> String {
@@ -186,7 +230,7 @@ impl fmt::Debug for NamespaceType {
 
 #[cfg(test)]
 mod tests {
-    use super::{Namespace, NamespaceType};
+    use super::{set_hostname_in_utsns, Namespace, NamespaceType};
     use crate::{mount::remove_mounts, skip_if_no_cap, skip_if_not_root};
     use capctl::caps::Cap;
     use nix::sched::CloneFlags;
@@ -266,6 +310,12 @@ mod tests {
 
         let ns_ipc = Namespace::new(&logger).get_ipc();
         assert_eq!(NamespaceType::Ipc, ns_ipc.ns_type);
+    }
+
+    #[test]
+    fn set_hostname_in_utsns_noop_on_empty() {
+        assert!(set_hostname_in_utsns("", "host").is_ok());
+        assert!(set_hostname_in_utsns("/nonexistent", "").is_ok());
     }
 
     #[test]
