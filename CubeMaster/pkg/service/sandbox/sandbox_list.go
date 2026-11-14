@@ -123,6 +123,7 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 	}
 
 	enrichSandboxListBackends(ctx, rsp.Data)
+	enrichSandboxListConfigs(ctx, rsp.Data)
 	mergePauseBindings(ctx, req, rsp)
 	enrichSandboxListEndAts(ctx, rsp.Data)
 	enrichSandboxListRestart(ctx, rsp.Data)
@@ -349,6 +350,35 @@ func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefD
 	}
 	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
 		log.G(ctx).Warnf("ListSandbox: read sandbox specs for backend: %v", err)
+	}
+}
+
+// enrichSandboxListConfigs echoes the persisted lifecycle/network config from
+// the canonical create-request specs (one batch read); unreadable specs leave the fields empty.
+func enrichSandboxListConfigs(ctx context.Context, items []*types.SandboxBriefData) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	specs, err := sandboxspec.GetMany(ctx, ids)
+	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+		log.G(ctx).Warnf("ListSandbox: read sandbox specs for config echo: %v", err)
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		spec, ok := specs[item.SandboxID]
+		if !ok {
+			continue
+		}
+		item.AutoPause = &spec.AutoPause
+		item.AutoResume = &spec.AutoResume
+		if spec.CubeNetworkConfig != nil {
+			item.CubeNetworkConfig = spec.CubeNetworkConfig
+		}
 	}
 }
 

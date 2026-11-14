@@ -878,7 +878,7 @@ pub struct CubeTCPSocket {
 }
 
 /// Network egress control sent to CubeMaster.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CubeNetworkConfig {
     /// Allow internet (public) access. Maps to CubeMaster allowInternetAccess.
     #[serde(
@@ -901,27 +901,27 @@ pub struct CubeNetworkConfig {
     pub mask_request_host: Option<String>,
 
     /// Allowed outbound CIDRs whitelist.
-    #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,
 
     /// Denied outbound CIDRs blacklist.
-    #[serde(rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
     pub deny_out: Vec<String>,
 
     /// L7 egress rules, evaluated first-match-wins in list order.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<CubeEgressRule>,
 }
 
 /// L7 egress rule forwarded to CubeMaster (camelCase wire keys).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CubeEgressRule {
     pub name: String,
     pub r#match: CubeEgressRuleMatch,
     pub action: CubeEgressRuleAction,
 }
 
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CubeEgressRuleMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
@@ -937,7 +937,7 @@ pub struct CubeEgressRuleMatch {
     pub port: Option<i32>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CubeEgressRuleAction {
     pub allow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -946,7 +946,7 @@ pub struct CubeEgressRuleAction {
     pub inject: Option<Vec<CubeEgressRuleInject>>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CubeEgressRuleInject {
     pub header: String,
     pub secret: String,
@@ -1286,6 +1286,12 @@ pub struct SandboxInfo {
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub auto_pause: Option<bool>,
+    #[serde(default)]
+    pub auto_resume: Option<bool>,
+    #[serde(default)]
+    pub cube_network_config: Option<CubeNetworkConfig>,
 }
 
 // ─── Get single sandbox ────────────────────────────────────────────────────
@@ -1332,6 +1338,12 @@ pub struct GetSandboxDataItem {
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub auto_pause: Option<bool>,
+    #[serde(default)]
+    pub auto_resume: Option<bool>,
+    #[serde(default)]
+    pub cube_network_config: Option<CubeNetworkConfig>,
     #[serde(default)]
     pub host_ip: String,
     #[serde(default)]
@@ -1391,6 +1403,9 @@ pub struct SandboxDetail {
     pub volume_mounts: Vec<CubeVolumeMount>,
     pub restart_status: Option<CubeRestartStatus>,
     pub configured_qos: Option<CubeQosConfig>,
+    pub auto_pause: Option<bool>,
+    pub auto_resume: Option<bool>,
+    pub cube_network_config: Option<CubeNetworkConfig>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1629,6 +1644,9 @@ impl GetSandboxResponse {
             volume_mounts: item.volume_mounts,
             restart_status: item.restart_status,
             configured_qos: item.configured_qos,
+            auto_pause: item.auto_pause,
+            auto_resume: item.auto_resume,
+            cube_network_config: item.cube_network_config,
         })
     }
 }

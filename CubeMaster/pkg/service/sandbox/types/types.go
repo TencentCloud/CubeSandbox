@@ -607,6 +607,10 @@ type SandboxBriefData struct {
 	EndAt           int64              `json:"end_at,omitempty"`
 	VolumeMounts    []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus   *RestartStatus     `json:"restart_status,omitempty"`
+	// Echo of the persisted spec; pointers distinguish "spec not read" from explicit false.
+	AutoPause         *bool              `json:"auto_pause,omitempty"`
+	AutoResume        *bool              `json:"auto_resume,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
@@ -647,6 +651,10 @@ type SandboxData struct {
 	VolumeMounts        []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus       *RestartStatus     `json:"restart_status,omitempty"`
 	ConfiguredQos       *qos.Config        `json:"configured_qos,omitempty"`
+	// Echo of the persisted spec; pointers distinguish "spec not read" from explicit false.
+	AutoPause         *bool              `json:"auto_pause,omitempty"`
+	AutoResume        *bool              `json:"auto_resume,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is

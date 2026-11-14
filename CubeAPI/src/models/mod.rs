@@ -802,6 +802,29 @@ pub struct RestartStatus {
     pub next_restart_at: Option<DateTime<Utc>>,
 }
 
+/// 9999-12-31 sentinel for "never expires"; the E2B SDK requires endAt on every response.
+const NEVER_END_AT_TS: i64 = 253_402_300_799;
+
+fn never_timeout_end_at() -> DateTime<Utc> {
+    DateTime::from_timestamp(NEVER_END_AT_TS, 0).expect("9999-12-31T23:59:59Z is a valid timestamp")
+}
+
+fn serialize_end_at<S>(end_at: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_some(&end_at.unwrap_or_else(never_timeout_end_at))
+}
+
+/// Maps the sentinel back to `None`, so `end_at.is_none()` stays trustworthy.
+fn deserialize_end_at<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<DateTime<Utc>>::deserialize(deserializer)?;
+    Ok(value.filter(|v| v.timestamp() != NEVER_END_AT_TS))
+}
+
 /// One entry in GET /sandboxes (RunningSandbox in OpenAPI spec).
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ListedSandbox {
@@ -815,10 +838,26 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
-    /// (no deadline) rather than being misreported as equal to startedAt.
-    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    /// Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
+    #[serde(
+        rename = "endAt",
+        default,
+        serialize_with = "serialize_end_at",
+        deserialize_with = "deserialize_end_at"
+    )]
     pub end_at: Option<DateTime<Utc>>,
+    /// Persisted lifecycle config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<SandboxLifecycleConfig>,
+    /// Persisted internet-access flag; absent when the spec was not read.
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_internet_access: Option<bool>,
+    /// Persisted egress config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<SandboxNetworkConfig>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     /// Exact CPU allocation in millicores. Optional for compatibility with older responses.
@@ -853,10 +892,26 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
-    /// (no deadline) rather than being misreported as equal to startedAt.
-    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    /// Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
+    #[serde(
+        rename = "endAt",
+        default,
+        serialize_with = "serialize_end_at",
+        deserialize_with = "deserialize_end_at"
+    )]
     pub end_at: Option<DateTime<Utc>>,
+    /// Persisted lifecycle config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<SandboxLifecycleConfig>,
+    /// Persisted internet-access flag; absent when the spec was not read.
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_internet_access: Option<bool>,
+    /// Persisted egress config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<SandboxNetworkConfig>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -1246,11 +1301,141 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, NewSandbox, NewSandboxV2,
-        ResumedSandbox, SandboxNetworkConfig, SetTimeoutRequest, TemplateAliasLookupResponse,
+        ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, ListedSandbox, NewSandbox,
+        NewSandboxV2, ResumedSandbox, SandboxDetail, SandboxLifecycleConfig, SandboxNetworkConfig,
+        SandboxOnTimeout, SandboxState, SetTimeoutRequest, TemplateAliasLookupResponse,
         UpdateSandboxNetworkRequest,
     };
+    use chrono::{DateTime, Utc};
     use validator::Validate;
+
+    const SENTINEL: &str = "9999-12-31T23:59:59Z";
+
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    fn listed(end_at: Option<DateTime<Utc>>) -> ListedSandbox {
+        ListedSandbox {
+            template_id: "tpl-1".into(),
+            alias: None,
+            sandbox_id: "sb-1".into(),
+            client_id: "host-1".into(),
+            started_at: ts(1_700_000_000),
+            end_at,
+            cpu_count: 2,
+            cpu_milli: None,
+            memory_mb: 1024,
+            disk_size_mb: None,
+            metadata: None,
+            state: SandboxState::Running,
+            envd_version: "v1".into(),
+            volume_mounts: None,
+            restart_status: None,
+            lifecycle: None,
+            allow_internet_access: None,
+            network: None,
+        }
+    }
+
+    fn detail(end_at: Option<DateTime<Utc>>) -> SandboxDetail {
+        SandboxDetail {
+            template_id: "tpl-1".into(),
+            alias: None,
+            sandbox_id: "sb-1".into(),
+            client_id: "host-1".into(),
+            started_at: ts(1_700_000_000),
+            end_at,
+            envd_version: "v1".into(),
+            envd_access_token: None,
+            domain: None,
+            cpu_count: 2,
+            cpu_milli: None,
+            memory_mb: 1024,
+            disk_size_mb: None,
+            metadata: None,
+            state: SandboxState::Running,
+            volume_mounts: None,
+            restart_status: None,
+            configured_qos: None,
+            lifecycle: None,
+            allow_internet_access: None,
+            network: None,
+        }
+    }
+
+    #[test]
+    fn never_timeout_serializes_sentinel_end_at() {
+        for value in [
+            serde_json::to_value(listed(None)).unwrap(),
+            serde_json::to_value(detail(None)).unwrap(),
+        ] {
+            assert_eq!(value["endAt"], SENTINEL);
+        }
+    }
+
+    #[test]
+    fn real_end_at_is_preserved() {
+        let deadline = ts(1_800_000_000);
+        for value in [
+            serde_json::to_value(listed(Some(deadline))).unwrap(),
+            serde_json::to_value(detail(Some(deadline))).unwrap(),
+        ] {
+            assert_eq!(value["endAt"], "2027-01-15T08:00:00Z");
+        }
+    }
+
+    #[test]
+    fn missing_end_at_still_deserializes_as_none() {
+        let body = r#"{
+            "templateID": "tpl-1", "sandboxID": "sb-1", "clientID": "host-1",
+            "startedAt": "2023-11-14T22:13:20Z", "cpuCount": 2, "memoryMB": 1024,
+            "envdVersion": "v1", "state": "running"
+        }"#;
+        let parsed: ListedSandbox = serde_json::from_str(body).unwrap();
+        assert!(parsed.end_at.is_none());
+    }
+
+    #[test]
+    fn end_at_round_trips_through_the_sentinel() {
+        for value in [
+            serde_json::to_value(listed(None)).unwrap(),
+            serde_json::to_value(detail(None)).unwrap(),
+        ] {
+            assert_eq!(value["endAt"], SENTINEL);
+            let back: serde_json::Value = value;
+            let parsed: ListedSandbox = serde_json::from_value(back).unwrap();
+            assert!(
+                parsed.end_at.is_none(),
+                "sentinel must deserialize back to None"
+            );
+        }
+    }
+
+    #[test]
+    fn config_echo_uses_e2b_wire_key_names() {
+        let mut sandbox = listed(None);
+        sandbox.lifecycle = Some(SandboxLifecycleConfig {
+            on_timeout: SandboxOnTimeout::Pause,
+            auto_resume: true,
+        });
+        sandbox.allow_internet_access = Some(false);
+        sandbox.network = Some(SandboxNetworkConfig {
+            deny_out: Some(vec!["1.2.3.4/32".into()]),
+            ..Default::default()
+        });
+        let value = serde_json::to_value(sandbox).unwrap();
+
+        assert_eq!(
+            value["lifecycle"],
+            serde_json::json!({"onTimeout": "pause", "autoResume": true})
+        );
+        assert_eq!(value["allowInternetAccess"], false);
+        assert_eq!(
+            value["network"],
+            serde_json::json!({"denyOut": ["1.2.3.4/32"]})
+        );
+    }
 
     fn update_parts(body: &str) -> Result<(Option<bool>, Option<SandboxNetworkConfig>), String> {
         serde_json::from_str::<UpdateSandboxNetworkRequest>(body)
