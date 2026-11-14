@@ -44,6 +44,44 @@
 E2B 后端不会关闭 TLS 证书校验。自托管 HTTPS 环境必须配置
 `SSL_CERT_FILE` 或系统 trust store。
 
+## 动态 S3 Volume E2E
+
+`cases/volume/test_private_data.py` 增加两个 v2 S3 挂载用例：writer sandbox
+写入并 `sync` 后，由新 sandbox 挂载同一卷 ID 读回；删除卷 A 后，由新 sandbox
+挂载兄弟前缀卷 B，确认原有数据仍可读。create、GET 和 list 响应均不得返回
+`private_data`。另有四个 raw HTTP 输入检查，按当前 API 契约拒绝超过
+1024 UTF-8 字节的 ASCII/多字节输入、真实 NUL 和真实非 BMP 字符。
+
+本文件所有用例均要求 **CubeAPI、CubeMaster、Cubelet >= 0.8.0**，以及支持
+`private_data` 的插件。基本 Volume 用例要求平台和 Python SDK
+`cubesandbox` >= 0.6.0。这些 v2 用例通过测试 adapter 的 HTTP client 创建卷，不验证 SDK 的
+`create_with_private_data` 方法。
+
+挂载用例需要有效的 `CUBE_TEMPLATE_ID` 和 `SDK_E2E_VOLUME_CRED_REF`。后者是
+服务端凭证引用名，必须在 Controller 和可能运行这些 sandbox 的每台 Cubelet
+主机上配置。插件默认桶必须已存在，引用的凭证必须有权访问测试前缀。runner
+只使用正常的 CubeAPI 认证和这个引用名，不接收对象存储密钥或额外 MinIO 凭证。
+
+```bash
+export SDK_E2E_VOLUME_CRED_REF=e2e-test
+# 可选的相对测试根；未设置或空白时用 sdk-e2e/，每个用例追加 UUID/a/ 或 UUID/b/。
+export SDK_E2E_VOLUME_PREFIX=ws/sdk-e2e/
+pytest --run-e2e -q cases/volume/test_private_data.py --sdk-e2e-backends=cubesandbox
+
+# 旧版 Volume 回归不需要动态凭证引用。
+pytest --run-e2e -q cases/volume/test_crud.py cases/volume/test_bind_unbind.py \
+  cases/volume/test_read_only.py --sdk-e2e-backends=cubesandbox
+```
+
+引用未设置或仅空白时，只跳过两个动态挂载用例；四个 raw 输入检查仍然运行，
+仍要求上述 v2 平台。旧版 Volume 用例沿用原有门控。已配置但无效的引用、v2
+接口错误或挂载失败均使测试失败。driver 可使用部署中的插件别名，默认 `s3`。
+
+清理会先停止所有 sandbox，再删除卷，并报告清理错误。Create 传输失败的结果
+未知，诊断提供唯一卷名和前缀供检查，不会立即发送 DELETE 与创建请求竞争。
+这些挂载断言不证明宿主 FUSE 缓存为冷、跨节点放置、对象数量或其他 S3 服务的
+兼容性。收集成功或用例跳过属于离线检查，不代表在线 E2E 通过。
+
 ## 准备模板
 
 执行在线 E2E 前，需要准备支持 Code Interpreter 的模板，并暴露 envd
@@ -132,7 +170,8 @@ pytest --run-e2e -m "smoke or p0" --sdk-e2e-backends=cubesandbox
 # 每日双 SDK 兼容性回归
 SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e -m "p0 or p1"
 
-# Volume Plugin 回归（默认 S3 + MinIO；cubesandbox >= 0.6.0）
+# Volume Plugin 回归（默认 S3 + MinIO；cubesandbox >= 0.6.0）。
+# 包含 v2 检查：CubeAPI/CubeMaster/Cubelet >= 0.8.0，且插件支持 private_data。
 pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
 
 # 更广泛的回归
@@ -363,7 +402,11 @@ cp env.example .env
   `cases/mcp`；
 - `SDK_E2E_VOLUME_PLUGIN`：运行 Volume Plugin 用例（CRUD 与 sandbox
   `volumeMounts` 绑定/解绑），默认 `true`；设为 `false` 可跳过；
-- `SDK_E2E_VOLUME_DRIVER`：`POST /volumes` 使用的 driver，默认 `s3`；
+- `SDK_E2E_VOLUME_DRIVER`：旧版和 v2 创建卷时使用的 driver/插件名，默认 `s3`；
+- `SDK_E2E_VOLUME_CRED_REF`：两个动态 S3 挂载用例使用的服务端凭证引用；
+  未设置或仅空白时只跳过这两个用例；
+- `SDK_E2E_VOLUME_PREFIX`：动态测试前缀的可选相对根，每个用例追加独立 UUID；
+  未设置或仅空白时用 `sdk-e2e/`，受限凭证可使用允许的根，如 `ws/sdk-e2e/`；
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`：等待绑定中删除 `409` / 解绑后 `204`
   的秒数，默认 `60`；
 - `SDK_E2E_RESTART_POLICY_WAIT`：每次等待重启状态变化的秒数，默认 `300`。
@@ -494,7 +537,13 @@ tests/e2e/sdk_compat/
 - `cases/concurrency/`：同时运行多个 sandbox 时的数据隔离；
 - `cases/host-mount/`：宿主目录挂载扩展——happy path，以及创建时校验、
   运行期 bind-mount 失败和跨 sandbox 共享等边界用例。
-- `cases/volume/`：Volume Plugin CRUD、sandbox `volumeMounts` 绑定/解绑，以及每个沙箱挂载点的只读约束（仅 CubeSandbox；默认 driver `s3`）。随 `--run-e2e` 执行，除非设置 `SDK_E2E_VOLUME_PLUGIN=false`。依赖默认安装的 S3 插件 + MinIO，且要求 `cubesandbox` >= 0.6.0。
+- `cases/volume/`：Volume Plugin CRUD、sandbox `volumeMounts` 绑定/解绑、只读挂载，
+  以及 v2 同卷跨 sandbox 读回、兄弟前缀删除隔离和 raw private-data 输入拒绝
+  （仅 CubeSandbox；默认 driver `s3`）。随 `--run-e2e` 执行，除非设置
+  `SDK_E2E_VOLUME_PLUGIN=false`。基本用例依赖 S3 插件，要求平台与
+  `cubesandbox` >= 0.6.0；v2 用例另需 CubeAPI/CubeMaster/Cubelet >= 0.8.0
+  和支持 `private_data` 的插件，即使未设置 `SDK_E2E_VOLUME_CRED_REF` 也如此。
+  该引用只控制两个动态挂载用例是否执行。
 - `cases/auth/`：`CUBE_API_KEY` 简单密钥鉴权，针对 CubeAPI 控制面——
   `X-API-Key`/`Bearer` 通过、错误/缺失返回 401、`/health` 豁免（仅 CubeSandbox）。
   仅当服务端以 `CUBE_API_KEY` 启动且 runner 导出相同 key 时才运行，否则跳过。

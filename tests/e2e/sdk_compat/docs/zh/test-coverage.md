@@ -179,6 +179,31 @@ Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 Cube
 
 `cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，默认使用 S3 driver，随 `--run-e2e` 执行，除非设置 `SDK_E2E_VOLUME_PLUGIN=false`。
 
+`cases/volume/test_private_data.py` 要求 **CubeAPI、CubeMaster、Cubelet >= 0.8.0**
+及支持 `private_data` 的插件。创建卷使用测试 adapter 的 HTTP client，不验证
+SDK 的新增创建方法。它新增以下用例定义：
+
+| 用例 | 断言 | 额外前提 |
+| --- | --- | --- |
+| 同卷读回 | sandbox 1 写入并 `sync` 后退出，sandbox 2 挂载原卷 ID 精确读回；create/GET/list 不返回 `private_data`，且 list 确实包含目标卷 | 有效的 `SDK_E2E_VOLUME_CRED_REF` |
+| 兄弟 prefix 删除隔离 | 在 `a/`、`b/` 写入不同内容，停止 writer，要求 DELETE A=204、GET A=404，再由新 sandbox 挂载原 B 读回 | 有效的 `SDK_E2E_VOLUME_CRED_REF` |
+| raw v2 输入拒绝 | 超过 1024 UTF-8 字节的 ASCII/多字节输入、真实 NUL、真实非 BMP 返回 400，不回显完整输入且 GET 查不到预留记录 | 不要求凭证引用；沿用当前仅 BMP 的 API 契约 |
+
+`SDK_E2E_VOLUME_CRED_REF` 未设置或仅空白时，只跳过两个动态挂载用例。
+四个 raw 输入检查仍运行，仍要求上述 v2 平台。
+已设置但无效的引用、HTTP 错误或挂载失败均使测试失败。Controller 和实际运行
+sandbox 的 Cubelet 主机都需配置该引用，并能访问已存在的平台默认桶。
+`SDK_E2E_VOLUME_PREFIX` 是可选的相对测试根，未设置或仅空白时用 `sdk-e2e/`；
+每个用例追加独立 UUID 和兄弟后缀。runner 无需对象存储密钥、额外 MinIO 凭证
+或对象存储 SDK。
+原有 Volume capability 和插件禁用门控继续生效。
+
+`cases/framework/test_volume_api_adapter.py` 离线验证 legacy/v2 路由、opaque
+输入原样透传、无 fallback、raw 错误响应、凭证门控和局部清理行为。在线用例先
+停止所有 sandbox 再删除卷，报告清理错误；Create 传输失败的结果未知，诊断中
+标明需检查的唯一名称和 prefix。收集成功或 skip 不代表 live E2E 通过。新 sandbox
+不保证跨节点或宿主 FUSE 冷缓存，也不直接验证对象数量、完整清桶或其他 S3 服务。
+
 ## 3. 覆盖边界
 
 当前 suite 主要验证 Python SDK 的同步常用路径和 CubeSandbox/E2B 兼容表面：

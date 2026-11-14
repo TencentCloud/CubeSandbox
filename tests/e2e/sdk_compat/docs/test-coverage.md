@@ -228,6 +228,35 @@ resource contention test or multi-worker safety validation.
 
 `cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only, default to the S3 driver, and run with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`.
 
+`cases/volume/test_private_data.py` requires **CubeAPI, CubeMaster and
+Cubelet >= 0.8.0** and a plugin supporting `private_data`. Its creates use the test
+adapter's HTTP client, rather than the SDK's new create method. It defines
+these additional cases:
+
+| Case | Assertion | Additional prerequisite |
+| --- | --- | --- |
+| Same-volume readback | Write and `sync` in sandbox 1, kill it, then read the exact content from the original volume ID in sandbox 2; create/GET/list omit `private_data` and list contains that volume | Valid `SDK_E2E_VOLUME_CRED_REF` |
+| Sibling-prefix delete | Write different content to sibling `a/` and `b/`, kill the writer, require DELETE A=204 and GET A=404, then read original B from a new sandbox | Valid `SDK_E2E_VOLUME_CRED_REF` |
+| Raw v2 input rejection | ASCII and multibyte input over 1024 UTF-8 bytes, real NUL and real non-BMP input return 400, omit the submitted value and leave no GET-visible record | No credential reference required; current BMP-only API contract |
+
+Unset or blank `SDK_E2E_VOLUME_CRED_REF` skips only the two dynamic mount cases.
+The four raw input checks still run and require the v2 platform above.
+A configured bad reference, HTTP error or mount failure fails. The Controller
+and applicable Cubelet hosts must configure the reference and access the
+existing plugin default bucket. `SDK_E2E_VOLUME_PREFIX` is an optional relative
+root (unset or blank uses `sdk-e2e/`); each case appends its own UUID and sibling
+suffixes.
+Runner storage credentials, object storage SDKs and direct MinIO access are not
+required. The existing Volume capability and plugin-disable gates still apply.
+
+`cases/framework/test_volume_api_adapter.py` checks legacy/v2 routing, exact
+opaque input forwarding, no fallback, raw error responses, the credential gate
+and local cleanup behavior without a network. Live cleanup kills sandboxes
+before deleting volumes, reports cleanup errors and identifies unknown create
+results for inspection. Collection or skips do not establish live success.
+A new sandbox does not guarantee another node or a cold host FUSE cache; these
+cases do not assert object counts, full bucket cleanup or other S3 providers.
+
 ### 2.9 Host Mount
 
 `cases/host-mount/` covers raw host-directory mount validation, runtime bind
