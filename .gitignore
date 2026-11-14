@@ -73,6 +73,8 @@ __pycache__
 !/tests/e2e/memory_reclaim/
 !/tests/e2e/memory_reclaim/**
 /tests/e2e/memory_reclaim/__pycache__/
+!/tests/e2e/hostname/
+!/tests/e2e/hostname/**
 !/tests/e2e/scheduler/
 !/tests/e2e/scheduler/**
 /tests/e2e/scheduler/.pytest_cache/
