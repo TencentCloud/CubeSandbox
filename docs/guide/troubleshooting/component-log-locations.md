@@ -31,7 +31,7 @@ CubeSandbox logs fall into three categories, each with a different source and a 
 
 1. **Business/behavioral logs**: requests, scheduling, audit, VMM creation, etc. Each component writes these directly to files under `/data/log/<Module>/`. They **never** show up in `journalctl`.
 2. **Startup-time logs**: the stdout/stderr produced while a process is being brought up by systemd (or exiting on failure). These can only be viewed with `journalctl -u <unit>`.
-3. **Sandbox/template container logs**: the stdout/stderr of the sandbox's init process (container PID 1), written by CubeShim into Cubelet's private mount namespace. These require `cubecli logs` to read; template build logs, by contrast, land on the host filesystem and need no namespace entry.
+3. **Sandbox/template container logs**: the stdout/stderr of the sandbox's init process (container PID 1), written by CubeShim to the host filesystem. `cubecli logs` can read both sandbox and template logs, and falls back to the Cubelet mount namespace for legacy sandbox logs.
 
 The guest kernel's boot log is, at its core, just another form of "container init process output": CubeShim forwards everything the guest kernel prints over its `console=hvc0` console — including the `Linux version ...` boot banner — into the very same `cube-shim-req.log`. So **the guest kernel log is already inside the CubeShim log**; no extra tooling is needed.
 
@@ -53,7 +53,7 @@ Cubelet defaults to a fairly quiet `warn` log level, so normal operation won't p
 | CubeShim | Stats log | `/data/log/CubeShim/cube-shim-stat.log` | `tail -F` |
 | Hypervisor (VMM) | VMM creation log | `/data/log/CubeVmm/vmm.log` | `tail -F` |
 | cube-proxy | Access/error logs | `/data/log/cube-proxy/{access,error}.log` | `tail -F` (see below) |
-| Sandbox container | init process stdout/stderr | `/data/cubelet/state/io.containerd.runtime.v2.task/default/<sandbox-id>/{stdout,stderr}` (inside Cubelet's mount namespace) | `cubecli logs <sandbox-id>` (see below) |
+| Sandbox container | init process stdout/stderr | `/data/cubelet/log/<sandbox-id>/{stdout,stderr}` (host filesystem) | `cubecli logs <sandbox-id>` (see below) |
 | Template build | Build container stdout/stderr | `/data/log/template/<template-id>_0/{stdout,stderr}` (host filesystem) | `cubecli logs --tpl <template-id>` |
 
 ::: tip Business logs are not in journalctl
@@ -62,7 +62,7 @@ As also documented in `docs/guide/service-management.md`: all business/request l
 
 ### 2. Reading sandbox / template logs with `cubecli logs`
 
-`cubecli` is built alongside Cubelet and installed automatically by the one-click installer. Sandbox log files live inside Cubelet's private mount namespace, so `cubecli logs` **must be run directly on the compute node** — it cannot be invoked remotely via any API.
+`cubecli` is built alongside Cubelet and installed automatically by the one-click installer. `cubecli logs` **must be run directly on the compute node** — it cannot be invoked remotely via any API.
 
 ```bash
 # Sandbox stdout, last 100 lines (default)
@@ -95,7 +95,7 @@ Flags:
 
 `cubecli logs` only covers the output of the **container init process (PID 1)**. Sub-tasks started inside a sandbox via the E2B `exec` interface produce their own stdout/stderr, which must be captured with the E2B SDK's `on_stdout`/`on_stderr` callbacks — that's out of scope here; see [Sandbox Logs](../sandbox-logs.md).
 
-Log files are removed together with the sandbox once it's deleted, and log forwarding requires CubeShim v0.4.0 or newer.
+Log files are removed together with the sandbox by default; see [Sandbox Logs](../sandbox-logs.md) for opt-in node-local retention. Log forwarding requires CubeShim v0.4.0 or newer.
 
 ### 3. Guest kernel log: right there in the CubeShim log
 

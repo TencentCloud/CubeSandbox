@@ -2,11 +2,57 @@ package sandbox
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
+
+func TestSandboxDiagnosticsMarkerStates(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "marker")
+	if sandboxDiagnosticsEnabledAt(p) {
+		t.Fatal("missing marker must be disabled")
+	}
+	if err := os.WriteFile(p, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !sandboxDiagnosticsEnabledAt(p) {
+		t.Fatal("file marker must be enabled")
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if !sandboxDiagnosticsEnabledAt(p) {
+		t.Fatal("invalid marker must fail closed")
+	}
+}
+
+func TestSafePrintCreateRedactsCreateTimeEnvValues(t *testing.T) {
+	const secret = "example-sensitive-value"
+	req := &types.CreateCubeSandboxReq{
+		CreateTimeEnvVars: map[string]string{"TOKEN": secret},
+		Annotations:       map[string]string{constants.CubeAnnotationCreateTimeEnvVars: secret},
+		Containers:        []*types.Container{{Envs: []*types.KeyValue{{Key: "TOKEN", Value: secret}}}},
+	}
+	if strings.Contains(safePrintCreateCubeSandboxReqWithDiagnostics(req, true), secret) {
+		t.Fatal("create-time environment value appeared in request log")
+	}
+	if !strings.Contains(safePrintCreateCubeSandboxReqWithDiagnostics(req, false), secret) {
+		t.Fatal("disabled diagnostics must preserve existing request logging behavior")
+	}
+	if req.CreateTimeEnvVars["TOKEN"] != secret {
+		t.Fatal("logging must not change the original request")
+	}
+	if req.Containers[0].Envs[0].Value != secret || req.Annotations[constants.CubeAnnotationCreateTimeEnvVars] != secret {
+		t.Fatal("logging must not change container envs or annotations")
+	}
+}
 
 func TestSetCreateTimeEnvVarsAnnotation(t *testing.T) {
 	out := map[string]string{}
