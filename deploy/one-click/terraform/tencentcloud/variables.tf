@@ -350,6 +350,50 @@ variable "templatecenter_replicas" {
     error_message = "templatecenter_replicas must be an integer >= 1."
   }
 }
+
+variable "templatecenter_trusted_ca_certs" {
+  description = "Inline PEM certificates (CERTIFICATE blocks only) trusting private-CA image registries for the cube-templatecenter pod. Each entry may hold one or several certificates (a chain); entries are rendered as keys of a terraform-managed ConfigMap mounted at /etc/cube/trusted-ca and exposed through SSL_CERT_DIR, which Go reads IN ADDITION to the system bundle -- publicly-trusted registries keep working. Set via tfvars / -var / TF_VAR_ only (never persisted to .env or the resolved mirror: terraform's own state and plan manage the ConfigMap's lifecycle). A pasted private key is rejected at plan time. Empty list (default) disables the feature; mutually exclusive with templatecenter_trusted_ca_existing_config_map."
+  type        = list(string)
+  default     = []
+
+  # Content guard, same rule as the chart's render-time check: every PEM
+  # block must be a CERTIFICATE. Checked in a validation block (a
+  # validation may reference its own variable since 1.2; the cross-variable
+  # mutual-exclusion check therefore stays a resource precondition) so the
+  # FIRST plan fails -- including create.sh's early phases that run with
+  # deploy_tke_addons=false, where a resource precondition is skipped. The
+  # check runs on the whitespace-trimmed text (the exact bytes written to
+  # the ConfigMap): Go's PEM decoder only recognizes markers at column 0,
+  # and trimspace strips every Unicode space, so a key indented with e.g.
+  # a non-breaking space must not slip past a check made on raw input.
+  validation {
+    condition = alltrue([
+      for norm in [for pem in var.templatecenter_trusted_ca_certs :
+        join("\n", [for line in split("\n", pem) : trimspace(line)])
+      ] :
+      length(regexall("(?mi)^-----BEGIN [A-Z ]+-----", norm)) > 0 &&
+      length(regexall("(?mi)^-----BEGIN [A-Z ]+-----", norm)) ==
+      length(regexall("(?mi)^-----BEGIN CERTIFICATE-----", norm))
+    ])
+    error_message = "templatecenter_trusted_ca_certs must contain CERTIFICATE blocks only; a pasted private key must not reach the registry-facing pod."
+  }
+}
+
+variable "templatecenter_trusted_ca_existing_config_map" {
+  description = "Name of an operator-managed ConfigMap (in the cubesandbox namespace) whose keys hold PEM content, mounted instead of the terraform-managed one. The namespace itself is created by the same addons apply, so on a first deployment this variable is only usable on a rerun: create the ConfigMap after the namespace exists, then run create.sh again. If the ConfigMap is missing, the Deployment's volume never mounts and the apply blocks waiting for the rollout until it fails at the provider timeout. Changes to its content take effect only after the pods restart (kubectl -n cubesandbox rollout restart deploy/cube-templatecenter). The name cube-templatecenter-trusted-ca is reserved for the inline path and rejected by plan. Mutually exclusive with templatecenter_trusted_ca_certs."
+  type        = string
+  default     = ""
+
+  # The reconcile table in create.sh deletes cluster objects whose
+  # Terraform address is absent from state, and this resource is count=0
+  # on this path -- so an operator ConfigMap named exactly like the
+  # managed one would be deleted as drift on every rerun. Rejecting the
+  # reserved name here makes that collision impossible.
+  validation {
+    condition     = var.templatecenter_trusted_ca_existing_config_map != "cube-templatecenter-trusted-ca"
+    error_message = "'cube-templatecenter-trusted-ca' is reserved for the terraform-managed ConfigMap on the inline path; choose a different name for your own ConfigMap."
+  }
+}
 # Per-component replica counts. All four default to 1 in env.example / variables.tf
 # and are independently tunable via -var / TF_VAR_* / the TENCENTCLOUD_*_REPLICAS
 # env knobs wired by create.sh.
