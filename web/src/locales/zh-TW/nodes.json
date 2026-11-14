@@ -1,0 +1,8 @@
+{
+  "title": "節點",
+  "subtitle": "叢集中各主機的容量、飽和度與狀態。",
+  "noNodes": "暫無已註冊節點。",
+  "cpu": "CPU",
+  "memory": "記憶體",
+  "isolated": "已隔離"
+}

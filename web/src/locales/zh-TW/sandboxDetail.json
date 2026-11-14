@@ -1,0 +1,56 @@
+{
+  "started": "啟動於 {{time}}",
+  "resources": "資源",
+  "runtime": "執行時",
+  "runtimeDesc": "服務端上報的生命週期欄位。",
+  "metadata": "元資料",
+  "noMetadata": "暫無元資料。",
+  "logs": "事件",
+  "logsDesc": "最新事件條目，10s 自動重新整理。",
+  "logsLoading": "載入中…",
+  "logsEmpty": "暫無日誌。",
+  "logsEntries": "條",
+  "logsRefresh": "立即重新整理",
+  "logsUnavailable": "沙箱已結束，日誌停止重新整理。",
+  "logsError": "日誌載入失敗，請稍後重試。",
+  "refreshFailed": "狀態重新整理失敗，當前顯示的是上次成功獲取的資料。",
+  "backToList": "返回沙箱列表",
+  "unavailable": {
+    "title": "沙箱已結束",
+    "badge": "已結束",
+    "description": "該沙箱可能已因超時自動銷燬，或已被其他操作刪除。"
+  },
+  "notFound": {
+    "title": "找不到沙箱",
+    "description": "請確認沙箱 ID 是否正確，或該沙箱是否已經被刪除。"
+  },
+  "loadError": {
+    "title": "沙箱詳細資料載入失敗",
+    "description": "暫時無法獲取沙箱詳細資料，請檢查連線後重試。"
+  },
+  "fields": {
+    "vcpu": "vCPU",
+    "memory": "記憶體",
+    "client": "使用者端",
+    "alias": "別名",
+    "template": "範本",
+    "ends": "到期時間",
+    "domain": "域名",
+    "started": "啟動時間",
+    "state": "狀態",
+    "envd": "envd"
+  },
+  "actions": {
+    "resume": "恢復",
+    "pause": "暫停",
+    "kill": "終止"
+  },
+  "errors": {
+    "unknown": "未知錯誤",
+    "actionFailed": "操作失敗: {{message}}",
+    "conflict": "{{message}}",
+    "resumeCapacity": "節點資源不足, 無法恢復該沙箱, 請先釋放其他執行個體容量",
+    "resumeCapacityDetail": "節點記憶體不足, 無法恢復 (還需 {{need}}, 已用 {{used}}, 配額 {{quota}})",
+    "resumeCapacityDetailCpu": "節點 CPU 不足, 無法恢復 (還需 {{need}}, 已用 {{used}}, 配額 {{quota}})"
+  }
+}

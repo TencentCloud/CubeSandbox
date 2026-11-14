@@ -1,0 +1,12 @@
+{
+  "loading": "載入中…",
+  "noData": "—",
+  "viewAll": "檢視全部 →",
+  "manage": "管理 →",
+  "trendingStable": "趨勢平穩",
+  "live": "即時 · 5s 自動重新整理",
+  "comingSoon": "即將上線",
+  "comingSoonDesc": "此功能正在路線圖規劃中，請關注後續版本。",
+  "preview": "預覽",
+  "refreshed": "已重新整理"
+}

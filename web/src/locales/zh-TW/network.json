@@ -1,0 +1,22 @@
+{
+  "title": "網路",
+  "description": "API 閘道配置與節點限流總覽。",
+  "gateway": {
+    "title": "API 閘道",
+    "desc": "API 閘道接入配置。",
+    "domain": "沙箱域名"
+  },
+  "quota": {
+    "title": "節點限流 / Quota",
+    "desc": "各節點的併發建立限制與資源配額。",
+    "colNode": "節點",
+    "colStatus": "狀態",
+    "colConcurrent": "併發限制",
+    "colCpuQuota": "CPU Quota",
+    "colMemQuota": "記憶體 Quota",
+    "colMvmSlots": "MVM 槽位",
+    "ready": "就緒",
+    "degraded": "降級",
+    "empty": "暫無節點資料。"
+  }
+}
