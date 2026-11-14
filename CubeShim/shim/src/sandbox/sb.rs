@@ -649,8 +649,8 @@ impl SandBox {
         let dns = self.get_dns()?;
         let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
         let mut req = agent::CreateSandboxRequest {
-            //hostname: self.id.clone(),
-            hostname: self.id.chars().take(8).collect::<String>(),
+            // 12-char sandbox-ID prefix so the prompt matches cubecli ls.
+            hostname: hostname_from_sandbox_id(&self.id),
             dns: dns.into(),
             storages: storages.into(),
             sandbox_pidns: false,
@@ -2142,6 +2142,15 @@ fn recreate_dir(path: &str, context: &str) -> CResult<()> {
     Ok(())
 }
 
+/// Build the guest hostname from the sandbox ID.
+///
+/// Uses a 12-character prefix so the prompt matches `cubecli ls` truncated
+/// CONTAINER/CUBEBOX IDs. Collisions are fine: each sandbox has its own UTS
+/// namespace.
+fn hostname_from_sandbox_id(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
 fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
     let trimmed = entry.trim();
     if trimmed.is_empty() {
@@ -2195,6 +2204,7 @@ mod tests {
     use super::agent;
     use super::agent_ttrpc;
     use super::config;
+    use super::hostname_from_sandbox_id;
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
@@ -2488,6 +2498,17 @@ mod tests {
             sandbox.guest_container_id("real-task").await.unwrap(),
             "guest-container"
         );
+    }
+
+    #[test]
+    fn test_hostname_from_sandbox_id_uses_short_prefix() {
+        let sandbox_id = "711be366a1b2c3d4e5f60718293a4b5c";
+        assert_eq!(hostname_from_sandbox_id(sandbox_id), "711be366a1b2");
+
+        let template_id = "tpl-cd1c0123456789abcdef0123";
+        assert_eq!(hostname_from_sandbox_id(template_id), "tpl-cd1c0123");
+
+        assert_eq!(hostname_from_sandbox_id("abc"), "abc");
     }
 
     #[test]
