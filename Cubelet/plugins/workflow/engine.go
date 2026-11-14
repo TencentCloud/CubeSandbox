@@ -350,6 +350,11 @@ type DestroyContext struct {
 	// What is kept is decided only by Retain.
 	IsRestartDestroy bool
 
+	// KeepSandboxOnFailure keeps a failed destroy step from handing the
+	// sandbox to the cleanup flow, which reclaims the row and the disk the
+	// caller still needs for a later lifecycle operation.
+	KeepSandboxOnFailure bool
+
 	// VolumeRefEvents collects node-level plugin_volume ref-count transitions
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
 	// destroy response ext_info.
@@ -495,7 +500,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 					}
 				}
 
-				if flow_destroy == do && !restartDestroyKeepsResources(opts) {
+				if flow_destroy == do && !destroyMustSkipCleanup(opts) {
 					e.cleanUp(ctx, opts)
 				}
 
@@ -540,6 +545,17 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 func restartDestroyKeepsResources(opts ReqContext) bool {
 	d, ok := opts.(*DestroyContext)
 	return ok && RetainFor(d).Storage
+}
+
+// destroyMustSkipCleanup is true when a failed destroy step must not run the
+// cleanup flow: cleanup reclaims the disk and the cubebox row these destroys
+// deliberately keep.
+func destroyMustSkipCleanup(opts ReqContext) bool {
+	if restartDestroyKeepsResources(opts) {
+		return true
+	}
+	d, ok := opts.(*DestroyContext)
+	return ok && d != nil && d.KeepSandboxOnFailure
 }
 
 // restartDestroyContinueTimeout is a fresh window for destroy steps that did

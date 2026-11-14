@@ -193,6 +193,24 @@ func GetSandboxRootfsFor(ctx context.Context, backend, sandboxID, preferredVolum
 	return backendFileInfoToSnapshotObject(ctx, store, rootfs)
 }
 
+// SandboxHasPluginVolumes reports whether the sandbox's storage record still
+// lists plugin volumes: the only source of volume-ref events that must travel
+// in the pause response. Reads strictly, so a store error fails safe instead
+// of reading as "no plugin volumes".
+func SandboxHasPluginVolumes(ctx context.Context, sandboxID string) (bool, error) {
+	if localStorage == nil {
+		return false, fmt.Errorf("storage is not initialized")
+	}
+	info, err := localStorage.readBackendFileInfoStrict(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info != nil && len(info.PluginVolumeBackendInfos) > 0, nil
+}
+
 // GetImportedSandboxMemoryFor returns the sandbox-private memory disk Create
 // minted (cross-node import or same-node S3 pause-resume clone). Empty / missing
 // is not an error: XFS template start and XFS Resume never create one.

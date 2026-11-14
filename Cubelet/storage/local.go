@@ -1804,7 +1804,20 @@ func (l *local) deleteBackendFileInfo(ctx context.Context, id string) error {
 	return err
 }
 
+// readBackendFileInfoRawStrict is readBackendFileInfoRaw without the
+// not-found collapse: store errors stay visible.
+func (l *local) readBackendFileInfoRawStrict(ctx context.Context, id string) (*StorageInfo, error) {
+	return l.readBackendFileInfoRawWith(ctx, id, true)
+}
+
 func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*StorageInfo, error) {
+	return l.readBackendFileInfoRawWith(ctx, id, false)
+}
+
+// readBackendFileInfoRawWith reads the record with the failover fallback.
+// surfaceStoreErr decides whether a store read error surfaces or collapses
+// to ErrorKeyNotFound, the "no record" contract Destroy relies on.
+func (l *local) readBackendFileInfoRawWith(ctx context.Context, id string, surfaceStoreErr bool) (*StorageInfo, error) {
 	b, err := l.db.Get(bucketName, id)
 	if err != nil {
 		if errors.Is(err, utils.ErrorKeyNotFound) || errors.Is(err, utils.ErrorBucketNotFound) {
@@ -1821,6 +1834,8 @@ func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*Storage
 			} else {
 				return nil, utils.ErrorKeyNotFound
 			}
+		} else if surfaceStoreErr {
+			return nil, err
 		} else {
 			return nil, utils.ErrorKeyNotFound
 		}
@@ -1835,6 +1850,18 @@ func (l *local) readBackendFileInfoRaw(ctx context.Context, id string) (*Storage
 
 func (l *local) readBackendFileInfo(ctx context.Context, id string) (*StorageInfo, error) {
 	bf, err := l.readBackendFileInfoRaw(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.refreshCowPaths(bf); err != nil {
+		return nil, err
+	}
+	return bf, nil
+}
+
+// readBackendFileInfoStrict is readBackendFileInfo with the store error intact.
+func (l *local) readBackendFileInfoStrict(ctx context.Context, id string) (*StorageInfo, error) {
+	bf, err := l.readBackendFileInfoRawStrict(ctx, id)
 	if err != nil {
 		return nil, err
 	}
