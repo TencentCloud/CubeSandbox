@@ -148,6 +148,8 @@ struct cache_read {
 	uint32_t                 bytes;
 	bool                     object_read;
 	bool                     alias_read;
+	/* spdk_get_ticks() when the device read was submitted. */
+	uint64_t                 start_ticks;
 };
 
 struct s3_cache {
@@ -195,6 +197,11 @@ struct s3_cache {
 	 * zero before the first. Atomic: readers run on any thread. */
 	uint64_t                 foreground_ticks;
 	uint64_t                 foreground_quiet_ticks;
+	/* Object reads go to S3 until this tick; zero when the device is fast.
+	 * Atomic: read on any thread, written by read completions. */
+	uint64_t                 object_slow_until;
+	/* Last time a probe read was let through while slow. */
+	uint64_t                 object_probe_at;
 	struct cache_alias     **alias_hash;
 	uint32_t                 alias_hash_buckets;
 	uint64_t                 alias_count;
@@ -942,6 +949,11 @@ cache_read_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 
 	spdk_bdev_free_io(bdev_io);
 	s3_cache_foreground_touch(cache);
+	if (success && rd->object_read) {
+		s3_cache_object_note_read_us(cache,
+					     (spdk_get_ticks() - rd->start_ticks) *
+					     1000000 / spdk_get_ticks_hz());
+	}
 
 	pthread_mutex_lock(&cache->lock);
 	if (success && rd->zero_len) {
@@ -1205,6 +1217,7 @@ s3_cache_read_on_channel(struct s3_cache *cache, struct spdk_io_channel *channel
 	/* A device read is foreground work whoever asked for it; preheat
 	 * fills stand aside while these are arriving. */
 	s3_cache_foreground_touch(cache);
+	rd->start_ticks = spdk_get_ticks();
 	rc = spdk_bdev_read(cache->desc, channel, buf,
 			    device_offset,
 			    read_len, cache_read_done, rd);
@@ -1344,6 +1357,7 @@ s3_cache_object_read_on_channel(struct s3_cache *cache,
 	/* A device read is foreground work whoever asked for it; preheat
 	 * fills stand aside while these are arriving. */
 	s3_cache_foreground_touch(cache);
+	rd->start_ticks = spdk_get_ticks();
 	rc = spdk_bdev_read(cache->desc, channel, buf, device_offset, read_len,
 			    cache_read_done, rd);
 	if (rc != 0) {
@@ -2365,6 +2379,54 @@ s3_cache_foreground_active(const struct s3_cache *cache)
 	}
 	return now - last < __atomic_load_n(&cache->foreground_quiet_ticks,
 					    __ATOMIC_RELAXED);
+}
+
+void
+s3_cache_object_note_read_us(struct s3_cache *cache, uint64_t us)
+{
+	uint64_t until = 0;
+
+	if (!cache) {
+		return;
+	}
+	if (us >= S3_CACHE_OBJECT_SLOW_READ_US) {
+		until = spdk_get_ticks() +
+			(uint64_t)S3_CACHE_OBJECT_SLOW_HOLD_US * spdk_get_ticks_hz() /
+			1000000;
+	}
+	__atomic_store_n(&cache->object_slow_until, until, __ATOMIC_RELAXED);
+}
+
+bool
+s3_cache_object_reads_slow(const struct s3_cache *cache)
+{
+	uint64_t until;
+
+	if (!cache) {
+		return false;
+	}
+	until = __atomic_load_n(&cache->object_slow_until, __ATOMIC_RELAXED);
+	return until != 0 && spdk_get_ticks() < until;
+}
+
+bool
+s3_cache_object_probe_due(struct s3_cache *cache)
+{
+	uint64_t now, last, gap;
+
+	if (!s3_cache_object_reads_slow(cache)) {
+		return false;
+	}
+	now = spdk_get_ticks();
+	gap = (uint64_t)S3_CACHE_OBJECT_PROBE_US * spdk_get_ticks_hz() / 1000000;
+	last = __atomic_load_n(&cache->object_probe_at, __ATOMIC_RELAXED);
+	if (last != 0 && now - last < gap) {
+		return false;
+	}
+	/* One caller wins the slot; the others keep going to S3. */
+	return __atomic_compare_exchange_n(&cache->object_probe_at, &last, now,
+					   false, __ATOMIC_RELAXED,
+					   __ATOMIC_RELAXED);
 }
 
 void

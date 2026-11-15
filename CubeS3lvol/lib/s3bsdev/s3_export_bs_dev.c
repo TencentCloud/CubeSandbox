@@ -33,6 +33,7 @@
 
 #include "spdk/stdinc.h"
 #include "spdk/blob.h"
+#include "spdk/env.h"
 #include "spdk/log.h"
 #include "spdk/string.h"
 #include "spdk/thread.h"
@@ -185,6 +186,7 @@ struct s3_export_dev {
 	uint64_t                   shared_cache_hits;
 	uint64_t                   shared_cache_misses;
 	uint64_t                   shared_cache_fallbacks;
+	uint64_t                   shared_cache_bypasses;
 
 	/* One walk of this device's manifest into the lvstore object cache.
 	 * Started at most once. In-flight GETs count toward preheat_inflight
@@ -1832,6 +1834,35 @@ export_cache_read_done(void *cb_arg, int status)
  * refetch, so a 404 against the manifest just fetched is reported rather than
  * sent round again. */
 static void
+export_cache_probe_done(void *cb_arg, int status)
+{
+	(void)status;
+	spdk_dma_free(cb_arg);
+}
+
+/* While the cache device is slow, re-measure it now and then with a read no
+ * caller waits on. Its completion updates the cache's verdict. */
+static void
+export_cache_probe(struct s3_export_dev *dev, struct spdk_io_channel *cache_ch,
+		   const struct s3_cache_object_id *id, uint32_t object_len)
+{
+	void *buf;
+
+	if (!s3_cache_object_probe_due(dev->shared_cache)) {
+		return;
+	}
+	buf = spdk_dma_zmalloc(S3LVOL_BLOCK_SIZE, S3LVOL_BLOCK_SIZE, NULL);
+	if (!buf) {
+		return;
+	}
+	if (s3_cache_object_read_on_channel(dev->shared_cache, cache_ch, id,
+					    object_len, 0, S3LVOL_BLOCK_SIZE, buf,
+					    export_cache_probe_done, buf) != 0) {
+		spdk_dma_free(buf);
+	}
+}
+
+static void
 export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel,
 		     void *payload, uint64_t lba, uint32_t lba_count,
 		     struct spdk_bs_dev_cb_args *cb_args, bool is_retry)
@@ -1991,6 +2022,17 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 				cache_io->dst = buf;
 				snprintf(cache_io->key, sizeof(cache_io->key), "%s",
 					 key);
+				/* A busy cache device is slower than S3 for the
+				 * same immutable bytes; see
+				 * S3_CACHE_OBJECT_SLOW_READ_US. */
+				if (s3_cache_object_reads_slow(dev->shared_cache)) {
+					export_cache_probe(dev, export_ch->cache_ch, &id,
+							   object_len);
+					__atomic_fetch_add(&dev->shared_cache_bypasses, 1,
+							   __ATOMIC_RELAXED);
+					export_cache_submit_s3(cache_io);
+					goto next;
+				}
 				rc = s3_cache_object_read_on_channel(
 					dev->shared_cache, export_ch->cache_ch, &id,
 					object_len, offset_in_chunk, length, buf,
@@ -2323,12 +2365,13 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	       " exact fallback(s), %" PRIu64
 	       " shared-cache hit(s), %" PRIu64 " shared-cache miss(es), %" PRIu64
 	       " shared-cache fallback(s), %" PRIu64
+	       " slow-cache bypass(es), %" PRIu64
 	       " manifest refetch(es)\n",
 		       dev->m->uuid_str, dev->reads, dev->bytes_read, dev->zero_fills,
 		       dev->whole_gets, dev->coalesced_reads, dev->ready_hits,
 	       dev->exact_fallbacks, dev->shared_cache_hits,
 	       dev->shared_cache_misses, dev->shared_cache_fallbacks,
-	       dev->refetches);
+	       dev->shared_cache_bypasses, dev->refetches);
 
 	/* No wait for a refetch, deliberately.
 	 *

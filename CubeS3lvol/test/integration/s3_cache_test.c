@@ -826,6 +826,24 @@ main(int argc, char **argv)
 		check_true("dropping an uncached chunk is harmless", true, NULL);
 	}
 
+	printf("\n[9b] object reads go to S3 while the device is slow\n");
+	{
+		check_true("an idle cache is not slow",
+			   !s3_cache_object_reads_slow(cache), NULL);
+		check_true("and no probe is due while it is fast",
+			   !s3_cache_object_probe_due(cache), NULL);
+		s3_cache_object_note_read_us(cache, S3_CACHE_OBJECT_SLOW_READ_US);
+		check_true("one read at the threshold marks it slow",
+			   s3_cache_object_reads_slow(cache), NULL);
+		check_true("the first probe is due at once",
+			   s3_cache_object_probe_due(cache), NULL);
+		check_true("the next waits for the probe interval",
+			   !s3_cache_object_probe_due(cache), NULL);
+		s3_cache_object_note_read_us(cache, 1000);
+		check_true("a fast read clears it",
+			   !s3_cache_object_reads_slow(cache), NULL);
+	}
+
 	printf("\n[10] out-of-range and degenerate arguments\n");
 	{
 		check_true("lookup past num_chunks is false",

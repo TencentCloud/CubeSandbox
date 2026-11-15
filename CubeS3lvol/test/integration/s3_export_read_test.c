@@ -55,6 +55,9 @@ static char g_preheat_keys[PREHEAT_CACHED][S3_EXPORT_KEY_MAX];
 static uint32_t g_preheat_nkeys;
 static uint32_t g_object_free_slots = 1024;
 static bool g_foreground_active;
+static bool g_cache_slow;
+static uint32_t g_probe_due_left;
+static uint32_t g_cache_read_calls;
 static uint32_t g_foreground_touches;
 static uint32_t g_object_reservations;
 static uint32_t g_reserved_populate_failures;
@@ -192,6 +195,29 @@ s3_cache_object_populate(struct s3_cache *cache,
 	snprintf(g_cached_key, sizeof(g_cached_key), "%s", id->key);
 }
 
+bool
+s3_cache_object_reads_slow(const struct s3_cache *cache)
+{
+	return cache && g_cache_slow;
+}
+
+bool
+s3_cache_object_probe_due(struct s3_cache *cache)
+{
+	if (!cache || !g_cache_slow || g_probe_due_left == 0) {
+		return false;
+	}
+	g_probe_due_left--;
+	return true;
+}
+
+void
+s3_cache_object_note_read_us(struct s3_cache *cache, uint64_t us)
+{
+	(void)cache;
+	(void)us;
+}
+
 void
 s3_cache_foreground_touch(struct s3_cache *cache)
 {
@@ -315,6 +341,7 @@ s3_cache_object_read_on_channel(struct s3_cache *cache,
 
 	(void)cache;
 	(void)channel;
+	g_cache_read_calls++;
 	if (!g_cached_object || object_valid_bytes != g_cached_object_len ||
 	    strcmp(id->endpoint, g_cached_endpoint) != 0 ||
 	    strcmp(id->bucket, g_cached_bucket) != 0 ||
@@ -938,6 +965,55 @@ main(void)
 				   fallback_read.status == 0 &&
 				   buffer_has_pattern(&fallback_read, byte_offset,
 						      CHUNK_SIZE));
+
+			/* A busy cache device: the object is resident, but S3 is
+			 * the faster source for the same immutable bytes. */
+			{
+				struct read_result slow_read = {0};
+				struct read_result again_read = {0};
+				uint32_t calls = g_cache_read_calls;
+
+				g_cache_slow = true;
+				g_probe_due_left = 1;
+				first = g_ngets;
+				submit_read_on_channel(second_dev, second_ch, &slow_read,
+						       byte_offset, CHUNK_SIZE);
+				check_u64("a slow cache device sends the hit to S3",
+					  g_ngets, first + 1);
+				check_u64("and measures the device with one probe read",
+					  g_cache_read_calls, calls + 1);
+				complete_get(first, 0, CHUNK_SIZE);
+				check_true("the bypassed read returns the object's bytes",
+					   slow_read.done && slow_read.status == 0 &&
+					   buffer_has_pattern(&slow_read, byte_offset,
+							      CHUNK_SIZE));
+
+				calls = g_cache_read_calls;
+				first = g_ngets;
+				submit_read_on_channel(second_dev, second_ch, &again_read,
+						       byte_offset, CHUNK_SIZE);
+				check_u64("no second probe inside the probe interval",
+					  g_cache_read_calls, calls);
+				if (g_ngets > first) {
+					complete_get(first, 0, CHUNK_SIZE);
+				}
+				check_true("further slow-device reads still complete",
+					   again_read.done && again_read.status == 0);
+				g_cache_slow = false;
+				g_probe_due_left = 0;
+
+				calls = g_cache_read_calls;
+				first = g_ngets;
+				free(again_read.buf);
+				submit_read_on_channel(second_dev, second_ch, &again_read,
+						       byte_offset, CHUNK_SIZE);
+				check_true("a fast device serves the hit again",
+					   again_read.done && again_read.status == 0 &&
+					   g_ngets == first &&
+					   g_cache_read_calls == calls + 1);
+				free(slow_read.buf);
+				free(again_read.buf);
+			}
 			second_dev->destroy_channel(second_dev, second_ch);
 			second_dev->destroy(second_dev);
 			spdk_thread_poll(thread, 0, 0);
