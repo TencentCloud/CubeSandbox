@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -346,6 +347,41 @@ func (s *service) admitResume(
 	}
 
 	return nil
+}
+
+// admitPausedReplace applies the admitResume quota check to the Create-from-pause
+// path. Since the cubecow pause rework, Resume no longer goes through
+// Update(resume)/resumeLocked: CubeMaster sends a thin Create carrying
+// cube.master.desired_sandbox_id and Cubelet recreates the sandbox from the
+// pause package, replacing the local PAUSED tombstone. Without this gate a
+// same-node resume (XFS is always pinned to the origin; Master placement never
+// consults the scheduler for it) bypasses the node CPU/memory quota entirely
+// once paused_resource_release_ratio has released the paused sandbox's share —
+// the exact allocation an ordinary create would be rejected for.
+//
+// It returns a non-nil business error when the resume must be rejected, or nil
+// to proceed. There is nothing to check when the request is not a paused
+// replacement or this node holds no PAUSED record for it (cross-node restore:
+// Master's restoreplace.Select already ran the scheduler filters against the
+// target node).
+func (s *service) admitPausedReplace(
+	ctx context.Context,
+	req *cubebox.RunCubeSandboxRequest,
+) *errorcode.Ret {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil
+	}
+	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
+	if err != nil || sb == nil || sb.SandboxID != desired {
+		return nil
+	}
+	if st := sb.GetStatus(); st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+		// Live or in-flight-pause collisions are rejected downstream as
+		// already exists; only a PAUSED tombstone is a resume replacement.
+		return nil
+	}
+	return s.admitResume(ctx, sb)
 }
 
 // resumeDemand returns the incremental CPU/memory a resume re-adds to the node
