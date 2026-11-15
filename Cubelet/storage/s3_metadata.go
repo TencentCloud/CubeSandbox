@@ -838,9 +838,12 @@ func mountS3MetadataDeviceImpl(devicePath, mountPath string) error {
 		// which is exactly when the cause matters most. Keep the exec error
 		// (exit status or signal) and how long the mount ran against its
 		// budget, so a timeout and a refused mount read differently.
-		return fmt.Errorf("mount s3 metadata %s at %s failed after %s (timeout %s): %w: %s",
-			devicePath, mountPath, time.Since(start).Round(time.Millisecond), cmdTimeout,
-			err, strings.TrimSpace(stderr))
+		mountErr := fmt.Errorf("mount s3 metadata %s at %s failed after %s (timeout %s): %w",
+			devicePath, mountPath, time.Since(start).Round(time.Millisecond), cmdTimeout, err)
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			return fmt.Errorf("%w: %s", mountErr, msg)
+		}
+		return mountErr
 	}
 	return nil
 }

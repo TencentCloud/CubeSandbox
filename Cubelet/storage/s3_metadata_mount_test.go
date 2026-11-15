@@ -47,5 +47,7 @@ func TestMountS3MetadataDeviceExplainsAKilledMount(t *testing.T) {
 	err := mountS3MetadataDeviceImpl("/dev/nvme8n1", "/meta")
 	require.ErrorIs(t, err, sentinel)
 	require.Contains(t, err.Error(), "signal: killed")
-	require.Regexp(t, `failed after [0-9]+ms`, err.Error())
+	require.Regexp(t, `failed after [0-9.]+m?s \(timeout `, err.Error())
+	// A killed mount leaves stderr empty; nothing may dangle after the exec error.
+	require.NotRegexp(t, `:\s*$`, err.Error())
 }
