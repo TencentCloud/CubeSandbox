@@ -76,7 +76,7 @@ APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_export_read_test s3_preheat_test s3_copy_xml_test \
        s3_pending_persist_test s3_active_nsid_test s3_writeback_test \
        s3_dynamic_json_test s3_bstore_test s3_registry_persist_test \
-       s3_owner_test s3_nvmf_state_test
+       s3_owner_test s3_nvmf_state_test s3_overlay_retry_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -385,7 +385,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
        s3_checkpoint_test s3_export_swap_test s3_export_read_test s3_preheat_test \
        s3_copy_xml_test s3_pending_persist_test s3_active_nsid_test \
        s3_writeback_test s3_dynamic_json_test s3_bstore_test \
-       s3_registry_persist_test s3_owner_test s3_nvmf_state_test
+       s3_registry_persist_test s3_owner_test s3_nvmf_state_test s3_overlay_retry_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -408,6 +408,7 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_registry_persist_test
 	./s3_owner_test
 	./s3_nvmf_state_test
+	./s3_overlay_retry_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:
@@ -419,3 +420,12 @@ $(S3BSDEV_DIR)/libs3bsdev.a:
 
 clean:
 	rm -f $(APPS) *.o *.d
+
+# Release callbacks must not retry writes inside an overlay mutation.
+s3_overlay_retry_test: s3_overlay_retry_test.c $(S3BSDEV_DIR)/s3_bs_dev.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) s3_overlay_retry_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
+	    $(AWS_LIBS) \
+	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
+	    $(BLOB_DPDK_ARGS) \
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@

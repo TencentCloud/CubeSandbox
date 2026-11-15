@@ -54,6 +54,15 @@ problem ("it did not take the create path", "could not create ctl-a").
 
 ## integration/
 
+`s3_overlay_retry_test` covers a write-back release callback reclaiming the ring
+while a write to the same block is queued. It includes `s3_bs_dev.c` to exercise
+the real private release/reclaim/retry chain, rather than duplicating it in a
+mock. On the broken implementation, successful flush completion recursively
+releases the same operation and asserts `overlay_refs > 0`. The test requires
+the queued write to wait until the next retry turn and checks its data survives
+the old flush. Like the other offline tests, it uses `--no-huge`, needs no S3
+credentials, and runs via `make -C test/integration check`.
+
 ```sh
 make -C test/integration check
 ```
