@@ -2252,6 +2252,7 @@ mod tests {
     }
 
     struct ReconnectFixture {
+        id: String,
         dir: std::path::PathBuf,
         accept: tokio::task::JoinHandle<()>,
         peers: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -2278,8 +2279,11 @@ mod tests {
             let (reset_started_tx, reset_started) = tokio::sync::oneshot::channel();
             let (release_reset, release_reset_rx) = tokio::sync::oneshot::channel();
             let id = format!("retry-ut-{}", uuid::Uuid::new_v4());
-            let dir = std::path::Path::new(crate::common::utils::VM_PATH).join(&id);
+            // A directory the test user can write: the shim test lane does not
+            // run as root, and VM_PATH is root-owned.
+            let dir = std::env::temp_dir().join(&id);
             std::fs::create_dir_all(&dir).unwrap();
+            crate::common::utils::test_vm_dirs::set(&id, &dir);
             let backend = dir.join("agent.sock");
             let resets = Arc::new(AtomicUsize::new(0));
             let service: Arc<Box<dyn agent_ttrpc::AgentService + Send + Sync>> =
@@ -2331,9 +2335,10 @@ mod tests {
                 }
             });
             let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
-            let sb = SandBox::new(id, Log::default(), false, tx);
+            let sb = SandBox::new(id.clone(), Log::default(), false, tx);
             (
                 Self {
+                    id,
                     dir,
                     accept,
                     peers,
@@ -2360,6 +2365,7 @@ mod tests {
             for task in self.peers.lock().unwrap().drain(..) {
                 task.abort();
             }
+            crate::common::utils::test_vm_dirs::clear(&self.id);
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }

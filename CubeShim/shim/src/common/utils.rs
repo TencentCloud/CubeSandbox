@@ -41,6 +41,36 @@ pub const VMM_PID_FILE: &str = "vmm.pid";
 pub const ADDRESS_FILE: &str = "address";
 pub const VM_PATH: &str = "/run/vc/vm/";
 
+/// Test-only override of a sandbox's run directory, so tests that need its
+/// agent socket can work in a directory the test user can write instead of
+/// the root-owned `VM_PATH`. Keyed by sandbox id, so parallel tests do not
+/// interfere.
+#[cfg(test)]
+pub(crate) mod test_vm_dirs {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static DIRS: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
+
+    pub(crate) fn set(sandbox_id: &str, dir: &Path) {
+        DIRS.lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(sandbox_id.to_string(), dir.to_path_buf());
+    }
+
+    pub(crate) fn clear(sandbox_id: &str) {
+        if let Some(dirs) = DIRS.lock().unwrap().as_mut() {
+            dirs.remove(sandbox_id);
+        }
+    }
+
+    pub(crate) fn get(sandbox_id: &str) -> Option<PathBuf> {
+        DIRS.lock().unwrap().as_ref()?.get(sandbox_id).cloned()
+    }
+}
+
 pub const IMAGE_VERSION: &str = "/usr/local/services/cubetoolbox/cube-image/version";
 
 const SNAPSHOT_BASE_DIR: &str = "/usr/local/services/cubetoolbox/cube-snapshot";
@@ -466,6 +496,12 @@ impl Utils {
     }
 
     pub fn vsock_path(sandbox_id: &str) -> PathBuf {
+        #[cfg(test)]
+        {
+            if let Some(dir) = test_vm_dirs::get(sandbox_id) {
+                return dir.join("cube.sock");
+            }
+        }
         PathBuf::from(format!("{}/{}/cube.sock", VM_PATH, sandbox_id))
     }
 
