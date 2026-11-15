@@ -54,16 +54,12 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
-/// Bounded reconnects for the restore-thaw window: a freshly restored guest
-/// transiently refuses or resets the first connections until its runtime
-/// settles. Both steps are safe to repeat (fresh channel; idempotent RPCs).
+// 恢复握手分开限制单次等待与整体预算，避免第一次连接占满全部重试时间。
 const RECONNECT_ATTEMPTS: u32 = 5;
-const RECONNECT_BACKOFF_MS: u64 = 200;
-/// Overall deadline for the retry loop: bounds the sequence even when a
-/// single attempt parks (connect_agent has no internal timeout). With the
-/// 3 s RPC timeout, a hung agent gets ~3 attempts rather than all 5.
-/// Fast-failing attempts exhaust RECONNECT_ATTEMPTS in ~1 s; this deadline
-/// only binds when an attempt hangs.
+const RECONNECT_BACKOFF_MS: u64 = 100;
+const RECONNECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+// 包含连接、reset RPC（Remote Procedure Call，远程过程调用）和重试间隔；
+// 最后一次尝试只能使用剩余时间，不额外延长恢复预算。
 const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How often the snapshot recovery task re-checks the lease and retries a
@@ -325,13 +321,24 @@ impl SandBox {
         let mut stat =
             restore.then(|| self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string()));
         let mut last_err: Option<String> = None;
+        let mut attempt = 0;
         let retry = async {
             let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
-            let mut attempt = 0;
             loop {
                 attempt += 1;
                 let res: CResult<()> = async {
-                    self.connect_agent().await?;
+                    if restore {
+                        tokio::time::timeout(RECONNECT_CONNECT_TIMEOUT, self.connect_agent())
+                            .await
+                            .map_err(|_| {
+                                format!(
+                                    "agent connect handshake timed out after {}ms",
+                                    RECONNECT_CONNECT_TIMEOUT.as_millis()
+                                )
+                            })??;
+                    } else {
+                        self.connect_agent().await?;
+                    }
                     if restore {
                         self.reset_guest().await?;
                     }
@@ -358,7 +365,8 @@ impl SandBox {
         let res = match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
             Ok(res) => res,
             Err(_) => Err(format!(
-                "agent reconnect exceeded the deadline (last attempt: {})",
+                "agent reconnect exceeded the deadline after {} attempts (last failure: {})",
+                attempt,
                 last_err.unwrap_or_else(|| "still in flight".to_string())
             )),
         };
@@ -2203,6 +2211,259 @@ mod tests {
         ERR_FREEZE_UNSUPPORTED, ERR_ROOTFS_UNSUPPORTED, FREEZE_CALL_BACKSTOP, FREEZE_RPC_TIMEOUT,
     };
     use cube_hypervisor::SnapshotType;
+
+    // 通过真实 Unix socket 模拟 vsock 握手；后端使用真实 ttRPC 服务，覆盖连接和 reset。
+    struct ReconnectAgent {
+        resets: Arc<std::sync::atomic::AtomicUsize>,
+        reset_started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release_reset: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        hang_reset: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl agent_ttrpc::AgentService for ReconnectAgent {
+        async fn set_guest_date_time(
+            &self,
+            _: &ttrpc::r#async::TtrpcContext,
+            _: agent::SetGuestDateTimeRequest,
+        ) -> ttrpc::Result<protoc::empty::Empty> {
+            self.resets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(started) = self.reset_started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            if self.hang_reset {
+                let release = self.release_reset.lock().await.take();
+                if let Some(release) = release {
+                    let _ = release.await;
+                }
+            }
+            Ok(Default::default())
+        }
+        async fn reseed_random_dev(
+            &self,
+            _: &ttrpc::r#async::TtrpcContext,
+            _: agent::ReseedRandomDevRequest,
+        ) -> ttrpc::Result<protoc::empty::Empty> {
+            self.resets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Default::default())
+        }
+    }
+
+    struct ReconnectFixture {
+        dir: std::path::PathBuf,
+        accept: tokio::task::JoinHandle<()>,
+        peers: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+        server: ttrpc::r#async::Server,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        closed: Arc<std::sync::atomic::AtomicUsize>,
+        resets: Arc<std::sync::atomic::AtomicUsize>,
+        reset_started: Option<tokio::sync::oneshot::Receiver<()>>,
+        release_reset: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ReconnectFixture {
+        async fn new(hangs: usize, reject: bool) -> (Self, SandBox) {
+            Self::new_with_reset_hang(hangs, reject, false).await
+        }
+
+        async fn new_with_reset_hang(
+            hangs: usize,
+            reject: bool,
+            hang_reset: bool,
+        ) -> (Self, SandBox) {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (reset_started_tx, reset_started) = tokio::sync::oneshot::channel();
+            let (release_reset, release_reset_rx) = tokio::sync::oneshot::channel();
+            let id = format!("retry-ut-{}", uuid::Uuid::new_v4());
+            let dir = std::path::Path::new(crate::common::utils::VM_PATH).join(&id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let backend = dir.join("agent.sock");
+            let resets = Arc::new(AtomicUsize::new(0));
+            let service: Arc<Box<dyn agent_ttrpc::AgentService + Send + Sync>> =
+                Arc::new(Box::new(ReconnectAgent {
+                    resets: resets.clone(),
+                    reset_started: std::sync::Mutex::new(Some(reset_started_tx)),
+                    release_reset: tokio::sync::Mutex::new(Some(release_reset_rx)),
+                    hang_reset,
+                }));
+            let mut server = ttrpc::r#async::Server::new()
+                .set_domain_unix()
+                .add_listener(
+                    std::os::unix::net::UnixListener::bind(&backend)
+                        .unwrap()
+                        .into_raw_fd(),
+                )
+                .unwrap()
+                .register_service(agent_ttrpc::create_agent_service(service));
+            server.start().await.unwrap();
+            let listener = tokio::net::UnixListener::bind(dir.join("cube.sock")).unwrap();
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let closed = Arc::new(AtomicUsize::new(0));
+            let peers = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (counts, eof, tasks) = (attempts.clone(), closed.clone(), peers.clone());
+            let accept = tokio::spawn(async move {
+                loop {
+                    let (mut peer, _) = listener.accept().await.unwrap();
+                    let n = counts.fetch_add(1, Ordering::SeqCst);
+                    let backend = backend.clone();
+                    let eof = eof.clone();
+                    let task = tokio::spawn(async move {
+                        let mut request = [0; 13];
+                        peer.read_exact(&mut request).await.unwrap();
+                        assert_eq!(&request, b"CONNECT 1024\n");
+                        if n < hangs {
+                            let mut b = [0];
+                            if peer.read(&mut b).await.unwrap() == 0 {
+                                eof.fetch_add(1, Ordering::SeqCst);
+                            }
+                        } else if reject {
+                            peer.write_all(b"ERROR\n").await.unwrap();
+                        } else {
+                            let mut agent = tokio::net::UnixStream::connect(backend).await.unwrap();
+                            peer.write_all(b"OK 1024\n").await.unwrap();
+                            let _ = tokio::io::copy_bidirectional(&mut peer, &mut agent).await;
+                        }
+                    });
+                    tasks.lock().unwrap().push(task);
+                }
+            });
+            let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+            let sb = SandBox::new(id, Log::default(), false, tx);
+            (
+                Self {
+                    dir,
+                    accept,
+                    peers,
+                    server,
+                    attempts,
+                    closed,
+                    resets,
+                    reset_started: Some(reset_started),
+                    release_reset: Some(release_reset),
+                },
+                sb,
+            )
+        }
+        fn attempts(&self) -> usize {
+            self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        async fn stop(&mut self) {
+            self.server.shutdown().await.unwrap();
+        }
+    }
+    impl Drop for ReconnectFixture {
+        fn drop(&mut self) {
+            self.accept.abort();
+            for task in self.peers.lock().unwrap().drain(..) {
+                task.abort();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_retries_after_a_stalled_handshake() {
+        let (mut f, mut sb) = ReconnectFixture::new(1, false).await;
+        let start = std::time::Instant::now();
+        let result = sb.connect_agent_with_retry(true).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        assert_eq!(f.attempts(), 2);
+        assert_eq!(f.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(f.resets.load(std::sync::atomic::Ordering::SeqCst), 2);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_keeps_waiting_for_a_late_ready_guest() {
+        let (mut f, mut sb) = ReconnectFixture::new(3, false).await;
+        let start = std::time::Instant::now();
+        let result = sb.connect_agent_with_retry(true).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(start.elapsed() >= std::time::Duration::from_secs(6));
+        assert!(start.elapsed() < std::time::Duration::from_secs(9));
+        assert_eq!(f.attempts(), 4);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_caps_all_stalled_connections_at_ten_seconds() {
+        let (mut f, mut sb) = ReconnectFixture::new(usize::MAX, false).await;
+        let start = std::time::Instant::now();
+        let result = sb.connect_agent_with_retry(true).await;
+        let elapsed = start.elapsed();
+        assert!(result
+            .unwrap_err()
+            .contains("agent reconnect exceeded the deadline"));
+        assert!(elapsed >= std::time::Duration::from_secs(9));
+        assert!(elapsed < std::time::Duration::from_secs(11));
+        assert_eq!(f.attempts(), 5);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_caps_fast_failures_at_five_attempts() {
+        let (mut f, mut sb) = ReconnectFixture::new(0, true).await;
+        let result = sb.connect_agent_with_retry(true).await;
+        assert!(result.unwrap_err().contains("Connect failed rsp"));
+        assert_eq!(f.attempts(), 5);
+        assert_eq!(f.resets.load(std::sync::atomic::Ordering::SeqCst), 0);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_ready_guest_stops_after_one_attempt() {
+        let (mut f, mut sb) = ReconnectFixture::new(0, false).await;
+        assert!(sb.connect_agent_with_retry(true).await.is_ok());
+        assert_eq!(f.attempts(), 1);
+        assert_eq!(f.resets.load(std::sync::atomic::Ordering::SeqCst), 2);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_cold_boot_does_not_retry_after_fast_rejection() {
+        let (mut f, mut sb) = ReconnectFixture::new(0, true).await;
+        let result = sb.connect_agent_with_retry(false).await;
+        assert!(result.unwrap_err().contains("Connect failed rsp"));
+        assert_eq!(f.attempts(), 1);
+        assert_eq!(f.resets.load(std::sync::atomic::Ordering::SeqCst), 0);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_budget_deadline_includes_a_hung_reset_rpc() {
+        let (mut f, mut sb) = ReconnectFixture::new_with_reset_hang(0, false, true).await;
+        // 将 RPC 自身超时设得更长，确认真正生效的是整体重连预算。
+        sb.ctx.timeout_nano = 20_000_000_000;
+        let reset_started = f.reset_started.take().unwrap();
+        let start = std::time::Instant::now();
+        let retry = tokio::spawn(async move { sb.connect_agent_with_retry(true).await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), reset_started)
+            .await
+            .expect("reset RPC did not start")
+            .expect("reset-start notification was dropped");
+
+        let result = retry.await.unwrap();
+        let elapsed = start.elapsed();
+        assert!(result
+            .unwrap_err()
+            .contains("agent reconnect exceeded the deadline"));
+        assert!(elapsed >= std::time::Duration::from_secs(9));
+        assert!(elapsed < std::time::Duration::from_secs(11));
+        assert_eq!(
+            f.attempts(),
+            1,
+            "a hung reset must not open another connection"
+        );
+        assert_eq!(f.resets.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let _ = f.release_reset.take().unwrap().send(());
+        f.stop().await;
+    }
 
     fn new_ut_sandbox() -> SandBox {
         let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
