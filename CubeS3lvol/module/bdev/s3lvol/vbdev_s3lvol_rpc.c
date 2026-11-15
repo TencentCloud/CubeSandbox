@@ -2254,6 +2254,11 @@ rpc_rcow_get_lvol(struct spdk_jsonrpc_request *request,
 		spdk_json_write_named_string(w, "bdev_name", lvol->bdev->name);
 	}
 	spdk_json_write_named_uuid(w, "uuid", &lvol->uuid);
+	/* bdev geometry survives deactivation; cluster bitmap counts do not. */
+	if (lvol->bdev) {
+		spdk_json_write_named_uint64(w, "size_bytes",
+					     lvol->bdev->blockcnt * lvol->bdev->blocklen);
+	}
 	spdk_json_write_named_uint64(w, "cluster_size",
 				     spdk_bs_get_cluster_size(store->blobstore));
 	if (lvol->blob != NULL) {

@@ -168,6 +168,10 @@ void s3lvol_lvstore_checkpoint(struct s3lvol_lvstore *lvs,
 void s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
 			  spdk_lvs_op_complete cb_fn, void *cb_arg);
 
+/** Export flush with an idle-progress deadline, preserving hot-prepare gates. */
+void s3lvol_lvstore_flush_progress(struct s3lvol_lvstore *lvs, uint64_t idle_us,
+                                    spdk_lvs_op_complete cb_fn, void *cb_arg);
+
 /**
  * Quiesce exported I/O for every loaded lvstore.
  *

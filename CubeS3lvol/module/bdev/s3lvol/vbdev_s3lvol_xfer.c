@@ -2024,7 +2024,7 @@ export_ref(struct export_ctx *ctx)
 static void
 export_drain(struct export_ctx *ctx)
 {
-	s3lvol_lvstore_flush(ctx->lvs, 0, export_drained, ctx);
+	s3lvol_lvstore_flush_progress(ctx->lvs, 0, export_drained, ctx);
 }
 
 /* One-shot: unregisters itself, then resubmits the drain. */

@@ -154,6 +154,11 @@ void s3_flusher_kick(struct s3_flusher *f);
 void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		      s3_flusher_cb cb_fn, void *cb_arg);
 
+/** Export drain: timeout bounds time without a successful upload, not
+ * total transfer time. In-flight callbacks are always waited for. */
+void s3_flusher_drain_progress(struct s3_flusher *f, uint64_t timeout_us,
+                               s3_flusher_cb cb_fn, void *cb_arg);
+
 /**
  * Stop starting uploads and complete after current uploads and WAL super
  * updates finish. Dirty overlay data remains protected by the WAL. The pause is

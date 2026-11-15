@@ -5099,6 +5099,7 @@ s3_bs_dev_set_reap_cb(struct spdk_bs_dev *bs_dev, s3_bs_dev_reap_cb cb_fn,
 }
 
 struct s3_bs_drain_req {
+	bool progress;
 	struct s3_ctx *ctx;
 	uint64_t timeout_us;
 	s3_bs_dev_cb cb_fn;
@@ -5113,8 +5114,13 @@ s3_bs_dev_drain_wal_done(void *cb_arg, int status)
 	void *user_arg;
 
 	if (status == 0) {
-		s3_flusher_drain(req->ctx->flusher, req->timeout_us,
-				 req->cb_fn, req->cb_arg);
+		if (req->progress) {
+			s3_flusher_drain_progress(req->ctx->flusher, req->timeout_us,
+					  req->cb_fn, req->cb_arg);
+		} else {
+			s3_flusher_drain(req->ctx->flusher, req->timeout_us,
+					 req->cb_fn, req->cb_arg);
+		}
 		free(req);
 		return;
 	}
@@ -5127,9 +5133,9 @@ s3_bs_dev_drain_wal_done(void *cb_arg, int status)
 	}
 }
 
-void
-s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
-		s3_bs_dev_cb cb_fn, void *cb_arg)
+static void
+bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us, bool progress,
+	     s3_bs_dev_cb cb_fn, void *cb_arg)
 {
 	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
 	struct s3_bs_drain_req *req;
@@ -5155,6 +5161,7 @@ s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 	}
 	req->ctx = ctx;
 	req->timeout_us = timeout_us;
+	req->progress = progress;
 	req->cb_fn = cb_fn;
 	req->cb_arg = cb_arg;
 	s3_bs_dev_wal_flush(bs_dev, s3_bs_dev_drain_wal_done, req);
@@ -5773,3 +5780,20 @@ s3_bs_dev_get_stats(struct spdk_bs_dev *bs_dev, struct s3_bs_dev_stats *out)
 	}
 }
 
+
+void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
+		     s3_bs_dev_cb cb_fn, void *cb_arg)
+{
+	bs_dev_drain(bs_dev, timeout_us, false, cb_fn, cb_arg);
+}
+void s3_bs_dev_drain_progress(struct spdk_bs_dev *bs_dev, uint64_t idle_us,
+			      s3_bs_dev_cb cb_fn, void *cb_arg)
+{
+	bs_dev_drain(bs_dev, idle_us, true, cb_fn, cb_arg);
+}
+
+bool s3_bs_dev_chunk_is_live(struct spdk_bs_dev *bs_dev, uint64_t chunk_index)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+	return ctx && ctx->overlay && s3_overlay_chunk_is_live(ctx->overlay, chunk_index);
+}
