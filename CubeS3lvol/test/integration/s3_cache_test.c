@@ -844,6 +844,18 @@ main(int argc, char **argv)
 			   !s3_cache_object_reads_slow(cache), NULL);
 	}
 
+	printf("\n[9c] a zero quiet window never parks background work\n");
+	{
+		s3_cache_set_foreground_quiet_us(cache, 0);
+		s3_cache_foreground_touch(cache);
+		check_true("a touch just now does not count with a zero window",
+			   !s3_cache_foreground_active(cache), NULL);
+		s3_cache_set_foreground_quiet_us(cache, S3_CACHE_FOREGROUND_QUIET_US);
+		s3_cache_foreground_touch(cache);
+		check_true("the same touch counts with the default window",
+			   s3_cache_foreground_active(cache), NULL);
+	}
+
 	printf("\n[10] out-of-range and degenerate arguments\n");
 	{
 		check_true("lookup past num_chunks is false",

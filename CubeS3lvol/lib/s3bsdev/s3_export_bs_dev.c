@@ -1830,9 +1830,7 @@ export_cache_read_done(void *cb_arg, int status)
  * Read path
  * ========================================================================== */
 
-/* The read itself. \p is_retry marks an I/O that has already been through one
- * refetch, so a 404 against the manifest just fetched is reported rather than
- * sent round again. */
+/* Completion of a probe read: the cache has already timed it. */
 static void
 export_cache_probe_done(void *cb_arg, int status)
 {
@@ -1862,6 +1860,9 @@ export_cache_probe(struct s3_export_dev *dev, struct spdk_io_channel *cache_ch,
 	}
 }
 
+/* The read itself. \p is_retry marks an I/O that has already been through one
+ * refetch, so a 404 against the manifest just fetched is reported rather than
+ * sent round again. */
 static void
 export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel,
 		     void *payload, uint64_t lba, uint32_t lba_count,

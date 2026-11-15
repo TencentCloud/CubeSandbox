@@ -2363,9 +2363,15 @@ s3_cache_foreground_touch(struct s3_cache *cache)
 bool
 s3_cache_foreground_active(const struct s3_cache *cache)
 {
-	uint64_t last, now;
+	uint64_t last, now, quiet;
 
 	if (!cache) {
+		return false;
+	}
+	/* A zero window turns yielding off outright, even for a touch stamped
+	 * on this very tick. */
+	quiet = __atomic_load_n(&cache->foreground_quiet_ticks, __ATOMIC_RELAXED);
+	if (quiet == 0) {
 		return false;
 	}
 	last = __atomic_load_n(&cache->foreground_ticks, __ATOMIC_RELAXED);
@@ -2377,8 +2383,7 @@ s3_cache_foreground_active(const struct s3_cache *cache)
 	if (now <= last) {
 		return true;
 	}
-	return now - last < __atomic_load_n(&cache->foreground_quiet_ticks,
-					    __ATOMIC_RELAXED);
+	return now - last < quiet;
 }
 
 void
