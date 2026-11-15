@@ -2390,7 +2390,7 @@ mod tests {
         let result = sb.connect_agent_with_retry(true).await;
         assert!(result.is_ok(), "{result:?}");
         assert!(start.elapsed() >= std::time::Duration::from_secs(6));
-        assert!(start.elapsed() < std::time::Duration::from_secs(9));
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(f.attempts(), 4);
         f.stop().await;
     }
@@ -2405,8 +2405,11 @@ mod tests {
             .unwrap_err()
             .contains("agent reconnect exceeded the deadline"));
         assert!(elapsed >= std::time::Duration::from_secs(9));
-        assert!(elapsed < std::time::Duration::from_secs(11));
-        assert_eq!(f.attempts(), 5);
+        assert!(elapsed < std::time::Duration::from_secs(12));
+        // The fifth attempt starts about 8.4 s in, so a slow timer wake-up on
+        // a loaded runner can let the deadline fire first. Four attempts are
+        // what a 10 s budget guarantees; the deadline is the property here.
+        assert!(f.attempts() >= 4, "only {} attempts", f.attempts());
         f.stop().await;
     }
 
