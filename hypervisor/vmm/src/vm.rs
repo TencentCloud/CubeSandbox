@@ -2692,31 +2692,17 @@ impl Pausable for Vm {
         })?;
 
         self.cpu_manager.lock().unwrap().pause()?;
-        if let Err(e) = self.device_manager.lock().unwrap().pause() {
-            // The vCPUs, and whichever devices got there first, are paused
-            // while the state still says Running. Leaving them so freezes a
-            // guest the caller believes it can keep using, with no way back
-            // short of killing it. Undo the partial pause as resume() would,
-            // then report the failure.
-            error!("Pausing devices failed, resuming the VM: {:?}", e);
-            let undo = (|| -> std::result::Result<(), MigratableError> {
-                self.cpu_manager.lock().unwrap().resume()?;
-                #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-                {
-                    if let Some(clock) = &self.saved_clock {
-                        self.vm.set_clock(clock).map_err(|e| {
-                            MigratableError::Resume(anyhow!("Could not set VM clock: {}", e))
-                        })?;
-                    }
+        pause_devices_or_undo(&*self.cpu_manager, &*self.device_manager, || {
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            {
+                if let Some(clock) = &self.saved_clock {
+                    self.vm.set_clock(clock).map_err(|e| {
+                        MigratableError::Resume(anyhow!("Could not set VM clock: {}", e))
+                    })?;
                 }
-                self.device_manager.lock().unwrap().resume()
-            })();
-            match undo {
-                Ok(()) => info!("vm resumed after a failed pause"),
-                Err(re) => error!("Could not resume the VM after a failed pause: {:?}", re),
             }
-            return Err(e);
-        }
+            Ok(())
+        })?;
 
         *state = new_state;
 
@@ -3190,10 +3176,118 @@ impl GuestDebuggable for Vm {
     }
 }
 
+/// Pauses the devices once the vCPUs are paused. If that fails, the vCPUs
+/// and whichever devices got there first are paused while the VM state
+/// still says Running, which freezes a guest the caller believes it can
+/// keep using. Undo the partial pause in resume()'s order (vCPUs, clock,
+/// devices) and return the pause error.
+fn pause_devices_or_undo<C, D>(
+    cpus: &Mutex<C>,
+    devices: &Mutex<D>,
+    restore_clock: impl FnOnce() -> std::result::Result<(), MigratableError>,
+) -> std::result::Result<(), MigratableError>
+where
+    C: Pausable + ?Sized,
+    D: Pausable + ?Sized,
+{
+    // Take the result first, so the device lock is released before the
+    // undo below takes it again; a guard held in an `if let` scrutinee
+    // lives to the end of the whole `if let`.
+    let paused = devices.lock().unwrap().pause();
+    let Err(e) = paused else {
+        return Ok(());
+    };
+    error!("Pausing devices failed, resuming the VM: {:?}", e);
+    let undo = (|| -> std::result::Result<(), MigratableError> {
+        cpus.lock().unwrap().resume()?;
+        restore_clock()?;
+        devices.lock().unwrap().resume()
+    })();
+    match undo {
+        Ok(()) => info!("vm resumed after a failed pause"),
+        Err(re) => error!("Could not resume the VM after a failed pause: {:?}", re),
+    }
+    Err(e)
+}
+
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct FakePausable {
+        fail_pause: bool,
+        paused: bool,
+        resumes: u32,
+    }
+
+    impl Pausable for FakePausable {
+        fn pause(&mut self) -> std::result::Result<(), MigratableError> {
+            if self.fail_pause {
+                return Err(MigratableError::Pause(anyhow!("injected pause failure")));
+            }
+            self.paused = true;
+            Ok(())
+        }
+
+        fn resume(&mut self) -> std::result::Result<(), MigratableError> {
+            self.paused = false;
+            self.resumes += 1;
+            Ok(())
+        }
+    }
+
+    // Runs pause_devices_or_undo on its own thread, so that re-locking a
+    // mutex the call still holds fails the test instead of hanging it.
+    fn run_pause_devices(devices_fail: bool) -> (bool, FakePausable, FakePausable, bool) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let cpus = Mutex::new(FakePausable {
+                paused: true,
+                ..Default::default()
+            });
+            let devices = Mutex::new(FakePausable {
+                fail_pause: devices_fail,
+                ..Default::default()
+            });
+            let mut clock_restored = false;
+            let res = pause_devices_or_undo(&cpus, &devices, || {
+                clock_restored = true;
+                Ok(())
+            });
+            tx.send((
+                res.is_err(),
+                cpus.into_inner().unwrap(),
+                devices.into_inner().unwrap(),
+                clock_restored,
+            ))
+            .unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("pause_devices_or_undo did not return: lock held across the undo?")
+    }
+
+    #[test]
+    fn test_failed_device_pause_resumes_the_vm() {
+        let (failed, cpus, devices, clock_restored) = run_pause_devices(true);
+        assert!(failed, "the pause error must be returned");
+        assert!(!cpus.paused, "vCPUs must be resumed");
+        assert_eq!(cpus.resumes, 1);
+        assert!(clock_restored, "the saved clock must be restored");
+        assert_eq!(devices.resumes, 1, "devices must be resumed");
+    }
+
+    #[test]
+    fn test_successful_device_pause_is_not_undone() {
+        let (failed, cpus, devices, clock_restored) = run_pause_devices(false);
+        assert!(!failed);
+        assert!(cpus.paused);
+        assert_eq!(cpus.resumes, 0);
+        assert!(!clock_restored);
+        assert!(devices.paused);
+        assert_eq!(devices.resumes, 0);
+    }
 
     fn test_vm_state_transitions(state: VmState) {
         match state {

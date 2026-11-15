@@ -110,6 +110,14 @@ const RATE_LIMITER_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 // no progress at all for this long fails the drain, so the snapshot is
 // aborted instead of being captured in an inconsistent state.
 const PAUSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+// Upper bound on the whole drain, however much progress it is making. The
+// progress signal includes the host device's completed IO, which other users
+// of a shared device also move, and the layers above give a whole pause about
+// 120 s (CubeMaster, CubeAPI and Cubelet), which must also cover the
+// pause-time flush and the snapshot that follow the drain. Stopping here
+// leaves them half of that budget and fails the pause cleanly, with the VM
+// resumed, rather than letting an upper layer time out mid-snapshot.
+const PAUSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 // Per-iteration poll budget while draining; bounds CPU when the
 // completion notifier is quiet but we have not yet hit the deadline.
 const PAUSE_DRAIN_POLL_MS: i32 = 100;
@@ -168,8 +176,8 @@ fn parse_completed_ios(stat: &str) -> Option<u64> {
 }
 
 /// Opens the sysfs `stat` of the block device behind `path`, if it is one.
-/// Opened here, on the VMM thread, because the virtio thread's seccomp
-/// filter allows reading an open file but not opening one.
+/// Opened once here, on the VMM thread, and shared by every queue, so a
+/// drain only has to `pread` it.
 fn open_device_stat(path: &std::path::Path) -> Option<Arc<File>> {
     let md = std::fs::metadata(path).ok()?;
     if !md.file_type().is_block_device() {
@@ -197,9 +205,11 @@ fn read_completed_ios(stat: &File) -> Option<u64> {
 /// Tracks whether a pause drain is still getting anywhere. Progress is a
 /// drop in this queue's inflight count or any change in the host device's
 /// completed-IO count; `expired` is true once neither has moved for
-/// `idle`.
+/// `idle`, or once the drain has run for `limit` in total.
 struct DrainProgress {
     idle: Duration,
+    limit: Duration,
+    started: Instant,
     last_progress: Instant,
     inflight: usize,
     device_ios: Option<u64>,
@@ -207,9 +217,17 @@ struct DrainProgress {
 }
 
 impl DrainProgress {
-    fn new(now: Instant, idle: Duration, inflight: usize, device_ios: Option<u64>) -> Self {
+    fn new(
+        now: Instant,
+        idle: Duration,
+        limit: Duration,
+        inflight: usize,
+        device_ios: Option<u64>,
+    ) -> Self {
         DrainProgress {
             idle,
+            limit,
+            started: now,
             last_progress: now,
             inflight,
             device_ios,
@@ -230,8 +248,16 @@ impl DrainProgress {
         }
     }
 
-    fn expired(&self, now: Instant) -> bool {
+    fn stalled(&self, now: Instant) -> bool {
         now.duration_since(self.last_progress) >= self.idle
+    }
+
+    fn over_limit(&self, now: Instant) -> bool {
+        now.duration_since(self.started) >= self.limit
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        self.stalled(now) || self.over_limit(now)
     }
 }
 
@@ -588,16 +614,23 @@ impl EpollHelperHandler for BlockEpollHandler {
         let mut progress = DrainProgress::new(
             started,
             PAUSE_DRAIN_TIMEOUT,
+            PAUSE_DRAIN_LIMIT,
             self.request_list.len(),
             self.device_stat.as_deref().and_then(read_completed_ios),
         );
 
         while !self.request_list.is_empty() {
-            if progress.expired(Instant::now()) {
+            let now = Instant::now();
+            if progress.expired(now) {
+                let why = if progress.stalled(now) {
+                    format!("made no progress for {:?}", PAUSE_DRAIN_TIMEOUT)
+                } else {
+                    format!("reached the {:?} limit", PAUSE_DRAIN_LIMIT)
+                };
                 error!(
-                    "virtio-blk {}: pause drain made no progress for {:?}, {} IO still inflight after {:?}",
+                    "virtio-blk {}: pause drain {}, {} IO still inflight after {:?}",
                     self.id,
-                    PAUSE_DRAIN_TIMEOUT,
+                    why,
                     self.request_list.len(),
                     started.elapsed()
                 );
@@ -751,9 +784,10 @@ pub struct Block {
     exit_evt: EventFd,
     read_only: bool,
     /// Shared with each per-queue `BlockEpollHandler`. Set by an epoll
-    /// thread when its pause-time drain or flush could not complete
-    /// within `PAUSE_DRAIN_TIMEOUT`; checked by `pause()` after the
-    /// pause barrier so the upper layer can abort the snapshot.
+    /// thread when its pause-time drain stalled for `PAUSE_DRAIN_TIMEOUT`
+    /// or ran past `PAUSE_DRAIN_LIMIT`, or when its pause-time flush failed;
+    /// checked by `pause()` after the pause barrier so the upper layer can
+    /// abort the snapshot.
     drain_failed: Arc<AtomicBool>,
     /// sysfs `stat` of the host block device behind `disk_path`, if any.
     device_stat: Option<Arc<File>>,
@@ -1096,13 +1130,12 @@ impl Pausable for Block {
 
         // After common.pause() returns, every per-queue epoll thread has
         // executed its `before_pause` hook and crossed the barrier. Any
-        // queue that failed to drain inflight IO or to issue the
-        // pause-time flush within `PAUSE_DRAIN_TIMEOUT` will have set
-        // this flag. Aborting pause here propagates upward and prevents
+        // queue whose drain stalled or ran past its limit, or whose
+        // pause-time flush failed, will have set this flag. Aborting pause here propagates upward and prevents
         // a snapshot from being captured in an inconsistent state.
         if self.drain_failed.swap(false, Ordering::SeqCst) {
             return Err(MigratableError::Pause(anyhow!(
-                "Failed to drain inflight IO for block device {} within timeout",
+                "Failed to drain inflight IO for block device {}: stalled or past the drain limit",
                 self.id
             )));
         }
@@ -1146,7 +1179,7 @@ mod tests {
     fn drain_progress_renews_while_device_completes_io() {
         let t0 = Instant::now();
         let idle = Duration::from_secs(20);
-        let mut p = DrainProgress::new(t0, idle, 1, Some(100));
+        let mut p = DrainProgress::new(t0, idle, Duration::from_secs(600), 1, Some(100));
         // The guest's request is still queued, but the host device keeps
         // completing writeback: never expires, however long it takes.
         for s in 1..=60u64 {
@@ -1161,7 +1194,7 @@ mod tests {
     fn drain_progress_expires_after_idle_window_without_progress() {
         let t0 = Instant::now();
         let idle = Duration::from_secs(20);
-        let mut p = DrainProgress::new(t0, idle, 2, Some(500));
+        let mut p = DrainProgress::new(t0, idle, Duration::from_secs(600), 2, Some(500));
         p.observe(t0 + Duration::from_secs(5), 1, Some(500)); // own request done
         p.observe(t0 + Duration::from_secs(24), 1, Some(500));
         assert!(!p.expired(t0 + Duration::from_secs(24)));
@@ -1173,10 +1206,30 @@ mod tests {
     fn drain_progress_without_device_counters_falls_back_to_completions() {
         let t0 = Instant::now();
         let idle = Duration::from_secs(20);
-        let mut p = DrainProgress::new(t0, idle, 1, None);
+        let mut p = DrainProgress::new(t0, idle, Duration::from_secs(600), 1, None);
         p.observe(t0 + Duration::from_secs(19), 1, None);
         assert!(!p.expired(t0 + Duration::from_secs(19)));
         assert!(p.expired(t0 + Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn drain_progress_stops_at_the_limit_despite_progress() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(20);
+        let limit = Duration::from_secs(60);
+        let mut p = DrainProgress::new(t0, idle, limit, 1, Some(0));
+        // Unrelated IO on a shared device keeps moving the counter, so the
+        // idle window alone would never end the drain.
+        for s in 1..60u64 {
+            let now = t0 + Duration::from_secs(s);
+            p.observe(now, 1, Some(s));
+            assert!(!p.expired(now), "expired at {}s", s);
+        }
+        let now = t0 + limit;
+        p.observe(now, 1, Some(60));
+        assert!(!p.stalled(now));
+        assert!(p.over_limit(now));
+        assert!(p.expired(now));
     }
 
     #[test]
