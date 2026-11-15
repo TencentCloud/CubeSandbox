@@ -1570,7 +1570,8 @@ fn config_echo(
             allow_public_traffic: n.allow_public_traffic,
             allow_out: (!n.allow_out.is_empty()).then(|| n.allow_out.clone()),
             deny_out: (!n.deny_out.is_empty()).then(|| n.deny_out.clone()),
-            mask_request_host: None,
+            mask_request_host: n.mask_request_host.clone(),
+            // rules omitted: CubeEgressRuleInject carries plaintext secrets.
             rules: None,
         })
         .filter(|n| !n.is_empty());
@@ -3019,7 +3020,8 @@ mod tests {
             "auto_pause": false,
             "cube_network_config": {
                 "allowInternetAccess": true,
-                "denyOut": ["1.2.3.4/32"]
+                "denyOut": ["1.2.3.4/32"],
+                "maskRequestHost": "masked.example.com"
             }
         }))
         .unwrap();
@@ -3031,6 +3033,10 @@ mod tests {
         assert_eq!(listed.allow_internet_access, Some(true));
         let network = listed.network.expect("network echo");
         assert_eq!(network.deny_out, Some(vec!["1.2.3.4/32".to_string()]));
+        assert_eq!(
+            network.mask_request_host.as_deref(),
+            Some("masked.example.com")
+        );
     }
 
     #[test]

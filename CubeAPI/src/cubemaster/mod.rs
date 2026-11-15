@@ -917,7 +917,10 @@ pub struct CubeNetworkConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CubeEgressRule {
     pub name: String,
+    // types.EgressRule marks these omitempty; persisted template rules may lack either.
+    #[serde(default)]
     pub r#match: CubeEgressRuleMatch,
+    #[serde(default)]
     pub action: CubeEgressRuleAction,
 }
 
@@ -937,7 +940,7 @@ pub struct CubeEgressRuleMatch {
     pub port: Option<i32>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CubeEgressRuleAction {
     pub allow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2607,6 +2610,28 @@ mod tests {
         assert!(response.data.is_empty());
         assert_eq!(seen.lock().unwrap().as_deref(), Some("0.0.0.0"));
         server.abort();
+    }
+
+    #[test]
+    fn sandbox_info_tolerates_egress_rules_without_match_or_action() {
+        // Go's types.EgressRule marks match/action omitempty, so a persisted
+        // template rule can carry neither; strict decode would 500 the response.
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "cube_network_config": {
+                "rules": [
+                    {"name": "tpl-rule"},
+                    {"name": "host-rule", "match": {"host": "api.example.com"}}
+                ]
+            }
+        }))
+        .expect("rules without match/action must not fail the whole decode");
+
+        let config = info.cube_network_config.expect("network config");
+        assert_eq!(config.rules.len(), 2);
+        assert!(config.rules[0].r#match.sni.is_none());
+        assert!(!config.rules[0].action.allow);
     }
 
     #[test]

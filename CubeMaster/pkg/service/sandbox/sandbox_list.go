@@ -123,8 +123,9 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 	}
 
 	enrichSandboxListBackends(ctx, rsp.Data)
-	enrichSandboxListConfigs(ctx, rsp.Data)
 	mergePauseBindings(ctx, req, rsp)
+	// After mergePauseBindings so pause-synthesized rows (no shim, missed by the scan) get echoed too.
+	enrichSandboxListConfigs(ctx, rsp.Data)
 	enrichSandboxListEndAts(ctx, rsp.Data)
 	enrichSandboxListRestart(ctx, rsp.Data)
 	types.SortSandboxList(rsp.Data)

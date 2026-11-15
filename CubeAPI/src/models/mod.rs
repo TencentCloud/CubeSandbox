@@ -1412,18 +1412,21 @@ mod tests {
 
     #[test]
     fn end_at_round_trips_through_the_sentinel() {
-        for value in [
-            serde_json::to_value(listed(None)).unwrap(),
-            serde_json::to_value(detail(None)).unwrap(),
-        ] {
-            assert_eq!(value["endAt"], SENTINEL);
-            let back: serde_json::Value = value;
-            let parsed: ListedSandbox = serde_json::from_value(back).unwrap();
-            assert!(
-                parsed.end_at.is_none(),
-                "sentinel must deserialize back to None"
-            );
-        }
+        let listed_value = serde_json::to_value(listed(None)).unwrap();
+        assert_eq!(listed_value["endAt"], SENTINEL);
+        let parsed: ListedSandbox = serde_json::from_value(listed_value).unwrap();
+        assert!(
+            parsed.end_at.is_none(),
+            "sentinel must deserialize back to None"
+        );
+
+        let detail_value = serde_json::to_value(detail(None)).unwrap();
+        assert_eq!(detail_value["endAt"], SENTINEL);
+        let parsed: SandboxDetail = serde_json::from_value(detail_value).unwrap();
+        assert!(
+            parsed.end_at.is_none(),
+            "sentinel must deserialize back to None"
+        );
     }
 
     #[test]

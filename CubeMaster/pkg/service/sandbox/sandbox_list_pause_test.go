@@ -73,6 +73,39 @@ func TestApplyPauseBindingsAppendsRowMissingFromNodeScan(t *testing.T) {
 	require.Equal(t, before+1, pauseViewWithoutSpecCount("list"))
 }
 
+func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
+	spec := specWithIdentity()
+	spec.AutoPause = true
+	spec.AutoResume = true
+	maskHost := "masked.example.com"
+	spec.CubeNetworkConfig = &types.CubeNetworkConfig{MaskRequestHost: &maskHost}
+
+	rows := applyPauseBindings(t.Context(), nil, []*pausesnap.Record{{
+		SandboxID:    "sb-cfg",
+		SnapshotID:   "snap-cfg",
+		Status:       pausesnap.StatusReady,
+		RemoteStatus: constants.RemoteStatusReady,
+	}}, pauseBindingMerge{
+		appendMissing: true,
+		specs:         map[string]*types.CreateCubeSandboxReq{"sb-cfg": spec},
+	})
+	require.Len(t, rows, 1)
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return map[string]*types.CreateCubeSandboxReq{"sb-cfg": spec}, nil
+	})
+
+	enrichSandboxListConfigs(t.Context(), rows)
+	require.NotNil(t, rows[0].AutoPause)
+	require.True(t, *rows[0].AutoPause)
+	require.NotNil(t, rows[0].AutoResume)
+	require.True(t, *rows[0].AutoResume)
+	require.NotNil(t, rows[0].CubeNetworkConfig)
+	require.Equal(t, maskHost, *rows[0].CubeNetworkConfig.MaskRequestHost)
+}
+
 func TestEnrichSandboxListEndAtsUsesOneBatchLookup(t *testing.T) {
 	provider := &mockTimeoutProvider{returnEndAts: map[string]int64{
 		"sb-node":   1234,
