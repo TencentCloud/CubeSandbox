@@ -15,7 +15,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
@@ -348,4 +350,165 @@ func TestResumeLockedRejectsWithoutSkipAdmissionUnderCapacityPressure(t *testing
 	require.NotNil(t, result.ret)
 	assert.Equal(t, errorcode.ErrorCode_Conflict, result.ret.RetCode)
 	assert.Zero(t, task.resumeCalls, "task.Resume must not be called when admission rejects")
+}
+
+// pausedReplaceRequest builds the thin Create-from-pause request CubeMaster
+// sends for a same-node XFS resume: desired sandbox id + pause snapshot id.
+func pausedReplaceRequest(desired string) *cubebox.RunCubeSandboxRequest {
+	req := &cubebox.RunCubeSandboxRequest{RequestID: "resume-create"}
+	if desired != "" {
+		req.Annotations = map[string]string{
+			constants.MasterAnnotationDesiredSandboxID: desired,
+			constants.MasterAnnotationPauseSnapshotID:  "snap-test",
+		}
+	}
+	return req
+}
+
+// TestAdmitPausedReplaceRejectsResumeCreateOverQuota locks the fix for the
+// same-node XFS resume quota bypass: Resume now arrives as Create-from-pause
+// (not Update(resume)), so without the Create-entry admission a resume would
+// re-add the released quota share even though an identical ordinary create
+// would be rejected.
+func TestAdmitPausedReplaceRejectsResumeCreateOverQuota(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// PAUSED tombstone of an 8Gi sandbox on a 4Gi-quota node: the paused
+	// record contributes nothing (ratio 1), and resuming needs the full 8Gi.
+	sb := sandboxWithResourceForTest("sb-resume-create", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	sb.SandboxID = "sb-resume-create"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	rejected := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-resume-create"))
+
+	require.NotNil(t, rejected, "resume Create must be rejected when it exceeds the node quota")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected.RetCode)
+	assert.Contains(t, rejected.RetMsg, "mem quota")
+}
+
+func TestAdmitPausedReplaceAllowsWhenResumeFits(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 8000
+	hostConf.Quota.Mem = "16Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	sb := sandboxWithResourceForTest("sb-fits", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	sb.SandboxID = "sb-fits"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-fits")),
+		"a resume that fits the node quota must be admitted")
+}
+
+func TestAdmitPausedReplaceNoOpWhenPolicyDisabled(t *testing.T) {
+	// Policy off (default config): resume keeps the legacy guaranteed
+	// behaviour, even when the tombstone alone exceeds the quota.
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	sb := sandboxWithResourceForTest("sb-policy-off", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	sb.SandboxID = "sb-policy-off"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-policy-off")))
+}
+
+func TestAdmitPausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// An over-quota tombstone proves the no-op cases below are not skipping
+	// the check by accident.
+	paused := sandboxWithResourceForTest("sb-paused", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	paused.SandboxID = "sb-paused"
+	running := sandboxWithResourceForTest("sb-running", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	running.SandboxID = "sb-running"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: paused}}}
+
+	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("")),
+		"an ordinary create without the desired-id annotation is not a replacement")
+	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-elsewhere")),
+		"a desired id this node does not hold is a cross-node or fresh create")
+
+	sRunning := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: running}}}
+	assert.Nil(t, sRunning.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-running")),
+		"a live sandbox collision is rejected downstream as already exists, never here")
+}
+
+// TestCreateRejectsResumeOverQuotaBeforeTheFlowRuns is the regression test for
+// the same-node XFS resume bypass: Create-from-pause must refuse an over-quota
+// resume with Conflict before the workflow allocates anything, and must not
+// destroy the paused tombstone (Conflict skips create-flow failover).
+func TestCreateRejectsResumeOverQuotaBeforeTheFlowRuns(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// A PAUSED tombstone whose shim is provably gone, so gatePausedReplace
+	// passes and only the quota admission can stop the resume.
+	sb := sandboxWithResourceForTest("sb-resume-create", cubeboxstore.Status{
+		StartedAt: 1,
+		PausedAt:  time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	sb.SandboxID = "sb-resume-create"
+	flow := &fakeCreateFlow{}
+	s := createServiceForTest(sb, flow, time.Minute)
+
+	rsp, err := s.Create(context.Background(), resumeReplaceRequest("sb-resume-create"))
+	require.NoError(t, err)
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rsp.Ret.RetCode,
+		"an over-quota resume must be rejected with the retriable Conflict code")
+	assert.Zero(t, flow.createCalls, "admission must run before the flow allocates anything")
+	assert.Zero(t, flow.destroyCalls, "a rejected resume must not roll the paused tombstone back")
 }

@@ -502,6 +502,15 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		return rsp, nil
 	}
+	// Same reasoning as the gate above: the resume quota admission must run
+	// before the create flow allocates network/volume/cgroup, and Conflict
+	// (not a failover-triggering code) keeps the paused tombstone intact so
+	// the user can retry after freeing capacity.
+	if rejected := s.admitPausedReplace(ctx, req); rejected != nil {
+		rsp.Ret.RetMsg = rejected.RetMsg
+		rsp.Ret.RetCode = rejected.RetCode
+		return rsp, nil
+	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
