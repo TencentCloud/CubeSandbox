@@ -26,9 +26,11 @@ use block_util::{
 use rate_limiter::{BucketReduction, RateLimiter, TokenType};
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::io;
 use std::num::Wrapping;
 use std::ops::Deref;
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::result;
@@ -97,12 +99,16 @@ const COMPLETION_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 // New 'wake up' event from the rate limiter
 const RATE_LIMITER_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 
-// Maximum time we wait for inflight IO to drain when the device is
-// paused. Pause is the synchronization point a snapshot relies on, so
-// we err on the side of giving the backend (network or local) enough
-// time to settle. If this expires we mark drain as failed so the
-// snapshot is aborted by the upper layer instead of being captured in
-// an inconsistent state.
+// How long inflight IO may go without any progress while the device is
+// paused before the drain is declared stuck. Pause is the synchronization
+// point a snapshot relies on, so the drain does not give up on a backend
+// that is merely slow: the guest's last requests can sit behind gigabytes
+// of host page cache that drain at the backend's pace, and how long that
+// takes depends on how much the guest wrote, not on any fixed bound. The
+// window restarts whenever one of this queue's requests completes or the
+// host device behind the disk completes any IO. Only a backend that makes
+// no progress at all for this long fails the drain, so the snapshot is
+// aborted instead of being captured in an inconsistent state.
 const PAUSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 // Per-iteration poll budget while draining; bounds CPU when the
 // completion notifier is quiet but we have not yet hit the deadline.
@@ -140,6 +146,95 @@ pub struct BlockCounters {
     limit_by_ops: Arc<AtomicU64>,
 }
 
+/// Total IOs the host block device has completed, from its sysfs `stat`:
+/// reads, writes and, where the kernel reports them, discards and flushes.
+/// Only ever compared with an earlier reading of the same device.
+fn parse_completed_ios(stat: &str) -> Option<u64> {
+    let fields: Vec<u64> = stat
+        .split_whitespace()
+        .map(|f| f.parse().ok())
+        .collect::<Option<Vec<u64>>>()?;
+    if fields.len() < 11 {
+        return None;
+    }
+    let mut ios = fields[0].wrapping_add(fields[4]);
+    if fields.len() >= 15 {
+        ios = ios.wrapping_add(fields[11]);
+    }
+    if fields.len() >= 17 {
+        ios = ios.wrapping_add(fields[15]);
+    }
+    Some(ios)
+}
+
+/// Opens the sysfs `stat` of the block device behind `path`, if it is one.
+/// Opened here, on the VMM thread, because the virtio thread's seccomp
+/// filter allows reading an open file but not opening one.
+fn open_device_stat(path: &std::path::Path) -> Option<Arc<File>> {
+    let md = std::fs::metadata(path).ok()?;
+    if !md.file_type().is_block_device() {
+        return None;
+    }
+    let rdev = md.rdev();
+    // SAFETY: major/minor only split the device number; no memory is touched.
+    let (major, minor) = unsafe { (libc::major(rdev), libc::minor(rdev)) };
+    let stat = format!("/sys/dev/block/{}:{}/stat", major, minor);
+    match File::open(&stat) {
+        Ok(f) => Some(Arc::new(f)),
+        Err(e) => {
+            warn!("cannot open {} for pause drain progress: {}", stat, e);
+            None
+        }
+    }
+}
+
+fn read_completed_ios(stat: &File) -> Option<u64> {
+    let mut buf = [0u8; 512];
+    let n = stat.read_at(&mut buf, 0).ok()?;
+    parse_completed_ios(std::str::from_utf8(&buf[..n]).ok()?)
+}
+
+/// Tracks whether a pause drain is still getting anywhere. Progress is a
+/// drop in this queue's inflight count or any change in the host device's
+/// completed-IO count; `expired` is true once neither has moved for
+/// `idle`.
+struct DrainProgress {
+    idle: Duration,
+    last_progress: Instant,
+    inflight: usize,
+    device_ios: Option<u64>,
+    renewals: u64,
+}
+
+impl DrainProgress {
+    fn new(now: Instant, idle: Duration, inflight: usize, device_ios: Option<u64>) -> Self {
+        DrainProgress {
+            idle,
+            last_progress: now,
+            inflight,
+            device_ios,
+            renewals: 0,
+        }
+    }
+
+    fn observe(&mut self, now: Instant, inflight: usize, device_ios: Option<u64>) {
+        let progressed =
+            inflight < self.inflight || (device_ios.is_some() && device_ios != self.device_ios);
+        if progressed {
+            self.last_progress = now;
+            self.renewals += 1;
+        }
+        self.inflight = inflight;
+        if device_ios.is_some() {
+            self.device_ios = device_ios;
+        }
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.last_progress) >= self.idle
+    }
+}
+
 struct BlockEpollHandler {
     queue_index: u16,
     queue: Queue,
@@ -165,6 +260,10 @@ struct BlockEpollHandler {
     // the snapshot must be aborted. Shared (not owned) so a multi-queue
     // device aggregates failures from any queue.
     drain_failed: Arc<AtomicBool>,
+    // sysfs `stat` of the host block device behind the disk, when it is
+    // one; read during a pause drain to tell a slow backend from a
+    // stuck one.
+    device_stat: Option<Arc<File>>,
 }
 
 impl BlockEpollHandler {
@@ -484,15 +583,23 @@ impl EpollHelperHandler for BlockEpollHandler {
     // `drain_failed` rather than `Err`, because returning Err here
     // would skip `paused_sync.wait()` and deadlock the pausing thread.
     fn before_pause(&mut self, _helper: &mut EpollHelper) -> result::Result<(), EpollHelperError> {
-        let deadline = Instant::now() + PAUSE_DRAIN_TIMEOUT;
+        let started = Instant::now();
         let efd = self.disk_image.notifier().as_raw_fd();
+        let mut progress = DrainProgress::new(
+            started,
+            PAUSE_DRAIN_TIMEOUT,
+            self.request_list.len(),
+            self.device_stat.as_deref().and_then(read_completed_ios),
+        );
 
         while !self.request_list.is_empty() {
-            if Instant::now() >= deadline {
+            if progress.expired(Instant::now()) {
                 error!(
-                    "virtio-blk {}: pause drain timed out, {} IO still inflight",
+                    "virtio-blk {}: pause drain made no progress for {:?}, {} IO still inflight after {:?}",
                     self.id,
-                    self.request_list.len()
+                    PAUSE_DRAIN_TIMEOUT,
+                    self.request_list.len(),
+                    started.elapsed()
                 );
                 self.drain_failed.store(true, Ordering::SeqCst);
                 return Ok(());
@@ -518,6 +625,16 @@ impl EpollHelperHandler for BlockEpollHandler {
                 self.drain_failed.store(true, Ordering::SeqCst);
                 return Ok(());
             }
+            let ios = self.device_stat.as_deref().and_then(read_completed_ios);
+            progress.observe(Instant::now(), self.request_list.len(), ios);
+        }
+        if started.elapsed() >= Duration::from_secs(1) {
+            info!(
+                "virtio-blk {}: pause drain took {:?} ({} progress renewals)",
+                self.id,
+                started.elapsed(),
+                progress.renewals
+            );
         }
 
         // Make the freshly-added used entries visible to the guest.
@@ -638,6 +755,8 @@ pub struct Block {
     /// within `PAUSE_DRAIN_TIMEOUT`; checked by `pause()` after the
     /// pause barrier so the upper layer can abort the snapshot.
     drain_failed: Arc<AtomicBool>,
+    /// sysfs `stat` of the host block device behind `disk_path`, if any.
+    device_stat: Option<Arc<File>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -742,6 +861,8 @@ impl Block {
             (disk_nsectors, avail_features, 0, config)
         };
 
+        let device_stat = open_device_stat(&disk_path);
+
         Ok(Block {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Block as u32,
@@ -764,6 +885,7 @@ impl Block {
             exit_evt,
             read_only,
             drain_failed: Arc::new(AtomicBool::new(false)),
+            device_stat,
         })
     }
 
@@ -904,6 +1026,7 @@ impl VirtioDevice for Block {
                 rate_limited: std::sync::Once::new(),
                 id: self.id.clone(),
                 drain_failed: self.drain_failed.clone(),
+                device_stat: self.device_stat.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -1007,6 +1130,54 @@ impl Migratable for Block {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_completed_ios_sums_reads_writes_discards_and_flushes() {
+        // 17-field stat (kernel >= 5.5): reads 10, writes 20, discards 3, flushes 4.
+        let stat = "10 0 80 5 20 0 160 9 1 7 14 3 0 24 1 4 2\n";
+        assert_eq!(parse_completed_ios(stat), Some(37));
+        // 11-field stat (old kernels): reads and writes only.
+        assert_eq!(parse_completed_ios("10 0 80 5 20 0 160 9 1 7 14"), Some(30));
+        assert_eq!(parse_completed_ios("garbage"), None);
+        assert_eq!(parse_completed_ios("1 2 3"), None);
+    }
+
+    #[test]
+    fn drain_progress_renews_while_device_completes_io() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(20);
+        let mut p = DrainProgress::new(t0, idle, 1, Some(100));
+        // The guest's request is still queued, but the host device keeps
+        // completing writeback: never expires, however long it takes.
+        for s in 1..=60u64 {
+            let now = t0 + Duration::from_secs(s);
+            p.observe(now, 1, Some(100 + s));
+            assert!(!p.expired(now), "expired at {}s despite progress", s);
+        }
+        assert_eq!(p.renewals, 60);
+    }
+
+    #[test]
+    fn drain_progress_expires_after_idle_window_without_progress() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(20);
+        let mut p = DrainProgress::new(t0, idle, 2, Some(500));
+        p.observe(t0 + Duration::from_secs(5), 1, Some(500)); // own request done
+        p.observe(t0 + Duration::from_secs(24), 1, Some(500));
+        assert!(!p.expired(t0 + Duration::from_secs(24)));
+        p.observe(t0 + Duration::from_secs(25), 1, Some(500));
+        assert!(p.expired(t0 + Duration::from_secs(25)));
+    }
+
+    #[test]
+    fn drain_progress_without_device_counters_falls_back_to_completions() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(20);
+        let mut p = DrainProgress::new(t0, idle, 1, None);
+        p.observe(t0 + Duration::from_secs(19), 1, None);
+        assert!(!p.expired(t0 + Duration::from_secs(19)));
+        assert!(p.expired(t0 + Duration::from_secs(20)));
+    }
 
     #[test]
     fn test_used_len_reports_bytes_written_to_guest() {

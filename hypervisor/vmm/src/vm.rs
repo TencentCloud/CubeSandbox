@@ -2692,7 +2692,31 @@ impl Pausable for Vm {
         })?;
 
         self.cpu_manager.lock().unwrap().pause()?;
-        self.device_manager.lock().unwrap().pause()?;
+        if let Err(e) = self.device_manager.lock().unwrap().pause() {
+            // The vCPUs, and whichever devices got there first, are paused
+            // while the state still says Running. Leaving them so freezes a
+            // guest the caller believes it can keep using, with no way back
+            // short of killing it. Undo the partial pause as resume() would,
+            // then report the failure.
+            error!("Pausing devices failed, resuming the VM: {:?}", e);
+            let undo = (|| -> std::result::Result<(), MigratableError> {
+                self.cpu_manager.lock().unwrap().resume()?;
+                #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+                {
+                    if let Some(clock) = &self.saved_clock {
+                        self.vm.set_clock(clock).map_err(|e| {
+                            MigratableError::Resume(anyhow!("Could not set VM clock: {}", e))
+                        })?;
+                    }
+                }
+                self.device_manager.lock().unwrap().resume()
+            })();
+            match undo {
+                Ok(()) => info!("vm resumed after a failed pause"),
+                Err(re) => error!("Could not resume the VM after a failed pause: {:?}", re),
+            }
+            return Err(e);
+        }
 
         *state = new_state;
 
