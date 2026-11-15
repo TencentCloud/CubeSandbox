@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/moby/sys/mountinfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -33,6 +33,8 @@ const hostDirMountTimeout = 3 * time.Second
 const hostDirMountBinary = "/usr/bin/mount"
 
 var runHostDirCommand = defaultRunHostDirCommand
+
+var isHostDirMountPoint = utils.IsMountPoint
 
 type HostDirBackendInfo struct {
 	VolumeName string `json:"volume_name"`
@@ -154,6 +156,14 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 			return fmt.Errorf("prepareHostDirVolume: mkdir %s: %w", bindDest, err)
 		}
 
+		mounted, err := isHostDirMountPoint(bindDest)
+		if err != nil {
+			return fmt.Errorf("prepareHostDirVolume: check mount point %s: %w", bindDest, err)
+		}
+		if mounted {
+			return fmt.Errorf("prepareHostDirVolume: bind destination %s is already a mount point", bindDest)
+		}
+
 		key := v.GetName() + "/" + src.GetName()
 		result.HostDirBackendInfos[key] = &HostDirBackendInfo{
 			VolumeName: v.GetName(),
@@ -231,10 +241,29 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 	return nil
 }
 
+func matchesSandboxMountPrefix(mountpoint, sandboxDir string) bool {
+	if mountpoint == "" || sandboxDir == "" {
+		return false
+	}
+	if mountpoint == sandboxDir {
+		return true
+	}
+	prefix := sandboxDir
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(mountpoint, prefix)
+}
+
 // unmountHostDirTree detaches all mounts at or under sandboxDir in deepest-first
 // order (including stacked mounts on the same mountpoint).
 func unmountHostDirTree(sandboxDir string) error {
-	mounts, err := mountinfo.GetMounts(mountinfo.PrefixFilter(sandboxDir))
+	mounts, err := mountinfo.GetMounts(func(m *mountinfo.Info) (bool, bool) {
+		if m == nil {
+			return true, false
+		}
+		return !matchesSandboxMountPrefix(m.Mountpoint, sandboxDir), false
+	})
 	if err != nil {
 		return fmt.Errorf("list mounts under %s: %w", sandboxDir, err)
 	}
@@ -257,14 +286,15 @@ func unmountHostDirTree(sandboxDir string) error {
 	})
 
 	for _, target := range targets {
-		if err := detachAllMountsAt(target); err != nil {
-			return err
+		if err := mount.UnmountAll(target, unix.MNT_DETACH); err != nil {
+			return fmt.Errorf("unmount %s: %w", target, err)
 		}
 	}
 
-	// Also walk the directory tree to catch any mountpoint not returned by the
-	// mountinfo prefix pass (e.g. kernel-level mount root detected via
-	// openat2(RESOLVE_NO_XDEV) / statx(STATX_ATTR_MOUNT_ROOT) / st_dev).
+	// Defensive second pass across the directory tree: mountinfo already returned
+	// every mount at/under sandboxDir, so this skips symlinks (leaving
+	// removeEmptyHostDirTree to refuse non-directory entries) and checks
+	// utils.IsMountPoint in case a mount boundary appeared mid-teardown.
 	return filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if os.IsNotExist(walkErr) {
@@ -272,7 +302,10 @@ func unmountHostDirTree(sandboxDir string) error {
 			}
 			return walkErr
 		}
-		mounted, err := isActiveMountPoint(path)
+		if d != nil && d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		mounted, err := isHostDirMountPoint(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -282,66 +315,14 @@ func unmountHostDirTree(sandboxDir string) error {
 		if !mounted {
 			return nil
 		}
-		if err := detachAllMountsAt(path); err != nil {
-			return err
+		if err := mount.UnmountAll(path, unix.MNT_DETACH); err != nil {
+			return fmt.Errorf("unmount %s: %w", path, err)
 		}
 		if d.IsDir() && path != sandboxDir {
 			return filepath.SkipDir
 		}
 		return nil
 	})
-}
-
-func detachAllMountsAt(target string) error {
-	const maxStackedMounts = 64
-	for i := 0; i < maxStackedMounts; i++ {
-		err := unix.Unmount(target, unix.MNT_DETACH)
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) || os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("unmount %s: %w", target, err)
-	}
-	return fmt.Errorf("unmount %s: exceeded %d stacked mounts", target, maxStackedMounts)
-}
-
-// isActiveMountPoint combines kernel-level mount boundary detection
-// (openat2 RESOLVE_NO_XDEV, statx STATX_ATTR_MOUNT_ROOT, st_dev comparison)
-// with mountinfo lookup so neither bind mounts nor cross-device mounts can slip
-// through undetected.
-func isActiveMountPoint(path string) (bool, error) {
-	mounted, sure, err := mountinfo.MountedFast(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if sure {
-		return mounted, nil
-	}
-
-	likelyNot, err := utils.IsLikelyNotMountPoint(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if !likelyNot {
-		return true, nil
-	}
-
-	mounted, err = utils.IsMountPoint(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return mounted, nil
 }
 
 // removeEmptyHostDirTree removes the staging directory hierarchy bottom-up using
@@ -376,15 +357,18 @@ func removeEmptyHostDirTree(sandboxDir string) error {
 			return fmt.Errorf("refusing to remove %s: device id (%d) differs from parent (%d), mount still active",
 				path, st.Dev, expectedDev)
 		}
-		mounted, err := isActiveMountPoint(path)
+		if !d.IsDir() {
+			return fmt.Errorf("refusing to remove unexpected non-directory entry %s in hostdir staging tree", path)
+		}
+		mounted, err := isHostDirMountPoint(path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return fmt.Errorf("verify mount status %s: %w", path, err)
 		}
 		if mounted {
 			return fmt.Errorf("refusing to remove active mount point %s", path)
-		}
-		if !d.IsDir() {
-			return fmt.Errorf("refusing to remove unexpected non-directory entry %s in hostdir staging tree", path)
 		}
 		dirs = append(dirs, path)
 		return nil
@@ -395,8 +379,11 @@ func removeEmptyHostDirTree(sandboxDir string) error {
 
 	for i := len(dirs) - 1; i >= 0; i-- {
 		dir := dirs[i]
-		mounted, err := isActiveMountPoint(dir)
+		mounted, err := isHostDirMountPoint(dir)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return fmt.Errorf("re-verify mount status %s: %w", dir, err)
 		}
 		if mounted {

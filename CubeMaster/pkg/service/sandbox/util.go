@@ -909,6 +909,7 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 	delete(req.Annotations, AnnotationPluginVolumeSources)
 
 	if req.Volumes != nil {
+		seenHostDirSources := make(map[string]struct{})
 		for _, e := range req.Volumes {
 			if e.Name == "" {
 				return fmt.Errorf("volume name must not be empty")
@@ -960,6 +961,12 @@ func checkAndGetVolumes(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSan
 				if err := checkAndGetHostDirVolumeSource(e.VolumeSource.HostDirVolumeSources, v); err != nil {
 					return err
 				}
+				for _, s := range e.VolumeSource.HostDirVolumeSources.VolumeSources {
+					if _, dup := seenHostDirSources[s.Name]; dup {
+						return fmt.Errorf("duplicate host_dir volume source name %q", s.Name)
+					}
+					seenHostDirSources[s.Name] = struct{}{}
+				}
 			}
 			v.VolumeSource.Image = e.VolumeSource.Image
 			out.Volumes = append(out.Volumes, v)
@@ -987,10 +994,15 @@ func checkAndGetHostDirVolumeSource(src *types.HostDirVolumeSources, out *cubebo
 	if src == nil {
 		return nil
 	}
+	seen := make(map[string]struct{}, len(src.VolumeSources))
 	for _, s := range src.VolumeSources {
 		if s.Name == "" {
 			return errors.New("host_dir volume source name must not be empty")
 		}
+		if _, dup := seen[s.Name]; dup {
+			return fmt.Errorf("duplicate host_dir volume source name %q", s.Name)
+		}
+		seen[s.Name] = struct{}{}
 		if s.HostPath == "" {
 			return fmt.Errorf("host_dir volume source %q: host_path must not be empty", s.Name)
 		}

@@ -20,6 +20,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestBindHostDirRW(t *testing.T) {
@@ -329,4 +331,104 @@ func TestRemoveEmptyHostDirTreeRefusesActiveMountPoint(t *testing.T) {
 	err := removeEmptyHostDirTree(sandboxDir)
 	require.Error(t, err)
 	require.FileExists(t, srcFile)
+}
+
+func TestMatchesSandboxMountPrefixRequiresPathBoundary(t *testing.T) {
+	t.Parallel()
+
+	sandboxDir := "/data/cubelet/hostdir/test"
+	require.True(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test", sandboxDir))
+	require.True(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test/rw/vol", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test0/rw/vol", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test0", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix("", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix(sandboxDir, ""))
+}
+
+func TestPrepareHostDirVolumeRefusesExistingMountPoint(t *testing.T) {
+	tmp := t.TempDir()
+	origBase := hostDirBasePath
+	origRun := runHostDirCommand
+	origIsMount := isHostDirMountPoint
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	t.Cleanup(func() {
+		hostDirBasePath = origBase
+		runHostDirCommand = origRun
+		isHostDirMountPoint = origIsMount
+	})
+
+	runCalled := 0
+	runHostDirCommand = func(ctx context.Context, name string, args ...string) error {
+		runCalled++
+		return nil
+	}
+	isHostDirMountPoint = func(dst string) (bool, error) {
+		return true, nil
+	}
+
+	s := &local{}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sb-dup"},
+		ReqInfo:          &cubebox.RunCubeSandboxRequest{},
+	}
+	vol := &cubebox.Volume{
+		Name: "vol-dup",
+		VolumeSource: &cubebox.VolumeSource{
+			HostDirVolumes: &cubebox.HostDirVolumeSources{
+				VolumeSources: []*cubebox.HostDirSource{{
+					Name:     "dup",
+					HostPath: "/data/shared/upper",
+				}},
+			},
+		},
+	}
+	result := &StorageInfo{SandboxID: "sb-dup"}
+
+	err := s.prepareHostDirVolume(context.Background(), opts, vol, result)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "already a mount point")
+	require.Equal(t, 0, runCalled)
+	require.Empty(t, result.HostDirBackendInfos)
+}
+
+func TestCleanupHostDirVolumesDoesNotUnmountSiblingPrefix(t *testing.T) {
+	utils.SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	origBase := hostDirBasePath
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	require.NoError(t, os.MkdirAll(hostDirBasePath, 0755))
+	t.Cleanup(func() { hostDirBasePath = origBase })
+
+	srcA := filepath.Join(tmp, "src-a")
+	srcB := filepath.Join(tmp, "src-b")
+	require.NoError(t, os.MkdirAll(srcA, 0755))
+	require.NoError(t, os.MkdirAll(srcB, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcA, "a.txt"), []byte("a"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcB, "b.txt"), []byte("b"), 0644))
+
+	// Sibling sandbox IDs where "test" is a string prefix of "test0".
+	bindA := filepath.Join(hostDirBasePath, "test", "rw", "vol")
+	bindB := filepath.Join(hostDirBasePath, "test0", "rw", "vol")
+	require.NoError(t, os.MkdirAll(bindA, 0755))
+	require.NoError(t, os.MkdirAll(bindB, 0755))
+
+	require.NoError(t, unix.Mount(srcA, bindA, "", unix.MS_BIND, ""))
+	t.Cleanup(func() { _ = unix.Unmount(bindA, unix.MNT_DETACH) })
+	require.NoError(t, unix.Mount(srcB, bindB, "", unix.MS_BIND, ""))
+	t.Cleanup(func() { _ = unix.Unmount(bindB, unix.MNT_DETACH) })
+
+	s := &local{}
+	require.NoError(t, s.cleanupHostDirVolumes(context.Background(), &StorageInfo{
+		SandboxID: "test",
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"vol/vol": {VolumeName: "vol", BindPath: bindA},
+		},
+	}))
+
+	require.NoDirExists(t, filepath.Join(hostDirBasePath, "test"))
+	mounted, err := utils.IsMountPoint(bindB)
+	require.NoError(t, err)
+	require.True(t, mounted, "destroying sandbox 'test' must not unmount sibling 'test0'")
+	require.FileExists(t, filepath.Join(bindB, "b.txt"))
 }

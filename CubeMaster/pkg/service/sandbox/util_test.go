@@ -200,6 +200,19 @@ func Test_checkAndGetHostDirVolumeSource(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "duplicate_source_names_in_single_volume",
+			args: args{
+				src: &types.HostDirVolumeSources{
+					VolumeSources: []*types.HostDirSource{
+						{Name: "dup", HostPath: "/data/shared/lower"},
+						{Name: "dup", HostPath: "/data/shared/upper"},
+					},
+				},
+				out: &cubebox.Volume{VolumeSource: &cubebox.VolumeSource{}},
+			},
+			wantErr: true,
+		},
+		{
 			name: "out_volumeSource_nil_panics",
 			args: args{
 				src: &types.HostDirVolumeSources{},
@@ -226,6 +239,37 @@ func Test_checkAndGetHostDirVolumeSource(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckAndGetVolumesRejectsDuplicateHostDirSourceNamesAcrossVolumes(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{
+		Volumes: []*types.Volume{
+			{
+				Name: "vol-a",
+				VolumeSource: &types.VolumeSource{
+					HostDirVolumeSources: &types.HostDirVolumeSources{
+						VolumeSources: []*types.HostDirSource{
+							{Name: "dup", HostPath: "/data/shared/lower"},
+						},
+					},
+				},
+			},
+			{
+				Name: "vol-b",
+				VolumeSource: &types.VolumeSource{
+					HostDirVolumeSources: &types.HostDirVolumeSources{
+						VolumeSources: []*types.HostDirSource{
+							{Name: "dup", HostPath: "/data/shared/upper"},
+						},
+					},
+				},
+			},
+		},
+	}
+	out := &cubebox.RunCubeSandboxRequest{}
+	err := checkAndGetVolumes(req, out)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate host_dir volume source name")
 }
 
 func TestGetReqResourceRejectsCPUOverflowWhenMemIsValid(t *testing.T) {

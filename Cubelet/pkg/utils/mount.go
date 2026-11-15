@@ -6,7 +6,6 @@ package utils
 
 import (
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +38,7 @@ func IsMountPoint(dst string) (bool, error) {
 
 	if mounted, sure, err := mountinfo.MountedFast(resolved); err == nil && sure {
 		return mounted, nil
-	} else if err != nil && (errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err)) {
+	} else if err != nil && os.IsNotExist(err) {
 		return false, err
 	}
 
