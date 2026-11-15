@@ -240,6 +240,18 @@ func pauseBindingRow(rec *pausesnap.Record) *types.SandboxBriefData {
 	return item
 }
 
+// echoNetworkConfig copies cfg for a response item. Rules never leave
+// CubeMaster: EgressRuleInject carries plaintext secrets that would land in
+// response logs and the internal hop to CubeAPI/CubeOps.
+func echoNetworkConfig(cfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Rules = nil
+	return &out
+}
+
 func briefFromPauseBinding(rec *pausesnap.Record, spec *types.CreateCubeSandboxReq) *types.SandboxBriefData {
 	item := pauseBindingRow(rec)
 	if item == nil {

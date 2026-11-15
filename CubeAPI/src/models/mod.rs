@@ -845,6 +845,7 @@ pub struct ListedSandbox {
         serialize_with = "serialize_end_at",
         deserialize_with = "deserialize_end_at"
     )]
+    #[schema(required = true, nullable = false)]
     pub end_at: Option<DateTime<Utc>>,
     /// Persisted lifecycle config; absent when the spec was not read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -899,6 +900,7 @@ pub struct SandboxDetail {
         serialize_with = "serialize_end_at",
         deserialize_with = "deserialize_end_at"
     )]
+    #[schema(required = true, nullable = false)]
     pub end_at: Option<DateTime<Utc>>,
     /// Persisted lifecycle config; absent when the spec was not read.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -101,7 +101,7 @@ print(info)
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). Pausing does not cancel a finite idle deadline, so both detail and list APIs continue to return the same `endAt` while the sandbox is paused. For **never-timeout** sandboxes there is no deadline, so `endAt` is the **9999-12-31 sentinel** rather than being misreported as equal to `startedAt`. The sentinel is always sent because the E2B SDK requires `endAt` on every response; SDKs deserialize it back to "no deadline".
+`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). Pausing does not cancel a finite idle deadline, so both detail and list APIs continue to return the same `endAt` while the sandbox is paused. For **never-timeout** sandboxes there is no deadline, so `endAt` is the **9999-12-31 sentinel** rather than being misreported as equal to `startedAt`. The sentinel is always sent because the E2B SDK requires `endAt` on every response; the in-repo SDKs surface it as an ordinary datetime (year 9999), so clients should treat the sentinel as "no deadline".
 
 ## List Running Sandboxes
 

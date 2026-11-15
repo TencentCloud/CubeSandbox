@@ -377,9 +377,7 @@ func enrichSandboxListConfigs(ctx context.Context, items []*types.SandboxBriefDa
 		}
 		item.AutoPause = &spec.AutoPause
 		item.AutoResume = &spec.AutoResume
-		if spec.CubeNetworkConfig != nil {
-			item.CubeNetworkConfig = spec.CubeNetworkConfig
-		}
+		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
 	}
 }
 

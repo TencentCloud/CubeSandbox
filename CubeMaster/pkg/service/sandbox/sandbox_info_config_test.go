@@ -8,8 +8,17 @@ import (
 
 func TestApplySandboxConfigEchoesPersistedSpec(t *testing.T) {
 	allowInternet := true
+	secret := "topsecret"
 	specs := map[string]*types.CreateCubeSandboxReq{
-		"sb-full":           {AutoPause: true, AutoResume: true, CubeNetworkConfig: &types.CubeNetworkConfig{AllowInternetAccess: &allowInternet}},
+		"sb-full": {AutoPause: true, AutoResume: true, CubeNetworkConfig: &types.CubeNetworkConfig{
+			AllowInternetAccess: &allowInternet,
+			Rules: []*types.EgressRule{{
+				Name: "inject-cred",
+				Action: &types.EgressRuleAction{
+					Inject: []*types.EgressRuleInject{{Header: "Authorization", Secret: secret}},
+				},
+			}},
+		}},
 		"sb-lifecycle-only": {AutoPause: false},
 	}
 	items := []*types.SandboxData{
@@ -27,6 +36,12 @@ func TestApplySandboxConfigEchoesPersistedSpec(t *testing.T) {
 	}
 	if full.CubeNetworkConfig == nil || full.CubeNetworkConfig.AllowInternetAccess == nil || !*full.CubeNetworkConfig.AllowInternetAccess {
 		t.Fatalf("sb-full network echo = %+v, want allowInternetAccess=true", full.CubeNetworkConfig)
+	}
+	if len(full.CubeNetworkConfig.Rules) != 0 {
+		t.Fatalf("echoed network config must drop rules (inject secrets): %+v", full.CubeNetworkConfig.Rules)
+	}
+	if len(specs["sb-full"].CubeNetworkConfig.Rules) != 1 {
+		t.Fatalf("echo must copy the config, spec rules = %+v, want untouched", specs["sb-full"].CubeNetworkConfig.Rules)
 	}
 
 	lifecycleOnly := items[1]

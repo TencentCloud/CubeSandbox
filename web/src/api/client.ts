@@ -3,8 +3,14 @@
 
 import { api, apiWithHeaders, ops, setTokens, clearTokens } from '@/lib/api';
 import type { components } from './generated/schema';
+import type {
+  ClusterOverview as ClusterOverviewSchema,
+  NodeView,
+  VersionMatrixView,
+  ComponentVersionView,
+} from './admin-types';
 
-export type ClusterOverviewDto = components['schemas']['ClusterOverview'];
+export type ClusterOverviewDto = ClusterOverviewSchema;
 export type ListedSandboxDto = components['schemas']['ListedSandbox'];
 export type SandboxDetailDto = components['schemas']['SandboxDetail'];
 export type SandboxSessionDto = components['schemas']['Sandbox'];
@@ -13,9 +19,9 @@ export type SandboxLogEntry = components['schemas']['SandboxLogEntry'];
 export type SandboxResumeRequest = components['schemas']['ResumedSandbox'];
 export type TemplateSummaryDto = components['schemas']['TemplateSummary'];
 export type TemplateDetailDto = components['schemas']['TemplateDetail'];
-export type ApiNodeView = components['schemas']['NodeView'];
-export type VersionMatrixDto = components['schemas']['VersionMatrixView'];
-export type ComponentVersionDto = components['schemas']['ComponentVersionView'];
+export type ApiNodeView = NodeView;
+export type VersionMatrixDto = VersionMatrixView;
+export type ComponentVersionDto = ComponentVersionView;
 
 export interface RunningSandbox extends ListedSandboxDto {}
 

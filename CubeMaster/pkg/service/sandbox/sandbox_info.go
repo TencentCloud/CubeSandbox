@@ -334,9 +334,7 @@ func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.Crea
 		}
 		item.AutoPause = &spec.AutoPause
 		item.AutoResume = &spec.AutoResume
-		if spec.CubeNetworkConfig != nil {
-			item.CubeNetworkConfig = spec.CubeNetworkConfig
-		}
+		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
 	}
 }
 

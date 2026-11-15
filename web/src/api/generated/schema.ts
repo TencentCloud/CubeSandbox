@@ -864,7 +864,7 @@ export interface components {
              * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
              *     (no deadline) rather than being misreported as equal to startedAt.
              */
-            endAt?: string | null;
+            endAt: string;
             envdVersion: string;
             /**
              * Format: int32
@@ -1206,7 +1206,7 @@ export interface components {
              * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
              *     (no deadline) rather than being misreported as equal to startedAt.
              */
-            endAt?: string | null;
+            endAt: string;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** @description Stored status or exit reason for the primary container. Omitted when unavailable. */

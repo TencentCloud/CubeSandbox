@@ -78,7 +78,14 @@ func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
 	spec.AutoPause = true
 	spec.AutoResume = true
 	maskHost := "masked.example.com"
-	spec.CubeNetworkConfig = &types.CubeNetworkConfig{MaskRequestHost: &maskHost}
+	secret := "topsecret"
+	spec.CubeNetworkConfig = &types.CubeNetworkConfig{
+		MaskRequestHost: &maskHost,
+		Rules: []*types.EgressRule{{
+			Name:   "inject-cred",
+			Action: &types.EgressRuleAction{Inject: []*types.EgressRuleInject{{Header: "Authorization", Secret: secret}}},
+		}},
+	}
 
 	rows := applyPauseBindings(t.Context(), nil, []*pausesnap.Record{{
 		SandboxID:    "sb-cfg",
@@ -104,6 +111,8 @@ func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
 	require.True(t, *rows[0].AutoResume)
 	require.NotNil(t, rows[0].CubeNetworkConfig)
 	require.Equal(t, maskHost, *rows[0].CubeNetworkConfig.MaskRequestHost)
+	require.Empty(t, rows[0].CubeNetworkConfig.Rules, "echoed config must drop rules (inject secrets)")
+	require.Len(t, spec.CubeNetworkConfig.Rules, 1, "echo must copy the config, spec rules stay untouched")
 }
 
 func TestEnrichSandboxListEndAtsUsesOneBatchLookup(t *testing.T) {
