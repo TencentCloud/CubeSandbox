@@ -135,6 +135,20 @@
  * again, so this can be larger than the disk-fill window above. */
 #define S3_CACHE_PREHEAT_MAX 32
 
+/* How long the cache device must see no foreground read before background
+ * template preheat may issue new work.
+ *
+ * Preheat writes whole objects to the device every reader of this lvstore
+ * shares. A restoring guest faults its memory in serially, one read behind the
+ * other, so a read that queues behind a window of 1 MiB preheat writes costs
+ * the guest that whole wait on every fault -- on a rotational device that
+ * turned a sub-second restore into one that outlasted its reconnect deadline.
+ * Nothing waits for preheat to finish, so it simply stands aside: a demand
+ * read fetches (and caches) what it needs by itself. The window is long
+ * enough to cover the gaps inside one burst of faults and the distance from
+ * importing an export to its consumer's first read. */
+#define S3_CACHE_FOREGROUND_QUIET_US (1000 * 1000)
+
 /* Whole-object DRAM hot set. RPC callers use DEFAULT when the parameter is
  * omitted and may pass zero to retain the disk-only behaviour. The limit keeps
  * a single malformed request from prefaulting an unbounded anonymous mapping. */
@@ -427,6 +441,29 @@ void s3_cache_drop_chunk(struct s3_cache *cache, uint64_t chunk_index);
  * it owns a slot across the GET, before any disk fill exists.
  */
 bool s3_cache_is_quiesced(const struct s3_cache *cache);
+
+/**
+ * Record foreground read activity against this cache's device.
+ *
+ * Called when a demand read starts and when it completes, from any thread.
+ * It is a timestamp rather than an in-flight count on purpose: a count that
+ * leaked on one error path would park preheat for good, whereas a missed
+ * touch only lets it resume a little early.
+ */
+void s3_cache_foreground_touch(struct s3_cache *cache);
+
+/**
+ * True while background work should stand aside for foreground reads: one
+ * was started or completed within S3_CACHE_FOREGROUND_QUIET_US. Safe from any
+ * thread. The caller polls; there is no wakeup when the window closes.
+ */
+bool s3_cache_foreground_active(const struct s3_cache *cache);
+
+/**
+ * Change the quiet window from its S3_CACHE_FOREGROUND_QUIET_US default.
+ * Zero disables yielding altogether: background work never stands aside.
+ */
+void s3_cache_set_foreground_quiet_us(struct s3_cache *cache, uint64_t quiet_us);
 
 void s3_cache_get_stats(struct s3_cache *cache, struct s3_cache_stats *stats);
 

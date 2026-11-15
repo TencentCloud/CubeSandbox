@@ -402,6 +402,7 @@ export_io_complete(struct s3_export_io *io)
 		status = -ENOENT;
 	}
 
+	s3_cache_foreground_touch(dev->shared_cache);
 	export_io_drop(io);
 	cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, status);
 	if (lifetime_ref) {
@@ -1381,6 +1382,20 @@ export_preheat_pump(struct s3_export_dev *dev)
 		}
 		return;
 	}
+	/* Foreground reads own the cache device. The GETs below end as whole
+	 * object writes on it, and a restoring guest that faults its memory in
+	 * one read at a time pays for every one of those it queues behind. So no
+	 * new work is issued while such reads are arriving; what is already in
+	 * flight finishes, and the poller comes back once the device is quiet.
+	 * Without a wakeup to come back on, the walk carries on rather than
+	 * strand itself.
+	 * Nothing depends on the walk completing, so a volume that is read
+	 * without pause simply caches what it reads instead. */
+	if ((dev->preheat_cursor < dev->m->num_chunks || dev->preheat_has_retry) &&
+	    s3_cache_foreground_active(dev->shared_cache) &&
+	    export_preheat_arm_poller(dev)) {
+		return;
+	}
 	dev->preheat_pumping = true;
 	/* Finish the current pass before revisiting blocked chunks. Otherwise one
 	 * busy early reservation can repeatedly rewind the cursor and starve every
@@ -1869,6 +1884,9 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 	io->num_pending = 1;
 
 	__atomic_fetch_add(&dev->reads, 1, __ATOMIC_RELAXED);
+	/* Every read through this parent is a consumer waiting, whether it ends
+	 * in RAM, on the cache device or in S3. Template preheat yields to it. */
+	s3_cache_foreground_touch(dev->shared_cache);
 
 	while (remaining > 0 && io->status == 0) {
 		uint32_t chunk_size = io->m->chunk_size;
@@ -2840,6 +2858,11 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 			 m->src.endpoint);
 		snprintf(dev->cache_bucket, sizeof(dev->cache_bucket), "%s",
 			 s3_client_bucket(client));
+		/* An export is imported because something is about to read it.
+		 * Counting the import as that reader's first sign gives it the
+		 * quiet window to arrive in, instead of meeting a device already
+		 * queued deep with this export's own preheat. */
+		s3_cache_foreground_touch(shared_cache);
 	}
 	dev->chunk_shift      = (uint32_t)spdk_u32log2(m->chunk_size);
 	dev->blocks_per_chunk = m->chunk_size / S3LVOL_BLOCK_SIZE;
