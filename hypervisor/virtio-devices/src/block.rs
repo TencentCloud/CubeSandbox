@@ -184,7 +184,12 @@ fn open_device_stat(path: &std::path::Path) -> Option<Arc<File>> {
         return None;
     }
     let rdev = md.rdev();
-    // SAFETY: major/minor only split the device number; no memory is touched.
+    // major/minor only split the device number. The libc locked by the
+    // hypervisor workspace declares them safe, but the older libc that
+    // CubeShim builds this crate against still declares them unsafe, so
+    // keep the block and silence the lint where it is not needed.
+    #[allow(unused_unsafe)]
+    // SAFETY: no memory is touched.
     let (major, minor) = unsafe { (libc::major(rdev), libc::minor(rdev)) };
     let stat = format!("/sys/dev/block/{}:{}/stat", major, minor);
     match File::open(&stat) {
