@@ -2644,11 +2644,6 @@ impl MemoryManager {
 const FUSE_SNAPSHOT_WRITE_ALIGN: u64 = 1 << 20;
 const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
 
-/// Window size used to coalesce incremental snapshot writes, 0 for page
-/// granular writes. FUSE targets (JuiceFS) get 1 MiB windows, because
-/// JuiceFS stores every discontiguous write as its own slice and later
-/// compacts whole chunks, so thousands of 4 KiB writes cost far more than
-/// a few large ones.
 /// Make a written memory snapshot durable before the caller is told it is
 /// saved.
 ///
@@ -2664,6 +2659,11 @@ fn sync_memory_snapshot(memory_file: &File, path: &Path) -> result::Result<(), M
     })
 }
 
+/// Window size used to coalesce incremental snapshot writes, 0 for page
+/// granular writes. FUSE targets (JuiceFS) get 1 MiB windows, because
+/// JuiceFS stores every discontiguous write as its own slice and later
+/// compacts whole chunks, so thousands of 4 KiB writes cost far more than
+/// a few large ones.
 fn snapshot_write_align(memory_file: &File) -> u64 {
     // SAFETY: fstatfs only writes into the zeroed struct we pass it.
     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
