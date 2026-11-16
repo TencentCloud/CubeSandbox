@@ -8,7 +8,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
 use validator::Validate;
 
 use crate::{
