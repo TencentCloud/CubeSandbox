@@ -480,3 +480,43 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	require.Equal(t, createdAt.UnixNano(), listed[0].CreateAt)
 	require.Equal(t, infoRsp.Data[0].CreateAt, listed[0].CreateAt)
 }
+
+func TestListSpecReadsStayBounded(t *testing.T) {
+	// Mirror what listSandbox does after the node scan: enrich the scanned
+	// rows, then merge pause bindings. The spec-store batch read must stay
+	// bounded (1 call without pause rows, 2 with a synthesized shimless row)
+	// so the hot list path cannot regress into per-row lookups.
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+
+	calls := 0
+	patches.ApplyFunc(sandboxspec.GetMany, func(_ context.Context, ids []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		calls++
+		out := make(map[string]*types.CreateCubeSandboxReq, len(ids))
+		for _, id := range ids {
+			out[id] = specWithIdentity()
+		}
+		return out, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetCreatedAtMany, func(context.Context, []string) (map[string]time.Time, error) {
+		return nil, nil
+	})
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return nil, nil
+	})
+
+	rsp := &types.ListCubeSandboxRes{Data: []*types.SandboxBriefData{{SandboxID: "sb-scan"}}}
+	enrichSandboxList(t.Context(), rsp.Data)
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Equal(t, 1, calls, "no pause rows: exactly one GetMany")
+
+	calls = 0
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return []*pausesnap.Record{readyInfoRecord("sb-paused-shimless")}, nil
+	})
+	rsp = &types.ListCubeSandboxRes{Data: []*types.SandboxBriefData{{SandboxID: "sb-scan"}}}
+	enrichSandboxList(t.Context(), rsp.Data)
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Equal(t, 2, calls, "one synthesized pause row: enrich + merge each read once")
+	require.Len(t, rsp.Data, 2)
+}

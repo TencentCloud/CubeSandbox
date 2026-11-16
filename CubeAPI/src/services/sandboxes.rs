@@ -2976,6 +2976,19 @@ mod tests {
             .await
             .expect("detail should succeed");
 
+        // The GET /sandboxes/{id} wire must actually carry the three e2b keys.
+        // (Asserted before the field moves below consume `detail`.)
+        let wire = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            wire["lifecycle"],
+            serde_json::json!({"onTimeout": "pause", "autoResume": true})
+        );
+        assert_eq!(wire["allowInternetAccess"], false);
+        assert_eq!(
+            wire["network"]["denyOut"],
+            serde_json::json!(["1.2.3.4/32"])
+        );
+
         let lifecycle = detail.lifecycle.expect("lifecycle echo");
         assert!(matches!(lifecycle.on_timeout, SandboxOnTimeout::Pause));
         assert!(lifecycle.auto_resume);
