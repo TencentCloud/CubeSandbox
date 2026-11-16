@@ -616,6 +616,20 @@ type SandboxBriefData struct {
 	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
 }
 
+// MarshalJSON on the sandbox response items scrubs egress rules at the
+// serialization boundary, making the secret protection structural instead of
+// relying on every fill site remembering to scrub. See scrubEchoNetworkConfig.
+func (d SandboxBriefData) MarshalJSON() ([]byte, error) {
+	type alias SandboxBriefData
+	return FastestJsoniter.Marshal(&struct {
+		CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+		*alias
+	}{
+		CubeNetworkConfig: scrubEchoNetworkConfig(d.CubeNetworkConfig),
+		alias:             (*alias)(&d),
+	})
+}
+
 type GetCubeSandboxReq struct {
 	RequestID     string `json:"requestID,omitempty"`
 	SandboxID     string `json:"sandbox_id,omitempty"`
@@ -659,6 +673,32 @@ type SandboxData struct {
 	AutoPause         *bool              `json:"auto_pause,omitempty"`
 	AutoResume        *bool              `json:"auto_resume,omitempty"`
 	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+}
+
+// MarshalJSON scrubs egress rules on the wire; see SandboxBriefData.
+func (d SandboxData) MarshalJSON() ([]byte, error) {
+	type alias SandboxData
+	return FastestJsoniter.Marshal(&struct {
+		CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+		*alias
+	}{
+		CubeNetworkConfig: scrubEchoNetworkConfig(d.CubeNetworkConfig),
+		alias:             (*alias)(&d),
+	})
+}
+
+// scrubEchoNetworkConfig drops L7 egress rules from the wire form of a network
+// config: EgressRuleInject carries plaintext secrets and must never leave the
+// control plane. Called from the response MarshalJSON methods so no code path
+// — including future early returns that bypass the explicit fill-time scrub —
+// can leak it.
+func scrubEchoNetworkConfig(cfg *CubeNetworkConfig) *CubeNetworkConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Rules = nil
+	return &out
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is

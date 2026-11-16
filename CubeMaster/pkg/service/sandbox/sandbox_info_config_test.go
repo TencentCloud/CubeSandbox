@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -59,5 +60,39 @@ func TestApplySandboxConfigEchoesPersistedSpec(t *testing.T) {
 
 	if items[3] != nil {
 		t.Fatalf("nil item mutated: %+v", items[3])
+	}
+}
+
+func TestResponseMarshalScrubsEgressRules(t *testing.T) {
+	secret := "topsecret"
+	cfg := &types.CubeNetworkConfig{
+		AllowInternetAccess: &[]bool{false}[0],
+		Rules: []*types.EgressRule{{
+			Name:   "inject-cred",
+			Action: &types.EgressRuleAction{Inject: []*types.EgressRuleInject{{Header: "Authorization", Secret: secret}}},
+		}},
+	}
+	detail := &types.SandboxData{SandboxID: "sb-1", CubeNetworkConfig: cfg}
+	brief := &types.SandboxBriefData{SandboxID: "sb-1", CubeNetworkConfig: cfg}
+
+	for name, item := range map[string]interface{ MarshalJSON() ([]byte, error) }{
+		"SandboxData":      detail,
+		"SandboxBriefData": brief,
+	} {
+		raw, err := item.MarshalJSON()
+		if err != nil {
+			t.Fatalf("%s marshal: %v", name, err)
+		}
+		if strings.Contains(string(raw), "rules") {
+			t.Fatalf("%s: rules leaked onto the wire: %s", name, raw)
+		}
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("%s: inject secret leaked onto the wire", name)
+		}
+	}
+	// The in-memory config keeps its rules: only the wire form is scrubbed,
+	// and the persisted-spec data must stay untouched.
+	if len(cfg.Rules) != 1 {
+		t.Fatalf("source config rules mutated: %+v", cfg.Rules)
 	}
 }
