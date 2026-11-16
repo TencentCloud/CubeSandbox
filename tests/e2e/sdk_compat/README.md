@@ -366,7 +366,8 @@ Optional:
   `8.8.8.8`.
 - `SDK_E2E_TCP_TARGET_PORT`: public TCP probe port. Defaults to `53`.
 - `SDK_E2E_ALTERNATE_TCP_TARGET_IP`: alternate public TCP probe address.
-  Defaults to `1.1.1.1`.
+  Defaults to `8.8.4.4`. Both configured targets must accept TCP connections on
+  `SDK_E2E_TCP_TARGET_PORT` from inside the sandbox.
 - `SDK_E2E_PUBLIC_ACCESS_PORT`: exposed HTTP port used by restricted public
   access inbound tests. Defaults to `49983`.
 - `SDK_E2E_PUBLIC_ACCESS_PATH`: path used by restricted public access inbound
