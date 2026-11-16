@@ -624,6 +624,77 @@ test_owner_release_is_guarded_by_acquired_identity() {
   assert_contains "${lvstore_c}" '&lvs->owner_identity'
 }
 
+# Missing VERSION must not abort via pipefail with no ERROR; the reader returns
+# empty and install_cubes3lvol_versioned dies with a clear message.
+test_s3lvol_version_missing_does_not_silent_abort() {
+  local empty got err rc
+  empty="$(mktemp -d "${TMP_DIR}/no-version.XXXXXX")"
+  mkdir -p "${empty}/scripts"
+  : >"${empty}/scripts/rcow_common.sh"
+
+  (
+    set -euo pipefail
+    load_install_lifecycle_functions
+    got="$(s3lvol_component_version "${empty}")"
+    [[ -z "${got}" ]] || fail "missing VERSION must yield empty (got: ${got})"
+  ) || fail "s3lvol_component_version aborted under set -e"
+
+  set +e
+  err="$(
+    load_install_lifecycle_functions
+    INSTALL_PREFIX="${TMP_DIR}/refuse-stage"
+    mkdir -p "${INSTALL_PREFIX}"
+    log() { :; }
+    # Match install.sh die: exit the subshell so staging cannot continue.
+    die() { echo "$*" >&2; exit 1; }
+    install_cubes3lvol_versioned "${empty}" 2>&1
+  )"
+  rc=$?
+  set -e
+  [[ "${rc}" -ne 0 ]] || fail "staging without VERSION must die (rc=0)"
+  [[ "${err}" == *"missing VERSION file"* ]] ||
+    fail "expected loud missing-VERSION-file error, got: ${err}"
+}
+
+# Packaging must refuse a CubeS3lvol tree without the make_release stanza.
+test_bundle_script_dies_without_s3lvol_VERSION() {
+  grep -qF 'has no make_release VERSION stanza' "${ONE_CLICK_DIR}/build-release-bundle.sh" ||
+    fail "build-release-bundle.sh must die when VERSION stanza is missing"
+  grep -qF 'rebuild it with make_release.sh' "${ONE_CLICK_DIR}/build-release-bundle.sh" ||
+    fail "build-release-bundle.sh must point operators at make_release.sh"
+  # Must not paper over a broken prebuilt by writing a synthetic VERSION stanza.
+  if grep -nE 'CubeS3lvol/VERSION' "${ONE_CLICK_DIR}/build-release-bundle.sh" |
+       grep -qE 'printf.*>.*CubeS3lvol/VERSION'; then
+    fail "build-release-bundle.sh must not synthesize CubeS3lvol/VERSION"
+  fi
+}
+
+# Pre-versioning bare directory without VERSION must keep a legacy-* name.
+test_legacy_directory_without_VERSION_uses_legacy_name() {
+  local prefix="${TMP_DIR}/legacy-no-ver" src="${TMP_DIR}/legacy-no-ver-src" live
+  mkdir -p "${prefix}/CubeS3lvol/scripts" "${src}/scripts"
+  printf 'old\n' >"${prefix}/CubeS3lvol/running"
+  : >"${prefix}/CubeS3lvol/scripts/rcow_common.sh"
+  printf 'version: 2.0\n' >"${src}/VERSION"
+  printf 'new\n' >"${src}/payload"
+  : >"${src}/scripts/rcow_common.sh"
+
+  (
+    load_install_lifecycle_functions
+    INSTALL_PREFIX="${prefix}"
+    log() { :; }
+    die() { echo "$*" >&2; exit 1; }
+    install_cubes3lvol_versioned "${src}"
+  ) || fail "legacy migration without VERSION failed"
+
+  [[ -L "${prefix}/CubeS3lvol" ]] || fail "bare name was not converted to a symlink"
+  live="$(readlink "${prefix}/CubeS3lvol")"
+  [[ "${live}" == CubeS3lvol-legacy-* ]] ||
+    fail "expected CubeS3lvol-legacy-* bare target, got ${live}"
+  [[ "$(cat "${prefix}/${live}/running")" == old ]] ||
+    fail "legacy migration did not preserve the previous install"
+}
+
 test_the_prefix_travels_with_the_invocation
 test_without_the_prefix_it_refuses
 test_install_sh_hands_over_the_prefix
@@ -648,5 +719,8 @@ test_cleanup_failure_rolls_the_symlink_back
 test_lifecycle_operations_share_an_exclusive_flock
 test_concurrent_upgrade_waits_for_the_host_lock
 test_owner_release_is_guarded_by_acquired_identity
+test_s3lvol_version_missing_does_not_silent_abort
+test_bundle_script_dies_without_s3lvol_VERSION
+test_legacy_directory_without_VERSION_uses_legacy_name
 
 echo "CubeS3lvol hot upgrade tests OK"
