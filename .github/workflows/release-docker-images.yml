@@ -983,4 +983,6 @@ jobs:
           CRANE_PULL_TIMEOUT: 20m
           CRANE_PUSH_TIMEOUT: 20m
           CRANE_INDEX_TIMEOUT: 5m
+          # A copy of a source tag that already moved on can carry layers.
+          CRANE_COPY_TIMEOUT: 20m
         run: scripts/sync-release-images.sh

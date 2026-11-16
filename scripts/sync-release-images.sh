@@ -26,7 +26,9 @@
 #   CRANE_SYNC_ATTEMPTS   per-arch blob transfer attempts (default: 3)
 #   CRANE_PULL_TIMEOUT    per-attempt pull timeout (default: 20m)
 #   CRANE_PUSH_TIMEOUT    per-attempt push timeout (default: 20m)
-#   CRANE_INDEX_TIMEOUT   timeout for index/tag manifest copies (default: 5m)
+#   CRANE_INDEX_TIMEOUT   timeout for a copy that only PUTs a manifest (default: 5m)
+#   CRANE_COPY_TIMEOUT    timeout for a copy that may carry layers, e.g. a
+#                         source tag already moved on (default: 20m)
 #   WORK_DIR              scratch dir for OCI layouts
 #                         (default: ${RUNNER_TEMP:-/tmp}/crane-sync)
 #
@@ -66,6 +68,7 @@ CRANE_SYNC_ATTEMPTS="${CRANE_SYNC_ATTEMPTS:-3}"
 CRANE_PULL_TIMEOUT="${CRANE_PULL_TIMEOUT:-20m}"
 CRANE_PUSH_TIMEOUT="${CRANE_PUSH_TIMEOUT:-20m}"
 CRANE_INDEX_TIMEOUT="${CRANE_INDEX_TIMEOUT:-5m}"
+CRANE_COPY_TIMEOUT="${CRANE_COPY_TIMEOUT:-20m}"
 WORK_DIR="${WORK_DIR:-${RUNNER_TEMP:-/tmp}/crane-sync}"
 
 [[ -n "${SRC_REGISTRY}" ]] || die "SRC_REGISTRY is empty"
@@ -132,11 +135,12 @@ sync_blobs() {
 copy_manifest() {
   local from="$1"
   local to="$2"
+  local limit="${3:-${CRANE_INDEX_TIMEOUT}}"
   local attempt
 
   for attempt in $(seq 1 "${CRANE_SYNC_ATTEMPTS}"); do
     log "Copying manifest ${from} -> ${to} (attempt ${attempt}/${CRANE_SYNC_ATTEMPTS})"
-    if timeout "${CRANE_INDEX_TIMEOUT}" crane copy "${from}" "${to}"; then
+    if timeout "${limit}" crane copy "${from}" "${to}"; then
       return 0
     fi
     if [[ "${attempt}" == "${CRANE_SYNC_ATTEMPTS}" ]]; then
@@ -209,7 +213,9 @@ assert_same_digest "${IMAGE_TAG}"
 # the source tag is what consumers on the other registries resolve.
 for extra in "${tags[@]:1}"; do
   verify_index "${src}:${extra}"
-  copy_manifest "${src}:${extra}" "${dst}:${extra}"
+  # The source tag may already point at a newer release whose layers are absent
+  # here, so this copy can carry blobs; use the layer-sized budget.
+  copy_manifest "${src}:${extra}" "${dst}:${extra}" "${CRANE_COPY_TIMEOUT}"
   verify_index "${dst}:${extra}"
   assert_same_digest "${extra}"
 done

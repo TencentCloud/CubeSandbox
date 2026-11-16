@@ -108,10 +108,25 @@ for _ in $(seq 1 30); do
 done
 
 # Seed a two-arch source the way release does: per-arch images plus an index.
-crane pull --platform linux/amd64 alpine:3.19 "${work}/amd.tar" >/dev/null 2>&1
-crane pull --platform linux/arm64 alpine:3.19 "${work}/arm.tar" >/dev/null 2>&1
-crane push "${work}/amd.tar" "${src}/cube-sandbox/testapp:v1.2.3-amd64" >/dev/null 2>&1
-crane push "${work}/arm.tar" "${src}/cube-sandbox/testapp:v1.2.3-arm64" >/dev/null 2>&1
+# The fixtures are built locally rather than pulled from Docker Hub, whose
+# anonymous rate limit is shared across hosted runners and would turn this gate
+# red for reasons unrelated to the script.
+seed_fixture() {
+	local tag="$1"
+	local label="$2"
+	local platform="$3"
+	local ctx="${work}/ctx-${tag}"
+	mkdir -p "${ctx}"
+	printf 'FROM scratch\nLABEL fixture=%s\n' "${label}" >"${ctx}/Dockerfile"
+	docker buildx build --platform "${platform}" -f "${ctx}/Dockerfile" \
+		--provenance=false --sbom=false --push -t "${tag}" "${ctx}" >/dev/null 2>&1
+}
+testapp_amd64="${src}/cube-sandbox/testapp:v1.2.3-amd64"
+testapp_arm64="${src}/cube-sandbox/testapp:v1.2.3-arm64"
+seed_fixture "${testapp_amd64}" v123-amd64 linux/amd64 ||
+	fail "could not build the amd64 fixture"
+seed_fixture "${testapp_arm64}" v123-arm64 linux/arm64 ||
+	fail "could not build the arm64 fixture"
 # Seed the source index the way release publishes it, using buildx when
 # available (Docker manifest list) and crane otherwise (OCI index). Both media
 # types are accepted by the mirror, so either seeding path is valid.
@@ -170,8 +185,12 @@ else
 fi
 
 # A source tag that does not exist must fail rather than publish a partial set.
+# Assert the reason so another failure is not mistaken for this one.
 if run_sync env IMAGE_TAG=v1.2.3 ARCHES="amd64 s390x" >"${work}/badarch.log" 2>&1; then
 	fail "sync succeeded for a non-existent arch tag"
+elif ! grep -q 'failed to transfer' "${work}/badarch.log"; then
+	fail "non-existent arch tag failed for an unexpected reason"
+	tail -5 "${work}/badarch.log" >&2
 else
 	pass "non-existent arch tag fails the sync"
 fi
@@ -287,10 +306,10 @@ fi
 # mirrored from the source, which may already point at a newer release. The
 # newer release needs genuinely different content, otherwise its index digest
 # equals the older one and the case cannot distinguish the two behaviours.
-crane pull --platform linux/amd64 alpine:3.20 "${work}/n-amd.tar" >/dev/null 2>&1
-crane pull --platform linux/arm64 alpine:3.20 "${work}/n-arm.tar" >/dev/null 2>&1
-crane push "${work}/n-amd.tar" "${src}/cube-sandbox/testapp:v1.2.5-amd64" >/dev/null 2>&1
-crane push "${work}/n-arm.tar" "${src}/cube-sandbox/testapp:v1.2.5-arm64" >/dev/null 2>&1
+seed_fixture "${src}/cube-sandbox/testapp:v1.2.5-amd64" v125-amd64 linux/amd64 ||
+	fail "could not build the newer amd64 fixture"
+seed_fixture "${src}/cube-sandbox/testapp:v1.2.5-arm64" v125-arm64 linux/arm64 ||
+	fail "could not build the newer arm64 fixture"
 seed_index "${src}/cube-sandbox/testapp:v1.2.5" \
 	"${src}/cube-sandbox/testapp:v1.2.5-amd64" \
 	"${src}/cube-sandbox/testapp:v1.2.5-arm64"
