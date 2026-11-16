@@ -98,6 +98,20 @@ func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
 	})
 	require.Len(t, rows, 1)
 
+	// Assert the synthesis-time echo BEFORE enrichSandboxList runs: production
+	// order is enrich-then-merge, so enrich can never cover a pause-synthesized
+	// row — these fields must come from the spec applyPauseBindings got.
+	require.NotNil(t, rows[0].AutoPause)
+	require.True(t, *rows[0].AutoPause)
+	require.NotNil(t, rows[0].AutoResume)
+	require.True(t, *rows[0].AutoResume)
+	require.NotNil(t, rows[0].CubeNetworkConfig)
+	require.Equal(t, maskHost, *rows[0].CubeNetworkConfig.MaskRequestHost)
+	require.Empty(t, rows[0].CubeNetworkConfig.Rules, "echoed config must drop rules (inject secrets)")
+	require.Len(t, spec.CubeNetworkConfig.Rules, 1, "echo must copy the config, spec rules stay untouched")
+
+	// enrichSandboxList re-fills from GetMany with the same values; assert it
+	// does not clobber the synthesized echo.
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
