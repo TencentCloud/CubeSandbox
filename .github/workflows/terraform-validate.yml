@@ -18,6 +18,10 @@ on:
       # bump-image.sh is the single source of truth for the hard-coded image
       # tags this deployer bakes in; test_bump_image.sh guards it.
       - 'scripts/bump-image.sh'
+      # sync-release-images.sh and its test guard the TCR cn digest contract.
+      - 'scripts/sync-release-images.sh'
+      - 'deploy/one-click/tests/test_sync_release_images.sh'
+      - '.github/workflows/release-docker-images.yml'
       - '.github/workflows/terraform-validate.yml'
       - 'CubeObservability/**'
       - 'docs/guide/observability.md'
