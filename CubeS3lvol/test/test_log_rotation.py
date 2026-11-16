@@ -49,10 +49,27 @@ class RotationTest(unittest.TestCase):
 
     def test_policy_uses_size_and_shared_framework(self):
         text = self.render()
-        for value in ['size 256M', 'rotate 8', 'copytruncate', 'su root root', 'prerotate']:
+        for value in ['size 256M', 'rotate 8', 'copytruncate', 'su root root', 'firstaction',
+                      'createolddir 0700 root root']:
             self.assertIn(value, text)
         self.assertNotIn('hourly', text)
+        # A prerotate refusal runs after archives were shifted and erodes them.
+        self.assertNotRegex(text, r'(?m)^\s*prerotate\b')
         self.assertIn(str(self.log), text)
+
+    def test_placeholder_names_in_paths_are_rendered_literally(self):
+        self.log = self.root / 'at@ARCHIVE@.log'
+        self.log.write_text('log\n', encoding='utf-8')
+        text = self.render(RCOW_LOG=str(self.log))
+        self.assertIn('"{}" {{'.format(self.log), text)
+        self.assertIn('olddir {}\n'.format(self.archive), text)
+
+    def test_check_space_recreates_a_removed_archive_directory(self):
+        self.render()
+        shutil.rmtree(self.root / 'rotated')
+        with patch.object(policy.shutil, 'disk_usage', return_value=SimpleNamespace(free=2**62)):
+            policy.check_space(self.log, self.archive)
+        self.assertTrue(self.archive.is_dir())
 
     def test_log_dir_fallback(self):
         text = self.render(RCOW_LOG='', RCOW_LOG_DIR=str(self.root))
@@ -144,6 +161,22 @@ class RotationTest(unittest.TestCase):
         return subprocess.run(['bash', str(INSTALLER)], env=dict(self.env, **settings),
                               text=True, capture_output=True, check=True)
 
+    def install_without_logrotate(self, **settings):
+        script = 'source "$1"; resolve_logrotate() { return 1; }; main'
+        return subprocess.run(['bash', '-c', script, 'bash', str(INSTALLER)],
+                              env=dict(self.env, **settings), text=True,
+                              capture_output=True, check=True)
+
+    def reject_storage_policies(self):
+        (self.bin / 'logrotate').write_text(
+            '#!/bin/sh\nfor last do :; done\nif grep -q "^[[:space:]]*copytruncate" "$last"; then\n'
+            '  echo "error: rejected storage policy"\n  exit 1\nfi\n', encoding='utf-8')
+
+    def assert_host_rotation_installed(self):
+        self.assertEqual(self.shim.read_bytes(), (POLICY_DIR / 'cubesandbox').read_bytes())
+        self.assertTrue((self.units / 'cube-sandbox-logrotate.timer').exists())
+        self.assertIn('restart cube-sandbox-logrotate.timer', self.calls.read_text(encoding='utf-8'))
+
     def test_stale_override_recovers_both_policies_in_one_install(self):
         self.prepare_installer()
         result = self.install(ONE_CLICK_LOGROTATE_BIN=str(self.root / 'missing'))
@@ -163,6 +196,14 @@ class RotationTest(unittest.TestCase):
         self.assertFalse(self.storage.exists())
         self.assertTrue(self.shim.exists())
 
+    def test_storage_policy_removed_when_disabled_without_logrotate(self):
+        self.prepare_installer()
+        self.install()
+        result = self.install_without_logrotate(ONE_CLICK_ENABLE_S3LVOL='0')
+        self.assertIn('logrotate missing', result.stderr)
+        self.assertFalse(self.storage.exists())
+        self.assertTrue(self.shim.exists())
+
     def test_real_installer_validates_custom_log_paths(self):
         binary = self.real_logrotate()
         self.prepare_installer()
@@ -175,27 +216,72 @@ class RotationTest(unittest.TestCase):
         self.assertEqual(rotated.returncode, 0, rotated.stderr)
         self.assertEqual(self.log.stat().st_size, 0)
 
-    def test_rejected_storage_policy_preserves_live_policies_and_timer(self):
+    def test_real_installer_accepts_error_text_in_log_path(self):
+        # --debug echoes the path ("rotating pattern: ..."); only a leading
+        # "error:" is a logrotate diagnostic.
+        binary = self.real_logrotate()
+        self.prepare_installer()
+        self.log = self.root / 'error:disk.log'
+        self.log.write_text('log\n', encoding='utf-8')
+        result = self.install(ONE_CLICK_LOGROTATE_BIN=binary, RCOW_LOG=str(self.log))
+        self.assertNotIn('rejected', result.stderr)
+        self.assertTrue(self.storage.exists(), result.stderr)
+
+    def test_rejected_storage_policy_is_kept_while_host_rotation_is_refreshed(self):
         self.prepare_installer()
         self.install()
         original = self.storage.read_bytes()
-        calls = self.calls.read_bytes()
-        (self.bin / 'logrotate').write_text(
-            '#!/bin/sh\nfor last do :; done\nif grep -q "^[[:space:]]*copytruncate" "$last"; then\n'
-            '  echo "error: rejected storage policy"\n  exit 1\nfi\n', encoding='utf-8')
+        self.shim.write_text('previous host policy\n', encoding='utf-8')
+        self.calls.unlink()
+        self.reject_storage_policies()
         result = self.install(RCOW_LOG=str(self.root / 'replacement.log'))
         self.assertIn('rejected policy saved', result.stderr)
+        self.assertIn('live storage policy left untouched', result.stderr)
         self.assertEqual(self.storage.read_bytes(), original)
-        self.assertEqual(self.calls.read_bytes(), calls)
         self.assertEqual(len(list(self.shim.parent.parent.glob('s3lvol.rejected.*'))), 1)
+        self.assert_host_rotation_installed()
 
-    def test_unrenderable_policy_leaves_existing_install_untouched(self):
+    def test_rejected_storage_policy_does_not_block_first_install(self):
+        self.prepare_installer()
+        self.reject_storage_policies()
+        result = self.install()
+        self.assertIn('storage log rotation is not installed', result.stderr)
+        self.assertFalse(self.storage.exists())
+        self.assert_host_rotation_installed()
+
+    def test_unrenderable_policy_leaves_existing_storage_policy_untouched(self):
         self.prepare_installer()
         self.install()
         original = self.storage.read_bytes()
+        self.calls.unlink()
         result = self.install(RCOW_LOG_ARCHIVE_DIR=str(self.root / 'bad dir'))
-        self.assertIn('live policies left untouched', result.stderr)
+        self.assertIn('live storage policy left untouched', result.stderr)
         self.assertEqual(self.storage.read_bytes(), original)
+        self.assert_host_rotation_installed()
+
+    def test_unrenderable_policy_does_not_block_first_install(self):
+        self.prepare_installer()
+        result = self.install(RCOW_LOG='relative.log')
+        self.assertIn('could not render storage log policy', result.stderr)
+        self.assertFalse(self.storage.exists())
+        self.assert_host_rotation_installed()
+
+    def test_log_settings_reach_the_runtime_env(self):
+        # The policy is rendered from the installer's environment and the
+        # service reads .one-click.env: real template keys survive the upgrade
+        # merge and the upsert keeps both sides on the same values.
+        example = (ROOT / 'deploy/one-click/env.example').read_text(encoding='utf-8')
+        installer = (ROOT / 'deploy/one-click/install.sh').read_text(encoding='utf-8')
+        loop = installer[installer.index('for rcow_log_key in'):]
+        loop = loop[:loop.index('done')]
+        for key in ['RCOW_LOG_DIR', 'RCOW_LOG', 'RCOW_LOG_ARCHIVE_DIR',
+                    'RCOW_LOG_RESERVE_BYTES', 'RCOW_LOG_RESTART_RETAIN']:
+            with self.subTest(key=key):
+                self.assertRegex(example, r'(?m)^{}='.format(key))
+                self.assertRegex(loop, r'\b{}\b'.format(key))
+        self.assertIn('upsert_env_kv "${RUNTIME_ENV_FILE}" "${rcow_log_key}"', loop)
+        self.assertRegex(example, r'(?m)^RCOW_LOG_RESTART_RETAIN=8$')
+        self.assertIn('RCOW_LOG_RESTART_RETAIN="${RCOW_LOG_RESTART_RETAIN-8}"', installer)
 
     def test_restart_retention_only_removes_matching_regular_files(self):
         names = [self.log.name + '.20000101-000000', self.log.name + '.20000101-000000~',
@@ -291,6 +377,32 @@ class RotationTest(unittest.TestCase):
         self.assertEqual(self.log.read_bytes(), original)
         self.assertEqual(previous.read_bytes(), b'previous archive\n')
         self.assertEqual(list(self.archive.iterdir()), [previous])
+
+    def test_real_repeated_refusals_keep_every_archive_generation(self):
+        self.real_logrotate()
+        text = self.render(RCOW_LOG_RESERVE_BYTES=str(2**63))
+        (self.archive / (self.log.name + '.1')).write_bytes(b'generation 1\n')
+        for index in range(2, 9):
+            (self.archive / '{}.{}.gz'.format(self.log.name, index)).write_bytes(
+                'generation {}\n'.format(index).encode())
+        before = {path.name: path.read_bytes() for path in self.archive.iterdir()}
+        original = self.log.read_bytes()
+        for _ in range(3):
+            result = self.rotate(text)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('insufficient archive space', result.stderr)
+        self.assertEqual({path.name: path.read_bytes() for path in self.archive.iterdir()}, before)
+        self.assertEqual(self.log.read_bytes(), original)
+
+    def test_real_rotation_recreates_removed_archive_directory(self):
+        self.real_logrotate()
+        text = self.render()
+        original = self.log.read_bytes()
+        shutil.rmtree(self.root / 'rotated')
+        result = self.rotate(text)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.archive / (self.log.name + '.1')).read_bytes(), original)
+        self.assertEqual(self.log.stat().st_size, 0)
 
     def test_frequent_checks_preserve_hourly_policy(self):
         self.real_logrotate()

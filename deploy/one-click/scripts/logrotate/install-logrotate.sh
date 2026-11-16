@@ -74,37 +74,50 @@ warn_existing_timer() {
 }
 
 # Some logrotate parse problems (for example an unknown directive) are only
-# reported as "unknown option ... -- ignoring line" with a zero exit status, so
-# check both the exit code and the debug output. --debug writes nothing; the
-# temporary state file keeps the real rotation state untouched. Validate a
+# reported as "error: ... unknown option ... -- ignoring line" with a zero exit
+# status, so check both the exit code and the debug output. Only lines that
+# start with "error:" count: --debug also echoes the log path ("rotating
+# pattern: ..."), which may itself contain that text. --debug writes nothing;
+# the temporary state file keeps the real rotation state untouched. Validate a
 # staged copy first so a rejected upgrade never overwrites the live policy.
+# The caller decides what a rejection means for the timer.
 validate_policy() {
   local src="$1" dst="$2" out_dir out_file candidate rejected rc
   out_dir="$(mktemp -d)"
-  candidate="${out_dir}/cubesandbox"
+  candidate="${out_dir}/$(basename "${dst}")"
   # logrotate refuses config files owned by non-root when running as root.
   install -m 0644 "${src}" "${candidate}"
   out_file="${out_dir}/logrotate.out"
   rc=0
   "${LOGROTATE_BIN}" --debug --state "${out_dir}/status" "${candidate}" \
     >"${out_file}" 2>&1 || rc=$?
-  if [[ "${rc}" -ne 0 ]] || grep -qE 'unknown option|error:' "${out_file}"; then
+  if [[ "${rc}" -ne 0 ]] || grep -q '^error:' "${out_file}"; then
     rejected="$(dirname "$(dirname "${dst}")")/$(basename "${dst}").rejected.$(date +%s)"
     install -d -m 0755 "$(dirname "${rejected}")"
     install -m 0644 "${src}" "${rejected}"
-    log "WARNING: logrotate rejected the packaged policy; timer not installed or enabled"
+    log "WARNING: logrotate rejected the packaged policy for ${dst}"
     log "         rejected policy saved for diagnosis: ${rejected}"
-    if [[ -e "${dst}" ]]; then
-      log "         live policy left untouched: ${dst}"
-      warn_existing_timer "it keeps using the unchanged policy at ${dst}"
-    else
-      warn_existing_timer "no live policy is installed; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
-    fi
     sed -n '1,40p' "${out_file}" >&2
     rm -rf "${out_dir}"
     return 1
   fi
   rm -rf "${out_dir}"
+}
+
+cleanup_work_dir() {
+  [[ -n "${LOGROTATE_WORK_DIR:-}" ]] && rm -rf -- "${LOGROTATE_WORK_DIR}"
+  return 0
+}
+
+# Report a storage policy that could not be refreshed. The host policy and the
+# shared timer are handled independently: a storage-side problem never costs
+# CubeShim and VMM their rotation.
+skip_storage_policy() {
+  if [[ -e "${S3LVOL_DST}" ]]; then
+    log "WARNING: $*; live storage policy left untouched: ${S3LVOL_DST}"
+  else
+    log "WARNING: $*; storage log rotation is not installed"
+  fi
 }
 
 main() {
@@ -119,14 +132,17 @@ main() {
   [[ -f "${POLICY_SRC}" && -f "${SERVICE_SRC}" && -f "${TIMER_SRC}" ]] \
     || die "logrotate sources missing under ${SCRIPT_DIR}"
 
-  local work_dir s3_candidate=""
-  work_dir="$(mktemp -d)"
-  trap "rm -rf -- $(printf '%q' "${work_dir}")" EXIT
+  # Storage policy action: "install" a validated candidate, "keep" whatever is
+  # live (enabled but the candidate is unusable), or "remove" (disabled).
+  local s3_candidate="" s3_action="remove"
+  LOGROTATE_WORK_DIR="$(mktemp -d)"
+  trap cleanup_work_dir EXIT
   if [[ "${ONE_CLICK_ENABLE_S3LVOL:-0}" == "1" ]]; then
-    s3_candidate="${work_dir}/s3lvol"
+    s3_candidate="${LOGROTATE_WORK_DIR}/s3lvol"
+    s3_action="install"
     if ! python3 "${SCRIPT_DIR}/s3lvol_policy.py" render "${SCRIPT_DIR}/s3lvol" >"${s3_candidate}"; then
-      log "WARNING: could not render storage log policy; live policies left untouched"
-      return 0
+      skip_storage_policy "could not render storage log policy"
+      s3_action="keep"
     fi
   fi
 
@@ -135,29 +151,41 @@ main() {
     # Stage first-install policies only. An unvalidated upgrade must not
     # overwrite policies still used by an existing timer.
     [[ -e "${POLICY_DST}" ]] || install -m 0644 "${POLICY_SRC}" "${POLICY_DST}"
-    if [[ -n "${s3_candidate}" && ! -e "${S3LVOL_DST}" ]]; then
-      install -m 0644 "${s3_candidate}" "${S3LVOL_DST}"
-    fi
+    case "${s3_action}" in
+      install) [[ -e "${S3LVOL_DST}" ]] || install -m 0644 "${s3_candidate}" "${S3LVOL_DST}" ;;
+      remove) rm -f "${S3LVOL_DST}" ;;
+    esac
     log "WARNING: logrotate missing; policies staged but timer not installed or enabled"
     log "         install logrotate, then re-run: bash ${SCRIPT_DIR}/install-logrotate.sh"
     warn_existing_timer "it cannot run without logrotate; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
     return 0
   fi
   LOGROTATE_BIN="$(resolve_logrotate)"
-  validate_policy "${POLICY_SRC}" "${POLICY_DST}" || return 0
-  if [[ -n "${s3_candidate}" ]]; then
-    validate_policy "${s3_candidate}" "${S3LVOL_DST}" || return 0
+  if ! validate_policy "${POLICY_SRC}" "${POLICY_DST}"; then
+    log "WARNING: host log policy rejected; timer not installed or enabled"
+    if [[ -e "${POLICY_DST}" ]]; then
+      log "         live policy left untouched: ${POLICY_DST}"
+      warn_existing_timer "it keeps using the unchanged policy at ${POLICY_DST}"
+    else
+      warn_existing_timer "no live policy is installed; disable it with: systemctl disable --now cube-sandbox-logrotate.timer"
+    fi
+    return 0
+  fi
+  if [[ "${s3_action}" == "install" ]] && ! validate_policy "${s3_candidate}" "${S3LVOL_DST}"; then
+    skip_storage_policy "storage log policy rejected"
+    s3_action="keep"
   fi
 
   install -d -m 0755 "$(dirname "${POLICY_DST}")"
   install -m 0644 "${POLICY_SRC}" "${POLICY_DST}"
   log "installed ${POLICY_DST}"
-  if [[ -n "${s3_candidate}" ]]; then
-    install -m 0644 "${s3_candidate}" "${S3LVOL_DST}"
-    log "installed ${S3LVOL_DST}"
-  else
-    rm -f "${S3LVOL_DST}"
-  fi
+  case "${s3_action}" in
+    install)
+      install -m 0644 "${s3_candidate}" "${S3LVOL_DST}"
+      log "installed ${S3LVOL_DST}"
+      ;;
+    remove) rm -f "${S3LVOL_DST}" ;;
+  esac
   install -d -m 0755 "${UNIT_DIR}"
   render_service "${SERVICE_SRC}" "${UNIT_DIR}/cube-sandbox-logrotate.service" \
     "${LOGROTATE_BIN}" "$(dirname "${POLICY_DST}")"
@@ -184,8 +212,6 @@ main() {
     log "WARNING: moving legacy ${LEGACY_DST} -> ${bak}"
     mv "${LEGACY_DST}" "${bak}" || log "WARNING: could not retire ${LEGACY_DST}"
   fi
-  rm -rf "${work_dir}"
-  trap - EXIT
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

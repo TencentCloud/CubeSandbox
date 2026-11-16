@@ -699,6 +699,75 @@ apply_one_click_observability_intent() {
   return 0
 }
 
+# Storage log keys are active env.example entries, so a .env copied from the
+# template carries their defaults (empty paths, RCOW_LOG_RESTART_RETAIN=8).
+# Sourcing that .env, or the upgrade merge output, must not clobber
+# `RCOW_LOG=/x ./install.sh` or `RCOW_LOG_RESTART_RETAIN= ./install.sh`.
+# Per key: a .env value that differs from the template default wins, then a
+# process-environment value (an empty one included), then the loaded or merged
+# value. This is the MinIO / logs-backend rule of snapshot_one_click_toggles.
+ONE_CLICK_RCOW_LOG_KEYS=(
+  RCOW_LOG_DIR
+  RCOW_LOG
+  RCOW_LOG_ARCHIVE_DIR
+  RCOW_LOG_RESERVE_BYTES
+  RCOW_LOG_RESTART_RETAIN
+)
+
+# Must run before any env file is sourced.
+snapshot_one_click_rcow_log_intent() {
+  local env_file="$1"
+  local key
+  local template="$(dirname "${BASH_SOURCE[0]}")/../env.example"
+  # Separate declaration and assignment: see snapshot_one_click_toggles.
+  declare -gA ONE_CLICK_RCOW_LOG_ENV_SNAPSHOT
+  declare -gA ONE_CLICK_RCOW_LOG_DOTENV_SNAPSHOT
+  declare -gA ONE_CLICK_RCOW_LOG_DOTENV_PRESENT
+  declare -gA ONE_CLICK_RCOW_LOG_TEMPLATE_DEFAULT
+  ONE_CLICK_RCOW_LOG_ENV_SNAPSHOT=()
+  ONE_CLICK_RCOW_LOG_DOTENV_SNAPSHOT=()
+  ONE_CLICK_RCOW_LOG_DOTENV_PRESENT=()
+  ONE_CLICK_RCOW_LOG_TEMPLATE_DEFAULT=()
+  for key in "${ONE_CLICK_RCOW_LOG_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_RCOW_LOG_ENV_SNAPSHOT["${key}"]="${!key}"
+    fi
+    if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+      ONE_CLICK_RCOW_LOG_DOTENV_PRESENT["${key}"]=1
+      ONE_CLICK_RCOW_LOG_TEMPLATE_DEFAULT["${key}"]="$(read_env_key "${template}" "${key}")"
+    fi
+  done
+  return 0
+}
+
+# Run right after load_env_file of the bundle .env, so quoted values are
+# compared and replayed as the shell interpreted them.
+capture_one_click_rcow_log_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_RCOW_LOG_KEYS[@]}"; do
+    [[ -n "${ONE_CLICK_RCOW_LOG_DOTENV_PRESENT[${key}]+x}" ]] || continue
+    [[ "${!key-}" == "${ONE_CLICK_RCOW_LOG_TEMPLATE_DEFAULT[${key}]}" ]] && continue
+    ONE_CLICK_RCOW_LOG_DOTENV_SNAPSHOT["${key}"]="${!key-}"
+  done
+  return 0
+}
+
+apply_one_click_rcow_log_intent() {
+  local key
+  for key in "${ONE_CLICK_RCOW_LOG_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_RCOW_LOG_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_RCOW_LOG_DOTENV_SNAPSHOT[${key}]}"
+    elif [[ -n "${ONE_CLICK_RCOW_LOG_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_RCOW_LOG_ENV_SNAPSHOT[${key}]}"
+    else
+      continue
+    fi
+    # install-logrotate.sh reads these from its environment.
+    export "${key?}"
+  done
+  return 0
+}
+
 # Database engine keys (and CUBE_EXTERNAL_REDIS_DB) are commented out of
 # env.example, so merge_env_three_way always re-appends the previous
 # .one-click.env markers as "preserved custom settings". Without a this-run

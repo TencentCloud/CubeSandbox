@@ -7,8 +7,6 @@ ConditionPathExists=@POLICY@
 
 [Service]
 Type=oneshot
-# A legacy storage log can take longer than the default start timeout to copy.
-TimeoutStartSec=infinity
 # Private state file: avoid locking against the distro daily logrotate.
 StateDirectory=cube-sandbox-logrotate
 # @LOGROTATE@ and @POLICY@ are replaced at install time.
