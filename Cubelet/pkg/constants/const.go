@@ -253,7 +253,22 @@ const (
 	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
 	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
 	MasterAnnotationInstanceType            = "cube.master.instance.type"
+	// MasterAnnotationCgroupMode is the guest cgroup hierarchy selector for
+	// the template and every sandbox created from it: empty = default unified
+	// v2 hierarchy; "legacy" lets the guest mount cgroup v1 controllers itself
+	// (required by Android init).
+	MasterAnnotationCgroupMode = "cube.master.cgroup_mode"
 )
+
+// GuestAffectingMasterAnnotations lists the cube.master.* request-level
+// annotations that alter the guest environment and therefore must be copied
+// from the sandbox request into the sandbox OCI spec annotations. The
+// annotation map assembled in CreateSandbox otherwise carries only
+// platform-internal keys, so without this passthrough these flags are
+// silently dropped before the shim can see them.
+var GuestAffectingMasterAnnotations = []string{
+	MasterAnnotationCgroupMode,
+}
 
 // Inventory version annotations used by Ensure
 const (
