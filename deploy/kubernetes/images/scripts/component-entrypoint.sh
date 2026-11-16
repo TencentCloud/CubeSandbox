@@ -753,6 +753,45 @@ patch_cow_jfs_opt_in() {
   log "cow.jfs enable=true mount_path=${mount_path} root=${root} cache_dir=${cache_dir}"
 }
 
+# patch_cow_jfs_rootfs_placement sets [cow.jfs] rootfs_placement (shared|local)
+# in an already-enabled jfs table.
+patch_cow_jfs_rootfs_placement() {
+  local cfg="$1"
+  local placement="$2"
+  local header='[plugins."io.cubelet.internal.v1.storage".cow.jfs]'
+  local tmp
+
+  case "${placement}" in
+    shared|local) ;;
+    *) fail "CUBE_JFS_ROOTFS_PLACEMENT must be shared or local, got '${placement}'" ;;
+  esac
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  awk -v header="${header}" -v placement="${placement}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    function flush_jfs() {
+      if (in_jfs && !found) print "    rootfs_placement = \"" placement "\""
+      in_jfs = 0
+    }
+    is_table($0, header) { flush_jfs(); in_jfs = 1; found = 0; print; next }
+    in_jfs && /^[[:space:]]*\[/ { flush_jfs() }
+    in_jfs && /^[[:space:]]*rootfs_placement[[:space:]]*=/ {
+      print "    rootfs_placement = \"" placement "\""; found = 1; next
+    }
+    { print }
+    END { flush_jfs() }
+  ' "${cfg}" > "${tmp}"
+  if [[ "$(grep -Ec '^[[:space:]]*rootfs_placement[[:space:]]*=' "${tmp}" || true)" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "failed to set ${header} rootfs_placement = ${placement}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+  log "cow.jfs rootfs_placement=${placement}"
+}
+
 detect_primary_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '
     {
@@ -1125,6 +1164,9 @@ run_cubelet() {
       "${CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs}" \
       "${CUBE_JFS_ROOT:-.}" \
       "${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
+    if [[ -n "${CUBE_JFS_ROOTFS_PLACEMENT:-}" ]]; then
+      patch_cow_jfs_rootfs_placement "${cfg}" "${CUBE_JFS_ROOTFS_PLACEMENT}"
+    fi
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"

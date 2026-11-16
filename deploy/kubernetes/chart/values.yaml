@@ -1319,6 +1319,12 @@ cubeJuiceFS:
   # "." stores objects/, snapshots/, and pause-snapshots/ directly at mountPath.
   root: "."
   cacheDir: /data/cubelet/jfs-cache
+  # Where a jfs sandbox's runtime rootfs lives. "shared" (default) keeps it on
+  # JuiceFS. "local" keeps it on the node-local XFS reflink store for xfs-level
+  # random I/O and publishes only each pause package's / snapshot's rootfs
+  # difference to JuiceFS. Must be the same on every node; switch only with no
+  # paused or running jfs sandboxes.
+  rootfsPlacement: ""
   cacheSizeMB: 102400
   terminationGracePeriodSeconds: 120
   mountOptions:

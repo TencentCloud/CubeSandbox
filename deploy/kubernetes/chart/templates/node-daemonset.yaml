@@ -81,6 +81,10 @@ spec:
               value: {{ .Values.cubeJuiceFS.root | quote }}
             - name: CUBE_JFS_CACHE_DIR
               value: {{ .Values.cubeJuiceFS.cacheDir | quote }}
+            {{- with .Values.cubeJuiceFS.rootfsPlacement }}
+            - name: CUBE_JFS_ROOTFS_PLACEMENT
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
           ports:
             - name: cubelet-grpc

@@ -151,6 +151,13 @@ type CowJFSUserConfig struct {
 	// uploaded, and so restorable on another node, once none of its blocks
 	// is left in the writeback staging area under it.
 	CacheDir string `toml:"cache_dir"`
+	// RootfsPlacement selects where a jfs sandbox's runtime rootfs lives.
+	// "shared" (default) keeps it on the JuiceFS mount like every other jfs
+	// object. "local" keeps runtime rootfs on the node-local XFS reflink
+	// store (xfs-level random I/O) and publishes only each pause package's or
+	// snapshot's rootfs difference to JuiceFS; memory and package metadata
+	// stay on JuiceFS. Every node in a cluster must use the same value.
+	RootfsPlacement string `toml:"rootfs_placement"`
 }
 
 // CowS3UserConfig is the operator-facing `[cow.s3]` block.

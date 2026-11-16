@@ -109,6 +109,9 @@ func (jfsUploader) UploadStatus(ctx context.Context, snapshotID string) (*cow.Re
 	id := strings.TrimSpace(snapshotID)
 	tracker, err := jfsUploadTrackerFor(ctx, id)
 	if err != nil {
+		if errors.Is(err, errJFSRootfsPublishPending) {
+			return &cow.RemoteStatus{SnapshotID: id, State: cow.RemoteStateRunning, Message: err.Error()}, nil
+		}
 		if errors.Is(err, ErrSnapshotCatalogNotFound) || errors.Is(err, errJFSPackageIncomplete) {
 			return &cow.RemoteStatus{SnapshotID: id, State: cow.RemoteStateFailed, Message: err.Error()}, nil
 		}
@@ -321,7 +324,16 @@ func jfsPackageFiles(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs, 
 		return store.ResolveDevPath(ctx, name, k)
 	}
 	files := &cow.RemoteUUIDs{Metadata: strings.TrimSpace(entry.SnapshotPath)}
-	if files.Rootfs, err = resolve(entry.RootfsVol, entry.RootfsKind); err != nil {
+	// rootfs_placement=local: the package rootfs lives on the node that made
+	// it; what other nodes import is the published difference in the home.
+	if meta, published, pendingHere := jfsLocalPackageState(entry); published {
+		files.Rootfs = filepath.Join(meta, jfsRootfsDiffBlob)
+	} else if pendingHere {
+		if h := activeJFSHybrid(); h != nil {
+			h.publishAsync(id)
+		}
+		return nil, fmt.Errorf("jfs package %s: %w", id, errJFSRootfsPublishPending)
+	} else if files.Rootfs, err = resolve(entry.RootfsVol, entry.RootfsKind); err != nil {
 		return nil, fmt.Errorf("resolve jfs package %s rootfs: %w", id, err)
 	}
 	if files.Memory, err = resolve(entry.MemoryVol, entry.MemoryKind); err != nil {
