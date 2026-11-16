@@ -166,7 +166,7 @@ func (s *Sandbox) doEnvdFileGet(ctx context.Context, path string, options ...fil
 	}
 
 	query := newEnvdFileQuery(path, options...)
-	req, err := s.newEnvdRequest(ctx, http.MethodGet, "/files", query, nil)
+	req, err := s.newEnvdRequest(ctx, http.MethodGet, envdFilesPath, query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func newEnvdFileQuery(path string, options ...fileRequestOption) url.Values {
 }
 
 func (s *Sandbox) doEnvdUpload(ctx context.Context, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
-	req, err := s.newEnvdRequest(ctx, http.MethodPost, "/files", query, body)
+	req, err := s.newEnvdRequest(ctx, http.MethodPost, envdFilesPath, query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -229,20 +229,39 @@ func (s *Sandbox) doEnvdUpload(ctx context.Context, query url.Values, body io.Re
 	return s.client.dataHTTP.Do(req)
 }
 
-func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
+const (
+	envdFilesPath        = "/files"
+	multipartFileField   = "file"
+	streamUploadFilename = "upload"
+)
+
+// multipartFileFraming shares the wire format without changing Write's legacy
+// filename or its buffered fallback. WriteFrom uses a constant safe filename.
+func multipartFileFraming(filename string) ([]byte, []byte, string, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-	part, err := writer.CreateFormFile("file", path)
+	if _, err := writer.CreateFormFile(multipartFileField, filename); err != nil {
+		return nil, nil, "", err
+	}
+	headerLen := buf.Len()
+	if err := writer.Close(); err != nil {
+		return nil, nil, "", err
+	}
+	raw := buf.Bytes()
+	return raw[:headerLen], raw[headerLen:], writer.FormDataContentType(), nil
+}
+
+func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
+	header, footer, contentType, err := multipartFileFraming(path)
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := part.Write(data); err != nil {
-		return nil, "", err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, "", err
-	}
-	return &buf, writer.FormDataContentType(), nil
+	var buf bytes.Buffer
+	buf.Grow(len(header) + len(data) + len(footer))
+	buf.Write(header)
+	buf.Write(data)
+	buf.Write(footer)
+	return &buf, contentType, nil
 }
 
 func (s *Sandbox) newEnvdRequest(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Request, error) {
