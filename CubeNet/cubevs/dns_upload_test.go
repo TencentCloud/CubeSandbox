@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -31,11 +33,12 @@ const (
 )
 
 type dnsUploadTestEnv struct {
-	program   *ebpf.Program
-	meta      *ebpf.Map
-	track     *ebpf.Map
-	caseStore *ebpf.Map
-	events    *ebpf.Map
+	program        *ebpf.Program
+	meta           *ebpf.Map
+	track          *ebpf.Map
+	caseStore      *ebpf.Map
+	events         *ebpf.Map
+	sandboxMetrics *ebpf.Map
 }
 
 func loadDNSUploadTestEnv(t *testing.T) *dnsUploadTestEnv {
@@ -64,14 +67,15 @@ func loadDNSUploadTestEnv(t *testing.T) *dnsUploadTestEnv {
 	t.Cleanup(coll.Close)
 
 	env := &dnsUploadTestEnv{
-		program:   coll.Programs["test_dns_upload"],
-		meta:      coll.Maps["ifindex_to_mvmmeta"],
-		track:     coll.Maps["dns_query_track"],
-		caseStore: coll.Maps["test_upload_case"],
-		events:    coll.Maps["dns_events"],
+		program:        coll.Programs["test_dns_upload"],
+		meta:           coll.Maps["ifindex_to_mvmmeta"],
+		track:          coll.Maps["dns_query_track"],
+		caseStore:      coll.Maps["test_upload_case"],
+		events:         coll.Maps["dns_events"],
+		sandboxMetrics: coll.Maps["sandbox_metrics"],
 	}
 	if env.program == nil || env.meta == nil || env.track == nil ||
-		env.caseStore == nil || env.events == nil {
+		env.caseStore == nil || env.events == nil || env.sandboxMetrics == nil {
 		t.Fatal("loaded dns upload test program or maps missing")
 	}
 	return env
@@ -307,12 +311,32 @@ func TestDNSUploadRecordCarriesTheWholeFrame(t *testing.T) {
 	env.trackQuery(t, ifindex, srcPort, id, "qq.com", false)
 	env.stageUploadCase(t, ifindex, srcPort)
 
+	// Seed metrics under key zero, which is the sandbox key used by the test
+	// program. A failed perf helper increments the drop counter; a successful
+	// helper increments the forwarded counter even on kernels whose test-run
+	// path cannot deliver the appended skb bytes to the reader.
+	metricsKey := uint32(0)
+	metrics := dnsuploadSandboxMetrics{}
+	if err := env.sandboxMetrics.Put(&metricsKey, &metrics); err != nil {
+		t.Fatalf("seed sandbox metrics: %v", err)
+	}
+
 	frame := buildDNSReplyFrame(t, defaultDNSReplyOptions())
 	if got := env.run(t, frame); got != uploadVerdictUpload {
 		t.Fatalf("verdict = %d, want upload (%d)", got, uploadVerdictUpload)
 	}
-
+	reader.SetDeadline(time.Now().Add(time.Second))
 	record, err := reader.Read()
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		if err := env.sandboxMetrics.Lookup(&metricsKey, &metrics); err != nil {
+			t.Fatalf("read sandbox metrics after perf timeout: %v", err)
+		}
+		if metrics.IngressDropPackets != 0 || metrics.IngressPackets != 1 {
+			t.Fatalf("perf helper did not succeed: forwarded=%d dropped=%d",
+				metrics.IngressPackets, metrics.IngressDropPackets)
+		}
+		t.Skipf("kernel BPF test-run cannot deliver appended skb bytes to perf reader: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("read perf record: %v", err)
 	}
@@ -388,11 +412,9 @@ func TestDNSUploadEmitsNothingWhenForwarding(t *testing.T) {
 		t.Fatalf("verdict = %d, want forward", got)
 	}
 
-	if err := reader.Close(); err != nil {
-		t.Fatalf("close reader: %v", err)
-	}
-	if _, err := reader.Read(); !errors.Is(err, perf.ErrClosed) {
-		t.Fatalf("expected no record before close, got err=%v", err)
+	reader.SetDeadline(time.Now().Add(time.Second))
+	if _, err := reader.Read(); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected no perf record, got err=%v", err)
 	}
 }
 
