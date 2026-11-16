@@ -867,10 +867,14 @@ jobs:
           ghcr="ghcr.io/tencentcloud/${IMAGE_NAME}"
           tcr="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
           for tag in "${tags[@]}"; do
-            # Read the digest from the JSON manifest: a template referencing a
-            # missing field silently falls back to the full human-readable dump.
-            ghcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${ghcr}:${tag}" | jq -r .digest)"
-            tcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${tcr}:${tag}" | jq -r .digest)"
+            # Read the digest from the JSON manifest. -e makes a missing or null
+            # field fail instead of yielding "null" on both sides and passing.
+            ghcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${ghcr}:${tag}" | jq -er .digest)"
+            tcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${tcr}:${tag}" | jq -er .digest)"
+            if [[ "${ghcr_digest}" != sha256:* || "${tcr_digest}" != sha256:* ]]; then
+              echo "Refusing to continue: ${tag} did not resolve to a sha256 digest: ghcr ${ghcr_digest} tcr-int ${tcr_digest}" >&2
+              exit 1
+            fi
             if [[ "${ghcr_digest}" != "${tcr_digest}" ]]; then
               echo "Refusing to continue: ${tag} differs between registries: ghcr ${ghcr_digest} != tcr-int ${tcr_digest}" >&2
               exit 1

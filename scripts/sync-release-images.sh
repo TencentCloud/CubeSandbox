@@ -186,6 +186,9 @@ for arch in "${arch_list[@]}"; do
   assert_same_digest "${IMAGE_TAG}-${arch}"
 done
 
+# Validate the source before publishing it. A rejected index must not overwrite
+# the destination tag, which is what consumers pull by name.
+verify_index "${src}:${IMAGE_TAG}"
 copy_manifest "${src}:${IMAGE_TAG}" "${dst}:${IMAGE_TAG}"
 verify_index "${dst}:${IMAGE_TAG}"
 assert_same_digest "${IMAGE_TAG}"
@@ -194,6 +197,7 @@ assert_same_digest "${IMAGE_TAG}"
 # A re-sync of an older release must not move `latest` back to that release, and
 # the source tag is what consumers on the other registries resolve.
 for extra in "${tags[@]:1}"; do
+  verify_index "${src}:${extra}"
   copy_manifest "${src}:${extra}" "${dst}:${extra}"
   verify_index "${dst}:${extra}"
   assert_same_digest "${extra}"
