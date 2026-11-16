@@ -321,7 +321,8 @@ cp env.example .env
 - `SDK_E2E_TCP_TARGET_IP`：公网 TCP 探测地址，默认 `8.8.8.8`；
 - `SDK_E2E_TCP_TARGET_PORT`：公网 TCP 探测端口，默认 `53`；
 - `SDK_E2E_ALTERNATE_TCP_TARGET_IP`：备用公网 TCP 探测地址，默认
-  `1.1.1.1`；
+  `8.8.4.4`；两个配置的目标都必须能从 sandbox 内通过
+  `SDK_E2E_TCP_TARGET_PORT` 建立 TCP 连接；
 - `SDK_E2E_PUBLIC_ACCESS_PORT`：限制公开访问入站用例访问的已暴露 HTTP
   端口，默认 `49983`；
 - `SDK_E2E_PUBLIC_ACCESS_PATH`：限制公开访问入站用例访问的路径，默认
