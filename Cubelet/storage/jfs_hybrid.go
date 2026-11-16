@@ -449,7 +449,7 @@ func (h *jfsHybridStore) createReplica(ctx context.Context, name string) error {
 		_ = h.localEngine.DeleteVolume(name)
 		return err
 	}
-	CubeLog.Warnf("jfs local rootfs: replica %s from %s (read %d, data %d bytes) in %s",
+	CubeLog.Infof("jfs local rootfs: replica %s from %s (read %d, data %d bytes) in %s",
 		name, src, read, written, time.Since(start).Round(time.Millisecond))
 	return nil
 }
@@ -476,7 +476,7 @@ func (h *jfsHybridStore) refreshReplicaIfStale(ctx context.Context, name string)
 		return fmt.Errorf("drop stale local replica %s: %w", name, err)
 	}
 	_ = os.Remove(h.replicaRecordPath(name))
-	CubeLog.Warnf("jfs local rootfs: replica %s was stale (source changed), recopying", name)
+	CubeLog.Infof("jfs local rootfs: replica %s was stale (source changed), recopying", name)
 	return h.createReplica(ctx, name)
 }
 
@@ -548,7 +548,7 @@ func (h *jfsHybridStore) importPublishedRootfs(ctx context.Context, name, meta s
 		}
 		return fmt.Errorf("apply rootfs diff to %s: %w", name, err)
 	}
-	CubeLog.Warnf("jfs local rootfs: imported %s segments=%d bytes=%d base_ready=%s clone=%s blob_read=%s local_write=%s punch=%s total=%s",
+	CubeLog.Infof("jfs local rootfs: imported %s segments=%d bytes=%d base_ready=%s clone=%s blob_read=%s local_write=%s punch=%s total=%s",
 		name, len(m.Segments), m.BlobBytes, baseDur.Round(time.Millisecond), cloneDur.Round(time.Millisecond),
 		time.Duration(ios.ReadNs).Round(time.Millisecond), time.Duration(ios.WriteNs).Round(time.Millisecond),
 		time.Duration(ios.PunchNs).Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
@@ -709,8 +709,7 @@ func (h *jfsHybridStore) publish(ctx context.Context, snapshotID string) error {
 		return err
 	}
 	deleteJFSUploadTracker(snapshotID)
-	// WARN so the timing survives the runtime log level (INFO is filtered).
-	CubeLog.Warnf("jfs local rootfs: published %s base=%q segments=%d bytes=%d holes=%d start_delay=%s diff=%s read=%s blob_write=%s sync=%s manifest=%s total=%s staging_blocks=%d->%d from_live=%d",
+	CubeLog.Infof("jfs local rootfs: published %s base=%q segments=%d bytes=%d holes=%d start_delay=%s diff=%s read=%s blob_write=%s sync=%s manifest=%s total=%s staging_blocks=%d->%d from_live=%d",
 		snapshotID, base, len(segs), blobBytes, len(d.Holes), startDelay.Round(time.Millisecond),
 		diffDur.Round(time.Millisecond), time.Duration(ios.ReadNs).Round(time.Millisecond),
 		time.Duration(ios.WriteNs).Round(time.Millisecond), syncDur.Round(time.Millisecond),

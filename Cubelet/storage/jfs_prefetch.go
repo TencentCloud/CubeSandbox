@@ -82,7 +82,7 @@ func (l *local) warmJFSRestoreMemory(ctx context.Context, sandboxID, devPath str
 	if s := st.Duration.Seconds(); s > 0 {
 		mbps = float64(st.ReadBytes) / s / (1 << 20)
 	}
-	CubeLog.Warnf("jfs memory prefetch for sandbox %s: read %d bytes (%d of %d already cached) in %s (%.0f MiB/s)",
+	CubeLog.Infof("jfs memory prefetch for sandbox %s: read %d bytes (%d of %d already cached) in %s (%.0f MiB/s)",
 		sandboxID, st.ReadBytes, st.ResidentBefore, st.SizeBytes, st.Duration.Round(time.Millisecond), mbps)
 }
 
@@ -109,6 +109,6 @@ func (c *Config) applyJFSFuseReadAhead() error {
 	if err := os.WriteFile(knob, []byte(want), 0o644); err != nil {
 		return fmt.Errorf("set %s=%s: %w", knob, want, err)
 	}
-	CubeLog.Warnf("jfs: set %s read_ahead_kb=%s", c.jfsMountPath(), want)
+	CubeLog.Infof("jfs: set %s read_ahead_kb=%s", c.jfsMountPath(), want)
 	return nil
 }
