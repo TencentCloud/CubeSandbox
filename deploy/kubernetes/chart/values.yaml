@@ -1390,12 +1390,25 @@ cubeJuiceFS:
     readiness:
       periodSeconds: 10
       failureThreshold: 3
+  # The juicefs container's memory cgroup is also charged for the page cache of
+  # its disk-cache block files, which fills any limit. Once full, new cache
+  # writes are written back synchronously and (on rotational cache disks) the
+  # FUSE mount stalls for seconds, long enough to fail a VM restore. 2Gi was
+  # measured to stall restores of a 2GiB guest; 8Gi plus pageCacheHeadroom
+  # keeps clean-cache headroom so writeback stays asynchronous.
+  pageCacheHeadroom:
+    enabled: true
+    # Check every intervalSeconds; when memory.current exceeds highPercent of
+    # the container's memory limit, reclaim clean cache down to targetPercent.
+    intervalSeconds: 5
+    highPercent: 75
+    targetPercent: 50
   resources:
     requests:
       cpu: "100m"
       memory: "256Mi"
     limits:
-      memory: "2Gi"
+      memory: "8Gi"
 
 bootstrap:
   pvmHostKernel:
