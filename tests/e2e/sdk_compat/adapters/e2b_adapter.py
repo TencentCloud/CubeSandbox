@@ -13,8 +13,8 @@ from typing import Any
 
 from adapters.base import SandboxAdapter, cleanup_raw_sandbox
 from framework.capabilities import E2B_CAPABILITIES
-from framework.exceptions import UnsupportedCapability
 from framework.config import SdkE2EConfig
+from framework.exceptions import UnsupportedCapability
 from framework.models import (
     CodeResult,
     CommandResult,
@@ -24,6 +24,9 @@ from framework.models import (
 )
 
 MAX_LIST_PAGES = 100
+NON_RUNNING_CONTROL_PLANE_STATES = frozenset(
+    {"paused", "pausing", "killing", "killed", "terminated", "stopped"}
+)
 
 
 def _import_e2b_sandbox():
@@ -46,11 +49,23 @@ def _import_e2b_sandbox():
 
 def _import_e2b_command_exit_exception():
     try:
-        from e2b.sandbox.commands.command_handle import CommandExitException  # type: ignore
+        from e2b.sandbox.commands.command_handle import (
+            CommandExitException,  # type: ignore
+        )
 
         return CommandExitException
     except ImportError:
         return None
+
+
+def _is_e2b_not_found(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) == 404:
+        return True
+    try:
+        from e2b.exceptions import SandboxNotFoundException  # type: ignore
+    except ImportError:
+        return False
+    return isinstance(exc, SandboxNotFoundException)
 
 
 def _get_sandbox_id(sandbox: Any) -> str:
@@ -269,6 +284,20 @@ class E2BAdapter(SandboxAdapter):
         method = getattr(self._sandbox, "is_running", None)
         if not callable(method):
             raise UnsupportedCapability(self.backend, "is_running")
+
+        # E2B's is_running() probes envd directly. That can auto-resume a paused
+        # CubeSandbox and reports stale proxy routes as errors after deletion, so
+        # answer known non-running control-plane states before touching the data
+        # plane. Unknown deliberately falls through, matching the SDK contract.
+        try:
+            info = self.info()
+        except Exception as exc:
+            if _is_e2b_not_found(exc):
+                return False
+            raise
+        if (info.state or "").strip().lower() in NON_RUNNING_CONTROL_PLANE_STATES:
+            return False
+
         return bool(method())
 
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
