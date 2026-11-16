@@ -56,6 +56,12 @@ cubeNode:
 使新的 `OnDelete` 模板生效。关闭 JuiceFS 会删除 DaemonSet 并卸载全部节点，
 因此集群中不能再保留 JFS 后端沙箱。
 
+修改挂载容器的资源或包装命令（例如 `cubeJuiceFS.resources` 内存上限或
+`cubeJuiceFS.pageCacheHeadroom`）不会被拦截，也不需要确认，但同样受
+`OnDelete` 约束：普通 `helm upgrade` 只更新模板，正在运行的 `cube-juicefs`
+Pod 仍使用旧配置。需要先 drain 节点，再删除该节点的 `cube-juicefs` Pod，
+新配置才会在该节点生效。
+
 不要用 `helm rollback` 回到不包含本 preflight Hook 的旧 revision：旧目标无法
 拦截危险的卸载。失败的 `helm upgrade --atomic` 也可能自动回滚到这种无闸门
 revision。执行这两类操作前都必须 drain 所有计算节点；修改或关闭 JuiceFS 时，

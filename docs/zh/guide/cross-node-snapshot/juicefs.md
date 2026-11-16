@@ -310,6 +310,24 @@ cubeopscli node delete <node-id>
 
 建议将缓存目录放在独立的快速数据盘上，`CUBE_JFS_CACHE_SIZE_MB` 不超过该盘可用空间的 70%–80%；数据盘较小（如 100–200 GiB）时按比例调小该值。读缓存的淘汰通常先由 `CUBE_JFS_CACHE_SIZE_MB` 触发；`--free-space-ratio` 更多是在缓存盘被其他数据（尤其是 staging 积压）持续填满时兜底，缓存盘越宽裕该兜底触发越晚，建议同时监控缓存盘整体使用率。
 
+### 本地运行时 rootfs、恢复预读与 JuiceFS 内存
+
+以下配置位于 Cubelet 的 `[cow.jfs]` 段（`Cubelet/config/config.toml`），Helm Chart 通过 `cubeJuiceFS` 下的同名值暴露。
+
+| `[cow.jfs]` 配置项 | Helm 值 | 默认值 | 说明 |
+|---|---|---|---|
+| `rootfs_placement` | `cubeJuiceFS.rootfsPlacement` | `shared` | `shared` 把每个沙箱的可写 rootfs 放在 JuiceFS 挂载点上。`local` 把它放在节点本地 XFS reflink 存储上（本地盘级别的随机 I/O），暂停/快照时只把 rootfs 相对模板的差异发布到 JuiceFS |
+| `fuse_read_ahead_kb` | `cubeJuiceFS.fuseReadAheadKB` | `16384` | Cubelet 为 JuiceFS 挂载点设置的 `read_ahead_kb`，让恢复后的 guest 在内存镜像上每次冷缺页读取更大的区间。挂载点重新挂载后该值会被重置，因此每次 jfs 恢复前都会重新设置。设为 `0` 时保持内核默认值（128） |
+| `memory_prefetch` | `cubeJuiceFS.memoryPrefetch` | `false` | VM 启动前把整个内存镜像读入页缓存。完整读取发生在恢复路径上，并会集中产生 JuiceFS 缓存写入，因此通常不如配合上面预读的按需缺页快 |
+
+`rootfs_placement = "local"` 的约束：
+
+- 所有节点必须使用相同的值。只能在没有处于暂停或运行状态的 jfs 沙箱时切换：`local` 模式下暂停的包只包含 rootfs 差异，只有 `local` 模式的节点能导入，`shared` 模式节点（或旧版本 Cubelet）无法恢复。
+- 每个节点会在 XFS 存储下为用过的每个模板 rootfs 保留一份稀疏副本，需要为此预留本地数据盘空间。
+- 发布是异步的：rootfs 差异上传到对象存储之前，`remote_status` 保持为 `running`，在此之前该包只存在于执行暂停的节点上。
+
+JuiceFS 容器内存（Helm）：juicefs 容器的内存 cgroup 也会计入其磁盘缓存块文件的页缓存，因此任何上限都会被逐渐占满。占满后，缓存和 staging 写入只能同步回写，缓存盘为机械盘时 FUSE 挂载点会卡住数秒。因此 Chart 默认将 `cubeJuiceFS.resources.limits.memory` 设为 `8Gi`，并启用 `cubeJuiceFS.pageCacheHeadroom`：占用超过上限的 `highPercent`（75%）时，把干净页缓存回收到 `targetPercent`（50%）。挂载 DaemonSet 使用 `OnDelete`，已有 Pod 需要重建后才会生效（见[修改 JuiceFS 开关或存储配置](/zh/guide/kubernetes/upgrade#修改-juicefs-开关或存储配置)）。
+
 ## 镜像分发
 
 目标节点默认从 Cube 自己的镜像仓库拉取 JuiceFS 客户端镜像 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1`。在 `.env` 里设置 `MIRROR=cn` 可改用 `-cn` 镜像，与其它组件镜像的规则一致。

@@ -56,6 +56,13 @@ delete each `cube-juicefs` Pod only after its node is drained so the new
 `OnDelete` template takes effect. Disabling JuiceFS deletes the DaemonSet and
 unmounts every node, so no JFS-backed sandbox may remain.
 
+Changes to the mount container's resources or wrapper — for example the
+`cubeJuiceFS.resources` memory limit or `cubeJuiceFS.pageCacheHeadroom` — are
+not gated and need no acknowledgement, but `OnDelete` still applies: a plain
+`helm upgrade` updates the template and leaves every running `cube-juicefs` Pod
+on the old settings. Drain a node and delete its `cube-juicefs` Pod to roll
+them out there.
+
 Do not use `helm rollback` to return to a revision that predates this preflight
 Hook: the older target cannot block an unsafe unmount. `helm upgrade --atomic`
 can also roll back to such an ungated revision after a failed upgrade. Drain

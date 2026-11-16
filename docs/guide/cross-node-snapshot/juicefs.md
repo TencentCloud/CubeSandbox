@@ -299,6 +299,24 @@ The default `CUBE_JFS_CACHE_SIZE_MB` is 100 GiB, matching the setup used by the 
 
 Place the cache directory on a dedicated fast data disk and keep `CUBE_JFS_CACHE_SIZE_MB` within 70%–80% of that disk's free space. On smaller data disks (for example 100–200 GiB), scale the value down proportionally. Read-cache eviction is normally triggered by `CUBE_JFS_CACHE_SIZE_MB` first; `--free-space-ratio` mainly acts as a fallback when the cache disk keeps being filled by other data — most notably a staging backlog. The roomier the cache disk, the later this fallback fires, so also monitor overall cache-disk usage.
 
+### Local runtime rootfs, restore read-ahead and JuiceFS memory
+
+These settings live in Cubelet's `[cow.jfs]` table (`Cubelet/config/config.toml`); the Helm chart exposes them under `cubeJuiceFS`.
+
+| `[cow.jfs]` key | Helm value | Default | Description |
+|---|---|---|---|
+| `rootfs_placement` | `cubeJuiceFS.rootfsPlacement` | `shared` | `shared` keeps each sandbox's writable rootfs on the JuiceFS mount. `local` keeps it on the node-local XFS reflink store (local-disk random I/O) and publishes only the rootfs difference of each pause/snapshot package to JuiceFS |
+| `fuse_read_ahead_kb` | `cubeJuiceFS.fuseReadAheadKB` | `16384` | `read_ahead_kb` Cubelet enforces on the JuiceFS mount, so each cold page fault on a restored guest's memory image fetches a larger run. Re-applied before every jfs restore because a remount resets it. `0` leaves the kernel default (128) |
+| `memory_prefetch` | `cubeJuiceFS.memoryPrefetch` | `false` | Read the whole memory image into the page cache before the VM starts. The full read sits on the resume path and bursts JuiceFS cache writes, so on-demand faults with the read-ahead above are usually faster |
+
+`rootfs_placement = "local"` constraints:
+
+- Every node must use the same value. Switch only when no jfs sandbox is paused or running: packages paused in `local` mode carry a rootfs difference that only `local`-mode nodes can import, so a `shared`-mode node (or an older Cubelet) cannot restore them.
+- Each node keeps a sparse replica of every template rootfs it has used under the XFS store; size the local data disk for it.
+- Publishing is asynchronous: `remote_status` stays `running` until the rootfs difference has been uploaded to object storage. Until then the package exists only on the node that paused it.
+
+JuiceFS container memory (Helm): the juicefs container's memory cgroup is also charged for the page cache of its disk-cache block files, which fills any limit. Once full, cache and staging writes are written back synchronously and, on a rotational cache disk, the FUSE mount stalls for seconds. The chart therefore defaults `cubeJuiceFS.resources.limits.memory` to `8Gi` and enables `cubeJuiceFS.pageCacheHeadroom`, which reclaims clean cache from `highPercent` (75%) down to `targetPercent` (50%) of the limit. The mount DaemonSet uses `OnDelete`, so existing Pods pick these up only after they are recreated (see [Changing JuiceFS enablement or storage configuration](/guide/kubernetes/upgrade#changing-juicefs-enablement-or-storage-configuration)).
+
 ## Image distribution
 
 By default, each target node pulls the JuiceFS client image `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1` from Cube's own registry. Set `MIRROR=cn` in `.env` to pull the `-cn` mirror instead, exactly like the other component images.
