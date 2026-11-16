@@ -827,22 +827,24 @@ jobs:
           fi
 
           # Assert the published index from its JSON form: media types compared
-          # literally, platforms from the descriptor list.
+          # literally, platforms from the descriptor list. The index body is read
+          # with --raw, whose shape does not depend on whether the descriptor JSON
+          # happens to embed the manifest list.
           verify_index() {
             local ref="$1"
-            local manifest arch
-            manifest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${ref}")"
-            echo "${manifest}"
+            local index_json arch
+            index_json="$(docker buildx imagetools inspect --raw "${ref}")"
+            echo "${index_json}"
             if ! jq -e '.mediaType == "application/vnd.oci.image.index.v1+json"
               or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json"' \
-              <<<"${manifest}" >/dev/null; then
+              <<<"${index_json}" >/dev/null; then
               echo "Refusing to continue: ${ref} is not an image index" >&2
               exit 1
             fi
             for arch in "${arch_list[@]}"; do
               if ! jq -e --arg arch "${arch}" \
                 '[.manifests[].platform.architecture] | index($arch) != null' \
-                <<<"${manifest}" >/dev/null; then
+                <<<"${index_json}" >/dev/null; then
                 echo "Refusing to continue: ${ref} missing linux/${arch}" >&2
                 exit 1
               fi
@@ -931,6 +933,9 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Same revision the images were built from, not the event ref.
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Install crane
         env:
