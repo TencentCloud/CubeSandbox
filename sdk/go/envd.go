@@ -107,7 +107,7 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 		return nil, apiErrorFromResponse(resp)
 	}
 
-	result, err := parseProcessStartStream(resp.Body)
+	result, err := parseProcessStartStream(resp.Body, opts.OnStdout, opts.OnStderr)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +301,7 @@ func setFilesystemRPCUser(req *http.Request, options ...fileRequestOption) {
 	}
 }
 
-func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
+func parseProcessStartStream(r io.Reader, onStdout, onStderr func(string)) (*processStartResult, error) {
 	var result processStartResult
 	var stdout strings.Builder
 	var stderr strings.Builder
@@ -342,6 +342,9 @@ func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
 					return nil, fmt.Errorf("decode stdout: %w", err)
 				}
 				stdout.WriteString(text)
+				if onStdout != nil {
+					onStdout(text)
+				}
 			}
 			if response.Event.Data.Stderr != "" {
 				text, err := decodeProcessBytes(response.Event.Data.Stderr)
@@ -349,6 +352,9 @@ func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
 					return nil, fmt.Errorf("decode stderr: %w", err)
 				}
 				stderr.WriteString(text)
+				if onStderr != nil {
+					onStderr(text)
+				}
 			}
 		}
 		if response.Event.End != nil {
