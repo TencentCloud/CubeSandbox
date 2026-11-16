@@ -5,6 +5,12 @@ SECRET_ID=AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUCKET=mybucket-1250000000
 REGION=ap-guangzhou
+# Optional: Tencent Cloud APPID, used only by content-token (STS
+# GetFederationToken resource ARNs). Auto-derived from the numeric suffix of
+# BUCKET (e.g. 1250000000 above) when omitted; set explicitly if BUCKET does
+# not follow the "<name>-<appid>" convention. SECRET_ID/SECRET_KEY above must
+# have the sts:GetFederationToken CAM permission for content-token to work.
+# APPID=1250000000
 
 # FUSE mount base: Cubelet AttachRequest.volumeBaseDir
 # (volume_plugin_base_dir, default /data/cube-shared/volume/cos-<id>).

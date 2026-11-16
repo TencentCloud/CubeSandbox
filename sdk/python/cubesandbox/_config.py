@@ -14,10 +14,10 @@ class Config:
     """SDK configuration. All fields can be set via environment variables."""
 
     api_url: str = field(
-        default_factory=lambda: os.environ.get("CUBE_API_URL", "http://127.0.0.1:3000")
+        default_factory=lambda: os.environ.get("CUBE_API_URL") or os.environ.get("E2B_API_URL") or "http://127.0.0.1:3000"
     )
     api_key: str | None = field(
-        default_factory=lambda: os.environ.get("CUBE_API_KEY"),
+        default_factory=lambda: os.environ.get("CUBE_API_KEY") or os.environ.get("E2B_API_KEY"),
         repr=False,
     )
     template_id: str | None = field(
@@ -44,6 +44,9 @@ class Config:
     #: ``max(request_timeout, BUDGET)`` so lowering it fail-fasts only the 16
     #: fast routes (long routes stay at their CubeAPI budgets 160 s/280 s).
     request_timeout: float = 30.0
+    volume_api_url: str | None = field(
+        default_factory=lambda: os.environ.get("CUBE_VOLUME_API_URL") or os.environ.get("E2B_VOLUME_API_URL")
+    )
 
     def __post_init__(self) -> None:
         self.api_url = self.api_url.rstrip("/")

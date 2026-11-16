@@ -143,6 +143,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(VolumeAction, handleCreateVolume)
 	g.GET(VolumeAction+"/:volume_id", handleGetVolume)
 	g.DELETE(VolumeAction+"/:volume_id", handleDeleteVolume)
+	g.POST(VolumeAction+"/:volume_id/content-token", handleIssueVolumeContentToken)
 }
 
 // RegisterTemplateRoutes registers ONLY the template-related routes onto g.

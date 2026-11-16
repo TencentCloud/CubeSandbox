@@ -26,13 +26,17 @@ func init() {
 	plugin.SetRPCFactory(func(name, socketPath string) (plugin.ControllerPlugin, error) {
 		return New(name, socketPath)
 	})
+	plugin.SetRPCContentFactory(func(name, socketPath string) (plugin.ContentPlugin, error) {
+		return NewContent(name, socketPath)
+	})
 }
 
 // Plugin is a ControllerPlugin backed by an external gRPC server.
 type Plugin struct {
-	name   string
-	conn   *grpc.ClientConn
-	client vpb.VolumeControllerServiceClient
+	name     string
+	conn     *grpc.ClientConn
+	client   vpb.VolumeControllerServiceClient
+	ownsConn bool
 }
 
 // New dials the gRPC server and returns a Plugin.
@@ -50,9 +54,10 @@ func New(name, socketPath string) (*Plugin, error) {
 	}
 
 	return &Plugin{
-		name:   name,
-		conn:   conn,
-		client: vpb.NewVolumeControllerServiceClient(conn),
+		name:     name,
+		conn:     conn,
+		client:   vpb.NewVolumeControllerServiceClient(conn),
+		ownsConn: true,
 	}, nil
 }
 
@@ -89,10 +94,10 @@ func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) erro
 	return nil
 }
 
-// Close closes the gRPC connection.
+// Close closes the gRPC connection when this object owns it.
 func (p *Plugin) Close() error {
-	if p.conn != nil {
-		return p.conn.Close()
+	if !p.ownsConn || p.conn == nil {
+		return nil
 	}
-	return nil
+	return p.conn.Close()
 }

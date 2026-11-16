@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.71
+	github.com/tencentyun/qcloud-cos-sts-sdk v0.0.0-20251226100129-1701383cae15
 	google.golang.org/grpc v1.78.0
 )
 

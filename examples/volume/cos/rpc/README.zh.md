@@ -7,6 +7,7 @@
 |----|------|------------|
 | CubeMaster（Controller） | Create / Destroy | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
 | Cubelet（Node） | Attach / Detach | [cosfs](https://cloud.tencent.com/document/product/436/6883) |
+| CubeMaster（Content，可选） | IssueCredentials | [COS STS `GetFederationToken`](https://cloud.tencent.com/document/product/436/14048) |
 
 与 [binary](../binary/) 对比：Controller 用 **Go SDK** 替代 **coscmd**；Node 仍用 **cosfs**。
 
@@ -30,6 +31,24 @@
 | 5 | SDK：`Volume.create(..., driver="cos-rpc")` 验证 |
 
 **本示例不使用 coscmd**；Create/Destroy 由 COS Go SDK 完成（`go mod` 拉取，见 [31215](https://cloud.tencent.com/document/product/436/31215)）。
+
+---
+
+### 2.1 COS STS（可选：SDK 直连 COS）
+
+`IssueCredentials`（`internal/cosapi/content.go`）调用 COS STS
+[`GetFederationToken`](https://cloud.tencent.com/document/product/436/14048)
+签发限定到单卷对象前缀（`volumes/<id>/*`）的临时凭证，TTL 封顶为 CubeMaster
+的 15 分钟上限。需要：
+
+- **APPID**：可在 `volume-cos.conf` 显式配置，也可从 `BUCKET` 的
+  `-<数字>` 后缀自动推导（如 `mybucket-1250000000` 中的 `1250000000`）。
+- **CAM 权限**：`SECRET_ID`/`SECRET_KEY` 需有 `sts:GetFederationToken`
+  权限（主账号/管理员身份默认具备；生产环境建议使用限权子账号，参考
+  [子账号密钥](https://cloud.tencent.com/document/product/598/37140)）。
+
+CubeMaster 侧若未开启 `content_enabled: true`（见 §4），该 Hook 永远不会
+被调用，Create/Destroy/Attach/Detach 不受影响。
 
 ---
 
@@ -123,6 +142,10 @@ volume_plugins:
   - name: cos-rpc
     type: rpc
     socket_path: /run/cube-volume-cos-rpc.sock
+    # 可选：开启 VolumeContentService（POST /volumes/{id}/content-token），
+    # 让 Python SDK 无需沙箱直连 COS。需要 APPID（或可推导的数字 BUCKET
+    # 后缀）及 SECRET_ID/SECRET_KEY 的 sts:GetFederationToken 权限，见 §2.1。
+    content_enabled: true
 ```
 
 **Cubelet** `config.toml`：
@@ -179,6 +202,24 @@ finally:
 
 Volume.destroy(vol.volume_id)
 ```
+
+### 直连 S3 风格访问冒烟测试（无需沙箱）
+
+需要开启 `content_enabled: true`（§4）并完成 STS 配置（§2.1）：
+
+```python
+from cubesandbox import Volume
+
+vol = Volume.create("my-data", driver="cos-rpc")
+try:
+    vol.write_file("hello.txt", "via cos-rpc content-token")
+    print(vol.read_file("hello.txt"))
+    print([entry.name for entry in vol.list("/")])
+finally:
+    Volume.destroy(vol.volume_id)
+```
+
+需要 SDK 的可选依赖：`pip install "cubesandbox[s3]"`。
 
 ---
 

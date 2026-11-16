@@ -26,8 +26,8 @@ const MaxPrivateDataLen = 1024
 //   - VolumeID    : stable business key (same as Name when the caller supplies a name)
 //   - Name        : human-readable label; UNIQUE, cannot be reused while the row exists
 //   - Driver      : plugin name (ControllerPlugin.Name()) used to create the volume
-//   - Token       : per-volume credential returned by the plugin; may be empty
-//   - PrivateData : opaque plugin state from Create; forwarded to Attach; not API-visible
+//   - Token       : legacy Create-hook credential retained for compatibility
+//   - PrivateData : opaque plugin state from Create; forwarded to Attach and Content hooks; not API-visible
 //   - RefCount    : number of nodes currently referencing (mounting) the volume
 //
 // Deletion is hard-delete (row removed). There is no deleted_at column.

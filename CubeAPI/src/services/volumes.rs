@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     cubemaster::{CreateVolumeRequest, CubeMasterClient, CubeMasterError, ListVolumesRequest},
     error::{AppError, AppResult},
-    models::{Volume, VolumeAndToken},
+    models::{Volume, VolumeAndToken, VolumeContentCredentials},
 };
 
 fn new_request_id() -> String {
@@ -31,6 +31,13 @@ fn cm_err_to_app(e: CubeMasterError) -> AppError {
         CubeMasterError::Api { ret_code, .. } if *ret_code == 400 || *ret_code == 130400 => {
             AppError::BadRequest(e.to_string())
         }
+        CubeMasterError::Api { ret_code, .. } if *ret_code == 501 => {
+            AppError::NotImplemented(e.to_string())
+        }
+        CubeMasterError::Api { ret_code, .. } if *ret_code == 503 => AppError::ServiceUnavailable {
+            message: e.to_string(),
+            retry_after: 1,
+        },
         _ => AppError::Internal(anyhow::anyhow!("{e}")),
     }
 }
@@ -75,8 +82,8 @@ impl VolumeService {
 
     // ── POST /volumes ─────────────────────────────────────────────────────
 
-    /// Create a new volume. Returns `VolumeAndToken` so the caller can
-    /// hand the token to the volume-content service immediately.
+    /// Create a new volume. The legacy token field is retained for response compatibility;
+    /// direct content access obtains a separate short-lived token on demand.
     pub async fn create(&self, name: String, driver: Option<String>) -> AppResult<VolumeAndToken> {
         self.create_with_private_data(name, driver, None).await
     }
@@ -112,7 +119,7 @@ impl VolumeService {
 
     // ── GET /volumes/{volumeID} ───────────────────────────────────────────
 
-    /// Fetch a single volume by ID, including its auth token.
+    /// Fetch a single volume by ID, including the legacy Create-hook token.
     pub async fn get(&self, volume_id: &str) -> AppResult<VolumeAndToken> {
         let resp = self
             .cubemaster
@@ -126,6 +133,37 @@ impl VolumeService {
             volume_id: resp.volume.volume_id,
             name: resp.volume.name,
             token: resp.volume.token,
+        })
+    }
+
+    // ── POST /volumes/{volumeID}/content-token ───────────────────────────
+
+    /// Issue fresh direct-storage credentials through the selected driver.
+    pub async fn issue_content_credentials(
+        &self,
+        volume_id: &str,
+    ) -> AppResult<VolumeContentCredentials> {
+        let response = self
+            .cubemaster
+            .issue_volume_content_credentials(volume_id)
+            .await
+            .map_err(cm_err_to_app)?;
+        response.ret.into_result().map_err(cm_err_to_app)?;
+        Ok(VolumeContentCredentials {
+            provider: response.provider,
+            endpoint: response.endpoint,
+            bucket: response.bucket,
+            region: response.region,
+            prefix: response.prefix,
+            addressing_style: if response.addressing_style.is_empty() {
+                "auto".to_string()
+            } else {
+                response.addressing_style
+            },
+            access_key_id: response.access_key_id,
+            secret_access_key: response.secret_access_key,
+            session_token: response.session_token,
+            expires_at: response.expires_at,
         })
     }
 

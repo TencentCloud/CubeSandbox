@@ -158,6 +158,74 @@ flowchart LR
     style Cube2 fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
 ```
 
+### SDK 直通内容访问：服务边界与拆分取舍
+
+这里的“SDK 直通”指 SDK **不创建 Sandbox、不经过 Cubelet，并在取得存储临时凭证后直接访问 COS 等存储**。卷管理/凭证签发是控制面；文件数据读写是 SDK 到存储的独立数据面。
+
+#### E2B 公开架构可确认的部分
+
+[E2B Runtime 架构文档](https://github.com/e2b-dev/runtime/blob/main/docs/ARCHITECTURE.md)描述：`POST/GET /volumes` 由 Control Plane 管理并签发绑定 team/volume 的短期 JWT；SDK 随后直接访问独立的 Volume Content API（belt）的 `/volumecontent/{id}/...`，而不是经 Control Plane API 转发内容。文档没有说明 belt 是否会在内部调用计算节点；虽然同一文档提到 Orchestrator 有 `VolumeService`，但没有给出它与 belt 的请求关系。因此，我们可以对标其**管理面与内容面分离、SDK 不要求连 Sandbox/Cubelet**，不能推断其内部存储实现。
+
+```text
+E2B：SDK → Control Plane（卷管理/短期 JWT）
+     SDK → Volume Content API (belt)（文件读写）
+```
+
+#### CubeSandbox 目标链路
+
+```mermaid
+flowchart LR
+    SDK[SDK]
+    API[CubeAPI 控制面]
+    MASTER[CubeMaster]
+    CONTROLLER[VolumeControllerService]
+    HOOK[VolumeContentService 凭证 Hook]
+    STS[对象存储 STS / 临时凭证服务]
+    COS[(S3-compatible Object Storage)]
+
+    SDK -->|API Key：创建或连接卷| API
+    API --> MASTER
+    MASTER -->|Create / 查询卷| CONTROLLER
+    SDK -->|API Key：申请存储凭证| API
+    API --> MASTER
+    MASTER -->|IssueCredentials：volume + prefix| HOOK
+    HOOK -->|服务端身份 + 单卷最小权限策略| STS
+    STS -->|短期 access key / secret key / session token| HOOK
+    HOOK --> MASTER
+    MASTER --> API
+    API -->|endpoint / bucket / prefix / 短期凭证| SDK
+    SDK -->|S3 API：直接读写对象| COS
+```
+
+存储凭证 Hook 只负责按已查到的 Volume 签发最小权限、短 TTL 的临时凭证；它**不代理 `Read/Write` 数据**。SDK 携带临时凭证直接通过 S3 API 访问对象存储。provider 表示 API 协议族：`s3` 用于 S3-compatible 服务（如 AWS S3、COS、R2、MinIO 等），`cos` 仅作为旧 Hook 的兼容值保留。对象存储厂商、endpoint、region 和 bucket 由 Hook 提供，不能由 SDK 根据 provider 猜测。返回的 prefix 必须由服务端依据 Volume ID 固定，不能由 SDK 指定。
+
+TTL 采用应用层统一上限：凭证有效期最多 **15 分钟**，CubeMaster 拒绝到期时间超过签发时刻 15 分钟的 Hook 响应；Hook 应向对应 STS/临时凭证服务请求不超过 15 分钟的凭证，若服务不支持该时长则暂不兼容，不能放宽 Master 上限。SDK 只在进程内缓存，剩余有效期不超过 **2 分钟**时提前重新申请；凭证不写磁盘、不进入日志。
+
+`POST /volumes/{volumeID}/content-token`（CubeAPI → CubeMaster `POST /cube/volume/{id}/content-token`）**不接受任何请求参数**，TTL 完全由服务端决定，SDK 无法传入期望的 TTL、也读不到 Hook 实际申请的具体数值，只能拿到最终的 `expires_at` 绝对时间。这与 E2B 公开的 `POST/GET /volumes` 协议一致：其 `NewVolume`/`VolumeAndToken` schema 里同样没有 ttl/expiration 字段，token 有效期完全由服务端配置（`cfg.VolumesTokenConfig`）决定，客户端没有旋钮。因此**不应该**给这个接口加 `ttl_seconds` 之类的可选入参——那样反而会偏离 E2B 的协议形态；15 分钟上限只应作为服务端常量维护，不对外暴露为可配置项。
+
+#### 方案取舍
+
+SDK 对外可以保持 E2B 的 Volume 方法、入参和返回语义；内部使用 COS API 直连存储，并不要求暴露 `/volumecontent/{id}/...` HTTP 路由。`VolumeContentService` 在目标方案中只负责签发临时存储凭证，不承接文件字节。
+
+| 方案 | 请求链路 | 优点 | 代价 / 风险 |
+|---|---|---|---|
+| **CubeMaster 代理内容** | SDK → CubeMaster 内容 HTTP → Hook → 存储 | 改动小、可集中做逐请求鉴权、审计和限流 | CubeMaster 承担全部数据流量；大文件影响控制面资源；每次读写都多一次代理；不符合本次确定的 SDK→存储数据路径 |
+| **独立 Volume Content 服务** | SDK → 独立内容服务 → 存储 | 内容流量可独立扩缩容和故障隔离；与 E2B 公开的独立 belt API 形态接近 | 仍需内容服务代理数据；增加部署、路由和运维面；仍非 SDK→存储直连 |
+| **Hook 签发短期存储凭证（目标方案）** | 控制面：SDK → CubeAPI → CubeMaster → driver Hook/STS；数据面：SDK → COS | CubeAPI/CubeMaster 不承载文件字节；不需要 Cubelet；复用存储原生鉴权和传输；实现链路直接 | 临时凭证可在有效期内重放；必须限定到单卷 prefix、操作集和 TTL；服务端要认证/授权后才签发；SDK 需处理凭证刷新及对象存储语义与 POSIX 差异 |
+
+三种方案都可以不依赖 Cubelet；只有 Hook 复用 Cubelet 上已挂载的文件系统时，才会引入节点定位、挂载时序、节点故障和销毁竞态。本次目标选择第三种，数据面不经过 CubeAPI/CubeMaster。
+
+#### 建议的实现约束
+
+1. SDK 对外保持与 E2B 一致的 Volume 方法、参数和返回语义；管理 API 负责创建/连接 Volume。申请凭证时由 CubeAPI → CubeMaster → driver Hook 完成认证、卷记录查询和临时凭证签发。
+2. Hook 只提供 `IssueCredentials`，返回 provider、endpoint、bucket、region、服务端固定的 volume prefix、临时凭证和到期时间；不定义经 Hook 转发的 `Read/Write` RPC。S3 权限限定到单卷对象前缀及所需操作，绝不返回永久密钥。
+3. SDK 收到凭证后使用配置了 endpoint、region、临时 session token 和寻址风格的 S3 客户端直连对象存储；支持对象流式读写。`List/Stat/Mkdir/Remove` 按对象存储语义映射。各 S3-compatible 服务的签名、寻址和 API 支持可能不同，需逐服务验证；对象存储不原生提供 POSIX uid/gid/mode、symlink 和原子目录操作，需要明确哪些接口只支持近似语义或返回“不支持”。
+4. 发行凭证前必须确认请求者对该卷有权；凭证响应使用 `no-store`，TTL 最长 15 分钟，CubeMaster 强制校验上限；SDK 只在内存缓存，并在剩余 TTL 不超过 2 分钟时刷新。凭证中的 bucket、endpoint 和 prefix 必须由服务端选择/验证，不能信任 SDK 提交的路径或存储目标。
+
+#### 当前实现状态
+
+CubeMaster 已有通用凭证 Hook 转发、HTTPS/Volume prefix 校验和 15 分钟 TTL 上限，并接受 `s3` 与旧 `cos` provider 值；CubeAPI 透传完整对象存储凭证结构；Python SDK 的 `Volume` 已直连 S3/COS 读写（`read_file`/`write_file`/`list`/`get_info`/`update_metadata`/`remove` 等），无需沙箱。[`examples/volume/cos/rpc`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md) 已提供一份真实的 STS 签发 Hook 参考实现（基于 COS STS `GetFederationToken`，策略限定到单卷对象前缀）。其他对象存储（AWS S3/R2/MinIO 等）的 STS/临时凭证 Hook、以及 Node.js SDK 支持仍需按各自服务实现和验证。
+
 无论 **binary** 还是 **rpc**，插件都必须实现**同一套 Hook 字段**。**binary** 映射为 CLI 参数 / stdout JSON（`snake_case`，如 `volume_id` → `--volume-id`、JSON 里 `host_path`）；**rpc** 使用 `volumeplugin.proto` 中的同名字段。CubeMaster / Cubelet 在调用 Hook **之前**按配置的 `driver` 选定插件——**`driver` 不是 Hook 入参**。
 
 > **错误返回：** **binary** 用非零 exit 与/或 stdout JSON 中非空 `"error"`；**rpc** 用 gRPC error status（响应消息不含 `error` 字段）。
@@ -173,12 +241,17 @@ flowchart LR
 
 ### Hook 定义
 
+Hook 分为卷生命周期、沙箱挂载和 SDK 直通凭证签发三类。**SDK 的对象读写使用独立的 `VolumeContentService.IssueCredentials` Hook 获取存储临时凭证；不复用沙箱创建时的 `Attach`，数据读写也不经过该 Hook、CubeMaster 或 Cubelet。**
+
 | Hook | 侧 | 触发 |
 |------|----|------|
-| **Create** | Controller | `POST /volumes` |
-| **Destroy** | Controller | `DELETE /volumes/:id` |
-| **Attach** | Node | 沙箱创建（`volumeMounts`） |
-| **Detach** | Node | 沙箱销毁或创建失败回滚 |
+| **Create** | Controller | `POST /volumes`，创建后端卷 |
+| **Destroy** | Controller | `DELETE /volumes/:id`，删除后端卷 |
+| **Attach** | Node | 沙箱创建（`volumeMounts`），准备宿主机挂载 |
+| **Detach** | Node | 沙箱销毁或创建失败回滚，释放宿主机挂载 |
+| **IssueCredentials** | Content | SDK 经 CubeAPI/CubeMaster 申请短时、限单卷 prefix 的存储凭证 |
+
+内容 Hook 由 CubeMaster 按 Volume 的 `driver` 调用，仅签发凭证；SDK 随后用该凭证直接调用 COS 对象 API。插件不得返回永久密钥，凭证范围由服务端固定，不能由 SDK 传入或扩大。
 
 #### Create
 
@@ -664,6 +737,9 @@ rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSand
 |---------|--------|-----|
 | `VolumeControllerService` | CubeMaster | `Create`、`Destroy` |
 | `VolumePluginService` | Cubelet | `Attach`、`Detach` |
+| `VolumeContentService`（可选） | CubeMaster 控制面 | `IssueCredentials` |
+
+`VolumeContentService` 只为 SDK 无沙箱直通访问签发存储临时凭证，不代理文件读写；SDK 凭证到手后直接访问 COS。仅 rpc driver 可通过 `content_enabled: true` 注册该独立 Hook，也可用 `content_socket_path` 将凭证签发进程与生命周期/挂载插件拆开部署。[`examples/volume/cos/rpc`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md) 已基于 COS STS `GetFederationToken` 完成该凭证 Hook 的参考实现（见其 §2.1）。
 
 修改 proto 后重新生成：`cd pkgs/proto && make proto`。参考实现：[`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md)。
 
