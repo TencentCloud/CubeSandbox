@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Coverage for scripts/sync-release-images.sh: argument validation, the
 # vX.Y.Z -> latest rule, the index/platform assertions, and the cross-registry
-# digest contract. The registry checks need docker and crane; without them only
-# the static checks run.
+# digest contract.
+#
+# The registry checks need docker and crane. When either is missing they are
+# skipped locally, unless CUBE_SYNC_TEST_REQUIRE=1, which turns a missing
+# dependency into a failure so CI cannot pass without running them.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,23 +63,29 @@ if ! "${SYNC_SCRIPT}" --help | grep -q 'CRANE_INDEX_TIMEOUT'; then
 fi
 pass "--help"
 
+require_e2e="${CUBE_SYNC_TEST_REQUIRE:-0}"
+
+# Skip locally, fail in required mode.
+skip_or_fail() {
+	local reason="$1"
+	if [[ "${require_e2e}" == "1" ]]; then
+		fail "end-to-end registry checks are required but ${reason}"
+		exit 1
+	fi
+	echo "SKIP: end-to-end registry checks (${reason})"
+	[[ "${failures}" -eq 0 ]] || exit 1
+	exit 0
+}
+
 if [[ "${CUBE_SYNC_TEST_SKIP:-0}" == "1" ]]; then
 	echo "SKIP: end-to-end registry checks (CUBE_SYNC_TEST_SKIP=1)"
 	[[ "${failures}" -eq 0 ]] || exit 1
 	exit 0
 fi
-for tool in docker crane; do
-	if ! command -v "${tool}" >/dev/null 2>&1; then
-		echo "SKIP: end-to-end registry checks (${tool} not installed)"
-		[[ "${failures}" -eq 0 ]] || exit 1
-		exit 0
-	fi
+for tool in docker crane jq; do
+	command -v "${tool}" >/dev/null 2>&1 || skip_or_fail "${tool} not installed"
 done
-if ! docker info >/dev/null 2>&1; then
-	echo "SKIP: end-to-end registry checks (docker daemon unavailable)"
-	[[ "${failures}" -eq 0 ]] || exit 1
-	exit 0
-fi
+docker info >/dev/null 2>&1 || skip_or_fail "docker daemon unavailable"
 
 work="$(mktemp -d)"
 src_name="cubesync-src-$$"
@@ -103,14 +112,25 @@ crane pull --platform linux/amd64 alpine:3.19 "${work}/amd.tar" >/dev/null 2>&1
 crane pull --platform linux/arm64 alpine:3.19 "${work}/arm.tar" >/dev/null 2>&1
 crane push "${work}/amd.tar" "${src}/cube-sandbox/testapp:v1.2.3-amd64" >/dev/null 2>&1
 crane push "${work}/arm.tar" "${src}/cube-sandbox/testapp:v1.2.3-arm64" >/dev/null 2>&1
-if ! command -v docker >/dev/null 2>&1; then
-	echo "SKIP: end-to-end registry checks (docker CLI needed to seed the index)"
-	[[ "${failures}" -eq 0 ]] || exit 1
-	exit 0
-fi
-docker buildx imagetools create -t "${src}/cube-sandbox/testapp:v1.2.3" \
+# Seed the source index the way release publishes it, using buildx when
+# available (Docker manifest list) and crane otherwise (OCI index). Both media
+# types are accepted by the mirror, so either seeding path is valid.
+seed_index() {
+	local ref="$1"
+	shift
+	if command -v docker >/dev/null 2>&1 &&
+		docker buildx imagetools create -t "${ref}" "$@" >/dev/null 2>&1; then
+		return 0
+	fi
+	local args=()
+	local m
+	for m in "$@"; do args+=(-m "${m}"); done
+	crane index append -t "${ref}" "${args[@]}" >/dev/null 2>&1
+}
+
+seed_index "${src}/cube-sandbox/testapp:v1.2.3" \
 	"${src}/cube-sandbox/testapp:v1.2.3-amd64" \
-	"${src}/cube-sandbox/testapp:v1.2.3-arm64" >/dev/null 2>&1 ||
+	"${src}/cube-sandbox/testapp:v1.2.3-arm64" ||
 	{
 		echo "FAIL: could not seed the multi-arch source index" >&2
 		exit 1
@@ -149,19 +169,68 @@ else
 	fail "destination index is not an image index"
 fi
 
-# A component missing one of the requested arches must fail, not silently ship.
+# A source tag that does not exist must fail rather than publish a partial set.
 if run_sync env IMAGE_TAG=v1.2.3 ARCHES="amd64 s390x" >"${work}/badarch.log" 2>&1; then
-	fail "sync succeeded for a missing arch"
+	fail "sync succeeded for a non-existent arch tag"
 else
-	pass "missing arch fails the sync"
+	pass "non-existent arch tag fails the sync"
+fi
+
+# The platform assertion itself: both per-arch tags exist under one repo, but the
+# index there was built from amd64 only (the collapsed shape the old mirror
+# produced), so the platform check is what must reject it.
+crane copy "${src}/cube-sandbox/testapp:v1.2.3-amd64" \
+	"${src}/cube-sandbox/partial:v2.0.0-amd64" >/dev/null 2>&1 ||
+	fail "could not seed partial amd64 tag"
+crane copy "${src}/cube-sandbox/testapp:v1.2.3-arm64" \
+	"${src}/cube-sandbox/partial:v2.0.0-arm64" >/dev/null 2>&1 ||
+	fail "could not seed partial arm64 tag"
+seed_index "${src}/cube-sandbox/partial:v2.0.0" \
+	"${src}/cube-sandbox/partial:v2.0.0-amd64"
+mkdir -p "${work}/partial"
+if ! crane manifest "${src}/cube-sandbox/partial:v2.0.0" | jq -e \
+	'[.manifests[].platform.architecture] == ["amd64"]' >/dev/null 2>&1; then
+	fail "could not seed a single-arch source index"
+else
+	if SRC_REGISTRY="${src}" DST_REGISTRY="${dst}" IMAGE_NAME=partial \
+		WORK_DIR="${work}/partial" IMAGE_TAG=v2.0.0 ARCHES="amd64 arm64" \
+		"${SYNC_SCRIPT}" >"${work}/partial.log" 2>&1; then
+		fail "sync succeeded although the source index lacks arm64"
+	elif grep -q 'is missing platform arm64' "${work}/partial.log"; then
+		pass "source index missing a platform fails on the platform assertion"
+	else
+		fail "unexpected failure for a single-arch source index"
+		tail -5 "${work}/partial.log" >&2
+	fi
+fi
+
+# A destination tag that is still a collapsed single-arch image is replaced by a
+# correct multi-arch index on the next sync.
+crane copy "${src}/cube-sandbox/testapp:v1.2.3-amd64" \
+	"${dst}/cube-sandbox/testapp:v1.2.3" >/dev/null 2>&1
+if run_sync env IMAGE_TAG=v1.2.3 ARCHES="amd64 arm64" >"${work}/repair.log" 2>&1; then
+	repaired="$(crane manifest "${dst}/cube-sandbox/testapp:v1.2.3" | jq -r .mediaType 2>/dev/null || true)"
+	want="$(crane digest "${src}/cube-sandbox/testapp:v1.2.3")"
+	got="$(crane digest "${dst}/cube-sandbox/testapp:v1.2.3" 2>/dev/null || true)"
+	if [[ "${repaired}" != "application/vnd.oci.image.index.v1+json" &&
+		"${repaired}" != "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+		fail "collapsed destination tag was not restored to an index"
+	elif [[ "${want}" != "${got}" ]]; then
+		fail "repaired destination digest differs: src=${want} dst=${got}"
+	else
+		pass "collapsed destination tag is restored to the source index"
+	fi
+else
+	fail "sync failed while repairing a collapsed destination tag"
+	tail -5 "${work}/repair.log" >&2
 fi
 
 # A prerelease is mirrored but must leave `latest` on the previous release.
 crane tag "${src}/cube-sandbox/testapp:v1.2.3-amd64" v1.2.4-rc1-amd64 >/dev/null 2>&1
 crane tag "${src}/cube-sandbox/testapp:v1.2.3-arm64" v1.2.4-rc1-arm64 >/dev/null 2>&1
-docker buildx imagetools create -t "${src}/cube-sandbox/testapp:v1.2.4-rc1" \
+seed_index "${src}/cube-sandbox/testapp:v1.2.4-rc1" \
 	"${src}/cube-sandbox/testapp:v1.2.4-rc1-amd64" \
-	"${src}/cube-sandbox/testapp:v1.2.4-rc1-arm64" >/dev/null 2>&1
+	"${src}/cube-sandbox/testapp:v1.2.4-rc1-arm64"
 latest_before="$(crane digest "${dst}/cube-sandbox/testapp:latest" 2>/dev/null || true)"
 if run_sync env IMAGE_TAG=v1.2.4-rc1 ARCHES="amd64 arm64" >"${work}/rc.log" 2>&1; then
 	rc_digest="$(crane digest "${src}/cube-sandbox/testapp:v1.2.4-rc1")"

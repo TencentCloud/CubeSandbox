@@ -181,6 +181,9 @@ verify_index() {
 for arch in "${arch_list[@]}"; do
   sync_blobs "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
   copy_manifest "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
+  # The index references child digests, so it can match while a per-arch tag has
+  # drifted. Assert the tag itself.
+  assert_same_digest "${IMAGE_TAG}-${arch}"
 done
 
 copy_manifest "${src}:${IMAGE_TAG}" "${dst}:${IMAGE_TAG}"

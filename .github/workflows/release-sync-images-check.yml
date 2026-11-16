@@ -1,0 +1,63 @@
+name: Release Sync Images Check
+
+# Guards the TCR int -> TCR cn mirror contract: every mirrored tag must keep the
+# source digest and media type, and a release tag must stay a multi-arch index.
+# Kept out of terraform-validate.yml so that suite stays docker-free.
+on:
+  pull_request:
+    paths:
+      - 'scripts/sync-release-images.sh'
+      - 'deploy/one-click/tests/test_sync_release_images.sh'
+      - '.github/workflows/release-docker-images.yml'
+      - '.github/workflows/release-sync-images-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-sync-images-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-images:
+    name: sync-release-images (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install crane
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64|amd64) crane_arch=x86_64 ;;
+            aarch64|arm64) crane_arch=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          bin_dir="${RUNNER_TEMP}/crane-bin"
+          mkdir -p "${bin_dir}"
+          curl -fsSL \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${crane_arch}.tar.gz" \
+            | tar -xz -C "${bin_dir}" crane
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+
+      - name: Install jq
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends jq
+
+      - name: Registry-backed sync checks
+        env:
+          # Missing docker, crane or a daemon fails instead of silently skipping.
+          CUBE_SYNC_TEST_REQUIRE: "1"
+        run: bash deploy/one-click/tests/test_sync_release_images.sh

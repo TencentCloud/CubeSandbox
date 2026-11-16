@@ -862,6 +862,22 @@ jobs:
             done
           done
 
+          # The cn mirror is verified against TCR int, so the two registries must
+          # resolve to the same digest or digest-pinned consumers break silently.
+          ghcr="ghcr.io/tencentcloud/${IMAGE_NAME}"
+          tcr="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          for tag in "${tags[@]}"; do
+            # Read the digest from the JSON manifest: a template referencing a
+            # missing field silently falls back to the full human-readable dump.
+            ghcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${ghcr}:${tag}" | jq -r .digest)"
+            tcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${tcr}:${tag}" | jq -r .digest)"
+            if [[ "${ghcr_digest}" != "${tcr_digest}" ]]; then
+              echo "Refusing to continue: ${tag} differs between registries: ghcr ${ghcr_digest} != tcr-int ${tcr_digest}" >&2
+              exit 1
+            fi
+            echo "Registry digests match for ${tag} (${ghcr_digest})"
+          done
+
   # Mirror TCR int to TCR cn on a China-side self-hosted runner, with every tag
   # digest-identical to TCR int. Sourced from TCR int rather than GHCR to keep
   # large layers out of the cross-border path. The work lives in
