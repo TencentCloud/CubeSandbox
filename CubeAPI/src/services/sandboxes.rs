@@ -23,7 +23,7 @@ use crate::{
         ForkResult, LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff,
         RestartStatus, Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig,
         SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
-        SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
+        SandboxNetworkConfigEcho, SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
     },
 };
 
@@ -1554,7 +1554,7 @@ fn config_echo(
 ) -> (
     Option<SandboxLifecycleConfig>,
     Option<bool>,
-    Option<SandboxNetworkConfig>,
+    Option<SandboxNetworkConfigEcho>,
 ) {
     let lifecycle = auto_pause.map(|pause| SandboxLifecycleConfig {
         on_timeout: if pause {
@@ -1565,14 +1565,13 @@ fn config_echo(
         auto_resume: auto_resume.unwrap_or_default(),
     });
     let allow_internet_access = network.and_then(|n| n.allow_internet_access);
+    // Rules carry plaintext inject secrets and are never echoed.
     let network = network
-        .map(|n| SandboxNetworkConfig {
+        .map(|n| SandboxNetworkConfigEcho {
             allow_public_traffic: n.allow_public_traffic,
             allow_out: (!n.allow_out.is_empty()).then(|| n.allow_out.clone()),
             deny_out: (!n.deny_out.is_empty()).then(|| n.deny_out.clone()),
             mask_request_host: n.mask_request_host.clone(),
-            // rules omitted: CubeEgressRuleInject carries plaintext secrets.
-            rules: None,
         })
         .filter(|n| !n.is_empty());
     (lifecycle, allow_internet_access, network)
@@ -2976,8 +2975,6 @@ mod tests {
             .await
             .expect("detail should succeed");
 
-        // The GET /sandboxes/{id} wire must actually carry the three e2b keys.
-        // (Asserted before the field moves below consume `detail`.)
         let wire = serde_json::to_value(&detail).unwrap();
         assert_eq!(
             wire["lifecycle"],
@@ -3054,7 +3051,6 @@ mod tests {
 
     #[test]
     fn from_cubemaster_info_omits_empty_network_echo() {
-        // allowInternetAccess-only config must not surface as "network": {}.
         let info: SandboxInfo = serde_json::from_value(serde_json::json!({
             "sandbox_id": "sb-1",
             "status": 1,

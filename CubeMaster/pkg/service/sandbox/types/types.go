@@ -616,9 +616,7 @@ type SandboxBriefData struct {
 	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
 }
 
-// MarshalJSON on the sandbox response items scrubs egress rules at the
-// serialization boundary, making the secret protection structural instead of
-// relying on every fill site remembering to scrub. See scrubEchoNetworkConfig.
+// MarshalJSON scrubs egress rules on the wire; see scrubEchoNetworkConfig.
 func (d SandboxBriefData) MarshalJSON() ([]byte, error) {
 	type alias SandboxBriefData
 	return FastestJsoniter.Marshal(&struct {
@@ -687,11 +685,9 @@ func (d SandboxData) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// scrubEchoNetworkConfig drops L7 egress rules from the wire form of a network
-// config: EgressRuleInject carries plaintext secrets and must never leave the
-// control plane. Called from the response MarshalJSON methods so no code path
-// — including future early returns that bypass the explicit fill-time scrub —
-// can leak it.
+// scrubEchoNetworkConfig drops egress rules from the wire form:
+// EgressRuleInject carries plaintext secrets and must never leave the
+// control plane.
 func scrubEchoNetworkConfig(cfg *CubeNetworkConfig) *CubeNetworkConfig {
 	if cfg == nil {
 		return nil

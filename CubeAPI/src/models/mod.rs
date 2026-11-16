@@ -95,6 +95,40 @@ impl SandboxNetworkConfig {
     }
 }
 
+/// Query-response form of [`SandboxNetworkConfig`]. Egress `rules` never
+/// appear here — they carry plaintext inject secrets and are scrubbed before
+/// a response is built — so the response schema must not declare them.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+pub struct SandboxNetworkConfigEcho {
+    #[serde(rename = "allowPublicTraffic", skip_serializing_if = "Option::is_none")]
+    pub allow_public_traffic: Option<bool>,
+    #[serde(
+        rename = "allowOut",
+        alias = "allow_out",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_out: Option<Vec<String>>,
+    #[serde(
+        rename = "denyOut",
+        alias = "deny_out",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deny_out: Option<Vec<String>>,
+    #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
+    pub mask_request_host: Option<String>,
+}
+
+impl SandboxNetworkConfigEcho {
+    /// True when there is nothing worth echoing (e.g. the persisted config
+    /// carried only egress rules, which never appear on the wire).
+    pub fn is_empty(&self) -> bool {
+        self.allow_public_traffic.is_none()
+            && self.allow_out.is_none()
+            && self.deny_out.is_none()
+            && self.mask_request_host.is_none()
+    }
+}
+
 /// Deserialize CubeSandbox's ordered rule list and E2B's host-keyed rule map
 /// into the same internal representation. E2B uses the map form for
 /// per-host request transforms, while CubeEgress evaluates an ordered list.
@@ -856,9 +890,10 @@ pub struct ListedSandbox {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
-    /// Persisted egress config; absent when the spec was not read.
+    /// Persisted egress config; absent when the spec was not read or when it
+    /// carried only egress rules (rules never appear on the wire).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<SandboxNetworkConfig>,
+    pub network: Option<SandboxNetworkConfigEcho>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     /// Exact CPU allocation in millicores. Optional for compatibility with older responses.
@@ -911,9 +946,10 @@ pub struct SandboxDetail {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
-    /// Persisted egress config; absent when the spec was not read.
+    /// Persisted egress config; absent when the spec was not read or when it
+    /// carried only egress rules (rules never appear on the wire).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<SandboxNetworkConfig>,
+    pub network: Option<SandboxNetworkConfigEcho>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -1319,8 +1355,8 @@ mod tests {
     use super::{
         ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, ListedSandbox, NewSandbox,
         NewSandboxV2, ResumedSandbox, SandboxDetail, SandboxLifecycleConfig, SandboxNetworkConfig,
-        SandboxOnTimeout, SandboxState, SetTimeoutRequest, TemplateAliasLookupResponse,
-        UpdateSandboxNetworkRequest,
+        SandboxNetworkConfigEcho, SandboxOnTimeout, SandboxState, SetTimeoutRequest,
+        TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
     };
     use chrono::{DateTime, Utc};
     use validator::Validate;
@@ -1439,7 +1475,7 @@ mod tests {
             auto_resume: true,
         });
         sandbox.allow_internet_access = Some(false);
-        sandbox.network = Some(SandboxNetworkConfig {
+        sandbox.network = Some(SandboxNetworkConfigEcho {
             deny_out: Some(vec!["1.2.3.4/32".into()]),
             ..Default::default()
         });

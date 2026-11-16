@@ -247,8 +247,7 @@ func echoNetworkConfig(cfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	if cfg == nil {
 		return nil
 	}
-	// DeepCopy, not a struct shallow copy: the echoed item must not alias
-	// AllowOut/DenyOut with the persisted spec's slices.
+	// DeepCopy so the echo never aliases the persisted spec's slices.
 	out := cfg.DeepCopy()
 	out.Rules = nil
 	return out

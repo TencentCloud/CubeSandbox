@@ -98,9 +98,6 @@ func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
 	})
 	require.Len(t, rows, 1)
 
-	// Assert the synthesis-time echo BEFORE enrichSandboxList runs: production
-	// order is enrich-then-merge, so enrich can never cover a pause-synthesized
-	// row — these fields must come from the spec applyPauseBindings got.
 	require.NotNil(t, rows[0].AutoPause)
 	require.True(t, *rows[0].AutoPause)
 	require.NotNil(t, rows[0].AutoResume)
@@ -110,8 +107,6 @@ func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
 	require.Empty(t, rows[0].CubeNetworkConfig.Rules, "echoed config must drop rules (inject secrets)")
 	require.Len(t, spec.CubeNetworkConfig.Rules, 1, "echo must copy the config, spec rules stay untouched")
 
-	// enrichSandboxList re-fills from GetMany with the same values; assert it
-	// does not clobber the synthesized echo.
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
@@ -482,10 +477,6 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 }
 
 func TestListSpecReadsStayBounded(t *testing.T) {
-	// Mirror what listSandbox does after the node scan: enrich the scanned
-	// rows, then merge pause bindings. The spec-store batch read must stay
-	// bounded (1 call without pause rows, 2 with a synthesized shimless row)
-	// so the hot list path cannot regress into per-row lookups.
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 

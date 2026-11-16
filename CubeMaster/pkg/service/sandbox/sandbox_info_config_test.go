@@ -75,11 +75,11 @@ func TestResponseMarshalScrubsEgressRules(t *testing.T) {
 	detail := &types.SandboxData{SandboxID: "sb-1", CubeNetworkConfig: cfg}
 	brief := &types.SandboxBriefData{SandboxID: "sb-1", CubeNetworkConfig: cfg}
 
-	for name, item := range map[string]interface{ MarshalJSON() ([]byte, error) }{
+	for name, item := range map[string]interface{}{
 		"SandboxData":      detail,
 		"SandboxBriefData": brief,
 	} {
-		raw, err := item.MarshalJSON()
+		raw, err := types.FastestJsoniter.Marshal(item)
 		if err != nil {
 			t.Fatalf("%s marshal: %v", name, err)
 		}
@@ -90,8 +90,6 @@ func TestResponseMarshalScrubsEgressRules(t *testing.T) {
 			t.Fatalf("%s: inject secret leaked onto the wire", name)
 		}
 	}
-	// The in-memory config keeps its rules: only the wire form is scrubbed,
-	// and the persisted-spec data must stay untouched.
 	if len(cfg.Rules) != 1 {
 		t.Fatalf("source config rules mutated: %+v", cfg.Rules)
 	}
