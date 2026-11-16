@@ -88,7 +88,15 @@ jobs:
           fi
           for t in "${tests[@]}"; do
             echo "::group::${t}"
-            if bash "${t}"; then
+            # This suite is cloud-free by construction. The sync test's registry
+            # section needs docker, crane and Docker Hub, and runs in
+            # release-sync-images-check.yml; opt it out explicitly here instead
+            # of relying on crane being absent from the runner image.
+            skip_env=()
+            case "${t}" in
+              */test_sync_release_images.sh) skip_env+=(CUBE_SYNC_TEST_SKIP=1) ;;
+            esac
+            if env "${skip_env[@]}" bash "${t}"; then
               echo "::endgroup::"
             else
               echo "::endgroup::"

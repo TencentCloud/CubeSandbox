@@ -196,7 +196,7 @@ else
 		WORK_DIR="${work}/partial" IMAGE_TAG=v2.0.0 ARCHES="amd64 arm64" \
 		"${SYNC_SCRIPT}" >"${work}/partial.log" 2>&1; then
 		fail "sync succeeded although the source index lacks arm64"
-	elif grep -q 'is missing platform arm64' "${work}/partial.log"; then
+	elif grep -q 'is missing linux/arm64' "${work}/partial.log"; then
 		pass "source index missing a platform fails on the platform assertion"
 	else
 		fail "unexpected failure for a single-arch source index"

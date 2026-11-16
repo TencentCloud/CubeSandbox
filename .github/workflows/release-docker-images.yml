@@ -843,7 +843,7 @@ jobs:
             fi
             for arch in "${arch_list[@]}"; do
               if ! jq -e --arg arch "${arch}" \
-                '[.manifests[].platform.architecture] | index($arch) != null' \
+                '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index($arch) != null' \
                 <<<"${index_json}" >/dev/null; then
                 echo "Refusing to continue: ${ref} missing linux/${arch}" >&2
                 exit 1

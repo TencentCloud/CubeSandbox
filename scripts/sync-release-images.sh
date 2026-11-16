@@ -168,10 +168,12 @@ verify_index() {
     exit 1
   fi
   for arch in "${arch_list[@]}"; do
+    # Require a linux platform: an amd64 entry under os=windows would satisfy a
+    # bare architecture match while no Linux node could pull it.
     if ! jq -e --arg arch "${arch}" \
-      '[.manifests[].platform.architecture] | index($arch) != null' \
+      '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index($arch) != null' \
       <<<"${manifest}" >/dev/null; then
-      echo "error: ${ref} is missing platform ${arch}:" >&2
+      echo "error: ${ref} is missing linux/${arch}:" >&2
       echo "${manifest}" >&2
       exit 1
     fi
