@@ -65,6 +65,10 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            {{- with .Values.cubeNode.cubeletLogLevel }}
+            - name: CUBELET_LOG_LEVEL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

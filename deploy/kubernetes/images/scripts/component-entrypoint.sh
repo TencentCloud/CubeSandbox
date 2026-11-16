@@ -790,6 +790,42 @@ patch_cow_jfs_setting() {
 }
 
 # patch_cow_jfs_rootfs_placement sets [cow.jfs] rootfs_placement (shared|local).
+# set_cubelet_log_level <conf.yaml> <level> sets common.log_level, which
+# Cubelet applies after startup (without it Cubelet falls back to its
+# --log-level default, warn). An empty level leaves the file unchanged.
+set_cubelet_log_level() {
+  local dyn="$1"
+  local level="$2"
+
+  [[ -n "${level}" ]] || return 0
+  # StringToLevel maps unknown names to DEBUG, so reject them here.
+  case "${level}" in
+    debug|info|warn|error) ;;
+    *) fail "CUBELET_LOG_LEVEL must be debug, info, warn or error, got '${level}'" ;;
+  esac
+  local tmp
+  tmp="$(mktemp "${dyn}.XXXXXX")"
+  # Only touch log_level inside the top-level common: block; other sections
+  # may carry their own log_level keys.
+  awk -v level="${level}" '
+    function flush_common() {
+      if (in_common && !done) print "  log_level: " level
+      in_common = 0
+    }
+    /^[^[:space:]#]/ { flush_common(); if ($0 ~ /^common:[[:space:]]*$/) { in_common = 1; done = 0 } print; next }
+    in_common && /^  log_level:/ { if (!done) print "  log_level: " level; done = 1; next }
+    { print }
+    END { flush_common() }
+  ' "${dyn}" > "${tmp}"
+  if [[ "$(awk '/^[^[:space:]#]/{c = ($0 ~ /^common:/)} c && /^  log_level:/' "${tmp}")" != "  log_level: ${level}" ]]; then
+    rm -f "${tmp}"
+    fail "failed to set common.log_level in ${dyn}"
+  fi
+  cat "${tmp}" > "${dyn}"
+  rm -f "${tmp}"
+  log "cubelet log_level=${level}"
+}
+
 patch_cow_jfs_rootfs_placement() {
   case "$2" in
     shared|local) ;;
@@ -1108,6 +1144,7 @@ run_cubelet() {
   master_http_esc="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
   sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ops_esc}\"#" "${dyn}"
   sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${master_http_esc}\"#" "${dyn}"
+  set_cubelet_log_level "${dyn}" "${CUBELET_LOG_LEVEL:-}"
   # Warehouse downloads use the same CubeOps as node register/heartbeat.
   cubeops_addr="${CUBE_OPS_ADDR:-${CUBE_OPS_ENDPOINT}}"
   if [[ "${cubeops_addr}" != http://* && "${cubeops_addr}" != https://* ]]; then

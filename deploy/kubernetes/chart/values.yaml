@@ -902,6 +902,10 @@ cubeNode:
       followNodeDns: true
       nameservers: []
 
+  # Cubelet log level after startup (common.log_level in dynamicconf/conf.yaml):
+  # debug, info, warn or error. Empty keeps the conf.yaml value (info); without
+  # one, Cubelet falls back to warn and drops every Infof.
+  cubeletLogLevel: info
   env: []
   # Resource defaults for the cubelet run container.
   resources:
