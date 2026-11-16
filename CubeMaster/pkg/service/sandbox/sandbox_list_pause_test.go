@@ -104,7 +104,7 @@ func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
 		return map[string]*types.CreateCubeSandboxReq{"sb-cfg": spec}, nil
 	})
 
-	enrichSandboxListConfigs(t.Context(), rows)
+	enrichSandboxList(t.Context(), rows)
 	require.NotNil(t, rows[0].AutoPause)
 	require.True(t, *rows[0].AutoPause)
 	require.NotNil(t, rows[0].AutoResume)
@@ -428,7 +428,7 @@ func TestPartialSpecReadKeepsIdentityAndBackend(t *testing.T) {
 	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
 
 	items := []*types.SandboxBriefData{{SandboxID: "sb-spec"}}
-	enrichSandboxListBackends(t.Context(), items)
+	enrichSandboxList(t.Context(), items)
 	require.Equal(t, constants.SnapshotBackendXFS, items[0].Backend)
 }
 
