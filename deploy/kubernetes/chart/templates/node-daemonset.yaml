@@ -85,6 +85,14 @@ spec:
             - name: CUBE_JFS_ROOTFS_PLACEMENT
               value: {{ . | quote }}
             {{- end }}
+            {{- if ne (toString .Values.cubeJuiceFS.memoryPrefetch) "<nil>" }}
+            - name: CUBE_JFS_MEMORY_PREFETCH
+              value: {{ .Values.cubeJuiceFS.memoryPrefetch | toString | quote }}
+            {{- end }}
+            {{- if ne (toString .Values.cubeJuiceFS.fuseReadAheadKB) "<nil>" }}
+            - name: CUBE_JFS_FUSE_READ_AHEAD_KB
+              value: {{ .Values.cubeJuiceFS.fuseReadAheadKB | int | toString | quote }}
+            {{- end }}
             {{- end }}
           ports:
             - name: cubelet-grpc

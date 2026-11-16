@@ -225,6 +225,9 @@ func (l *local) tryJFSCowInitOnce(ctx context.Context) error {
 	if err := l.config.validateJFSRootfsPlacement(); err != nil {
 		return err
 	}
+	if err := l.config.applyJFSFuseReadAhead(); err != nil {
+		CubeLog.Warnf("jfs: fuse read-ahead not applied: %v", err)
+	}
 	engine, source, err := initJFSCowEngine(l.config)
 	if err != nil {
 		return fmt.Errorf("jfs cubecow handle init: %w", err)

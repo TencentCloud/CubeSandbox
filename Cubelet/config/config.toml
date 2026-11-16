@@ -147,6 +147,18 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # package is ready for cross-node restore once none of its blocks is in
     # the --writeback staging area under it.
     # cache_dir = "/data/cubelet/jfs-cache"
+    # Where a jfs sandbox's runtime rootfs lives: "shared" (default) keeps it
+    # on JuiceFS; "local" keeps it on the node-local XFS reflink store and
+    # publishes only each pause/snapshot package's rootfs difference to
+    # JuiceFS. Every node must use the same value; switch only with no paused
+    # or running jfs sandboxes.
+    # rootfs_placement = "shared"
+    # read_ahead_kb enforced on the JuiceFS mount before each jfs restore.
+    # Unset = 16384 (16 MiB); 0 leaves the kernel default (128).
+    # fuse_read_ahead_kb = 16384
+    # Read a restore's whole memory image into the page cache before the VM
+    # starts. Off by default (on-demand faults with read-ahead are faster).
+    # memory_prefetch = false
 
     # Only needed when switching back to the legacy ext4 / raw / reflink-pool
     # backend: change storage_backend to the corresponding value (e.g. "ext4")

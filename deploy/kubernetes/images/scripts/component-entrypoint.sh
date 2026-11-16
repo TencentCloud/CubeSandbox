@@ -753,43 +753,49 @@ patch_cow_jfs_opt_in() {
   log "cow.jfs enable=true mount_path=${mount_path} root=${root} cache_dir=${cache_dir}"
 }
 
-# patch_cow_jfs_rootfs_placement sets [cow.jfs] rootfs_placement (shared|local)
-# in an already-enabled jfs table.
-patch_cow_jfs_rootfs_placement() {
+# patch_cow_jfs_setting sets `key = value` (value already TOML-rendered) in
+# an already-enabled [cow.jfs] table, replacing an existing key.
+patch_cow_jfs_setting() {
   local cfg="$1"
-  local placement="$2"
+  local key="$2"
+  local value="$3"
   local header='[plugins."io.cubelet.internal.v1.storage".cow.jfs]'
   local tmp
 
-  case "${placement}" in
-    shared|local) ;;
-    *) fail "CUBE_JFS_ROOTFS_PLACEMENT must be shared or local, got '${placement}'" ;;
-  esac
   tmp="$(mktemp "${cfg}.XXXXXX")"
-  awk -v header="${header}" -v placement="${placement}" '
+  awk -v header="${header}" -v key="${key}" -v value="${value}" '
     function is_table(line, name,    t) {
       t = line
       sub(/^[[:space:]]+/, "", t)
       return index(t, name) == 1
     }
     function flush_jfs() {
-      if (in_jfs && !found) print "    rootfs_placement = \"" placement "\""
+      if (in_jfs && !found) print "    " key " = " value
       in_jfs = 0
     }
     is_table($0, header) { flush_jfs(); in_jfs = 1; found = 0; print; next }
     in_jfs && /^[[:space:]]*\[/ { flush_jfs() }
-    in_jfs && /^[[:space:]]*rootfs_placement[[:space:]]*=/ {
-      print "    rootfs_placement = \"" placement "\""; found = 1; next
+    in_jfs && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      print "    " key " = " value; found = 1; next
     }
     { print }
     END { flush_jfs() }
   ' "${cfg}" > "${tmp}"
-  if [[ "$(grep -Ec '^[[:space:]]*rootfs_placement[[:space:]]*=' "${tmp}" || true)" -ne 1 ]]; then
+  if [[ "$(grep -Ec "^[[:space:]]*${key}[[:space:]]*=" "${tmp}" || true)" -ne 1 ]]; then
     rm -f "${tmp}"
-    fail "failed to set ${header} rootfs_placement = ${placement}"
+    fail "failed to set ${header} ${key} = ${value}"
   fi
   mv -f "${tmp}" "${cfg}"
-  log "cow.jfs rootfs_placement=${placement}"
+  log "cow.jfs ${key}=${value}"
+}
+
+# patch_cow_jfs_rootfs_placement sets [cow.jfs] rootfs_placement (shared|local).
+patch_cow_jfs_rootfs_placement() {
+  case "$2" in
+    shared|local) ;;
+    *) fail "CUBE_JFS_ROOTFS_PLACEMENT must be shared or local, got '$2'" ;;
+  esac
+  patch_cow_jfs_setting "$1" rootfs_placement "\"$2\""
 }
 
 detect_primary_interface() {
@@ -1166,6 +1172,16 @@ run_cubelet() {
       "${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
     if [[ -n "${CUBE_JFS_ROOTFS_PLACEMENT:-}" ]]; then
       patch_cow_jfs_rootfs_placement "${cfg}" "${CUBE_JFS_ROOTFS_PLACEMENT}"
+    fi
+    if [[ -n "${CUBE_JFS_MEMORY_PREFETCH:-}" ]]; then
+      case "${CUBE_JFS_MEMORY_PREFETCH}" in
+        true|false) patch_cow_jfs_setting "${cfg}" memory_prefetch "${CUBE_JFS_MEMORY_PREFETCH}" ;;
+        *) fail "CUBE_JFS_MEMORY_PREFETCH must be true or false" ;;
+      esac
+    fi
+    if [[ -n "${CUBE_JFS_FUSE_READ_AHEAD_KB:-}" ]]; then
+      [[ "${CUBE_JFS_FUSE_READ_AHEAD_KB}" =~ ^[0-9]+$ ]] || fail "CUBE_JFS_FUSE_READ_AHEAD_KB must be a non-negative integer"
+      patch_cow_jfs_setting "${cfg}" fuse_read_ahead_kb "${CUBE_JFS_FUSE_READ_AHEAD_KB}"
     fi
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then

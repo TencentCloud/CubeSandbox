@@ -1325,6 +1325,15 @@ cubeJuiceFS:
   # difference to JuiceFS. Must be the same on every node; switch only with no
   # paused or running jfs sandboxes.
   rootfsPlacement: ""
+  # Read a restore's whole guest memory image into the page cache before the
+  # VM starts. Leave unset for the Cubelet default (false): it puts the full
+  # read on the resume path and bursts JuiceFS cache writes; on-demand faults
+  # with fuseReadAheadKB measured faster. Set true to enable.
+  memoryPrefetch: null
+  # read_ahead_kb Cubelet enforces on the JuiceFS mount (re-applied before
+  # each jfs restore, since a remount resets it). Leave unset for the Cubelet
+  # default (16384 = 16 MiB); 0 leaves the kernel default (128).
+  fuseReadAheadKB: null
   cacheSizeMB: 102400
   terminationGracePeriodSeconds: 120
   mountOptions:
