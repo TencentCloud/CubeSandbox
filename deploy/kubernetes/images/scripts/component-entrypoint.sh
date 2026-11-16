@@ -1221,10 +1221,17 @@ run_cubelet() {
   done
 
   cleanup() { kill_pidfile cubelet; }
-  trap cleanup TERM INT HUP EXIT
+  trap cleanup EXIT
+  # Exit on a stop signal instead of resuming the wait loop, otherwise the
+  # container lingers until terminationGracePeriodSeconds expires.
+  trap 'exit 0' TERM INT HUP
 
-  while kill -0 "$(cat "${CUBE_PID_DIR}/cubelet.pid" 2>/dev/null || echo 0)" >/dev/null 2>&1; do
-    sleep 10
+  # Track the pid captured at startup: cleanup/preStop remove the pidfile, and
+  # `kill -0 0` (the old fallback) signals our own process group and always
+  # succeeds, so the loop never ended. `sleep & wait` lets a trap run at once.
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    sleep 10 &
+    wait $! || true
   done
   fail "cubelet exited"
 }
