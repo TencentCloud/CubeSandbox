@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,7 +38,9 @@ func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 			const payload = "content"
 			sourceEOF := make(chan struct{})
 			footerAttempt := make(chan struct{})
-			responseWritten := make(chan struct{})
+			responseReceived := make(chan struct{})
+			responseFlushed := make(chan struct{})
+			var responseOnce sync.Once
 			abort := make(chan struct{})
 			packet := make(chan []byte, 1)
 			boundary := make(chan string, 1)
@@ -78,10 +81,16 @@ func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusNoContent)
 				w.(http.Flusher).Flush()
-				close(responseWritten)
+				close(responseFlushed)
 			})
-			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second, false)
+			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second)
 			t.Cleanup(func() { close(abort) })
+			// HTTP/2 may need its writer lock to process control frames before
+			// response headers. Do not hold that lock waiting for the client trace.
+			responseReady := responseReceived
+			if h2 {
+				responseReady = responseFlushed
+			}
 			transport := sb.client.dataHTTP.Transport.(*http.Transport)
 			dial := transport.DialContext
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -91,7 +100,7 @@ func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 				}
 				return &uploadFooterFailureConn{
 					Conn: conn, sourceEOF: sourceEOF, attempted: footerAttempt,
-					response: responseWritten, abort: abort, packet: packet,
+					response: responseReady, abort: abort, packet: packet,
 				}, nil
 			}
 			if tc.wrapped {
@@ -101,7 +110,8 @@ func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 			}
 			traceResult := make(chan error, 1)
 			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
-				WroteRequest: func(info httptrace.WroteRequestInfo) { traceResult <- info.Err },
+				WroteRequest:         func(info httptrace.WroteRequestInfo) { traceResult <- info.Err },
+				GotFirstResponseByte: func() { responseOnce.Do(func() { close(responseReceived) }) },
 			})
 			src := &uploadEOFReader{reader: strings.NewReader(payload), eof: sourceEOF}
 			err := sb.Files().WriteFrom(ctx, "/tmp/file", src)
@@ -131,7 +141,12 @@ func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 					t.Fatal("caller trace did not observe the write failure")
 				}
 				if !h2 && !errors.Is(err, writeErr) {
-					t.Fatalf("upload error=%v did not preserve trace error=%v", err, writeErr)
+					// Without a sleep, RoundTrip may observe the failure before returning
+					// the 2xx. In that case net/http supplies its own URL-wrapped error.
+					var requestErr *url.Error
+					if !errors.As(err, &requestErr) {
+						t.Fatalf("upload error=%v did not preserve trace error=%v", err, writeErr)
+					}
 				}
 			case <-time.After(time.Second):
 				t.Fatal("SDK did not preserve the caller's WroteRequest hook")
@@ -174,9 +189,9 @@ func (c *uploadFooterFailureConn) Write(p []byte) (int, error) {
 			case <-c.response:
 			case <-c.abort:
 			}
-			// Let the real response reach the transport while the final
-			// write is pending, then report that none of its bytes were sent.
-			time.Sleep(150 * time.Millisecond)
+			// The response was flushed (HTTP/2) or observed (HTTP/1.1)
+			// while this write was pending.
+			// Report that none of the final bytes were sent.
 		}
 		return 0, io.ErrClosedPipe
 	default:
@@ -364,7 +379,7 @@ func TestFilesWriteFromPrefersHTTPRejection(t *testing.T) {
 				w.(http.Flusher).Flush()
 				<-stop
 			})
-			sb := uploadProtocolSandbox(t, handler, h2, 250*time.Millisecond, false)
+			sb := uploadProtocolSandbox(t, handler, h2, 250*time.Millisecond)
 			t.Cleanup(func() { close(stop) })
 			err := sb.Files().WriteFrom(context.Background(), "/tmp/file", strings.NewReader("content"))
 			if err == nil || !strings.Contains(err.Error(), "HTTP 413") || errors.Is(err, context.DeadlineExceeded) {

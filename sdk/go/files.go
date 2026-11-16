@@ -110,18 +110,21 @@ func (f *Files) Write(ctx context.Context, path string, data []byte) error {
 // the entire file. It does not retry or follow redirects, since src may not be
 // replayable. The caller owns src; WriteFrom never closes it.
 //
-// With the standard HTTP transport, including wrappers that preserve its trace
-// hooks, WriteFrom also waits for the request-write result. Custom transports
-// need not implement tracing, but any transport that reports both GotConn and
-// WroteHeaders must complete the lifecycle with WroteRequest. Without those
-// hooks, a custom transport is responsible for its own write-error contract.
-// Use a context deadline or HTTP client Timeout to bound the completion wait.
+// With the standard HTTP transport, including wrappers preserving its trace
+// hooks, WriteFrom also checks the final request-write result. Custom transports
+// reporting GotConn and WroteHeaders must report WroteRequest; transports without
+// tracing remain responsible for their own write-error contract.
 //
-// The earlier of ctx's deadline and an injected HTTP client's Timeout bounds
-// the full operation, including the request-body completion wait. Cancellation
-// cannot interrupt a Read blocked inside src. The caller must unblock such a
-// Read and ensure it has exited before reusing src after an error. An error
-// may leave a partial file in the sandbox; uploads are not atomic.
+// The earlier of ctx's deadline and an injected client's Timeout bounds the
+// operation with the standard transport. Without either, completion after a 2xx
+// response is bounded by Config.RequestTimeout (default 30 seconds). A missing
+// callback returns an error; this fallback does not limit the upload before a
+// response. Custom transports must honor request cancellation.
+//
+// One demand-driven worker and a 32 KiB buffer let cancellation unblock the
+// transport without closing src. A source blocked in Read can retain that worker
+// until its owner unblocks it, even after this call returns. Ensure that Read has
+// exited before reusing src. Errors can leave partial files; writes are not atomic.
 func (f *Files) WriteFrom(ctx context.Context, path string, src io.Reader) error {
 	if f == nil || f.writer == nil {
 		return fmt.Errorf("files is not attached to a sandbox")

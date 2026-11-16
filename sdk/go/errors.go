@@ -129,13 +129,20 @@ func apiErrorFromStatus(statusCode int, message string) *APIError {
 	}
 }
 
+const maxErrorBodyBytes = 64 << 10
+
 func readErrorMessage(resp *http.Response) string {
 	if resp == nil || resp.Body == nil {
 		return ""
 	}
-	raw, err := io.ReadAll(resp.Body)
+	// Read one extra byte to detect truncation. The caller closes the body;
+	// do not drain an unbounded error response just to reuse the connection.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
 	if err != nil {
 		return ""
+	}
+	if len(raw) > maxErrorBodyBytes {
+		return strings.TrimSpace(string(raw[:maxErrorBodyBytes])) + " [truncated]"
 	}
 	raw = []byte(strings.TrimSpace(string(raw)))
 	if len(raw) == 0 {

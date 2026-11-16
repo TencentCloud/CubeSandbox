@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptrace"
 	"sync"
@@ -23,6 +22,8 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 	if src == nil {
 		return fmt.Errorf("file source must not be nil")
 	}
+	ctx, cancelRequest := context.WithCancel(ctx)
+	defer cancelRequest()
 	httpClient := *s.client.dataHTTP
 	if httpClient.Timeout > 0 {
 		// Include the post-response completion wait in the client's timeout.
@@ -33,7 +34,7 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 		defer cancel()
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
 	body, contentType, err := newMultipartUploadBody(ctx, src)
 	if err != nil {
@@ -43,7 +44,7 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 
 	writes := newUploadWriteObserver()
 	requestCtx := httptrace.WithClientTrace(ctx, writes.trace())
-	req, err := s.newEnvdRequest(requestCtx, http.MethodPost, "/files", newEnvdFileQuery(path, options...), body)
+	req, err := s.newEnvdRequest(requestCtx, http.MethodPost, envdFilesPath, newEnvdFileQuery(path, options...), body)
 	if err != nil {
 		return err
 	}
@@ -80,20 +81,28 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 
 	// A server can reply before the request body has finished. Do not turn
 	// a source read failure or a prematurely closed upload into success.
+	// Bound completion even when the caller supplied no deadline. Start this
+	// fallback after the response, so it does not limit a long-running upload.
+	completionCtx := ctx
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		completionCtx, cancel = context.WithTimeout(ctx, s.client.config.RequestTimeout)
+		defer cancel()
+	}
 	select {
 	case <-body.done:
-		if err := ctx.Err(); err != nil {
+		if err := completionCtx.Err(); err != nil {
 			return fmt.Errorf("failed to write %s: %w", path, err)
 		}
 		if body.err != nil {
 			return fmt.Errorf("failed to write %s: %w", path, body.err)
 		}
-		if err := writes.wait(ctx); err != nil {
+		if err := writes.wait(completionCtx); err != nil {
 			return fmt.Errorf("failed to write %s: %w", path, err)
 		}
 		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("failed to write %s: %w", path, ctx.Err())
+	case <-completionCtx.Done():
+		return fmt.Errorf("failed to write %s: upload completion timed out or was canceled: %w", path, completionCtx.Err())
 	}
 }
 
@@ -151,42 +160,53 @@ func (w *uploadWriteObserver) wait(ctx context.Context) error {
 	}
 }
 
-// multipartUploadBody buffers only the multipart framing. The transport reads
-// src directly, so there is no producer goroutine or file-sized buffer. Closing
-// the body stops future reads without taking ownership of src.
+// multipartUploadBody uses one demand-driven worker and a fixed buffer so Close
+// can unblock the transport's Read without closing the caller's source. A source
+// stuck inside Read can retain that worker until its owner unblocks it.
 type multipartUploadBody struct {
-	ctx    context.Context
-	reader io.Reader
-	done   chan struct{}
-	once   sync.Once
-	err    error // published by closing done
+	ctx        context.Context
+	reader     io.Reader
+	done       chan struct{}
+	once       sync.Once
+	err        error // published by closing done
+	readMu     sync.Mutex
+	start      sync.Once
+	requests   chan int
+	results    chan uploadReadResult
+	workerDone chan struct{}
+}
+
+const uploadReadBufferSize = 32 << 10
+
+type uploadReadResult struct {
+	data []byte
+	err  error
 }
 
 func newMultipartUploadBody(ctx context.Context, src io.Reader) (*multipartUploadBody, string, error) {
-	var framing bytes.Buffer
-	writer := multipart.NewWriter(&framing)
 	// The destination is carried by the path query parameter. Keep it out
 	// of MIME headers: older Go versions do not escape CR/LF in filenames.
-	if _, err := writer.CreateFormFile("file", "upload"); err != nil {
+	header, footer, contentType, err := multipartFileFraming(streamUploadFilename)
+	if err != nil {
 		return nil, "", err
 	}
-	headerLen := framing.Len()
-	if err := writer.Close(); err != nil {
-		return nil, "", err
-	}
-	raw := framing.Bytes()
 	return &multipartUploadBody{
 		ctx: ctx,
 		reader: io.MultiReader(
-			bytes.NewReader(raw[:headerLen]),
+			bytes.NewReader(header),
 			src,
-			&multipartFooterReader{reader: bytes.NewReader(raw[headerLen:])},
+			&multipartFooterReader{reader: bytes.NewReader(footer)},
 		),
-		done: make(chan struct{}),
-	}, writer.FormDataContentType(), nil
+		done:       make(chan struct{}),
+		requests:   make(chan int),
+		results:    make(chan uploadReadResult),
+		workerDone: make(chan struct{}),
+	}, contentType, nil
 }
 
 func (b *multipartUploadBody) Read(p []byte) (int, error) {
+	b.readMu.Lock()
+	defer b.readMu.Unlock()
 	select {
 	case <-b.done:
 		if b.err != nil {
@@ -199,13 +219,60 @@ func (b *multipartUploadBody) Read(p []byte) (int, error) {
 		b.finish(err)
 		return 0, err
 	}
-	n, err := b.reader.Read(p)
-	if err == io.EOF {
-		b.finish(nil)
-	} else if err != nil {
-		b.finish(err)
+	if len(p) == 0 {
+		return 0, nil
 	}
-	return n, err
+	b.start.Do(func() { go b.readSource() })
+	select {
+	case b.requests <- min(len(p), uploadReadBufferSize):
+	case <-b.ctx.Done():
+		b.finish(b.ctx.Err())
+	case <-b.done:
+	}
+	select {
+	case result := <-b.results:
+		n := copy(p, result.data)
+		if result.err == io.EOF {
+			b.finish(nil)
+		} else if result.err != nil {
+			b.finish(result.err)
+		}
+		return n, result.err
+	case <-b.ctx.Done():
+		b.finish(b.ctx.Err())
+	case <-b.done:
+	}
+	<-b.done
+	if b.err != nil {
+		return 0, b.err
+	}
+	return 0, io.EOF
+}
+
+func (b *multipartUploadBody) readSource() {
+	defer close(b.workerDone)
+	buffer := make([]byte, uploadReadBufferSize)
+	for {
+		var size int
+		select {
+		case <-b.done:
+			return
+		case <-b.ctx.Done():
+			return
+		case size = <-b.requests:
+		}
+		n, err := b.reader.Read(buffer[:size])
+		select {
+		case <-b.done:
+			return
+		case <-b.ctx.Done():
+			return
+		case b.results <- uploadReadResult{data: buffer[:n], err: err}:
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (b *multipartUploadBody) Close() error {

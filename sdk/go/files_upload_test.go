@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -292,7 +293,7 @@ func TestFilesWriteFromValidationAndTransportErrors(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := files.WriteFrom(ctx, "/tmp/file", &uploadErrorReader{err: boom}); !errors.Is(err, context.Canceled) {
+	if err := files.WriteFrom(ctx, "/tmp/file", &uploadErrorReader{err: boom}); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "/tmp/file") {
 		t.Fatalf("pre-cancelled upload error=%v", err)
 	}
 	if calls.Load() != 0 {
@@ -303,37 +304,80 @@ func TestFilesWriteFromValidationAndTransportErrors(t *testing.T) {
 	}
 }
 
-func BenchmarkFilesWriteFrom(b *testing.B) {
+// Keep preloaded input outside the timer, and measure materialization separately.
+func BenchmarkFilesWriteFrom(b *testing.B) { benchmarkFileUpload(b, true, false, false) }
+
+func BenchmarkFilesWrite(b *testing.B) {
+	for _, fallback := range []bool{false, true} {
+		for _, prepare := range []bool{false, true} {
+			b.Run(fmt.Sprintf("fallback_%v/materialize_%v", fallback, prepare), func(b *testing.B) { benchmarkFileUpload(b, false, fallback, prepare) })
+		}
+	}
+}
+
+func benchmarkFileUpload(b *testing.B, stream, fallback, prepare bool) {
 	for _, size := range []int64{64 << 10, 8 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				reader, err := r.MultipartReader()
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
+				var reader io.Reader = r.Body
+				var multipartReader *multipart.Reader
+				if r.Header.Get("Content-Type") != "application/octet-stream" {
+					var err error
+					multipartReader, err = r.MultipartReader()
+					if err != nil {
+						http.Error(w, err.Error(), 400)
+						return
+					}
+					reader, err = multipartReader.NextPart()
+					if err != nil {
+						http.Error(w, err.Error(), 400)
+						return
+					}
+				}
+				if n, err := io.Copy(io.Discard, reader); err != nil || n != size {
+					http.Error(w, "incomplete upload", 400)
 					return
 				}
-				part, err := reader.NextPart()
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
+				if multipartReader != nil {
+					if _, err := multipartReader.NextPart(); err != io.EOF {
+						http.Error(w, "invalid ending", 400)
+						return
+					}
 				}
-				if n, err := io.Copy(io.Discard, part); err != nil || n != size {
-					http.Error(w, "incomplete upload", http.StatusBadRequest)
-					return
-				}
-				if _, err := reader.NextPart(); err != io.EOF {
-					http.Error(w, "invalid multipart ending", http.StatusBadRequest)
+				if fallback && multipartReader == nil {
+					w.WriteHeader(http.StatusUnsupportedMediaType)
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer server.Close()
 			sb := uploadTestSandbox(b, server)
+			var data []byte
+			if !stream && !prepare {
+				var err error
+				data, err = io.ReadAll(&uploadPatternReader{remaining: size})
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
 			b.SetBytes(size)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := sb.Files().WriteFrom(context.Background(), "/tmp/benchmark", &uploadPatternReader{remaining: size}); err != nil {
+				var err error
+				if stream {
+					err = sb.Files().WriteFrom(context.Background(), "/tmp/benchmark", &uploadPatternReader{remaining: size})
+				} else {
+					payload := data
+					if prepare {
+						payload, err = io.ReadAll(&uploadPatternReader{remaining: size})
+						if err != nil {
+							b.Fatal(err)
+						}
+					}
+					err = sb.Files().Write(context.Background(), "/tmp/benchmark", payload)
+				}
+				if err != nil {
 					b.Fatal(err)
 				}
 			}

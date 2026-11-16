@@ -86,27 +86,36 @@ if err := sandbox.Files().WriteFrom(ctx, "/tmp/artifact.tar.gz", file); err != n
 }
 ```
 
-`ForUser` also applies to this method. The SDK sends one multipart request and
-never retries it or follows redirects, since the reader may not be replayable.
-The caller retains ownership of the reader. The endpoint and proxy must accept
-unknown-length request bodies (chunked transfer for HTTP/1.1).
+`ForUser` also applies. The SDK consumes the reader once, never closes it, and
+does not retry a rejected upload or follow redirects. It uses one demand-driven
+reader goroutine, a 32 KiB buffer and multipart framing. Endpoints and proxies
+must accept unknown-length bodies (chunked transfer for HTTP/1.1). For older
+endpoints without multipart support, consider `Write([]byte)` and its initial
+octet-stream request if buffering is acceptable; `WriteFrom` does not replay.
 
-With the standard HTTP transport, including wrappers that preserve its HTTP trace
-hooks, the method also waits for the request-write result. Custom transports need
-not implement tracing, but a transport that reports both `GotConn` and
-`WroteHeaders` must complete the lifecycle with `WroteRequest`. Without these
-hooks, it remains responsible for its own write-error contract. Set a context
-deadline or HTTP client `Timeout`: a missing completion callback can otherwise
-wait indefinitely. See the Go SDK README for the full transport contract.
+With the standard HTTP transport and trace-preserving wrappers, the SDK waits
+for the final request-write result. **A custom transport reporting `GotConn` and
+`WroteHeaders` must also report `WroteRequest`.** Missing callbacks produce errors.
+Without tracing, custom transports remain responsible for their write errors.
 
-The earlier of the context deadline and an injected HTTP client's `Timeout`
-bounds the full operation, including the request-body completion wait. An
-arbitrary blocked source `Read` must be unblocked by the caller or support
-cancellation itself; ensure it has exited before reusing the source after an
-error. Uploads are not atomic: an error can leave a partial or truncated
-destination file. Existing `Write([]byte)` behavior is unchanged.
+Use a context deadline or injected HTTP client `Timeout` to bound the full
+operation with the standard transport; the earlier bound applies. If neither is
+set, completion after a successful response uses `Config.RequestTimeout`
+(default 30 seconds), including remaining body consumption and the write
+callback. This fallback starts at the response, not the start of the upload.
+Custom transports must honor cancellation.
 
-This avoids buffering the entire file in the SDK. A custom transport or proxy may
-still buffer the request. The bundled CubeProxy configuration limits the entire
-request body to 256 MiB, including multipart framing; deployments can override
-this limit. `WriteFrom` does not change proxy buffering or upload size limits.
+**A blocked source may retain one reader goroutine and its buffer after the call
+returns.** Cancellation releases the transport's read but cannot interrupt an
+arbitrary source `Read`, such as one on a stalled mount. The owner must unblock
+that read and wait for it to exit before reusing the source. Uploads are not
+atomic; failures can leave partial or truncated files.
+
+CubeProxy defaults to buffering requests, potentially using temporary disk space.
+The 256 MiB body limit includes multipart framing; exceeding it produces HTTP 413.
+Request-body temporary files use `client_body_temp_path`; `proxy_temp_path /data/`
+is for responses. SDK retry guarantees do not govern proxies: the bundled Nginx
+configuration does not enable `non_idempotent`, so it normally does not retry a
+POST already sent to an upstream. Deployment overrides can change these rules.
+Error responses are limited to 64 KiB plus one detection byte and marked when
+truncated. See the Go SDK README for the full transport contract and limitations.

@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func uploadProtocolSandbox(t *testing.T, handler http.Handler, h2 bool, timeout time.Duration, delayWrite bool) *Sandbox {
+func uploadProtocolSandbox(t *testing.T, handler http.Handler, h2 bool, timeout time.Duration) *Sandbox {
 	t.Helper()
 	server := httptest.NewUnstartedServer(handler)
 	server.EnableHTTP2 = h2
@@ -42,9 +42,6 @@ func uploadProtocolSandbox(t *testing.T, handler http.Handler, h2 bool, timeout 
 		if err != nil {
 			return nil, err
 		}
-		if delayWrite {
-			return &uploadDelayedWriteConn{Conn: conn}, nil
-		}
 		return conn, nil
 	}
 	client := NewClient(Config{ProxyScheme: scheme, SandboxDomain: "cube.test"}, WithHTTPClient(&http.Client{
@@ -52,18 +49,6 @@ func uploadProtocolSandbox(t *testing.T, handler http.Handler, h2 bool, timeout 
 	}))
 	t.Cleanup(func() { _ = client.Close() })
 	return &Sandbox{client: client, SandboxID: "sb-upload-http"}
-}
-
-type uploadDelayedWriteConn struct {
-	net.Conn
-}
-
-func (c *uploadDelayedWriteConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p)
-	// Bytes have reached the peer, but the writer has not resumed. This
-	// lets HTTP/2 process the response before another request-body Read.
-	time.Sleep(150 * time.Millisecond)
-	return n, err
 }
 
 func TestFilesWriteFromCompleteHTTPBodyBeforeFinalEOFRead(t *testing.T) {
@@ -111,7 +96,7 @@ func TestFilesWriteFromCompleteHTTPBodyBeforeFinalEOFRead(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusNoContent)
 			})
-			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second, true)
+			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second)
 			if tc.wrapped {
 				transport := sb.client.dataHTTP.Transport
 				sb.client.dataHTTP.Transport = roundTripFunc(transport.RoundTrip)
@@ -142,7 +127,7 @@ func TestFilesWriteFromIncompleteHTTPBodyWithEarlySuccess(t *testing.T) {
 				_, _ = io.CopyN(io.Discard, r.Body, 1024)
 				w.WriteHeader(http.StatusNoContent)
 			})
-			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second, false)
+			sb := uploadProtocolSandbox(t, handler, h2, 5*time.Second)
 			err := sb.Files().WriteFrom(context.Background(), "/tmp/file", &uploadPatternReader{remaining: 8 << 20})
 			if !errors.Is(err, io.ErrUnexpectedEOF) {
 				t.Fatalf("incomplete upload error=%v, want unexpected EOF", err)
@@ -188,7 +173,7 @@ func TestFilesWriteFromEffectiveDeadlineAfterEarlySuccess(t *testing.T) {
 					close(responseSent)
 					<-stop
 				})
-				sb := uploadProtocolSandbox(t, handler, h2, tc.client, false)
+				sb := uploadProtocolSandbox(t, handler, h2, tc.client)
 				t.Cleanup(func() {
 					close(src.release)
 					close(stop)
@@ -228,15 +213,16 @@ func TestFilesWriteFromEffectiveDeadlineAfterEarlySuccess(t *testing.T) {
 }
 
 type uploadBlockedReader struct {
-	entered chan struct{}
-	release chan struct{}
-	exited  chan struct{}
-	once    sync.Once
+	entered  chan struct{}
+	release  chan struct{}
+	exited   chan struct{}
+	once     sync.Once
+	exitOnce sync.Once
 }
 
 func (r *uploadBlockedReader) Read([]byte) (int, error) {
 	r.once.Do(func() { close(r.entered) })
 	<-r.release
-	close(r.exited)
+	r.exitOnce.Do(func() { close(r.exited) })
 	return 0, io.EOF
 }
