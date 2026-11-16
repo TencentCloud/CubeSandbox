@@ -265,6 +265,8 @@ class Template:
             start_cmd: Not supported by CubeAPI's current template endpoint.
             instance_type: CubeMaster instance type (defaults server-side).
             writable_layer_size: Writable layer size, e.g. ``"1G"``.
+            backend: CoW backend for the template and its snapshots: ``"xfs"`` or ``"s3"``.
+                Omit to keep the server's xfs default.
             exposed_ports: Container ports to expose.
             probe_port: HTTP probe port.
             probe_path: HTTP probe path.
