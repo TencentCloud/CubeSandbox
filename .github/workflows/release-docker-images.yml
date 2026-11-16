@@ -889,6 +889,16 @@ jobs:
   # large layers out of the cross-border path. The work lives in
   # scripts/sync-release-images.sh so it can be run locally against throwaway
   # registries. This ARC runner set requires a job container.
+  #
+  # Repairing a release that already shipped a collapsed cn tag: the script must
+  # come from a ref that contains it, so re-dispatching with `ref=<old tag>`
+  # fails. Run the script directly against the existing TCR int tags instead,
+  # from a checkout that has it:
+  #   SRC_REGISTRY=cube-sandbox-int.tencentcloudcr.com \
+  #   DST_REGISTRY=cube-sandbox-cn.tencentcloudcr.com \
+  #   IMAGE_NAME=<component> IMAGE_TAG=<release> ARCHES="amd64 arm64" \
+  #     scripts/sync-release-images.sh
+  # It needs TCR credentials in the crane credential store and never rebuilds.
   sync_cn:
     name: ${{ matrix.component }} sync to TCR CN
     runs-on: arc-2c4g-ctd-gz

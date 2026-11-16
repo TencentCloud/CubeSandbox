@@ -98,8 +98,27 @@ trap cleanup EXIT
 
 src_port="${CUBE_SYNC_TEST_SRC_PORT:-5501}"
 dst_port="${CUBE_SYNC_TEST_DST_PORT:-5502}"
-docker run -d --name "${src_name}" -p "${src_port}:5000" registry:2 >/dev/null
-docker run -d --name "${dst_name}" -p "${dst_port}:5000" registry:2 >/dev/null
+
+# The registry under test is the only image pulled from Docker Hub. Pin it by
+# digest and retry, because anonymous pulls share the hosted-runner egress IP
+# and can be rate limited for reasons unrelated to this script.
+REGISTRY_IMAGE="${CUBE_SYNC_TEST_REGISTRY_IMAGE:-registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373}"
+start_registry() {
+	local name="$1"
+	local port="$2"
+	local attempt
+	for attempt in 1 2 3; do
+		if docker run -d --name "${name}" -p "${port}:5000" "${REGISTRY_IMAGE}" >/dev/null 2>&1; then
+			return 0
+		fi
+		docker rm -f "${name}" >/dev/null 2>&1 || true
+		sleep "$((attempt * 5))"
+	done
+	fail "could not start ${REGISTRY_IMAGE} on port ${port}"
+	return 1
+}
+start_registry "${src_name}" "${src_port}"
+start_registry "${dst_name}" "${dst_port}"
 src="127.0.0.1:${src_port}"
 dst="127.0.0.1:${dst_port}"
 for _ in $(seq 1 30); do
