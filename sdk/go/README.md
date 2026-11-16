@@ -256,6 +256,10 @@ Uploads are not atomic or resumable; an error can leave a partial or truncated
 file. Non-2xx responses prefer the HTTP rejection and available server message.
 Error bodies are read up to 64 KiB plus one truncation-detection byte, then closed
 without an unbounded drain; oversized messages are marked `[truncated]`.
+An incomplete final UTF-8 character is dropped at the truncation boundary. This
+shared limit also applies to other SDK HTTP errors: oversized JSON is returned
+as a truncated raw prefix, so `message`/`detail` extraction and keyword-based
+error classification may differ from a complete error response.
 During successful-response completion, deadline and observed source/write errors
 are returned. Go 1.22 legacy transport timeouts may expose `net.Error.Timeout()`
 without wrapping `context.DeadlineExceeded`, matching the standard client.

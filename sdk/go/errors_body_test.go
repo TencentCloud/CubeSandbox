@@ -4,10 +4,12 @@
 package cubesandbox
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestReadErrorMessageBound(t *testing.T) {
@@ -29,5 +31,31 @@ func TestReadErrorMessageBound(t *testing.T) {
 				t.Fatalf("read %d bytes", read)
 			}
 		})
+	}
+}
+
+func TestReadErrorMessageTruncatesAtUTF8Boundary(t *testing.T) {
+	for _, char := range []string{"é", "中", "😀"} {
+		for included := 0; included <= len(char); included++ {
+			t.Run(fmt.Sprintf("%s/bytes_%d", char, included), func(t *testing.T) {
+				padding := strings.Repeat("x", maxErrorBodyBytes-included)
+				body := padding + char + "tail"
+				reader := strings.NewReader(body)
+				resp := &http.Response{Body: io.NopCloser(reader)}
+				defer resp.Body.Close()
+				want := padding
+				if included == len(char) {
+					want += char
+				}
+				want += " [truncated]"
+				got := readErrorMessage(resp)
+				if got != want || !utf8.ValidString(got) {
+					t.Fatalf("invalid truncation: length=%d, valid UTF-8=%v", len(got), utf8.ValidString(got))
+				}
+				if read := len(body) - reader.Len(); read != maxErrorBodyBytes+1 {
+					t.Fatalf("read %d bytes, want %d", read, maxErrorBodyBytes+1)
+				}
+			})
+		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -142,7 +143,17 @@ func readErrorMessage(resp *http.Response) string {
 		return ""
 	}
 	if len(raw) > maxErrorBodyBytes {
-		return strings.TrimSpace(string(raw[:maxErrorBodyBytes])) + " [truncated]"
+		prefix := raw[:maxErrorBodyBytes]
+		// Drop an incomplete trailing rune rather than introduce invalid UTF-8
+		// by cutting valid server text in the middle of a multibyte character.
+		start := len(prefix) - 1
+		for start > 0 && !utf8.RuneStart(prefix[start]) {
+			start--
+		}
+		if !utf8.FullRune(prefix[start:]) {
+			prefix = prefix[:start]
+		}
+		return strings.TrimSpace(string(prefix)) + " [truncated]"
 	}
 	raw = []byte(strings.TrimSpace(string(raw)))
 	if len(raw) == 0 {

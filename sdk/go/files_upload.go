@@ -17,10 +17,10 @@ import (
 
 func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader, options ...fileRequestOption) error {
 	if err := s.ensureClient(); err != nil {
-		return err
+		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
 	if src == nil {
-		return fmt.Errorf("file source must not be nil")
+		return fmt.Errorf("failed to write %s: file source must not be nil", path)
 	}
 	ctx, cancelRequest := context.WithCancel(ctx)
 	defer cancelRequest()
@@ -38,7 +38,7 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 	}
 	body, contentType, err := newMultipartUploadBody(ctx, src)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
 	defer body.Close()
 
@@ -46,7 +46,7 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 	requestCtx := httptrace.WithClientTrace(ctx, writes.trace())
 	req, err := s.newEnvdRequest(requestCtx, http.MethodPost, envdFilesPath, newEnvdFileQuery(path, options...), body)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
 	req.Header.Set("Content-Type", contentType)
 
@@ -75,6 +75,9 @@ func (s *Sandbox) writeFileFrom(ctx context.Context, path string, src io.Reader,
 		message := readErrorMessage(resp)
 		if message == "" {
 			message = http.StatusText(resp.StatusCode)
+		}
+		if message == "" {
+			return fmt.Errorf("failed to write %s: HTTP %d", path, resp.StatusCode)
 		}
 		return fmt.Errorf("failed to write %s: HTTP %d: %s", path, resp.StatusCode, message)
 	}

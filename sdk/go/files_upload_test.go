@@ -288,8 +288,8 @@ func TestFilesWriteFromValidationAndTransportErrors(t *testing.T) {
 	})}))
 	defer client.Close()
 	files := (&Sandbox{client: client, SandboxID: "sb-upload"}).Files()
-	if err := files.WriteFrom(context.Background(), "/tmp/file", nil); err == nil {
-		t.Fatal("nil source must fail")
+	if err := files.WriteFrom(context.Background(), "/tmp/file", nil); err == nil || !strings.HasPrefix(err.Error(), "failed to write /tmp/file:") {
+		t.Fatalf("nil source error=%v, want destination context", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -301,6 +301,50 @@ func TestFilesWriteFromValidationAndTransportErrors(t *testing.T) {
 	}
 	if err := files.WriteFrom(context.Background(), "/tmp/file", strings.NewReader("content")); !errors.Is(err, boom) {
 		t.Fatalf("transport error=%v", err)
+	}
+}
+
+func TestFilesWriteFromRequestErrorIncludesPath(t *testing.T) {
+	var calls atomic.Int32
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		req.Body.Close()
+		return nil, errors.New("unexpected transport call")
+	})}))
+	defer client.Close()
+	client.config.ProxyScheme = "invalid scheme"
+	err := (&Sandbox{client: client, SandboxID: "sb-upload"}).Files().WriteFrom(context.Background(), "/tmp/invalid-request", strings.NewReader("content"))
+	if err == nil || !strings.HasPrefix(err.Error(), "failed to write /tmp/invalid-request:") || errors.Unwrap(err) == nil {
+		t.Fatalf("request error=%v, want path and wrapped cause", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("invalid request reached the transport")
+	}
+}
+
+func TestFilesWriteFromHTTPErrorMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "standard_empty", status: 500, want: "HTTP 500: Internal Server Error"},
+		{name: "custom_empty", status: 599, want: "HTTP 599"},
+		{name: "custom_whitespace", status: 599, body: " \n\t", want: "HTTP 599"},
+		{name: "custom_message", status: 599, body: `{"message":"upstream rejected upload"}`, want: "HTTP 599: upstream rejected upload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				defer req.Body.Close()
+				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})}))
+			defer client.Close()
+			err := (&Sandbox{client: client, SandboxID: "sb-upload"}).Files().WriteFrom(context.Background(), "/tmp/rejected", strings.NewReader("content"))
+			if err == nil || err.Error() != "failed to write /tmp/rejected: "+tc.want {
+				t.Fatalf("HTTP error=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

@@ -22,6 +22,10 @@ import (
 	"time"
 )
 
+// This fixture relies on Go's standard HTTP/1.1 and HTTP/2 transports reporting
+// a request-body write failure through WroteRequest. When upgrading Go, verify
+// that hook and the response/write ordering before changing these assertions.
+// The channels establish ordering; timeouts elsewhere only detect a stuck test.
 func TestFilesWriteFromRejectsFailedFooterWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

@@ -118,4 +118,6 @@ is for responses. SDK retry guarantees do not govern proxies: the bundled Nginx
 configuration does not enable `non_idempotent`, so it normally does not retry a
 POST already sent to an upstream. Deployment overrides can change these rules.
 Error responses are limited to 64 KiB plus one detection byte and marked when
-truncated. See the Go SDK README for the full transport contract and limitations.
+truncated, dropping an incomplete final UTF-8 character. This shared SDK limit
+can change field extraction and error classification for oversized responses.
+See the Go SDK README for the full transport contract and limitations.

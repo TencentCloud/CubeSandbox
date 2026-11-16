@@ -174,8 +174,11 @@ func TestUploadBlockedReaderRepeatedRead(t *testing.T) {
 }
 
 // A complete HTTP/2 request may be closed without a subsequent EOF-only read.
+// io.MultiReader preserves (n > 0, io.EOF) from its last reader, allowing the
+// transport-facing body to record completion with the final delimiter bytes.
+// Keep this assumption covered when updating the supported Go toolchain.
 func TestMultipartFooterReportsEOFWithFinalBytes(t *testing.T) {
-	r := &multipartFooterReader{reader: bytes.NewReader([]byte("footer"))}
+	r := io.MultiReader(&multipartFooterReader{reader: bytes.NewReader([]byte("footer"))})
 	buf := make([]byte, 32)
 	n, err := r.Read(buf)
 	if n != 6 || err != io.EOF || string(buf[:n]) != "footer" {

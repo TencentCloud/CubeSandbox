@@ -137,6 +137,8 @@ func TestFilesWriteFromIncompleteHTTPBodyWithEarlySuccess(t *testing.T) {
 }
 
 func TestFilesWriteFromEffectiveDeadlineAfterEarlySuccess(t *testing.T) {
+	// The short deadline triggers cancellation; the separate 2 s guards allow
+	// scheduling slack. No assertion requires an exact elapsed time.
 	const short = 250 * time.Millisecond
 	for _, h2 := range []bool{false, true} {
 		for _, tc := range []struct {
