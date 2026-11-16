@@ -248,6 +248,36 @@ else
 	cat "${work}/rc.log" >&2
 fi
 
+# Re-syncing an older release must not drag `latest` back to it: `latest` is
+# mirrored from the source, which may already point at a newer release. The
+# newer release needs genuinely different content, otherwise its index digest
+# equals the older one and the case cannot distinguish the two behaviours.
+crane pull --platform linux/amd64 alpine:3.20 "${work}/n-amd.tar" >/dev/null 2>&1
+crane pull --platform linux/arm64 alpine:3.20 "${work}/n-arm.tar" >/dev/null 2>&1
+crane push "${work}/n-amd.tar" "${src}/cube-sandbox/testapp:v1.2.5-amd64" >/dev/null 2>&1
+crane push "${work}/n-arm.tar" "${src}/cube-sandbox/testapp:v1.2.5-arm64" >/dev/null 2>&1
+seed_index "${src}/cube-sandbox/testapp:v1.2.5" \
+	"${src}/cube-sandbox/testapp:v1.2.5-amd64" \
+	"${src}/cube-sandbox/testapp:v1.2.5-arm64"
+if crane tag "${src}/cube-sandbox/testapp:v1.2.5" latest >/dev/null 2>&1 &&
+	[[ "$(crane digest "${src}/cube-sandbox/testapp:latest")" != \
+		"$(crane digest "${src}/cube-sandbox/testapp:v1.2.3")" ]]; then
+	newer="$(crane digest "${src}/cube-sandbox/testapp:latest")"
+	if run_sync env IMAGE_TAG=v1.2.3 ARCHES="amd64 arm64" >"${work}/resync.log" 2>&1; then
+		dst_latest="$(crane digest "${dst}/cube-sandbox/testapp:latest" 2>/dev/null || true)"
+		if [[ "${dst_latest}" != "${newer}" ]]; then
+			fail "re-sync of an older release moved latest: want ${newer} got ${dst_latest:-<missing>}"
+		else
+			pass "re-sync of an older release keeps the source latest"
+		fi
+	else
+		fail "re-sync of an older release failed"
+		tail -5 "${work}/resync.log" >&2
+	fi
+else
+	fail "could not repoint the source latest to a distinct newer release"
+fi
+
 [[ "${failures}" -eq 0 ]] || {
 	echo "${failures} failure(s)" >&2
 	exit 1

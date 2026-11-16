@@ -190,10 +190,11 @@ copy_manifest "${src}:${IMAGE_TAG}" "${dst}:${IMAGE_TAG}"
 verify_index "${dst}:${IMAGE_TAG}"
 assert_same_digest "${IMAGE_TAG}"
 
+# Mirror extra tags from the source instead of retagging the release locally.
+# A re-sync of an older release must not move `latest` back to that release, and
+# the source tag is what consumers on the other registries resolve.
 for extra in "${tags[@]:1}"; do
-  log "Tagging ${dst}:${extra} from ${dst}:${IMAGE_TAG}"
-  crane tag "${dst}:${IMAGE_TAG}" "${extra}" ||
-    die "failed to tag ${dst}:${IMAGE_TAG} as ${extra}"
+  copy_manifest "${src}:${extra}" "${dst}:${extra}"
   verify_index "${dst}:${extra}"
   assert_same_digest "${extra}"
 done
