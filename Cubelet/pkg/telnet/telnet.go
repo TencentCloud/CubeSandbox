@@ -87,7 +87,7 @@ func probe(ctx context.Context, p *ProbeConfig, retCh chan error) {
 	for {
 		select {
 		case <-innerCtx.Done():
-			err = innerCtx.Err()
+			err = deadlineError(innerCtx.Err(), err)
 			goto exitDetect
 		case <-ctx.Done():
 			return
@@ -141,6 +141,21 @@ exitDetect:
 		retCh <- wrapError(err, errorcode.ErrorCode_PortBindingFailed)
 		return
 	}
+}
+
+// deadlineError keeps the last attempt's error when the probe runs out of time.
+// With the template defaults (300 attempts, 100ms apart, 30s budget) the
+// deadline usually expires just before the failure threshold, so returning the
+// bare context error hid whether the port refused, timed out or answered badly.
+func deadlineError(ctxErr, last error) error {
+	if last == nil {
+		return ctxErr
+	}
+	code := errorcode.ErrorCode_PortBindingFailed
+	if s, ok := ret.FromError(last); ok {
+		code = s.Code()
+	}
+	return ret.Errorf(code, "%v, last attempt: %v", ctxErr, last)
 }
 
 func wrapError(err error, code errorcode.ErrorCode) error {
