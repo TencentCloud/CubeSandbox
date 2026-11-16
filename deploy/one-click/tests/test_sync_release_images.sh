@@ -253,19 +253,27 @@ fi
 # would leave a pullable but broken release tag behind. The source has both
 # per-arch tags so the blob phase succeeds and the index check is what rejects.
 crane copy "${src}/cube-sandbox/testapp:v1.2.3-amd64" \
-	"${src}/cube-sandbox/broken:v3.0.0-amd64" >/dev/null 2>&1
+	"${src}/cube-sandbox/broken:v3.0.0-amd64" >/dev/null 2>&1 ||
+	fail "could not seed broken amd64 tag"
 crane copy "${src}/cube-sandbox/testapp:v1.2.3-arm64" \
-	"${src}/cube-sandbox/broken:v3.0.0-arm64" >/dev/null 2>&1
+	"${src}/cube-sandbox/broken:v3.0.0-arm64" >/dev/null 2>&1 ||
+	fail "could not seed broken arm64 tag"
 seed_index "${src}/cube-sandbox/broken:v3.0.0" \
 	"${src}/cube-sandbox/broken:v3.0.0-amd64"
 # Pre-seed the destination with a healthy two-arch index of different content.
 crane copy "${src}/cube-sandbox/testapp:v1.2.3" \
-	"${dst}/cube-sandbox/broken:v3.0.0" >/dev/null 2>&1
+	"${dst}/cube-sandbox/broken:v3.0.0" >/dev/null 2>&1 ||
+	fail "could not pre-seed the destination tag"
 broken_before="$(crane digest "${dst}/cube-sandbox/broken:v3.0.0" 2>/dev/null || true)"
 if SRC_REGISTRY="${src}" DST_REGISTRY="${dst}" IMAGE_NAME=broken \
 	WORK_DIR="${work}/broken" IMAGE_TAG=v3.0.0 ARCHES="amd64 arm64" \
 	"${SYNC_SCRIPT}" >"${work}/broken.log" 2>&1; then
 	fail "sync accepted a source index that is missing a platform"
+elif ! grep -q 'is missing linux/arm64' "${work}/broken.log"; then
+	# Without this the case would pass for any failure, including one unrelated
+	# to the platform assertion.
+	fail "rejected sync failed for an unexpected reason"
+	tail -5 "${work}/broken.log" >&2
 else
 	broken_after="$(crane digest "${dst}/cube-sandbox/broken:v3.0.0" 2>/dev/null || true)"
 	if [[ -z "${broken_before}" || "${broken_after}" != "${broken_before}" ]]; then

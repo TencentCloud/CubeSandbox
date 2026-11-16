@@ -126,16 +126,25 @@ sync_blobs() {
 }
 
 # Manifest-level copy: blobs are already at the destination, so this only PUTs
-# the manifest document and preserves the source digest and media type.
+# the manifest document and preserves the source digest and media type. The
+# int->cn link stalls intermittently, so retry with the same backoff as the blob
+# transfer; a single transient failure would otherwise abort mid-publish.
 copy_manifest() {
   local from="$1"
   local to="$2"
+  local attempt
 
-  log "Copying manifest ${from} -> ${to}"
-  if ! timeout "${CRANE_INDEX_TIMEOUT}" crane copy "${from}" "${to}"; then
-    echo "error: failed to copy manifest ${from} -> ${to}" >&2
-    return 1
-  fi
+  for attempt in $(seq 1 "${CRANE_SYNC_ATTEMPTS}"); do
+    log "Copying manifest ${from} -> ${to} (attempt ${attempt}/${CRANE_SYNC_ATTEMPTS})"
+    if timeout "${CRANE_INDEX_TIMEOUT}" crane copy "${from}" "${to}"; then
+      return 0
+    fi
+    if [[ "${attempt}" == "${CRANE_SYNC_ATTEMPTS}" ]]; then
+      echo "error: failed to copy manifest ${from} -> ${to} after ${CRANE_SYNC_ATTEMPTS} attempts" >&2
+      return 1
+    fi
+    sleep "$((attempt * 10))"
+  done
 }
 
 # Consumers may pin either registry, so a destination digest that differs from
