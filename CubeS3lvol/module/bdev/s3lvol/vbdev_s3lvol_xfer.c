@@ -2589,6 +2589,22 @@ s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
  * reporting YES for it made --retry-pending attempt a delete that then failed
  * with EBUSY. Only a snapshot that is genuinely absent blocks nothing.
  *
+ * === The one refusal this deliberately does not mirror ===
+ *
+ * Check 2 asks s3lvol_export_pinning(), the cached verdict. The delete path
+ * asks the stricter s3lvol_export_pinning_for_delete(), which also refuses an
+ * export whose no-reader answer is older than S3LVOL_LEASE_FRESH_SEC because
+ * the lease check of an idle export is backed off (see the cadence note in
+ * vbdev_s3lvol_exports.c). So YES here can still meet a deferral there.
+ *
+ * Mirroring it is the wrong fix: this runs from rcow_get_snapshot_status and
+ * rcow_get_lvstores, and _for_delete() starts a lease check, which is exactly
+ * what polling status must not be able to do -- it would defeat the backoff.
+ * The divergence is bounded and self-clearing: the refusal is a *deferral*, not
+ * an error (success + "deferred": true), it records the usual pending-delete
+ * mark, and the poller completes the delete on the fresh answer. Callers that
+ * must tell "gone" from "gone shortly" read that field; --retry-pending does.
+ *
  * Computed on the spot every time; nothing here is cached. */
 static bool
 export_snapshot_deletable(struct s3lvol_lvstore *lvs, const char *snapshot_name)

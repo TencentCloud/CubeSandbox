@@ -405,10 +405,21 @@ pending_destroy_done(void *cb_arg, int lvolerrno)
 
 /* Whether this lvol can be deleted right now.
  *
- * Deliberately the same predicates, in the same order, as the refusals in
- * s3lvol_lvol_destroy(): a deferred delete has to be exactly as safe as
- * deleting on the spot would have been, and the way to guarantee that is to ask
- * the same questions rather than a summary of them. */
+ * Deliberately the same predicates as the refusals in s3lvol_lvol_destroy(): a
+ * deferred delete has to be exactly as safe as deleting on the spot would have
+ * been, and the way to guarantee that is to ask the same questions rather than
+ * a summary of them.
+ *
+ * Not in the same order, though: the lease question comes last. It is the one
+ * predicate with a side effect -- an answer too old to act on starts a lease
+ * check and pins the export to the 20 s cadence for another backoff period --
+ * and this runs every poll for as long as the mark exists. Asked first, a
+ * snapshot held by something else (several clones nobody removes, a decouple)
+ * would re-kick its exports every round and undo the backoff for good, with a
+ * 404 ERROR per check when the lease object is absent (#2289). Asked last, it is
+ * only asked once the lease is the sole remaining blocker. The answer is the
+ * same either way, since every predicate has to pass; the destroy path asks the
+ * lease question again itself before acting. */
 static bool
 pending_lvol_deletable(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 		       const char **why)
@@ -427,19 +438,6 @@ pending_lvol_deletable(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	if (s3lvol_snapshot_exports_have_local_readers(lvs, lvol->name)) {
 		*why = "a local esnap clone still reads an export of it";
 		return false;
-	}
-
-	/* A stale or missing lease, and a pre-lease export, let the pending
-	 * delete proceed: the recorded intent is the revocation. */
-	switch (s3lvol_export_pin_state(lvs, lvol->name)) {
-	case S3LVOL_EXPORT_PIN_LEASE:
-		*why = "an importer may still be reading an export of it";
-		return false;
-	case S3LVOL_EXPORT_PIN_LEGACY:
-	case S3LVOL_EXPORT_PIN_STALE:
-	case S3LVOL_EXPORT_PIN_NONE:
-	default:
-		break;
 	}
 
 	if (lvol->blob) {
@@ -467,6 +465,21 @@ pending_lvol_deletable(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 	if (s3lvol_lvol_import_finalizing(lvs, lvol)) {
 		*why = "an export it reads is detaching";
 		return false;
+	}
+
+	/* Last, see the header. A stale or missing lease, and a pre-lease
+	 * export, let the pending delete proceed: the recorded intent is the
+	 * revocation. Asked the way the destroy path asks, so an answer too old
+	 * to act on starts a check and the next round decides. */
+	switch (s3lvol_export_pin_state_for_delete(lvs, lvol->name)) {
+	case S3LVOL_EXPORT_PIN_LEASE:
+		*why = "an importer may still be reading an export of it";
+		return false;
+	case S3LVOL_EXPORT_PIN_LEGACY:
+	case S3LVOL_EXPORT_PIN_STALE:
+	case S3LVOL_EXPORT_PIN_NONE:
+	default:
+		break;
 	}
 	return true;
 }

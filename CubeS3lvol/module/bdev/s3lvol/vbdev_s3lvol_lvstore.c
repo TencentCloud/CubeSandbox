@@ -4330,6 +4330,7 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 {
 	struct s3lvol_lvstore *owner;
 	struct s3lvol_export *pin;
+	bool pin_awaiting_check = false;
 	int rc;
 
 	if (!lvol) {
@@ -4369,15 +4370,28 @@ s3lvol_lvol_destroy_impl(struct spdk_lvol *lvol,
 		return -EBUSY;
 	}
 
-	pin = owner ? s3lvol_export_pinning(owner, lvol->name) : NULL;
+	pin = owner ? s3lvol_export_pinning_for_delete(owner, lvol->name,
+						       &pin_awaiting_check) : NULL;
 	if (pin) {
 		struct s3lvol_export_entry info;
 
 		s3lvol_export_get(pin, &info);
-		SPDK_ERRLOG("lvol '%s' is the snapshot behind export %s, which another "
-			    "node may still be reading through; delete is deferred "
-			    "until its lease is no longer live\n",
-			    lvol->name, info.export_uuid);
+		if (pin_awaiting_check) {
+			/* The lease of an export nobody reads is checked less and
+			 * less often, so this answer is too old to delete on. A
+			 * check is already in flight; the poller finishes the
+			 * delete on its result. Routine, hence not an error. */
+			SPDK_NOTICELOG("lvol '%s' is the snapshot behind export %s, "
+				       "whose lease has not been checked recently; "
+				       "delete is deferred until a fresh check "
+				       "confirms that nobody reads it\n",
+				       lvol->name, info.export_uuid);
+		} else {
+			SPDK_ERRLOG("lvol '%s' is the snapshot behind export %s, which "
+				    "another node may still be reading through; delete "
+				    "is deferred until its lease is no longer live\n",
+				    lvol->name, info.export_uuid);
+		}
 		destroy_mark_pending(lvol, S3LVOL_PENDING_EXPORT);
 		return -EBUSY;
 	}

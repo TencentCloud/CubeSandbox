@@ -1423,6 +1423,10 @@ struct s3lvol_export_entry {
 	bool    reaping;
 	uint64_t    lease_updated_at;
 	uint32_t    lease_renew_s;
+	/* time(NULL) when the last answered lease check was sent; 0 if none. */
+	uint64_t    lease_checked_at;
+	/* Seconds between lease checks right now; 0 when not watched. */
+	uint32_t    lease_interval_s;
 	enum s3lvol_export_pin pin;
 };
 
@@ -1433,12 +1437,34 @@ struct s3lvol_export_entry {
  * confirmed lease miss older than the source grace, and a pre-lease (LEGACY)
  * export, do not pin: they remain importable until the snapshot is deleted, and
  * that delete releases them internally.
+ *
+ * Answers from the cached lease checks and never touches S3: for status.
  */
 struct s3lvol_export *s3lvol_export_pinning(struct s3lvol_lvstore *lvs,
 					    const char *snapshot_name);
 
 enum s3lvol_export_pin s3lvol_export_pin_state(struct s3lvol_lvstore *lvs,
 					       const char *snapshot_name);
+
+/**
+ * The same questions for a caller that is about to delete on the answer.
+ *
+ * Lease checks of an export that has shown no reader for a while are spaced out
+ * (up to a few minutes), so a cached "no reader" may predate the first lease PUT
+ * of a just-admitted importer. These treat a no-reader answer older than two
+ * check intervals as "may be read" and start a check at once; the delete is
+ * deferred and the pending-delete poller completes it on the fresh answer.
+ *
+ * \c awaiting_check, when not NULL, is set if the returned export pins *only*
+ * because its answer is too old to act on -- a routine deferral of a few
+ * seconds, as opposed to a reader that is actually there.
+ */
+struct s3lvol_export *s3lvol_export_pinning_for_delete(struct s3lvol_lvstore *lvs,
+						       const char *snapshot_name,
+						       bool *awaiting_check);
+
+enum s3lvol_export_pin s3lvol_export_pin_state_for_delete(struct s3lvol_lvstore *lvs,
+							  const char *snapshot_name);
 
 struct s3lvol_export *s3lvol_export_find(struct s3lvol_lvstore *lvs,
 					 const char *uuid_str);
@@ -1452,6 +1478,11 @@ void s3lvol_export_set_local_ref(struct s3lvol_export *exp, uint32_t generation)
 
 struct s3lvol_export *s3lvol_export_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_export *s3lvol_export_next(struct s3lvol_export *prev);
+
+/* Registered exports of \c lvs, and (if non-NULL) how many of their lease
+ * watches are currently checking less often than every
+ * S3LVOL_LEASE_RENEW_MIN_SEC. O(exports); touches no lvol. */
+uint32_t s3lvol_export_count(struct s3lvol_lvstore *lvs, uint32_t *lease_backed_off);
 /** First REF export of this live snapshot (uuid, else blob_id). Skips reaper. */
 struct s3lvol_export *s3lvol_export_first_ref_for_snapshot(
 	struct s3lvol_lvstore *lvs, const char *snapshot_name);
