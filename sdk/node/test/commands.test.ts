@@ -236,6 +236,25 @@ describe("Commands.run", () => {
     sb.close();
   });
 
+  it("replaces genuinely invalid UTF-8", async () => {
+    const sb = await createSandbox();
+    const stdout = Buffer.from([0x6f, 0x6b, 0xff, 0xfe]).toString("base64");
+    const stderr = Buffer.from([0xe4, 0xb8]).toString("base64");
+    handler = () => ({
+      status: 200,
+      buffer: Buffer.concat([
+        connectFrame(0, JSON.stringify({ event: { data: { stdout, stderr } } })),
+        connectFrame(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+        connectFrame(0x02, "{}"),
+      ]),
+    });
+
+    const result = await sb.commands.run("printf data");
+    expect(result.stdout).toBe("ok\uFFFD\uFFFD");
+    expect(result.stderr).toBe("\uFFFD");
+    sb.close();
+  });
+
   it("reports a non-zero exit code", async () => {
     const sb = await createSandbox();
     handler = () => ({

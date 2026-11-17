@@ -135,8 +135,8 @@ class Commands:
 
 
 def _parse_process_start_stream(chunks) -> CommandResult:
-    stdout = bytearray()
-    stderr = bytearray()
+    stdout: bytearray = bytearray()
+    stderr: bytearray = bytearray()
     exit_code: int | None = None
     buffer = bytearray()
 
