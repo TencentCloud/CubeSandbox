@@ -478,6 +478,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return err
 	}
 	success = true
+	publishCheckpoint(ctx)
 	logger.Infof("snapshot create finished successfully")
 	return nil
 }
@@ -1408,6 +1409,7 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 		"node_ip":     nodeIP,
 	})
 	defer cancel()
+	jobCtx = withCheckpointNotification(jobCtx, req, sandboxID)
 	createReq, storedReq, err := buildSnapshotRequests(req, info.TemplateID, displayName)
 	if err != nil {
 		return nil, err
