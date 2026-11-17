@@ -415,14 +415,23 @@ If one of the covered Go SDK calls (`Commands.Run`, `Files.WatchDir`,
 page or invalid envelope, check
 the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
 Connect streams and unary PTY calls reject HTTP 200 responses labeled
-`text/html`. Filesystem RPCs also check the body for an HTML page on HTTP 200.
+`text/html`. On HTTP 200, filesystem RPCs recognize `text/html` or a
+case-insensitive `<!doctype` / `<html` body prefix after leading whitespace.
+JSON API error documents retain the existing exception. Plain-text or JSON
+login pages without these HTML indicators continue through normal response
+handling and may produce decoding errors.
 On HTTP errors, the SDK treats HTML pages as routing errors and checks non-JSON
 `text/*` responses for misrouting only on 404. Routing errors clear the
 not-found classifications, while 401/403 responses keep `ErrAuthentication`.
 JSON API error documents keep their classification even when labeled `text/*`.
-`Pty.Kill` returns an error for a 404 HTML routing page. Non-200 routing page
+**Breaking behavior change.** `Pty.Kill` returns an error for a 404 HTML routing
+page. A genuine process-not-found response still returns `(false, nil)`.
+Non-200 routing page
 messages are truncated before the SDK appends the routing hint. For redirects
 surfaced by stream validation, the diagnostic includes only the truncated URL path.
+HTTP error bodies read by the API error parser, PTY unary calls, and filesystem
+RPCs are limited to 64 KiB. Larger error documents may be truncated before JSON
+decoding. Successful filesystem responses are read in full.
 This diagnostic
 does not cover `RunCode`, which uses the separate Jupyter endpoint, nor the
 plain-HTTP `Files.Read`/`Files.Write` paths.

@@ -101,7 +101,8 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	originalBody := resp.Body
+	defer originalBody.Close()
 
 	if err := validateConnectResponse(resp); err != nil {
 		return nil, err
@@ -398,8 +399,13 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any,
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	originalBody := resp.Body
+	defer originalBody.Close()
+	var reader io.Reader = originalBody
+	if resp.StatusCode >= http.StatusBadRequest {
+		reader = io.LimitReader(originalBody, maxErrorResponseBytes)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -409,10 +415,7 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any,
 		// surface the routing diagnostic instead. Genuine envd errors are
 		// Connect JSON and keep their existing classification below.
 		if resp.StatusCode == http.StatusOK {
-			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, &APIError{
-				Kind:    apiErrorKindAPI,
-				Message: "received HTML instead of a Connect response; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service",
-			})
+			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, newHTMLRoutingError(resp.Header.Get("Content-Type")))
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		if verr := validateConnectResponse(resp); verr != nil {

@@ -162,9 +162,13 @@ func misroutedHTMLDiagnostic(resp *http.Response) *APIError {
 	if resp == nil || resp.StatusCode != http.StatusOK || responseMediaType(resp) != "text/html" {
 		return nil
 	}
+	return newHTMLRoutingError(resp.Header.Get("Content-Type"))
+}
+
+func newHTMLRoutingError(contentType string) *APIError {
 	return &APIError{
 		Kind:    apiErrorKindAPI,
-		Message: fmt.Sprintf("unexpected content-type %q (received HTML instead of Connect stream; check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service)", resp.Header.Get("Content-Type")),
+		Message: fmt.Sprintf("received HTML instead of a Connect response (content-type %q); check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service", contentType),
 	}
 }
 
@@ -192,6 +196,8 @@ func truncateDiagnostic(message string) string {
 // Note: resp.Body is replaced during validation (with a wrapper over the peeked
 // prefix); the replacement's Close does not close the original body, so the caller
 // must keep a reference to the original in order to release the connection.
+// A direct defer resp.Body.Close() before validation also saves the original
+// receiver when the defer executes.
 // For 200 responses, text/html media types (such as from a misrouted Web UI or portal
 // landing page) are immediately rejected with an *APIError without blocking on body reads.
 // Other content types (and omitted headers) fall through to envelope parsing for maximum

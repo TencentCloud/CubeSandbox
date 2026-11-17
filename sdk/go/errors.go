@@ -13,6 +13,10 @@ import (
 )
 
 const (
+	// maxErrorResponseBytes caps buffered HTTP error bodies. Successful
+	// responses, including large filesystem listings, use their normal readers.
+	maxErrorResponseBytes = 64 << 10
+
 	apiErrorKindAPI              = "api"
 	apiErrorKindAuthentication   = "authentication"
 	apiErrorKindSandboxNotFound  = "sandbox_not_found"
@@ -133,7 +137,7 @@ func readErrorMessage(resp *http.Response) string {
 	if resp == nil || resp.Body == nil {
 		return ""
 	}
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBytes))
 	if err != nil {
 		return ""
 	}
