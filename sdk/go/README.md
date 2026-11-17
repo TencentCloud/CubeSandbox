@@ -197,6 +197,7 @@ for ev := range watcher.Events {
 | `ReadBytes(ctx, path)` | Download raw bytes (e2b `format=bytes`) |
 | `ReadStream(ctx, path)` | Stream download; caller must `Close` (e2b `format=stream`) |
 | `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
+| `WriteFrom(ctx, path, src)` | Stream an `io.Reader` in one multipart upload; caller owns the reader |
 | `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
 | `List(ctx, path)` | List directory entries via `ListDir` RPC |
 | `Stat(ctx, path)` | File/directory metadata via `Stat` RPC |
@@ -205,6 +206,96 @@ for ev := range watcher.Events {
 | `Rename(ctx, old, new)` | Move/rename via `Move` RPC |
 | `Remove(ctx, path)` | Delete file or directory via `Remove` RPC |
 | `WatchDir(ctx, path)` | Stream filesystem events (Connect streaming) |
+
+### Streaming uploads
+
+Use `WriteFrom` when the content is already available as an `io.Reader`, such
+as a local file. It uses fixed-size buffering instead of loading the entire file:
+
+```go
+file, err := os.Open("artifact.tar.gz")
+if err != nil {
+	panic(err)
+}
+defer file.Close()
+
+if err := sb.Files().WriteFrom(ctx, "/tmp/artifact.tar.gz", file); err != nil {
+	panic(err)
+}
+```
+
+`WriteFrom` uses `POST /files` with a streaming multipart body, including for
+empty files, and supports `ForUser`. It uses one demand-driven reader goroutine,
+a 32 KiB transfer buffer and multipart framing, rather than a file-sized buffer.
+The endpoint and any proxy must accept unknown-length bodies (chunked transfer
+for HTTP/1.1). If an older endpoint does not support multipart uploads, the call
+fails without replaying the reader. Consider `Write([]byte)`, which tries an
+octet-stream upload before its multipart fallback, if buffering is acceptable.
+
+The SDK consumes the source once, never closes it, and does not retry a rejected
+upload or follow redirects. These guarantees concern SDK behavior; proxy retry
+policies are deployment-specific. The bundled Nginx configuration allows up to two upstream attempts
+(`proxy_next_upstream_tries 2`) but does not enable `non_idempotent`: by default, a POST already sent to
+an upstream is not retried on another server. See Nginx's
+[retry rules](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream).
+
+The bundled [CubeProxy configuration](../../CubeProxy/nginx.conf) sets
+`client_max_body_size 256M` for the entire request body, including multipart
+framing. Exceeding this limit produces HTTP 413; a 256 MiB file itself exceeds it
+once framing is added. Default Nginx request buffering remains enabled, so large
+uploads can consume proxy temporary disk space before forwarding. Request-body
+temporary files use `client_body_temp_path`; `proxy_temp_path /data/` configures
+upstream **response** temporary files, not upload storage. Deployment overrides
+may change limits, buffering, paths and retries; `WriteFrom` does not change them.
+
+With the standard `http.Transport`, including wrappers that preserve its trace
+hooks, the SDK checks source consumption and the final request-write result.
+An early 2xx does not override an observed failure writing the multipart footer.
+Custom transports without tracing remain responsible for their write-error
+contract; reported `WroteRequest` errors are preserved.
+
+> **Transport requirement:** a transport or registered protocol handler reporting
+> both `GotConn` and `WroteHeaders` must complete the lifecycle with `WroteRequest`.
+> Wrappers must preserve the request context and the complete trace lifecycle.
+> A missing callback produces an error, not an assumed successful upload.
+
+Use a context deadline or an injected HTTP client's `Timeout` to bound the full
+operation with the standard transport; the earlier bound applies. If neither is
+set, successful-response completion has a fallback limit of `Config.RequestTimeout`
+(default 30 seconds), starting when the response is received. This bounds both
+remaining body consumption and the final write callback. It does not impose a
+30-second limit on the upload before a response arrives. Custom transports must
+honor request cancellation. The SDK does not change a shared client's settings.
+
+> **Blocked sources:** cancellation or closing the request body releases the
+> transport's read and lets the call return with the standard transport, even
+> before a response arrives. It cannot terminate an arbitrary source `Read`
+> (for example, a stalled filesystem mount). One reader goroutine and its buffer
+> can remain until the source owner unblocks that read. Use a cancelable source,
+> and ensure the pending read has exited before reusing the source after an error.
+
+Uploads are not atomic or resumable; an error can leave a partial or truncated
+file. Non-2xx responses prefer the HTTP rejection and available server message.
+Error bodies are read up to 64 KiB plus one truncation-detection byte, then closed
+without an unbounded drain; oversized messages are marked `[truncated]`.
+An incomplete final UTF-8 character is dropped at the truncation boundary. This
+shared limit also applies to other SDK HTTP errors: oversized JSON is returned
+as a truncated raw prefix, so `message`/`detail` extraction and keyword-based
+error classification may differ from a complete error response.
+During successful-response completion, deadline and observed source/write errors
+are returned. Go 1.22 legacy transport timeouts may expose `net.Error.Timeout()`
+without wrapping `context.DeadlineExceeded`, matching the standard client.
+
+For a local allocation comparison, run from `sdk/go`:
+
+```bash
+go test -run '^$' -bench '^BenchmarkFilesWrite' -benchtime=3x -benchmem .
+```
+
+The `Write` baseline separates preloaded `[]byte` from materializing a reader,
+and octet-stream success from multipart fallback. Preloaded input allocation is
+outside the timed region. Results include the local HTTP test server; they are
+not production throughput or peak-memory measurements.
 
 ## Snapshots, Clone, Rollback
 
@@ -450,3 +541,17 @@ export CUBE_PROXY_SCHEME=http
 export CUBE_SANDBOX_DOMAIN=cube.app
 go test -tags=integration -run Integration -count=1 ./...
 ```
+
+To verify streaming uploads through the configured CubeProxy and envd:
+
+```bash
+go test -tags=integration -run '^TestIntegrationFilesWriteFrom$' -v -count=1 -timeout=5m .
+```
+
+The selected template must provide `root` and `nobody`, as required by the
+filesystem user-isolation tests. This test uploads empty and binary files,
+truncates an existing file with an empty upload, checks a destination containing
+URL-special characters, and verifies ownership for both users. It reads back each
+destination specified by the `path` query (the multipart filename is `upload`)
+and checks its size and SHA-256. A skip due to an unset `CUBE_API_URL` / `E2B_API_URL`
+is not a successful live verification.
