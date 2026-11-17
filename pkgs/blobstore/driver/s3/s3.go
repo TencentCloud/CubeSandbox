@@ -37,17 +37,18 @@ const (
 
 	metaSHA256Key = "sha256"
 
-	extraEndpoint      = "endpoint"
-	extraNodeEndpoint  = "node_endpoint"
-	extraAccessKey     = "access_key_id"
-	extraSecretKey     = "secret_access_key"
-	extraRegion        = "region"
-	extraPathStyle     = "path_style"
-	extraUseSSL        = "use_ssl"
-	extraCreateBucket  = "create_bucket"
-	extraPutTimeout    = "put_timeout"
-	extraPresignExpiry = "presign_expiry"
-	extraAttachment    = "attachment_basename"
+	extraEndpoint        = "endpoint"
+	extraNodeEndpoint    = "node_endpoint"
+	extraAccessKey       = "access_key_id"
+	extraSecretKey       = "secret_access_key"
+	extraRegion          = "region"
+	extraPathStyle       = "path_style"
+	extraAddressingStyle = "addressing_style"
+	extraUseSSL          = "use_ssl"
+	extraCreateBucket    = "create_bucket"
+	extraPutTimeout      = "put_timeout"
+	extraPresignExpiry   = "presign_expiry"
+	extraAttachment      = "attachment_basename"
 )
 
 // Options is the typed configuration for the s3 driver.
@@ -59,6 +60,9 @@ type Options struct {
 	Bucket          string
 	Region          string
 	PathStyle       bool
+	// AddressingStyle accepts auto, path, or virtual and overrides PathStyle.
+	// Empty preserves the legacy PathStyle behavior (false means auto).
+	AddressingStyle string
 	UseSSL          *bool
 	CreateBucket    bool
 	PutTimeout      time.Duration
@@ -70,16 +74,17 @@ type Options struct {
 
 func (o Options) Config(prefix string) blobstore.Config {
 	extra := map[string]string{
-		extraEndpoint:      o.Endpoint,
-		extraNodeEndpoint:  o.NodeEndpoint,
-		extraAccessKey:     o.AccessKeyID,
-		extraSecretKey:     o.SecretAccessKey,
-		extraRegion:        o.Region,
-		extraPathStyle:     strconv.FormatBool(o.PathStyle),
-		extraCreateBucket:  strconv.FormatBool(o.CreateBucket),
-		extraPutTimeout:    o.PutTimeout.String(),
-		extraPresignExpiry: o.PresignExpiry.String(),
-		extraAttachment:    strconv.FormatBool(o.AttachmentBasename),
+		extraEndpoint:        o.Endpoint,
+		extraNodeEndpoint:    o.NodeEndpoint,
+		extraAccessKey:       o.AccessKeyID,
+		extraSecretKey:       o.SecretAccessKey,
+		extraRegion:          o.Region,
+		extraPathStyle:       strconv.FormatBool(o.PathStyle),
+		extraAddressingStyle: o.AddressingStyle,
+		extraCreateBucket:    strconv.FormatBool(o.CreateBucket),
+		extraPutTimeout:      o.PutTimeout.String(),
+		extraPresignExpiry:   o.PresignExpiry.String(),
+		extraAttachment:      strconv.FormatBool(o.AttachmentBasename),
 	}
 	if o.UseSSL != nil {
 		extra[extraUseSSL] = strconv.FormatBool(*o.UseSSL)
@@ -132,10 +137,19 @@ func open(cfg blobstore.Config) (*store, error) {
 	if region == "" {
 		region = "us-east-1"
 	}
-	pathStyle := extra(cfg, extraPathStyle) != "false"
 	lookup := minio.BucketLookupAuto
-	if pathStyle {
+	switch style := strings.ToLower(strings.TrimSpace(extra(cfg, extraAddressingStyle))); style {
+	case "":
+		if extra(cfg, extraPathStyle) != "false" {
+			lookup = minio.BucketLookupPath
+		}
+	case "auto":
+	case "path":
 		lookup = minio.BucketLookupPath
+	case "virtual":
+		lookup = minio.BucketLookupDNS
+	default:
+		return nil, fmt.Errorf("blobstore/s3: invalid addressing_style %q (want auto, path, or virtual)", style)
 	}
 	client, err := newMinioClient(endpoint, ak, sk, region, lookup, extra(cfg, extraUseSSL))
 	if err != nil {
