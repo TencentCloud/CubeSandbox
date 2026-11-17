@@ -121,6 +121,8 @@ func TestOpenRejectsInvalidAddressingStyle(t *testing.T) {
 }
 
 func TestStatUsesConfiguredAddressingStyle(t *testing.T) {
+	// Keep this test and other minio-client tests non-parallel: this fixture
+	// temporarily replaces the package-global minio.DefaultTransport.
 	for _, tc := range []struct {
 		style, host, path string
 	}{

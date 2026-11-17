@@ -49,11 +49,17 @@ The S3 driver accepts an optional `addressing_style` in `Config.Extra`, or
 | `virtual` | Force virtual-hosted-style URLs: `https://bucket.s3.example.com/key`. |
 
 A non-empty explicit value takes precedence over the legacy `path_style`
-(`s3.Options.PathStyle`) boolean. Invalid explicit values fail S3 store
-initialization. When unset or empty, the old behavior is preserved: `true`
+(`s3.Options.PathStyle`) boolean. Invalid explicit values make `blobstore.Open`
+return an error. When unset or empty, the old behavior is preserved: `true`
 forces path style, while `false` selects minio-go auto detection. A raw
 `Config.Extra` with neither key retains its existing path-style default.
 Existing MinIO deployments therefore need no configuration change.
+
+An invalid S3 addressing value does not stop the services: CubeOps logs a warning
+and disables its warehouse; CubeMaster logs a warning and retains existing
+artifact URLs when its shared store is unavailable; CubeTemplateCenter logs
+a warning and falls back to local-disk behavior. The Helm chart rejects
+invalid addressing values during rendering.
 
 `auto` does **not** guarantee virtual-hosted addressing for COS or OBS. If
 an endpoint requires virtual-hosted requests, set `virtual` explicitly;
@@ -79,6 +85,14 @@ Both Helm values default to empty, preserving the legacy behavior. The artifact
 Helm value applies when `controlPlane.artifactStore.s3Backed=true`; a matching
 `CUBE_S3_ADDRESSING_STYLE` entry in `global.env` overrides the chart-generated
 value. CubeOps environment variables override the corresponding YAML fields.
+
+In one-click deployments, set `CUBE_S3_ADDRESSING_STYLE` in `.env`; CubeOps
+inherits it unless `CUBE_OPS_S3_ADDRESSING_STYLE` is non-empty. Both keys are
+persisted to `.one-click.env`, and the warehouse keeps its separate bucket.
+On upgrade, explicit `.env` values take precedence over installer environment
+values, including empty values. If neither supplies a key, its previous runtime
+value is preserved.
+
 For example, for a COS or OBS bucket that requires virtual-hosted requests:
 
 ```yaml
