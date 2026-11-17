@@ -41,16 +41,17 @@ func (f *s3ClientFactory) init() {
 	backend := configenv.ArtifactStoreBackend()
 	s3 := configenv.ParseArtifactS3()
 	cfg := s3store.Config{
-		Driver:         backend,
-		Endpoint:       s3.Endpoint,
-		Bucket:         s3.Bucket,
-		AccessKey:      s3.AccessKey,
-		SecretKey:      s3.SecretKey,
-		Region:         s3.Region,
-		UsePathStyle:   s3.UsePathStyle,
-		UseSSL:         s3.UseSSL,
-		ArtifactPrefix: configenv.EnvOr(configenv.EnvS3ArtifactPrefix),
-		FSRoot:         configenv.ResolveArtifactFSRoot(),
+		Driver:          backend,
+		Endpoint:        s3.Endpoint,
+		Bucket:          s3.Bucket,
+		AccessKey:       s3.AccessKey,
+		SecretKey:       s3.SecretKey,
+		Region:          s3.Region,
+		UsePathStyle:    s3.UsePathStyle,
+		AddressingStyle: s3.AddressingStyle,
+		UseSSL:          s3.UseSSL,
+		ArtifactPrefix:  configenv.EnvOr(configenv.EnvS3ArtifactPrefix),
+		FSRoot:          configenv.ResolveArtifactFSRoot(),
 	}
 	if err := blobstore.AnnounceIfFS(cfg.FSRoot, backend); err != nil {
 		slog.Error("storage backend consistency check failed", "error", err)

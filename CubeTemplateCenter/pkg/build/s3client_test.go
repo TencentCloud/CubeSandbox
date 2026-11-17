@@ -4,11 +4,43 @@
 package build
 
 import (
+	"net/url"
 	"sync"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
+
+func TestSharedS3ClientAddressingStyle(t *testing.T) {
+	resetSharedS3(t)
+	t.Cleanup(func() { resetSharedS3(t) })
+	t.Setenv(configenv.EnvArtifactStoreBackend, "s3")
+	t.Setenv(configenv.EnvS3Endpoint, "https://storage.example.test")
+	t.Setenv(configenv.EnvS3Bucket, "artifacts")
+	t.Setenv(configenv.EnvS3AccessKeyID, "test-access-key")
+	t.Setenv(configenv.EnvS3SecretAccessKey, "test-secret-key")
+	t.Setenv(configenv.EnvS3Region, "us-east-1")
+	t.Setenv(configenv.EnvS3UseSSL, "true")
+	t.Setenv(configenv.EnvS3UsePathStyle, "true")
+	t.Setenv(configenv.EnvS3AddressingStyle, "virtual")
+	t.Setenv(configenv.EnvS3ArtifactPrefix, "templates")
+	client, enabled := SharedS3Client()
+	if !enabled || client == nil {
+		t.Fatal("expected configured S3 client")
+	}
+	raw, err := client.PresignedGetURL(t.Context(), "rfs-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "artifacts.storage.example.test" || u.Path != "/templates/rfs-test.ext4" {
+		t.Fatalf("CUBE_S3_ADDRESSING_STYLE was not forwarded to artifact uploads/downloads: host=%q path=%q", u.Host, u.Path)
+	}
+}
 
 // resetSharedS3 resets the package-level singleton so each test starts clean.
 func resetSharedS3(t *testing.T) {
