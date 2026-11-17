@@ -861,6 +861,10 @@ pub struct SandboxDetail {
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
     pub envd_access_token: Option<String>,
+    /// Stored status or exit reason for the primary container. Omitted when unavailable.
+    #[serde(rename = "errorReason", skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub error_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     #[serde(rename = "cpuCount")]
@@ -903,7 +907,10 @@ pub struct ResumedSandbox {
 /// Request body for POST /sandboxes/{id}/connect.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ConnectSandbox {
-    /// Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+    /// Idle timeout in seconds; omitted to keep the current value, -1 for no expiry,
+    /// and a positive value ensures at least that much remaining lifetime. For an
+    /// already-running sandbox, a shorter positive window is ignored; use
+    /// POST /sandboxes/{id}/timeout to shorten it.
     /// Zero and values below -1 are invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_connect_timeout_value"))]
@@ -926,7 +933,7 @@ pub struct CreateSnapshotRequest {
     /// E2B compatibility alias: false means fs-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<bool>,
-    /// Deprecated E2B alias for `memory`.
+    /// Deprecated E2B alias for `memory`; false means fs-only.
     #[serde(
         default,
         rename = "keepMemory",
