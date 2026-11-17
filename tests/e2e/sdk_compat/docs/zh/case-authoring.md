@@ -344,8 +344,10 @@ future/peer sandbox。
 ### 6.7 Volume
 
 Volume Plugin 用例使用 `volume` marker，随 `--run-e2e` 执行（默认 driver
-`s3`）。无插件的环境设置 `SDK_E2E_VOLUME_PLUGIN=false` 即可跳过。先创建
-volume，再通过 `create_adapter(..., create_options=...)` 传入动态
+`s3`）。设置 `SDK_E2E_VOLUME_PLUGIN=false` 可显式跳过；否则测试套件会探测所选
+driver，并在 driver、其配置文件或 Volume API 不存在时跳过依赖插件的用例。
+仅验证 API、无需配置插件的用例还可使用 `volume_api_only` 绕过 driver 探测。
+先创建 volume，再通过 `create_adapter(..., create_options=...)` 传入动态
 `volumeMounts`，不要在 `sandbox_create_options` 里写死 volume ID。默认安装
 已接好 S3 插件 + MinIO：
 https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md

@@ -157,6 +157,7 @@ def _snapshot_api(config) -> ApiClient:
     return ApiClient(config)
 
 
+@pytest.mark.volume
 @pytest.mark.requires_capability(RESTART_POLICY)
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
 def test_restart_keeps_plugin_volume_mount(sdk_backend, sdk_e2e_config):
@@ -250,6 +251,7 @@ def test_restart_keeps_host_mount(sdk_backend, sdk_e2e_config):
         safe_kill(sandbox, sdk_e2e_config)
 
 
+@pytest.mark.volume
 @pytest.mark.requires_capability(FILESYSTEM_ONLY_SNAPSHOT)
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
 def test_fs_only_create_mounts_plugin_volume(sdk_backend, sdk_sandbox, sdk_e2e_config):
@@ -363,6 +365,7 @@ def test_fs_only_create_mounts_host_directory(sdk_backend, sdk_sandbox, sdk_e2e_
         assert not errors, errors
 
 
+@pytest.mark.volume
 @pytest.mark.requires_capability(FILESYSTEM_ONLY_SNAPSHOT)
 @pytest.mark.requires_capability(RESTART_POLICY)
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
@@ -420,6 +423,7 @@ def test_fs_only_child_restart_keeps_plugin_volume(
         assert not errors, errors
 
 
+@pytest.mark.volume
 @pytest.mark.requires_capability(FILESYSTEM_ONLY_SNAPSHOT)
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
 def test_fs_only_child_pause_resume_keeps_plugin_volume(
@@ -481,6 +485,7 @@ def test_fs_only_child_pause_resume_keeps_plugin_volume(
         assert not errors, errors
 
 
+@pytest.mark.volume
 @pytest.mark.requires_capability(FILESYSTEM_ONLY_SNAPSHOT)
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
 def test_fs_only_create_keeps_a_read_only_volume_read_only(

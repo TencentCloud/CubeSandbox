@@ -48,7 +48,9 @@ _provisioned_backends: set[str] = set()
 
 
 @pytest.fixture(autouse=True)
-def _require_and_provision_host_mount(sdk_backend, sdk_e2e_config):
+def _require_and_provision_host_mount(
+    volume_plugin_gate, sdk_backend, sdk_e2e_config
+):
     skip_if_host_mount_unavailable(sdk_backend, sdk_e2e_config)
     if sdk_backend in _provisioned_backends:
         return
