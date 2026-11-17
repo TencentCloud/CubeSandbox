@@ -96,12 +96,27 @@ print(info)
 #   "templateID": "rki5dems9wqfm4r03t7g",
 #   "state": "running",
 #   "startedAt": "2026-06-17T12:34:56Z",
-#   "endAt":     "2026-06-17T12:39:56Z",
-#   "metadata":  {...}
+#   "endAt":       "2026-06-17T12:39:56Z",
+#   "endAtStatus": "deadline",
+#   "metadata":    {...}
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). Pausing does not cancel a finite idle deadline, so both detail and list APIs continue to return the same `endAt` while the sandbox is paused. For **never-timeout** sandboxes there is no deadline, so `endAt` is the **9999-12-31 sentinel** rather than being misreported as equal to `startedAt`. The sentinel is always sent because the E2B SDK requires `endAt` on every response; the in-repo SDKs surface it as an ordinary datetime (year 9999), so clients should treat the sentinel as "no deadline".
+`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed whenever the sandbox receives a request or you call `set_timeout`. Pausing does not cancel a finite idle deadline, so the detail and list APIs keep returning the same `endAt` while a sandbox is paused. The E2B SDK requires the field on every response, so it is always present; read the sibling `endAtStatus` to know what it means:
+
+| `endAtStatus` | `endAt` | Meaning |
+|---|---|---|
+| `deadline` | the projected instant | A real idle deadline. |
+| `never` | `9999-12-31T23:59:59Z` | The sandbox has no timeout. The sentinel is not a real instant. |
+| `unknown` | `9999-12-31T23:59:59Z` | The deadline lookup failed. Treat the deadline as unknown and do not reclaim the sandbox from this value. |
+
+The same responses echo the sandbox's persisted configuration:
+
+- `lifecycle`: `onTimeout` (`"pause"` / `"kill"`) and `autoResume`.
+- `allowInternetAccess`: the internet-access flag.
+- `network`: `allowOut`, `denyOut`, `allowPublicTraffic`, `maskRequestHost`.
+
+A field is absent either because the persisted spec could not be read (unknown) or because it was never set and the server default applies. Egress rules never appear in these responses because they can carry inject secrets; when rules are a sandbox's only egress policy, `network` carries just `"rulesPresent": true`, which tells you a policy exists without exposing it.
 
 ## List Running Sandboxes
 
