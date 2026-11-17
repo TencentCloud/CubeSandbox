@@ -341,11 +341,17 @@ impl Utils {
             Err(e) => Err(format!("resolve ivshmem path failed:{}", e)),
         };
 
-        // Regular-sandbox host logs. Template builds write under
-        // /data/log/template and never create this dir, so this is a no-op
-        // for app_snapshot_create. Task.Delete on a live shim is not enough:
-        // after a crash containerd reaps via the delete subcommand.
-        let ret_logdir = crate::container::remove_sandbox_log_dir_sync(sandbox_id);
+        // Task.Delete on a live shim is not enough: after a crash containerd
+        // reaps via the delete subcommand. Template logs use a different path.
+        let ret_logdir = match crate::container::cleanup_sandbox_log_dir_sync(sandbox_id) {
+            Err(crate::container::LogCleanupError::Retention(e)) => {
+                // Retention is best effort; leave the original logs in place.
+                eprintln!("retain sandbox log dir for {} failed: {}", sandbox_id, e);
+                Ok(())
+            }
+            Err(crate::container::LogCleanupError::Delete(e)) => Err(e),
+            Ok(()) => Ok(()),
+        };
 
         let mut err_msg = String::new();
         if let Err(e) = ret_vmdir {
