@@ -398,6 +398,34 @@ func TestCleanupTemplateReplicasWithLocatorsForwardsPinnedBackend(t *testing.T) 
 	}
 }
 
+func TestCleanupTemplateReplicasUsesPhysicalJFSVariantID(t *testing.T) {
+	origCleanupTemplateOnCubelet := cleanupTemplateOnCubelet
+	origGetCubeletAddrForDelete := getCubeletAddrForDelete
+	t.Cleanup(func() {
+		cleanupTemplateOnCubelet = origCleanupTemplateOnCubelet
+		getCubeletAddrForDelete = origGetCubeletAddrForDelete
+	})
+
+	getCubeletAddrForDelete = func(hostIP string) string { return hostIP + ":9000" }
+	gotID := ""
+	cleanupTemplateOnCubelet = func(_ context.Context, _ string, req *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+		gotID = req.GetTemplateID()
+		return &cubeboxv1.CleanupTemplateResponse{
+			Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+		}, nil
+	}
+	err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-a", []templateCleanupLocator{{
+		NodeIP:            "10.0.0.8",
+		TemplateVariantID: "tpl-a-hf1-deadbeef",
+	}}, "jfs")
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if gotID != "tpl-a-hf1-deadbeef" {
+		t.Fatalf("cleanup template id=%q, want physical variant", gotID)
+	}
+}
+
 func TestIsIgnorableTemplateCleanupMessage(t *testing.T) {
 	cases := []string{
 		"snapshot path not found",

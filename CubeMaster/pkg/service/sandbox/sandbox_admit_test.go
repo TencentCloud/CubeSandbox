@@ -5,13 +5,17 @@
 package sandbox
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestAdmitSelectedHost(t *testing.T) {
@@ -67,6 +71,74 @@ func TestRefreshAndAdmitHostUsesLocalcache(t *testing.T) {
 	c := &createSandboxContext{}
 	err := c.refreshAndAdmitHost()
 	assertAdmitFailed(t, err, "no selected host")
+}
+
+func TestBindJFSTemplateVariant(t *testing.T) {
+	SetJFSTemplateVariantResolver(nil)
+	t.Cleanup(func() { SetJFSTemplateVariantResolver(nil) })
+	host := &node.Node{
+		InsID: "n1",
+		HostFacts: &node.HostFacts{
+			CPUIDHash:         "sha256:cpu",
+			HostKernelRelease: "5.15.0",
+		},
+	}
+	c := &createSandboxContext{
+		selectHost: host,
+		cubeletReq: &cubeboxv1.RunCubeSandboxRequest{Annotations: map[string]string{
+			constants.CubeAnnotationStorageBackend:           "jfs",
+			constants.CubeAnnotationAppSnapshotTemplateID:    "tpl-a",
+			constants.CubeAnnotationJFSTemplateVariantPolicy: hostcompat.VariantPolicyV1,
+		}},
+	}
+	SetJFSTemplateVariantResolver(func(_ context.Context, logicalID, compatKey string) (string, error) {
+		got, _, ok := hostcompat.TemplateVariantID(logicalID, "sha256:cpu", "5.15.0")
+		if !ok || compatKey == "" {
+			t.Fatalf("resolver received logical=%q compat=%q", logicalID, compatKey)
+		}
+		return got, nil
+	})
+	assert.NoError(t, c.bindJFSTemplateVariant())
+	want, _, ok := hostcompat.TemplateVariantID("tpl-a", "sha256:cpu", "5.15.0")
+	assert.True(t, ok)
+	assert.Equal(t, want, c.cubeletReq.Annotations[constants.CubeAnnotationJFSTemplateVariantID])
+	assert.Equal(t, "tpl-a", c.cubeletReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+}
+
+func TestBindJFSTemplateVariantLeavesLegacyTemplateLogical(t *testing.T) {
+	SetJFSTemplateVariantResolver(nil)
+	t.Cleanup(func() { SetJFSTemplateVariantResolver(nil) })
+	c := &createSandboxContext{
+		selectHost: &node.Node{InsID: "n1"},
+		cubeletReq: &cubeboxv1.RunCubeSandboxRequest{Annotations: map[string]string{
+			constants.CubeAnnotationStorageBackend:        "jfs",
+			constants.CubeAnnotationAppSnapshotTemplateID: "tpl-old",
+			constants.CubeAnnotationJFSTemplateVariantID:  "forged",
+		}},
+	}
+	assert.NoError(t, c.bindJFSTemplateVariant())
+	assert.Empty(t, c.cubeletReq.Annotations[constants.CubeAnnotationJFSTemplateVariantID])
+}
+
+func TestBindJFSTemplateVariantFailsClosedWithoutResolver(t *testing.T) {
+	SetJFSTemplateVariantResolver(nil)
+	t.Cleanup(func() { SetJFSTemplateVariantResolver(nil) })
+	c := &createSandboxContext{
+		selectHost: &node.Node{
+			InsID: "n1",
+			HostFacts: &node.HostFacts{
+				CPUIDHash:         "sha256:cpu",
+				HostKernelRelease: "5.15.0",
+			},
+		},
+		cubeletReq: &cubeboxv1.RunCubeSandboxRequest{Annotations: map[string]string{
+			constants.CubeAnnotationStorageBackend:           "jfs",
+			constants.CubeAnnotationAppSnapshotTemplateID:    "tpl-a",
+			constants.CubeAnnotationJFSTemplateVariantPolicy: hostcompat.VariantPolicyV1,
+		}},
+	}
+	err := c.bindJFSTemplateVariant()
+	assertAdmitFailed(t, err, "resolver is not initialized")
 }
 
 func assertAdmitFailed(t *testing.T, err error, msgSubstr string) {

@@ -5,49 +5,17 @@
 
 #include "dns_parser.h"
 #include "map.h"
+#include "metrics.h"
 
-/* Inline twins of the dns_parser.h helpers used on the response path.
+/* Inline twin of the dns_parser.h QNAME hash.
  *
- * The query pipeline calls the __noinline originals from a program that has
+ * The query pipeline calls the __noinline original from a program that has
  * other bpf-to-bpf calls — those can sit in their own verifier frames. The
- * response path, however, runs from a SEC("tc") tail-called program that
- * must contain zero bpf-to-bpf calls so it is allowed to bpf_tail_call into
- * the UDP NAT finish program on kernel 5.4. We keep duplicate __always_inline
- * copies here so we can have it both ways without breaking the query path.
+ * response path, however, runs from a SEC("tc") tail-called program that must
+ * contain zero bpf-to-bpf calls so it is allowed to bpf_tail_call into the UDP
+ * NAT finish program on kernel 5.4. We keep a duplicate __always_inline copy
+ * here so we can have it both ways without breaking the query path.
  */
-
-static __always_inline bool dns_skip_name_inline(struct __sk_buff *skb, __u32 *cursor)
-{
-	__u32 off = *cursor;
-	int i;
-
-#pragma clang loop unroll(disable)
-	for (i = 0; i < DNS_MAX_NAME_LEN; i++) {
-		__u8 c;
-
-		if (bpf_skb_load_bytes(skb, off, &c, sizeof(c)))
-			return false;
-		off++;
-
-		if ((c & DNS_COMPRESS_PTR_MASK) == DNS_COMPRESS_PTR_MASK) {
-			if (bpf_skb_load_bytes(skb, off, &c, sizeof(c)))
-				return false;
-			off++;
-			*cursor = off;
-			return true;
-		}
-		if ((c & DNS_COMPRESS_PTR_MASK) != 0 || c > DNS_MAX_LABEL_LEN)
-			return false;
-		if (c == 0) {
-			*cursor = off;
-			return true;
-		}
-		off += c;
-	}
-
-	return false;
-}
-
 static __always_inline bool dns_hash_qname_inline(struct __sk_buff *skb, __u32 *cursor,
 						  struct dns_question_footer *question,
 						  __u64 *qname_hash)
@@ -98,162 +66,6 @@ static __always_inline bool dns_response_learning_enabled(__u32 ifindex)
 	return mvm_meta && (mvm_meta->dns_policy_flags & DNS_POLICY_FLAG_LEARNING_ENABLED);
 }
 
-/* Add an IPv4 A-record address as temporary DNS-learned allow_out_v3
- * entries.
- *
- * Two shapes, mirroring how the rule was installed:
- *   - Plain (non-L7) allow: a single /32 (any-port) entry, exactly as the
- *     pre-v3 dataplane did. Without this a plain domain-based allow rule
- *     would resolve via DNS yet never be admitted by classify_egress_flow,
- *     regressing to a default-deny drop.
- *   - L7 allow: v3 carries the destination port in the LPM key, so we write
- *     one exact (ip, port)/48 entry per (port, scheme) the query inherited
- *     from its matched dns_allow_v2 rule. port_count == 0 means the default
- *     {80/http, 443/https} set.
- * Each entry is refreshed independently; an existing entry for the EXACT
- * same key keeps its flags and its (zero) expiry, so a static rule
- * survives a later DNS refresh of the same IP. "Exact" is checked via
- * old->key_prefixlen: the LPM lookup alone is longest-prefix and would
- * otherwise match a shorter COVERING entry (e.g. a static /24), making
- * the learned entry wrongly inherit the static zero expiry (never ages)
- * or the covering entry's flags.
- */
-static __always_inline void dns_learn_response_ip(__u32 ifindex, __u32 ip, __u32 ttl,
-						  const struct dns_query_track_value *query)
-{
-	__u64 now = bpf_ktime_get_ns();
-	__u64 expires = now + ((__u64)ttl * NSEC_PER_SEC);
-	void *inner_map;
-
-	inner_map = bpf_map_lookup_elem(&allow_out_v3, &ifindex);
-	if (!inner_map)
-		return;
-
-	/* Learn the plain /32 (any-port) entry whenever the domain is
-	 * plain-allowed. For a non-L7 allow this is the whole policy; for a domain
-	 * that is both plain-allowed and L7-ruled (NET_POLICY_FLAG_L3_ALLOWED) it
-	 * coexists with the /48 L7 entries written below — a non-rule port falls
-	 * back to this /32 (plain SNAT) while the rule's ports match the longer
-	 * /48 prefix (L7 intercept) in classify_egress_flow. The L7/L3 marker bits
-	 * are stripped so the entry reads as a plain allow; for a non-L7 query
-	 * (flags==0) the mask is a no-op, so both cases share this one block.
-	 */
-	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED) ||
-	    (query->flags & NET_POLICY_FLAG_L3_ALLOWED)) {
-		struct lpm_key_v3 key = { .prefixlen = 32, .ip = ip, .port = 0 };
-		struct net_policy_value_v3 value = {
-			.expires_at_ns = expires,
-			.flags = query->flags &
-				~(__u8)(NET_POLICY_FLAG_L7_REQUIRED | NET_POLICY_FLAG_L3_ALLOWED),
-			.scheme = L7_SCHEME_NONE,
-			.key_prefixlen = 32,
-		};
-		struct net_policy_value_v3 *old = bpf_map_lookup_elem(inner_map, &key);
-		if (old && old->key_prefixlen == key.prefixlen) {
-			value.flags |= old->flags;
-			if (old->expires_at_ns == 0)
-				value.expires_at_ns = 0;
-		}
-		bpf_map_update_elem(inner_map, &key, &value, BPF_ANY);
-	}
-
-	/* A non-L7 allow is fully handled by the /32 entry above. */
-	if (!(query->flags & NET_POLICY_FLAG_L7_REQUIRED))
-		return;
-
-	/* L7 allow: one exact (ip, port)/48 entry per (port, scheme).
-	 *
-	 * The loop uses a fixed trip count with the bound as a guard inside the
-	 * body (not `break`), so clang fully unrolls it. That turns each
-	 * query->ports[i] into a constant-offset access the verifier accepts. A
-	 * `break`-bound loop is not unrolled and was rejected by the verifier as
-	 * a variable-offset map-value read (off beyond the 48-byte value).
-	 */
-	__u8 count = query->port_count;
-	bool use_defaults = count == 0;
-	__u8 limit = use_defaults ? 2 : count;
-	if (limit > MAX_L7_PORTS_PER_HOST)
-		limit = MAX_L7_PORTS_PER_HOST;
-
-#pragma unroll
-	for (__u8 i = 0; i < MAX_L7_PORTS_PER_HOST; i++) {
-		if (i >= limit)
-			continue;
-
-		__u16 port;
-		__u8 scheme;
-		if (use_defaults) {
-			port = (i == 0) ? bpf_htons(80) : bpf_htons(443);
-			scheme = (i == 0) ? L7_SCHEME_HTTP : L7_SCHEME_HTTPS;
-		} else {
-			port = query->ports[i].port;
-			scheme = query->ports[i].scheme;
-		}
-
-		struct lpm_key_v3 key = { .prefixlen = 48, .ip = ip, .port = port };
-		struct net_policy_value_v3 value = {
-			.expires_at_ns = expires,
-			.flags = query->flags,
-			.scheme = scheme,
-			.key_prefixlen = 48,
-		};
-		struct net_policy_value_v3 *old = bpf_map_lookup_elem(inner_map, &key);
-		if (old && old->key_prefixlen == key.prefixlen) {
-			value.flags |= old->flags;
-			if (old->expires_at_ns == 0)
-				value.expires_at_ns = 0;
-		}
-		bpf_map_update_elem(inner_map, &key, &value, BPF_ANY);
-	}
-}
-
-/* Return true when an answer RR carries an IN A record payload. */
-static __always_inline bool dns_response_record_is_ipv4_a(const struct dns_rr_header *rr,
-							  __u16 rdlength)
-{
-	return rr->type == bpf_htons(DNS_TYPE_A) &&
-	       rr->klass == bpf_htons(DNS_CLASS_IN) &&
-	       rdlength == DNS_IPV4_RDATA_LEN;
-}
-
-/* Parse one answer RR and learn its IPv4 address when it is an A record.
- *
- * Marked __always_inline (and using the *_inline DNS-name helpers above) so
- * the calling SEC("tc") program contains no bpf-to-bpf calls and can issue
- * bpf_tail_call on kernel 5.4.
- */
-static __always_inline bool dns_process_response_answer(struct __sk_buff *skb,
-							__u32 *cursor, __u32 ifindex,
-							const struct dns_query_track_value *query)
-{
-	struct dns_rr_header rr;
-	__u16 rdlength;
-	__u32 ip;
-	__u32 ttl;
-
-	if (!dns_skip_name_inline(skb, cursor))
-		return false;
-	if (bpf_skb_load_bytes(skb, *cursor, &rr, sizeof(rr)))
-		return false;
-	*cursor += sizeof(rr);
-
-	rdlength = bpf_ntohs(rr.rdlength);
-	if (dns_response_record_is_ipv4_a(&rr, rdlength)) {
-		if (bpf_skb_load_bytes(skb, *cursor, &ip, sizeof(ip)))
-			return false;
-		ttl = bpf_ntohl(rr.ttl);
-		if (ttl < 300) ttl = 300;
-		dns_learn_response_ip(ifindex, ip, ttl, query);
-	}
-
-	/* Keep cursor advancement bounded even for unsupported RR types. */
-	if (rdlength > DNS_MAX_RDATA_LEN)
-		return false;
-
-	*cursor += rdlength;
-	return true;
-}
-
 /* Lookup the pending DNS query that authorizes this response. */
 static __always_inline struct dns_query_track_value *dns_lookup_response_query(
 	__u32 ifindex, __u32 server_ip, __u16 source_port, __be16 dns_id,
@@ -267,19 +79,37 @@ static __always_inline struct dns_query_track_value *dns_lookup_response_query(
 	return bpf_map_lookup_elem(&dns_query_track, track_key);
 }
 
-/* Response hook for DNS replies returning to a sandbox.
+/* What dns_response_finish_prog should do with a reply. */
+#define DNS_RESP_FORWARD	0 /* not a query we tracked; deliver it */
+#define DNS_RESP_DROP		1 /* tracked, but we will not learn; do not deliver */
+#define DNS_RESP_UPLOAD		2 /* tracked and learnable; user space injects it */
+
+/* Parse a DNS reply far enough to find the pending query it answers, retire
+ * that query, and report how the caller should deliver the frame.
  *
- * The path learns IPv4 A records into allow_out_v3 as temporary DNS-learned IP
- * policy entries. It intentionally preserves the existing filtering semantics.
+ * DNS_RESP_UPLOAD means the reply answers a query we tracked and is small
+ * enough to learn from. User space re-injects it after the allow_out_v3
+ * write, so the sandbox cannot observe a resolved address before it is
+ * permitted.
  *
- * Marked __always_inline so the calling SEC("tc") program contains no
- * bpf-to-bpf calls; kernel 5.4 forbids mixing tail calls with bpf-to-bpf
- * calls in the same program, and we need the tail call to hand the packet
- * off to the post-DNS UDP NAT finish program.
+ * DNS_RESP_DROP means the reply carries positive addresses we did not learn
+ * (expired track entry, or a NOERROR answer that is too big to upload).
+ * Delivering it would let the guest cache those addresses. Dropping it makes
+ * the resolver retry.
+ *
+ * DNS_RESP_FORWARD is everything else. That includes replies we never tracked,
+ * and tracked replies with nothing to cache: NXDOMAIN, NODATA, other
+ * non-success rcodes, and TC=1. The truncated bit has to reach the guest so
+ * its resolver can fall back to TCP; the partial answer section is not
+ * learned.
+ *
+ * Marked __always_inline (and using the *_inline QNAME helper above) so the
+ * calling SEC("tc") program contains no bpf-to-bpf calls and can issue
+ * bpf_tail_call on kernel 5.4.
  */
-static __always_inline void dns_handle_response(struct __sk_buff *skb, __u32 dns_off,
-						__u32 ifindex, __u32 server_ip,
-						__u16 source_port)
+static __always_inline int dns_response_parse_and_track(struct __sk_buff *skb, __u32 dns_off,
+							__u32 ifindex, __u32 server_ip,
+							__u16 source_port)
 {
 	struct dns_query_track_value *query;
 	struct dns_query_track_key track_key = {};
@@ -290,42 +120,99 @@ static __always_inline void dns_handle_response(struct __sk_buff *skb, __u32 dns
 	__u64 now;
 	__u16 ancount;
 	__u16 flags;
-	int i;
 
 	if (!dns_response_learning_enabled(ifindex))
-		return;
+		return DNS_RESP_FORWARD;
 
 	if (!dns_read_response_header(skb, dns_off, &hdr, &flags))
-		return;
+		return DNS_RESP_FORWARD;
 
 	if (bpf_ntohs(hdr.qdcount) != 1)
-		return;
+		return DNS_RESP_FORWARD;
 	if (!dns_hash_qname_inline(skb, &cursor, &question, &qname_hash))
-		return;
+		return DNS_RESP_FORWARD;
 	if (!dns_question_footer_is_ipv4_a(&question))
-		return;
+		return DNS_RESP_FORWARD;
 
 	query = dns_lookup_response_query(ifindex, server_ip, source_port, hdr.id,
-						  qname_hash, &track_key);
+					  qname_hash, &track_key);
 	if (!query)
-		return;
+		return DNS_RESP_FORWARD;
 
+	/* From here on the query is spent whatever we decide. This keeps the
+	 * pre-existing behaviour of the handler this replaced, which retired the
+	 * entry on every one of the paths below (its `delete_query` label): a
+	 * pending query is one-shot, and leaving it behind would let a second
+	 * reply carrying the same DNS id be learned from.
+	 */
+	bpf_map_delete_elem(&dns_query_track, &track_key);
+
+	/* TC=1 must reach the guest unchanged. Uploading the partial answer
+	 * section would teach an incomplete set, and dropping the frame would
+	 * hide the bit the resolver needs in order to retry over TCP.
+	 */
+	if (flags & DNS_FLAG_TC)
+		return DNS_RESP_FORWARD;
+
+	/* No address to cache: the guest should see the negative or error
+	 * result instead of retrying until timeout.
+	 */
+	ancount = bpf_ntohs(hdr.ancount);
+	if ((flags & DNS_RCODE_MASK) == DNS_RCODE_NXDOMAIN ||
+	    (flags & DNS_RCODE_MASK) != DNS_RCODE_NOERROR ||
+	    ancount == 0)
+		return DNS_RESP_FORWARD;
+
+	/* Positive NOERROR answer we are not going to learn. */
 	now = bpf_ktime_get_ns();
 	if (query->expires_at_ns <= now)
-		goto delete_query;
-	if (!dns_response_header_is_supported(&hdr, flags, &ancount))
-		goto delete_query;
+		return DNS_RESP_DROP;
+	if ((flags & DNS_FLAG_OPCODE_MASK) != DNS_OPCODE_STANDARD ||
+	    (flags & DNS_FLAG_Z_RESERVED))
+		return DNS_RESP_DROP;
+	if (skb->len > DNS_EVENT_MAX_FRAME)
+		return DNS_RESP_DROP;
 
-#pragma clang loop unroll(disable)
-	for (i = 0; i < DNS_MAX_RESPONSE_ANSWERS; i++) {
-		if (i >= ancount)
-			break;
-		if (!dns_process_response_answer(skb, &cursor, ifindex, query))
-			goto delete_query;
-	}
+	return DNS_RESP_UPLOAD;
+}
 
-delete_query:
-	bpf_map_delete_elem(&dns_query_track, &track_key);
+/* Hand the (already reverse-NATed) frame to user space on dns_events.
+ *
+ * The frame is uploaded verbatim after NAT, so what user space injects onto the
+ * TAP is byte-for-byte what bpf_redirect() would have delivered. The prefix
+ * carries the ifindex because the post-NAT destination is mvm_inner_ip, a
+ * node-wide constant that cannot identify the sandbox.
+ *
+ * The data argument only carries the prefix; the packet rides along because the
+ * upper 32 bits of flags ask bpf_perf_event_output to append that many bytes of
+ * packet data to the sample. A record is therefore [prefix][frame], and
+ * frame_len is what bounds the frame — perf rounds the sample up to 8-byte
+ * alignment, so the record can carry a few bytes of padding past its end.
+ *
+ * sandbox_ip is the metrics key. A successful perf output is a forward: user
+ * space injects the copy, and the caller's TC_ACT_SHOT only withholds the
+ * original. A failed output is a drop, because nothing is left to inject.
+ */
+static __always_inline void dns_forward_response_to_user(struct __sk_buff *skb, __u32 ifindex,
+							 __u32 sandbox_ip)
+{
+	struct dns_event_prefix prefix = {};
+	__u32 frame_len = skb->len;
+	__u64 bytes = skb->len;
+	__u64 flags;
+	long err;
+
+	if (frame_len > DNS_EVENT_MAX_FRAME)
+		frame_len = DNS_EVENT_MAX_FRAME;
+	prefix.frame_len = (__u16)frame_len;
+	prefix.ifindex = ifindex;
+
+	flags = BPF_F_CURRENT_CPU | ((__u64)frame_len << 32);
+	err = bpf_perf_event_output(skb, &dns_events, flags, &prefix, sizeof(prefix));
+	if (err)
+		update_metrics(sandbox_ip, bytes, SANDBOX_METRIC_INGRESS, SANDBOX_METRIC_DROP);
+	else
+		update_metrics(sandbox_ip, bytes, SANDBOX_METRIC_INGRESS, SANDBOX_METRIC_FORWARDED);
 }
 
 #endif /* __DNS_RESPONSE_H */

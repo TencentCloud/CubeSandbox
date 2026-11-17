@@ -171,7 +171,7 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	//     exceeded; pausing" for the sandbox we *just* woke up. The log
 	//     is mostly cosmetic — tryPause will SETNX-fail against
 	//     state=running and silently return — but the noise is
-	//     misleading. The proxy's log_phase will eventually overwrite
+	//     misleading. The proxy's last_active stamps will eventually overwrite
 	//     this via the periodic last_active poll, but we want the right
 	//     answer immediately, not 5–10 seconds later.
 	bookkeepingCtx, cancel := context.WithTimeout(context.Background(), stateBookkeepingTimeout)

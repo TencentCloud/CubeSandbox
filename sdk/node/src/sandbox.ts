@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import { fetch, type Dispatcher } from "undici";
 
-import { Commands } from "./commands.js";
+import { Commands, ENVD_PORT } from "./commands.js";
 import { Config, NEVER_TIMEOUT, resolveConfig, type ConfigOptions } from "./config.js";
 import {
   ApiError,
@@ -172,7 +172,13 @@ export interface ListSnapshotsOptions {
   sandboxId?: string;
   limit?: number;
   nextToken?: string;
+  name?: string;
   config?: Config | ConfigOptions;
+}
+
+export interface CreateSnapshotOptions {
+  /** Lifetime from READY, in seconds. Zero or omitted means no expiration. */
+  ttlSeconds?: number;
 }
 
 const VALID_ON_TIMEOUT = ["kill", "pause"] as const;
@@ -276,7 +282,7 @@ function buildNetworkPayload(
   if (net.rules) {
     const normalized = normalizeRulesArg(net.rules);
     if (normalized.length > 0) {
-      wire.rules = normalized.map(serializeRule);
+      wire.rules = normalized.map((rule, index) => serializeRule(rule, index));
     }
   }
   return wire;
@@ -593,7 +599,11 @@ export class Sandbox {
   }
 
   /**
-   * GET /v2/sandboxes — list all running sandboxes (v2).
+   * GET /v2/sandboxes — list sandboxes in the E2B view (v2).
+   *
+   * Returns running and paused sandboxes; `unknown` (exited, still creating)
+   * is omitted unless the server is asked for it, which this method does not
+   * do. Use `list()` for the Cube-native view that includes `unknown`.
    *
    * The endpoint answers one page at a time (`limit`, 100 by default) and
    * reports the next page's position in the `x-next-token` response header.
@@ -635,6 +645,7 @@ export class Sandbox {
     if (options.sandboxId !== undefined) params.set("sandboxID", options.sandboxId);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.nextToken !== undefined) params.set("nextToken", options.nextToken);
+    if (options.name !== undefined) params.set("name", options.name);
     const query = params.toString();
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/snapshots${query ? `?${query}` : ""}`);
     await checkControlResponse(resp);
@@ -644,16 +655,20 @@ export class Sandbox {
     return { snapshots, nextToken };
   }
 
-  /** DELETE /templates/:id — delete a snapshot (stored as a template). */
+  /** DELETE /templates/:id?snapshot_only=true — delete a snapshot by ID or name; false when absent. */
   static async deleteSnapshot(
     snapshotId: string,
     options: { config?: Config | ConfigOptions } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     const cfg = resolveConfig(options.config);
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${snapshotId}`, {
+    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${encodeURIComponent(snapshotId)}?snapshot_only=true`, {
       method: "DELETE",
     });
+    if (resp.status === 404) {
+      return false;
+    }
     await checkControlResponse(resp);
+    return true;
   }
 
   // ── Instance methods ────────────────────────────────────────────────────────
@@ -716,6 +731,67 @@ export class Sandbox {
     const resp = await controlFetch(this.config, `${this.config.apiUrl}/sandboxes/${this.sandboxId}`);
     await checkControlResponse(resp);
     return (await resp.json()) as Record<string, any>;
+  }
+
+  /**
+   * Report whether the sandbox is currently running (matches E2B's API).
+   * Checks control-plane state first so a paused sandbox is answered without
+   * a data-plane probe (which would trigger CLM auto-resume). The envd /health
+   * probe runs only for running/unknown states.
+   */
+  async isRunning(options: { requestTimeoutMs?: number } = {}): Promise<boolean> {
+    let state: unknown;
+    try {
+      state = (await this.getInfo()).state;
+    } catch (err) {
+      if (err instanceof SandboxNotFoundError) {
+        return false;
+      }
+      throw err;
+    }
+    if (state === "paused" || state === "pausing") {
+      return false;
+    }
+
+    const url = this.dataUrl(ENVD_PORT, "/health");
+    const signal = AbortSignal.timeout(options.requestTimeoutMs ?? this.config.requestTimeoutMs);
+    let resp: Awaited<ReturnType<typeof fetch>>;
+    try {
+      // envd /health is unauthenticated, so no X-Access-Token is sent.
+      resp = await fetch(url, {
+        headers: this.trafficTokenHeaders(),
+        dispatcher: this.dataDispatcher,
+        signal,
+      });
+    } catch {
+      // Unreachable proxy / stale socket — sandbox not reachable.
+      return false;
+    }
+    // Only the status matters; cancel the body so the connection returns to
+    // the pool instead of leaking across a polling loop.
+    void resp.body?.cancel().catch(() => undefined);
+    if (resp.status === 404 || resp.status === 502 || resp.status === 503 || resp.status === 410) {
+      return false;
+    }
+    if (resp.status >= 400) {
+      throw new ApiError(`isRunning failed: HTTP ${resp.status}`, resp.status);
+    }
+    return true;
+  }
+
+  /**
+   * GET /sandboxes/:id/exposed-ports/:port — return the hostIP:hostPort
+   * endpoint of a template-declared exposed port. The endpoint works
+   * identically for off-node, host-side, and in-sandbox callers (same-node
+   * sandbox callers are served by CubeVS hairpin).
+   */
+  async getExposedPortEndpoint(port: number): Promise<string> {
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/exposed-ports/${port}`,
+    );
+    await checkControlResponse(resp);
+    return ((await resp.json()) as { endpoint: string }).endpoint;
   }
 
   /** POST /sandboxes/:id/pause — pause a sandbox (preserves memory snapshot). */
@@ -822,9 +898,15 @@ export class Sandbox {
     await this._cloneCleanup?.release(this.sandboxId);
   }
 
-  /** POST /sandboxes/:id/snapshots — create a snapshot. */
-  async createSnapshot(name?: string): Promise<SnapshotInfo> {
+  /** POST /sandboxes/:id/snapshots — create a snapshot; name must not start with tpl-/snap-. */
+  async createSnapshot(name?: string, options: CreateSnapshotOptions = {}): Promise<SnapshotInfo> {
     const payload: Record<string, unknown> = {};
+    if (options.ttlSeconds !== undefined) {
+      if (!Number.isSafeInteger(options.ttlSeconds) || options.ttlSeconds < 0 || options.ttlSeconds > 9_223_372_036) {
+        throw new RangeError("ttlSeconds must be an integer between 0 and 9223372036");
+      }
+      payload.ttlSeconds = options.ttlSeconds;
+    }
     if (name !== undefined) {
       payload.name = name;
     }

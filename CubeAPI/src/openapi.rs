@@ -12,12 +12,13 @@ use utoipa::{
 use crate::{
     handlers,
     models::{
-        ApiError, ConnectSandbox, ConnectSandboxV2, CreateSnapshotRequest, CreateTemplateRequest,
-        ForkError, ForkRequest, ForkResult, NewSandbox, NewSandboxV2, NewVolume,
-        RebuildTemplateRequest, RefreshRequest, ResumedSandbox, RollbackRequest, RollbackResponse,
-        Sandbox, SandboxDetail, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxState,
-        SandboxVolumeMount, SetTemplateAliasRequest, SetTimeoutRequest, SnapshotInfo,
-        SnapshotListItem, TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
+        ApiError, BlockIoQosConfig, ConnectSandbox, ConnectSandboxV2, CreateSnapshotRequest,
+        CreateTemplateRequest, ForkError, ForkRequest, ForkResult, NetworkQosConfig, NewSandbox,
+        NewSandboxV2, NewVolume, NewVolumeV2, QosConfig, RebuildTemplateRequest, RefreshRequest,
+        ResumedSandbox, RollbackRequest, RollbackResponse, Sandbox, SandboxDetail, SandboxLogEntry,
+        SandboxLogs, SandboxLogsV2Response, SandboxState, SandboxVolumeMount,
+        SetTemplateAliasRequest, SetTimeoutRequest, SnapshotInfo, SnapshotListItem,
+        TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
         TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
         UpdateSandboxNetworkRequest, Volume, VolumeAndToken,
@@ -52,6 +53,10 @@ impl Modify for SecurityAddon {
         version = "0.1.0",
         description = "E2B-compatible sandbox API server."
     ),
+    servers((
+        url = "/cubeapi/v1",
+        description = "CubeAPI SDK/dashboard surface (source of truth generated via `cube-api --export-openapi`)"
+    )),
     paths(
         handlers::health::health,
         handlers::templates::list_templates,
@@ -72,6 +77,7 @@ impl Modify for SecurityAddon {
         handlers::sandboxes::create_sandbox_v2,
         handlers::sandboxes::list_sandboxes_v2,
         handlers::sandboxes::get_sandbox,
+        handlers::sandboxes::get_sandbox_exposed_port,
         handlers::sandboxes::kill_sandbox,
         handlers::sandboxes::pause_sandbox,
         handlers::sandboxes::resume_sandbox,
@@ -88,18 +94,27 @@ impl Modify for SecurityAddon {
         handlers::snapshots::rollback_sandbox,
         handlers::volumes::list_volumes,
         handlers::volumes::create_volume,
+        handlers::volumes::create_volume_v2,
         handlers::volumes::get_volume,
         handlers::volumes::delete_volume
     ),
     components(schemas(
         ApiError,
         handlers::health::HealthResponse,
+        // Web type generation needs these dashboard models without CubeAPI routes.
+        crate::models::ClusterOverview,
+        crate::models::NodeView,
+        crate::models::ComponentVersionView,
+        crate::models::VersionMatrixView,
         TemplateSummary,
         TemplateDetail,
         TemplateAliasLookupResponse,
         TemplateBuildJob,
         TemplateBuildStatus,
         CreateTemplateRequest,
+        QosConfig,
+        NetworkQosConfig,
+        BlockIoQosConfig,
         RebuildTemplateRequest,
         SetTemplateAliasRequest,
         TemplateCompatSummaryView,
@@ -132,6 +147,7 @@ impl Modify for SecurityAddon {
         RollbackRequest,
         RollbackResponse,
         NewVolume,
+        NewVolumeV2,
         Volume,
         VolumeAndToken
     )),

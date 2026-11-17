@@ -46,6 +46,10 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_OPS_BIND
               value: {{ .Values.cubeOps.bind | quote }}
+            # ops-agent push channel: node-local agents listen on the compute
+            # nodes at .Values.opsAgent.port.
+            - name: CUBE_OPS_OPSAGENT_PORT
+              value: {{ .Values.opsAgent.port | quote }}
             - name: CUBE_OPS_WAREHOUSE_WORK_DIR
               value: {{ $workDir | quote }}
             - name: TMPDIR
@@ -151,7 +155,7 @@ spec:
             - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
               value: "true"
             - name: REDIS_HOST
-              value: {{ include "cube.redisHost" . | quote }}
+              value: {{ if .Values.redis.clusterNodes }}{{ "" | quote }}{{ else }}{{ include "cube.redisHost" . | quote }}{{ end }}
             - name: REDIS_PORT
               value: {{ .Values.redis.port | quote }}
             - name: REDIS_PASSWORD
@@ -161,6 +165,8 @@ spec:
                   key: redis-password
             - name: REDIS_DB
               value: {{ include "cube.redisDB" . | quote }}
+            - name: REDIS_CLUSTER_NODES
+              value: {{ .Values.redis.clusterNodes | default "" | quote }}
             - name: REDIS_MASTER_NAME
               value: {{ .Values.redis.masterName | default "" | quote }}
             - name: REDIS_SENTINEL_NODES

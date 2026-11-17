@@ -122,10 +122,7 @@ func (l snapshotWorkLayout) usesTmpRename() bool {
 }
 
 func (l snapshotWorkLayout) ensureTmp() error {
-	if err := storage.EnsureSnapshotPackage(l.Backend, l.TmpHome); err != nil {
-		return err
-	}
-	return os.MkdirAll(l.MetaWork, 0o755)
+	return storage.EnsureSnapshotPackage(l.Backend, l.TmpHome)
 }
 
 func (l snapshotWorkLayout) prepareWork(ctx context.Context) error {

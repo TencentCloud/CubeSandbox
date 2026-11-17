@@ -28,11 +28,6 @@ func warnVolumeDeleteDeferred(ctx context.Context, name, kind string, err error)
 	log.G(ctx).Warnf("%s: name=%s kind=%s: %v", volumeDeleteDeferredLog, name, kind, err)
 }
 
-func isCowVolumeKind(kind string) bool {
-	normalized, err := normalizeCowKind(kind)
-	return err == nil && normalized == cowKindVolume
-}
-
 // requireCowStore returns the default (XFS) [cow.Store].
 func requireCowStore() (cow.Store, error) {
 	return requireCowStoreFor(cow.BackendXFS)
@@ -116,6 +111,9 @@ func requireCowUploader(backend string) (cow.Uploader, error) {
 	normalized, err := cow.NormalizeBackend(backend)
 	if err != nil {
 		return nil, err
+	}
+	if normalized == cow.BackendJFS {
+		return jfsUploader{}, nil
 	}
 	if normalized != cow.BackendS3 {
 		return noopUploader{}, nil
@@ -385,10 +383,6 @@ func CleanupObjectsFor(ctx context.Context, backend string, refs []CowObjectRef)
 		// delete_snapshot also deactivates, and NotFound is success.
 		_ = store.DeactivateByKind(ctx, name, kind)
 		if err := store.DeleteByKind(ctx, name, kind); err != nil {
-			if isCowVolumeKind(kind) {
-				warnVolumeDeleteDeferred(ctx, name, kind, err)
-				continue
-			}
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", name, err))
 			if isRootfsCleanupRole(ref.Role) {
 				return cleanupErr

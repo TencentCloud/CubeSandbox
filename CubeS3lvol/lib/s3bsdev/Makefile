@@ -21,6 +21,7 @@ SRCS = s3_bs_dev.c \
        s3_wal.c \
        s3_overlay.c \
        s3_cache.c \
+       s3_writeback.c \
        s3_flusher.c \
        s3_checkpoint.c \
        s3_journal.c \

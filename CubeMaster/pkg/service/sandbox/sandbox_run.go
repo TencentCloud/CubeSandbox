@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/affinity"
@@ -36,6 +38,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -44,7 +47,25 @@ import (
 var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
 var getSandboxProxyMapFn = localcache.GetSandboxProxyMap
 
+// JFSTemplateVariantResolver verifies that the variant selected for a
+// target host-fact class was built successfully. Templatecenter wires the DB
+// lookup during CubeMaster initialization.
+type JFSTemplateVariantResolver func(ctx context.Context, templateID, variantID string) (string, error)
+
+var jfsTemplateVariantResolver JFSTemplateVariantResolver
+
+func SetJFSTemplateVariantResolver(resolver JFSTemplateVariantResolver) {
+	jfsTemplateVariantResolver = resolver
+}
+
+const (
+	createDispatchPending int32 = iota
+	createDispatchStarted
+	createDispatchAborted
+)
+
 type createSandboxContext struct {
+	dispatchState    atomic.Int32
 	selctx           *selctx.SelectorCtx
 	directHost       bool
 	selectHost       *node.Node
@@ -121,6 +142,17 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		reschedule: true,
 		retryCost:  time.Duration(0),
 	}
+	// Seal queued work before handing the response to callers. A cancellation
+	// alone cannot prove that a scheduler worker has not crossed the RPC boundary.
+	defer func() { rsp.CreateNotStarted = createCtx.abortUndispatchedCreate() }()
+	// Record the create attempt on every return path (mock / param failure
+	// included); endTime stays zero on early returns and the helper falls
+	// back to now. The profile label reflects the pipeline that actually
+	// served the request once scheduling ran.
+	defer func() {
+		scheduler.ObserveSandboxCreate(scheduler.ProfileNameOf(createCtx.selctx),
+			rsp.Ret.RetCode == int(errorcode.ErrorCode_Success), startTime, createCtx.endTime)
+	}()
 	if log.IsDebug() {
 		log.G(ctx).Debugf("CreateSandbox:%s", safePrintCreateCubeSandboxReq(req))
 	} else {
@@ -227,14 +259,31 @@ func (c *createSandboxContext) handleCubelet() {
 			}
 			c.selctx.AddLastBadNode(c.selectHost)
 			c.reschedule = true
+			status, _ := ret.FromError(err)
+			scheduler.RecordReschedule(scheduler.ProfileNameOf(c.selctx), status.Code())
 			log.G(c.ctx).Warnf("selected host blocked by scheduling admission, reschedule host=%s err=%v",
 				c.selectHost.ID(), err)
 			continue
 		}
+		if err := c.bindJFSTemplateVariant(); err != nil {
+			if c.directHost {
+				status, _ := ret.FromError(err)
+				c.setMasterRsp(int(status.Code()), status.Message())
+				return
+			}
+			c.selctx.AddLastBadNode(c.selectHost)
+			c.reschedule = true
+			log.G(c.ctx).Warnf("selected host cannot resolve JFS template variant, reschedule host=%s err=%v",
+				c.selectHost.ID(), err)
+			continue
+		}
 
-		if c.callCubelet() {
+		retry := c.callCubelet()
+		if retry {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
+			scheduler.RecordReschedule(scheduler.ProfileNameOf(c.selctx),
+				errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode()))
 
 			if c.cubeletRsp != nil && c.cubeletRsp.GetRet() != nil &&
 				errorcode.IsCircutBreakCode(errorcode.MasterCode(c.cubeletRsp.GetRet().GetRetCode())) {
@@ -246,6 +295,59 @@ func (c *createSandboxContext) handleCubelet() {
 		c.dealSuccResult()
 		return
 	}
+}
+
+// bindJFSTemplateVariant resolves a template ID to the JFS package built for
+// the selected node's restore-compatibility class. Legacy
+// JFS templates carry no variant policy and keep their original ID.
+func (c *createSandboxContext) bindJFSTemplateVariant() error {
+	if c == nil || c.cubeletReq == nil || c.selectHost == nil {
+		return nil
+	}
+	annotations := c.cubeletReq.GetAnnotations()
+	if annotations == nil {
+		return nil
+	}
+	delete(annotations, constants.CubeAnnotationJFSTemplateVariantID)
+	if !constants.IsJFSBackend(annotations[constants.CubeAnnotationStorageBackend]) ||
+		annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] != hostcompat.VariantPolicyV1 {
+		return nil
+	}
+	logicalID := strings.TrimSpace(annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	if logicalID == "" {
+		return nil
+	}
+	if c.selectHost.HostFacts == nil {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"node %s has no host facts for JFS template %s", c.selectHost.ID(), logicalID)
+	}
+	variantID, _, ok := hostcompat.TemplateVariantID(
+		logicalID,
+		c.selectHost.HostFacts.CPUIDHash,
+		c.selectHost.HostFacts.HostKernelRelease,
+	)
+	if !ok {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"node %s has incomplete cpuid_hash/host_kernel_release for JFS template %s",
+			c.selectHost.ID(), logicalID)
+	}
+	if jfsTemplateVariantResolver == nil {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"JFS template variant resolver is not initialized")
+	}
+	resolved, err := jfsTemplateVariantResolver(c.ctx, logicalID, variantID)
+	if err != nil {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"JFS template %s has no ready variant for node %s: %v",
+			logicalID, c.selectHost.ID(), err)
+	}
+	if strings.TrimSpace(resolved) != variantID {
+		return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed,
+			"JFS template %s variant mapping mismatch for node %s",
+			logicalID, c.selectHost.ID())
+	}
+	annotations[constants.CubeAnnotationJFSTemplateVariantID] = variantID
+	return nil
 }
 
 func (c *createSandboxContext) refreshAndAdmitHost() error {
@@ -275,7 +377,22 @@ func admitSelectedHost(selected *node.Node, getNode func(string) (*node.Node, bo
 	return current, nil
 }
 
+// abortUndispatchedCreate and beginCreateDispatch race on the same state. Once
+// an RPC may have reached a node, subsequent retries cannot make its result known.
+func (c *createSandboxContext) abortUndispatchedCreate() bool {
+	c.dispatchState.CompareAndSwap(createDispatchPending, createDispatchAborted)
+	return c.dispatchState.Load() == createDispatchAborted
+}
+
+func (c *createSandboxContext) beginCreateDispatch() bool {
+	c.dispatchState.CompareAndSwap(createDispatchPending, createDispatchStarted)
+	return c.dispatchState.Load() == createDispatchStarted
+}
+
 func (c *createSandboxContext) callCubelet() bool {
+	if !c.beginCreateDispatch() {
+		return false
+	}
 
 	localcache.IncrNodeConcurrent(c.selectHost)
 	defer func() {
@@ -400,6 +517,9 @@ func (c *createSandboxContext) failover() {
 			CallEp:   rt.CalleeEndpoint,
 		}
 
+		if lifecyclePublisher.Enabled() {
+			t.Ctx = webhook.WithOrigin(t.Ctx, webhook.OriginCreateFailover)
+		}
 		if err := task.AddAsyncTask(t); err != nil {
 			log.G(c.ctx).Fatalf("failover_DestroySandbox error:%+v", err.Error())
 		}
@@ -624,6 +744,7 @@ func (c *createSandboxContext) setProxyToRedis() error {
 func (c *createSandboxContext) newContext(ctx context.Context, req *types.CreateCubeSandboxReq) error {
 	c.selctx = selctx.New(config.GetConfig().Scheduler.LeastSelectName)
 	c.selctx.InstanceType = req.InstanceType
+	c.selctx.RequestLabels = config.GetConfig().Scheduler.ControlledProfileLabels(req.Labels)
 
 	c.constructAffanity(ctx, req)
 	c.done = make(chan struct{})

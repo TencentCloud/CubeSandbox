@@ -97,8 +97,9 @@ func TestCommitRootfsForUsesS3Store(t *testing.T) {
 func TestUploadSnapshotExportsRealUUIDs(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
-			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
-			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+			"tpl-snap-1-rootfs":              {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory":              {SizeBytes: 64 << 20},
+			S3MetadataSnapshotName("snap-1"): {SizeBytes: 8 << 20},
 		},
 	}
 	useTestCowStorage(t, engine)
@@ -112,7 +113,12 @@ func TestUploadSnapshotExportsRealUUIDs(t *testing.T) {
 	require.False(t, uuids.Empty())
 	require.Equal(t, "export-tpl-snap-1-rootfs", uuids.Rootfs)
 	require.Equal(t, "export-tpl-snap-1-memory", uuids.Memory)
-	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.exportSnapshots)
+	require.Equal(t, "export-"+S3MetadataSnapshotName("snap-1"), uuids.Metadata)
+	require.Equal(t, []string{
+		"tpl-snap-1-rootfs",
+		"tpl-snap-1-memory",
+		S3MetadataSnapshotName("snap-1"),
+	}, engine.exportSnapshots)
 
 	st, err = SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
@@ -131,8 +137,9 @@ func TestUploadSnapshotExportsRealUUIDs(t *testing.T) {
 func TestUploadSnapshotFailsWithoutMintingUUID(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
-			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
-			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+			"tpl-snap-1-rootfs":              {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory":              {SizeBytes: 64 << 20},
+			S3MetadataSnapshotName("snap-1"): {SizeBytes: 8 << 20},
 		},
 		exportErr: fmt.Errorf("export denied"),
 	}
@@ -142,6 +149,30 @@ func TestUploadSnapshotFailsWithoutMintingUUID(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, uuids)
 	require.Contains(t, err.Error(), "export denied")
+
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateFailed, st.State)
+}
+
+// A package without metadata.json cannot be cold booted: it carries the guest
+// runtime identity and the writable-layer name. Publishing it as "ready" would
+// hand the caller an artifact that only fails later, after the source sandbox
+// may be gone.
+func TestUploadSnapshotRefusesAPackageWithoutMetadata(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
+	require.Error(t, err)
+	require.Nil(t, uuids)
+	require.Contains(t, err.Error(), "metadata")
+	require.Empty(t, engine.exportSnapshots)
 
 	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)

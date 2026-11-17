@@ -26,12 +26,11 @@ Assisted-by: Cursor:Grok-4.6
 diff --git a/include/spdk/blob.h b/include/spdk/blob.h
 --- a/include/spdk/blob.h
 +++ b/include/spdk/blob.h
-@@ -264,1 +264,6 @@ struct spdk_bs_dev {
+@@ -264,1 +264,5 @@ struct spdk_bs_dev {
 +	/* Restrict copy() to an explicit spdk_blob_materialize_cluster() operation.
 +	 * Use this when copy() is bound to one external source rather than being a
 +	 * generic copy between LBAs on the base device. */
 +	bool copy_on_materialize_only;
-+
  };
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 --- a/lib/blob/blobstore.c

@@ -24,6 +24,8 @@ import { controlFetch } from "./transport.js";
  * an opaque HTTP 400 into a clean error at the call site.
  */
 export const MAX_VOLUME_NAME_LEN = 128;
+/** UTF-8 byte limit for opaque volume plugin input. */
+export const MAX_VOLUME_PRIVATE_DATA_LEN = 1024;
 const VOLUME_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
@@ -270,6 +272,50 @@ export class Volume extends VolumeInfo {
   static async create(
     options: { name?: string; driver?: string; config?: Config | ConfigOptions } = {},
   ): Promise<Volume> {
+    return Volume.createRequest(options);
+  }
+
+  /**
+   * Create via POST /v2/volumes. Requires CubeAPI, every serving CubeMaster,
+   * and Cubelet at version 0.8.0 or newer, a plugin that supports this
+   * protocol, and this SDK at version 0.8.0 or newer.
+   * privateData must be valid UTF-8 of at most 1024 bytes without NUL or
+   * characters outside the BMP; use credential references, never plaintext
+   * secrets.
+   * Empty strings are forwarded. Existing get/delete/mount APIs still apply.
+   * Unsupported servers return an error; this never falls back to /volumes.
+   */
+  static async createWithPrivateData(options: {
+    privateData: string;
+    name?: string;
+    driver?: string;
+    config?: Config | ConfigOptions;
+  }): Promise<Volume> {
+    if (typeof options.privateData !== "string") {
+      throw new TypeError("private_data must be a string");
+    }
+    if (Buffer.byteLength(options.privateData, "utf8") > MAX_VOLUME_PRIVATE_DATA_LEN) {
+      throw new Error(`private_data exceeds max length ${MAX_VOLUME_PRIVATE_DATA_LEN}`);
+    }
+    if (options.privateData.includes("\0")) {
+      throw new Error("private_data must not contain NUL");
+    }
+    for (const character of options.privateData) {
+      const codePoint = character.codePointAt(0)!;
+      if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+        throw new Error("private_data must be valid UTF-8");
+      }
+      if (codePoint > 0xffff) {
+        throw new Error("private_data must not contain characters outside the BMP");
+      }
+    }
+    return Volume.createRequest(options, options.privateData);
+  }
+
+  private static async createRequest(
+    options: { name?: string; driver?: string; config?: Config | ConfigOptions },
+    privateData?: string,
+  ): Promise<Volume> {
     const name = options.name ?? "";
     validateName(name);
     const cfg = resolveConfig(options.config);
@@ -277,7 +323,11 @@ export class Volume extends VolumeInfo {
     if (options.driver) {
       payload.driver = options.driver;
     }
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/volumes`, {
+    const path = privateData === undefined ? "/volumes" : "/v2/volumes";
+    if (privateData !== undefined) {
+      payload.private_data = privateData;
+    }
+    const resp = await controlFetch(cfg, `${cfg.apiUrl}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

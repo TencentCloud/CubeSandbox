@@ -2,9 +2,11 @@ name: Release Docker Images
 
 # Reusable pipeline for building and pushing release component images.
 # GitHub-hosted runners build amd64 + arm64 and publish multi-arch manifests to
-# GHCR and TCR int. A self-hosted job then copies per-arch and multi-arch images
-# to TCR cn (avoids slow US→CN pushes). Add a component by extending the prepare
-# job's component table and publish_manifests matrix below.
+# GHCR and TCR int; a self-hosted job mirrors TCR int to TCR cn with identical
+# digests via scripts/sync-release-images.sh. A missing tag or platform, a
+# non-index release tag, or a digest that differs from the source fails the
+# release. Add a component by extending the prepare job's component table and
+# publish_manifests matrix below.
 on:
   workflow_dispatch:
     inputs:
@@ -18,7 +20,7 @@ on:
         type: string
         default: ''
       components:
-        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-proxy, webui, cube-lifecycle-manager)'
+        description: 'Comma-separated components to build, or "all" (cube-egress, cube-egress-net, cube-s3lvol, cube-master, cubemastercli, cube-templatecenter, cubelet, cube-shim, cube-kernel, cube-guest, cube-agent, cube-pvm-host-bootstrap, cube-node-init, cube-wait-node-prep, cube-api, cube-ops, cube-ops-agent, cube-proxy, webui, cube-lifecycle-manager)'
         required: false
         type: string
         default: all
@@ -218,6 +220,7 @@ jobs:
               "cube-wait-node-prep",
               "cube-api",
               "cube-ops",
+              "cube-ops-agent",
               "cube-proxy",
               "webui",
               "cube-lifecycle-manager",
@@ -346,6 +349,13 @@ jobs:
                   "context": ".",
                   "dockerfile": "CubeOps/Dockerfile",
                   "cache_scope": "cube-ops",
+              },
+              {
+                  "component": "cube-ops-agent",
+                  "image": "cube-ops-agent",
+                  "context": ".",
+                  "dockerfile": "OpsAgent/Dockerfile",
+                  "cache_scope": "cube-ops-agent",
               },
               {
                   "component": "cube-proxy",
@@ -624,8 +634,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cube-egress-net-ctx/scripts
-          cp CubeEgress/scripts/cube-proxy-iptables-init.sh \
-            cube-egress-net-ctx/scripts/cube-proxy-iptables-init.sh
+          cp CubeEgress/scripts/cube-egress-iptables-init.sh \
+            cube-egress-net-ctx/scripts/cube-egress-iptables-init.sh
           cp deploy/kubernetes/images/scripts/cube-egress-net-entrypoint.sh \
             cube-egress-net-ctx/scripts/cube-egress-net-entrypoint.sh
           chmod +x cube-egress-net-ctx/scripts/*.sh
@@ -788,45 +798,107 @@ jobs:
           username: ${{ secrets.TCR_INT_USERNAME }}
           password: ${{ secrets.TCR_INT_PASSWORD }}
 
-      - name: Resolve manifest tags
-        id: tags
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-        run: |
-          tags="${IMAGE_TAG}"
-          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            tags="${tags} latest"
-          fi
-          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
-
       - name: Create multi-arch manifests
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           IMAGE_NAME: ${{ matrix.image }}
           ARCHES: ${{ matrix.arches }}
-          # Bind step outputs to env vars instead of interpolating ${{ }} into the
-          # script body, so no expression value can ever be parsed as shell. The
-          # unquoted ${MANIFEST_TAGS} expansion below is deliberate word-splitting
-          # into individual tags.
-          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
+          # Bind expression values to env vars instead of interpolating ${{ }}
+          # into the script body. The tag list is computed here, not taken from
+          # a previous step output, so a dropped output cannot skip publication.
         run: |
+          set -euo pipefail
+          if [[ -z "${ARCHES// }" ]]; then
+            echo "Refusing to continue: ARCHES is empty" >&2
+            exit 1
+          fi
+          if [[ -z "${IMAGE_TAG}" ]]; then
+            echo "Refusing to continue: IMAGE_TAG is empty" >&2
+            exit 1
+          fi
+          read -r -a arch_list <<< "${ARCHES}"
+          if [[ ${#arch_list[@]} -eq 0 ]]; then
+            echo "Refusing to continue: ARCHES is empty" >&2
+            exit 1
+          fi
+          tags=("${IMAGE_TAG}")
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags+=("latest")
+          fi
+
+          # Assert the published index from its JSON form: media types compared
+          # literally, platforms from the descriptor list. The index body is read
+          # with --raw, whose shape does not depend on whether the descriptor JSON
+          # happens to embed the manifest list.
+          verify_index() {
+            local ref="$1"
+            local index_json arch
+            index_json="$(docker buildx imagetools inspect --raw "${ref}")"
+            echo "${index_json}"
+            if ! jq -e '.mediaType == "application/vnd.oci.image.index.v1+json"
+              or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json"' \
+              <<<"${index_json}" >/dev/null; then
+              echo "Refusing to continue: ${ref} is not an image index" >&2
+              exit 1
+            fi
+            for arch in "${arch_list[@]}"; do
+              if ! jq -e --arg arch "${arch}" \
+                '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index($arch) != null' \
+                <<<"${index_json}" >/dev/null; then
+                echo "Refusing to continue: ${ref} missing linux/${arch}" >&2
+                exit 1
+              fi
+            done
+          }
+
           for image in \
             "ghcr.io/tencentcloud/${IMAGE_NAME}" \
             "cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"; do
-            for tag in ${MANIFEST_TAGS}; do
+            for tag in "${tags[@]}"; do
               sources=()
-              for arch in ${ARCHES}; do
+              for arch in "${arch_list[@]}"; do
                 sources+=("${image}:${IMAGE_TAG}-${arch}")
               done
               docker buildx imagetools create -t "${image}:${tag}" "${sources[@]}"
+              verify_index "${image}:${tag}"
             done
           done
 
-  # Sync per-arch and multi-arch images from TCR int to TCR cn on a China-side
-  # self-hosted runner (crane pull then push; avoids streaming copy stalls).
-  # TCR int already receives the release images during the build, and using it
-  # here avoids pulling large layers from GHCR into China.
-  # This ARC runner set requires a job container.
+          # The cn mirror is verified against TCR int, so the two registries must
+          # resolve to the same digest or digest-pinned consumers break silently.
+          ghcr="ghcr.io/tencentcloud/${IMAGE_NAME}"
+          tcr="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
+          for tag in "${tags[@]}"; do
+            # Read the digest from the JSON manifest. -e makes a missing or null
+            # field fail instead of yielding "null" on both sides and passing.
+            ghcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${ghcr}:${tag}" | jq -er .digest)"
+            tcr_digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${tcr}:${tag}" | jq -er .digest)"
+            if [[ "${ghcr_digest}" != sha256:* || "${tcr_digest}" != sha256:* ]]; then
+              echo "Refusing to continue: ${tag} did not resolve to a sha256 digest: ghcr ${ghcr_digest} tcr-int ${tcr_digest}" >&2
+              exit 1
+            fi
+            if [[ "${ghcr_digest}" != "${tcr_digest}" ]]; then
+              echo "Refusing to continue: ${tag} differs between registries: ghcr ${ghcr_digest} != tcr-int ${tcr_digest}" >&2
+              exit 1
+            fi
+            echo "Registry digests match for ${tag} (${ghcr_digest})"
+          done
+
+  # Mirror TCR int to TCR cn on a China-side self-hosted runner, with every tag
+  # digest-identical to TCR int. Sourced from TCR int rather than GHCR to keep
+  # large layers out of the cross-border path. The work lives in
+  # scripts/sync-release-images.sh so it can be run locally against throwaway
+  # registries. This ARC runner set requires a job container.
+  #
+  # Repairing a release that already shipped a collapsed cn tag: the script must
+  # come from a ref that contains it, so re-dispatching with `ref=<old tag>`
+  # fails. Run the script directly against the existing TCR int tags instead,
+  # from a checkout that has it:
+  #   SRC_REGISTRY=cube-sandbox-int.tencentcloudcr.com \
+  #   DST_REGISTRY=cube-sandbox-cn.tencentcloudcr.com \
+  #   IMAGE_NAME=<component> IMAGE_TAG=<release> ARCHES="amd64 arm64" \
+  #     scripts/sync-release-images.sh
+  # It needs TCR credentials in the crane credential store and never rebuilds.
   sync_cn:
     name: ${{ matrix.component }} sync to TCR CN
     runs-on: arc-2c4g-ctd-gz
@@ -845,6 +917,8 @@ jobs:
       run:
         shell: bash
     steps:
+      # The job container has no git, which actions/checkout needs, so install
+      # dependencies first.
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -863,8 +937,15 @@ jobs:
               "${src}"
           done
           apt-get update
-          apt-get install -y --no-install-recommends curl ca-certificates
+          # git for actions/checkout, jq for the sync script's manifest checks.
+          apt-get install -y --no-install-recommends git curl ca-certificates jq
           rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Same revision the images were built from, not the event ref.
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Install crane
         env:
@@ -898,60 +979,20 @@ jobs:
           echo "${TCR_CN_PASSWORD}" | crane auth login cube-sandbox-cn.tencentcloudcr.com \
             -u "${TCR_CN_USERNAME}" --password-stdin
 
-      - name: Resolve manifest tags
-        id: tags
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-        run: |
-          tags="${IMAGE_TAG}"
-          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            tags="${tags} latest"
-          fi
-          echo "list=${tags}" >> "${GITHUB_OUTPUT}"
-
       - name: Sync images to TCR CN
         env:
+          SRC_REGISTRY: cube-sandbox-int.tencentcloudcr.com
+          DST_REGISTRY: cube-sandbox-cn.tencentcloudcr.com
+          REPO_PREFIX: cube-sandbox
           IMAGE_TAG: ${{ inputs.image_tag }}
           IMAGE_NAME: ${{ matrix.image }}
           ARCHES: ${{ matrix.arches }}
-          MANIFEST_TAGS: ${{ steps.tags.outputs.list }}
           CRANE_SYNC_ATTEMPTS: "3"
-          # Split pull/push instead of `crane copy` streaming: concurrent
-          # pull+push was getting rwnd-limited / unexpected EOF against TCR CN.
+          # Pull and push run as separate phases; a concurrent stream stalls
+          # against TCR cn.
           CRANE_PULL_TIMEOUT: 20m
           CRANE_PUSH_TIMEOUT: 20m
-        run: |
-          set -euo pipefail
-          src="cube-sandbox-int.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
-          dst="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/${IMAGE_NAME}"
-          work_dir="${RUNNER_TEMP:-/tmp}/crane-sync"
-          mkdir -p "${work_dir}"
-
-          sync_image() {
-            local from="$1"
-            local to="$2"
-            local attempt
-            local tarball="${work_dir}/image.tar"
-            for attempt in $(seq 1 "${CRANE_SYNC_ATTEMPTS}"); do
-              echo "Syncing ${from} -> ${to} (attempt ${attempt}/${CRANE_SYNC_ATTEMPTS})"
-              rm -f "${tarball}"
-              if timeout "${CRANE_PULL_TIMEOUT}" crane pull "${from}" "${tarball}" \
-                && timeout "${CRANE_PUSH_TIMEOUT}" crane push "${tarball}" "${to}"; then
-                rm -f "${tarball}"
-                return 0
-              fi
-              rm -f "${tarball}"
-              if [[ "${attempt}" == "${CRANE_SYNC_ATTEMPTS}" ]]; then
-                echo "Failed to sync ${from} -> ${to}" >&2
-                return 1
-              fi
-              sleep "$((attempt * 10))"
-            done
-          }
-
-          for arch in ${ARCHES}; do
-            sync_image "${src}:${IMAGE_TAG}-${arch}" "${dst}:${IMAGE_TAG}-${arch}"
-          done
-          for tag in ${MANIFEST_TAGS}; do
-            sync_image "${src}:${tag}" "${dst}:${tag}"
-          done
+          CRANE_INDEX_TIMEOUT: 5m
+          # A copy of a source tag that already moved on can carry layers.
+          CRANE_COPY_TIMEOUT: 20m
+        run: scripts/sync-release-images.sh

@@ -1,5 +1,5 @@
 ---
-title: Quality Status
+title: Daily Performance Report
 sidebar: false
 aside: false
 ---

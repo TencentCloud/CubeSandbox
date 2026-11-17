@@ -13,7 +13,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow/s3"
-	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // S3Cow is the S3-backed CoW Store. It talks to a dedicated cubecow
@@ -184,25 +183,27 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 	if err != nil {
 		return nil, err
 	}
-	if sizeBytes > 0 {
-		info, infoErr := m.engine.GetVolumeInfo(volumeName)
-		if infoErr != nil {
-			if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
-				return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
-			}
-			return nil, infoErr
+	info, infoErr := m.engine.GetVolumeInfo(volumeName)
+	if infoErr != nil {
+		if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 		}
-		actual := uint64(0)
-		if info != nil {
-			actual = info.SizeBytes
+		return nil, infoErr
+	}
+	if info == nil {
+		infoErr = fmt.Errorf("cubecow object %q has empty info", volumeName)
+		if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 		}
-		if actual < sizeBytes {
-			sizeErr := fmt.Errorf("cloned memory volume %s size %d is smaller than requested %d", volumeName, actual, sizeBytes)
-			if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
-				return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
-			}
-			return nil, sizeErr
+		return nil, infoErr
+	}
+	actual := info.SizeBytes
+	if actual < sizeBytes {
+		sizeErr := fmt.Errorf("cloned memory volume %s size %d is smaller than requested %d", volumeName, actual, sizeBytes)
+		if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
+			return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
 		}
+		return nil, sizeErr
 	}
 	resolvedPath, err := m.ResolveDevPath(ctx, volumeName, cowKindVolume)
 	if err != nil {
@@ -211,7 +212,7 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 	if resolvedPath != "" {
 		devPath = resolvedPath
 	}
-	return newCowVolume(volumeName, cowKindVolume, 0, devPath), nil
+	return newCowVolumeWithSize(volumeName, cowKindVolume, 0, devPath, actual), nil
 }
 
 func (m *S3Cow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
@@ -341,47 +342,11 @@ func (m *S3Cow) ensureSnapshotOrigin(sourceName, snapshotName string) error {
 	return fmt.Errorf("%w: name=%s kind=%s origin=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot, sourceName)
 }
 
-// DeleteByKind removes a cubecow object, treating a snapshot that s3lvol
-// refuses as busy as removed. See [isS3DeleteBusy].
+// DeleteByKind accepts only successful deletion (including an explicitly
+// accepted deferred delete) or not-found. A bare busy error is not proof that
+// s3lvol recorded a durable delete intent; callers must retain their retry plan.
 func (m *S3Cow) DeleteByKind(ctx context.Context, name, kind string) error {
-	err := m.deleteByKind(ctx, name, kind)
-	if err == nil || !isS3DeleteBusy(err) {
-		return err
-	}
-	normalized, kindErr := normalizeCowKind(kind)
-	if kindErr != nil || normalized != cowKindSnapshot {
-		// Volumes follow the sandbox lifecycle and nothing else should be
-		// holding one open. Busy there is a bug worth surfacing, not an
-		// artifact of an export we cannot release.
-		return err
-	}
-	CubeLog.Warnf("s3 delete snapshot %s refused as busy; recording it as deleted and leaking the object: %v",
-		name, err)
-	return nil
-}
-
-// isS3DeleteBusy matches s3lvol's refusal to delete an object it still
-// considers referenced ("precondition failed: s3lvol rpc: Device or resource
-// busy").
-//
-// Nothing on this node can clear that reference: it lives inside s3lvol —
-// typically an export it has not released, and cubecow exposes no
-// release_export — while host activation has already been torn down. Retrying
-// returns the same answer forever, so a caller that honours the error never
-// finishes: the package is swept half way, its directory and catalog stay
-// behind, and the template or sandbox it belongs to can never be deleted.
-//
-// Leaking the object costs S3 space. The warning above is the only record
-// that it happened, so it names the object.
-//
-// Scope is deliberately this one error from this one call. Busy from the
-// export path (s3lvol draining an lvstore) means the export never happened
-// and must keep failing.
-func isS3DeleteBusy(err error) bool {
-	if !isCowSemantic(err, cubecow.SemPreconditionFailed) {
-		return false
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "busy")
+	return m.deleteByKind(ctx, name, kind)
 }
 
 func (m *S3Cow) deleteByKind(ctx context.Context, name, kind string) error {

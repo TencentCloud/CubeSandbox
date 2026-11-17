@@ -28,6 +28,11 @@
 pip install 'cubesandbox>=0.6.0'
 ```
 
+此最低版本用于基础 Volume 创建、挂载和删除。通过 `private_data` 使用动态
+S3 绑定要求 CubeAPI、所有 CubeMaster 与 Cubelet ≥ 0.8.0，且
+`cubesandbox` ≥ 0.8.0。请调用 `Volume.create_with_private_data` 或
+`POST /v2/volumes`；新入口不会回退到 `/volumes`。
+
 ::: warning 用 cubesandbox，不要用官方 e2b SDK
 官方 e2b Python SDK 会把请求硬编码发到 e2b.cloud 后端，**不能用于 CubeSandbox**。请使用 `cubesandbox`。
 :::
@@ -81,7 +86,7 @@ with Sandbox.create(volume_mounts={"/data": VolumeMount(vol, read_only=True)}) a
     sb.files.read("/data/model.bin")
 ```
 
-### 配合跨机快照使用
+### 配合跨机迁移使用
 
 S3 Volume 的数据位于共享对象存储，因此沙箱在其他节点恢复时可以重新 Attach。它与 VM Snapshot backend 是两套独立配置：
 
@@ -90,7 +95,7 @@ S3 Volume 的数据位于共享对象存储，因此沙箱在其他节点恢复�
 - FromSnap 先从 VM Snapshot 包恢复 VM/rootfs 状态，再 Attach 已有 Volume ID。Volume 数据不会回到快照时刻；恢复后的沙箱看到当前内容。
 - 如果 Volume 已删除、目标节点缺少 driver，或者 S3 Attach 失败，沙箱创建会在 VM 启动前失败。
 
-VM 兼容性和跨机调度条件见[跨机快照](./cross-node-snapshot.md)。
+VM 兼容性和跨机调度条件见[跨机迁移](./cross-node-snapshot/requirements.md)。
 
 ---
 
@@ -183,7 +188,9 @@ volumeS3:
 
 ### 桶必须提前创建吗？
 
-不必。Create 会先 `head-bucket`，桶不存在时自动创建；桶已存在则直接用，不需要 `s3:CreateBucket` 权限。
+旧版卷使用配置的桶，Create 会先检查，不存在时自动创建。所有动态卷解析后使用的桶
+都必须预先存在，包括省略 `private_data.bucket`、回落到配置 `BUCKET` 的情况。
+动态 Create 从不自动建桶。
 
 ---
 

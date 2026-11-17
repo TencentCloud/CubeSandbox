@@ -14,11 +14,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -100,6 +102,15 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 	return ""
 }
 
+// sandboxInfoLookupDeps keeps external lookups injectable so tests don't rely
+// on toolchain-sensitive monkey patching.
+type sandboxInfoLookupDeps struct {
+	getPauseBinding    func(context.Context, string) (*pausesnap.Record, error)
+	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)
+	getNodesByIP       func(string) (*node.Node, bool)
+	getCubeletAddr     func(string) string
+}
+
 // checkValidAndGetReq locates the cubelet that should answer an Info query.
 //
 // ok is false when rsp already carries the error. An empty endpoint with ok
@@ -108,6 +119,16 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 // nil when there is none; callers must not read it again.
 func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cubeletReq *cubebox.ListCubeSandboxRequest,
 	rsp *types.GetCubeSandboxRes) (endpoint, locatedHost string, rec *pausesnap.Record, ok bool) {
+	return checkValidAndGetReqWithDeps(ctx, req, cubeletReq, rsp, sandboxInfoLookupDeps{
+		getPauseBinding:    pausesnap.GetBySandbox,
+		getSandboxProxyMap: localcache.GetSandboxProxyMap,
+		getNodesByIP:       localcache.GetNodesByIp,
+		getCubeletAddr:     cubelet.GetCubeletAddr,
+	})
+}
+
+func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxReq, cubeletReq *cubebox.ListCubeSandboxRequest,
+	rsp *types.GetCubeSandboxRes, deps sandboxInfoLookupDeps) (endpoint, locatedHost string, rec *pausesnap.Record, ok bool) {
 	if req.SandboxID == "" && req.HostID == "" {
 		setError(errorcode.ErrorCode_MasterParamsError, rsp)
 		return "", "", nil, false
@@ -115,7 +136,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 
 	if req.SandboxID != "" {
 		cubeletReq.Id = &req.SandboxID
-		rec = lookupPauseBinding(ctx, req.SandboxID)
+		rec = lookupPauseBindingWith(ctx, req.SandboxID, deps.getPauseBinding)
 	}
 
 	var (
@@ -130,7 +151,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 		}
 		locatedHost = n.IP
 	} else {
-		locatedHost = cachedSandboxHostIP(ctx, req.SandboxID)
+		locatedHost = cachedSandboxHostIPWith(ctx, req.SandboxID, deps.getSandboxProxyMap)
 		if locatedHost == "" && rec != nil {
 			locatedHost = strings.TrimSpace(rec.NodeIP)
 		}
@@ -138,7 +159,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 			setError(errorcode.ErrorCode_NotFound, rsp)
 			return "", "", nil, false
 		}
-		n, exist = localcache.GetNodesByIp(locatedHost)
+		n, exist = deps.getNodesByIP(locatedHost)
 	}
 
 	if !exist || !n.Healthy {
@@ -157,24 +178,26 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 		}
 		return "", "", nil, false
 	}
-	return cubelet.GetCubeletAddr(locatedHost), locatedHost, rec, true
+	return deps.getCubeletAddr(locatedHost), locatedHost, rec, true
 }
 
-// cachedSandboxHostIP is where the sandbox was last seen running. It wins
-// over the pause binding's node: after a cross-node resume whose binding
+// cachedSandboxHostIPWith returns where the sandbox was last seen running. It
+// wins over the pause binding's node: after a cross-node resume whose binding
 // cleanup failed, the binding still names the origin node.
-func cachedSandboxHostIP(ctx context.Context, sandboxID string) string {
+func cachedSandboxHostIPWith(ctx context.Context, sandboxID string,
+	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)) string {
 	if v := localcache.GetSandboxCache(sandboxID); v != nil {
 		return v.HostIP
 	}
-	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
+	if proxyMap, ok := getSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
 		return proxyMap.HostIP
 	}
 	return ""
 }
 
-func lookupPauseBinding(ctx context.Context, sandboxID string) *pausesnap.Record {
-	rec, err := pausesnap.GetBySandbox(ctx, sandboxID)
+func lookupPauseBindingWith(ctx context.Context, sandboxID string,
+	getPauseBinding func(context.Context, string) (*pausesnap.Record, error)) *pausesnap.Record {
+	rec, err := getPauseBinding(ctx, sandboxID)
 	if err != nil {
 		if !errors.Is(err, pausesnap.ErrNotFound) && !errors.Is(err, pausesnap.ErrNotReady) {
 			log.G(ctx).Warnf("GetSandboxInfo: read pause binding %s: %v", sandboxID, err)
@@ -198,8 +221,9 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 
 	for _, sandbox := range cubeRsp.GetItems() {
 		one := &types.SandboxData{
-			SandboxID: sandbox.GetId(),
-			NameSpace: sandbox.GetNamespace(),
+			SandboxID:   sandbox.GetId(),
+			NameSpace:   sandbox.GetNamespace(),
+			ErrorReason: sandbox.GetErrorReason(),
 		}
 		sandboxLabels := cloneStringMap(sandbox.GetLabels())
 
@@ -227,6 +251,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
+		one.CreateAt = sandbox.GetCreatedAt()
 		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
 		one.VolumeMounts = volumeMountsToContainerInfo(collectVolumeMountsFromContainers(sandbox.GetContainers()))
 		rsp.Data = append(rsp.Data, one)
@@ -246,6 +271,9 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	}
 	if req.SandboxID == "" {
 		return nil
+	}
+	if item := findSandboxData(rsp.Data, req.SandboxID); item != nil {
+		decorateSandboxQos(ctx, item, sandboxspec.GetAnnotations)
 	}
 	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
 	if !ok || proxyMap == nil {
@@ -273,8 +301,53 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.RequestedContainerPort = endpoint.ContainerPort
 		item.ExposedPortEndpoint = endpoint.Address
 		item.ExposedPortMode = endpoint.Mode
+		item.ExposedPortHostPort = endpoint.HostPort
 	}
 	return nil
+}
+
+// decorateSandboxQos reports the QoS configuration of one sandbox. The
+// persisted create request is authoritative; when it is missing or carries no
+// QoS annotations, the template configuration is used as a fallback.
+func decorateSandboxQos(ctx context.Context, item *types.SandboxData, getAnnotations func(context.Context, string) (map[string]string, error)) {
+	if item == nil {
+		return
+	}
+	if getAnnotations != nil {
+		annotations, err := getAnnotations(ctx, item.SandboxID)
+		switch {
+		case err == nil:
+			item.ConfiguredQos = parseSandboxQosAnnotations(ctx, item.SandboxID, annotations)
+		case !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound):
+			log.G(ctx).Warnf("failed to load persisted QoS annotations for sandbox %s: %v", item.SandboxID, err)
+		}
+	}
+	if item.ConfiguredQos == nil && item.TemplateID != "" {
+		if configured, err := lookupTemplateQos(ctx, item.TemplateID); err == nil && configured != nil {
+			item.ConfiguredQos = configured
+		}
+	}
+}
+
+// parseSandboxQosAnnotations parses the two template-managed annotations
+// independently so one malformed section does not hide the other.
+func parseSandboxQosAnnotations(ctx context.Context, sandboxID string, annotations map[string]string) *qos.Config {
+	network, networkErr := qos.ParseAnnotation(annotations[constants.CubeAnnotationsNetWork])
+	if networkErr != nil {
+		log.G(ctx).Warnf("failed to parse %s for sandbox %s: %v", constants.CubeAnnotationsNetWork, sandboxID, networkErr)
+	}
+	blockIO, blockIOErr := qos.ParseBlockIOAnnotation(annotations[constants.CubeAnnotationsBlkQos])
+	if blockIOErr != nil {
+		log.G(ctx).Warnf("failed to parse %s for sandbox %s: %v", constants.CubeAnnotationsBlkQos, sandboxID, blockIOErr)
+	}
+	if network == nil && blockIO == nil {
+		return nil
+	}
+	configured := &qos.Config{BlockIO: blockIO}
+	if network != nil {
+		configured.Network = network.Network
+	}
+	return configured
 }
 
 func getContainerName(label map[string]string) string {
@@ -331,6 +404,11 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		}
 		item = sandboxDataFromSpec(req.SandboxID, spec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
+		// The binding only knows when the pause happened; the durable spec
+		// carries when the sandbox was created.
+		if ts, err := sandboxspec.GetCreatedAt(ctx, req.SandboxID); err == nil && !ts.IsZero() {
+			item.CreateAt = ts.UnixNano()
+		}
 	}
 	setSandboxDataStatus(item, view.status)
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)

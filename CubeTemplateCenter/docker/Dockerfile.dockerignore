@@ -25,3 +25,5 @@
 !pkgs/proto/**
 !pkgs/sandboxrestart
 !pkgs/sandboxrestart/**
+!pkgs/redisx
+!pkgs/redisx/**

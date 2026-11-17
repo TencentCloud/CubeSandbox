@@ -199,6 +199,66 @@ def _udp_probe(host: str, port: int, payload: str) -> str:
     )
 
 
+def _icmp_probe(host: str) -> str:
+    """One ICMP echo from inside the sandbox. Guest images do not ship ping."""
+    return (
+        "python3 - <<'PY'\n"
+        "import os\n"
+        "import socket\n"
+        "import struct\n"
+        "import sys\n"
+        "import time\n"
+        f"host = {host!r}\n"
+        "ident = os.getpid() & 0xffff\n"
+        "seq = 1\n"
+        "payload = b'cube-node-local-icmp'\n"
+        "\n"
+        "def checksum(data):\n"
+        "    if len(data) % 2:\n"
+        "        data += b'\\x00'\n"
+        "    total = sum(struct.unpack('!%dH' % (len(data) // 2), data))\n"
+        "    while total >> 16:\n"
+        "        total = (total & 0xffff) + (total >> 16)\n"
+        "    return ((~total) & 0xffff) or 0xffff\n"
+        "\n"
+        "header = struct.pack('!BBHHH', 8, 0, 0, ident, seq)\n"
+        "cksum = checksum(header + payload)\n"
+        "packet = struct.pack('!BBHHH', 8, 0, cksum, ident, seq) + payload\n"
+        "sock = None\n"
+        "try:\n"
+        "    sock = socket.socket(\n"
+        "        socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)\n"
+        "    sock.sendto(packet, (host, 0))\n"
+        "    deadline = time.monotonic() + 2\n"
+        "    while True:\n"
+        "        remaining = deadline - time.monotonic()\n"
+        "        if remaining <= 0:\n"
+        "            raise TimeoutError('no echo reply within 2s')\n"
+        "        sock.settimeout(remaining)\n"
+        "        try:\n"
+        "            data, addr = sock.recvfrom(1500)\n"
+        "        except socket.timeout:\n"
+        "            raise TimeoutError('no echo reply within 2s')\n"
+        "        if not data or data[0] >> 4 != 4:\n"
+        "            continue\n"
+        "        ihl = (data[0] & 0x0f) * 4\n"
+        "        if ihl < 20 or len(data) < ihl + 8:\n"
+        "            continue\n"
+        "        typ, _code, _cksum, rid, rseq = struct.unpack(\n"
+        "            '!BBHHH', data[ihl:ihl + 8])\n"
+        "        if typ == 0 and rid == ident and rseq == seq and addr[0] == host:\n"
+        "            print('icmp echo reply from %s' % addr[0])\n"
+        "            break\n"
+        "except Exception as exc:\n"
+        "    print('ERROR:%s:%s' % (type(exc).__name__, exc), file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "finally:\n"
+        "    if sock is not None:\n"
+        "        sock.close()\n"
+        "PY"
+    )
+
+
 def _parse_http(result) -> tuple[int, dict]:
     assert_command_ok(result)
     text = result.stdout
@@ -329,7 +389,7 @@ def test_node_local_direct_icmp(
             },
         )
         result = adapter.run_command(
-            f"ping -c 1 -W 2 {node_ip}",
+            _icmp_probe(node_ip),
             timeout=sdk_e2e_config.command_timeout,
         )
         assert_command_ok(result)

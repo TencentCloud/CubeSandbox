@@ -117,7 +117,7 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 	//     traffic in the last few seconds; we just don't know it yet.
 	// New entries that arrive AFTER startup (FirstSeenAt > startedAt) do
 	// not need this protection: their CreatedAt is recent and they are
-	// immediately tracked by log_phase, so we can act on the standard
+	// immediately tracked by the proxy's last_active stamps, so we can act on the standard
 	// `idle = now - max(LastActiveMs, CreatedAt)` rule.
 	withinWarmup := now.Sub(s.o.StartedAt) < s.o.BootstrapWarmup
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	cubeletconfig "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"net"
 	"time"
 
@@ -132,6 +133,9 @@ func (l *local) Init(ctx context.Context, _ *workflow.InitInfo) error {
 
 func networkRuntimeConfigFromPluginConfig(config *Config) networkruntime.Config {
 	cfg := networkruntime.DefaultConfig()
+	if current := cubeletconfig.GetConfig(); current != nil && current.Common != nil {
+		cfg.OperatorAllowOut = append([]string(nil), current.Common.OperatorAllowOut...)
+	}
 	cfg.EthName = config.EthName
 	cfg.ObjectDir = config.ObjectDir
 	cfg.CIDR = config.CIDR
@@ -175,11 +179,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	if request == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "RunCubeSandboxRequest nil")
 	}
-	req, err := decodeNetRequest(request.Annotations[constants.MasterAnnotationsNetWork])
+	rawNetworkRequest := request.Annotations[constants.MasterAnnotationsNetWork]
+	req, err := decodeNetRequest(rawNetworkRequest)
 	if err != nil {
+		log.G(ctx).Errorf("decode network request failed: sandbox_id=%s raw=%q err=%v",
+			opts.SandboxID, rawNetworkRequest, err)
 		return err
 	}
-	log.G(ctx).Debugf("network request for %s: %s", opts.SandboxID, request.Annotations[constants.MasterAnnotationsNetWork])
+	log.G(ctx).Debugf("network request for %s: %s", opts.SandboxID, rawNetworkRequest)
 
 	cubeNetworkConfigBeforeDNS, cubeNetworkConfig, resolvedDNSServers, dnsAllowOutCIDRs, err := buildRuntimePolicy(ctx, request)
 	if err != nil {
@@ -229,11 +236,12 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 }
 
 func decodeNetRequest(raw string) (*NetRequest, error) {
-	req := &NetRequest{}
-	if raw != "" {
-		if err := utils.Decode(raw, req); err != nil {
-			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "decode network params failed: %+v, raw: %s", err, raw)
-		}
+	if raw == "" {
+		return &NetRequest{}, nil
+	}
+	req, err := DecodeNetRequest(raw)
+	if err != nil {
+		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "decode network params failed: %+v", err)
 	}
 	return req, nil
 }

@@ -21,6 +21,7 @@ func Init(conf *Conf) {
 
 	CubeLog.EnableFileLog()
 	CubeLog.SetLevel(CubeLog.StringToLevel(conf.Level))
+	CubeLog.SetAsyncFlush(conf.AsyncFlush == "true")
 	CubeLog.SetSkipCallerDepth(0)
 	CubeLog.SetCallerPrettyfier(CubeLog.SuccinctCallerPath)
 	if IsDebug() {
@@ -62,6 +63,7 @@ func OnChangeConf(c *Conf) {
 		CubeLog.DisableLogMetric()
 	}
 	CubeLog.SetLevel(CubeLog.StringToLevel(c.Level))
+	CubeLog.SetAsyncFlush(c.AsyncFlush == "true")
 	if IsDebug() {
 		CubeLog.SetReportCaller(true)
 	} else {

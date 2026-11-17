@@ -75,6 +75,28 @@ fmt.Println(result.Stdout, result.Stderr, result.ExitCode)
 
 `Commands.Run` starts `/bin/bash -l -c <command>` through envd's `process.Process/Start` API and returns stdout, stderr, and the `EndEvent` exit code. Callers are still responsible for treating untrusted shell input carefully.
 
+Use optional output callbacks to display progress from a long-running command:
+
+```go
+result, err := sb.Commands().Run(ctx, "go test -v ./...", cubesandbox.CommandOptions{
+    OnStdout: func(chunk string) { fmt.Print(chunk) },
+    OnStderr: func(chunk string) { fmt.Fprint(os.Stderr, chunk) },
+})
+if err != nil {
+    panic(err)
+}
+fmt.Println("exit code:", result.ExitCode)
+```
+
+Callbacks run synchronously as decoded chunks arrive, before `Run` returns;
+keep them short because a slow callback delays reading the stream. Chunks may
+contain partial lines or multiple lines. The command must flush its own output
+for progress to arrive promptly. `CommandResult` still contains the complete
+stdout and stderr, and omitting callbacks preserves the existing behavior.
+If a later stream error occurs, callbacks may already have received output even
+though `Run` returns an error. Callbacks do not change timeout, cancellation, or
+exit-code handling.
+
 ## PTY (interactive terminal)
 
 `sb.Pty()` opens a real pseudo-terminal for interactive programs that need a TTY — shells/REPLs, full-screen tools (`vim`, `top`), or agent-driven terminals. It mirrors the Python/Node `sandbox.pty` surface.
@@ -175,6 +197,7 @@ for ev := range watcher.Events {
 | `ReadBytes(ctx, path)` | Download raw bytes (e2b `format=bytes`) |
 | `ReadStream(ctx, path)` | Stream download; caller must `Close` (e2b `format=stream`) |
 | `Write(ctx, path, data)` | Upload via `POST /files` (octet-stream, multipart fallback) |
+| `WriteFrom(ctx, path, src)` | Stream an `io.Reader` in one multipart upload; caller owns the reader |
 | `WriteFiles(ctx, entries)` | Batch write, stops on first error, returns count |
 | `List(ctx, path)` | List directory entries via `ListDir` RPC |
 | `Stat(ctx, path)` | File/directory metadata via `Stat` RPC |
@@ -183,6 +206,96 @@ for ev := range watcher.Events {
 | `Rename(ctx, old, new)` | Move/rename via `Move` RPC |
 | `Remove(ctx, path)` | Delete file or directory via `Remove` RPC |
 | `WatchDir(ctx, path)` | Stream filesystem events (Connect streaming) |
+
+### Streaming uploads
+
+Use `WriteFrom` when the content is already available as an `io.Reader`, such
+as a local file. It uses fixed-size buffering instead of loading the entire file:
+
+```go
+file, err := os.Open("artifact.tar.gz")
+if err != nil {
+	panic(err)
+}
+defer file.Close()
+
+if err := sb.Files().WriteFrom(ctx, "/tmp/artifact.tar.gz", file); err != nil {
+	panic(err)
+}
+```
+
+`WriteFrom` uses `POST /files` with a streaming multipart body, including for
+empty files, and supports `ForUser`. It uses one demand-driven reader goroutine,
+a 32 KiB transfer buffer and multipart framing, rather than a file-sized buffer.
+The endpoint and any proxy must accept unknown-length bodies (chunked transfer
+for HTTP/1.1). If an older endpoint does not support multipart uploads, the call
+fails without replaying the reader. Consider `Write([]byte)`, which tries an
+octet-stream upload before its multipart fallback, if buffering is acceptable.
+
+The SDK consumes the source once, never closes it, and does not retry a rejected
+upload or follow redirects. These guarantees concern SDK behavior; proxy retry
+policies are deployment-specific. The bundled Nginx configuration allows up to two upstream attempts
+(`proxy_next_upstream_tries 2`) but does not enable `non_idempotent`: by default, a POST already sent to
+an upstream is not retried on another server. See Nginx's
+[retry rules](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream).
+
+The bundled [CubeProxy configuration](../../CubeProxy/nginx.conf) sets
+`client_max_body_size 256M` for the entire request body, including multipart
+framing. Exceeding this limit produces HTTP 413; a 256 MiB file itself exceeds it
+once framing is added. Default Nginx request buffering remains enabled, so large
+uploads can consume proxy temporary disk space before forwarding. Request-body
+temporary files use `client_body_temp_path`; `proxy_temp_path /data/` configures
+upstream **response** temporary files, not upload storage. Deployment overrides
+may change limits, buffering, paths and retries; `WriteFrom` does not change them.
+
+With the standard `http.Transport`, including wrappers that preserve its trace
+hooks, the SDK checks source consumption and the final request-write result.
+An early 2xx does not override an observed failure writing the multipart footer.
+Custom transports without tracing remain responsible for their write-error
+contract; reported `WroteRequest` errors are preserved.
+
+> **Transport requirement:** a transport or registered protocol handler reporting
+> both `GotConn` and `WroteHeaders` must complete the lifecycle with `WroteRequest`.
+> Wrappers must preserve the request context and the complete trace lifecycle.
+> A missing callback produces an error, not an assumed successful upload.
+
+Use a context deadline or an injected HTTP client's `Timeout` to bound the full
+operation with the standard transport; the earlier bound applies. If neither is
+set, successful-response completion has a fallback limit of `Config.RequestTimeout`
+(default 30 seconds), starting when the response is received. This bounds both
+remaining body consumption and the final write callback. It does not impose a
+30-second limit on the upload before a response arrives. Custom transports must
+honor request cancellation. The SDK does not change a shared client's settings.
+
+> **Blocked sources:** cancellation or closing the request body releases the
+> transport's read and lets the call return with the standard transport, even
+> before a response arrives. It cannot terminate an arbitrary source `Read`
+> (for example, a stalled filesystem mount). One reader goroutine and its buffer
+> can remain until the source owner unblocks that read. Use a cancelable source,
+> and ensure the pending read has exited before reusing the source after an error.
+
+Uploads are not atomic or resumable; an error can leave a partial or truncated
+file. Non-2xx responses prefer the HTTP rejection and available server message.
+Error bodies are read up to 64 KiB plus one truncation-detection byte, then closed
+without an unbounded drain; oversized messages are marked `[truncated]`.
+An incomplete final UTF-8 character is dropped at the truncation boundary. This
+shared limit also applies to other SDK HTTP errors: oversized JSON is returned
+as a truncated raw prefix, so `message`/`detail` extraction and keyword-based
+error classification may differ from a complete error response.
+During successful-response completion, deadline and observed source/write errors
+are returned. Go 1.22 legacy transport timeouts may expose `net.Error.Timeout()`
+without wrapping `context.DeadlineExceeded`, matching the standard client.
+
+For a local allocation comparison, run from `sdk/go`:
+
+```bash
+go test -run '^$' -bench '^BenchmarkFilesWrite' -benchtime=3x -benchmem .
+```
+
+The `Write` baseline separates preloaded `[]byte` from materializing a reader,
+and octet-stream success from multipart fallback. Preloaded input allocation is
+outside the timed region. Results include the local HTTP test server; they are
+not production throughput or peak-memory measurements.
 
 ## Snapshots, Clone, Rollback
 
@@ -194,7 +307,10 @@ snaps, nextToken, err := client.ListSnapshots(ctx, cubesandbox.ListSnapshotsOpti
 	Limit:     100,
 })
 
-err = client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id
+deleted, err := client.DeleteSnapshot(ctx, snap.SnapshotID) // DELETE /templates/:id?snapshot_only=true
+// `deleted` is false when the snapshot no longer exists; a name may be passed
+// instead of an ID. Only snapshots are matched, never templates; several
+// same-named snapshots return an error (HTTP 409), so use the `snap-` ID.
 
 _, err = sb.Rollback(ctx, snap.SnapshotID) // POST /sandboxes/:id/rollback
 
@@ -204,7 +320,7 @@ clones, err := sb.Clone(ctx, cubesandbox.CloneOptions{N: 3, Concurrency: 3})
 forks, err := sb.Fork(ctx, cubesandbox.ForkOptions{Count: cubesandbox.IntPtr(3)})
 ```
 
-`Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
+`DeleteSnapshot` accepts a snapshot ID or name and returns `(deleted bool, err error)`; `deleted` is `false` when the snapshot does not exist. `Clone` snapshots the sandbox, creates `N` sandboxes from it (capped by `Concurrency`), then deletes the ephemeral snapshot. If any create fails, all successful siblings are killed and the first error is returned. `Rollback` restarts the sandbox process and drops pooled data-plane connections so the next call reconnects.
 
 `Fork` returns exactly `Count` entries — each a `ForkResult` with the derived `Sandbox` or that fork's error — so partial success keeps copies without failing the call (unlike `Clone`). `Count` is 1..100, default 1 (`IntPtr` for a value, nil = default); `Timeout` is a `time.Duration` idle TTL per fork. The temporary snapshot is server-managed.
 
@@ -234,6 +350,35 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 
 err = client.DeleteVolume(ctx, "my-data") // DELETE /volumes/:id
 ```
+
+For opaque plugin input, use the separate creation method (requires support in
+CubeAPI, every serving CubeMaster, and the plugin; existing `CreateVolume` calls are unchanged):
+
+```go
+volume, err := client.CreateVolumeWithPrivateData(ctx, cubesandbox.CreateVolumeWithPrivateDataOptions{
+	Name:        "my-data",
+	Driver:      "my-storage",
+	PrivateData: `{"bucket":"my-bucket","prefix":"work/","cred_ref":"account-7"}`,
+}) // POST /v2/volumes
+```
+
+The `private_data` create API requires CubeAPI, every serving CubeMaster, and
+Cubelet at **0.8.0 or newer**, a plugin that supports this protocol, and the Go
+SDK at **0.8.0 or newer**.
+`PrivateData` must be valid UTF-8, limited to 1024 bytes, contain no NUL, and
+contain no characters outside the BMP. Invalid input is rejected before any
+HTTP request. Valid input is passed unchanged.
+Use credential references, never plaintext credentials. Empty strings are
+forwarded; API versions without `/v2/volumes` return an error without a legacy fallback.
+The returned `VolumeInfo` works with the existing query, delete and mount APIs.
+
+Upgrade order: check or upgrade the Controller/Node plugins for Create input A
+and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,
+then deploy the new CubeAPI and begin using this method. A new API connected to
+an old Master can return 201 while silently dropping A; the old Master also omits
+B on Destroy. The SDK does not detect this mixed-version deployment. Keep compatible
+Masters serving existing A/B-dependent volumes during any rollback. See the
+[plugin upgrade guide](../../docs/guide/volume-plugin.md#private_data-upgrade-order).
 
 Deleting a volume does not auto-detach it: destroy the sandboxes using it first, otherwise the server refuses with an error matching `ErrVolumeInUse`. A delete of a missing volume matches `ErrVolumeNotFound`, so idempotent cleanup can ignore that case:
 
@@ -266,6 +411,21 @@ sb, err := client.Create(ctx, cubesandbox.CreateOptions{
 		}},
 	},
 })
+```
+
+## Is Running
+
+`Sandbox.IsRunning` checks the control-plane `state` first: `paused`/`pausing`
+return `false` without touching the data plane (so a probe never auto-resumes
+the sandbox). For `running`/`unknown` it probes envd `GET /health` on port
+49983, returning `false` on 404/502/503/410 and on transport errors, raising
+only on server errors such as 403/500.
+
+```go
+ok, err := sb.IsRunning(ctx)
+if err != nil {
+	panic(err)
+}
 ```
 
 ## Pause And Connect
@@ -381,3 +541,17 @@ export CUBE_PROXY_SCHEME=http
 export CUBE_SANDBOX_DOMAIN=cube.app
 go test -tags=integration -run Integration -count=1 ./...
 ```
+
+To verify streaming uploads through the configured CubeProxy and envd:
+
+```bash
+go test -tags=integration -run '^TestIntegrationFilesWriteFrom$' -v -count=1 -timeout=5m .
+```
+
+The selected template must provide `root` and `nobody`, as required by the
+filesystem user-isolation tests. This test uploads empty and binary files,
+truncates an existing file with an empty upload, checks a destination containing
+URL-special characters, and verifies ownership for both users. It reads back each
+destination specified by the `path` query (the multipart filename is `upload`)
+and checks its size and SHA-256. A skip due to an unset `CUBE_API_URL` / `E2B_API_URL`
+is not a successful live verification.

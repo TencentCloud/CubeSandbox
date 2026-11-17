@@ -173,5 +173,17 @@ export function formatDeleteError(err: unknown, t: TranslateFn): string {
   if (/cleanup locator is missing/i.test(raw)) {
     return t('errors.cleanupMissing');
   }
+  if (/snapshot is referenced by/i.test(raw)) {
+    return t('errors.snapshotReferenced');
+  }
+  if (/snapshot .* is still creating/i.test(raw)) {
+    return t('errors.snapshotCreating');
+  }
+  if (/snapshot .* is already deleting/i.test(raw)) {
+    return t('errors.snapshotDeleting');
+  }
+  if (/active snapshot operation/i.test(raw)) {
+    return t('errors.snapshotBusy');
+  }
   return raw;
 }

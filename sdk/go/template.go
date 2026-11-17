@@ -86,6 +86,10 @@ type BuildTemplateOptions struct {
 	DNS                 []string
 	AllowOut            []string
 	DenyOut             []string
+	Backend             string
+	// User is the container user for the template build and later sandboxes:
+	// uid, uid:gid, username, or username:gid. The group must be numeric.
+	User string
 	// Extra is merged into the request payload after the named fields above,
 	// so duplicate keys override those fields to match Python kwargs behavior.
 	Extra map[string]any
@@ -240,6 +244,12 @@ func buildTemplatePayload(opts BuildTemplateOptions) (map[string]any, error) {
 	}
 	if len(opts.DenyOut) > 0 {
 		payload["denyOut"] = append([]string(nil), opts.DenyOut...)
+	}
+	if backend := strings.TrimSpace(opts.Backend); backend != "" {
+		payload["backend"] = backend
+	}
+	if user := strings.TrimSpace(opts.User); user != "" {
+		payload["user"] = user
 	}
 	for key, value := range opts.Extra {
 		payload[key] = value

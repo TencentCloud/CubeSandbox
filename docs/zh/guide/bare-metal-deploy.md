@@ -139,6 +139,28 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 
 更多端到端示例，请参阅[示例项目](./tutorials/examples.md)。
 
+## 卸载
+
+one-click 安装提供完整卸载脚本。卸载会停止并删除 CubeSandbox 服务、容器、数据卷、网络配置、运行数据和日志，已有模板、沙箱及快照数据也会被删除。执行前请先备份需要保留的数据。
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+```
+
+卸载完成后，可以检查是否仍有 CubeSandbox 残留：
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+确认检查通过且不再需要卸载脚本和安装包后，最后手动删除保留的工具目录：
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> 该卸载脚本不会删除 Cube 相关的 Docker 镜像，如果需要删除，可以根据脚本提示手动删除。
+
 ## 下一步
 
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 自定义沙箱运行环境

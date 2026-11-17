@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,12 @@ func deriveS3CatalogEntry(ctx context.Context, snapshotID string) (*SnapshotCata
 	rootfs := cowTemplateRootfsName(snapshotID)
 	info, infoErr := store.GetVolumeInfo(ctx, rootfs)
 	exists, err := cowObjectPresent(info, infoErr)
-	if err != nil || !exists {
+	if err != nil {
+		// A lookup failure is not a missing package: reporting it as a miss
+		// would make a transient storage error look like a corrupt package.
+		return nil, fmt.Errorf("probe %s: %w", rootfs, err)
+	}
+	if !exists {
 		return nil, ErrSnapshotCatalogNotFound
 	}
 
@@ -57,40 +63,62 @@ func deriveS3CatalogEntry(ctx context.Context, snapshotID string) (*SnapshotCata
 	if info != nil {
 		entry.RootfsSizeBytes = info.SizeBytes
 	}
-	memWork := cowTemplateMemoryName(snapshotID)
-	if name, memKind := firstExistingS3Object(ctx, store,
-		s3ObjectCandidate{name: memWork + "-snap", kind: cowKindSnapshot},
-		s3ObjectCandidate{name: memWork, kind: cowKindVolume},
-	); name != "" {
-		entry.MemoryVol = name
-		entry.MemoryKind = memKind
+	memName, memKind, err := firstExistingCowObject(ctx, store, packageMemoryCandidates(snapshotID)...)
+	if err != nil {
+		return nil, err
 	}
-	if name, metaKind := firstExistingS3Object(ctx, store,
-		s3ObjectCandidate{name: S3MetadataSnapshotName(snapshotID), kind: cowKindSnapshot},
-		s3ObjectCandidate{name: S3MetadataVolumeName(snapshotID), kind: cowKindVolume},
-	); name != "" && !IsS3MetadataBaseName(name) {
-		entry.MetadataVol = name
+	entry.MemoryVol = memName
+	entry.MemoryKind = memKind
+
+	metaName, metaKind, err := firstExistingCowObject(ctx, store, packageMetadataCandidates(snapshotID)...)
+	if err != nil {
+		return nil, err
+	}
+	if !IsS3MetadataBaseName(metaName) {
+		entry.MetadataVol = metaName
 		entry.MetadataKind = metaKind
 	}
 	return entry, nil
 }
 
-// firstExistingS3Object returns the first candidate present in cubecow. A
-// lookup error is treated as absent: the caller is already on the degraded
-// path and a partial entry beats failing the whole restore.
-func firstExistingS3Object(ctx context.Context, store *S3Cow, candidates ...s3ObjectCandidate) (string, string) {
+// packageMemoryCandidates lists the names a package's memory object can have.
+// A commit seals the working memory volume into "-snap"; an empty volume keeps
+// the plain name.
+func packageMemoryCandidates(snapshotID string) []s3ObjectCandidate {
+	memWork := cowTemplateMemoryName(snapshotID)
+	return []s3ObjectCandidate{
+		{name: memWork + "-snap", kind: cowKindSnapshot},
+		{name: memWork, kind: cowKindVolume},
+	}
+}
+
+// packageMetadataCandidates does the same for the package metadata disk.
+func packageMetadataCandidates(snapshotID string) []s3ObjectCandidate {
+	return []s3ObjectCandidate{
+		{name: S3MetadataSnapshotName(snapshotID), kind: cowKindSnapshot},
+		{name: S3MetadataVolumeName(snapshotID), kind: cowKindVolume},
+	}
+}
+
+// firstExistingCowObject returns the first candidate present in the store. A
+// lookup error that is not a semantic NotFound is returned instead of being
+// treated as absent: the degraded path must not turn a storage outage into
+// "the package lost an object".
+func firstExistingCowObject(ctx context.Context, store cow.Store, candidates ...s3ObjectCandidate) (string, string, error) {
 	for _, c := range candidates {
 		if strings.TrimSpace(c.name) == "" {
 			continue
 		}
 		info, infoErr := store.GetVolumeInfo(ctx, c.name)
 		exists, err := cowObjectPresent(info, infoErr)
-		if err != nil || !exists {
-			continue
+		if err != nil {
+			return "", "", fmt.Errorf("probe %s: %w", c.name, err)
 		}
-		return c.name, c.kind
+		if exists {
+			return c.name, c.kind, nil
+		}
 	}
-	return "", ""
+	return "", "", nil
 }
 
 // s3PackageHomeAndKind locates the package directory on this node. The

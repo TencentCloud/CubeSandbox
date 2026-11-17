@@ -36,6 +36,8 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_rollback_clone.py` | rollback 异常/文件系统/kernel 状态，以及默认/并发 clone 和临时快照清理 | `rollback_clone`（仅 CubeSandbox），部分依赖 Code Interpreter | P1 |
 | `cases/lifecycle/test_negative_and_timeout.py` | create/connect 目标不存在、删除后 pause、在线更新 timeout | `lifecycle`、`pause_resume`、`set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | kill 后不可连接、列表移除、重复 kill 终态语义 | `lifecycle` | P1 |
+| `cases/lifecycle/test_list_metadata_filter.py` | 沙箱列表 `metadata` 过滤：E2B SDK 双重百分号编码的取值（空格、`/`、非 ASCII、`=`、`&`、`%`）、多 key 取 AND、旧调用方的单层编码（原样、`urlencode`、`quote`；被转义的 `&` 保留在值内）、手工拼 URL 时值内的 `&`/`=` 需双重编码、值不是 key=value 键值对时返回 400（v1 与 v2） | `lifecycle`；SDK 用例仅 `e2b` 后端执行 | P1 |
+| `cases/lifecycle/test_list_state_filter.py` | `GET /v2/sandboxes` 的 `state` 逗号多值、任一非法值整体 400、默认列表只含 E2B 可解析状态、paused/running 隔离；E2B SDK `SandboxQuery(state=...)` | `lifecycle`；paused 用例另需 `pause_resume`；SDK 用例仅 `e2b` 后端执行 | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause、手动/自动恢复、重入、auto-kill、主动 pause 与 timeout 的交互 | `platform_lifecycle`、CubeProxy、lifecycle-manager；部分需 Code Interpreter | P1 + `slow`，每日运行 |
 | `cases/lifecycle/test_restart_policy.py` | info 中的策略、默认 Never、非法取值拒绝、健康沙箱不重启、guest 崩溃后同 ID 且落盘文件仍在、删除不重启、达到 maxRestarts 放弃、退出码 0 只有 Always 重启、主进程非 0 退出、退避间隔、稳定期清零、退避中暂停、冷启动后暂停再恢复、退避中删除、存活探测失败 | `restart_policy`（仅 CubeSandbox）。随 `--run-e2e` 执行。模板暴露 envd 49983。暂停类另需 `pause_resume` | P1 控制面；崩溃、退出、退避与放弃为 P2/P3 + `slow` |
 
@@ -126,6 +128,15 @@ pytest --run-e2e -m "lifecycle and slow"
   不是 network runtime 的 state file；
 - 反复更新可收敛，守住增量 map diff 不漏删、不重复删。
 
+`cases/network/test_l7_catch_all.py` 覆盖 `"*"` L7 规则
+（`network_l7_egress` + `network_dns_allow`，仅 CubeSandbox）：
+
+- 沙箱里解析出的名字可以访问 80 和 443，HTTPS 响应由 catch-all 放行；
+- 该名字上另一个本来开放的端口仍然不通；
+- 没有做过 DNS 查询的公网 IP 不通；
+- 针对单个名字的规则先于 catch-all 生效；
+- 创建带凭证注入的 catch-all 规则会被接受。
+
 存量连接相关用例使用 `framework/network_probe.py` 里的 guest 侧 holder，它会
 刻意持续向对端发包：被撤销的流是在 guest 下一次发包时才被重判的，光挂着一个
 空闲 socket 观察不到任何现象。
@@ -167,6 +178,33 @@ Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 Cube
 ### 2.8 Volume
 
 `cases/volume/` 覆盖 Volume Plugin CRUD、sandbox 绑定/解绑和绑定期间禁止删除。它还验证同一个 Volume 可以在一个沙箱中保持读写，同时在另一个沙箱中以只读方式挂载，包括正常读取，以及 create、write、rename、delete 均被拒绝。这些用例仅适用于 CubeSandbox，默认使用 S3 driver，随 `--run-e2e` 执行，除非设置 `SDK_E2E_VOLUME_PLUGIN=false`。
+
+`cases/volume/test_private_data.py` 要求 **CubeAPI、CubeMaster、Cubelet >= 0.8.0**
+及支持 `private_data` 的插件。创建卷使用测试 adapter 的 HTTP client，不验证
+SDK 的新增创建方法。它新增以下用例定义：
+
+| 用例 | 断言 | 额外前提 |
+| --- | --- | --- |
+| 同卷读回 | sandbox 1 写入并 `sync` 后退出，sandbox 2 挂载原卷 ID 精确读回；create/GET/list 不返回 `private_data`，且 list 确实包含目标卷 | 有效的 `SDK_E2E_VOLUME_CRED_REF` |
+| 兄弟 prefix 删除隔离 | 在 `a/`、`b/` 写入不同内容，停止 writer，要求 DELETE A=204、GET A=404，再由新 sandbox 挂载原 B 读回 | 有效的 `SDK_E2E_VOLUME_CRED_REF` |
+| raw v2 输入拒绝 | 超过 1024 UTF-8 字节的 ASCII/多字节输入、真实 NUL、真实非 BMP 返回 400，不回显完整输入且 GET 查不到预留记录 | 不要求凭证引用；沿用当前仅 BMP 的 API 契约 |
+
+`SDK_E2E_VOLUME_CRED_REF` 未设置或仅空白时，只跳过两个动态挂载用例。
+四个 raw 输入检查仍运行，仍要求上述 v2 平台。
+已设置但无效的引用、HTTP 错误或挂载失败均使测试失败。Controller 和实际运行
+sandbox 的 Cubelet 主机都需配置该引用，并能访问已存在的平台默认桶。
+`SDK_E2E_VOLUME_PREFIX` 是可选的相对测试根，未设置或仅空白时用 `sdk-e2e/`；
+每个用例追加独立 UUID 和兄弟后缀。runner 无需对象存储密钥、额外 MinIO 凭证
+或对象存储 SDK。
+原有 Volume capability 和插件禁用门控继续生效。依赖插件的用例还会探测所选
+driver，并在 driver、其配置文件或 Volume API 不存在时跳过；raw API 输入检查
+发生在 CubeAPI 向插件分发之前，因此绕过该探测。
+
+`cases/framework/test_volume_api_adapter.py` 离线验证 legacy/v2 路由、opaque
+输入原样透传、无 fallback、raw 错误响应、凭证门控和局部清理行为。在线用例先
+停止所有 sandbox 再删除卷，报告清理错误；Create 传输失败的结果未知，诊断中
+标明需检查的唯一名称和 prefix。收集成功或 skip 不代表 live E2E 通过。新 sandbox
+不保证跨节点或宿主 FUSE 冷缓存，也不直接验证对象数量、完整清桶或其他 S3 服务。
 
 ## 3. 覆盖边界
 

@@ -4,6 +4,7 @@ import Layout from './Layout.vue'
 import BlogIndex from './BlogIndex.vue'
 import './blog.css'
 import './home.css'
+import './mermaid.css'
 
 export default {
   extends: DefaultTheme,

@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import sys
 import time
+import uuid
 
 import pytest
 
 from adapters import create_adapter, create_adapter_with_capacity_retry
-from framework.assertions import assert_command_ok
-from framework.capabilities import ROLLBACK_CLONE
+from framework.assertions import assert_code_ok, assert_command_ok
+from framework.capabilities import ROLLBACK_CLONE, RUN_CODE
 from framework.cleanup import safe_kill
 from framework.lifecycle import wait_until
 
@@ -61,7 +62,7 @@ def _wait_for_physical_cleanup(owner, snapshot_id: str, *, timeout: float) -> No
     last_observation = "DELETE still succeeded for the tombstone"
     while time.monotonic() < deadline:
         try:
-            owner.delete_snapshot(snapshot_id)
+            deleted = owner.delete_snapshot(snapshot_id)
         except Exception as exc:  # noqa: BLE001 - normalize SDK/API versions
             if _is_snapshot_not_found(exc, snapshot_id):
                 return
@@ -69,6 +70,10 @@ def _wait_for_physical_cleanup(owner, snapshot_id: str, *, timeout: float) -> No
                 raise
             last_observation = f"delete remains retryable: {exc}"
         else:
+            # SDKs that return a bool report False once the tombstone row is
+            # physically reclaimed (404); None-returning SDKs raise 404 above.
+            if deleted is False:
+                return
             last_observation = "DELETE still succeeded for the tombstone"
         time.sleep(0.5)
     elapsed = time.monotonic() - started
@@ -174,6 +179,106 @@ def test_delete_referenced_snapshot_retires_new_use_but_keeps_runtime_alive(
                     timeout=sdk_e2e_config.default_timeout,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve test diagnostics
+                cleanup_errors.append(exc)
+        if not active_failure:
+            assert not cleanup_errors, cleanup_errors
+
+
+def test_delete_snapshot_by_name(sdk_sandbox, sdk_e2e_config):
+    """A snapshot can be deleted by its name (E2B-compatible delete semantics)."""
+    name = f"e2e-snap-{uuid.uuid4().hex[:8]}"
+    snapshot_id = sdk_sandbox.create_snapshot(name=name)
+    assert snapshot_id in sdk_sandbox.list_snapshot_ids()
+
+    deleted = sdk_sandbox.delete_snapshot(name)
+    if deleted is not None:
+        assert deleted is True, "delete by name should report success"
+
+    wait_until(
+        lambda: snapshot_id not in sdk_sandbox.list_snapshot_ids(),
+        timeout=sdk_e2e_config.default_timeout,
+        interval=0.5,
+        description=f"snapshot {snapshot_id} to disappear after delete by name",
+    )
+
+
+def test_list_snapshots_by_name_and_id(sdk_sandbox, sdk_e2e_config):
+    """A snapshot is discoverable via `name=` by its name and by its ID."""
+    name = f"e2e-snap-{uuid.uuid4().hex[:8]}"
+    snapshot_id = sdk_sandbox.create_snapshot(name=name)
+    try:
+        by_name = sdk_sandbox.list_snapshot_ids_by_name(name)
+        assert snapshot_id in by_name, (
+            f"list by name {name!r} should include {snapshot_id}, got {by_name!r}"
+        )
+        by_id = sdk_sandbox.list_snapshot_ids_by_name(snapshot_id)
+        assert snapshot_id in by_id, (
+            f"list by ID {snapshot_id!r} should include itself, got {by_id!r}"
+        )
+    finally:
+        sdk_sandbox.delete_snapshot(snapshot_id)
+
+
+@pytest.mark.requires_capability(RUN_CODE)
+@pytest.mark.requires_code_interpreter
+@pytest.mark.parametrize("delete_before_capture", [False, True], ids=["incremental", "missing-base-fallback"])
+def test_later_snapshot_survives_physical_base_cleanup(
+    sdk_sandbox, sdk_backend, sdk_e2e_config, delete_before_capture
+):
+    """Check inherited memory, changed memory and filesystem after base removal."""
+    path = f"/tmp/sdk-snapshot-chain-{sdk_sandbox.sandbox_id}.txt"
+    snapshots = []
+    restored = None
+    source_released = False
+    cleanup_errors = []
+    try:
+        sdk_sandbox.write_file(path, "base-filesystem")
+        assert_code_ok(sdk_sandbox.run_code(
+            "snapshot_chain_pages = [b'A' * 4096, b'B' * 4096]",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+        base = sdk_sandbox.create_snapshot()
+        snapshots.append(base)
+        sdk_sandbox.write_file(path, "later-filesystem")
+        assert_code_ok(sdk_sandbox.run_code(
+            "snapshot_chain_pages[1] = b'C' * 4096",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+        if delete_before_capture:
+            _wait_for_physical_cleanup(sdk_sandbox, base, timeout=sdk_e2e_config.default_timeout)
+            snapshots.remove(base)
+        later = sdk_sandbox.create_snapshot()
+        snapshots.append(later)
+        # Further changes must not leak into the captured memory or filesystem.
+        sdk_sandbox.write_file(path, "uncaptured-filesystem")
+        assert_code_ok(sdk_sandbox.run_code(
+            "snapshot_chain_pages[:] = [b'X' * 4096, b'Y' * 4096]",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+        assert not safe_kill(sdk_sandbox, sdk_e2e_config)
+        source_released = True
+        if not delete_before_capture:
+            _wait_for_physical_cleanup(sdk_sandbox, base, timeout=sdk_e2e_config.default_timeout)
+            snapshots.remove(base)
+        restored = create_adapter_with_capacity_retry(
+            sdk_backend, sdk_e2e_config,
+            metadata={"test_suite": "sdk_compat", "test_role": "incremental_after_base_cleanup"},
+            create_options={"template": later},
+        )
+        assert restored.read_file(path) == "later-filesystem"
+        assert_code_ok(restored.run_code(
+            "assert snapshot_chain_pages == [b'A' * 4096, b'C' * 4096]",
+            timeout=sdk_e2e_config.run_code_timeout,
+        ))
+    finally:
+        active_failure = sys.exc_info()[0] is not None
+        for sandbox in (restored, None if source_released else sdk_sandbox):
+            if sandbox is not None:
+                cleanup_errors.extend(safe_kill(sandbox, sdk_e2e_config))
+        for snapshot_id in reversed(snapshots):
+            try:
+                _wait_for_physical_cleanup(sdk_sandbox, snapshot_id, timeout=sdk_e2e_config.default_timeout)
+            except Exception as exc:  # noqa: BLE001 - preserve the original failure
                 cleanup_errors.append(exc)
         if not active_failure:
             assert not cleanup_errors, cleanup_errors

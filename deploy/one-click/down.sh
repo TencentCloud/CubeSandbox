@@ -39,6 +39,19 @@ if systemctl is-enabled cube-sandbox-s3lvol.service >/dev/null 2>&1; then
   systemctl stop cube-sandbox-s3lvol.service
 fi
 
+# Stop optional observability systemd units if present on this node.
+for _obs_unit in \
+  cube-sandbox-otelcol.service \
+  cube-sandbox-grafana.service \
+  cube-sandbox-loki.service \
+  cube-sandbox-elasticsearch.service \
+  cube-sandbox-prometheus.service; do
+  if systemctl is-active --quiet "${_obs_unit}" 2>/dev/null ||
+     systemctl is-enabled "${_obs_unit}" >/dev/null 2>&1; then
+    systemctl stop "${_obs_unit}" 2>/dev/null || true
+  fi
+done
+
 # down.sh intentionally does NOT delete the s3lvol per-node state
 # (/data/cubelet/rcow/wal_bdev.img, lvstore/bstore metadata): the next
 # install/start attaches and replays it.

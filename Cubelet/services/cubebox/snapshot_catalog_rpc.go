@@ -18,7 +18,7 @@ import (
 )
 
 // ListLocalSnapshots returns catalog entries for the requested backend.
-// Empty backend lists XFS then S3 as two separate namespaces (never mixed
+// Empty backend lists XFS, S3 then jfs as separate namespaces (never mixed
 // by reading catalog.json).
 func (s *service) ListLocalSnapshots(ctx context.Context, req *cubebox.ListLocalSnapshotsRequest) (*cubebox.ListLocalSnapshotsResponse, error) {
 	rsp := &cubebox.ListLocalSnapshotsResponse{
@@ -26,7 +26,7 @@ func (s *service) ListLocalSnapshots(ctx context.Context, req *cubebox.ListLocal
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
 	filter := strings.TrimSpace(req.GetBackend())
-	backends := []string{cow.BackendXFS, cow.BackendS3}
+	backends := []string{cow.BackendXFS, cow.BackendS3, cow.BackendJFS}
 	if filter != "" {
 		normalized, err := resolveRequestStorageBackend(filter)
 		if err != nil {

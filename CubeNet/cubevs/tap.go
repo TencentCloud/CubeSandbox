@@ -3,6 +3,7 @@ package cubevs
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/cilium/ebpf"
@@ -19,11 +20,31 @@ type L7Target struct {
 	Scheme uint8  // one of L7SchemeNone / L7SchemeHTTP / L7SchemeHTTPS
 }
 
+// DNSCatchAllPort is one explicit (port, scheme) tuple on a catch-all rule.
+// Port is host byte order. Scheme is L7SchemeHTTP or L7SchemeHTTPS.
+type DNSCatchAllPort struct {
+	Port   uint16
+	Scheme uint8
+}
+
+// DNSCatchAll is the userspace description of one dns_allow_v2 rule that
+// matches every queried name. It is not stored in mvm_meta.
+//
+// An empty Ports slice means port_count 0: the datapath expands it to
+// {80/http, 443/https}. That form is used only when every catch-all rule
+// omitted both port and scheme. A non-empty Ports slice is the explicit set,
+// the same encoding as a per-host L7 rule. A scheme without a port is stored
+// as that scheme's default port (http → 80, https → 443).
+type DNSCatchAll struct {
+	Ports []DNSCatchAllPort
+}
+
 type MVMOptions struct {
 	AllowInternetAccess *bool
 	AllowOut            *[]string   // CIDR, IP, or domain
 	L7AllowOut          *[]L7Target // Host + optional (port, scheme) for L7 policy handling
 	DenyOut             *[]string   // CIDR or IP
+	DNSCatchAll         *DNSCatchAll
 }
 
 type tapMetadataMapOps interface {
@@ -63,6 +84,10 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 	if err := UpsertTAPDeviceMetadata(ifindex, ip, id, version); err != nil {
 		return err
 	}
+	if err := setDNSTrackRateLimit(ifindex); err != nil {
+		_ = DeleteTAPDevice(ifindex, ip)
+		return err
+	}
 	if err := applyNetPolicy(ifindex, opts); err != nil {
 		_ = DeleteTAPDevice(ifindex, ip)
 		return err
@@ -70,12 +95,55 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 	return nil
 }
 
+// setDNSTrackRateLimit installs the sandbox's zeroed DNS query-tracking
+// counter. It is installed before any policy so the ceiling is in place for the
+// sandbox's very first query — a missing entry means "unlimited" on the BPF
+// side, which is the right default for an unregistered ifindex but not for a
+// live one.
+func setDNSTrackRateLimit(ifindex uint32) error {
+	m, err := loadPinnedMap(MapNameDNSTrackRL)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	// All-zero: the first BPF access sees window_end_ns == 0 and opens a fresh
+	// window. The Lock field's contents belong to the kernel.
+	state := dnsTrackRLState{}
+	if err := m.Update(&ifindex, &state, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameDNSTrackRL)
+	}
+	return nil
+}
+
+// deleteDNSTrackRateLimit drops the sandbox's counter on teardown. A destroyed
+// TAP's ifindex is not reused, so leaving the entry would leak a slot in
+// dns_track_rl until the map hits its max and AddTAPDevice fails. A missing
+// key is already gone.
+func deleteDNSTrackRateLimit(ifindex uint32) error {
+	m, err := loadPinnedMap(MapNameDNSTrackRL)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	if err := m.Delete(&ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameDNSTrackRL)
+	}
+	return nil
+}
+
 // UpsertTAPDeviceMetadata registers or refreshes TAP metadata without touching
-// per-sandbox policy maps. Recovery paths use this to repair metadata while
-// preserving allow_out_v3, deny_out and dns_allow_v2 contents.
+// per-sandbox policy maps. It resets traffic metrics before publishing metadata.
+// Recovery paths use this to repair metadata while preserving allow_out_v3,
+// deny_out and dns_allow_v2 contents.
 func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint32) error {
 	if len(id) > maxIDLength {
 		return ErrTooLong
+	}
+	if err := EnsureSandboxTrafficMetrics(ip); err != nil {
+		log.Printf("cubevs tap: ensure sandbox traffic metrics failed; continuing with best-effort counters: sandbox_id=%s ifindex=%d sandbox_ip=%s err=%v",
+			id, ifindex, ip.String(), err)
 	}
 
 	mvmIP := ipToUint32(ip)
@@ -129,6 +197,11 @@ func UpsertTAPDeviceMetadata(ifindex uint32, ip net.IP, id string, version uint3
 	if oldMVMIP != 0 && oldMVMIP != mvmIP {
 		if err := m.Delete(&oldMVMIP); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+		}
+		oldIP := uint32ToIP(oldMVMIP)
+		if err := DeleteSandboxTrafficMetrics(oldIP); err != nil {
+			log.Printf("cubevs tap: delete previous sandbox traffic metrics failed; continuing after TAP re-IP: ifindex=%d sandbox_ip=%s err=%v",
+				ifindex, oldIP.String(), err)
 		}
 	}
 
@@ -212,12 +285,15 @@ func DeleteTAPDevice(ifindex uint32, ip net.IP) error {
 	if err := CleanupTAPDevicePolicy(ifindex); err != nil {
 		return err
 	}
+	if err := deleteDNSTrackRateLimit(ifindex); err != nil {
+		return err
+	}
 	return DeleteTAPDeviceMetadata(ifindex, ip)
 }
 
-// DeleteTAPDeviceMetadata removes TAP identity metadata from CubeVS without touching
-// policy maps. Missing keys are treated as already-clean so cleanup paths remain
-// idempotent.
+// DeleteTAPDeviceMetadata removes TAP identity metadata and traffic metrics
+// without touching policy maps. Missing keys are treated as already-clean so
+// cleanup paths remain idempotent.
 func DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error {
 	mvmIP := ipToUint32(ip)
 
@@ -235,29 +311,42 @@ func DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error {
 	}
 	defer ipMap.Close()
 
-	return deleteTAPDeviceMetadataEntries(ifindexMap, ipMap, ifindex, mvmIP)
+	canDeleteIPState, err := deleteTAPDeviceMetadataEntries(ifindexMap, ipMap, ifindex, mvmIP)
+	if err != nil {
+		return err
+	}
+	if canDeleteIPState {
+		if err := DeleteSandboxTrafficMetrics(ip); err != nil {
+			log.Printf("cubevs tap: delete sandbox traffic metrics failed; continuing after TAP metadata deletion: ifindex=%d sandbox_ip=%s err=%v",
+				ifindex, ip.String(), err)
+		}
+	}
+	return nil
 }
 
-func deleteTAPDeviceMetadataEntries(ifindexMap, ipMap tapMetadataMapOps, ifindex, mvmIP uint32) error {
+// deleteTAPDeviceMetadataEntries returns whether no different ifindex owns
+// mvmIP, allowing the caller to remove state keyed only by that IP.
+func deleteTAPDeviceMetadataEntries(ifindexMap, ipMap tapMetadataMapOps, ifindex, mvmIP uint32) (bool, error) {
 	var mappedIfindex uint32
-	ipMappingFound := true
+	mappingFound := true
 	if err := ipMap.Lookup(&mvmIP, &mappedIfindex); err != nil {
 		if !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("map.Lookup failed before delete: %w, name: %s", err, MapNameMVMIPToIfindex)
+			return false, fmt.Errorf("map.Lookup failed before delete: %w, name: %s", err, MapNameMVMIPToIfindex)
 		}
-		ipMappingFound = false
+		mappingFound = false
 	}
+	canDeleteIPState := !mappingFound || mappedIfindex == ifindex
 
 	if err := ifindexMap.Delete(&ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+		return false, fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
 	}
-	if ipMappingFound && mappedIfindex == ifindex {
+	if mappingFound && mappedIfindex == ifindex {
 		if err := ipMap.Delete(&mvmIP); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+			return false, fmt.Errorf("map.Delete failed: %w, name: %s", err, MapNameMVMIPToIfindex)
 		}
 	}
 
-	return nil
+	return canDeleteIPState, nil
 }
 
 // GetTAPDevice returns a TAP device associated with the specific ifindex.

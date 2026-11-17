@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/google/uuid"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -189,19 +190,24 @@ func (c *Client) CreateSnapshot(ctx context.Context, body interface{}) (json.Raw
 	return c.post(ctx, "/cube/snapshot", body)
 }
 
+// GetSnapshot fetches a single snapshot via CubeMaster.
+func (c *Client) GetSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
+	return c.get(ctx, "/cube/snapshot/"+url.PathEscape(snapshotID))
+}
+
 // GetTemplate fetches template info from CubeMaster.
 func (c *Client) GetTemplate(ctx context.Context, templateID string) (json.RawMessage, error) {
-	return c.get(ctx, fmt.Sprintf("/cube/template/%s", templateID))
+	return c.get(ctx, "/cube/template/"+url.PathEscape(templateID))
 }
 
 // DeleteSnapshot deletes a snapshot via CubeMaster.
 func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error) {
-	return c.deleteWithBody(ctx, fmt.Sprintf("/cube/snapshot/%s", snapshotID), map[string]interface{}{})
+	return c.deleteWithBody(ctx, "/cube/snapshot/"+url.PathEscape(snapshotID), map[string]interface{}{})
 }
 
 // RollbackSandbox rolls back a sandbox to a snapshot via CubeMaster.
 func (c *Client) RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error) {
-	return c.post(ctx, fmt.Sprintf("/cube/sandbox/%s/rollback", sandboxID), body)
+	return c.post(ctx, "/cube/sandbox/"+url.PathEscape(sandboxID)+"/rollback", body)
 }
 
 // UpdateSandbox sends a pause/resume action to CubeMaster.
@@ -279,12 +285,12 @@ func (c *Client) DeleteTemplate(ctx context.Context, body interface{}) (json.Raw
 
 // GetTemplateBuildStatus fetches the build status for a template build job.
 func (c *Client) GetTemplateBuildStatus(ctx context.Context, buildID string) (json.RawMessage, error) {
-	return c.get(ctx, fmt.Sprintf("/cube/template/build/%s/status", buildID))
+	return c.get(ctx, "/cube/template/build/"+url.PathEscape(buildID)+"/status")
 }
 
 // StartTemplateBuild starts (or retries) a template build job.
 func (c *Client) StartTemplateBuild(ctx context.Context, buildID string, body interface{}) (json.RawMessage, error) {
-	return c.post(ctx, fmt.Sprintf("/cube/template/build/%s", buildID), body)
+	return c.post(ctx, "/cube/template/build/"+url.PathEscape(buildID), body)
 }
 
 // GetTemplateCompat fetches the template compatibility matrix.

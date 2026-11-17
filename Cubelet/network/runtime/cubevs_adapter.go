@@ -25,6 +25,7 @@ type CubeVSAdapter interface {
 	GetTAPDevice(ifindex uint32) (*cubevs.TAPDevice, error)
 	CleanupTAPPolicy(ifindex uint32) error
 	DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) error
+	EnsureSandboxTrafficMetrics(ip net.IP) error
 	AttachFilter(ifindex uint32) error
 	InstallTAPDefaultDenyPolicy(ifindex uint32) error
 	GCStaleNetPolicyMaps(keep map[uint32]struct{}, stillPresent func(uint32) bool, onConflict func(uint32)) (int, error)
@@ -69,6 +70,10 @@ func (realCubeVSAdapter) DeleteTAPDeviceMetadata(ifindex uint32, ip net.IP) erro
 	return cubevs.DeleteTAPDeviceMetadata(ifindex, ip)
 }
 
+func (realCubeVSAdapter) EnsureSandboxTrafficMetrics(ip net.IP) error {
+	return cubevs.EnsureSandboxTrafficMetrics(ip)
+}
+
 func (realCubeVSAdapter) AttachFilter(ifindex uint32) error {
 	return cubevs.AttachFilter(ifindex)
 }
@@ -96,7 +101,7 @@ func (realCubeVSAdapter) DeletePortMappingsByIfindex(ifindex uint32) error {
 // registerCubeVSTap writes the complete TAP metadata and policy options into
 // CubeVS for a newly-created sandbox.
 func (s *NetworkController) registerCubeVSTap(ifindex int, ip net.IP, sandboxID string, cfg *CubeNetworkConfig) (err error) {
-	opts, err := cubeVSTapRegistration(cfg)
+	opts, err := cubeVSTapRegistration(withOperatorAllowOut(cfg, s.cfg.OperatorAllowOut))
 	if err != nil {
 		return err
 	}
@@ -129,7 +134,7 @@ func (s *NetworkController) registerCubeVSTap(ifindex int, ip net.IP, sandboxID 
 // register/replace it neither touches TAP metadata nor flushes the policy maps,
 // because the sandbox is live and must not lose its policy mid-update.
 func (s *NetworkController) updateCubeVSTapPolicy(ifindex int, sandboxID string, cfg *CubeNetworkConfig) error {
-	opts, err := cubeVSTapRegistration(cfg)
+	opts, err := cubeVSTapRegistration(withOperatorAllowOut(cfg, s.cfg.OperatorAllowOut))
 	if err != nil {
 		return err
 	}
@@ -144,7 +149,7 @@ func (s *NetworkController) updateCubeVSTapPolicy(ifindex int, sandboxID string,
 // Legacy recovery uses this to avoid carrying old allow/deny/DNS residue into
 // the recovered Active sandbox.
 func (s *NetworkController) replaceCubeVSTap(ifindex int, ip net.IP, sandboxID string, cfg *CubeNetworkConfig) error {
-	opts, err := cubeVSTapRegistration(cfg)
+	opts, err := cubeVSTapRegistration(withOperatorAllowOut(cfg, s.cfg.OperatorAllowOut))
 	if err != nil {
 		return err
 	}

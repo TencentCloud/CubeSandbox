@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
+pub mod snapshot_mode;
+pub use snapshot_mode::{normalize_request, SnapshotMode};
+
 // ─── Common ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -703,6 +706,9 @@ pub struct ForkRequest {
     /// Optional idle TTL (seconds) applied to each forked sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
+    /// Snapshot artifact mode for the one shared fork snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn default_fork_count() -> i32 {
@@ -855,6 +861,10 @@ pub struct SandboxDetail {
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
     pub envd_access_token: Option<String>,
+    /// Stored status or exit reason for the primary container. Omitted when unavailable.
+    #[serde(rename = "errorReason", skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub error_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     #[serde(rename = "cpuCount")]
@@ -874,6 +884,8 @@ pub struct SandboxDetail {
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
     #[serde(rename = "restartStatus", skip_serializing_if = "Option::is_none")]
     pub restart_status: Option<RestartStatus>,
+    #[serde(rename = "configuredQos", skip_serializing_if = "Option::is_none")]
+    pub configured_qos: Option<QosConfig>,
 }
 
 // ─── Sandbox — pause/resume/connect/snapshot ──────────────────────────────
@@ -895,7 +907,10 @@ pub struct ResumedSandbox {
 /// Request body for POST /sandboxes/{id}/connect.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ConnectSandbox {
-    /// Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+    /// Idle timeout in seconds; omitted to keep the current value, -1 for no expiry,
+    /// and a positive value ensures at least that much remaining lifetime. For an
+    /// already-running sandbox, a shorter positive window is ignored; use
+    /// POST /sandboxes/{id}/timeout to shorten it.
     /// Zero and values below -1 are invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_connect_timeout_value"))]
@@ -906,9 +921,25 @@ pub struct ConnectSandbox {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateSnapshotRequest {
     pub name: Option<String>,
+    /// Lifetime from READY in seconds; omitted or zero means no expiration.
+    #[serde(default, rename = "ttlSeconds", alias = "ttl_seconds")]
+    pub ttl_seconds: Option<i64>,
     /// CoW backend (xfs | s3). Empty means xfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Snapshot artifact mode: full | fs-only | filesystem (E2B alias).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// E2B compatibility alias: false means fs-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
+    /// Deprecated E2B alias for `memory`; false means fs-only.
+    #[serde(
+        default,
+        rename = "keepMemory",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_memory: Option<bool>,
 }
 
 /// Response for POST /sandboxes/{id}/snapshots.
@@ -917,12 +948,16 @@ pub struct SnapshotInfo {
     #[serde(rename = "snapshotID")]
     pub snapshot_id: String,
     pub names: Vec<String>,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     /// CoW backend that produced this snapshot (xfs | s3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     /// S3 sync status (pending|running|ready|failed). Empty for xfs.
     #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
     pub remote_status: Option<String>,
+    /// Snapshot artifact mode. Always one of full | fs-only.
+    pub mode: SnapshotMode,
 }
 
 /// Query parameters for GET /snapshots.
@@ -937,6 +972,8 @@ pub struct ListSnapshotsQuery {
     /// Pagination cursor from previous response header x-next-token.
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
+    /// Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0)
+    pub name: Option<String>,
     /// Filter by CoW backend (xfs | s3).
     pub backend: Option<String>,
 }
@@ -947,6 +984,8 @@ pub struct SnapshotListItem {
     #[serde(rename = "snapshotID")]
     pub snapshot_id: String,
     pub names: Vec<String>,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     pub status: String,
     #[serde(rename = "originSandboxID", skip_serializing_if = "Option::is_none")]
     pub origin_sandbox_id: Option<String>,
@@ -960,6 +999,8 @@ pub struct SnapshotListItem {
     /// S3 sync status (pending|running|ready|failed). Empty for xfs.
     #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
     pub remote_status: Option<String>,
+    /// Snapshot artifact mode. Always one of full | fs-only.
+    pub mode: SnapshotMode,
 }
 
 /// Request body for POST /sandboxes/{id}/rollback.
@@ -1179,6 +1220,9 @@ pub struct RefreshRequest {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListSandboxesQuery {
+    /// `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+    /// A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+    /// An empty value is the same as omitting `metadata`: no filter.
     pub metadata: Option<String>,
 }
 
@@ -1193,12 +1237,13 @@ pub struct ListSandboxesQuery {
 #[derive(Debug, Deserialize, Validate, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListSandboxesV2Query {
+    /// `key=value` pairs joined by `&`, written as is, percent-encoded, or double-encoded as E2B's SDKs send it.
+    /// A `&` or `=` inside a value must stay `%`-encoded after URL decoding (`+` is a space when form-encoded).
+    /// An empty value is the same as omitting `metadata`: no filter.
     pub metadata: Option<String>,
-    /// Filter by sandbox state. Accepted values are `running`, `paused`,
-    /// `pausing`, and `unknown`; `stopped` and `error` are accepted as aliases
-    /// for `unknown`. The `unknown` bucket also holds sandboxes that are still
-    /// being created and sandboxes whose state could not be read from their
-    /// node, so it is not a synonym for "exited".
+    /// Comma-separated states: `running`, `paused` (includes pausing), `pausing`, `unknown` (aliases `stopped`, `error`).
+    /// `pausing` is a Cube-native state: asking for it returns `pausing`; otherwise a pausing sandbox reads `paused`.
+    /// Defaults to running and paused sandboxes; any unrecognised or empty value is a 400.
     pub state: Option<String>,
     /// Continuation cursor from the previous response's `x-next-token` header.
     #[serde(rename = "nextToken")]
@@ -1287,6 +1332,21 @@ mod tests {
         assert_eq!(rules[0].name, "n");
         // The deny verdict is exactly what E2B's shape cannot carry.
         assert!(!rules[0].action.allow);
+    }
+
+    #[test]
+    fn update_network_converts_e2b_catch_all_host() {
+        let (_, net) = update_parts(
+            r#"{"rules": {"*": [{"transform": {"headers": {"Authorization": "sek"}}}]}}"#,
+        )
+        .expect("catch-all host should convert");
+        let rules = net.expect("policy").rules.expect("rules");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "e2b-transform-*");
+        assert_eq!(rules[0].r#match.host.as_deref(), Some("*"));
+        let inject = rules[0].action.inject.as_ref().expect("inject");
+        assert_eq!(inject[0].header, "Authorization");
+        assert_eq!(inject[0].secret, "sek");
     }
 
     #[test]
@@ -1686,6 +1746,85 @@ mod tests {
         assert_eq!(json["templateID"], "tpl-abc");
         assert_eq!(json["public"], true);
     }
+
+    #[test]
+    fn create_template_accepts_canonical_qos_shape() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "network": {
+                    "bandwidthMbps": 100,
+                    "packetsPerSecond": 5000
+                }
+            }
+        }))
+        .expect("template qos should deserialize");
+
+        let qos = req.qos.expect("qos");
+        let network = qos.network.expect("network qos");
+        assert_eq!(network.bandwidth_mbps, Some(100));
+        assert_eq!(network.packets_per_second, Some(5000));
+    }
+
+    #[test]
+    fn create_template_accepts_packets_only_qos_shape() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "network": {
+                    "packetsPerSecond": 5000
+                }
+            }
+        }))
+        .expect("packets-only template qos should deserialize");
+
+        let qos = req.qos.expect("qos");
+        let network = qos.network.as_ref().expect("network qos");
+        assert_eq!(network.bandwidth_mbps, None);
+        assert_eq!(network.packets_per_second, Some(5000));
+        let serialized = serde_json::to_value(qos).expect("qos should serialize");
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "network": {"packetsPerSecond": 5000}
+            })
+        );
+    }
+
+    #[test]
+    fn create_template_accepts_block_io_only_qos_shape() {
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "blockIo": {
+                    "throughputMiBps": 64,
+                    "iops": 1000
+                }
+            }
+        }))
+        .expect("block-io-only template qos should deserialize");
+
+        let qos = req.qos.expect("qos");
+        assert!(qos.network.is_none());
+        let block_io = qos.block_io.expect("block io qos");
+        assert_eq!(block_io.throughput_mibps, Some(64));
+        assert_eq!(block_io.iops, Some(1000));
+    }
+
+    #[test]
+    fn create_template_rejects_unknown_qos_fields() {
+        let err = serde_json::from_value::<CreateTemplateRequest>(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "qos": {
+                "network": {
+                    "bandwidth_mbps": 100
+                }
+            }
+        }))
+        .expect_err("unknown qos fields must be rejected");
+
+        assert!(err.to_string().contains("bandwidth_mbps"));
+    }
 }
 
 // ─── Templates ─────────────────────────────────────────────────────────────
@@ -1752,6 +1891,8 @@ pub struct TemplateDetail {
         skip_serializing_if = "Option::is_none"
     )]
     pub allow_internet_access: Option<bool>,
+    #[serde(rename = "configuredQos", skip_serializing_if = "Option::is_none")]
+    pub configured_qos: Option<QosConfig>,
     /// Latest create/rebuild job id for the template.
     #[serde(rename = "jobID", skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
@@ -1834,10 +1975,66 @@ pub struct CreateTemplateRequest {
     /// Enable ivshmem when building the template snapshot.
     #[serde(rename = "enableIvshmem", default)]
     pub enable_ivshmem: Option<bool>,
+    /// Optional template-level QoS. Every sandbox created from this template
+    /// receives the same independent ingress and egress network ceilings.
+    #[serde(default)]
+    pub qos: Option<QosConfig>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
+    /// CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
+    /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
+    #[serde(rename = "backend", default)]
+    pub backend: Option<String>,
+    /// Container user for the template build and later sandboxes.
+    /// `uid`, `uid:gid`, `username`, or `username:gid`. The group must be numeric.
+    /// Omitted keeps the default root user.
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QosConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkQosConfig>,
+    #[serde(rename = "blockIo", default, skip_serializing_if = "Option::is_none")]
+    pub block_io: Option<BlockIoQosConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkQosConfig {
+    #[schema(minimum = 1)]
+    #[serde(
+        rename = "bandwidthMbps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bandwidth_mbps: Option<u32>,
+    #[schema(minimum = 1)]
+    #[serde(
+        rename = "packetsPerSecond",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub packets_per_second: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BlockIoQosConfig {
+    #[schema(minimum = 1)]
+    #[serde(
+        rename = "throughputMiBps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub throughput_mibps: Option<u32>,
+    #[schema(minimum = 1)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u32>,
 }
 
 /// Body for POST /templates/:id (rebuild).
@@ -2120,6 +2317,9 @@ pub struct VersionMatrixView {
 /// Maximum length of a customer-supplied volume `name` (matches `t_cube_volume.name`).
 pub const MAX_VOLUME_NAME_LEN: usize = 128;
 
+/// Maximum UTF-8 byte length of volume plugin private data (matches CubeMaster).
+pub const MAX_VOLUME_PRIVATE_DATA_LEN: usize = 1024;
+
 /// Request body for POST /volumes.
 ///
 /// `name` must match `^[a-zA-Z0-9_-]+$` and be at most [`MAX_VOLUME_NAME_LEN`] characters
@@ -2136,6 +2336,20 @@ pub struct NewVolume {
     /// Omit to use CubeMaster's default plugin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+}
+
+/// Request body for POST /v2/volumes, extending the legacy creation request
+/// with opaque plugin input. Existing /volumes callers keep using NewVolume.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct NewVolumeV2 {
+    #[serde(flatten)]
+    pub base: NewVolume,
+    /// Opaque input forwarded unchanged to the volume plugin's Create hook.
+    /// Valid UTF-8, at most 1024 bytes, with no NUL or characters outside the
+    /// Basic Multilingual Plane. Use credential references, never plaintext
+    /// credentials. This field is not included in volume responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_data: Option<String>,
 }
 
 impl NewVolume {
@@ -2169,4 +2383,26 @@ pub struct VolumeAndToken {
     /// Auth token returned by the volume plugin. Empty string when not applicable.
     #[serde(default)]
     pub token: String,
+}
+
+/// Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+///
+/// `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+/// hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+/// sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+/// node).
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ExposedPortEndpoint {
+    #[serde(rename = "sandboxID")]
+    pub sandbox_id: String,
+    #[serde(rename = "containerPort")]
+    pub container_port: i32,
+    pub mode: String,
+    pub endpoint: String,
+    #[serde(rename = "hostIP", skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+    #[serde(rename = "hostPort", skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<i32>,
+    #[serde(rename = "sandboxIP", skip_serializing_if = "Option::is_none")]
+    pub sandbox_ip: Option<String>,
 }

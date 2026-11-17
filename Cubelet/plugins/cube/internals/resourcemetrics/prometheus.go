@@ -38,6 +38,9 @@ var (
 	hostMemoryCurrent       = prometheus.NewDesc("cubesandbox_host_sandbox_memory_current_bytes", "Current memory charged to the host sandbox cgroup.", hostLabels, nil)
 	hostMemoryLimit         = prometheus.NewDesc("cubesandbox_host_sandbox_memory_limit_bytes", "Configured memory limit for the host sandbox cgroup.", hostLabels, nil)
 	hostMemoryFailures      = prometheus.NewDesc("cubesandbox_host_sandbox_memory_failures_total", "Host cgroup memory limit failures for the current sandbox since its assignment baseline.", hostLabels, nil)
+
+	nodeSandboxCount          = prometheus.NewDesc("cubesandbox_node_sandbox_count", "Number of sandboxes currently present in the Cubelet host-sandbox inventory.", nil, nil)
+	nodeSandboxAvailableCount = prometheus.NewDesc("cubesandbox_node_sandbox_available_count", "Number of sandboxes with a current available host-sandbox resource sample.", nil, nil)
 )
 
 type prometheusCollector struct {
@@ -64,6 +67,7 @@ func (c *prometheusCollector) Describe(ch chan<- *prometheus.Desc) {
 		hostCPUUsage, hostCPUUser, hostCPUSystem, hostCPUThrottled,
 		hostCPUPeriods, hostCPUThrottledPeriods, hostCPULimit,
 		hostMemoryCurrent, hostMemoryLimit, hostMemoryFailures,
+		nodeSandboxCount, nodeSandboxAvailableCount,
 	} {
 		ch <- desc
 	}
@@ -77,13 +81,23 @@ func (c *prometheusCollector) Collect(ch chan<- prometheus.Metric) {
 	if err != nil {
 		return
 	}
+	hostCount := 0
+	hostAvailableCount := 0
 	for _, sandbox := range latest {
 		if sandbox.GuestWorkload != nil {
 			collectGuestPrometheus(ch, *sandbox.GuestWorkload)
 		}
 		if sandbox.HostSandbox != nil {
+			hostCount++
+			if sandbox.HostSandbox.Availability == HostSandboxAvailable {
+				hostAvailableCount++
+			}
 			collectHostPrometheus(ch, *sandbox.HostSandbox)
 		}
+	}
+	if c.cache.host != nil && c.cache.scopeEnabled(ResourceScopeHostSandbox) {
+		ch <- prometheus.MustNewConstMetric(nodeSandboxCount, prometheus.GaugeValue, float64(hostCount))
+		ch <- prometheus.MustNewConstMetric(nodeSandboxAvailableCount, prometheus.GaugeValue, float64(hostAvailableCount))
 	}
 }
 

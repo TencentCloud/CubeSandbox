@@ -135,10 +135,8 @@ func (s *internalHttp) registerRoutes() {
 
 // healthHandler implements the readiness probe.
 //
-// Readiness requires both: the store is attached (DB reachable, reconciler
-// can take its session lock), and the node view is loaded (distribution
-// picks target nodes via distributeRootfsArtifact -> resolveTemplateNodes ->
-// healthyTemplateNodes -> localcache.GetHealthyNodesByInstanceType).
+// Readiness requires the store and node view needed by TC's read-only
+// template info/list handlers. Artifact distribution runs only in CubeMaster.
 func (s *internalHttp) healthHandler(c *gin.Context) {
 	storeReady := templatecenter.IsReady()
 	nodeReady := nodemeta.Ready()

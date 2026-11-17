@@ -103,6 +103,9 @@ struct s3_lvs_opts {
 	uint32_t             wal_size_mb;
 	uint32_t             journal_size_mb;
 	uint32_t             cache_size_mb;
+	/* Process-shared write-back payload budget for this lvstore. Zero selects
+	 * 4096 MiB. It is runtime policy and may change on a clean attach. */
+	uint32_t             writeback_size_mb;
 	/* Whole-object DRAM cache entries. Process policy: not persisted, and an
 	 * attach may choose a different value. Zero disables the RAM tier. */
 	uint32_t             cache_hot_bufs;
@@ -132,72 +135,19 @@ struct s3_lvs_opts {
 };
 
 /* ==========================================================================
- * lvstore runtime states
- * ========================================================================== */
-
-enum s3_lvstore_state {
-	S3_LVS_NOT_PRESENT = 0,
-	S3_LVS_CREATING,
-	S3_LVS_BS_LOADING,
-	S3_LVS_ONLINE,
-	S3_LVS_DRAINING,
-	S3_LVS_DETACHED,
-	S3_LVS_FAILED_CLEANUP,
-};
-
-/* ==========================================================================
  * chunk_map entry
  * The chunk_index -> chunk_uuid mapping, the only level of the three-level
  * mapping chain that needs a table lookup.
  * ========================================================================== */
 
 enum s3_chunk_flags {
-	S3_CHUNK_ZERO        = 1u << 0,   /* unallocated; reads are zeroes, no S3 request */
 	S3_CHUNK_IN_S3       = 1u << 1,   /* confirmed to exist on S3 */
-	S3_CHUNK_DIRTY_LOCAL = 1u << 2,   /* data is in WAL / cache, not yet PUT to S3 */
-	S3_CHUNK_UPLOADING   = 1u << 3,   /* PUT in flight */
 };
 
 struct s3_chunk_map_entry {
 	struct spdk_uuid     uuid;
 	uint64_t             gen;
 	uint16_t             flags;
-};
-
-/* ==========================================================================
- * fork modes
- * ========================================================================== */
-
-enum s3lvol_fork_mode {
-	/* Pure clone: millisecond-class, shares the parent's chunks, accepts
-	 * clone_count = N fan-out. The default and recommended mode for 1:N
-	 * forks. */
-	S3LVOL_FORK_SHARED = 0,
-
-	/* clone + inflate, producing a fully independent volume. Expensive
-	 * (full materialisation + cross-S3 traffic); use only when the
-	 * dependency really must be cut. */
-	S3LVOL_FORK_DETACHED,
-
-	/* clone with background progressive inflate. v2 implementation. */
-	S3LVOL_FORK_LAZY_DETACH,
-};
-
-/* ==========================================================================
- * chain-depth governance modes
- * ========================================================================== */
-
-enum s3lvol_rectify_mode {
-	/* Three phases: first delete the deletable intermediate snapshots (pure
-	 * metadata, zero data movement), then decouple if that is not enough.
-	 * Default. */
-	S3LVOL_RECTIFY_AUTO = 0,
-
-	/* Delete intermediate snapshots only; no data movement at all */
-	S3LVOL_RECTIFY_DELETE_ONLY,
-
-	S3LVOL_RECTIFY_DECOUPLE,
-	S3LVOL_RECTIFY_INFLATE,
 };
 
 #endif /* S3LVOL_TYPES_H */

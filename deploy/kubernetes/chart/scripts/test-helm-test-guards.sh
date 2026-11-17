@@ -255,6 +255,10 @@ if mode == "default.yaml":
         raise SystemExit("node-runtime-test must pin runAsUser/runAsGroup 0")
     if "allowPrivilegeEscalation: false" not in d or 'drop: ["ALL"]' not in d:
         raise SystemExit("node-runtime-test securityContext missing privilege hardening")
+    if "mountPath: /dev/shm" not in d or "name: dev-shm" not in d:
+        raise SystemExit("node-runtime-test must mount host /dev/shm read-only")
+    if "test -d /dev/shm/cubelet/network-runtime/state" not in d:
+        raise SystemExit("node-runtime-test must check the network runtime state dir")
 
     print("helm test default placement/image/probe guard passed")
 

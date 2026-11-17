@@ -43,6 +43,9 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(ImageAction, createImageGinHandler)
 	g.DELETE(ImageAction, deleteImageGinHandler)
 
+	// Control-plane capabilities so clients can fail fast on unsupported modes.
+	g.GET(CapabilitiesAction, handleCapabilitiesAction)
+
 	// Snapshot (NOTE: DELETE /snapshot collection-level is NOT registered —
 	// the original mux only registered DELETE /snapshot/{snapshot_id})
 	g.POST(SnapshotAction, createSnapshotGinHandler)
@@ -56,6 +59,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.GET(SnapshotAction+"/:snapshot_id/restore-compat", restoreCompatGinHandler)
 	g.GET(SnapshotAction+"/:snapshot_id/compatible-nodes", compatibleNodesGinHandler)
 	g.DELETE(SnapshotAction+"/:snapshot_id", deleteSnapshotGinHandler)
+	g.POST(SnapshotAction+"/:snapshot_id/recover-create", recoverSnapshotCreateReservationGinHandler)
 	g.GET(OperationAction+"/:operation_id", handleSnapshotOperationAction)
 
 	// Template control plane. A /cube/template/* route runs locally on

@@ -100,19 +100,19 @@ func TestOnExitSkipsTerminalWhileRestarting(t *testing.T) {
 	}
 }
 
-func TestClearRestartCountForResume(t *testing.T) {
+func TestMarkResumedAfterPause(t *testing.T) {
 	box := &cubeboxstore.CubeBox{}
 	box.RestartCount = 2
+	box.DestroyFailCount = 3
 	box.RestartState = restartpolicy.StateBackOff
-	clearRestartCountForResume(box)
-	if box.RestartCount != 0 || box.RestartState != restartpolicy.StateRunning || box.StatusSeq != 1 {
-		t.Fatalf("count=%d state=%s seq=%d", box.RestartCount, box.RestartState, box.StatusSeq)
+	box.StatusSeq = 7
+	markResumedAfterPause(box)
+	if box.RestartCount != 2 || box.DestroyFailCount != 0 ||
+		box.RestartState != restartpolicy.StateRunning || box.StatusSeq != 8 {
+		t.Fatalf("count=%d destroy=%d state=%s seq=%d",
+			box.RestartCount, box.DestroyFailCount, box.RestartState, box.StatusSeq)
 	}
-	clearRestartCountForResume(box)
-	if box.StatusSeq != 1 {
-		t.Fatalf("unchanged resume bumped seq to %d", box.StatusSeq)
-	}
-	clearRestartCountForResume(nil)
+	markResumedAfterPause(nil)
 }
 
 func TestRecoverGaveUpWhenRetriesSpent(t *testing.T) {

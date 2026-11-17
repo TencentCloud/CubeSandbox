@@ -16,6 +16,8 @@ common:
   # CUBE_TEMPLATE_CENTER_ADDR env (env wins). Uncomment and adjust for your
   # deployment; one-click defaults to http://127.0.0.1:8090.
   # template_center_addr: "http://127.0.0.1:8090"
+  # Per-call max concurrency for rootfs artifact distribution. Default 4.
+  # distribution_workers: 4
 
 log:
   module: "cubemaster"
@@ -23,6 +25,8 @@ log:
   file_size: 100
   file_num: 10
   level: "info"
+  # "true" writes log lines through a bounded queue. A full queue drops lines.
+  async_flush: "false"
 
 cubelet_conf:
   grpc:
@@ -81,6 +85,12 @@ redis:
 
 scheduler:
   priority_select_num: 1
+  # Optional scenario profiles are documented in
+  # docs/guide/scheduler-plugin.md. This file configures the legacy
+  # filter/score path below, which is compiled as the compatible default
+  # profile. When neither profiles nor filter/score is configured at all,
+  # three built-in profiles embedded in the binary take effect instead
+  # (pkg/base/config/scheduler_factory.yaml).
   metric_update_timeout: 300s
   local_metric_update_timeout: 300s
   # Whether to ignore the per-node allocated CPU/Mem usage recorded in Redis

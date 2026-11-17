@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import time
+
 from adapters.api_adapter import ApiClient
 from adapters.base import SandboxAdapter
 from framework.config import SdkE2EConfig
@@ -65,6 +67,38 @@ def safe_kill(adapter: SandboxAdapter, config: SdkE2EConfig) -> list[str]:
     if interrupt is not None:
         raise interrupt
     return errors
+
+
+def delete_snapshot_after_runtime_release(
+    adapter: SandboxAdapter,
+    snapshot_id: str,
+    *,
+    timeout: float,
+) -> None:
+    """Delete a snapshot after the sandboxes that booted from it are gone.
+
+    A snapshot that still has a live runtime reference is tombstoned right away
+    by CubeMaster, so this is normally a single call. Two answers are still
+    worth retrying: a delete job that is already running (a repeat DELETE, or
+    cleanup racing the node releasing its reference) and, for older Master
+    builds, a delete refused because a runtime still references the snapshot.
+    Everything else is surfaced unchanged instead of being retried in a loop.
+    """
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            adapter.delete_snapshot(snapshot_id)
+            return
+        except Exception as exc:  # noqa: BLE001 - normalize backend conflict text
+            message = str(exc).lower()
+            retryable_conflict = (
+                "attempt is already in progress" in message
+                or "active runtime ref" in message
+            )
+            if not retryable_conflict or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
 
 
 def _rest_delete(adapter: SandboxAdapter, config: SdkE2EConfig, errors: list[str]) -> None:

@@ -160,6 +160,37 @@ grep -Fq 'enable = true' "${tmp}" \
 grep -Fq 'socket_path = "/var/run/s3lvol/s3lvol.sock"' "${tmp}" \
   || fail "append path must write socket_path"
 
+run_jfs_patch() {
+  bash -c '
+    set -euo pipefail
+    fail() { printf "%s\n" "$*" >&2; exit 1; }
+    log() { :; }
+    source "$1"
+    patch_cow_jfs_opt_in "$2" "/data/cubelet/storage/jfs" "." "/data/cubelet/jfs-cache"
+  ' _ "${fn}" "${tmp}"
+}
+
+cat > "${tmp}" <<'EOF'
+    [plugins."io.cubelet.internal.v1.storage".cow.jfs]
+    enable = false
+    mount_path = "/old/jfs"
+    root = "old"
+    # cache_dir = "/old/cache"
+    [plugins."io.cubelet.internal.v1.images"]
+    foo = "bar"
+EOF
+run_jfs_patch
+grep -Fq 'enable = true' "${tmp}" || fail "JFS patch must enable cow.jfs"
+grep -Fq 'mount_path = "/data/cubelet/storage/jfs"' "${tmp}" || fail "JFS patch must set mount_path"
+grep -Fq 'root = "."' "${tmp}" || fail "JFS patch must set root"
+grep -Fq 'cache_dir = "/data/cubelet/jfs-cache"' "${tmp}" || fail "JFS patch must add cache_dir"
+[[ "$(grep -c '^[[:space:]]*enable[[:space:]]*=' "${tmp}")" -eq 1 ]] \
+  || fail "JFS patch must keep a single enable"
+
+run_jfs_patch
+[[ "$(grep -c '\[plugins\."io.cubelet.internal.v1.storage"\.cow\.jfs\]' "${tmp}")" -eq 1 ]] \
+  || fail "JFS re-patch must keep a single table"
+
 RCOW_START="$(cd "${SCRIPT_DIR}/../../../.." && pwd)/CubeS3lvol/scripts/rcow_start.sh"
 [[ -f "${RCOW_START}" ]] || fail "missing ${RCOW_START}"
 # Literal -r "${RCOW_RPC_SOCK}" so a non-default emptyDir socket is honored.

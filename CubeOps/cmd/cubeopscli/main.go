@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/cmd/cubeopscli/app"
@@ -11,6 +12,7 @@ import (
 
 func main() {
 	if err := app.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "cubeopscli run fail: %s\n", err)
 		os.Exit(1)
 	}
 }

@@ -126,6 +126,31 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// GET /cube/sandbox/info with container_port — resolve the exposed-port
+    /// endpoint in host_port form (hostIP:hostPort). CubeMaster otherwise falls
+    /// back to the connection's RemoteAddr when no caller header is present,
+    /// which could select tap_ip for a same-node CubeAPI. Send an unspecified
+    /// sentinel (not a user-supplied address) to make the host_port choice
+    /// explicit and independent of deployment topology. CubeVS hairpin makes
+    /// that form reachable for same-node sandbox callers as well.
+    pub async fn get_sandbox_exposed_port(
+        &self,
+        sandbox_id: &str,
+        container_port: i32,
+    ) -> Result<GetSandboxResponse, CubeMasterError> {
+        let url = format!("{}/cube/sandbox/info", self.base_url);
+        let port = container_port.to_string();
+        let resp = self
+            .inner
+            .get(&url)
+            .query(&[("sandbox_id", sandbox_id), ("container_port", &port)])
+            .header("X-Cube-Caller-Host-IP", "0.0.0.0")
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// POST /cube/sandbox/update — pause or resume a sandbox (action: "pause" | "resume").
     pub async fn update_sandbox(
         &self,
@@ -261,22 +286,6 @@ impl CubeMasterClient {
             .filter(|t| !t.is_empty())
         {
             builder = builder.query(&[("next_token", token)]);
-        }
-        let resp = builder.send().await.map_err(CubeMasterError::Http)?;
-        parse_response(resp).await
-    }
-
-    /// GET /cube/snapshot/{snapshot_id} — fetch a single snapshot.
-    pub async fn get_snapshot(
-        &self,
-        snapshot_id: &str,
-        include_request: bool,
-    ) -> Result<SnapshotDetailResponse, CubeMasterError> {
-        validate_path_segment("snapshot_id", snapshot_id)?;
-        let url = format!("{}/cube/snapshot/{}", self.base_url, snapshot_id);
-        let mut builder = self.inner.get(&url);
-        if include_request {
-            builder = builder.query(&[("include_request", "true")]);
         }
         let resp = builder.send().await.map_err(CubeMasterError::Http)?;
         parse_response(resp).await
@@ -541,6 +550,19 @@ impl CubeMasterClient {
     pub async fn get_volume(&self, volume_id: &str) -> Result<GetVolumeResponse, CubeMasterError> {
         validate_volume_id(volume_id)?;
         let url = format!("{}/cube/volume/{}", self.base_url, volume_id);
+        let resp = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
+    /// GET /cube/capabilities — the snapshot modes this Master accepts;
+    /// empty means filesystem-only is unsupported.
+    pub async fn get_capabilities(&self) -> Result<CapabilitiesResponse, CubeMasterError> {
+        let url = format!("{}/cube/capabilities", self.base_url);
         let resp = self
             .inner
             .get(&url)
@@ -1241,7 +1263,7 @@ pub struct SandboxInfo {
     pub status: String,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub started_at: Option<DateTime<Utc>>,
-    /// Unix nanoseconds from Cubelet container.created_at — used as fallback for started_at
+    /// Unix nanoseconds from Cubelet sandbox.created_at — used as fallback for started_at.
     #[serde(default)]
     pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
@@ -1289,21 +1311,39 @@ pub struct GetSandboxDataItem {
     #[serde(default)]
     pub host_id: String,
     #[serde(default)]
+    pub error_reason: Option<String>,
+    #[serde(default)]
     pub template_id: String,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
     #[serde(default)]
     pub labels: HashMap<String, String>,
     #[serde(default)]
+    pub configured_qos: Option<CubeQosConfig>,
+    #[serde(default)]
     pub containers: Vec<GetSandboxContainerItem>,
     #[serde(default)]
     pub namespace: String,
+    /// Sandbox creation time in Unix nanoseconds. `end_at` below is
+    /// millisecond-based.
+    #[serde(default)]
+    pub create_at: i64,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub host_ip: String,
+    #[serde(default)]
+    pub sandbox_ip: String,
+    #[serde(default)]
+    pub exposed_port_endpoint: String,
+    #[serde(default)]
+    pub exposed_port_mode: String,
+    #[serde(default)]
+    pub exposed_port_host_port: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1339,6 +1379,7 @@ pub struct GetSandboxContainerItem {
 pub struct SandboxDetail {
     pub sandbox_id: String,
     pub host_id: String,
+    pub error_reason: Option<String>,
     pub instance_type: String,
     pub status: SandboxStatus,
     pub template_id: String,
@@ -1352,6 +1393,7 @@ pub struct SandboxDetail {
     pub labels: HashMap<String, String>,
     pub volume_mounts: Vec<CubeVolumeMount>,
     pub restart_status: Option<CubeRestartStatus>,
+    pub configured_qos: Option<CubeQosConfig>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1575,10 +1617,12 @@ impl GetSandboxResponse {
         Some(SandboxDetail {
             sandbox_id: sid.clone(),
             host_id: item.host_id,
+            error_reason: item.error_reason.filter(|reason| !reason.trim().is_empty()),
             instance_type: instance_type.to_string(),
             status,
             template_id,
-            started_at: primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at)),
+            started_at: datetime_from_unix_nanos(item.create_at)
+                .or_else(|| primary_container.and_then(|c| datetime_from_unix_nanos(c.create_at))),
             end_at: item.end_at,
             cpu_count: cpu_milli / 1000,
             cpu_milli,
@@ -1588,6 +1632,7 @@ impl GetSandboxResponse {
             labels: item.labels,
             volume_mounts: item.volume_mounts,
             restart_status: item.restart_status,
+            configured_qos: item.configured_qos,
         })
     }
 }
@@ -1738,9 +1783,14 @@ pub struct CreateSnapshotRequest {
     pub request_id: String,
     pub sandbox_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Canonical snapshot mode: full | fs-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Snapshot resource as returned by CubeMaster.
@@ -1748,6 +1798,8 @@ pub struct CreateSnapshotRequest {
 #[allow(dead_code)]
 pub struct SnapshotResource {
     pub snapshot_id: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub names: Vec<String>,
     #[serde(default)]
@@ -1766,10 +1818,24 @@ pub struct SnapshotResource {
     pub backend: String,
     #[serde(default)]
     pub remote_status: String,
+    /// Snapshot mode. Older Masters omit it; empty means full.
+    #[serde(default)]
+    pub mode: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// GET /cube/capabilities — the fields CubeAPI consumes.
+///
+/// The list is the set of `mode` values this Master accepts on create and fork.
+/// It is empty when the Master predates the endpoint or its modes contract,
+/// which is exactly the answer the caller needs: treated as "cannot do it".
+#[derive(Debug, Deserialize, Default)]
+pub struct CapabilitiesResponse {
+    #[serde(default)]
+    pub snapshot_modes: Vec<String>,
 }
 
 /// Slimmed mirror of CubeMaster's nested `operation` block returned alongside
@@ -1830,16 +1896,6 @@ pub struct ListSnapshotsResponse {
     pub items: Vec<SnapshotResource>,
     #[serde(default)]
     pub next_token: String,
-}
-
-/// GET /cube/snapshot/{snapshot_id} — response.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct SnapshotDetailResponse {
-    #[serde(rename = "RequestID", alias = "requestID", default)]
-    pub request_id: String,
-    pub ret: RetCode,
-    pub snapshot: SnapshotResource,
 }
 
 /// DELETE /cube/snapshot/{snapshot_id} — request body.
@@ -1970,6 +2026,9 @@ pub struct ForkSandboxRequest {
     /// Optional idle TTL (seconds) applied to each forked sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<i32>,
+    /// Canonical snapshot mode for the one shared fork snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn is_zero(value: &i32) -> bool {
@@ -2151,6 +2210,8 @@ pub struct TemplateResponse {
     pub replicas: Vec<serde_json::Value>,
     #[serde(default)]
     pub create_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub configured_qos: Option<CubeQosConfig>,
 }
 
 /// Body for DELETE /cube/template.
@@ -2294,9 +2355,53 @@ pub struct CreateTemplateFromImageReq {
     /// Whether the template build sandbox should include ivshmem.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_ivshmem: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qos: Option<CubeQosConfig>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_cube_ca: Option<bool>,
+    /// CoW backend ("xfs" | "s3"); empty means historical xfs path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeQosConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<CubeNetworkQosConfig>,
+    #[serde(rename = "blockIo", default, skip_serializing_if = "Option::is_none")]
+    pub block_io: Option<CubeBlockIoQosConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeNetworkQosConfig {
+    #[serde(
+        rename = "bandwidthMbps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bandwidth_mbps: Option<u32>,
+    #[serde(
+        rename = "packetsPerSecond",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub packets_per_second: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeBlockIoQosConfig {
+    #[serde(
+        rename = "throughputMiBps",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub throughput_mibps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u32>,
 }
 
 /// Minimal container overrides for template creation.
@@ -2314,6 +2419,28 @@ pub struct CreateTemplateContainerOverrides {
     pub envs: Option<Vec<CreateTemplateEnv>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_config: Option<DnsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<TemplateSecurityContext>,
+}
+
+/// Numeric uid/gid wrapper expected by CubeMaster `Int64Value`.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct TemplateInt64Value {
+    pub value: i64,
+}
+
+/// User fields for a template container. Privileged stays on so the guest can
+/// still set up devices; only the process uid/gid changes.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct TemplateSecurityContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<TemplateInt64Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_group: Option<TemplateInt64Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as_username: Option<String>,
 }
 
 /// CPU / memory resources for template container.
@@ -2419,6 +2546,50 @@ mod tests {
         non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
         GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
     };
+
+    #[tokio::test]
+    async fn exposed_port_info_uses_explicit_host_port_sentinel() {
+        use axum::{extract::Request, routing::get, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None::<String>));
+        let captured = seen.clone();
+        let app = Router::new().route(
+            "/cube/sandbox/info",
+            get(move |request: Request| {
+                let captured = captured.clone();
+                async move {
+                    let value = request
+                        .headers()
+                        .get("X-Cube-Caller-Host-IP")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    *captured.lock().unwrap() = Some(value);
+                    axum::Json(serde_json::json!({
+                        "requestID": "req-test",
+                        "ret": {"ret_code": 200, "ret_msg": "success"},
+                        "data": []
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client =
+            super::CubeMasterClient::new(format!("http://{address}"), reqwest::Client::new());
+        let response = client
+            .get_sandbox_exposed_port("sb-test", 8080)
+            .await
+            .unwrap();
+        assert!(response.data.is_empty());
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("0.0.0.0"));
+        server.abort();
+    }
 
     #[test]
     fn non_empty_str_trims_surrounding_whitespace() {
@@ -2616,6 +2787,10 @@ mod tests {
                 "host_id": "host-1",
                 "status": 1,
                 "template_id": "tpl-1",
+                "configured_qos": {
+                    "network": { "bandwidthMbps": 100 }
+                },
+                "error_reason": "OOMKilled",
                 "containers": [
                     {
                         "container_id": "workload-1",
@@ -2642,9 +2817,18 @@ mod tests {
             .expect("detail should exist");
 
         assert_eq!(detail.host_id, "host-1");
+        assert_eq!(detail.error_reason.as_deref(), Some("OOMKilled"));
         assert_eq!(detail.cpu_count, 2);
         assert_eq!(detail.cpu_milli, 2000);
         assert_eq!(detail.memory_mb, 2048);
+        assert_eq!(
+            detail
+                .configured_qos
+                .as_ref()
+                .and_then(|qos| qos.network.as_ref())
+                .and_then(|network| network.bandwidth_mbps),
+            Some(100)
+        );
         assert_eq!(
             detail
                 .started_at
@@ -2665,6 +2849,7 @@ mod tests {
             "data": [{
                 "sandbox_id": "sb-frac",
                 "host_id": "host-1",
+                "error_reason": " \t ",
                 "status": 1,
                 "containers": [{
                     "container_id": "sb-frac",
@@ -2684,6 +2869,7 @@ mod tests {
             .expect("detail should exist");
 
         assert_eq!(detail.cpu_count, 0);
+        assert_eq!(detail.error_reason, None);
         assert_eq!(detail.cpu_milli, 250);
         assert_eq!(detail.memory_mb, 2048);
     }
@@ -2714,6 +2900,7 @@ mod tests {
             .expect("detail should exist");
 
         assert_eq!(detail.cpu_milli, 500);
+        assert_eq!(detail.error_reason, None);
         assert_eq!(detail.memory_mb, 2048);
     }
 }
@@ -2758,6 +2945,9 @@ pub struct CreateVolumeRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+    /// Opaque caller input for the Controller Create hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_data: Option<String>,
 }
 
 /// POST /cube/volume — response.

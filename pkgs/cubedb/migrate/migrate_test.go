@@ -68,6 +68,7 @@ func TestRun_Fresh(t *testing.T) {
 		t.Fatalf("migrate.Run (fresh): %v", err)
 	}
 	assertHeadSchema(t, db)
+	assertSandboxSpecSupplementaryRoundTrip(ctx, t, db)
 }
 
 // TestRun_UpgradeFromV022 is the upgrade-path test: manually create
@@ -471,6 +472,81 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 				t.Errorf("%s: missing index %q (have: %s)", c.table, want, strings.Join(sortedKeys(idx), ","))
 			}
 		}
+	}
+	assertLegacyTablesUTF8MB4(ctx, t, db)
+}
+
+// utf8mb3 tables converted by 20261112035937.
+var legacyUTF8MB3Tables = []string{
+	"t_cube_instance_info",
+	"t_cube_instance_userdata",
+	"t_cube_node_registration",
+	"t_cube_node_status",
+	"t_cube_template_definition",
+	"t_cube_template_replica",
+	"t_cube_rootfs_artifact",
+	"t_cube_template_image_job",
+	"t_cube_sandbox_spec",
+	"t_cube_snapshot_runtime_ref",
+	"t_cube_snapshot_runtime_active",
+}
+
+func assertLegacyTablesUTF8MB4(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(legacyUTF8MB3Tables)), ",")
+	args := make([]any, len(legacyUTF8MB3Tables))
+	for i, name := range legacyUTF8MB3Tables {
+		args[i] = name
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME
+		  FROM INFORMATION_SCHEMA.COLUMNS
+		 WHERE TABLE_SCHEMA = DATABASE()
+		   AND CHARACTER_SET_NAME IS NOT NULL
+		   AND TABLE_NAME IN (`+placeholders+`)`, args...)
+	if err != nil {
+		t.Fatalf("select converted charsets: %v", err)
+	}
+	defer rows.Close()
+	seen := map[string]int{}
+	for rows.Next() {
+		var table, column, charset, collation string
+		if err := rows.Scan(&table, &column, &charset, &collation); err != nil {
+			t.Fatalf("scan converted charset: %v", err)
+		}
+		seen[table]++
+		if charset != "utf8mb4" || collation != "utf8mb4_0900_ai_ci" {
+			t.Errorf("%s.%s charset/collation = %s/%s, want utf8mb4/utf8mb4_0900_ai_ci", table, column, charset, collation)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("converted charset rows: %v", err)
+	}
+	for _, table := range legacyUTF8MB3Tables {
+		if seen[table] == 0 {
+			t.Errorf("%s: no character columns found after conversion", table)
+		}
+	}
+}
+
+func assertSandboxSpecSupplementaryRoundTrip(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	const (
+		sandboxID   = "charset-probe-supplementary"
+		requestJSON = `{"name":"🙂"}`
+	)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO t_cube_sandbox_spec (sandbox_id, request_json) VALUES (?, ?)`,
+		sandboxID, requestJSON); err != nil {
+		t.Fatalf("insert supplementary character into sandbox spec: %v", err)
+	}
+	var got string
+	if err := db.QueryRowContext(ctx,
+		`SELECT request_json FROM t_cube_sandbox_spec WHERE sandbox_id = ?`, sandboxID).Scan(&got); err != nil {
+		t.Fatalf("read sandbox spec request_json: %v", err)
+	}
+	if got != requestJSON {
+		t.Fatalf("sandbox spec request_json = %q, want %q", got, requestJSON)
 	}
 }
 

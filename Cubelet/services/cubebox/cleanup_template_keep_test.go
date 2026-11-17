@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -46,7 +45,7 @@ func TestCleanupTemplateKeepsLivePauseAndHonorLiveFalseDeletes(t *testing.T) {
 	}
 	live := newCubeboxWithStatusForTest("sb-live-keep", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
 	stampPauseSnapshotID(live, snap)
-	live.AddLabels(map[string]string{constants.MasterAnnotationRuntimeRestoreSnapshotID: snap})
+	live.BindRestoreBase(snap)
 	listCubeboxesForTest = func() []*cubeboxstore.CubeBox { return []*cubeboxstore.CubeBox{live} }
 
 	deleted := 0
@@ -96,4 +95,32 @@ func TestCleanupTemplateForgedPauseLabelDoesNotKeep(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode(), rsp.GetRet().GetRetMsg())
 	require.Equal(t, 1, deleted, "forged pause-id Label must not block origin GC of another sandbox's package")
+}
+
+func TestCleanupTemplateJFSOnNodeWithoutJFSIsANoop(t *testing.T) {
+	installCleanupTemplateTestHooks(t)
+	origJFS := cleanupJFSConfigured
+	t.Cleanup(func() { cleanupJFSConfigured = origJFS })
+	getLocalSnapshotForFn = func(context.Context, string, string) (*storage.SnapshotCatalogEntry, error) {
+		return nil, storage.ErrSnapshotCatalogNotFound
+	}
+	cleanupIsCowBackend = func() bool { return true }
+	swept := 0
+	cleanupObjectsFor = func(context.Context, string, []storage.CowObjectRef) error {
+		swept++
+		return storage.ErrJFSNotConfigured
+	}
+	req := &cubebox.CleanupTemplateRequest{TemplateID: "tpl-shared-0000000000001", Backend: "jfs"}
+
+	cleanupJFSConfigured = func() bool { return false }
+	rsp, err := (&service{}).cleanupTemplate(context.Background(), req, true)
+	require.NoError(t, err)
+	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode(), rsp.GetRet().GetRetMsg())
+	require.Zero(t, swept)
+
+	cleanupJFSConfigured = func() bool { return true }
+	rsp, err = (&service{}).cleanupTemplate(context.Background(), req, true)
+	require.NoError(t, err)
+	require.NotEqual(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
+	require.Equal(t, 1, swept)
 }

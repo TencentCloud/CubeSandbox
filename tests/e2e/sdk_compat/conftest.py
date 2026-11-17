@@ -57,6 +57,7 @@ from adapters import create_adapter_with_capacity_retry  # noqa: E402
 from framework.capabilities import (  # noqa: E402
     CODE_INTERPRETER,
     capabilities_for_backend,
+    require_capabilities,
 )
 from framework.cleanup import safe_kill  # noqa: E402
 from framework.config import SdkE2EConfig, volume_plugin_enabled_from_env  # noqa: E402
@@ -167,6 +168,7 @@ def pytest_configure(config: pytest.Config):
         "sandbox_create_options(**kwargs): SDK sandbox create options for this test",
         "sandbox_template_id(template_id, optional=False): override template ID for this test or module; "
         "optional templates are left out of preflight and their tests are skipped when the template does not exist",
+        "self_managed_template: test provisions and cleans up its own template",
         "requires_code_interpreter: test requires a stateful Code Interpreter kernel",
         "requires_run_code_env_inheritance: test requires an opt-in template whose run_code inherits create-time envs",
         "requires_internet: test requires public internet access from the sandbox",
@@ -216,7 +218,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         if (template_id := _template_id_for_node(item)) is not None and not _template_is_optional(item)
     }
     config._sdk_e2e_default_template_needed = any(
-        _template_id_for_node(item) is None for item in items
+        _template_id_for_node(item) is None
+        and item.get_closest_marker("self_managed_template") is None
+        for item in items
     )
     volume_skip = None
     if not volume_plugin_enabled_from_env():
@@ -377,6 +381,49 @@ def gate_internet_tests(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(scope="session")
+def _volume_plugin_probe(sdk_e2e_config: SdkE2EConfig):
+    from framework.volume import probe_volume_plugin
+
+    try:
+        return probe_volume_plugin(sdk_e2e_config), None
+    except Exception as exc:  # noqa: BLE001 - cache any probe failure once
+        # pytest does not cache fixtures that raise. Cache the failure as data so a
+        # broken backend is probed only once per session/worker.
+        return None, exc
+
+
+@pytest.fixture(autouse=True)
+def volume_plugin_gate(
+    request: pytest.FixtureRequest,
+    sdk_e2e_config: SdkE2EConfig,
+) -> None:
+    if (
+        not request.config.getoption("--run-e2e")
+        or request.node.get_closest_marker("volume") is None
+    ):
+        return
+
+    # Check the selected SDK backend before touching the Cube control plane. This
+    # keeps unsupported backends (for example e2b) side-effect free.
+    sdk_backend = request.getfixturevalue("sdk_backend")
+    from framework.capabilities import VOLUME_PLUGIN
+
+    require_capabilities(sdk_backend, VOLUME_PLUGIN)
+
+    if not sdk_e2e_config.volume_plugin_enabled:
+        from framework.volume import VOLUME_PLUGIN_SKIP_REASON
+
+        pytest.skip(VOLUME_PLUGIN_SKIP_REASON)
+    if request.node.get_closest_marker("volume_api_only") is not None:
+        return
+    probe, probe_error = request.getfixturevalue("_volume_plugin_probe")
+    if probe_error is not None:
+        raise probe_error
+    if not probe.available:
+        pytest.skip(f"volume plugin tests skipped: {probe.reason}")
+
+
+@pytest.fixture(scope="session")
 def _optional_template_exists(sdk_e2e_config: SdkE2EConfig):
     from adapters.api_adapter import ApiClient
 
@@ -411,10 +458,10 @@ def sdk_sandbox(
     sdk_e2e_reporter: JsonlReporter,
     sdk_e2e_trace: TraceCollector,
 ):
-    for marker in request.node.iter_markers("requires_capability"):
-        capability = marker.args[0]
-        if capability not in capabilities_for_backend(sdk_backend):
-            pytest.skip(f"backend {sdk_backend!r} does not support capability {capability!r}")
+    require_capabilities(
+        sdk_backend,
+        *[marker.args[0] for marker in request.node.iter_markers("requires_capability")],
+    )
 
     if request.node.get_closest_marker("requires_code_interpreter"):
         if CODE_INTERPRETER not in capabilities_for_backend(sdk_backend):
@@ -436,11 +483,6 @@ def sdk_sandbox(
             "platform lifecycle tests require SDK_E2E_PLATFORM_LIFECYCLE=true "
             "(cube-proxy + lifecycle manager coordination)"
         )
-
-    if request.node.get_closest_marker("volume") and not sdk_e2e_config.volume_plugin_enabled:
-        from framework.volume import VOLUME_PLUGIN_SKIP_REASON
-
-        pytest.skip(VOLUME_PLUGIN_SKIP_REASON)
 
     template_id = _template_id_for_node(request.node) or sdk_e2e_config.cube_template_id
     if not template_id:

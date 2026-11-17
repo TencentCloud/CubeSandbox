@@ -17,6 +17,7 @@ Documentation:
 - [Framework design](docs/framework-design.md)
 - [Case authoring guide](docs/case-authoring.md)
 - [Test coverage and improvement plan](docs/test-coverage.md)
+- [Webhook lifecycle test runbook](../webhook/README.md) (in-memory delivery; separate receiver and platform evidence)
 - [中文 README](README_zh.md)
 - [中文框架设计](docs/zh/framework-design.md)
 - [中文用例编写指南](docs/zh/case-authoring.md)
@@ -45,6 +46,52 @@ Documentation:
 
 Shared timeout, reporting, tracing, and lifecycle variables are listed in the
 [Environment](#environment) section.
+
+## Dynamic S3 Volume E2E
+
+`cases/volume/test_private_data.py` adds two mount cases for v2 S3 bindings:
+a writer sandbox syncs data before a new sandbox reads the same volume ID,
+and deleting volume A leaves data readable from sibling-prefix volume B in a
+new sandbox. Create, GET and list responses must omit `private_data`. Four raw
+HTTP checks reject input over 1024 UTF-8 bytes (ASCII and multibyte), NUL and
+real non-BMP characters under the current API contract.
+
+All cases in this file require **CubeAPI, CubeMaster and Cubelet >= 0.8.0**
+and a plugin that supports `private_data`. Basic Volume cases require the
+platform and Python SDK `cubesandbox` >= 0.6.0. These v2 cases create volumes
+through the test adapter's HTTP client; they do not exercise the SDK's
+`create_with_private_data` method.
+
+The mount cases require a valid `CUBE_TEMPLATE_ID` and
+`SDK_E2E_VOLUME_CRED_REF`, a reference name configured on the Controller and
+every Cubelet host that may run these sandboxes. The plugin default bucket must
+already exist, and the referenced credentials must permit access to the test
+prefix. The runner uses its normal CubeAPI authorization and this reference
+name; it receives no object storage keys or extra MinIO credentials.
+
+```bash
+export SDK_E2E_VOLUME_CRED_REF=e2e-test
+# Optional relative root; unset/blank uses sdk-e2e/. Each case appends UUID/a/ or UUID/b/.
+export SDK_E2E_VOLUME_PREFIX=ws/sdk-e2e/
+pytest --run-e2e -q cases/volume/test_private_data.py --sdk-e2e-backends=cubesandbox
+
+# Legacy Volume regressions use no dynamic credential reference.
+pytest --run-e2e -q cases/volume/test_crud.py cases/volume/test_bind_unbind.py \
+  cases/volume/test_read_only.py --sdk-e2e-backends=cubesandbox
+```
+
+An unset or blank reference skips only the two dynamic mount cases. The four
+raw input checks still run and require the v2 platform above; legacy Volume
+cases retain their existing gates. A configured bad reference, v2 endpoint
+error or mount failure fails the test. The driver
+name may be a deployment alias; it defaults to `s3`.
+
+Cleanup kills all sandboxes before deleting their volumes and reports failures.
+A create transport failure has an unknown result: diagnostics identify its
+unique name and prefix for inspection rather than racing it with a DELETE.
+These mount assertions do not establish cold host FUSE caches, cross-node
+placement, direct object counts or compatibility with other S3 providers.
+Collection and skipped cases are offline checks, not live E2E results.
 
 ## Prepare Template
 
@@ -90,6 +137,40 @@ form:
 pytest --run-e2e --sdk-e2e-backends=cubesandbox
 ```
 
+## Template QoS E2E
+
+The QoS cases provision and clean up their own template and sandbox, so selecting this file alone does not require `CUBE_TEMPLATE_ID`. Set `CUBE_TEMPLATE_E2E_IMAGE` to an image that exposes envd on `49983` and responds to `/health` on `49999`.
+
+Run the control/runtime case:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+pytest --run-e2e cases/qos/test_template_qos.py::test_template_qos_control_and_runtime_state
+```
+
+Bandwidth tests require an iperf3 server reachable from the sandbox, and block I/O tests require a writable virtio-blk-backed filesystem. Start `iperf3 -s -p 5201`, set the server IP, and enable the dataplane opt-in:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_QOS_IPERF_SERVER=10.0.0.10 \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_E2E_INSTALL_TOOLS=1 \
+pytest --run-e2e -m "qos and not qos_node" cases/qos/test_template_qos.py
+```
+
+The pytest runner does not need `iperf3` or `fio`, but the sandbox does. Missing tools cause the affected case to skip unless `CUBE_QOS_E2E_INSTALL_TOOLS=1` is set; use `CUBE_QOS_E2E_INSTALL_COMMAND` to override installation. An IP-literal iperf server is automatically added to `allow_out` for a temporary template. Set `CUBE_QOS_CONTROL_TEMPLATE_ID` to reuse a template for the control/runtime case, `CUBE_QOS_E2E_TEMPLATE_ID` for the bandwidth and block I/O cases, or `CUBE_QOS_PPS_TEMPLATE_ID` for the PPS case. A reused template must already allow the required test endpoint and match the QoS values expected by that case.
+
+The PPS case must run on the sandbox compute node because it reads the TAP counter. It also requires the dataplane opt-in, so set both `CUBE_QOS_DATAPLANE_E2E=1` and `CUBE_QOS_NODE_PPS_E2E=1`, point `CUBE_QOS_IPERF_SERVER` at the node IP reachable from the sandbox, and run:
+
+```bash
+CUBE_TEMPLATE_E2E_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+CUBE_TEMPLATE_E2E_NODE=<node-id> \
+CUBE_QOS_IPERF_SERVER=<node-ip> \
+CUBE_QOS_DATAPLANE_E2E=1 \
+CUBE_QOS_NODE_PPS_E2E=1 \
+pytest --run-e2e -m qos_node cases/qos/test_template_qos.py
+```
+
 ## Execution Scope
 
 Recommended scopes:
@@ -107,7 +188,8 @@ SDK_E2E_BACKENDS=e2b,cubesandbox pytest --run-e2e -m "p0 or p1"
 # Platform lifecycle regression (cube-proxy + lifecycle manager)
 SDK_E2E_PLATFORM_LIFECYCLE=true pytest --run-e2e -k lifecycle -m "p1 and slow"
 
-# Volume plugin regression (default S3 + MinIO; cubesandbox >= 0.6.0)
+# Volume plugin regression (default S3 + MinIO; cubesandbox >= 0.6.0).
+# Includes v2 checks: CubeAPI/CubeMaster/Cubelet >= 0.8.0 + private_data-capable plugin.
 pytest --run-e2e -m volume --sdk-e2e-backends=cubesandbox
 
 # Broader regression
@@ -332,7 +414,8 @@ Optional:
   `8.8.8.8`.
 - `SDK_E2E_TCP_TARGET_PORT`: public TCP probe port. Defaults to `53`.
 - `SDK_E2E_ALTERNATE_TCP_TARGET_IP`: alternate public TCP probe address.
-  Defaults to `1.1.1.1`.
+  Defaults to `8.8.4.4`. Both configured targets must accept TCP connections on
+  `SDK_E2E_TCP_TARGET_PORT` from inside the sandbox.
 - `SDK_E2E_PUBLIC_ACCESS_PORT`: exposed HTTP port used by restricted public
   access inbound tests. Defaults to `49983`.
 - `SDK_E2E_PUBLIC_ACCESS_PATH`: path used by restricted public access inbound
@@ -386,8 +469,15 @@ Optional:
   `examples/mcp-gateway/template/Dockerfile`. Defaults to `mcp-gateway`. `cases/mcp`
   is skipped when the template does not exist.
 - `SDK_E2E_VOLUME_PLUGIN`: run Volume Plugin cases (CRUD and sandbox
-  `volumeMounts` bind/unbind). Defaults to `true`; set `false` to skip.
-- `SDK_E2E_VOLUME_DRIVER`: driver name for `POST /volumes`. Defaults to `s3`.
+  `volumeMounts` bind/unbind). Defaults to `true`; set `false` to skip. Before
+  running these cases, the suite probes `SDK_E2E_VOLUME_DRIVER` against the
+  installed Cube system and skips automatically when that driver is not
+  configured or the Volume API is unavailable.
+- `SDK_E2E_VOLUME_DRIVER`: driver/plugin name for legacy and v2 volume creates. Defaults to `s3`.
+- `SDK_E2E_VOLUME_CRED_REF`: server-side credential reference for the two dynamic
+  S3 mount cases. Missing or blank skips only those two cases.
+- `SDK_E2E_VOLUME_PREFIX`: optional relative root for UUID-isolated dynamic test
+  prefixes. Unset or blank uses `sdk-e2e/`; use a permitted root such as `ws/sdk-e2e/`.
 - `SDK_E2E_VOLUME_REFCOUNT_WAIT`: seconds to wait for delete-while-bound `409`
   and post-unbind `204`. Defaults to `60`.
 - `SDK_E2E_RESTART_POLICY_WAIT`: seconds to wait for one restart-status
@@ -481,8 +571,9 @@ tests/e2e/sdk_compat/
 Current capability domains:
 
 - `cases/lifecycle/`: create/info smoke, connect, create options, pause/resume,
-  kill, platform-managed auto-pause/auto-resume/auto-kill, and node-local
-  restart policy (`test_restart_policy.py`, CubeSandbox only).
+  kill, platform-managed auto-pause/auto-resume/auto-kill, node-local
+  restart policy (`test_restart_policy.py`), and filesystem-only snapshots plus
+  cold boot (`test_filesystem_only_snapshot.py`; both CubeSandbox only).
 - `cases/commands/`: stdout, stderr, exit code, env, special characters, multiline output, missing command.
 - `cases/filesystem/`: read/write, overwrite, multiline content, file API and shell interoperability.
 - `cases/run_code/`: expression text, stdout, kernel state, Python error reporting.
@@ -493,7 +584,14 @@ Current capability domains:
 - `cases/host-mount/`: host-directory mount extension — happy path plus create-time
   validation, runtime bind-mount failures, cross-sandbox sharing boundaries, and
   multi-generation snapshot restore, rollback, and clone external-reference semantics.
-- `cases/volume/`: Volume Plugin CRUD plus sandbox `volumeMounts` bind/unbind and per-sandbox read-only attachment enforcement (CubeSandbox only; default driver `s3`). Runs with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Requires the default-install S3 plugin + MinIO and `cubesandbox` >= 0.6.0.
+- `cases/volume/`: Volume Plugin CRUD, bind/unbind, read-only attachments, v2
+  same-volume data readback, sibling-prefix deletion isolation and raw
+  private-data input rejection (CubeSandbox only; default driver `s3`). Runs
+  with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`. Basic cases require
+  the S3 plugin, platform and `cubesandbox` >= 0.6.0. The v2 cases also require
+  CubeAPI/CubeMaster/Cubelet >= 0.8.0 and a `private_data`-capable plugin, even
+  when `SDK_E2E_VOLUME_CRED_REF` is unset; that reference gates only the two
+  dynamic mount cases.
 - `cases/auth/`: `CUBE_API_KEY` simple-key authentication against the CubeAPI
   control plane — `X-API-Key`/`Bearer` accept, wrong/missing 401, `/health`
   exempt (CubeSandbox only). Skipped unless the server was started with
@@ -519,7 +617,8 @@ Capability markers:
 - `@pytest.mark.requires_capability("<name>")`: skip or deselect unsupported backends.
 - `@pytest.mark.sandbox_create_options(...)`: pass SDK create-time options such as `network`, `env_vars`, or `lifecycle`.
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
-- `@pytest.mark.volume`: Volume Plugin cases. Run with `--run-e2e`; skipped when `SDK_E2E_VOLUME_PLUGIN=false`.
+- `@pytest.mark.volume`: Volume cases. Run with `--run-e2e`; skipped when `SDK_E2E_VOLUME_PLUGIN=false`.
+- `@pytest.mark.volume_api_only`: Volume API validation that keeps the `volume` capability gate but does not require the configured driver probe.
 - `@pytest.mark.restart_policy`: node-local restart policy cases. Run with `--run-e2e`; e2b skips via the `restart_policy` capability.
 - `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
 - Common capabilities include `lifecycle`, `commands`, `filesystem`,
@@ -527,7 +626,8 @@ Capability markers:
 - Optional capabilities include `code_interpreter`, `pause_resume`, `set_timeout`,
   `rollback_clone`, `network_allow_deny`, `network_public_access`,
   `network_mask_request_host`, `platform_lifecycle`, `host_mount`,
-  `volume_plugin`, `auth_simple_key`, and `restart_policy`.
+  `volume_plugin`, `auth_simple_key`, `restart_policy`, and
+  `filesystem_only_snapshot`.
 - `platform_lifecycle` is available only to CubeSandbox platform-managed lifecycle cases.
 - `host_mount` is a CubeSandbox-only extension; `cases/host-mount/` uses it via
   `@pytest.mark.requires_capability("host_mount")` to skip backends (e.g. e2b) that

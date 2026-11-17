@@ -248,9 +248,10 @@ export async function mockDelay() {
 
 export function listSandboxes(filters: { state?: string | null; metadata?: string | null } = {}) {
   const { state, metadata } = filters;
+  const wanted = state ? state.split(',') : null;
   return clone(
     sandboxes.filter((sandbox) => {
-      if (state && sandbox.state !== state) return false;
+      if (wanted && !wanted.includes(sandbox.state)) return false;
       if (!metadata) return true;
       const pairs = new URLSearchParams(metadata);
       return Array.from(pairs.entries()).every(([key, value]) => sandbox.metadata?.[key] === value);

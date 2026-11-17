@@ -274,16 +274,45 @@ func cubecowVolumeToSnapshotObject(ctx context.Context, manager cowVolumeManager
 	if volume == nil {
 		return nil, fmt.Errorf("cubecow volume is nil")
 	}
-	return resolveCowObject(ctx, manager, volume.VolumeName, volume.Kind, volume.Gen)
+	if strings.TrimSpace(volume.VolumeName) == "" {
+		return nil, fmt.Errorf("cubecow object name is required")
+	}
+	devPath := volume.FilePath
+	if devPath == "" {
+		var err error
+		devPath, err = manager.ResolveDevPath(ctx, volume.VolumeName, volume.Kind)
+		if err != nil {
+			return nil, err
+		}
+	}
+	sizeBytes := volume.SizeBytes
+	if sizeBytes == 0 {
+		var err error
+		sizeBytes, err = manager.GetSizeBytes(ctx, volume.VolumeName)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &CowSnapshotObject{
+		Name:      volume.VolumeName,
+		Kind:      volume.Kind,
+		DevPath:   devPath,
+		SizeBytes: sizeBytes,
+		Gen:       volume.Gen,
+	}, nil
 }
 
 func cubecowVolumeToSnapshotObjectWithoutActivation(ctx context.Context, manager cowVolumeManager, volume *cowVolume) (*CowSnapshotObject, error) {
 	if volume == nil {
 		return nil, fmt.Errorf("cubecow volume is nil")
 	}
-	size, err := manager.GetSizeBytes(ctx, volume.VolumeName)
-	if err != nil {
-		return nil, err
+	size := volume.SizeBytes
+	if size == 0 {
+		var err error
+		size, err = manager.GetSizeBytes(ctx, volume.VolumeName)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &CowSnapshotObject{
 		Name:      volume.VolumeName,

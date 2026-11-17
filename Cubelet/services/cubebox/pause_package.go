@@ -48,6 +48,20 @@ func buildPauseSandboxSpec(sb *cubeboxstore.CubeBox, requestID string) *cubebox.
 	if runReq.InstanceType == "" {
 		runReq.InstanceType = cubebox.InstanceType_cubebox.String()
 	}
+	// Pause→Resume rebuilds the sandbox from this package alone, so the restart
+	// policy has to travel with it. The CubeBox row keeps the policy only inside
+	// OriginalRequest, so copy both fields from there; without them Resume
+	// replaces the thin Create request with a policy-less spec and silently
+	// disarms the restart manager.
+	orig, _ := sb.CopyOriginalRequest()
+	if orig != nil {
+		if policy := orig.GetRestartPolicy(); policy != "" {
+			runReq.RestartPolicy = policy
+			if backoff := orig.GetRestartBackoff(); backoff != nil {
+				runReq.RestartBackoff = proto.Clone(backoff).(*cubebox.RestartBackoffConfig)
+			}
+		}
+	}
 	for _, c := range sb.AllContainers() {
 		if c == nil || c.Config == nil {
 			continue

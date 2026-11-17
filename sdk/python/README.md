@@ -6,7 +6,7 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/version-0.7.3-orange" alt="v0.7.3" />
+  <img src="https://img.shields.io/badge/version-0.8.0-orange" alt="v0.8.0" />
 </p>
 
 ---
@@ -326,9 +326,9 @@ invalid names raise `ValueError` before any network call. See
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # list of running sandbox dicts
-print(Sandbox.list_v2())    # v2 API (supports filtering)
+print(Sandbox.list_v2())    # v2 E2B view: running and paused only
 ```
 
 ## Configuration
@@ -367,7 +367,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, envs, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — create a new sandbox (optionally restricted to specified compute nodes or mounting volumes); `envs` is the E2B-compatible alias for `env_vars` |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) and optionally reset the idle timeout |
 | `Sandbox.list(config)` | `GET /sandboxes` — list running sandboxes (v1) |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list sandboxes (v2) |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — list running and paused sandboxes (v2 E2B view) |
 | `Sandbox.health(config)` | `GET /health` — service health check |
 
 ### `Sandbox` — instance methods
@@ -376,6 +376,7 @@ with Sandbox.create(config=cfg) as sb:
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.get_info()` | `GET /sandboxes/:id` — get sandbox state and metadata as a `SandboxInfo` |
+| `sb.is_running(request_timeout=None)` | Report if the sandbox is running — checks control-plane state first, probes envd `/health` only when running/unknown; returns `bool` (`False` on unreachable/transport errors) |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.set_timeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |

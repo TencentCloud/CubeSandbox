@@ -3,8 +3,7 @@ title: "How Much Code Does Switching Sandbox Backends Take? Selection and Field 
 date: 2026-10-15
 author: Clivia (Author of LambChat)
 description: "LambChat is a multi-tenant Agent system with integrated Skills capabilities, whose sandbox layer supports three backends: E2B, CubeSandbox, and Daytona. This article records the real pitfalls the project hit when adopting CubeSandbox: user-level persistent binding, a four-level lookup chain, post-resume 504s, and the bash -lc login-shell environment problem."
-featured: true
-weight: 2
+featured: false
 ---
 
 # How Much Code Does Switching Sandbox Backends Take? Selection and Field Notes from Migrating an Agent Platform

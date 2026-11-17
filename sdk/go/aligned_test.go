@@ -148,6 +148,85 @@ func TestCreateRejectsInvalidRulePortScheme(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsCatchAllWithoutInject(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	disabled := false
+	if _, err := client.Create(context.Background(), CreateOptions{
+		AllowInternetAccess: &disabled,
+		Network: NetworkOptions{Rules: []Rule{
+			{Name: "audit_all_http", Match: Match{Scheme: "http", Host: "*"}, Action: Action{Allow: true, Audit: "metadata"}},
+			{Name: "audit_all_https", Match: Match{Scheme: "https", SNI: "*"}, Action: Action{Allow: true, Audit: "metadata"}},
+		}},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestCreateAcceptsCatchAllInjectAndCustomPort(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-env"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-env"})
+	_, err := client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "leak",
+			Match:  Match{Host: "*"},
+			Action: Action{Allow: true, Inject: []Inject{{Header: "Authorization", Secret: "sek"}}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("Create inject: %v", err)
+	}
+	inject := got["network"].(map[string]any)["rules"].([]any)[0].(map[string]any)["action"].(map[string]any)["inject"].([]any)
+	if inject[0].(map[string]any)["header"] != "Authorization" || inject[0].(map[string]any)["secret"] != "sek" {
+		t.Fatalf("inject=%v, want Authorization/sek", inject)
+	}
+
+	_, err = client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "scoped",
+			Match:  Match{Host: "*.example.com"},
+			Action: Action{Allow: true, Inject: []Inject{{Header: "Authorization", Secret: "sek"}}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("wildcard inject rejected: %v", err)
+	}
+	host := got["network"].(map[string]any)["rules"].([]any)[0].(map[string]any)["match"].(map[string]any)["host"]
+	if host != "*.example.com" {
+		t.Fatalf("host=%v, want *.example.com", host)
+	}
+
+	_, err = client.Create(context.Background(), CreateOptions{
+		Network: NetworkOptions{Rules: []Rule{{
+			Name:   "wide",
+			Match:  Match{Host: "*", Port: 8443, Scheme: "https"},
+			Action: Action{Allow: true},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("Create custom port: %v", err)
+	}
+	match := got["network"].(map[string]any)["rules"].([]any)[0].(map[string]any)["match"].(map[string]any)
+	if match["port"].(float64) != 8443 || match["scheme"] != "https" || match["host"] != "*" {
+		t.Fatalf("match=%v, want * port 8443 https", match)
+	}
+}
+
 func TestCreateRejectsOversizedInjectSecret(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -325,6 +404,9 @@ func TestSnapshotLifecycle(t *testing.T) {
 			if r.URL.Query().Get("sandboxID") != testSandboxID || r.URL.Query().Get("limit") != "50" {
 				t.Fatalf("query=%s", r.URL.RawQuery)
 			}
+			if r.URL.Query().Get("name") != "prod" {
+				t.Fatalf("name query=%s", r.URL.RawQuery)
+			}
 			w.Header().Set("x-next-token", "tok-2")
 			fmt.Fprint(w, `[{"snapshotID":"snap-1","names":["n1"]}]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/templates/snap-1":
@@ -351,21 +433,104 @@ func TestSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("CreateSnapshot=%#v err=%v", snap, err)
 	}
 
-	items, next, err := client.ListSnapshots(ctx, ListSnapshotsOptions{SandboxID: testSandboxID, Limit: 50})
+	items, next, err := client.ListSnapshots(ctx, ListSnapshotsOptions{SandboxID: testSandboxID, Limit: 50, Name: "prod"})
 	if err != nil || len(items) != 1 || next != "tok-2" {
 		t.Fatalf("ListSnapshots items=%#v next=%q err=%v", items, next, err)
 	}
 
-	if err := client.DeleteSnapshot(ctx, "snap-1"); err != nil {
-		t.Fatalf("DeleteSnapshot: %v", err)
+	deleted, err := client.DeleteSnapshot(ctx, "snap-1")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteSnapshot deleted=%v err=%v", deleted, err)
 	}
-	if err := client.DeleteSnapshot(ctx, ""); err == nil {
+	if _, err := client.DeleteSnapshot(ctx, ""); err == nil {
 		t.Fatal("DeleteSnapshot without id returned nil error")
 	}
 
 	result, err := sb.Rollback(ctx, "snap-1")
 	if err != nil || result["status"] != "success" {
 		t.Fatalf("Rollback=%#v err=%v", result, err)
+	}
+}
+
+func TestSnapshotTTLContract(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body["ttlSeconds"] != float64(60) {
+			t.Errorf("TTL body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"snapshotID":"snap-ttl","expiresAt":"2030-01-01T00:00:00Z"}`)
+	}))
+	defer server.Close()
+	sb := &Sandbox{client: NewClient(Config{APIURL: server.URL}), SandboxID: testSandboxID}
+	info, err := sb.CreateSnapshot(context.Background(), "", CreateSnapshotOptions{TTLSeconds: 60})
+	if err != nil || info.ExpiresAt != "2030-01-01T00:00:00Z" {
+		t.Fatalf("info=%#v err=%v", info, err)
+	}
+	for _, ttl := range []int64{-1, 9_223_372_037} {
+		if _, err := sb.CreateSnapshot(context.Background(), "", CreateSnapshotOptions{TTLSeconds: ttl}); err == nil {
+			t.Fatalf("invalid TTL %d accepted", ttl)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("invalid TTL reached server: %d requests", requests)
+	}
+}
+
+func TestDeleteSnapshotByNameNotFoundAndAmbiguous(t *testing.T) {
+	// Mirrors CubeAPI resolve_snapshot_delete_target: snap- id or name, 404 for unknown, 409 for ambiguous.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("snapshot_only") != "true" {
+			t.Errorf("%s %s missing snapshot_only=true", r.Method, r.URL)
+		}
+		switch r.URL.Path {
+		case "/templates/snap-1", "/templates/prod":
+			w.WriteHeader(http.StatusNoContent)
+		case "/templates/unknown":
+			// Server phrases it "snapshot ... not found"; SDK must still yield (false, nil).
+			http.Error(w, `{"message":"snapshot unknown not found"}`, http.StatusNotFound)
+		case "/templates/dup":
+			http.Error(w, `{"message":"snapshot name \"dup\" is ambiguous"}`, http.StatusConflict)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	ctx := context.Background()
+
+	if deleted, err := client.DeleteSnapshot(ctx, "prod"); err != nil || !deleted {
+		t.Fatalf("DeleteSnapshot by name: deleted=%v err=%v", deleted, err)
+	}
+	if deleted, err := client.DeleteSnapshot(ctx, "unknown"); err != nil || deleted {
+		t.Fatalf("DeleteSnapshot unknown: deleted=%v err=%v (want false, nil)", deleted, err)
+	}
+	if _, err := client.DeleteSnapshot(ctx, "dup"); err == nil {
+		t.Fatal("DeleteSnapshot ambiguous name returned nil error")
+	}
+}
+
+func TestDeleteSnapshotEscapesNameInPath(t *testing.T) {
+	var gotPath, gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.EscapedPath(), r.URL.RawQuery
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if deleted, err := client.DeleteSnapshot(context.Background(), "team/app:v1?x#y%41"); err != nil || !deleted {
+		t.Fatalf("DeleteSnapshot deleted=%v err=%v", deleted, err)
+	}
+	if gotPath != "/templates/team%2Fapp:v1%3Fx%23y%2541" || gotQuery != "snapshot_only=true" {
+		t.Fatalf("path=%q query=%q", gotPath, gotQuery)
 	}
 }
 

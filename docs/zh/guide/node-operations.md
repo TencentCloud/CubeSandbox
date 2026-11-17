@@ -5,11 +5,11 @@ lang: zh-CN
 
 # 节点相关操作
 
-本页说明 CubeSandbox 集群的三类主要计算节点操作：增加节点、隔离节点和删除节点。
+日常节点管理建议使用控制节点上的 `cubeopscli` 命令行工具，也可以使用 WebUI 节点详情页（12088 端口）。
 
-日常节点管理可以使用控制节点上的 `cubeopscli` 或 WebUI 节点详情页。以下示例默认 CubeOps 地址为 `127.0.0.1:3010`；多机部署时请替换为控制面 IP。
+> cubeopscli 默认访问本地 127.0.0.1:3010 的 CubeOps 服务，对于 Terraform 集群版等分离部署的方案，可以使用 `--address` 和 `--port` 参数指定控制面地址。
 
-操作前后可以通过以下命令确认节点 ID 和当前状态：
+可以通过以下命令确认节点 ID 和当前状态：
 
 ```bash
 cubeopscli node list
@@ -18,16 +18,33 @@ cubeopscli node list
 cubeopscli node list --hostid <node_id>
 ```
 
+## 节点分组
+
+沙箱的跨机恢复要求源节点和目标节点的 CPU 和 Kernel 完全一致，对于这种机器我们称为同一机型。在一类机型上产生的内存快照只能恢复到同类机型上。
+
+查看集群的节点类别及每组的成员：
+
+```bash
+cubeopscli node groups
+```
+
+输出示例（默认精简显示——组名、CPU 信息、成员数量和成员列表）：
+
+```text
+GROUP    CPU_VENDOR     CPU_MODEL             COUNT  NODES
+type-1   GenuineIntel   Intel(R) Xeon(R) ...  3      node-1,node-2,node-3
+type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5(cordoned)
+```
+
+- 同组节点之间可以互相跨机恢复内存快照，不同组之间不可以。
+- 节点状态标记：`(down)` 不健康、`(cordoned)` 已隔离（停止调度）、`(tainted)` 宿主机 KVM 模块带有可疑污染标志。
+- `unknown` 组汇集了未上报 `cpuid_hash`/`host_kernel_release` 的节点（例如旧版本 Cubelet 未采集）。这类节点的类别无法确认，跨机恢复对其按失败处理。
+
+在构建共享存储后端的模板、执行跨机恢复、规划宿主内核滚动升级之前，都可以先用该命令确认集群里混用了几种节点类型。
+
 ## 增加节点
 
-增加计算节点的过程是安装计算面组件，并让 Cubelet 向 CubeOps 注册。系统没有单独的 `node add` 命令；计算节点服务启动后会自动完成注册。
-
-### 前置条件
-
-- 已有使用相同 CubeSandbox 发布包安装的可用控制节点。
-- 计算节点满足硬件和软件要求。
-- 计算节点可以访问 CubeOps 的 `3010` 端口。
-- 计算节点可以访问集群的 S3 兼容存储。使用内置 MinIO 时，需要能够访问控制节点的 `9000` 端口。
+增加计算节点的过程是安装计算面组件，并让 Cubelet 向 CubeOps 注册。系统没有单独的 `node add` 命令；**计算节点服务启动后会自动完成注册**。
 
 ### 操作步骤
 
@@ -72,22 +89,9 @@ cubeopscli node list --hostid <node_id>
 
 ## 隔离节点
 
-隔离会临时阻止 CubeMaster 向指定计算节点调度新沙箱，行为类似 Kubernetes `cordon`：节点仍可保持健康，已有沙箱继续运行。
+**隔离会临时阻止 CubeMaster 向指定计算节点调度新沙箱**，行为类似 Kubernetes `cordon`：节点仍可保持健康，已有沙箱继续运行。
 
-| 维度 | 隔离后的行为 |
-| --- | --- |
-| 新沙箱调度 | 不再选择该节点；如果没有其他可调度节点，创建会失败。 |
-| 已有沙箱 | 不受影响，不会自动销毁或迁移。 |
-| 节点健康状态 | 与隔离相互独立，隔离节点仍可显示 `healthy=true`。 |
-| Cubelet 心跳 | 继续正常，节点侧不能自行清除隔离状态。 |
-
-CubeOps 使用以下保留 label 记录隔离状态：
-
-```text
-cube.cloud.tencentcloud.com/scheduling-disabled=true
-```
-
-普通 labels API 和 Cubelet 注册都不能设置或清除该 label。
+对于隔离后的节点，后续的新沙箱调度不再选择该节点；如果没有其他可调度节点，创建会失败。而对于已有沙箱则不受影响，不会自动销毁或迁移。
 
 ::: warning 隔离不等于清空节点
 隔离不会驱逐已有沙箱。执行会中断进程或网络的维护操作前，需要先隔离节点，再主动销毁该节点上的沙箱。

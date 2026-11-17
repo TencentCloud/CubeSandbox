@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-export const VERSION = "0.7.3";
+export const VERSION = "0.8.0";
 
 export {
   Sandbox,
@@ -13,6 +13,7 @@ export {
   type RunCodeOptions,
   type PauseOptions,
   type ListSnapshotsOptions,
+  type CreateSnapshotOptions,
   type NetworkOptions,
   type UpdateNetworkOptions,
   type LifecycleOptions,
@@ -46,6 +47,7 @@ export {
   VolumeInfo,
   VolumeMount,
   MAX_VOLUME_NAME_LEN,
+  MAX_VOLUME_PRIVATE_DATA_LEN,
   type VolumeMountsArg,
 } from "./volume.js";
 

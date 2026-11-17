@@ -136,6 +136,50 @@ EOF
   assert_contains "${diff}" "[preserved]"
 }
 
+# CUBE_JFS_IMAGE used to default to the Docker Hub image juicedata/mount.
+# The new template leaves it empty so install.sh selects by MIRROR; an
+# untouched old default must be adopted (i.e. dropped to empty), while an
+# operator override must survive.
+test_three_way_adopts_empty_jfs_image_default() {
+  local new="${TMP_DIR}/new-jfs.example" old="${TMP_DIR}/old-jfs.env"
+  local base="${TMP_DIR}/base-jfs.example"
+  local out="${TMP_DIR}/out-jfs.env" diff="${TMP_DIR}/diff-jfs.txt"
+  cat > "${new}" <<'EOF'
+CUBE_JFS_IMAGE=
+EOF
+  cat > "${base}" <<'EOF'
+CUBE_JFS_IMAGE=juicedata/mount:ce-v1.4.1
+EOF
+  cat > "${old}" <<'EOF'
+CUBE_JFS_IMAGE=juicedata/mount:ce-v1.4.1
+EOF
+
+  merge_env_three_way "${new}" "${old}" "${base}" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_JFS_IMAGE ""
+  assert_contains "${diff}" "[default-updated]"
+}
+
+test_three_way_keeps_customized_jfs_image_over_empty_default() {
+  local new="${TMP_DIR}/new-jfs2.example" old="${TMP_DIR}/old-jfs2.env"
+  local base="${TMP_DIR}/base-jfs2.example"
+  local out="${TMP_DIR}/out-jfs2.env" diff="${TMP_DIR}/diff-jfs2.txt"
+  cat > "${new}" <<'EOF'
+CUBE_JFS_IMAGE=
+EOF
+  cat > "${base}" <<'EOF'
+CUBE_JFS_IMAGE=juicedata/mount:ce-v1.4.1
+EOF
+  cat > "${old}" <<'EOF'
+CUBE_JFS_IMAGE=harbor.internal/cube/juicefs:ce-v1.4.1
+EOF
+
+  merge_env_three_way "${new}" "${old}" "${base}" "" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_JFS_IMAGE "harbor.internal/cube/juicefs:ce-v1.4.1"
+  assert_contains "${diff}" "[preserved]"
+}
+
 test_preserves_shell_sensitive_values() {
   local new="${TMP_DIR}/new5.example" old="${TMP_DIR}/old5.env"
   local out="${TMP_DIR}/out5.env" diff="${TMP_DIR}/diff5.txt"
@@ -696,6 +740,8 @@ test_preserves_user_customized_value
 test_adds_new_keys_with_defaults
 test_three_way_adopts_new_default_for_untouched_key
 test_three_way_keeps_customized_over_new_default
+test_three_way_adopts_empty_jfs_image_default
+test_three_way_keeps_customized_jfs_image_over_empty_default
 test_preserves_shell_sensitive_values
 test_upsert_env_kv_preserves_shell_sensitive_values
 test_upsert_env_kv_quotes_shell_metachar_only_values

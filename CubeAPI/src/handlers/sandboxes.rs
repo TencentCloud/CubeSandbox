@@ -14,22 +14,55 @@ use crate::{
     error::{AppError, AppResult},
     logging::{LogEvent, LogLevel},
     models::{
-        ApiError, ConnectSandbox, ConnectSandboxV2, ForkRequest, ForkResult, ListSandboxesQuery,
-        ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest, ResumedSandbox, Sandbox,
-        SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query, SandboxLogsV2Response,
-        SetTimeoutRequest, UpdateSandboxNetworkRequest,
+        ApiError, ConnectSandbox, ConnectSandboxV2, ExposedPortEndpoint, ForkRequest, ForkResult,
+        ListSandboxesQuery, ListSandboxesV2Query, NewSandbox, NewSandboxV2, RefreshRequest,
+        ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery, SandboxLogsV2Query,
+        SandboxLogsV2Response, SetTimeoutRequest, UpdateSandboxNetworkRequest,
     },
     state::AppState,
 };
 
+// ─── GET /sandboxes/:sandboxID/exposed-ports/:containerPort ──────────────────
+
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/exposed-ports/{containerPort}",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox ID"),
+        ("containerPort" = i32, Path, description = "Container port declared via the template's expose-port list"),
+    ),
+    responses(
+        (status = 200, description = "Exposed port endpoint", body = ExposedPortEndpoint),
+        (status = 400, description = "Invalid container port", body = ApiError),
+        (status = 404, description = "Sandbox not found or port not exposed", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+    )
+)]
+pub async fn get_sandbox_exposed_port(
+    State(state): State<AppState>,
+    Path((sandbox_id, container_port)): Path<(String, i32)>,
+) -> AppResult<impl IntoResponse> {
+    // The endpoint is always the hostIP:hostPort form. CubeVS hairpin makes it
+    // reachable for same-node sandbox callers too, so no caller-IP based
+    // same-node detection is needed (and the caller address is not trusted).
+    let endpoint = state
+        .services
+        .sandboxes
+        .get_exposed_port_endpoint(&sandbox_id, container_port)
+        .await?;
+    Ok(Json(endpoint))
+}
+
 // ─── GET /sandboxes ───────────────────────────────────────────────────────────
 
+/// List sandboxes in every state, `pausing` and `unknown` included; GET /v2/sandboxes is the E2B view.
 #[utoipa::path(
     get,
     path = "/sandboxes",
     params(ListSandboxesQuery),
     responses(
         (status = 200, description = "Sandbox list", body = [crate::models::ListedSandbox]),
+        (status = 400, description = "Invalid metadata", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
@@ -91,7 +124,7 @@ pub async fn list_sandboxes(
                 ("x-next-token", description = "Continuation cursor for the next page. Omitted on the last page.")
             )
         ),
-        (status = 400, description = "Malformed nextToken", body = ApiError),
+        (status = 400, description = "Malformed nextToken, invalid state or invalid metadata", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)
     )
 )]
@@ -412,7 +445,12 @@ pub async fn pause_sandbox(
         (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Sandbox is already running", body = ApiError),
-        (status = 500, description = "Unexpected backend error", body = ApiError)
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+        (status = 503, description = "A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying resume")
+            )
+        )
     )
 )]
 pub async fn resume_sandbox(
@@ -462,7 +500,12 @@ pub async fn resume_sandbox(
         (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request", body = ApiError),
-        (status = 500, description = "Unexpected backend error", body = ApiError)
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+        (status = 503, description = "A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying connect")
+            )
+        )
     )
 )]
 pub async fn connect_sandbox(
@@ -505,7 +548,12 @@ pub async fn connect_sandbox(
         (status = 400, description = "Invalid timeout value", body = ApiError),
         (status = 404, description = "Sandbox not found", body = ApiError),
         (status = 409, description = "Paused sandbox cannot be resumed during a conflicting lifecycle transition", body = ApiError),
-        (status = 500, description = "Unexpected backend error", body = ApiError)
+        (status = 500, description = "Unexpected backend error", body = ApiError),
+        (status = 503, description = "A concurrent lifecycle operation has not settled and the sandbox is not running yet; retry", body = ApiError,
+            headers(
+                ("Retry-After" = u64, description = "Seconds a client should wait before retrying connect")
+            )
+        )
     )
 )]
 pub async fn connect_sandbox_v2(

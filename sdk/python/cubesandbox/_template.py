@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import requests
 
-from ._config import Config, _auth_headers
+from ._config import SNAPSHOT_REQUEST_TIMEOUT_S, Config, _auth_headers
 from ._exceptions import ApiError, AuthenticationError, TemplateNotFoundError
 from ._policy import _validate_allow_out_domains_require_deny_all
 
@@ -160,7 +160,11 @@ class Template:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates", headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         data = resp.json() or []
         if isinstance(data, dict):
@@ -200,8 +204,12 @@ class Template:
         if next_token is not None:
             params["nextToken"] = next_token
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}", params=params,
-                     headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates/{template_id}",
+            params=params,
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return TemplateInfo.from_dict(resp.json())
 
@@ -234,6 +242,8 @@ class Template:
         allow_out: list[str] | None = None,
         deny_out: list[str] | None = None,
         enable_ivshmem: bool | None = None,
+        backend: str | None = None,
+        user: str | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateBuild:
@@ -272,6 +282,10 @@ class Template:
             allow_out: Allowed outbound CIDRs for CubeVS egress policy.
             deny_out: Denied outbound CIDRs for CubeVS egress policy.
             enable_ivshmem: Whether the template build sandbox should boot with ivshmem enabled.
+            backend: CoW backend for this template ("xfs" | "s3"). Omitted keeps xfs.
+            user: Container user for the template build and later sandboxes.
+                ``uid``, ``uid:gid``, ``username``, or ``username:gid``. The group
+                must be numeric. Omitted keeps the default root user.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
@@ -337,6 +351,10 @@ class Template:
             payload["denyOut"] = deny_out
         if enable_ivshmem is not None:
             payload["enableIvshmem"] = enable_ivshmem
+        if backend is not None:
+            payload["backend"] = backend
+        if user is not None:
+            payload["user"] = user
         payload.update(kwargs)
 
         s = requests.Session()
@@ -344,6 +362,7 @@ class Template:
             f"{cfg.api_url}/templates",
             json=payload,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=cfg.request_timeout,
         )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
@@ -364,6 +383,7 @@ class Template:
             f"{cfg.api_url}/templates/{template_id}",
             json=extra,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=cfg.request_timeout,
         )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
@@ -380,8 +400,11 @@ class Template:
         """GET /templates/:templateID/builds/:buildID/status."""
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status",
-                     headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
 
@@ -397,8 +420,11 @@ class Template:
         """GET /templates/:templateID/builds/:buildID/logs."""
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs",
-                     headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return resp.json()
 
@@ -447,7 +473,11 @@ class Template:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{template_id}", headers=_auth_headers(cfg))
+        resp = s.delete(
+            f"{cfg.api_url}/templates/{template_id}",
+            headers=_auth_headers(cfg),
+            timeout=max(cfg.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
 
 
@@ -482,6 +512,7 @@ class Template:
             f"{cfg.api_url}/templates/{template_id}/alias",
             json=payload,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=cfg.request_timeout,
         )
         _check_response(resp)
         return TemplateInfo.from_dict(resp.json())

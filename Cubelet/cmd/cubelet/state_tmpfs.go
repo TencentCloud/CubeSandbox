@@ -4,14 +4,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	stdlog "log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/moby/sys/mountinfo"
+	coremount "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/core/mount"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 )
@@ -51,15 +54,22 @@ func stateTmpfsMount(sizeMB int, remount bool) *mount.Mount {
 }
 
 func mountFreshStateTmpfs(stateDir string, sizeMB int) error {
+	return mountFreshStateTmpfsWithLookup(stateDir, sizeMB, lookupExactMount)
+}
+
+func mountFreshStateTmpfsWithLookup(stateDir string, sizeMB int, lookup func(string) (*mountinfo.Info, error)) error {
 	if err := stateTmpfsMount(sizeMB, false).Mount(stateDir); err != nil {
 		return err
 	}
-	exist, err := mountinfo.Mounted(stateDir)
+	info, err := lookup(stateDir)
 	if err != nil {
 		return fmt.Errorf("verify tmpfs mount %s: %w", stateDir, err)
 	}
-	if !exist {
-		return fmt.Errorf("mount tmpfs:%v fail", stateDir)
+	if info == nil {
+		return fmt.Errorf("verify tmpfs mount %s: no visible mount", stateDir)
+	}
+	if info.FSType != "tmpfs" {
+		return fmt.Errorf("verify tmpfs mount %s: expected tmpfs, got %s", stateDir, info.FSType)
 	}
 	stdlog.Printf("mounted state tmpfs %s size=%dm", stateDir, sizeMB)
 	return nil
@@ -110,14 +120,72 @@ func refuseShrinkStateTmpfs(stateDir string, currentBytes, desiredBytes uint64) 
 }
 
 func lookupExactMount(mountpoint string) (*mountinfo.Info, error) {
-	mounts, err := mountinfo.GetMounts(mountinfo.SingleEntryFilter(mountpoint))
+	// /proc/self/mountinfo contains the resolved path. A configured path such
+	// as /data/cubelet/state may traverse a /data symlink. Comparing the alias
+	// would miss the live tmpfs and cover all running shim state on restart.
+	resolved, err := coremount.CanonicalizePath(mountpoint)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("canonicalize %s: %w", mountpoint, err)
 	}
-	if len(mounts) == 0 {
-		return nil, nil
+	return lookupVisibleExactMount(resolved)
+}
+
+// lookupVisibleExactMount returns nil when the path is only a directory on
+// another mount, including when an ancestor covers an old exact mount.
+func lookupVisibleExactMount(mountpoint string) (*mountinfo.Info, error) {
+	mountID, err := visibleMountID(mountpoint)
+	if err != nil {
+		return nil, fmt.Errorf("resolve visible mount at %s: %w", mountpoint, err)
 	}
-	return mounts[0], nil
+	mounts, err := mountinfo.GetMounts(nil)
+	if err != nil {
+		return nil, fmt.Errorf("read mount table: %w", err)
+	}
+	for _, info := range mounts {
+		if uint64(info.ID) == mountID {
+			if info.Mountpoint != mountpoint {
+				return nil, nil
+			}
+			return info, nil
+		}
+	}
+	return nil, fmt.Errorf("visible mount ID %d at %s is absent from mount table", mountID, mountpoint)
+}
+
+// visibleMountID prefers statx and uses fdinfo on kernels without mount IDs.
+func visibleMountID(path string) (uint64, error) {
+	var st unix.Statx_t
+	statErr := unix.Statx(unix.AT_FDCWD, path, 0, unix.STATX_MNT_ID, &st)
+	if statErr == nil && st.Mask&unix.STATX_MNT_ID != 0 {
+		return st.Mnt_id, nil
+	}
+	id, fdErr := mountIDFromPathFD(path)
+	if fdErr == nil {
+		return id, nil
+	}
+	if statErr == nil {
+		statErr = fmt.Errorf("statx mount ID unavailable")
+	}
+	return 0, errors.Join(fmt.Errorf("statx %s: %w", path, statErr), fmt.Errorf("fdinfo %s: %w", path, fdErr))
+}
+
+func mountIDFromPathFD(path string) (uint64, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer unix.Close(fd)
+	data, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "mnt_id:" {
+			return strconv.ParseUint(fields[1], 10, 64)
+		}
+	}
+	return 0, fmt.Errorf("mount ID missing from fdinfo for %s", path)
 }
 
 // parseTmpfsSizeBytes parses the size= option from mountinfo VFSOptions.

@@ -191,6 +191,16 @@ int32_t cubecow_get_volume_info(
     char** out_json);
 
 /*
+ * Get lightweight volume/snapshot path and size information.
+ * The JSON shape matches cubecow_get_volume_info, but backends may skip
+ * management-only work such as counting snapshots.
+ */
+int32_t cubecow_get_object_info(
+    CubecowEngineHandle engine,
+    const char* name,
+    char** out_json);
+
+/*
  * Get block-level info for a volume.
  */
 int32_t cubecow_get_volume_block_info(

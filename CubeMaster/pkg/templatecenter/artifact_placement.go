@@ -52,6 +52,16 @@ func listArtifactNodePlacementsTx(tx *gorm.DB, artifactID string) ([]models.Arti
 	return rows, err
 }
 
+// listArtifactNodePlacements is listArtifactNodePlacementsTx outside a
+// transaction, for callers that only need the current coverage (the jfs
+// replica-backfill sweep computes its push set from these rows).
+func listArtifactNodePlacements(ctx context.Context, artifactID string) ([]models.ArtifactNodePlacement, error) {
+	if !isReady() {
+		return nil, ErrTemplateStoreNotInitialized
+	}
+	return listArtifactNodePlacementsTx(store.db.WithContext(ctx), artifactID)
+}
+
 // deleteArtifactNodePlacementsTx removes all placement rows for artifactID. It
 // must run in the same transaction (TX2) that deletes the artifact row.
 func deleteArtifactNodePlacementsTx(tx *gorm.DB, artifactID string) error {

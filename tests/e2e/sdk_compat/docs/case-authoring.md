@@ -115,6 +115,7 @@ Capabilities (Cube-only unless noted):
 | `network_l7_egress` | CubeEgress inject / first-match / deny / TLS MITM / SNI·host |
 | `network_mask_request_host` | `mask_request_host` rewrite |
 | `network_template_merge` | Template `allow_out`/`deny_out` merged with create-time network |
+| `network_sandbox_to_sandbox` | Sandbox-to-sandbox access: CubeProxy Host routing, node host-port mapping (hairpin), egress policy on hairpin |
 
 L7 echo / header observation uses the public service **httpbun.com**
 (`SDK_E2E_L7_ECHO_HOST` to override). Mark those cases `requires_internet`.
@@ -137,8 +138,11 @@ pytest --run-e2e --sdk-e2e-trace cases/lifecycle/test_auto_lifecycle.py
 ```
 
 Volume Plugin cases use the `volume` marker and run with `--run-e2e` (default
-driver `s3`). Set `SDK_E2E_VOLUME_PLUGIN=false` to skip. Create the volume
-first, then pass dynamic `volumeMounts` through
+driver `s3`). Set `SDK_E2E_VOLUME_PLUGIN=false` to skip. Otherwise the suite
+probes the selected driver and skips plugin-dependent cases when that driver,
+its config file, or the Volume API is absent. API-only validation may additionally
+use `volume_api_only` to bypass the driver probe. Create the volume first, then
+pass dynamic `volumeMounts` through
 `create_adapter(..., create_options=...)` — do not hard-code a volume ID in
 `sandbox_create_options`. Default install wires the S3 plugin + MinIO:
 https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md

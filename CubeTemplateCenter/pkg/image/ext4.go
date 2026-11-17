@@ -220,7 +220,11 @@ func BuildExt4(ctx context.Context, source *PreparedSource, opts BuildOptions) (
 			if err := checkDiskSpace(ctx, storeDir, estimatedPhase2); err != nil {
 				return BuildResult{}, err
 			}
-			if err := createExt4ImageStreaming(ctx, source, workDir, tmpExt4Path, estimatedPhase2, opts.PostRootfsExport); err != nil {
+			if err := createExt4ImageStreaming(ctx, source, workDir, tmpExt4Path, estimatedPhase2, opts.PostRootfsExport); err != nil && errors.Is(err, ErrPostExportPermanent) {
+				_ = os.RemoveAll(workDir)
+				_ = os.Remove(tmpExt4Path)
+				return BuildResult{}, err
+			} else if err != nil {
 				log.G(ctx).Warnf("loop-mount streaming ext4 build failed, falling back to phase-1: %v", err)
 				_ = os.RemoveAll(workDir)
 				_ = os.Remove(tmpExt4Path)

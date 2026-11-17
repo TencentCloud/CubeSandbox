@@ -8,11 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -305,21 +305,43 @@ func TestReleaseCandidateNumber(t *testing.T) {
 func TestShouldRetryWithLegacy(t *testing.T) {
 	rejected := snapshotCaptureError(
 		fmt.Errorf("update shim: %w", errors.New("unknown update ext action: SnapshotCapture")))
-	require.True(t, shouldRetryWithLegacy(rejected, nil))
+	require.True(t, shouldRetryWithLegacy(rejected, nil, snapshotmode.Full))
 
 	// CommitSandbox wraps the sentinel again when restoring the binding labels
 	// fails; the retry must still see it.
 	wrapped := fmt.Errorf("%w; failed to restore runtime snapshot binding: %v",
 		rejected, errors.New("sync failed"))
-	require.True(t, shouldRetryWithLegacy(wrapped, nil))
+	require.True(t, shouldRetryWithLegacy(wrapped, nil, snapshotmode.Full))
 
 	// The retry must never redo a transaction that already produced an artifact.
 	// runSnapshotWithRootfs makes this unreachable today; the case pins the
 	// invariant so a change to that helper cannot quietly break it.
-	require.False(t, shouldRetryWithLegacy(rejected, errors.New("rootfs committed")))
+	require.False(t, shouldRetryWithLegacy(rejected, errors.New("rootfs committed"), snapshotmode.Full))
 
-	require.False(t, shouldRetryWithLegacy(errors.New("memory capture failed"), nil))
-	require.False(t, shouldRetryWithLegacy(nil, nil))
+	require.False(t, shouldRetryWithLegacy(errors.New("memory capture failed"), nil, snapshotmode.Full))
+	require.False(t, shouldRetryWithLegacy(nil, nil, snapshotmode.Full))
+
+	// The legacy path always captures memory, so it can never stand in for a
+	// filesystem-only capture.
+	require.False(t, shouldRetryWithLegacy(rejected, nil, snapshotmode.FsOnly))
+}
+
+// TestUseCoordinatedSnapshotPath pins that fs-only ignores the recorded pin -- it
+// is decided by the shim -- while full snapshots keep the version boundary.
+func TestUseCoordinatedSnapshotPath(t *testing.T) {
+	legacy := shimSnapshotCapability{Version: "manual-refs-pull-2145-head-f1cd3394613e", Coordinated: false}
+	unknown := shimSnapshotCapability{Version: "", Coordinated: false}
+	coordinated := shimSnapshotCapability{Version: "v0.7.3", Coordinated: true}
+
+	require.True(t, useCoordinatedSnapshotPath(legacy, snapshotmode.FsOnly),
+		"fs-only is decided by the shim, not by the recorded pin")
+	require.True(t, useCoordinatedSnapshotPath(unknown, snapshotmode.FsOnly))
+	require.True(t, useCoordinatedSnapshotPath(coordinated, snapshotmode.FsOnly))
+
+	// Full snapshots keep the version boundary; the legacy path is their fallback.
+	require.False(t, useCoordinatedSnapshotPath(legacy, snapshotmode.Full))
+	require.False(t, useCoordinatedSnapshotPath(unknown, snapshotmode.Full))
+	require.True(t, useCoordinatedSnapshotPath(coordinated, snapshotmode.Full))
 }
 
 func TestRunSnapshotWithRootfs(t *testing.T) {
@@ -385,16 +407,16 @@ func TestCaptureLegacyCommitMemoryAdvancesBaselineOnlyOnSuccess(t *testing.T) {
 	}{
 		{"success", nil, nil, []string{"invalidate", "capture"}, "next"},
 		{"invalidation failure", invalidateFailure, nil, []string{"invalidate"}, "previous"},
-		{"capture or metadata failure", nil, captureFailure, []string{"invalidate", "capture"}, runtimeSnapshotBindingInvalidID},
+		{"capture or metadata failure", nil, captureFailure, []string{"invalidate", "capture"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox"}}
-			setRuntimeSnapshotBindingLabels(cb, "previous", time.Now().UTC())
+			setRuntimeSnapshotBinding(cb, "previous")
 			var calls []string
 			err := captureLegacyCommitMemory(cb, "next", func() error {
 				calls = append(calls, "invalidate")
 				if tc.invalidateErr == nil {
-					setRuntimeSnapshotBindingLabels(cb, runtimeSnapshotBindingInvalidID, time.Now().UTC())
+					cb.ClearRuntimeBase()
 				}
 				return tc.invalidateErr
 			}, func() error {
@@ -532,8 +554,15 @@ func TestCommitSnapshotDestinationRejectsExistingPackage(t *testing.T) {
 			return nil, dbErr
 		})
 	require.ErrorIs(t, err, dbErr)
-	require.NoError(t, checkCommitSnapshotDestination(context.Background(), "xfs", "new",
-		func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error) {
-			return nil, nil
-		}))
+	for _, backend := range []string{"", "xfs", "jfs", "juicefs"} {
+		t.Run("skip_"+backend, func(t *testing.T) {
+			inspected := false
+			require.NoError(t, checkCommitSnapshotDestination(context.Background(), backend, "new",
+				func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error) {
+					inspected = true
+					return nil, nil
+				}))
+			require.False(t, inspected)
+		})
+	}
 }

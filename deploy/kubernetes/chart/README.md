@@ -26,14 +26,33 @@ Official docs (source of truth; do not keep a parallel copy under this chart):
 
 - [Kubernetes Deployment](https://cubesandbox.com/guide/kubernetes/) — overview and install order
 - [Helm Install](https://cubesandbox.com/guide/kubernetes/install) — prerequisites through `helm test`
-- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, four compute DaemonSets, DNS / Proxy / Egress, compute-only mode
+- [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) — component layering, compute DaemonSets, DNS / Proxy / Egress, compute-only mode
 - [Upgrade](https://cubesandbox.com/guide/kubernetes/upgrade) — control plane can roll; compute upgrades recreate the Big Pod
 - [FAQ](https://cubesandbox.com/guide/kubernetes/faq) — common install and runtime issues
 - Chinese: [https://cubesandbox.com/zh/guide/kubernetes/](https://cubesandbox.com/zh/guide/kubernetes/)
 
+## Sandbox observability
+
+Observability is disabled by default. Add
+`--set observability.enabled=true` to the normal Helm install or upgrade to
+deploy the compute-node Collector, Prometheus, Loki, and Grafana. Loki is the
+default and recommended log backend; set
+`observability.logs.backend=elasticsearch` to use Elasticsearch instead.
+
+The compute-node Collector reads Cubelet sandbox CPU/memory/count metrics and
+sandbox `stdout`/`stderr` logs. `observability.logs.components.enabled=true`
+adds a second Collector DaemonSet for allowlisted component containers, mounting
+`/var/log/pods` read-only. Collector and backend Pods carry readiness/liveness
+probes. The chart also generates a random Grafana admin password in a
+release-scoped Secret unless `observability.backend.grafana.existingSecret` is
+set. See `observability` in [values.yaml](values.yaml) for endpoints,
+credentials, persistence, and retention settings. Backend and Collector details
+are documented in the
+[observability guide](../../../docs/guide/observability.md).
+
 ## Architecture
 
-See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, the four compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
+See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) guide for component layering, core and optional compute DaemonSets, DNS/Proxy/Egress flows, and external control plane / compute-only mode.
 
 ## Image responsibilities
 
@@ -52,6 +71,7 @@ See the [Architecture](https://cubesandbox.com/guide/kubernetes/architecture) gu
 | `cube-lifecycle-manager` | Sandbox auto-pause / auto-resume; discovered via Service DNS and Redis. |
 | `cube-egress` / `cube-egress-net` | Transparent outbound proxy + host TPROXY helper (Big Pod sidecars). |
 | `cube-webui` | WebUI static assets and OpenResty. |
+| `cube-observability` | Grafana OSS image plus CubeSandbox dashboards; build with `deploy/kubernetes/images/build-cube-images.sh cube-observability` and set `observability.backend.grafana.image`. |
 
 ## Node selection
 
@@ -155,6 +175,7 @@ can set it to `false`.
 - runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary NIC of the Pod's netns (the host's under `hostNetwork`) and patches Cubelet `eth_name`;
 - `cubeNode.hostNetwork` (default `true`) puts the Big Pod on the host network: the netns is the host's, so sandbox tap devices and cubevs hooks stay across Pod recreation (drain until cubelet-restart survival is live-validated). Trade-offs: NetworkPolicy cannot govern sandbox traffic, and cubelet / egress / s3lvol bind on the host. `cube-node-init` preflights cubelet's ports and, with `cubeS3lvol.enabled`, its listen port (`bootstrap.nodeInit.checkHostPorts`, independent of `cidrSkipConflictCheck`); CubeEgress ports are not in that check. Set `false` for the Pod network: NetworkPolicy then applies, but a Pod recreate breaks networking for every sandbox on the node.
+- `hostPaths.devShm` (default `/dev/shm`) is mounted at cubelet's `/dev/shm`. That host per-boot tmpfs holds network recovery state (`/dev/shm/cubelet/network-runtime/state`), CubeVS policy snapshots, and ivshmem segments. It survives Pod recreation and is cleared on node reboot. Do not point it at `/dev/shm/cube-s3lvol`. The first upgrade that adds this mount recreates the Big Pod while the previous state is still in the old container's private tmpfs — drain before that upgrade.
 - `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk. Under `hostNetwork` this CIDR becomes a host route, so an overlap also affects the node's own traffic — on a cluster whose Service CIDR is `172.16.0.0/16` (e.g. TKE) layer the provider preset, such as `values-tke.yaml`.
 - `cubeNode.network.mtu` patches Cubelet `mvm_mtu`, the MTU the sandbox tap is created with and, via `VIRTIO_NET_F_MTU`, the MTU the guest configures. It must not exceed the MTU of the interface the traffic leaves through: on the host network that interface is the node uplink, so `auto` is normally a no-op; on the Pod network it is the CNI interface, which encapsulates below 1500 (Flannel VXLAN is 1450; Calico's documented IPIP default is 1480). A guest on a 1500 tap emits frames the uplink drops, and it cannot recover on its own, because inbound ICMP fragmentation-needed is not forwarded into it, so connections stall rather than fail. The default `auto` lowers `mvm_mtu` to the detected NIC's MTU and never raises it, so it is a no-op wherever the uplink is already >= the packaged value; set an integer in `1280`..`65535` to pin it, or `0` to keep the packaged Cubelet `config.toml` value.
 - `cubeNode.hostNetworkChangeAck` (default `false`) is read only by the `cube-node-hostnet-preflight` Hook (`pre-install`/`pre-upgrade`/`pre-rollback`): an existing release may change `cubeNode.hostNetwork` — recreating every Big Pod — only with it set. Remove the key once that upgrade has gone through. See the upgrade guide for the `helm rollback` caveat.
@@ -182,7 +203,7 @@ To **turn off PVM on one node**: remove the `allow-pvm-bootstrap` label. Bootstr
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.7.3 ./deploy/kubernetes/images/build-cube-images.sh
+PUSH=1 REGISTRY=cube-sandbox-int.tencentcloudcr.com/cube-sandbox IMAGE_TAG=v0.8.0 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Cube-owned images default to `imagePullPolicy: IfNotPresent`. To pick up a
@@ -231,7 +252,7 @@ postgres:
   database: cube_mvp
 ```
 
-The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
+The chart installs the `cube-redis` StatefulSet only when `redis.enabled=true` and no external host, Sentinel master, or Cluster seeds are configured.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
 CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
 Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
@@ -318,7 +339,7 @@ The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:
 
 ```yaml
-# Optional: pin master / mysql / redis / minio PVCs at once.
+# Optional: pin stateful PVCs (including optional JuiceFS Redis) at once.
 persistence:
   storageClassName: ""   # empty → cluster default SC
 
@@ -477,7 +498,9 @@ The lifecycle manager runs two warm replicas by default. Both replicas consume
 lifecycle events and serve resume callbacks, while a Redis lease elects the
 single replica allowed to run idle sweep/kill and stale-proxy pruning. The
 lease uses single-key Redis transactions and requires no Kubernetes RBAC.
-Production deployments should pair this with Sentinel or managed HA Redis;
+Production deployments should pair this with Sentinel, external native Redis
+Cluster (`redis.clusterNodes`, DB 0), or managed HA Redis. See the
+[Cluster configuration and migration guide](../../../docs/guide/redis-cluster.md);
 the chart's built-in single-replica Redis remains a shared failure point.
 Because Redis replication is asynchronous, a Redis failover does not provide
 strict fencing for an already in-flight leader operation. The new leader
@@ -731,7 +754,7 @@ The script collects Pods, DaemonSets, Deployments, StatefulSets, Services, Endpo
 CubeEgress always runs inside the Cube Node Big Pod:
 
 - `cube-egress` mounts `/etc/cube/ca` and exposes the loopback admin API on `127.0.0.1:9091` by default (`cubeEgress.adminPort` / `CUBE_EGRESS_ADMIN_PORT`);
-- `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-proxy-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
+- `cube-egress-net` waits for the `cube-dev` interface, applies the upstream `CubeEgress/scripts/cube-egress-iptables-init.sh` rules, periodically reapplies them, and removes them on Pod termination;
 - CubeMaster and CubeAPI both mount the same CA Secret at `/etc/cube/ca` so template CA bake and AgentHub/OpenClaw CA injection use the same trust root.
 
 Default CA mode is `selfSigned`; the chart creates and reuses a release-scoped Secret named `<release>-egress-ca` with:
@@ -756,19 +779,26 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 
 ## CubeS3lvol
 
-`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 19 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
+`cubeS3lvol.enabled=false` by default, same as one-click. Enabling it injects a `cube-s3lvol` sidecar into the Cube Node Big Pod and **recreates that Pod** — budget about 2 CPU, 23 GiB RAM, and a 512 GiB sparse WAL per compute node (x86_64 needs AVX2).
 
 When enabled, the sidecar:
 
 - runs in its own `cube-s3lvol` image next to cubelet;
 - shares a Unix socket (`/var/run/s3lvol/s3lvol.sock`) with cubelet over an in-memory emptyDir, and writes cubelet's `[cow.s3] enable = true` + `socket_path` (a socket path alone does not opt in);
-- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths, so a Pod recreate loses nothing;
+- keeps WAL and logs on the existing `data-cubelet` / `data-log` hostPaths and
+  mounts the fixed host path `/dev/shm/cube-s3lvol` at `/dev/shm`,
+  so a Pod recreate on the same node can replay acknowledged writes that have
+  not reached S3;
 - reads S3 config from a chart Secret mounted at `/etc/s3lvol/s3.cfg`; an `existingSecret` must contain that key in s3lvol format (not `volume-s3.conf`);
 - reuses chart MinIO or `volumeS3` endpoint and credentials by default. The bucket is `cube-s3lvol` and must not be the volume plugin's `cube-volumes` (Helm fails on a shared bucket);
 - identifies the node by hashing the full Kubernetes node name (`spec.nodeName`) to `rcow-<8hex>`, so a Pod recreate is not a new machine and IP / dotted node names stay unique. `cubeS3lvol.lvsName` pins the same name on every node — do not set it when more than one node runs the sidecar;
 - uses the last two allowed CPUs by default; set `cubeS3lvol.cpuMask` when cores are isolated.
 - reserves 1024 whole-object RAM-cache slots (1 GiB at the default chunk size)
   per lvstore; set `cubeS3lvol.cacheHotBufs: 0` for disk-only caching.
+- uses the host's memory-backed `/dev/shm` for the default 4 GiB write-back
+  ring. The sidecar refuses to start if that mount is not tmpfs or lacks room.
+  The host path survives Pod recreation but is cleared by a node reboot; writes
+  that have not reached S3 can therefore still be lost on node reboot.
 
 ```yaml
 cubeS3lvol:
@@ -852,3 +882,28 @@ Prepare a separate host-kernel rollback runbook for production.
 - external DNS or load balancer records.
 
 Clean those items using the platform runbook for the target environment.
+
+### Operator-managed network allowlist
+
+`cubeNode.operatorAllowOut` is an administrator-owned list of IPv4 CIDRs.
+It defaults to `[]`, preserving existing sandbox policy behavior. For example:
+
+```yaml
+cubeNode:
+  operatorAllowOut:
+    - 10.204.0.10/32 # replace with your managed resolver address
+```
+
+The chart writes `common.operator_allow_out` through
+`CUBE_SANDBOX_OPERATOR_ALLOW_OUT`. Restart Cubelet after changing the list.
+Every CubeVS policy installation (create, update, and recovery) layers this
+list onto the sandbox-authored allow_out. Sandbox callers cannot change the
+operator list; replacing or clearing their policy does not remove platform grants.
+Platform grants are not persisted as caller policy, so removing a grant and
+restarting Cubelet does not resurrect it from sandbox state.
+
+This is a general network allowance, independent of guest DNS configuration.
+It admits all ports to the selected CIDRs; it is not a DNS-port-only exception.
+No resolver or Kubernetes Service CIDR is automatically included. Configure
+only the exact resolver /32 when that is the access required. Existing CubeVS
+allow/deny precedence and domain/L7 resolver admission remain unchanged.

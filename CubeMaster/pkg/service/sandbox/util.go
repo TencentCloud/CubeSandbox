@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeboximages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -282,6 +283,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 
 	out := &cubebox.RunCubeSandboxRequest{
 		RequestID:         req.RequestID,
+		SnapshotMode:      snapshotmode.Normalize(req.SnapshotMode).String(),
 		Labels:            stripUserCubeMasterLabels(req.Labels),
 		InstanceType:      req.InstanceType,
 		NetworkType:       req.NetworkType,
@@ -1028,6 +1030,8 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 		out.Annotations[constants.CubeAnnotationsVIPs] = v
 	}
 
+	// Seed the legacy instance-type defaults. Template-managed annotations on
+	// the request overwrite these values in the copy loop below.
 	out.Annotations[constants.CubeAnnotationsBlkQos] = getBlkQosAnnotation(req)
 	out.Annotations[constants.CubeAnnotationsFSQos] = getFsQosAnnotation(req)
 	for k, v := range req.Annotations {

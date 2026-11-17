@@ -34,6 +34,9 @@ const (
 	// pause snapshot" (see pausesnap.Begin). Only the latter is a no-op.
 	RetCodeMasterParamsError = 130400
 
+	// RetCodeNotFound is returned when CubeMaster cannot find the sandbox ID.
+	RetCodeNotFound = 130404
+
 	// RetCodeInvalidParamFormat is reused by CubeMaster's pause/resume path
 	// for "sandbox does not exist" — the meta lookup misses, surfaced as
 	// ret_msg "key not found". Treat as a hard NotFound for the caller.
@@ -74,9 +77,9 @@ func (e *APIError) Error() string {
 
 // IsNotFound reports whether the master replied with the "sandbox does not
 // exist" ret_code. CLM uses this to evict stale registry entries instead
-// of retrying a doomed pause/resume forever.
+// of retrying a doomed pause/resume/kill forever.
 func (e *APIError) IsNotFound() bool {
-	return e != nil && e.RetCode == RetCodeInvalidParamFormat
+	return e != nil && (e.RetCode == RetCodeNotFound || e.RetCode == RetCodeInvalidParamFormat)
 }
 
 // alreadyHasPauseSnapshotMarker is the pausesnap.Begin message CubeMaster

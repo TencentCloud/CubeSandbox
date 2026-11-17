@@ -7,6 +7,7 @@ package ext4image
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -102,6 +103,8 @@ func BenchmarkSparseCopy(b *testing.B) {
 		{name: "dense", payload: dense},
 		{name: "mixed", payload: mixed},
 		{name: "zeros", payload: make([]byte, size)},
+		// Binaries and filesystem metadata contain frequent short zero runs.
+		{name: "elf-like", payload: elfLikePayload(size)},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			f, err := os.CreateTemp(b.TempDir(), "sparse-bench")
@@ -109,6 +112,7 @@ func BenchmarkSparseCopy(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer f.Close()
+			dst := &countingSparseFile{File: f}
 			hasher := sha256.New()
 			b.SetBytes(int64(len(tc.payload)))
 			b.ReportAllocs()
@@ -121,10 +125,11 @@ func BenchmarkSparseCopy(b *testing.B) {
 					b.Fatal(err)
 				}
 				hasher.Reset()
-				if _, err := sparseCopy(f, hasher, bytes.NewReader(tc.payload), 1024*1024); err != nil {
+				if _, err := sparseCopy(dst, hasher, bytes.NewReader(tc.payload), 1024*1024); err != nil {
 					b.Fatal(err)
 				}
 			}
+			b.ReportMetric(float64(dst.writes)/float64(b.N), "writes/op")
 		})
 	}
 }
@@ -174,7 +179,27 @@ func TestSparseCopyPropagatesUnexpectedEOF(t *testing.T) {
 	}
 }
 
-func assertSparseCopy(t *testing.T, fullPayload []byte, src io.Reader) {
+func assertSparseCopy(t *testing.T, fullPayload []byte, src io.Reader) *countingSparseFile {
+	t.Helper()
+	dst := copyAndVerify(t, fullPayload, src)
+	st, err := dst.Stat()
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	stat, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("unexpected stat type %T", st.Sys())
+	}
+	allocatedBytes := stat.Blocks * 512
+	if allocatedBytes >= st.Size() {
+		t.Fatalf("file is not sparse: allocated %d bytes for apparent size %d", allocatedBytes, st.Size())
+	}
+	return dst
+}
+
+// copyAndVerify runs sparseCopy into a temporary file and checks the returned
+// length, hash, apparent size and content. It does not require any holes.
+func copyAndVerify(t *testing.T, fullPayload []byte, src io.Reader) *countingSparseFile {
 	t.Helper()
 	expectedHasher := sha256.New()
 	expectedHasher.Write(fullPayload)
@@ -187,10 +212,11 @@ func assertSparseCopy(t *testing.T, fullPayload []byte, src io.Reader) {
 	if err != nil {
 		t.Fatalf("os.Create failed: %v", err)
 	}
-	defer f.Close()
+	t.Cleanup(func() { f.Close() })
+	dst := &countingSparseFile{File: f}
 
 	hasher := sha256.New()
-	n, err := sparseCopy(f, hasher, src, 1024*1024)
+	n, err := sparseCopy(dst, hasher, src, 1024*1024)
 	if err != nil {
 		t.Fatalf("sparseCopy failed: %v", err)
 	}
@@ -214,14 +240,6 @@ func assertSparseCopy(t *testing.T, fullPayload []byte, src io.Reader) {
 	if st.Size() != int64(len(fullPayload)) {
 		t.Fatalf("file apparent size %d != expected %d", st.Size(), len(fullPayload))
 	}
-	stat, ok := st.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("unexpected stat type %T", st.Sys())
-	}
-	allocatedBytes := stat.Blocks * 512
-	if allocatedBytes >= st.Size() {
-		t.Fatalf("file is not sparse: allocated %d bytes for apparent size %d", allocatedBytes, st.Size())
-	}
 
 	// Verify content read-back
 	readBack, err := os.ReadFile(targetPath)
@@ -230,5 +248,127 @@ func assertSparseCopy(t *testing.T, fullPayload []byte, src io.Reader) {
 	}
 	if !bytes.Equal(readBack, fullPayload) {
 		t.Fatalf("read back content does not match original payload")
+	}
+	return dst
+}
+
+// countingSparseFile counts the write and seek calls sparseCopy makes on the
+// underlying file. Each one is a syscall on *os.File.
+type countingSparseFile struct {
+	*os.File
+	writes int
+	seeks  int
+}
+
+func (f *countingSparseFile) Write(p []byte) (int, error) {
+	f.writes++
+	return f.File.Write(p)
+}
+
+func (f *countingSparseFile) Seek(offset int64, whence int) (int64, error) {
+	f.seeks++
+	return f.File.Seek(offset, whence)
+}
+
+// elfLikePayload returns deterministic data resembling executable code and
+// ext4 metadata: small little-endian integers and pointers interleaved with
+// opcode-like bytes, so short zero runs occur every few bytes.
+func elfLikePayload(size int) []byte {
+	out := make([]byte, size)
+	x := uint32(2463534242)
+	for i := 0; i+16 <= size; i += 16 {
+		binary.LittleEndian.PutUint32(out[i:], uint32(i/16)%4096)
+		binary.LittleEndian.PutUint64(out[i+4:], 0x400000+uint64(i))
+		for j := 12; j < 16; j++ {
+			x ^= x << 13
+			x ^= x >> 17
+			x ^= x << 5
+			out[i+j] = byte(x)
+		}
+	}
+	return out
+}
+
+func TestSparseCopyCoalescesShortZeroRuns(t *testing.T) {
+	const bufSize = 1024 * 1024
+	elf := elfLikePayload(4 * bufSize)
+	short := elf[:bufSize/2+5]
+
+	t.Run("dense", func(t *testing.T) {
+		dst := copyAndVerify(t, elf, bytes.NewReader(elf))
+		// One write per full buffer. Writing each non-zero run separately
+		// would issue hundreds of thousands of writes for this payload.
+		if want := len(elf) / bufSize; dst.writes > want {
+			t.Fatalf("writes = %d, want at most %d", dst.writes, want)
+		}
+		if dst.seeks != 0 {
+			t.Fatalf("seeks = %d, want 0", dst.seeks)
+		}
+	})
+	t.Run("dense with short reads", func(t *testing.T) {
+		src := &sparseTestReader{data: elf, chunkSize: 32*1024 + 7, finalErr: io.EOF}
+		dst := copyAndVerify(t, elf, src)
+		if want := len(elf)/bufSize + 1; dst.writes > want {
+			t.Fatalf("writes = %d, want at most %d", dst.writes, want)
+		}
+	})
+	t.Run("holes still punched", func(t *testing.T) {
+		payload := append(bytes.Clone(short), make([]byte, 2*bufSize)...)
+		payload = append(payload, short...)
+		payload = append(payload, make([]byte, sparseHoleThreshold)...)
+		payload = append(payload, short...)
+		dst := assertSparseCopy(t, payload, bytes.NewReader(payload))
+		if dst.seeks != 2 {
+			t.Fatalf("seeks = %d, want 2", dst.seeks)
+		}
+		// Each data segment fits in one buffer and is flushed before a seek
+		// or at the end.
+		if dst.writes != 3 {
+			t.Fatalf("writes = %d, want 3", dst.writes)
+		}
+	})
+}
+
+func TestSparseCopyEdgeCases(t *testing.T) {
+	data := bytes.Repeat([]byte{0x7f, 'E', 'L', 'F'}, 1024)
+	withZeros := func(n int64) []byte {
+		payload := append(bytes.Clone(data), make([]byte, n)...)
+		return append(payload, data...)
+	}
+	for _, tc := range []struct {
+		name      string
+		payload   []byte
+		chunkSize int // 0 reads through bytes.Reader
+		wantSeeks int
+	}{
+		{name: "empty", payload: []byte{}},
+		{name: "all zeros", payload: make([]byte, 3*sparseHoleThreshold+11), wantSeeks: 1},
+		{name: "zero run below threshold", payload: withZeros(sparseHoleThreshold - 1)},
+		{name: "zero run at threshold", payload: withZeros(sparseHoleThreshold), wantSeeks: 1},
+		{name: "zero run above threshold", payload: withZeros(sparseHoleThreshold + 1), wantSeeks: 1},
+		{name: "trailing zeros below threshold", payload: append(bytes.Clone(data), make([]byte, sparseHoleThreshold-1)...)},
+		{name: "trailing zeros at threshold", payload: append(bytes.Clone(data), make([]byte, sparseHoleThreshold)...), wantSeeks: 1},
+		{
+			name:      "zero run below threshold across short reads",
+			payload:   withZeros(sparseHoleThreshold - 1),
+			chunkSize: 4096 + 3,
+		},
+		{
+			name:      "zero run at threshold across short reads",
+			payload:   withZeros(sparseHoleThreshold),
+			chunkSize: 4096 + 3,
+			wantSeeks: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var src io.Reader = bytes.NewReader(tc.payload)
+			if tc.chunkSize > 0 {
+				src = &sparseTestReader{data: tc.payload, chunkSize: tc.chunkSize, finalErr: io.EOF}
+			}
+			dst := copyAndVerify(t, tc.payload, src)
+			if dst.seeks != tc.wantSeeks {
+				t.Fatalf("seeks = %d, want %d", dst.seeks, tc.wantSeeks)
+			}
+		})
 	}
 }

@@ -140,6 +140,28 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 
 For more end-to-end examples, see [Examples](./tutorials/examples.md).
 
+## Uninstall
+
+The one-click installation includes a complete uninstall script. It stops and removes CubeSandbox services, containers, volumes, network configuration, runtime data, and logs. Existing templates, sandboxes, and snapshots are also deleted, so back up anything you need first.
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+```
+
+After uninstalling, check the host for remaining CubeSandbox resources:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+Once the check passes and you no longer need the uninstall script or installed bundle, remove the preserved toolbox directory manually:
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> The uninstall script does not delete Cube-related Docker images. To remove them as well, follow the command printed by the script.
+
 ## Next Steps
 
 - [Create Templates from OCI Image](./tutorials/template-from-image.md) — Customize sandbox environments

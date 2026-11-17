@@ -258,11 +258,18 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	if err != nil {
 		return nil, err
 	}
+	definition, err := GetDefinition(ctx, normalized.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureRedoTemplateNotInUse(ctx, normalized.TemplateID, definition.InstanceType); err != nil {
+		return nil, err
+	}
 	jobID := uuid.NewString()
 	var redoJob *models.TemplateImageJob
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			def, err := lockTemplateDefinitionTx(tx, normalized.TemplateID)
+			definition, err := lockTemplateDefinitionTx(tx, normalized.TemplateID)
 			if err != nil {
 				return err
 			}
@@ -271,7 +278,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 			// definition is published FAILED, which would turn a working READY
 			// template into FAILED (and FAILED skips the in-use check on
 			// delete). Only failed-node redos are allowed on a READY template.
-			if strings.EqualFold(def.Status, StatusReady) && !normalized.FailedOnly {
+			if strings.EqualFold(definition.Status, StatusReady) && !normalized.FailedOnly {
 				return fmt.Errorf("%w: template %s is READY; use --failed-only or build a new template id",
 					ErrTemplateNotReady, normalized.TemplateID)
 			}
@@ -304,6 +311,9 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 				return fmt.Errorf("decode latest template image request fail: %w", err)
 			}
 			sourceReq.TemplateID = normalized.TemplateID
+			if strings.TrimSpace(sourceReq.Backend) == "" {
+				sourceReq.Backend = definition.StorageBackend
+			}
 			if !isCreateRedoJobOperation(sourceJob.Operation) {
 				sourceReq.Alias = ""
 			}
@@ -316,6 +326,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 				return err
 			}
 			targetScope := distributionScopeFromTargets(targetNodes)
+			sourceReq.DistributionScope = append([]string(nil), targetScope...)
 			attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
 			requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
 			if err != nil {

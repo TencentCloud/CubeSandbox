@@ -20,11 +20,13 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 // Max concurrent derivations per fork request, capping the template-resolve
@@ -44,6 +46,7 @@ const (
 var (
 	forkDealCubeboxCreateReqWithTemplateFn = dealCubeboxCreateReqWithTemplate
 	forkCreateSandboxRunFn                 = sandbox.CreateSandbox
+	resolveSourceAliasFn                   = resolveSourceSandboxAlias
 )
 
 func extendForkWriteDeadline(w http.ResponseWriter) {
@@ -71,6 +74,8 @@ func forkSandboxFromSnapshot(
 	count int,
 	timeout *int,
 	envVars map[string]string,
+	alias string,
+	mode snapshotmode.Mode,
 ) []*forkSandboxResult {
 	results := make([]*forkSandboxResult, count)
 	var wg sync.WaitGroup
@@ -96,7 +101,7 @@ func forkSandboxFromSnapshot(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			subCtx := withTemplateResolveResult(ctx, &templateResolveResult{})
-			sb, ret := singleForkDerive(subCtx, fmt.Sprintf("%s-%d", requestID, idx), snapshotID, timeout, envVars)
+			sb, ret := singleForkDerive(subCtx, fmt.Sprintf("%s-%d", requestID, idx), snapshotID, timeout, envVars, alias, mode)
 			results[idx] = &forkSandboxResult{Sandbox: sb, Ret: ret}
 		}(i)
 	}
@@ -112,21 +117,27 @@ func singleForkDerive(
 	snapshotID string,
 	timeout *int,
 	envVars map[string]string,
+	alias string,
+	mode snapshotmode.Mode,
 ) (*types.CreateCubeSandboxRes, *types.Ret) {
-	req, err := buildForkCreateReq(requestID, snapshotID, timeout, envVars)
+	req, err := buildForkCreateReq(requestID, snapshotID, timeout, envVars, alias, mode)
 	if err != nil {
 		return nil, forkRet(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
 
 	if err := forkDealCubeboxCreateReqWithTemplateFn(subCtx, req); err != nil {
-		return nil, forkRet(errorcode.ErrorCode_MasterParamsError, err.Error())
+		return nil, forkRet(errorcode.ErrorCode(snapshotErrorCode(err)), err.Error())
 	}
 	// Mirror create: seed node affinity into the per-derivation ctx.
 	subCtx, err = runInsReq2Affinity(subCtx, req)
 	if err != nil {
 		return nil, forkRet(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
+	if err := reserveCreatedSandboxRuntimeRef(subCtx, req); err != nil {
+		return nil, forkRet(errorcode.ErrorCode(snapshotErrorCode(err)), err.Error())
+	}
 	ret := forkCreateSandboxRunFn(subCtx, req)
+	releaseUndispatchedSnapshotCreate(subCtx, req, ret)
 	if ret == nil {
 		return nil, forkRet(errorcode.ErrorCode_MasterInternalError, "create returned nil")
 	}
@@ -152,15 +163,22 @@ func buildForkCreateReq(
 	snapshotID string,
 	timeout *int,
 	envVars map[string]string,
+	alias string,
+	mode snapshotmode.Mode,
 ) (*types.CreateCubeSandboxReq, error) {
 	// Mark as v2 snapshot create to route via template-center, matching
 	// snapshot_ops.go's from-snapshot spawn (avoids the local-config path).
+	annotations := map[string]string{
+		constants.CubeAnnotationAppSnapshotTemplateID: snapshotID,
+		constants.CubeAnnotationAppSnapshotVersion:    templatecenter.DefaultTemplateVersion,
+	}
+	// Inherit the source alias so fork reads match the fork response.
+	if alias := strings.TrimSpace(alias); alias != "" {
+		annotations[constants.CubeAnnotationAppSnapshotTemplateAlias] = alias
+	}
 	payload := map[string]any{
-		"requestID": requestID,
-		"annotations": map[string]string{
-			constants.CubeAnnotationAppSnapshotTemplateID: snapshotID,
-			constants.CubeAnnotationAppSnapshotVersion:    templatecenter.DefaultTemplateVersion,
-		},
+		"requestID":   requestID,
+		"annotations": annotations,
 	}
 	if len(envVars) > 0 {
 		payload["create_time_env_vars"] = envVars
@@ -179,7 +197,13 @@ func buildForkCreateReq(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set(constants.Caller, "fork")
-	return constructCreateReq(httpReq)
+	req, err := constructCreateReq(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	// Master-set from the record this fork just created.
+	req.SnapshotMode = mode.String()
+	return req, nil
 }
 
 // registerForkRuntimeRef registers a derived sandbox's runtime ref against the
@@ -202,10 +226,11 @@ func forkRet(code errorcode.ErrorCode, msg string) *types.Ret {
 // into N copies: CubeMaster snapshots the source once, then derives N sandboxes
 // from that snapshot.
 type forkSandboxFromSourceRequest struct {
-	RequestID       string `json:"requestID,omitempty"`
-	LegacyRequestID string `json:"request_id,omitempty"`
-	Count           int    `json:"count,omitempty"`
-	Timeout         *int   `json:"timeout,omitempty"`
+	RequestID       string  `json:"requestID,omitempty"`
+	LegacyRequestID string  `json:"request_id,omitempty"`
+	Count           int     `json:"count,omitempty"`
+	Timeout         *int    `json:"timeout,omitempty"`
+	Mode            *string `json:"mode,omitempty"`
 }
 
 func handleForkSandboxFromSandboxAction(c *gin.Context) {
@@ -234,6 +259,21 @@ func handleForkSandboxFromSandboxAction(c *gin.Context) {
 		})
 		return
 	}
+	mode := snapshotmode.Full
+	if req.Mode != nil {
+		parsed, err := snapshotmode.Parse(*req.Mode)
+		if err != nil {
+			rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+			common.WriteAPI(c, &forkSandboxResponse{
+				Res: &types.Res{RequestID: requestID, Ret: &types.Ret{
+					RetCode: int(errorcode.ErrorCode_MasterParamsError),
+					RetMsg:  snapshotmode.ErrSnapshotModeInvalid + ": " + err.Error(),
+				}},
+			})
+			return
+		}
+		mode = parsed
+	}
 	count := req.Count
 	if count < 1 || count > 100 {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
@@ -257,7 +297,7 @@ func handleForkSandboxFromSandboxAction(c *gin.Context) {
 			Ret:       &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: "success"},
 		},
 	}
-	if err := forkSandboxFromSource(ctx, requestID, sandboxID, count, req.Timeout, resp); err != nil {
+	if err := forkSandboxFromSource(ctx, requestID, sandboxID, count, req.Timeout, mode, resp); err != nil {
 		code := snapshotErrorCode(err)
 		resp.Res.Ret = &types.Ret{RetCode: int(code), RetMsg: err.Error()}
 		resp.Results = nil
@@ -278,13 +318,15 @@ func forkSandboxFromSource(
 	sandboxID string,
 	count int,
 	timeout *int,
+	mode snapshotmode.Mode,
 	resp *forkSandboxResponse,
 ) error {
 	hostID, hostIP, err := resolveSnapshotHostFn(ctx, requestID, sandboxID)
 	if err != nil {
 		return err
 	}
-	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "")
+	alias := resolveSourceAliasFn(ctx, sandboxID)
+	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "", mode, 0)
 	if err != nil {
 		return err
 	}
@@ -295,7 +337,7 @@ func forkSandboxFromSource(
 
 	// Replay source env vars from the snapshot spec (template merge omits them).
 	envVars := inheritedForkEnvVars(ctx, snapshotID)
-	resp.Results = forkSandboxFromSnapshot(ctx, requestID, snapshotID, count, timeout, envVars)
+	resp.Results = forkSandboxFromSnapshot(ctx, requestID, snapshotID, count, timeout, envVars, alias, mode)
 
 	// Reclaim off the response path: a synchronous delete could push the
 	// response past its write deadline.
@@ -314,6 +356,16 @@ func forkSandboxFromSource(
 		}
 	}()
 	return nil
+}
+
+// resolveSourceSandboxAlias returns the source sandbox's template alias from
+// its persisted create spec; empty when absent or unreadable.
+func resolveSourceSandboxAlias(ctx context.Context, sandboxID string) string {
+	spec, err := sandboxspec.Get(ctx, sandboxID)
+	if err != nil || spec == nil {
+		return ""
+	}
+	return strings.TrimSpace(spec.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias])
 }
 
 // inheritedForkEnvVars returns the source sandbox env vars stored in the

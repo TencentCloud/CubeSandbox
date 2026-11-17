@@ -16,7 +16,7 @@ TCP_TARGET_IP = os.environ.get("SDK_E2E_TCP_TARGET_IP", "8.8.8.8")
 TCP_TARGET_PORT = int(os.environ.get("SDK_E2E_TCP_TARGET_PORT", "53"))
 ALTERNATE_TCP_TARGET_IP = os.environ.get(
     "SDK_E2E_ALTERNATE_TCP_TARGET_IP",
-    "1.1.1.1",
+    "8.8.4.4",
 )
 PUBLIC_ACCESS_PORT = int(os.environ.get("SDK_E2E_PUBLIC_ACCESS_PORT", "49983"))
 PUBLIC_ACCESS_PATH = os.environ.get("SDK_E2E_PUBLIC_ACCESS_PATH", "/health")

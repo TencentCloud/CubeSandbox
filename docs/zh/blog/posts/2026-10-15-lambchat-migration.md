@@ -3,8 +3,7 @@ title: "换一个沙箱后端，要改多少代码？Agent 平台沙箱迁移的
 date: 2026-10-15
 author: Clivia（LambChat 作者）
 description: "LambChat 是一个集成 Skills 能力、支持多租户的 Agent 系统，沙箱层同时支持 E2B、CubeSandbox、Daytona 三种后端。本文记录了这个项目在选择 CubeSandbox 时的真实踩坑：用户级持久绑定、四级查找链、Resume 后 504、bash -lc 登录 shell 环境问题。"
-featured: true
-weight: 2
+featured: false
 ---
 
 # 换一个沙箱后端，要改多少代码？Agent 平台沙箱迁移的选型与实录

@@ -2,30 +2,26 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-#  Snapshotting an imported volume whose decouple is *running* must cancel that
-#  decouple and succeed.
+#  Snapshotting an imported volume must not disturb the hidden template's
+#  decouple.
 #
-#  The companion of run_decouple_queue_test.sh, which covers the queued case.
-#  This one covers the common one: s3lvol_lvol_decouple() starts immediately
-#  unless another decouple is in the way, so an ordinary "import, then snapshot"
-#  meets a decouple that is already materialising -- and trips the
-#  action_in_progress branch of derive_check rather than the decouple_pending one.
-#  Both had to give way; a queue only exercises one of them.
+#  An import with decouple:true materialises __rcow_tpl_<uuid>, not the user
+#  volume. The user volume is a clone of that template, so snapshotting it does
+#  not move the esnap and does not cancel the copy. The old hazard -- snapshot
+#  steals the external parent, then the decouple fails to detach -- does not
+#  arise on this path.
 #
 #  What must hold afterwards:
-#    - the snapshot exists, and the reply says decouple_cancelled
-#    - the decouple stopped part-way and said so, without the detach failure of
-#      docs/import-reference-snapshot-design.md 9.2
-#    - clusters materialised before the cancellation are kept, and they belong to
-#      the snapshot (a volume hands its clusters over when snapshotted)
-#    - the snapshot reads the source's bytes, and so does the volume
-#    - the volume can no longer be decoupled: the snapshot holds the parent now
+#    - the snapshot exists, and the reply does not say decouple_cancelled
+#    - the template decouple runs to completion, with no detach failure
+#    - the snapshot and the volume both read the source's bytes in this process
+#    - a further decouple is refused: the template is no longer an esnap
 #
 #  Scenario:
 #    src: a volume written full -> snapshot -> export  (a slow decouple, so the
-#         cancellation lands in the middle of one rather than after it)
-#    dst: import it with decouple:true, assert the decouple is actually running
-#    dst: snapshot the import -> must cancel and succeed
+#         snapshot lands while the copy is still running)
+#    dst: import it with decouple:true, assert the template is materialising
+#    dst: snapshot the import -> must succeed without cancelling that copy
 #
 #  Usage:
 #    sudo -E ./test/dataplane/run_snapshot_cancel_test.sh -e <endpoint> -b <bucket> [-r <region>]
@@ -463,105 +459,95 @@ if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","l
 	exit 1
 fi
 
-# It must be *running*, not queued -- that is the branch this test exists for.
-# decouple_start() is called before the import replies, so this should already
-# hold; asserted rather than assumed, because a queued one would quietly turn this
-# into a duplicate of run_decouple_queue_test.sh.
-if ! grep -qE "Decoupling lvol '${BIG_IMP}'" "${TGT_LOG}"; then
-	fail "${BIG_IMP} is not materialising -- this test needs a running decouple"
+# The copy is on the hidden template, not on the user volume. decouple_start()
+# runs before the import replies.
+TPL="__rcow_tpl_${BIG_EXP_UUID}"
+# import_start_shared_decouple() names the template itself, so the log is
+# "Decoupling lvol '__rcow_tpl_...'" and not the user-lvol redirect line.
+if ! grep -aqF "Decoupling lvol '${TPL}'" "${TGT_LOG}"; then
+	fail "${TPL} is not materialising -- this test needs a running decouple"
 	exit 1
 fi
-pass "${BIG_IMP} imported, decouple running"
+pass "imported ${BIG_IMP}; decouple is running on ${TPL}"
 
-# Let it get somewhere, so the cancellation has clusters to keep.
+# Land the snapshot while that copy is still in progress.
 sleep 5
 
 # ==========================================================================
-echo "[5] snapshot the importing volume; that cancels its decouple"
+echo "[5] snapshot the user volume; that must not cancel the template"
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
 	"${BIG_IMP}" "${BIG_IMP_SNAP}")" \
 	>"${WORKDIR}/snap.json" 2>"${WORKDIR}/snap.err"
 SNAP_RC=$?
 if [ "${SNAP_RC}" -eq 0 ]; then
-	pass "snapshot succeeded while a decouple was running (rc=0)"
+	pass "snapshot succeeded while the template decouple was running (rc=0)"
 else
 	fail "snapshot refused (rc=${SNAP_RC})"
 	sed 's/^/    /' "${WORKDIR}/snap.err" 2>/dev/null | tail -5
 fi
 
 if grep -q 'decouple_cancelled' "${WORKDIR}/snap.json" 2>/dev/null; then
-	pass "reply confirms the decouple was cancelled"
-else
-	fail "reply did not report decouple_cancelled"
+	fail "snapshot reported decouple_cancelled; the template copy must keep going"
 	tr -d '\n' < "${WORKDIR}/snap.json" 2>/dev/null | head -c 200 | sed 's/^/    /'
+else
+	pass "snapshot did not cancel the template decouple"
 fi
 
-if grep -qE "Cancelling the decouple of lvol '${BIG_IMP}'" "${TGT_LOG}"; then
-	pass "snapshot cancelled ${BIG_IMP}'s decouple"
+if grep -qE "Cancelling the decouple of lvol '${TPL}'" "${TGT_LOG}"; then
+	fail "snapshot cancelled the template decouple"
 else
-	fail "snapshot did not cancel ${BIG_IMP}'s decouple"
+	pass "the template decouple was not cancelled"
 fi
 
 # ==========================================================================
-echo "[6] the cancelled decouple must stop without a detach failure"
+echo "[6] the template decouple finishes without a detach failure"
 if wait_for_decouple; then
-	pass "cancelled decouple finished"
+	pass "template decouple finished"
 else
-	fail "decouple still running after the cancellation"
+	fail "template decouple still running"
 fi
 
-if grep -qE "Decoupling lvol '${BIG_IMP}' from export .* was cancelled after" "${TGT_LOG}"; then
-	pass "decouple reported itself cancelled"
+if grep -qF "'${TPL}' no longer reads export" "${TGT_LOG}"; then
+	pass "template reports it no longer reads the export"
 else
-	fail "decouple did not report the cancellation"
+	fail "no 'no longer reads export' line for ${TPL}"
 fi
 
-# The regression this whole family of tests is about.
+if grep -qE "Decoupling lvol '${TPL}' from export .* was cancelled after" "${TGT_LOG}"; then
+	fail "template decouple reported itself cancelled"
+else
+	pass "template decouple was not cancelled"
+fi
+
 if grep -qE 'blob is not a clone of an external snapshot' "${TGT_LOG}"; then
-	fail "detach failure present -- cancelling did not prevent the 9.2 hazard"
+	fail "detach failure present"
 else
 	pass "no detach failure"
 fi
 
-# The old failure message must not be reused for a cancellation: it says the
-# volume can be decoupled again, which is exactly what [8] shows to be false.
-if grep -qE "Decoupling lvol '${BIG_IMP}'.*can be decoupled again" "${TGT_LOG}"; then
-	fail "cancellation logged with the misleading 'can be decoupled again' message"
+# ==========================================================================
+echo "[7] the snapshot exists, and the template stays hidden"
+if raw_rpc rcow_get_lvol "$(printf '{"lvol_name":"%s"}' "${BIG_IMP_SNAP}")" \
+	>/dev/null 2>"${WORKDIR}/get_snap.err"; then
+	pass "snapshot ${BIG_IMP_SNAP} is visible"
 else
-	pass "cancellation did not claim the volume can be decoupled again"
+	fail "snapshot ${BIG_IMP_SNAP} is not visible"
+	sed 's/^/    /' "${WORKDIR}/get_snap.err" 2>/dev/null | tail -3
+fi
+if raw_rpc rcow_get_lvol "$(printf '{"lvol_name":"%s"}' "${TPL}")" \
+	>/dev/null 2>"${WORKDIR}/get_tpl.err"; then
+	fail "hidden template ${TPL} was listed"
+else
+	pass "hidden template is not visible"
 fi
 
 # ==========================================================================
-echo "[7] clusters copied before the cancellation are kept, and belong to the snapshot"
-raw_rpc rcow_get_lvstores "" >"${WORKDIR}/lvs.json" 2>/dev/null || true
-SNAP_ALLOC="$(python3 -c "
-import json, sys
-try:
-    rows = json.load(open(sys.argv[1]))
-except Exception:
-    print(-1); raise SystemExit
-for lvs in (rows if isinstance(rows, list) else rows.get('lvstores', [])):
-    for l in lvs.get('lvols', []):
-        if l.get('name') == sys.argv[2]:
-            print(l.get('allocated_clusters', -1)); raise SystemExit
-print(-1)
-" "${WORKDIR}/lvs.json" "${BIG_IMP_SNAP}" 2>/dev/null || echo -1)"
-# Zero is a legal answer: the snapshot can land before the first cluster is
-# copied, and then it simply keeps reading the export. What is not legal is a
-# missing snapshot, or clusters that the listing cannot account for.
-if [ "${SNAP_ALLOC}" -ge 0 ] 2>/dev/null; then
-	pass "snapshot holds the ${SNAP_ALLOC} cluster(s) copied before the cancellation"
-else
-	fail "could not read how many clusters the snapshot kept (got '${SNAP_ALLOC}')"
-fi
-
-# ==========================================================================
-echo "[8] the volume can no longer be decoupled: its snapshot holds the parent"
+echo "[8] a further decouple is refused: the template is no longer an esnap"
 if raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${BIG_IMP}")" \
 	>/dev/null 2>"${WORKDIR}/redecouple.err"; then
-	fail "${BIG_IMP} accepted a decouple after being snapshotted"
+	fail "${BIG_IMP} accepted another decouple after the template finished"
 else
-	pass "${BIG_IMP} refuses a further decouple (it reads its snapshot, not the export)"
+	pass "${BIG_IMP} refuses a further decouple"
 fi
 
 # ==========================================================================

@@ -76,4 +76,4 @@ OCI 镜像是制作模板的一种输入，而不是可直接启动的 CubeSandb
 
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 完整的 CLI 指南，包括探针配置、进度监控和故障排查。
 - [将运行中的沙箱提交为模板](./tutorials/template-from-sandbox.md) — 固化沙箱当前环境，并按需覆盖创建请求。
-- [模板检查与请求预览](./template-inspection-and-preview.md) — 查看模板状态并预览最终生效的请求。
+- [环境变量](./environment-variables.md) — 区分模板、Sandbox 与单次执行的环境变量作用域和覆盖规则。

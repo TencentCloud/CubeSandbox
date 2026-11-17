@@ -233,17 +233,24 @@ json_buf_append(void *cb_ctx, const void *data, size_t size)
 }
 
 static int
-active_flush(void)
+active_flush_excluding(const struct active_entry *skip)
 {
 	struct json_buf buf = {};
 	struct spdk_json_write_ctx *w;
 	struct active_entry *e;
+	bool empty = true;
 	int rc;
 
-	/* An empty registry is an empty file rather than "{}": nothing is active,
-	 * and a recovery that finds no file behaves the same as one that finds no
-	 * entries. */
-	if (TAILQ_EMPTY(&g_active)) {
+	TAILQ_FOREACH(e, &g_active, link) {
+		if (e != skip) {
+			empty = false;
+			break;
+		}
+	}
+
+	/* An empty registry has no file: nothing is active, and recovery treats an
+	 * absent file as no entries. */
+	if (empty) {
 		return s3lvol_statefile_remove(ACTIVE_PATH);
 	}
 
@@ -255,6 +262,9 @@ active_flush(void)
 
 	spdk_json_write_object_begin(w);
 	TAILQ_FOREACH(e, &g_active, link) {
+		if (e == skip) {
+			continue;
+		}
 		spdk_json_write_named_object_begin(w, e->pub.name);
 		spdk_json_write_named_string(w, "uuid", e->pub.uuid);
 		spdk_json_write_named_uint32(w, "subsys", e->pub.subsys);
@@ -273,6 +283,12 @@ active_flush(void)
 	rc = s3lvol_statefile_write(ACTIVE_PATH, buf.data);
 	free(buf.data);
 	return rc;
+}
+
+static int
+active_flush(void)
+{
+	return active_flush_excluding(NULL);
 }
 
 /* --------------------------------------------------------------------------
@@ -538,6 +554,7 @@ int
 s3lvol_active_remove(const char *name)
 {
 	struct active_entry *e;
+	int rc;
 
 	if (!name) {
 		return -EINVAL;
@@ -545,10 +562,18 @@ s3lvol_active_remove(const char *name)
 
 	TAILQ_FOREACH(e, &g_active, link) {
 		if (strcmp(e->pub.name, name) == 0) {
+			/* Persist the list without this entry first. On a directory
+			 * fsync failure the unlink/rename may already be visible, but
+			 * retaining the in-memory entry makes the operation retryable;
+			 * the retry writes the same desired state idempotently. */
+			rc = active_flush_excluding(e);
+			if (rc != 0) {
+				return rc;
+			}
 			active_touch_nsid(e->pub.subsys, e->pub.nsid);
 			TAILQ_REMOVE(&g_active, e, link);
 			free(e);
-			return active_flush();
+			return 0;
 		}
 	}
 	return -ENOENT;

@@ -214,23 +214,68 @@ func deleteLocalExt4(ext4Path string) error {
 // managedArtifactDir reports whether dir is inside one of the artifact roots
 // TC writes to: the work dir, the store dir, or the fallback store dir.
 func managedArtifactDir(dir string) bool {
-	roots := []string{image.ArtifactWorkRootDir(), image.ArtifactStoreRootDir()}
-	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
-		roots = append(roots, image.ArtifactFallbackStoreRootDir())
+	_, ok := managedArtifactDirCanonical(dir)
+	return ok
+}
+
+// managedArtifactDirCanonical is managedArtifactDir plus the canonical form of
+// dir, so a caller can act on exactly the path the check approved.
+//
+// Both sides are compared after resolving symlinks. A directory under a root
+// that symlinks OUTSIDE it must not count as managed: unlinking a path through
+// that directory deletes a file TC does not own, and TC runs as root, so the
+// lexical check alone is not a safety boundary. Conversely a root that is
+// itself reached through a symlink (a /data -> /mnt/data mount, a PV) must
+// still match, so roots are canonicalized too.
+//
+// Path components that do not exist are kept lexically, because both callers
+// legitimately compare paths that are already gone: an artifact dir a previous
+// purge removed, or a root this process has not created yet.
+func managedArtifactDirCanonical(dir string) (string, bool) {
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false
 	}
-	for _, root := range roots {
+	canonicalDir := canonicalPath(dirAbs)
+	for _, root := range artifactRoots() {
 		rootAbs, err := filepath.Abs(root)
 		if err != nil {
 			continue
 		}
+		rootCanonical := canonicalPath(rootAbs)
 		// Strictly BELOW the root only. dir == root would make
 		// deleteLocalExt4's RemoveAll(dir) wipe the ENTIRE store (every
 		// artifact on the node), and the callback-side path validator accepts
 		// exactly such top-level paths (it only rejects escapes via
 		// filepath.Rel), so equality must fail here.
-		if dir != rootAbs && strings.HasPrefix(dir, rootAbs+string(os.PathSeparator)) {
-			return true
+		if canonicalDir != rootCanonical &&
+			strings.HasPrefix(canonicalDir, rootCanonical+string(os.PathSeparator)) {
+			return canonicalDir, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// artifactRoots lists the directories TC is allowed to write artifacts into.
+func artifactRoots() []string {
+	roots := []string{image.ArtifactWorkRootDir(), image.ArtifactStoreRootDir()}
+	if strings.TrimSpace(os.Getenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR")) == "" {
+		roots = append(roots, image.ArtifactFallbackStoreRootDir())
+	}
+	return roots
+}
+
+// canonicalPath resolves symlinks in the longest existing prefix of p and
+// re-appends the rest lexically. filepath.EvalSymlinks fails outright on a path
+// that does not exist, which is the common case for a root that has not been
+// created yet and for an artifact dir that was just reclaimed.
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p
+	}
+	return filepath.Join(canonicalPath(parent), filepath.Base(p))
 }

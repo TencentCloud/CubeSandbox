@@ -225,7 +225,9 @@ CubeVS 完全在内核态执行每沙箱的出站网络策略，使用 LPM（最
 - 精确匹配，例如 `qq.com` —— 只匹配 `qq.com` 本身。
 - 通配前缀，例如 `*.qq.com` —— 匹配 `a.qq.com` 等子域名，但不匹配顶级域名本身。
 
-沙箱发出 DNS 查询时，`from_cube` 从中提取查询名并到 `dns_allow` 中查找。若域名被允许，就将该次查询的 id 与源端口记入 `dns_query_track`。响应回来时，`from_world` 在 `dns_query_track` 中匹配，提取 A 记录，并将每个解析出的 IP 写入该沙箱的 `allow_out_v2`，过期时间取自 DNS TTL。DNS 回收器按与 NAT 会话回收器一致的方式清理过期条目。
+沙箱发出 DNS 查询时，`from_cube` 从中提取查询名并到 `dns_allow` 中查找。若域名被允许，就将该次查询的 id 与源端口记入 `dns_query_track`。响应回来时，`from_world` 在 `dns_query_track` 中匹配。可以学习的正向 A 应答不会转发给沙箱：内核把帧交给 Cubelet，由它把每个解析出的 IP 写入该沙箱的 `allow_out_v2`（过期时间取自 DNS TTL），再把帧注入 TAP。DNS 回收器按与 NAT 会话回收器一致的方式清理过期条目。
+
+Cubelet 在这条投递路径上。它停机期间，命中域名规则的 DNS 会被阻断。没有命中规则的名字，以及否定应答和截断应答，仍由数据面转发。已经学到的地址留在内核 map 里，直到 TTL 到期。
 
 因为 DNS 学习出来的规则落在与静态 CIDR 相同的 `allow_out_v2` 里，§5 中的快路径无需为它们做任何特殊处理。
 
@@ -269,6 +271,22 @@ Go API 提供了 `AddPortMapping()`、`DelPortMapping()`、`ListPortMapping()` �
 | `30000`--`65535` | 沙箱出站报文经 SNAT 使用的源端口 |
 
 Cubelet 内嵌网络运行时为沙箱 port mapping 分配宿主端口时，**仅使用** `20000`--`29999`。产品创建路径通过 `exposedPorts` 声明容器端口，并始终请求自动分配宿主端口（`HostPort=0`），用户无法指定具体 host port。运行时再从该管理段中分配空闲端口，并在创建响应中返回映射结果。
+
+### 7.5 同机互访（hairpin）
+
+端口映射的 DNAT 只挂在宿主机主网卡的 ingress 上（`from_world` 仅当报文来自主网卡时才查 `remote_port_mapping`），因此它天然只覆盖宿主机外部的客户端。同机沙箱之间的访问有两条路径：
+
+- **推荐：直连**。同机调用方使用 `对端沙箱IP:容器端口`，经 cube-dev egress 的 `from_envoy` 直达。CubeProxy 与 CubeMaster 的端口映射端点接口都对同机调用方做了这种特判。
+- **hairpin：同机访问 `nodeIP:hostPort`**。适用于不便区分同机/跨机的客户端。数据面在 `from_cube` 中识别目的为 `nodenic_ip` 且 `remote_port_mapping[dport]` 命中的 TCP 报文，先按普通出口流程做 SNAT（源改写为 `snat_ip:临时端口`，照常经过 `classify_egress_flow` 策略检查），再环回进主网卡 ingress（`BPF_F_INGRESS`）交给 `from_world` 完成 DNAT。回包在 `from_cube` 的 `local_port_mapping` 快路径中按"对端地址是否为本机 SNAT 地址（`nodenic_ip` 或 `snat_iplist` 中的地址）"分流：本机回包环回主网卡 ingress 走 `tcp_nat_session` 反向 NAT，外部回包照旧出物理网卡。整条路径不依赖交换机 hairpin。
+
+使用 hairpin 的注意点：
+
+- **策略照常生效**。hairpin 流量不豁免沙箱的 egress 策略。沙箱默认预装的始终拒绝私网段（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 等）会拒绝访问私网母机 IP —— 需要在沙箱网络配置中为母机 IP/网段显式配置 `allowOut`，否则同机 hairpin 访问会被拒绝（fail-fast RST）。
+- **不支持对母机 IP 配置 L7 域名规则**：hairpin 报文若被判定为 L7 代理流量会被直接 RST（L7 代理解析的是外部服务，从宿主协议栈无法触达 hostPort）。
+- SNAT 临时端口段（`30000` 起）与 hostPort 段（`20000`--`29999`）不重叠，回包在主网卡 ingress 上不会误命中 `remote_port_mapping`。
+- 每条 hairpin 连接会建立一对常规 SNAT 会话（egress + ingress），由现有会话回收器按超时清理；沙箱回滚的 generation 语义与普通出口连接一致。
+
+面向使用者的访问方式选择与操作步骤见[沙箱间互访指南](../guide/sandbox-to-sandbox.md)。
 
 ---
 
@@ -338,5 +356,5 @@ graph TB
 
 整个设计建立在两点之上：
 
-- **数据面逻辑住在内核里。** 策略评估、NAT、会话跟踪、DNS 学习与 ARP 应答都在 eBPF 中完成；Go 控制面只负责生命周期与定期清理。
+- **数据面判定住在内核里。** 策略评估、NAT、会话跟踪与 ARP 应答都在 eBPF 中完成。受控域名的 DNS 是例外：内核跟踪查询并丢弃可学习的应答，由 Cubelet 写入 allow 条目并注入帧。Cubelet 停机期间，这些域名的 DNS 会被阻断。除此之外，Go 控制面只负责生命周期与定期清理。
 - **每个沙箱端到端隔离。** 各自的 TAP 设备、各自的策略 Map、各自的会话 —— 同一宿主机上的两个沙箱之间没有共享的网桥或交换机。

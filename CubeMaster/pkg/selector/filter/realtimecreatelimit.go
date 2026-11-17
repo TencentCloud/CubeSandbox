@@ -12,6 +12,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// realtimecreatelimit rejects nodes whose current create concurrency has
+// reached the limit, keeping create pressure off single nodes.
 type realtimecreatelimit struct {
 }
 
@@ -27,32 +29,41 @@ func (l *realtimecreatelimit) String() string {
 	return l.ID()
 }
 
+// Select folds the node-local create concurrency into a global estimate via
+// the master node count before checking the limit.
 func (l *realtimecreatelimit) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
+	rejects := newRejectLog(selCtx)
 	for i := range inList {
 
 		realGlobalcnt := localcache.RealTimeCreateConcurrentLimit(inList[i])
 		limitcnt := localcache.CreateConcurrentLimit(inList[i])
 		if realGlobalcnt >= limitcnt {
-			log.G(selCtx.Ctx).Errorf("%s RealTimeCreateConcurrentLimit exceed:%d", inList[i].IP, realGlobalcnt)
+			rejects.errorf("%s RealTimeCreateConcurrentLimit exceed:%d", inList[i].IP, realGlobalcnt)
 			continue
 		}
 
 		localcnt := localcache.LocalCreateConcurrentLimit(inList[i])
 		gotGlobalLocalcnt := localcnt * localcache.HealthyMasterNodes()
 		if gotGlobalLocalcnt >= limitcnt {
-			log.G(selCtx.Ctx).Errorf("%s LocalCreateConcurrentLimit exceed,localcnt:%d,gotGlobalLocalcnt:%d",
+			rejects.errorf("%s LocalCreateConcurrentLimit exceed,localcnt:%d,gotGlobalLocalcnt:%d",
 				inList[i].IP, localcnt, gotGlobalLocalcnt)
 			continue
 		}
 
 		nodes.Append(inList[i])
 	}
+	rejects.flush(l.ID())
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
+	}
+	// When every candidate is dropped by the create-concurrency limit, stamp a
+	// reject reason so the subsequent no_node failure is classified as
+	// concurrency_limit in metrics instead of a bare no_node. Partial rejects
+	// are normal filtering and are not stamped.
+	if inList.Len() > 0 && nodes.Len() == 0 {
+		selCtx.SetRejectReason(selctx.RejectReasonConcurrencyLimit)
 	}
 	return nodes, nil
 }

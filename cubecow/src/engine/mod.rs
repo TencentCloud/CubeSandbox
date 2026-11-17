@@ -50,6 +50,13 @@ pub trait Engine: Send + Sync {
     /// Get volume information by name.
     fn get_volume_info(&self, name: &str) -> CubecowResult<Volume>;
 
+    /// Get only the object's path and size metadata. Backends may override
+    /// this to avoid management-only work such as counting snapshots or
+    /// refreshing remote export status.
+    fn get_object_info(&self, name: &str) -> CubecowResult<Volume> {
+        self.get_volume_info(name)
+    }
+
     /// Get block-level info (num_blocks, block_size) for a volume.
     fn get_volume_block_info(&self, name: &str) -> CubecowResult<VolumeBlockInfo>;
 

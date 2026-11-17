@@ -1,0 +1,142 @@
+{{- if and .Values.cubeNode.enabled (eq (include "cube.juicefsEnabled" .) "true") }}
+{{- $meta := default dict ((.Values.cubeJuiceFS).metadata) }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cube.juicefsName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cube-juicefs
+  annotations:
+    cube.tencent.com/juicefs-config-hash: {{ include "cube.juicefsConfigHash" . | quote }}
+spec:
+  updateStrategy:
+    # Never unmount a live sandbox underneath Cubelet during a Helm upgrade.
+    # Operators drain a node and delete its mount Pod to apply a new template.
+    type: OnDelete
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cube-juicefs
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cube-juicefs
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.cubeJuiceFS.terminationGracePeriodSeconds | default 120 }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-node-prep
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.waitNodePrep "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.waitNodePrep.pullPolicy }}
+          env:
+            - name: STATE_DIR
+              value: {{ .Values.hostPaths.bootstrapState | quote }}
+          volumeMounts:
+            - name: bootstrap-state
+              mountPath: {{ .Values.hostPaths.bootstrapState }}
+          {{- with .Values.cubeNodeBootstrap.waitResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: wait-volume-format
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.juicefs "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.juicefs.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              i=0
+              until juicefs status "$JFS_META_URL" >/dev/null 2>&1; do
+                i=$((i + 1))
+                [ "$i" -lt 180 ] || { echo "timed out waiting for JuiceFS format" >&2; exit 1; }
+                sleep 5
+              done
+          env:
+            - name: JFS_META_URL
+              value: {{ include "cube.juicefsMetadataURL" . | quote }}
+            - name: META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.juicefsMetadataSecretName" . }}
+                  key: {{ $meta.passwordKey | default "meta-password" }}
+      containers:
+        - name: juicefs
+          image: {{ include "cube.cubeImage" (dict "image" .Values.images.juicefs "context" $) | quote }}
+          imagePullPolicy: {{ .Values.images.juicefs.pullPolicy }}
+          command: ["/usr/local/bin/juicefs"]
+          securityContext:
+            privileged: {{ .Values.security.privileged }}
+            capabilities:
+              add: ["SYS_ADMIN"]
+          args:
+            - mount
+            - --no-usage-report
+            - --cache-dir
+            - {{ .Values.cubeJuiceFS.cacheDir | quote }}
+            - --cache-size
+            - {{ .Values.cubeJuiceFS.cacheSizeMB | quote }}
+            {{- range .Values.cubeJuiceFS.mountOptions }}
+            - {{ . | quote }}
+            {{- end }}
+            - {{ include "cube.juicefsMetadataURL" . | quote }}
+            - {{ .Values.cubeJuiceFS.mountPath | quote }}
+          env:
+            - name: META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.juicefsMetadataSecretName" . }}
+                  key: {{ $meta.passwordKey | default "meta-password" }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -ec
+                  - juicefs umount --flush {{ .Values.cubeJuiceFS.mountPath | quote }} || true
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test "$(findmnt -rn -M {{ .Values.cubeJuiceFS.mountPath | quote }} -o FSTYPE 2>/dev/null)" = "fuse.juicefs"
+            periodSeconds: {{ .Values.cubeJuiceFS.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.cubeJuiceFS.probes.startup.failureThreshold }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test "$(findmnt -rn -M {{ .Values.cubeJuiceFS.mountPath | quote }} -o FSTYPE 2>/dev/null)" = "fuse.juicefs"
+            periodSeconds: {{ .Values.cubeJuiceFS.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.cubeJuiceFS.probes.readiness.failureThreshold }}
+          volumeMounts:
+            - name: data-cubelet
+              mountPath: {{ .Values.hostPaths.dataCubelet }}
+              mountPropagation: Bidirectional
+            - name: dev-fuse
+              mountPath: /dev/fuse
+          {{- with .Values.cubeJuiceFS.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: bootstrap-state
+          hostPath:
+            path: {{ .Values.hostPaths.bootstrapState }}
+            type: DirectoryOrCreate
+        - name: data-cubelet
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubelet }}
+            type: DirectoryOrCreate
+        - name: dev-fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
+{{- end }}

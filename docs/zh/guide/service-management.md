@@ -94,7 +94,7 @@ network-online.target
 最常见的两种配置入口：
 
 - 顶层环境：`/usr/local/services/cubetoolbox/.one-click.env`
-- 组件原生配置：`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`cubeproxy/global.conf`、`coredns/Corefile`
+- 组件原生配置：`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`cubeproxy/global.conf`、`coredns/Corefile.template`
 
 改完之后，重启**直接读这份配置的那个服务**：
 
@@ -111,9 +111,13 @@ sudo systemctl restart cube-sandbox-cube-api.service
 # 改了 cubeproxy/global.conf
 sudo systemctl restart cube-sandbox-cube-proxy.service
 
-# 改了 coredns/Corefile
+# 改了 coredns/Corefile.template
 sudo systemctl restart cube-sandbox-coredns.service
 ```
+
+::: warning CoreDNS：改模板，而不是渲染产物 Corefile
+`coredns/Corefile` 是渲染产物：`cube-sandbox-coredns.service` 每次启动都会从 `coredns/Corefile.template` 重新渲染（`coredns-prepare.sh` → `coredns-start.sh` → `render_template_atomic`），直接改渲染文件会在下次重启时被静默覆盖。请修改模板文件，再重启服务。
+:::
 
 ::: warning 改 systemd unit 文件本身的情况
 如果你直接动了 `/etc/systemd/system/cube-sandbox-*.service` 文件本身，需要先 reload，systemd 才会读到新内容：

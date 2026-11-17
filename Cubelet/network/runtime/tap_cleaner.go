@@ -227,15 +227,13 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 	s.closeRuntimeTapOwnership(state)
 	s.recordCleanStep("fd_close")
 
-	if state.restoreBeforeCleanup {
-		restored, err := s.tapAdapter.Restore(state.tap, s.cfg.MvmMtu, s.cfg.MVMMacAddr, s.cubeDev.Index)
-		if err != nil {
+	if state.restoreAfterCleanup {
+		// Keep orphan links down across retries, including policy and egress
+		// failures. Restoring the link before clearing policy would expose stale
+		// allow rules while the TAP is still Cleaning.
+		if err := s.tapAdapter.Quarantine(state.tap); err != nil {
 			return err
 		}
-		state.tap = restored
-		state.TapIfIndex = restored.Index
-		state.TapName = restored.Name
-		state.SandboxIP = restored.IP.String()
 	}
 
 	// Durable records already carry the exact expected tuples. CubeVS performs
@@ -249,10 +247,12 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 	}
 	state.tap.PortMappings = append([]PortMapping(nil), state.PortMappings...)
 
-	if err := errors.Join(
-		s.deleteCubeVSPortMappings(state.SandboxID, state.tap),
-		s.cleanupCubeVSTapState(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4()),
-	); err != nil {
+	portErr := s.deleteCubeVSPortMappings(state.SandboxID, state.tap)
+	policyErr := resetTAPQuarantinePolicy(s.cubevsAdapter, uint32(state.TapIfIndex))
+	if err := errors.Join(portErr, policyErr); err != nil {
+		return err
+	}
+	if err := s.cleanupCubeVSTapMetadata(state.TapIfIndex, net.ParseIP(state.SandboxIP).To4()); err != nil {
 		return err
 	}
 	if err := s.cleanupEgressForReuse(ctx, &state.persistedState, state.legacyStatePath != "" || stateKind == ""); err != nil {
@@ -264,8 +264,15 @@ func (s *NetworkController) cleanupTapForReuse(ctx context.Context, state *manag
 	if err := s.verifyTapReusableFD(state.tap); err != nil {
 		return err
 	}
-	if err := s.installPoolDefaultDeny(state.tap); err != nil {
-		return err
+	if state.restoreAfterCleanup {
+		restored, err := s.tapAdapter.Restore(state.tap, s.cfg.MvmMtu, s.cfg.MVMMacAddr, s.cubeDev.Index)
+		if err != nil {
+			return err
+		}
+		state.tap = restored
+		state.TapIfIndex = restored.Index
+		state.TapName = restored.Name
+		state.SandboxIP = restored.IP.String()
 	}
 	s.recordCleanStep("default_deny_ready")
 
@@ -402,7 +409,7 @@ func (s *NetworkController) handleCleaningEntries() {
 				if record != nil {
 					copyCleanupRecordIntoManagedState(state, record)
 				} else {
-					state.restoreBeforeCleanup = true
+					state.restoreAfterCleanup = true
 				}
 				_ = s.cleanupTapOnce(state, stateKindOf(record), "maintenance_cleaning_retry")
 			})

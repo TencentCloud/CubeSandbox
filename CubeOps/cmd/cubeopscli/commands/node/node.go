@@ -24,7 +24,7 @@ import (
 var NodeCommand = cli.Command{
 	Name:    "node",
 	Aliases: []string{"nodes"},
-	Usage:   "list / isolate / unisolate / delete CubeOps nodes",
+	Usage:   "list / groups / isolate / unisolate / delete / quota CubeOps nodes",
 	Subcommands: []cli.Command{
 		{
 			Name:    "list",
@@ -38,6 +38,8 @@ var NodeCommand = cli.Command{
 			},
 			Action: listAction,
 		},
+		groupsCommand,
+		quotaCommand,
 		{
 			Name:      "isolate",
 			Usage:     "cordon node(s)",
@@ -241,8 +243,7 @@ func deleteAction(c *cli.Context) error {
 	var opErr error
 	for _, nodeID := range c.Args() {
 		if err := deleteOne(c, nodeID); err != nil {
-			fmt.Fprintf(os.Stderr, "delete failed: %s %s\n", nodeID, err.Error())
-			opErr = errors.Join(opErr, fmt.Errorf("%s: %w", nodeID, err))
+			opErr = errors.Join(opErr, fmt.Errorf("delete failed: %s: %w", nodeID, err))
 		}
 	}
 	return opErr

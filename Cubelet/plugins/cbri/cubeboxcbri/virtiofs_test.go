@@ -18,71 +18,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
-func TestSortRestoreVirtioMountsParentBeforeChild(t *testing.T) {
-	t.Parallel()
-
-	candidates := []restoreVirtioMount{
-		{mount: virtiofs.VirtioMounts{VirtiofsSource: "/.container_rw/deliverables", Destination: "/workspace/team-share/members/agent-a/deliverables"}},
-		{mount: virtiofs.VirtioMounts{VirtiofsSource: "/.container_rw/agent-b", Destination: "/workspace/team-share/./members/agent-b"}},
-		{mount: virtiofs.VirtioMounts{VirtiofsSource: "/.container_ro/team-share", Destination: "/workspace/team-share/"}},
-		{mount: virtiofs.VirtioMounts{VirtiofsSource: "/.container_rw/output", Destination: "/workspace/output"}},
-		{mount: virtiofs.VirtioMounts{VirtiofsSource: "/.container_rw/agent-a", Destination: "/workspace/team-share/members/agent-a"}},
-	}
-
-	mounts := sortRestoreVirtioMounts(candidates)
-
-	require.Len(t, mounts, 5)
-	require.Equal(t, []string{
-		"/workspace/output",
-		"/workspace/team-share/",
-		"/workspace/team-share/members/agent-a",
-		"/workspace/team-share/members/agent-a/deliverables",
-		"/workspace/team-share/./members/agent-b",
-	}, []string{
-		mounts[0].Destination,
-		mounts[1].Destination,
-		mounts[2].Destination,
-		mounts[3].Destination,
-		mounts[4].Destination,
-	})
-}
-
-func TestSortRestoreVirtioMountsNilInput(t *testing.T) {
-	t.Parallel()
-
-	require.Empty(t, sortRestoreVirtioMounts(nil))
-}
-
-func TestSortRestoreVirtioMountsUsesBackendKeyAsFinalTiebreaker(t *testing.T) {
-	t.Parallel()
-
-	candidates := []restoreVirtioMount{
-		{
-			mount: virtiofs.VirtioMounts{
-				VirtiofsSource: "/.container_rw/source-b",
-				Destination:    "/workspace/./data",
-			},
-			requestIndex: 0,
-			backendKey:   "shared/source-b",
-		},
-		{
-			mount: virtiofs.VirtioMounts{
-				VirtiofsSource: "/.container_rw/source-a",
-				Destination:    "/workspace/data/",
-			},
-			requestIndex: 0,
-			backendKey:   "shared/source-a",
-		},
-	}
-
-	mounts := sortRestoreVirtioMounts(candidates)
-
-	require.Equal(t, []virtiofs.VirtioMounts{
-		{VirtiofsSource: "/.container_rw/source-a", Destination: "/workspace/data/"},
-		{VirtiofsSource: "/.container_rw/source-b", Destination: "/workspace/./data"},
-	}, mounts)
-}
-
 func TestGenerateRestoreVirtiofsOptEqualDestinationsPreserveRequestOrder(t *testing.T) {
 	t.Parallel()
 
@@ -127,11 +62,13 @@ func TestGenerateRestoreVirtiofsOptEqualDestinationsPreserveRequestOrder(t *test
 					HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
 						"read-only": {
 							VolumeName: "read-only",
+							ShareDir:   "/data/cubelet/hostdir/sandbox",
 							BindPath:   "/data/cubelet/hostdir/sandbox/read-only",
 							ReadOnly:   true,
 						},
 						"writable": {
 							VolumeName: "writable",
+							ShareDir:   "/data/cubelet/hostdir/sandbox",
 							BindPath:   "/data/cubelet/hostdir/sandbox/writable",
 						},
 					},
@@ -154,7 +91,7 @@ func TestGenerateRestoreVirtiofsOptEqualDestinationsPreserveRequestOrder(t *test
 	}
 }
 
-func TestGenerateRestoreVirtiofsOptSkipsMissingVolumeMounts(t *testing.T) {
+func TestGenerateRestoreVirtiofsOptSkipsUndeclaredVolumes(t *testing.T) {
 	t.Parallel()
 
 	flowOpts := &workflow.CreateContext{
@@ -162,10 +99,12 @@ func TestGenerateRestoreVirtiofsOptSkipsMissingVolumeMounts(t *testing.T) {
 			HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
 				"matched-backend": {
 					VolumeName: "matched",
+					ShareDir:   "/data/cubelet/hostdir/sandbox",
 					BindPath:   "/data/cubelet/hostdir/sandbox/matched",
 				},
 				"unmatched-backend": {
 					VolumeName: "missing",
+					ShareDir:   "/data/cubelet/hostdir/sandbox",
 					BindPath:   "/data/cubelet/hostdir/sandbox/missing",
 				},
 			},
@@ -183,12 +122,6 @@ func TestGenerateRestoreVirtiofsOptSkipsMissingVolumeMounts(t *testing.T) {
 			name: "all backend volume names are unmatched",
 			containerReq: &cubebox.ContainerConfig{VolumeMounts: []*cubebox.VolumeMounts{
 				{Name: "other", ContainerPath: "/workspace/other"},
-			}},
-		},
-		{
-			name: "matched volume has empty container path",
-			containerReq: &cubebox.ContainerConfig{VolumeMounts: []*cubebox.VolumeMounts{
-				{Name: "matched"},
 			}},
 		},
 		{
@@ -218,6 +151,55 @@ func TestGenerateRestoreVirtiofsOptSkipsMissingVolumeMounts(t *testing.T) {
 			var mounts []virtiofs.VirtioMounts
 			require.NoError(t, json.Unmarshal([]byte(spec.Annotations[constants.AnnotationPropagationExecMounts]), &mounts))
 			require.Equal(t, tt.wantMounts, mounts)
+		})
+	}
+}
+
+func TestGenerateRestoreVirtiofsOptFailsOnAnUnusableBackend(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		backend      *storage.HostDirBackendInfo
+		volumeMounts []*cubebox.VolumeMounts
+		wantErr      string
+	}{
+		{
+			name:    "declared volume with an empty container path",
+			backend: &storage.HostDirBackendInfo{VolumeName: "broken", ShareDir: "/share", BindPath: "/share/broken"},
+			volumeMounts: []*cubebox.VolumeMounts{
+				{Name: "broken"},
+			},
+			wantErr: "empty container path",
+		},
+		{
+			name:    "declared volume bound outside the share dir",
+			backend: &storage.HostDirBackendInfo{VolumeName: "outside", ShareDir: "/share", BindPath: "/elsewhere/outside"},
+			volumeMounts: []*cubebox.VolumeMounts{
+				{Name: "outside", ContainerPath: "/mnt/outside"},
+			},
+			wantErr: "unusable bind path",
+		},
+		{
+			name:    "backend without a record",
+			backend: nil,
+			wantErr: "has no volume record",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			flowOpts := &workflow.CreateContext{
+				StorageInfo: &storage.StorageInfo{
+					HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{"broken": tt.backend},
+				},
+			}
+			specOpts, err := generateRestoreVirtiofsOpt(context.Background(), flowOpts,
+				&cubebox.ContainerConfig{VolumeMounts: tt.volumeMounts})
+			require.ErrorContains(t, err, tt.wantErr)
+			require.Nil(t, specOpts)
 		})
 	}
 }
@@ -271,11 +253,13 @@ func TestGenerateRestoreVirtiofsOptOrdersParentBeforeNestedChildForAllAccessMode
 					HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
 						"child": {
 							VolumeName: "member-output",
+							ShareDir:   "/data/cubelet/hostdir/sandbox",
 							BindPath:   "/data/cubelet/hostdir/sandbox/member-output",
 							ReadOnly:   tt.childRO,
 						},
 						"parent": {
 							VolumeName: "team-share",
+							ShareDir:   "/data/cubelet/hostdir/sandbox",
 							BindPath:   "/data/cubelet/hostdir/sandbox/team-share",
 							ReadOnly:   tt.parentRO,
 						},
@@ -312,8 +296,8 @@ func TestGenerateRestoreVirtiofsOptSkipsGuestMountRestore(t *testing.T) {
 		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
 			"writable": {
 				VolumeName: "writable",
+				ShareDir:   "/data/cubelet/hostdir/sandbox",
 				BindPath:   "/data/cubelet/hostdir/sandbox/writable",
-				ShareDir:   "/data/cube-shared",
 			},
 		},
 	}
@@ -351,7 +335,7 @@ func TestGenerateRestoreVirtiofsOptSkipsGuestMountRestore(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, specOpts)
 
-			sandboxOpts, err := generateSandboxVirtiofsOpt(context.Background(), flowOpts, false)
+			sandboxOpts, err := generateSandboxVirtiofsOpt(context.Background(), flowOpts, true)
 			require.NoError(t, err)
 			spec := applySpecOpts(t, context.Background(), sandboxOpts)
 			require.NotEmpty(t, spec.Annotations[constants.AnnotationVirtiofs])

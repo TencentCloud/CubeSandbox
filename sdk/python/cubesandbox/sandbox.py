@@ -8,15 +8,28 @@ import shlex
 import threading
 import uuid
 from typing import Any, Callable, Dict
+from urllib.parse import quote
 
 import httpx
 import requests
 
-from ._commands import CommandResult, Commands
-from ._config import Config, _auth_headers
+from ._commands import ENVD_PORT, CommandResult, Commands
+from ._config import (
+    PAUSE_RESUME_REQUEST_TIMEOUT_S,
+    SNAPSHOT_REQUEST_TIMEOUT_S,
+    Config,
+    _auth_headers,
+)
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
-from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
+from ._models import (
+    Execution,
+    ExecutionError,
+    OutputMessage,
+    Result,
+    SandboxInfo,
+    SnapshotInfo,
+)
 from ._policy import (
     Rule,
     _build_network_payload,
@@ -186,6 +199,25 @@ class Sandbox:
         e.g. ``49999-<sandboxID>.cube.app``
         """
         return f"{port}-{self.sandbox_id}.{self.domain}"
+
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        """Return the hostIP:hostPort endpoint of a template-declared exposed port.
+
+        The port must be declared via the template's ``--expose-port``. The
+        returned endpoint works identically for off-node, host-side, and
+        in-sandbox callers (same-node sandbox callers are served by CubeVS
+        hairpin; requires nodes running the hairpin-capable CubeVS).
+
+        Raises:
+            SandboxNotFoundError: If the sandbox does not exist or the port
+                is not exposed.
+            ApiError: On unexpected backend error.
+        """
+        resp = self._session.get(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/exposed-ports/{port}",
+        )
+        _check_response(resp)
+        return resp.json()["endpoint"]
 
     def get_mcp_url(self) -> str:
         """Return the streamable-HTTP URL of the sandbox MCP gateway.
@@ -379,8 +411,12 @@ class Sandbox:
             payload["mcp"] = mcp
         s = requests.Session()
         for tpl in templates:
-            resp = s.post(f"{cfg.api_url}/sandboxes", json={**payload, "templateID": tpl, **kwargs},
-                          headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+            resp = s.post(
+                f"{cfg.api_url}/sandboxes",
+                json={**payload, "templateID": tpl, **kwargs},
+                headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+                timeout=cfg.request_timeout,
+            )
             if not (fallback and _is_template_not_found(resp)):
                 break
         else:
@@ -440,9 +476,12 @@ class Sandbox:
         body: dict[str, int] = {}
         if timeout is not None:
             body["timeout"] = timeout
-        resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                      json=body,
-                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+        resp = s.post(
+            f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
+            json=body,
+            headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=max(cfg.request_timeout, PAUSE_RESUME_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -460,15 +499,22 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/sandboxes", headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/sandboxes",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return resp.json()
 
     @classmethod
     def list_v2(cls, config: Config | None = None) -> list[dict]:
-        """GET /v2/sandboxes - List all running sandboxes (v2).
+        """GET /v2/sandboxes - List sandboxes in the E2B view (v2).
 
-        Supports state / metadata filtering on the server side.
+        Returns running and paused sandboxes; ``unknown`` (exited, still
+        creating) is omitted unless the server is asked for it, which this
+        method does not do. Use :meth:`list` for the Cube-native view that
+        includes ``unknown``.
 
         The endpoint answers one page at a time (``limit``, 100 by default) and
         reports the next page's position in the ``x-next-token`` response
@@ -493,6 +539,7 @@ class Sandbox:
                 f"{cfg.api_url}/v2/sandboxes",
                 headers=_auth_headers(cfg),
                 params=params,
+                timeout=cfg.request_timeout,
             )
             _check_response(resp)
             collected.extend(resp.json())
@@ -511,11 +558,15 @@ class Sandbox:
 
         Returns:
             A dict with at least a ``status`` key, e.g.
-            ``{"status": "ok", "sandboxes": 0}``.
+            ``{"status": "ok"}``.
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/health", headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/health",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return resp.json()
 
@@ -607,7 +658,10 @@ class Sandbox:
                 ``"paused"`` state within ``timeout`` seconds.
         """
         import time
-        resp = self._session.post(f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause")
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause",
+            timeout=max(self._config.request_timeout, PAUSE_RESUME_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
         if wait:
             deadline = time.monotonic() + timeout
@@ -641,6 +695,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/resume",
             json=body,
+            timeout=max(self._config.request_timeout, PAUSE_RESUME_REQUEST_TIMEOUT_S),
         )
         _check_response(resp)
 
@@ -659,6 +714,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/timeout",
             json={"timeout": timeout},
+            timeout=self._config.request_timeout,
         )
         _check_response(resp)
 
@@ -692,6 +748,7 @@ class Sandbox:
         resp = self._session.put(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/network",
             json=_build_network_update_body(network or {}),
+            timeout=self._config.request_timeout,
         )
         _check_response(resp)
 
@@ -702,7 +759,10 @@ class Sandbox:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: On unexpected backend error (HTTP 500).
         """
-        resp = self._session.delete(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
+        resp = self._session.delete(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}",
+            timeout=self._config.request_timeout,
+        )
         _check_response(resp)
         if self._clone_cleanup is not None:
             self._clone_cleanup.release(self.sandbox_id)
@@ -725,9 +785,45 @@ class Sandbox:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: On unexpected backend error (HTTP 500).
         """
-        resp = self._session.get(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
+        resp = self._session.get(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}",
+            timeout=self._config.request_timeout,
+        )
         _check_response(resp)
         return SandboxInfo.from_dict(resp.json())
+
+
+    def is_running(self, request_timeout: float | None = None) -> bool:
+        """Report whether the sandbox is currently running (matches E2B's API).
+
+        Checks the control-plane state first so a paused sandbox is answered
+        without a data-plane probe (which would trigger CLM auto-resume). The
+        envd /health probe runs only for running/unknown states.
+        """
+        try:
+            state = self.get_info().state
+        except SandboxNotFoundError:
+            return False
+        if state in ("paused", "pausing"):
+            return False
+
+        if self._client is None:
+            self._client = self._build_data_client()
+        timeout = request_timeout if request_timeout is not None else self._config.request_timeout
+        # envd /health is unauthenticated, so no X-Access-Token is sent.
+        try:
+            resp = self._client.get(
+                f"http://{self.get_host(ENVD_PORT)}/health",
+                timeout=timeout,
+            )
+        except httpx.TransportError:
+            # Unreachable proxy / stale socket / timeout — sandbox not reachable.
+            return False
+        if resp.status_code in (404, 502, 503, 410):
+            return False
+        if resp.status_code >= 400:
+            raise ApiError(f"is_running failed: HTTP {resp.status_code}", resp.status_code)
+        return True
 
 
     def __enter__(self) -> "Sandbox":
@@ -754,31 +850,61 @@ class Sandbox:
         return f"Sandbox(id={self.sandbox_id!r}, domain={self.domain!r})"
 
 
-    def create_snapshot(self, name: str | None = None) -> SnapshotInfo:
+    def create_snapshot(
+        self,
+        name: str | None = None,
+        *,
+        mode: str | None = None,
+        ttl_seconds: int | None = None,
+    ) -> SnapshotInfo:
         """POST /sandboxes/:sandboxID/snapshots — Create a snapshot (1.1).
 
-        The sandbox is temporarily paused during snapshot creation.
+        A ``full`` snapshot (the default) briefly pauses the sandbox and saves
+        guest memory with the filesystem.  An ``fs-only`` snapshot saves the
+        filesystem alone: the guest is never paused, and a sandbox created from
+        it cold-boots with the same files but fresh processes.
+
         The snapshot persists independently of the sandbox lifecycle;
         it remains valid even after the sandbox is killed.
 
         Args:
             name: Optional template name for the snapshot.  When a template
                 with this name already exists the new build is attached to it
-                rather than creating a new template.
+                rather than creating a new template.  Must not start with
+                ``tpl-`` or ``snap-`` (HTTP 400).
+            ttl_seconds: Lifetime in seconds from READY; omitted or zero means
+                no expiration. Expiration refuses new use while existing
+                instances retain their storage references.
+            mode: ``"full"`` (default) or ``"fs-only"``.  ``"filesystem"`` is
+                accepted as an alias for compatibility with E2B clients.
+                Whether the cluster can produce an fs-only artifact is decided
+                by the control plane and the target node, never guessed by the
+                SDK; when it cannot, the call fails with
+                ``snapshot_filesystem_only_unsupported_node`` (409) or a more
+                specific ``snapshot_filesystem_only_*`` code.
 
         Returns:
-            :class:`SnapshotInfo` with ``snapshot_id`` and ``names``.
+            :class:`SnapshotInfo` with ``snapshot_id``, ``names`` and the
+            ``mode`` the control plane actually recorded.
 
         Raises:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
-            ApiError: On unexpected backend error.
+            ApiError: On unexpected backend error, including a control plane
+                that recorded a different mode than the one requested.
         """
         payload: dict = {}
         if name is not None:
             payload["name"] = name
+        if mode is not None:
+            payload["mode"] = mode
+        if ttl_seconds is not None:
+            if type(ttl_seconds) is not int or not 0 <= ttl_seconds <= 9_223_372_036:
+                raise ValueError("ttl_seconds must be an integer between 0 and 9223372036")
+            payload["ttlSeconds"] = ttl_seconds
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshots",
             json=payload,
+            timeout=max(self._config.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
         )
         _check_response(resp)
         return SnapshotInfo.from_dict(resp.json())
@@ -790,6 +916,7 @@ class Sandbox:
         sandbox_id: str | None = None,
         limit: int | None = None,
         next_token: str | None = None,
+        name: str | None = None,
         config: Config | None = None,
     ) -> tuple[list[SnapshotInfo], str | None]:
         """GET /snapshots — List snapshots (1.2).
@@ -798,6 +925,7 @@ class Sandbox:
             sandbox_id: Filter by source sandbox ID.
             limit: Page size (default: 100).
             next_token: Pagination cursor from a previous call.
+            name: Filter by snapshot name or ID.
             config: SDK config.  Uses default (env-based) config if omitted.
 
         Returns:
@@ -812,33 +940,53 @@ class Sandbox:
             params["limit"] = limit
         if next_token is not None:
             params["nextToken"] = next_token
+        if name is not None:
+            params["name"] = name
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/snapshots", params=params, headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/snapshots",
+            params=params,
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         items = [SnapshotInfo.from_dict(d) for d in (resp.json() or [])]
         nt = resp.headers.get("x-next-token") or None
         return items, nt
 
     @classmethod
-    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> None:
+    def delete_snapshot(cls, snapshot_id: str, *, config: Config | None = None) -> bool:
         """DELETE /templates/:templateID — Delete a snapshot (1.3).
 
-        Snapshots are stored as templates; this call removes the underlying
-        template permanently.  Deleting the originating sandbox does **not**
-        cascade-delete its snapshots.
+        Accepts either a snapshot ID or a snapshot name and only ever matches
+        snapshots (``snapshot_only``), never templates.  Deleting the
+        originating sandbox does **not** cascade-delete its snapshots.
 
         Args:
-            snapshot_id: The ``snapshotID`` (= templateID) to delete.
+            snapshot_id: The ``snapshotID`` (= templateID) or snapshot name to
+                delete.
             config: SDK config.  Uses default (env-based) config if omitted.
 
+        Returns:
+            ``True`` when the snapshot was deleted, ``False`` when it did not
+            exist.
+
         Raises:
-            TemplateNotFoundError: If the snapshot does not exist (HTTP 404).
-            ApiError: On unexpected backend error.
+            ApiError: HTTP 409 when the name matches several snapshots (use
+                the ``snap-`` ID instead); or on an unexpected error.
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}", headers=_auth_headers(cfg))
+        resp = s.delete(
+            f"{cfg.api_url}/templates/{quote(snapshot_id, safe='')}",
+            params={"snapshot_only": "true"},
+            headers=_auth_headers(cfg),
+            timeout=max(cfg.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
+        )
+        if resp.status_code == 404:
+            return False
         _check_response(resp)
+        return True
 
     # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
     # See docstring of :meth:`create` for details.
@@ -873,6 +1021,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/rollback",
             json={"snapshotID": snapshot_id},
+            timeout=max(self._config.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
         )
         _check_response(resp)
         result = resp.json()

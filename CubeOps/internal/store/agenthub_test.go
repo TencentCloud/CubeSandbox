@@ -343,3 +343,236 @@ func TestStore_GetRecommendedAgentTemplate(t *testing.T) {
 		t.Errorf("got %q after soft delete, want nil", got.TemplateID)
 	}
 }
+
+// TestStore_CountTemplatesReferencingSnapshot covers direct and indirect (via
+// agenthub_state rows) template references, plus soft-delete and ID-shape edges.
+func TestStore_CountTemplatesReferencingSnapshot(t *testing.T) {
+	withWarehouseStores(t, func(t *testing.T, s *store.Store) {
+		testCountTemplatesReferencingSnapshot(t, s)
+	})
+}
+
+func testCountTemplatesReferencingSnapshot(t *testing.T, s *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	count := func(id string) int {
+		t.Helper()
+		n, err := s.CountTemplatesReferencingSnapshot(ctx, id)
+		if err != nil {
+			t.Fatalf("CountTemplatesReferencingSnapshot(%q): %v", id, err)
+		}
+		return n
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if err := s.DB().WithContext(ctx).Exec(query, args...).Error; err != nil {
+			t.Fatalf("exec %q: %v", query, err)
+		}
+	}
+	seedSnapshot := func(id, kind, rootfsType, rootfsID string) {
+		t.Helper()
+		exec(`INSERT INTO t_agenthub_snapshot
+		        (snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind,
+		         rootfs_source_type, rootfs_source_id, rootfs_snapshot_id)
+		      VALUES (?, 'agent-1', 'sb-1', ?, 'ready', ?, ?, ?, ?)`,
+			id, id, kind, rootfsType, rootfsID, rootfsID)
+	}
+	seedTemplate := func(id, sourceSnapshotID string) {
+		t.Helper()
+		exec(store.UpsertTemplateSQL(),
+			id, id, "agent-1", sourceSnapshotID, "sb-1", "deepseek-v4", "1.0", nil)
+	}
+
+	const infraID = "snap-aaaaaaaaaaaaaaaaaaaaaaaa"
+	if got := count(infraID); got != 0 {
+		t.Fatalf("no references: got %d, want 0", got)
+	}
+
+	// Direct: template published from the infra snapshot row itself. The row's
+	// rootfs_snapshot_id equals its own ID, so both branches match; count once.
+	seedSnapshot(infraID, "sandbox_snapshot", "snapshot", infraID)
+	seedTemplate("tpl-direct", infraID)
+	if got := count(infraID); got != 1 {
+		t.Fatalf("direct reference: got %d, want 1", got)
+	}
+
+	// Indirect: derived rows rooted on the infra snapshot, whatever the
+	// recorded rootfs_source_type is.
+	seedSnapshot("agenthub-derived-snapshot", "agenthub_state", "snapshot", infraID)
+	seedSnapshot("agenthub-derived-template", "agenthub_state", "template", infraID)
+	seedTemplate("tpl-via-snapshot", "agenthub-derived-snapshot")
+	seedTemplate("tpl-via-template", "agenthub-derived-template")
+	if got := count(infraID); got != 3 {
+		t.Fatalf("direct + indirect references: got %d, want 3", got)
+	}
+
+	// A soft-deleted template no longer protects the snapshot.
+	if err := s.DeleteAgentTemplate(ctx, "tpl-via-snapshot"); err != nil {
+		t.Fatalf("DeleteAgentTemplate: %v", err)
+	}
+	if got := count(infraID); got != 2 {
+		t.Fatalf("after template soft delete: got %d, want 2", got)
+	}
+
+	// A soft-deleted derived row no longer links its template to the snapshot.
+	if err := s.DeleteAgentSnapshot(ctx, "agent-1", "agenthub-derived-template"); err != nil {
+		t.Fatalf("DeleteAgentSnapshot: %v", err)
+	}
+	if got := count(infraID); got != 1 {
+		t.Fatalf("after derived row soft delete: got %d, want 1", got)
+	}
+
+	// Another snapshot is unaffected.
+	if got := count("snap-bbbbbbbbbbbbbbbbbbbbbbbb"); got != 0 {
+		t.Errorf("unrelated snapshot: got %d, want 0", got)
+	}
+
+	// A non-"snap-" ID that merely equals some rootfs_snapshot_id (a template
+	// ID) takes the direct branch only, so it never matches indirectly.
+	seedSnapshot("agenthub-derived-tpl-root", "agenthub_state", "template", "tpl-root")
+	seedTemplate("tpl-via-tpl-root", "agenthub-derived-tpl-root")
+	if got := count("tpl-root"); got != 0 {
+		t.Errorf("template-shaped ID: got %d, want 0", got)
+	}
+}
+
+// TestStore_SoftDeleteAgentSnapshotsByInfraID pins which rows the reverse-sync
+// soft delete touches: only live rows whose own snapshot_id matches exactly.
+func TestStore_SoftDeleteAgentSnapshotsByInfraID(t *testing.T) {
+	withWarehouseStores(t, func(t *testing.T, s *store.Store) {
+		ctx := context.Background()
+		seed := func(id, rootfsID string) {
+			t.Helper()
+			if err := s.DB().WithContext(ctx).Exec(
+				`INSERT INTO t_agenthub_snapshot
+				   (snapshot_id, agent_id, sandbox_id, name, status, snapshot_kind,
+				    rootfs_source_type, rootfs_source_id, rootfs_snapshot_id)
+				 VALUES (?, 'agent-1', 'sb-1', ?, 'ready', 'sandbox_snapshot', 'snapshot', ?, ?)`,
+				id, id, rootfsID, rootfsID,
+			).Error; err != nil {
+				t.Fatalf("seed %s: %v", id, err)
+			}
+		}
+		live := func(id string) bool {
+			t.Helper()
+			snap, err := s.GetAgentSnapshot(ctx, "agent-1", id)
+			if err != nil {
+				t.Fatalf("GetAgentSnapshot(%s): %v", id, err)
+			}
+			return snap != nil
+		}
+		softDelete := func(id string) int64 {
+			t.Helper()
+			n, err := s.SoftDeleteAgentSnapshotsByInfraID(ctx, id)
+			if err != nil {
+				t.Fatalf("SoftDeleteAgentSnapshotsByInfraID(%q): %v", id, err)
+			}
+			return n
+		}
+
+		const target = "snap-aaaaaaaaaaaaaaaaaaaaaaaa"
+		seed(target, target)
+		const longer = target + "-extra" // shares target as a prefix
+		seed(longer, longer)
+		seed("agenthub-derived", target) // rooted on target, own ID differs
+		seed("snap-gone", "snap-gone")
+		// A fixed past timestamp keeps the already-deleted case independent of clock ticks.
+		if err := s.DB().WithContext(ctx).Exec(
+			`UPDATE t_agenthub_snapshot SET deleted_at = '2020-01-01 00:00:00' WHERE snapshot_id = ?`, "snap-gone",
+		).Error; err != nil {
+			t.Fatalf("pre-delete snap-gone: %v", err)
+		}
+
+		if got := softDelete(target); got != 1 {
+			t.Fatalf("matching row: affected = %d, want 1", got)
+		}
+		if live(target) {
+			t.Error("target row still live after soft delete")
+		}
+		for _, id := range []string{longer, "agenthub-derived"} {
+			if !live(id) {
+				t.Errorf("%s was soft-deleted, want untouched", id)
+			}
+		}
+		if got := softDelete(target); got != 0 {
+			t.Errorf("repeat call: affected = %d, want 0", got)
+		}
+		if got := softDelete("snap-gone"); got != 0 {
+			t.Errorf("already deleted row: affected = %d, want 0", got)
+		}
+		if got := softDelete("snap-unknown"); got != 0 {
+			t.Errorf("unknown id: affected = %d, want 0", got)
+		}
+	})
+}
+
+// TestStore_ClearBaseSnapshotIDBySnapshotID pins which instances lose their base
+// pointer: only live ones pointing exactly at the given snapshot.
+func TestStore_ClearBaseSnapshotIDBySnapshotID(t *testing.T) {
+	withWarehouseStores(t, func(t *testing.T, s *store.Store) {
+		ctx := context.Background()
+		seed := func(agentID, baseID string) {
+			t.Helper()
+			if err := s.UpsertInstance(ctx, &store.AgentInstance{
+				ID: agentID, Name: agentID, Status: "running", Engine: "openclaw", Env: "linux",
+				Model: "deepseek-v4", Version: "1.0.0", SandboxID: "sb-" + agentID,
+				TemplateID: "tpl-1", Domain: "cube.app",
+			}); err != nil {
+				t.Fatalf("UpsertInstance(%s): %v", agentID, err)
+			}
+			if baseID != "" {
+				if err := s.SetBaseSnapshotID(ctx, agentID, baseID); err != nil {
+					t.Fatalf("SetBaseSnapshotID(%s): %v", agentID, err)
+				}
+			}
+		}
+		base := func(agentID string) string {
+			t.Helper()
+			var got string
+			if err := s.DB().WithContext(ctx).Raw(
+				`SELECT COALESCE(base_snapshot_id, '') FROM t_agenthub_instance WHERE agent_id = ?`, agentID,
+			).Row().Scan(&got); err != nil {
+				t.Fatalf("read base_snapshot_id(%s): %v", agentID, err)
+			}
+			return got
+		}
+		clearBase := func(id string) int64 {
+			t.Helper()
+			n, err := s.ClearBaseSnapshotIDBySnapshotID(ctx, id)
+			if err != nil {
+				t.Fatalf("ClearBaseSnapshotIDBySnapshotID(%q): %v", id, err)
+			}
+			return n
+		}
+
+		const target = "snap-aaaaaaaaaaaaaaaaaaaaaaaa"
+		seed("a-1", target)
+		seed("a-2", target)
+		seed("a-other", "snap-bbbbbbbbbbbbbbbbbbbbbbbb")
+		seed("a-none", "")
+		seed("a-deleted", target)
+		if err := s.SoftDeleteInstance(ctx, "a-deleted"); err != nil {
+			t.Fatalf("SoftDeleteInstance: %v", err)
+		}
+
+		if got := clearBase(target); got != 2 {
+			t.Fatalf("affected = %d, want 2 live instances", got)
+		}
+		for agentID, want := range map[string]string{
+			"a-1": "", "a-2": "", "a-none": "",
+			"a-other":   "snap-bbbbbbbbbbbbbbbbbbbbbbbb",
+			"a-deleted": target, // soft-deleted rows are left as they were
+		} {
+			if got := base(agentID); got != want {
+				t.Errorf("base_snapshot_id(%s) = %q, want %q", agentID, got, want)
+			}
+		}
+		if got := clearBase(target); got != 0 {
+			t.Errorf("repeat call: affected = %d, want 0", got)
+		}
+		if got := clearBase("snap-unknown"); got != 0 {
+			t.Errorf("unknown id: affected = %d, want 0", got)
+		}
+	})
+}

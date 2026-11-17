@@ -21,6 +21,26 @@ func TestValidatePluginPrivateData(t *testing.T) {
 	if err := validatePluginPrivateData("volumes/vol-1/"); err != nil {
 		t.Fatalf("short private_data should be allowed: %v", err)
 	}
+	if err := validatePluginPrivateData("before\x00after"); err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("expected sanitized NUL rejection, got %v", err)
+	}
+	for _, value := range []string{"é", "中", "\u2028", "\uFFFF", "\uFFFD", strings.Repeat("a", models.MaxPrivateDataLen)} {
+		if err := validatePluginPrivateData(value); err != nil {
+			t.Errorf("valid BMP private_data %q rejected: %v", value, err)
+		}
+	}
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{"😀", "outside the BMP"},
+		{"𠀀", "outside the BMP"},
+		{"\xff", "valid UTF-8"},
+	} {
+		if err := validatePluginPrivateData(tc.value); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("validatePluginPrivateData(%q) = %v, want %q error", tc.value, err, tc.want)
+		}
+	}
 	exact := strings.Repeat("a", models.MaxPrivateDataLen)
 	if err := validatePluginPrivateData(exact); err != nil {
 		t.Fatalf("exact max length should be allowed: %v", err)

@@ -14,18 +14,22 @@ import (
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 )
 
+// NodeLabels is the node-label interface: nodes expose their label set for matching.
 type NodeLabels interface {
 	Labels() map[string]string
 }
 
+// NodeSelector reports whether a node satisfies an affinity constraint.
 type NodeSelector interface {
 	Match(node NodeLabels) bool
 }
 
+// PreferredSchedulingTerms scores node-affinity preferences.
 type PreferredSchedulingTerms interface {
 	Score(node NodeLabels) int64
 }
 
+// NewNodeSelector builds a node selector from a list of selector terms.
 func NewNodeSelector(ns []NodeSelectorTerm) (NodeSelector, error) {
 	wns := &wrapNodeSelector{}
 	var err error
@@ -37,6 +41,7 @@ type wrapNodeSelector struct {
 	nodeselector *lazyErrorNodeSelector
 }
 
+// Match treats an empty selector or an empty node as a match.
 func (w *wrapNodeSelector) Match(n NodeLabels) bool {
 	if w.nodeselector == nil {
 		return true
@@ -47,6 +52,7 @@ func (w *wrapNodeSelector) Match(n NodeLabels) bool {
 	return w.nodeselector.Match(labels.Set(n.Labels()))
 }
 
+// lazyErrorNodeSelector defers term evaluation until Match is called.
 type lazyErrorNodeSelector struct {
 	terms []NodeSelectorTerm
 }
@@ -57,6 +63,7 @@ func NewLazyErrorNodeSelector(ns []NodeSelectorTerm) (*lazyErrorNodeSelector, er
 	}, nil
 }
 
+// Match succeeds if any term matches (terms are OR-ed).
 func (ns *lazyErrorNodeSelector) Match(nodeLabels labels.Set) bool {
 	if nodeLabels == nil {
 		return true
@@ -69,6 +76,7 @@ func (ns *lazyErrorNodeSelector) Match(nodeLabels labels.Set) bool {
 	return false
 }
 
+// Match requires every expression in the term to match (expressions are AND-ed).
 func (term NodeSelectorTerm) Match(nodeLabels labels.Set) bool {
 	if len(term.MatchExpressions) == 0 {
 		return true
@@ -83,6 +91,8 @@ func (term NodeSelectorTerm) Match(nodeLabels labels.Set) bool {
 	return true
 }
 
+// Match applies a single requirement by operator; Gt/Lt support only the
+// memory-size and CPU-cores label keys, compared by resource amount.
 func (require NodeSelectorRequirement) Match(ls labels.Set) bool {
 	switch require.Operator {
 	case NodeSelectorOpIn:
@@ -134,6 +144,7 @@ type wrapPreferredSchedulingTerms struct {
 	preferredSchedulingTerms *nodeaffinity.PreferredSchedulingTerms
 }
 
+// NewPreferredSchedulingTerms builds a scorer from k8s preferred scheduling terms.
 func NewPreferredSchedulingTerms(terms []v1.PreferredSchedulingTerm) (PreferredSchedulingTerms, error) {
 	wrapPreferst := &wrapPreferredSchedulingTerms{}
 	var err error
@@ -141,6 +152,8 @@ func NewPreferredSchedulingTerms(terms []v1.PreferredSchedulingTerm) (PreferredS
 	return wrapPreferst, err
 }
 
+// Score computes the affinity preference score from node labels; 0 when there
+// are no preferences or no labels.
 func (w *wrapPreferredSchedulingTerms) Score(n NodeLabels) int64 {
 	if w.preferredSchedulingTerms == nil {
 		return 0

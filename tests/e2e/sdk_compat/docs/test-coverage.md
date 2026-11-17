@@ -37,6 +37,8 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_rollback_clone.py` | Rollback errors/filesystem/kernel state; default/concurrent clone state and temporary-snapshot cleanup | `rollback_clone` (CubeSandbox only), partially Code Interpreter | P1 |
 | `cases/lifecycle/test_negative_and_timeout.py` | Missing create/connect targets, pause-after-delete and online timeout update | `lifecycle`, `pause_resume`, `set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | unusable after kill, list removal, idempotent terminal semantics | `lifecycle` | P1 |
+| `cases/lifecycle/test_list_metadata_filter.py` | sandbox list `metadata` filter: values E2B's SDKs percent-encode twice (space, `/`, non-ASCII, `=`, `&`, `%`), multi-key AND, single-encoded values from older callers (as written, `urlencode`, `quote`; an escaped `&` stays in the value), hand-built URL needs the value's `&`/`=` double-encoded, 400 on a value that is not key=value pairs (v1 and v2) | `lifecycle`; SDK cases run on the `e2b` backend only | P1 |
+| `cases/lifecycle/test_list_state_filter.py` | `GET /v2/sandboxes` comma-separated `state`, whole-request 400 on any bad token, default list limited to states E2B can parse, paused/running separation; E2B SDK `SandboxQuery(state=...)` | `lifecycle`; paused cases also `pause_resume`; SDK cases run on the `e2b` backend only | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause, manual/auto resume, reentrant resume, auto-kill, manual pause before timeout | `platform_lifecycle`, CubeProxy, lifecycle-manager, partially Code Interpreter | P1 + `slow`, daily run |
 | `cases/lifecycle/test_restart_policy.py` | policy on info, default Never, rejected values, healthy sandbox stays up, guest crash keeps id and durable file, kill does not restart, maxRestarts gives up, exit 0 only restarts Always, non-zero main-process exit, backoff schedule, stable-period reset, pause during backoff, pause and resume after a cold restart, delete during backoff, liveness failure | `restart_policy` (CubeSandbox only). Runs with `--run-e2e`. Cluster needs envd on port 49983. Pause cases also need `pause_resume` | P1 control plane; P2/P3 + `slow` for crash, exit, backoff and give-up |
 
@@ -146,6 +148,32 @@ The established-connection cases use the guest-side holder in
 flow is re-evaluated when the guest next sends, so nothing would be observed on
 an idle socket.
 
+`cases/network/test_sandbox_to_sandbox.py` covers sandbox-to-sandbox
+data-plane access (`network_sandbox_to_sandbox`, CubeSandbox only), mirroring
+`examples/code-sandbox-quickstart/sandbox-curl-sandbox.py` and
+`sandbox-port-mapping.py`:
+
+- an HTTP service in sandbox B reached from sandbox A through CubeProxy Host
+  routing (`curl --resolve` pins `<port>-<sandboxID>.<domain>` to the proxy
+  node IP, so no wildcard DNS is needed inside the sandbox);
+- the same path with B created `allow_public_traffic=False`: no token gets
+  HTTP 403, B's traffic access token gets 200;
+- node host-port mapping: B is created from a module-provisioned template
+  exposing the service port, the `hostIP:hostPort` endpoint is discovered via
+  the SDK's `get_exposed_port_endpoint` (a caller-IP override forces
+  `host_port` mode),
+  and A is created with `allow_out` for the node IP so the case also holds
+  when the node IP falls inside the built-in always-denied private ranges;
+- egress policy applied to hairpin traffic: a deny-all A is rejected when
+  curling `nodeIP:hostPort`.
+
+All cases create B from a module-provisioned template that declares the
+service port (same pattern as `test_mask_request_host.py`), which makes them
+scheduler-placement independent: the CubeProxy route resolves cross-node via
+the host-port mapping, and same-node pairs exercise the in-software hairpin
+loopback while cross-node pairs traverse the wire, both satisfying the same
+assertions. Neither group needs public internet.
+
 `cases/lifecycle/test_pause_resume_network.py` covers the same create-time
 policies after an SDK pause + connect resume:
 
@@ -154,6 +182,16 @@ policies after an SDK pause + connect resume:
   listed target;
 - restricted public access still requires a traffic access token after resume
   (CubeProxy HostIP rewrite path).
+
+`cases/network/test_l7_catch_all.py` covers a `"*"` L7 rule
+(`network_l7_egress` + `network_dns_allow`, CubeSandbox only):
+
+- a name resolved inside the sandbox can use ports 80 and 443, and the HTTPS
+  response is allowed by the catch-all;
+- another open port on that name stays closed;
+- a public IP that was never looked up stays closed;
+- a rule for one name is applied before the catch-all;
+- creating a catch-all rule that injects credentials is accepted.
 
 Shared TCP / public-access probe helpers live in
 `framework/network_probe.py`.
@@ -189,6 +227,38 @@ resource contention test or multi-worker safety validation.
 ### 2.8 Volume
 
 `cases/volume/` covers Volume Plugin CRUD, sandbox bind/unbind and delete-while-bound behavior. It also verifies that one Volume can remain writable in one sandbox while a concurrent attachment is read-only in another sandbox, including read access and rejected create, write, rename and delete operations. These cases are CubeSandbox-only, default to the S3 driver, and run with `--run-e2e` unless `SDK_E2E_VOLUME_PLUGIN=false`.
+
+`cases/volume/test_private_data.py` requires **CubeAPI, CubeMaster and
+Cubelet >= 0.8.0** and a plugin supporting `private_data`. Its creates use the test
+adapter's HTTP client, rather than the SDK's new create method. It defines
+these additional cases:
+
+| Case | Assertion | Additional prerequisite |
+| --- | --- | --- |
+| Same-volume readback | Write and `sync` in sandbox 1, kill it, then read the exact content from the original volume ID in sandbox 2; create/GET/list omit `private_data` and list contains that volume | Valid `SDK_E2E_VOLUME_CRED_REF` |
+| Sibling-prefix delete | Write different content to sibling `a/` and `b/`, kill the writer, require DELETE A=204 and GET A=404, then read original B from a new sandbox | Valid `SDK_E2E_VOLUME_CRED_REF` |
+| Raw v2 input rejection | ASCII and multibyte input over 1024 UTF-8 bytes, real NUL and real non-BMP input return 400, omit the submitted value and leave no GET-visible record | No credential reference required; current BMP-only API contract |
+
+Unset or blank `SDK_E2E_VOLUME_CRED_REF` skips only the two dynamic mount cases.
+The four raw input checks still run and require the v2 platform above.
+A configured bad reference, HTTP error or mount failure fails. The Controller
+and applicable Cubelet hosts must configure the reference and access the
+existing plugin default bucket. `SDK_E2E_VOLUME_PREFIX` is an optional relative
+root (unset or blank uses `sdk-e2e/`); each case appends its own UUID and sibling
+suffixes.
+Runner storage credentials, object storage SDKs and direct MinIO access are not
+required. The existing Volume capability and plugin-disable gates still apply.
+Plugin-dependent cases also probe the selected driver and skip when the driver,
+its config file, or the Volume API is absent; the raw API input checks bypass
+that probe because CubeAPI rejects them before plugin dispatch.
+
+`cases/framework/test_volume_api_adapter.py` checks legacy/v2 routing, exact
+opaque input forwarding, no fallback, raw error responses, the credential gate
+and local cleanup behavior without a network. Live cleanup kills sandboxes
+before deleting volumes, reports cleanup errors and identifies unknown create
+results for inspection. Collection or skips do not establish live success.
+A new sandbox does not guarantee another node or a cold host FUSE cache; these
+cases do not assert object counts, full bucket cleanup or other S3 providers.
 
 ### 2.9 Host Mount
 

@@ -10,6 +10,7 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	imagev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
@@ -71,6 +72,11 @@ type CreateCubeSandboxReq struct {
 	// Empty means xfs.
 	Backend string `json:"backend,omitempty"`
 
+	// SnapshotMode is the artifact mode of the snapshot this sandbox is created
+	// from. Master sets it from the snapshot record; the public create DTO never
+	// exposes it (constructCreateReq clears any client value).
+	SnapshotMode string `json:"snapshot_mode,omitempty"`
+
 	// RestartPolicy is Never, OnFailure or Always. Empty means Never.
 	RestartPolicy  string                          `json:"restart_policy,omitempty"`
 	RestartBackoff *cubeboxv1.RestartBackoffConfig `json:"restart_backoff,omitempty"`
@@ -120,12 +126,15 @@ func (r *CreateCubeSandboxReq) UnmarshalJSON(data []byte) error {
 }
 
 type CreateCubeSandboxRes struct {
-	RequestID string
-	Ret       *Ret   `json:"ret,omitempty"`
-	SandboxID string `json:"sandbox_id,omitempty"`
-	SandboxIP string `json:"sandbox_ip,omitempty"`
-	HostID    string `json:"host_id,omitempty"`
-	HostIP    string `json:"host_ip,omitempty"`
+	// CreateNotStarted certifies that no node RPC was issued and none can start
+	// after this response. Internal callers may release pre-create reservations.
+	CreateNotStarted bool `json:"-"`
+	RequestID        string
+	Ret              *Ret   `json:"ret,omitempty"`
+	SandboxID        string `json:"sandbox_id,omitempty"`
+	SandboxIP        string `json:"sandbox_ip,omitempty"`
+	HostID           string `json:"host_id,omitempty"`
+	HostIP           string `json:"host_ip,omitempty"`
 	// TrafficAccessToken is populated only when the request set
 	// CubeNetworkConfig.AllowPublicTraffic = false. Empty otherwise.
 	TrafficAccessToken string            `json:"traffic_access_token,omitempty"`
@@ -572,6 +581,8 @@ type ListCubeSandboxRes struct {
 	Data      []*SandboxBriefData `json:"data,omitempty"`
 }
 
+// SandboxBriefData is the list view of one sandbox. CreateAt and PauseAt are
+// Unix nanoseconds; EndAt is Unix milliseconds.
 type SandboxBriefData struct {
 	SandboxID  string `json:"sandbox_id,omitempty"`
 	Status     int32  `json:"status,omitempty"`
@@ -615,23 +626,31 @@ type GetCubeSandboxRes struct {
 	Data      []*SandboxData `json:"data,omitempty"`
 }
 
+// SandboxData is the detail view of one sandbox. CreateAt is Unix
+// nanoseconds; EndAt is Unix milliseconds.
 type SandboxData struct {
-	SandboxID              string             `json:"sandbox_id,omitempty"`
-	Status                 int32              `json:"status,omitempty"`
-	HostID                 string             `json:"host_id,omitempty"`
-	HostIP                 string             `json:"host_ip,omitempty"`
-	SandboxIP              string             `json:"sandbox_ip,omitempty"`
-	TemplateID             string             `json:"template_id,omitempty"`
-	Annotations            map[string]string  `json:"annotations,omitempty"`
-	Labels                 map[string]string  `json:"labels,omitempty"`
-	Containers             []*ContainerInfo   `json:"containers,omitempty"`
-	NameSpace              string             `json:"namespace,omitempty"`
-	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
-	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
-	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
-	EndAt                  int64              `json:"end_at,omitempty"`
-	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
-	RestartStatus          *RestartStatus     `json:"restart_status,omitempty"`
+	SandboxID              string            `json:"sandbox_id,omitempty"`
+	Status                 int32             `json:"status,omitempty"`
+	ErrorReason            string            `json:"error_reason,omitempty"`
+	HostID                 string            `json:"host_id,omitempty"`
+	HostIP                 string            `json:"host_ip,omitempty"`
+	SandboxIP              string            `json:"sandbox_ip,omitempty"`
+	TemplateID             string            `json:"template_id,omitempty"`
+	Annotations            map[string]string `json:"annotations,omitempty"`
+	Labels                 map[string]string `json:"labels,omitempty"`
+	Containers             []*ContainerInfo  `json:"containers,omitempty"`
+	NameSpace              string            `json:"namespace,omitempty"`
+	ExposedPortEndpoint    string            `json:"exposed_port_endpoint,omitempty"`
+	ExposedPortMode        string            `json:"exposed_port_mode,omitempty"`
+	RequestedContainerPort int32             `json:"requested_container_port,omitempty"`
+	// ExposedPortHostPort is the node-level host port when ExposedPortMode is
+	// host_port, so callers do not have to parse ExposedPortEndpoint.
+	ExposedPortHostPort int32              `json:"exposed_port_host_port,omitempty"`
+	CreateAt            int64              `json:"create_at,omitempty"`
+	EndAt               int64              `json:"end_at,omitempty"`
+	VolumeMounts        []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	RestartStatus       *RestartStatus     `json:"restart_status,omitempty"`
+	ConfiguredQos       *qos.Config        `json:"configured_qos,omitempty"`
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is
@@ -711,6 +730,7 @@ type CreateTemplateFromImageReq struct {
 	WritableLayerSize  string              `json:"writable_layer_size,omitempty"`
 	ExposedPorts       []int32             `json:"exposed_ports,omitempty"`
 	DistributionScope  []string            `json:"distribution_scope,omitempty"`
+	Qos                *qos.Config         `json:"qos,omitempty"`
 	ContainerOverrides *ContainerOverrides `json:"container_overrides,omitempty"`
 	Wait               bool                `json:"wait,omitempty"`
 
@@ -730,6 +750,12 @@ type CreateTemplateFromImageReq struct {
 	// with ivshmem enabled so the captured snapshot already contains the
 	// device topology.
 	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
+
+	// CgroupMode selects the cgroup hierarchy for the template and every
+	// sandbox created from it. Empty keeps the default unified (v2)
+	// hierarchy; "legacy" lets the guest mount cgroup v1 controllers itself
+	// (required by Android init).
+	CgroupMode *string `json:"cgroup_mode,omitempty"`
 
 	// Backend is the CoW store (xfs｜s3) for this template and every
 	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.

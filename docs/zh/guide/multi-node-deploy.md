@@ -39,9 +39,14 @@
 - **物理机或裸金属服务器**（不支持嵌套虚拟化）
 - **x86_64** 或 **aarch64**（ARM64）架构，**已启用 KVM**（`ls /dev/kvm`）
 - **Docker** 已安装并运行
+- 所有集群节点（包括控制节点和所有计算节点）均已启用**时间同步**，可使用 `chrony`、`ntpd`、`systemd-timesyncd`、PTP 或其他合适的时间同步方案
 - 到控制节点的**网络连通性**（默认需访问 `CubeOps` 的 `3010` 端口进行节点注册；使用内置 MinIO 时还需访问 `9000` 端口）
 
-完整要求列表请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
+控制节点的前置条件请参阅[本地构建部署 — 前置条件](./self-build-deploy.md#前置条件)。
+
+:::: warning 保持节点时间同步
+如果计算节点的时间落后于控制节点，其心跳时间可能看起来已超过 15 秒的过期窗口，导致该节点被标记为不健康，模板也不会下发到该节点。时间恢复同步后，CubeMaster 通常会自动补齐缺失的模板副本；如需立即触发重新下发，可执行 [template redo](./cubemaster-scheduler-config.md#扩容后的-template-redo)。
+::::
 
 ## 第一步：准备发布包
 
@@ -283,6 +288,25 @@ sudo ./down.sh
 ```
 
 计算节点模式下，该命令只会停止 `cubelet`，不影响控制面或其他计算节点。
+
+### 卸载
+
+集群中的控制节点和计算节点需要分别执行卸载。卸载会删除当前节点上的 CubeSandbox 服务、容器、数据卷、网络配置、运行数据和日志；卸载控制节点还会删除集群中的模板、沙箱及快照数据。执行前请先备份需要保留的数据，并按[节点相关操作](./node-operations.md)先隔离和清理待移除的计算节点。
+
+在每个需要卸载的节点执行：
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+确认检查通过且不再需要卸载脚本和安装包后，最后手动删除保留的工具目录：
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> 该卸载脚本不会删除 Cube 相关的 Docker 镜像，如果需要删除，可以根据脚本提示手动删除。
 
 ### 重新安装
 

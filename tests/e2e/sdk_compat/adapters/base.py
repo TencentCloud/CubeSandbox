@@ -35,6 +35,11 @@ class SandboxAdapter(ABC):
     def info(self) -> SandboxInfo:
         raise NotImplementedError
 
+    def is_running(self) -> bool:
+        """Data-plane liveness probe. Defaults to unsupported for backends
+        whose SDK does not expose it (e.g. old e2b versions)."""
+        raise UnsupportedCapability(self.backend, "is_running")
+
     @abstractmethod
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
         raise NotImplementedError
@@ -115,10 +120,10 @@ class SandboxAdapter(ABC):
     def set_timeout(self, timeout: int) -> None:
         raise UnsupportedCapability(self.backend, "set_timeout")
 
-    def create_snapshot(self) -> str:
+    def create_snapshot(self, name: str | None = None, *, mode: str | None = None) -> str:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
-    def delete_snapshot(self, snapshot_id: str) -> None:
+    def delete_snapshot(self, snapshot_id: str) -> bool:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
@@ -136,8 +141,16 @@ class SandboxAdapter(ABC):
     def list_snapshot_ids(self) -> set[str]:
         raise UnsupportedCapability(self.backend, "rollback_clone")
 
+    def list_snapshot_ids_by_name(self, name: str) -> set[str]:
+        raise UnsupportedCapability(self.backend, "rollback_clone")
+
     def get_host(self, port: int) -> str:
         raise UnsupportedCapability(self.backend, "network_public_access")
+
+    def get_exposed_port_endpoint(self, port: int) -> str:
+        """Return the hostIP:hostPort endpoint of a template-declared exposed
+        port via CubeAPI."""
+        raise UnsupportedCapability(self.backend, "network_sandbox_to_sandbox")
 
     def traffic_access_token(self) -> str | None:
         raise UnsupportedCapability(self.backend, "network_public_access")

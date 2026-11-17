@@ -37,6 +37,7 @@ var netlinkLinkList = func() ([]netlink.Link, error) {
 	return systemnet.WithDumpRetry(netlink.LinkList)
 }
 var netlinkLinkDel = netlink.LinkDel
+var netlinkLinkSetDown = netlink.LinkSetDown
 var deleteTAPDevicePolicyMaps = cubevs.DeleteTAPDevicePolicyMaps
 var unixOpen = unix.Open
 var unixClose = unix.Close
@@ -84,6 +85,8 @@ type TapDeviceAdapter interface {
 	Create(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx int) (*tapDevice, error)
 	// Restore reconciles link state, MTU, and ARP. It does not attach the filter.
 	Restore(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error)
+	// Quarantine disables traffic while policy cleanup is pending.
+	Quarantine(tap *tapDevice) error
 	Open(name string) (*os.File, error)
 	Close(file *os.File)
 	List() (map[string]*tapDevice, error)
@@ -114,6 +117,24 @@ func (realTapDeviceAdapter) Create(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx
 
 func (realTapDeviceAdapter) Restore(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error) {
 	return restoreTap(tap, mtu, mvmMacAddr, cubeDevIdx)
+}
+
+func (realTapDeviceAdapter) Quarantine(tap *tapDevice) error {
+	if tap == nil || tap.Index <= 0 || tap.Name == "" {
+		return fmt.Errorf("missing TAP identity for quarantine")
+	}
+	link, err := netlinkLinkByIndex(tap.Index)
+	if err != nil {
+		return err
+	}
+	device, ok := link.(*netlink.Tuntap)
+	if !ok || device.Mode != netlink.TUNTAP_MODE_TAP || device.Name != tap.Name || device.Index != tap.Index {
+		return fmt.Errorf("TAP identity changed before quarantine: %s(%d)", tap.Name, tap.Index)
+	}
+	if err := netlinkLinkSetDown(link); err != nil {
+		return fmt.Errorf("disable TAP %s(%d): %w", tap.Name, tap.Index, err)
+	}
+	return nil
 }
 
 func (realTapDeviceAdapter) Open(name string) (*os.File, error) {

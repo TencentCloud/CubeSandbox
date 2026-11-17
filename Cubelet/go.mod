@@ -37,6 +37,7 @@ require (
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart v0.0.0-00010101000000-000000000000
+	github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode v0.0.0
 	github.com/vishvananda/netlink v1.3.1
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/mod v0.29.0
@@ -109,6 +110,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
+	github.com/miekg/dns v1.1.62 // indirect
 	github.com/miekg/pkcs11 v1.1.1 // indirect
 	github.com/minio/blake2b-simd v0.0.0-20160723061019-3f5f724cb5b1 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
@@ -219,3 +221,5 @@ replace (
 )
 
 replace github.com/tencentcloud/CubeSandbox/CubeNet/cubevs => ../CubeNet/cubevs
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode => ../pkgs/snapshotmode

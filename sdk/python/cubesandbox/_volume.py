@@ -17,6 +17,7 @@ from ._exceptions import ApiError, AuthenticationError, VolumeNotFoundError
 # enforced in `CubeAPI/src/models/mod.rs` / `handlers/volumes.rs`. Validating
 # client-side turns an opaque HTTP 400 into a clean ValueError at the call site.
 MAX_VOLUME_NAME_LEN = 128
+MAX_VOLUME_PRIVATE_DATA_LEN = 1024
 _VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 # A thread-local session reused across the Volume control-plane classmethods so
@@ -360,14 +361,62 @@ class Volume:
             ValueError: If ``name`` is provided but violates the naming rules.
             ApiError: On unexpected backend error (HTTP 400/500).
         """
+        return cls._create(name, driver, config, None)
+
+    @classmethod
+    def create_with_private_data(
+        cls,
+        name: str | None = None,
+        *,
+        private_data: str,
+        driver: str | None = None,
+        config: Config | None = None,
+    ) -> "Volume":
+        """Create via POST /v2/volumes with opaque plugin input.
+
+        Pass valid UTF-8 of at most 1024 bytes without NUL or characters
+        outside the BMP. Use credential references, never plaintext
+        credentials. Empty strings are forwarded.
+        Requires CubeAPI, every serving CubeMaster, and Cubelet at version
+        0.8.0 or newer, a plugin that supports this protocol, and this SDK at
+        version 0.8.0 or newer.
+        Query, delete and mount the returned volume through the existing APIs.
+        Unsupported servers raise an error; this does not fall back to /volumes.
+        """
+        if not isinstance(private_data, str):
+            raise TypeError("private_data must be a string")
+        try:
+            encoded_private_data = private_data.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ValueError("private_data must be valid UTF-8") from None
+        if len(encoded_private_data) > MAX_VOLUME_PRIVATE_DATA_LEN:
+            raise ValueError(f"private_data exceeds max length {MAX_VOLUME_PRIVATE_DATA_LEN}")
+        if "\0" in private_data:
+            raise ValueError("private_data must not contain NUL")
+        if any(ord(character) > 0xFFFF for character in private_data):
+            raise ValueError("private_data must not contain characters outside the BMP")
+        return cls._create(name, driver, config, private_data)
+
+    @classmethod
+    def _create(
+        cls,
+        name: str | None,
+        driver: str | None,
+        config: Config | None,
+        private_data: str | None,
+    ) -> "Volume":
         _validate_name(name or "")
         cfg = config or Config()
         payload: dict = {"name": name or ""}
         if driver:
             payload["driver"] = driver
+        path = "/volumes"
+        if private_data is not None:
+            path = "/v2/volumes"
+            payload["private_data"] = private_data
         s = _shared_session()
         resp = s.post(
-            f"{cfg.api_url}/volumes",
+            f"{cfg.api_url}{path}",
             json=payload,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
             timeout=cfg.request_timeout,

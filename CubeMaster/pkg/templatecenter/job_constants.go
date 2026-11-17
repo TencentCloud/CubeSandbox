@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
@@ -77,7 +78,9 @@ const (
 	defaultTemplateMemory      = "2000Mi"
 	defaultTemplateArtifactTTL = 7 * 24 * time.Hour
 	rootfsWritableVolumeName   = "cube_rootfs_rw"
-	defaultDistributionWorkers = 4
+	// Derived from the config package's single source of truth so the two
+	// defaults cannot drift apart.
+	defaultDistributionWorkers = config.DefaultDistributionWorkers
 )
 
 var createRedoJobOperations = []string{JobOperationCreate, JobOperationRedo}

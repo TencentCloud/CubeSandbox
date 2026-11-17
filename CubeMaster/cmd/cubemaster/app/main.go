@@ -36,6 +36,7 @@ import (
 	volumeplugin "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
 	_ "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/rpc"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
@@ -45,6 +46,7 @@ import (
 )
 
 type App struct {
+	webhooks *webhook.Runtime
 }
 
 func New() *App {
@@ -66,6 +68,9 @@ func (a *App) Run() {
 		stdlog.Fatalf("core init fail:%v", recov.DumpStacktrace(3, err))
 		return
 	}
+
+	a.startWebhooks(ctx, cfg)
+	defer a.webhooks.Shutdown(context.Background())
 
 	type srvResp struct {
 		s   *server.Server
@@ -112,7 +117,9 @@ func (a *App) Run() {
 	case serverC <- serverTmp:
 	}
 
-	done := handleSignals(ctx, signals, serverC, cancel)
+	done := handleSignals(ctx, signals, serverC, func() {
+		a.shutdownWebhooksAndCancel(cancel)
+	})
 
 	signal.Notify(signals, handledSignals...)
 
@@ -219,7 +226,10 @@ func coreInit(ctx context.Context, cfg *config.Config) error {
 		log.G(ctx).Warnf("lifecycle init fail (non-fatal): %v", err)
 	}
 
-	scheduler.InitScheduler(ctx)
+	if err := scheduler.InitScheduler(ctx); err != nil {
+		stdlog.Fatalf("scheduler init fail:%v", err)
+		return err
+	}
 
 	if err := sandbox.Init(ctx, cfg); err != nil {
 		stdlog.Fatalf("cube init fail:%v", err)
@@ -353,4 +363,69 @@ func initVolumePlugins(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+// WebhookPublisher is the injection point for lifecycle success paths.
+// Run installs the immutable runtime once, before starting the HTTP server.
+func (a *App) WebhookPublisher() webhook.Publisher {
+	if a.webhooks == nil {
+		return webhook.NopPublisher{}
+	}
+	return a.webhooks.Publisher()
+}
+func (a *App) startWebhooks(ctx context.Context, cfg *config.Config) {
+	var err error
+	a.webhooks = nil
+	defer func() {
+		sandbox.SetWebhookPublisher(a.WebhookPublisher())
+		task.SetWebhookPublisher(a.WebhookPublisher())
+		templatecenter.SetWebhookPublisher(a.WebhookPublisher())
+		if err != nil {
+			CubeLog.Warnf("webhooks disabled: invalid startup configuration; values redacted")
+		}
+	}()
+	c := cfg.Webhooks
+	if c.Invalid {
+		err = config.ErrWebhookConfig
+		return
+	}
+	if !c.Enabled {
+		return
+	}
+	if err = c.Validate(); err != nil {
+		return
+	}
+	subscriptions := make([]webhook.Subscription, 0, len(c.Subscriptions))
+	enabled := false
+	for _, s := range c.Subscriptions {
+		enabled = enabled || s.Enabled
+		subscriptions = append(subscriptions, webhook.Subscription{ID: s.ID, Enabled: s.Enabled, Target: s.URL, Events: s.Events})
+	}
+	if !enabled {
+		return
+	}
+	provider, err := webhook.NewStaticSubscriptionProvider(subscriptions)
+	if err != nil {
+		return
+	}
+	store, err := webhook.NewMemoryDeliveryStore(c.Store.MaxRecords)
+	if err != nil {
+		return
+	}
+	sender := webhook.NewSender(c)
+	options := webhook.RuntimeOptions{IngressCapacity: c.IngressCapacity, Workers: c.Workers, RequestTimeout: c.RequestTimeout, MaxAttempts: c.MaxAttempts, StoreOperationTimeout: time.Second}
+	a.webhooks, err = webhook.NewRuntime(ctx, options, provider, store, sender)
+	if err != nil {
+		sender.Close()
+		_, _ = store.Close(context.Background())
+	}
+}
+
+// Complete the webhook's bounded drain before the existing cancellation path
+// can terminate the process. Other services retain their shutdown behavior.
+func (a *App) shutdownWebhooksAndCancel(cancel context.CancelFunc) {
+	if a.webhooks != nil {
+		a.webhooks.Shutdown(context.Background())
+	}
+	cancel()
 }

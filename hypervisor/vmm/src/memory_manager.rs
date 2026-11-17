@@ -2442,10 +2442,11 @@ impl MemoryManager {
         // Write only anonymous pages to the snapshot file.
         // With a base, non-anon regions already have the correct content.
         // Without a base, non-anon regions are zeros (sparse holes).
-        for range in filtered_ranges.regions() {
-            let file_off =
-                Self::calculate_file_offset_for_gpa(range.gpa, range.length, &gpa_to_file_offset)?;
-            self.save_range_to_file(&memory_file, range, file_off)?;
+        let align = snapshot_write_align(&memory_file);
+        for (range, file_off) in
+            snapshot_file_writes(filtered_ranges.regions(), &gpa_to_file_offset, align)?
+        {
+            self.save_range_to_file(&memory_file, &range, file_off)?;
         }
 
         info!(
@@ -2589,10 +2590,11 @@ impl MemoryManager {
         }
 
         // Overlay only the filtered (anon ∩ soft-dirty) pages.
-        for range in filtered_ranges.regions() {
-            let file_off =
-                Self::calculate_file_offset_for_gpa(range.gpa, range.length, &gpa_to_file_offset)?;
-            self.save_range_to_file(&memory_file, range, file_off)?;
+        let align = snapshot_write_align(&memory_file);
+        for (range, file_off) in
+            snapshot_file_writes(filtered_ranges.regions(), &gpa_to_file_offset, align)?
+        {
+            self.save_range_to_file(&memory_file, &range, file_off)?;
         }
         info!(
             "Soft-dirty snapshot saved: {} dirty bytes written to {:?}",
@@ -2634,6 +2636,175 @@ impl MemoryManager {
             gpa,
             length
         )))
+    }
+}
+
+const FUSE_SNAPSHOT_WRITE_ALIGN: u64 = 1 << 20;
+const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
+
+/// Window size used to coalesce incremental snapshot writes, 0 for page
+/// granular writes. FUSE targets (JuiceFS) get 1 MiB windows, because
+/// JuiceFS stores every discontiguous write as its own slice and later
+/// compacts whole chunks, so thousands of 4 KiB writes cost far more than
+/// a few large ones.
+fn snapshot_write_align(memory_file: &File) -> u64 {
+    // SAFETY: fstatfs only writes into the zeroed struct we pass it.
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::fstatfs(memory_file.as_raw_fd(), &mut stat) };
+    if ret == 0 && stat.f_type as i64 == FUSE_SUPER_MAGIC {
+        FUSE_SNAPSHOT_WRITE_ALIGN
+    } else {
+        0
+    }
+}
+
+/// The writes that overlay `ranges` onto the snapshot file, as (guest
+/// range, file offset) pairs. With a non-zero `align`, each range is
+/// widened to `align`-sized windows aligned in the file and clipped to its
+/// region, and touching windows are merged. The extra pages are read from
+/// guest memory, which still holds the base file's content for every page
+/// the guest has not written.
+fn snapshot_file_writes(
+    ranges: &[MemoryRange],
+    gpa_to_file_offset: &[(u64, u64, u64)],
+    align: u64,
+) -> result::Result<Vec<(MemoryRange, u64)>, MigratableError> {
+    let mut writes: Vec<(MemoryRange, u64)> = Vec::with_capacity(ranges.len());
+    let mut last_region = usize::MAX;
+    for range in ranges {
+        if align == 0 {
+            let file_off = MemoryManager::calculate_file_offset_for_gpa(
+                range.gpa,
+                range.length,
+                gpa_to_file_offset,
+            )?;
+            writes.push((range.clone(), file_off));
+            continue;
+        }
+
+        let (region, &(region_gpa, region_length, region_off)) = gpa_to_file_offset
+            .iter()
+            .enumerate()
+            .find(|(_, &(gpa, length, _))| {
+                range.gpa >= gpa && range.gpa + range.length <= gpa + length
+            })
+            .ok_or_else(|| {
+                MigratableError::MigrateSend(anyhow!(
+                    "Could not find file offset for GPA 0x{:x} (length {})",
+                    range.gpa,
+                    range.length
+                ))
+            })?;
+        let file_off = region_off + (range.gpa - region_gpa);
+        let start = (file_off / align * align).max(region_off);
+        let end = (file_off + range.length)
+            .div_ceil(align)
+            .saturating_mul(align)
+            .min(region_off + region_length);
+
+        if region == last_region {
+            if let Some((last, last_off)) = writes.last_mut() {
+                let last_end = *last_off + last.length;
+                if last_end >= start {
+                    last.length = end.max(last_end) - *last_off;
+                    continue;
+                }
+            }
+        }
+        last_region = region;
+        writes.push((
+            MemoryRange {
+                gpa: region_gpa + (start - region_off),
+                length: end - start,
+            },
+            start,
+        ));
+    }
+
+    if align != 0 {
+        info!(
+            "Snapshot writes coalesced to {} byte windows: {} ranges -> {} writes, {} bytes",
+            align,
+            ranges.len(),
+            writes.len(),
+            writes.iter().map(|(r, _)| r.length).sum::<u64>()
+        );
+    }
+    Ok(writes)
+}
+
+#[cfg(test)]
+mod snapshot_file_writes_tests {
+    use super::{snapshot_file_writes, MemoryRange};
+
+    const PAGE: u64 = 4096;
+    const MIB: u64 = 1 << 20;
+
+    fn range(gpa: u64, length: u64) -> MemoryRange {
+        MemoryRange { gpa, length }
+    }
+
+    fn summary(writes: &[(MemoryRange, u64)]) -> Vec<(u64, u64, u64)> {
+        writes
+            .iter()
+            .map(|(r, off)| (r.gpa, r.length, *off))
+            .collect()
+    }
+
+    #[test]
+    fn zero_align_keeps_ranges() {
+        let layout = [(0, 8 * MIB, 0), (16 * MIB, 8 * MIB, 8 * MIB)];
+        let ranges = [range(PAGE, PAGE), range(17 * MIB, 2 * PAGE)];
+        let writes = snapshot_file_writes(&ranges, &layout, 0).unwrap();
+        assert_eq!(
+            summary(&writes),
+            vec![(PAGE, PAGE, PAGE), (17 * MIB, 2 * PAGE, 9 * MIB)]
+        );
+    }
+
+    #[test]
+    fn ranges_in_one_window_merge() {
+        let layout = [(0, 16 * MIB, 0)];
+        let ranges = [
+            range(PAGE, PAGE),
+            range(MIB, PAGE),
+            range(4 * MIB - PAGE, PAGE),
+        ];
+        let writes = snapshot_file_writes(&ranges, &layout, 4 * MIB).unwrap();
+        assert_eq!(summary(&writes), vec![(0, 4 * MIB, 0)]);
+    }
+
+    #[test]
+    fn adjacent_windows_merge_and_gaps_split() {
+        let layout = [(0, 32 * MIB, 0)];
+        let ranges = [
+            range(4 * MIB - PAGE, 2 * PAGE),
+            range(9 * MIB, PAGE),
+            range(20 * MIB, PAGE),
+        ];
+        let writes = snapshot_file_writes(&ranges, &layout, 4 * MIB).unwrap();
+        assert_eq!(
+            summary(&writes),
+            vec![(0, 12 * MIB, 0), (20 * MIB, 4 * MIB, 20 * MIB)]
+        );
+    }
+
+    #[test]
+    fn windows_clip_to_regions_and_do_not_cross_them() {
+        // Region 1 starts at file offset 6 MiB, which is not window aligned.
+        let layout = [(0, 6 * MIB, 0), (16 * MIB, 6 * MIB, 6 * MIB)];
+        let ranges = [range(5 * MIB, PAGE), range(16 * MIB, PAGE)];
+        let writes = snapshot_file_writes(&ranges, &layout, 4 * MIB).unwrap();
+        assert_eq!(
+            summary(&writes),
+            vec![(4 * MIB, 2 * MIB, 4 * MIB), (16 * MIB, 2 * MIB, 6 * MIB)]
+        );
+    }
+
+    #[test]
+    fn unknown_gpa_is_an_error() {
+        let layout = [(0, 4 * MIB, 0)];
+        assert!(snapshot_file_writes(&[range(8 * MIB, PAGE)], &layout, 4 * MIB).is_err());
     }
 }
 

@@ -42,7 +42,7 @@ func (m *MockRunTemplateManager) IsReady() bool {
 	return true
 }
 
-func (m *MockRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
+func (m *MockRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context, templateID, backend string) (*templatetypes.LocalRunTemplate, error) {
 	return &templatetypes.LocalRunTemplate{
 		DistributionReference: templatetypes.DistributionReference{
 			TemplateID: templateID,
@@ -55,7 +55,7 @@ func (m *MockRunTemplateManager) ListLocalTemplates(ctx context.Context) (map[st
 }
 
 func (m *MockRunTemplateManager) EnsureLocalTemplate(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
-	return m.EnsureCubeRunTemplate(ctx, templateID)
+	return m.EnsureCubeRunTemplate(ctx, templateID, "")
 }
 
 func TestNewCubelet(t *testing.T) {

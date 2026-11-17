@@ -19,6 +19,8 @@ func TestNormalizeSnapshotBackend(t *testing.T) {
 		{in: "cubecow", want: SnapshotBackendXFS},
 		{in: "s3", want: SnapshotBackendS3},
 		{in: "S3", want: SnapshotBackendS3},
+		{in: "jfs", want: SnapshotBackendJFS},
+		{in: "JuiceFS", want: SnapshotBackendJFS},
 		{in: "nfs", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -73,8 +75,28 @@ func TestSnapshotRemoteStatus(t *testing.T) {
 	if got := SnapshotRemoteStatus(SnapshotBackendS3); got != RemoteStatusPending {
 		t.Fatalf("s3 remote_status=%q, want %q", got, RemoteStatusPending)
 	}
+	if got := SnapshotRemoteStatus(SnapshotBackendJFS); got != RemoteStatusPending {
+		t.Fatalf("jfs remote_status=%q, want %q", got, RemoteStatusPending)
+	}
 	if got := SnapshotRemoteStatus(SnapshotBackendXFS); got != "" {
 		t.Fatalf("xfs remote_status=%q, want empty", got)
+	}
+}
+
+func TestIsRemoteTrackedBackend(t *testing.T) {
+	t.Parallel()
+	for _, b := range []string{"s3", "jfs", "juicefs"} {
+		if !IsRemoteTrackedBackend(b) {
+			t.Fatalf("%q must be remote tracked", b)
+		}
+	}
+	for _, b := range []string{"", "xfs", "cubecow", "nfs"} {
+		if IsRemoteTrackedBackend(b) {
+			t.Fatalf("%q must not be remote tracked", b)
+		}
+	}
+	if IsS3Backend("jfs") {
+		t.Fatal("jfs must not be IsS3Backend: it has no s3lvol export")
 	}
 }
 

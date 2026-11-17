@@ -1,7 +1,7 @@
 /* Copyright (c) 2026 Tencent Inc.
  * SPDX-License-Identifier: Apache-2.0 */
 /*
- *   s3_journal -- change log for the chunk map 
+ *   s3_journal -- change log for the chunk map
  *
  *   The design rationale, including why this is fully asynchronous and why the
  *   synchronous version was deleted, lives in the header comment of

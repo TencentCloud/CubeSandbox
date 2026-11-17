@@ -55,6 +55,7 @@ func TestCrossNodeSandboxImportNeedsEveryPrecondition(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]string){
 		"same node":    func(ann map[string]string) { delete(ann, constants.MasterAnnotationSnapshotCrossNode) },
 		"xfs":          func(ann map[string]string) { ann[constants.MasterAnnotationStorageBackend] = cow.BackendXFS },
+		"shared jfs":   func(ann map[string]string) { ann[constants.MasterAnnotationStorageBackend] = cow.BackendJFS },
 		"no sandbox":   func(ann map[string]string) { delete(ann, constants.MasterAnnotationDesiredSandboxID) },
 		"no uuids":     func(ann map[string]string) { delete(ann, constants.MasterAnnotationSnapshotRemoteUUIDs) },
 		"empty uuids":  func(ann map[string]string) { ann[constants.MasterAnnotationSnapshotRemoteUUIDs] = `{}` },

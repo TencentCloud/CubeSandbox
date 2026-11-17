@@ -13,43 +13,63 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
 
+// getFactorWeightedAverageScore computes a node's weighted average score over
+// the enabled factors: each factor yields a base score in [0,100] (higher
+// means more idle / lower load), multiplied by its weight and summed. Base
+// scores are clamped first: overcommit or anomalous metrics can push raw
+// values out of range (quota usage >100% goes negative, create-limit raw
+// values can exceed 100), and the profile pipeline enforces [0,100] on
+// fail-closed plugins — an out-of-range score would fail the whole scheduling
+// attempt.
 func getFactorWeightedAverageScore(n *node.Node, enableWeightFactors []string) float64 {
 	scores := float64(0)
 	for _, v := range enableWeightFactors {
 		switch v {
 		case constants.WeightFactorCreateConcurrentLimit:
-			scores += getCreateLimitScore(n) * getFactorWeight(constants.WeightFactorCreateConcurrentLimit)
+			scores += clampFactorScore(getCreateLimitScore(n)) * getFactorWeight(constants.WeightFactorCreateConcurrentLimit)
 		case constants.WeightFactorMvmNum:
-			scores += getMvmNumScore(n) * getFactorWeight(constants.WeightFactorMvmNum)
+			scores += clampFactorScore(getMvmNumScore(n)) * getFactorWeight(constants.WeightFactorMvmNum)
 		case constants.WeightFactorMetricUpdate:
-			scores += getMetricUpdateDiff(n) * getFactorWeight(constants.WeightFactorMetricUpdate)
+			scores += clampFactorScore(getMetricUpdateDiff(n)) * getFactorWeight(constants.WeightFactorMetricUpdate)
 		case constants.WeightFactorLocalMetricUpdate:
-			scores += getMetricLocalUpdateDiff(n) * getFactorWeight(constants.WeightFactorLocalMetricUpdate)
+			scores += clampFactorScore(getMetricLocalUpdateDiff(n)) * getFactorWeight(constants.WeightFactorLocalMetricUpdate)
 		case constants.WeightFactorQuotaCpu:
-			scores += getQuotaCpuUsageScore(n) * getFactorWeight(constants.WeightFactorQuotaCpu)
+			scores += clampFactorScore(getQuotaCpuUsageScore(n)) * getFactorWeight(constants.WeightFactorQuotaCpu)
 		case constants.WeightFactorQuotaMem:
-			scores += getQuotaMemMbUsageScore(n) * getFactorWeight(constants.WeightFactorQuotaMem)
+			scores += clampFactorScore(getQuotaMemMbUsageScore(n)) * getFactorWeight(constants.WeightFactorQuotaMem)
 		case constants.WeightFactorCpuUtil:
-			scores += getCpuUtilScore(n) * getFactorWeight(constants.WeightFactorCpuUtil)
+			scores += clampFactorScore(getCpuUtilScore(n)) * getFactorWeight(constants.WeightFactorCpuUtil)
 		case constants.WeightFactorMemUsage:
-			scores += getMemMbUsageScore(n) * getFactorWeight(constants.WeightFactorMemUsage)
+			scores += clampFactorScore(getMemMbUsageScore(n)) * getFactorWeight(constants.WeightFactorMemUsage)
 		case constants.WeightFactorCpuLoadUsage:
-			scores += getCpuLoadUsageScore(n) * getFactorWeight(constants.WeightFactorCpuLoadUsage)
+			scores += clampFactorScore(getCpuLoadUsageScore(n)) * getFactorWeight(constants.WeightFactorCpuLoadUsage)
 		case constants.WeightFactorRealTimeCreateNum:
-			scores += getRealTimeCreateNumScore(n) * getFactorWeight(constants.WeightFactorRealTimeCreateNum)
+			scores += clampFactorScore(getRealTimeCreateNumScore(n)) * getFactorWeight(constants.WeightFactorRealTimeCreateNum)
 		case constants.WeightFactorLocalCreateNum:
-			scores += getLocalCreateNumScore(n) * getFactorWeight(constants.WeightFactorLocalCreateNum)
+			scores += clampFactorScore(getLocalCreateNumScore(n)) * getFactorWeight(constants.WeightFactorLocalCreateNum)
 		case constants.WeightFactorDataDiskUsage:
-			scores += getDataDiskUsageScore(n) * getFactorWeight(constants.WeightFactorDataDiskUsage)
+			scores += clampFactorScore(getDataDiskUsageScore(n)) * getFactorWeight(constants.WeightFactorDataDiskUsage)
 		case constants.WeightFactorStorageDiskUsage:
-			scores += getStorageUsageScore(n) * getFactorWeight(constants.WeightFactorStorageDiskUsage)
+			scores += clampFactorScore(getStorageUsageScore(n)) * getFactorWeight(constants.WeightFactorStorageDiskUsage)
 		case constants.WeightFactorSysDiskUsage:
-			scores += getSysDiskUsageScore(n) * getFactorWeight(constants.WeightFactorSysDiskUsage)
+			scores += clampFactorScore(getSysDiskUsageScore(n)) * getFactorWeight(constants.WeightFactorSysDiskUsage)
 		}
 	}
 	return scores
 }
 
+// clampFactorScore clamps a factor base score to the agreed [0,100] range.
+func clampFactorScore(s float64) float64 {
+	if s < 0 {
+		return 0
+	}
+	if s > 100 {
+		return 100
+	}
+	return s
+}
+
+// getReciprocal returns v/base in [0,1]; 0 when base is 0.
 func getReciprocal(v int64, base int64) float64 {
 	if base == 0 {
 		return 0.0
@@ -74,6 +94,7 @@ func getFactorWeight(k string) float64 {
 func getMetricUpdateDiff(n *node.Node) float64 {
 	return getReciprocal(n.MetricUpdate.Unix(), time.Now().Unix())
 }
+
 func getMetricLocalUpdateDiff(n *node.Node) float64 {
 	return getReciprocal(n.MetricUpdate.Unix(), time.Now().Unix())
 }

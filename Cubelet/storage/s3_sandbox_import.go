@@ -64,7 +64,8 @@ func CrossNodeSandboxImport(ann map[string]string) *SandboxImport {
 	if raw == "" {
 		return nil
 	}
-	if backend, err := cow.NormalizeBackend(raw); err != nil || backend != cow.BackendS3 {
+	backend, err := cow.NormalizeBackend(raw)
+	if err != nil || !CrossNodeImportBackend(backend) {
 		return nil
 	}
 	id := strings.TrimSpace(ann[constants.MasterAnnotationDesiredSandboxID])
@@ -75,7 +76,23 @@ func CrossNodeSandboxImport(ann map[string]string) *SandboxImport {
 	if uuids.Empty() {
 		return nil
 	}
-	return &SandboxImport{SandboxID: id, UUIDs: uuids}
+	return &SandboxImport{
+		SandboxID: id,
+		UUIDs:     uuids,
+	}
+}
+
+// CrossNodeImportBackend reports whether a package of backend can be
+// restored on a node other than the one that made it.
+func CrossNodeImportBackend(backend string) bool {
+	return backend == cow.BackendS3
+}
+
+// RemoteSnapshotBackend reports whether snapshot publication has asynchronous
+// remote readiness. S3 uploads objects; JFS waits for writeback staging to
+// drain even though every node already sees the shared namespace.
+func RemoteSnapshotBackend(backend string) bool {
+	return backend == cow.BackendS3 || backend == cow.BackendJFS
 }
 
 // SandboxObjectNamePrefix is what every disk minted for a sandbox is named

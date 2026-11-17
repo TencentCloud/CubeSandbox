@@ -56,8 +56,9 @@ var (
 // layout and resolves both from its local catalog (with deterministic
 // fallback) keyed by templateID.
 type templateCleanupLocator struct {
-	NodeID string
-	NodeIP string
+	NodeID            string
+	NodeIP            string
+	TemplateVariantID string
 }
 
 type templateCleanupTargets struct {
@@ -77,6 +78,7 @@ func cleanupLocatorKey(locator templateCleanupLocator) string {
 	return strings.Join([]string{
 		strings.TrimSpace(locator.NodeID),
 		strings.TrimSpace(locator.NodeIP),
+		strings.TrimSpace(locator.TemplateVariantID),
 	}, "|")
 }
 
@@ -140,13 +142,42 @@ func activeWorkBlocker(targets *templateCleanupTargets, templateID string) error
 	return nil
 }
 
+func hasActiveJFSJob(targets *templateCleanupTargets) bool {
+	if targets == nil || !targets.hasActiveJob() {
+		return false
+	}
+	if targets.Definition != nil && constants.IsJFSBackend(targets.Definition.StorageBackend) {
+		return true
+	}
+	for _, job := range targets.Jobs {
+		if !strings.EqualFold(job.Status, JobStatusPending) &&
+			!strings.EqualFold(job.Status, JobStatusRunning) &&
+			!strings.EqualFold(job.Status, JobStatusBuilt) {
+			continue
+		}
+		var req struct {
+			Backend string `json:"backend"`
+		}
+		if err := json.Unmarshal([]byte(job.RequestJSON), &req); err == nil && constants.IsJFSBackend(req.Backend) {
+			return true
+		}
+	}
+	return false
+}
+
 func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *templateCleanupTargets, opts DeleteTemplateOptions) error {
 	if !targets.hasCleanupState() {
 		return ErrTemplateNotFound
 	}
 	blocker := activeWorkBlocker(targets, templateID)
-	if blocker != nil && !opts.Force {
-		return blocker
+	backend := cleanupBackendFromTargets(targets)
+	if blocker != nil {
+		if !opts.Force {
+			return blocker
+		}
+		if hasActiveJFSJob(targets) {
+			return fmt.Errorf("%w: force delete is not supported while a JFS template job is active", blocker)
+		}
 	}
 	if targets.requiresCleanupLocator() {
 		if !opts.Force {
@@ -179,7 +210,7 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 			return err
 		}
 	}
-	if err := runReplicaCleanup(ctx, templateID, targets.Locators, cleanupBackendFromTargets(targets)); err != nil {
+	if err := runReplicaCleanup(ctx, templateID, targets.Locators, backend); err != nil {
 		return err
 	}
 	if err := runArtifactCleanup(ctx, templateID, targets); err != nil {
@@ -285,8 +316,9 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 			targets.ArtifactIDs[replica.ArtifactID] = struct{}{}
 		}
 		targets.addLocator(templateCleanupLocator{
-			NodeID: replica.NodeID,
-			NodeIP: replica.NodeIP,
+			NodeID:            replica.NodeID,
+			NodeIP:            replica.NodeIP,
+			TemplateVariantID: replica.TemplateVariantID,
 		})
 	}
 
@@ -452,6 +484,10 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 	backend = pinnedCleanupBackend(backend)
 	var cleanupErr error
 	for _, locator := range locators {
+		cleanupID := strings.TrimSpace(locator.TemplateVariantID)
+		if cleanupID == "" {
+			cleanupID = templateID
+		}
 		hostIP := locator.NodeIP
 		if hostIP == "" && locator.NodeID != "" {
 			if n, ok := localcache.GetNode(locator.NodeID); ok && n != nil {
@@ -467,14 +503,14 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 		// fallback) so master no longer needs to know any physical detail.
 		rsp, err := cleanupTemplateOnCubelet(ctx, getCubeletAddrForDelete(hostIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
-			TemplateID: templateID,
+			TemplateID: cleanupID,
 			Backend:    backend,
 		})
 		if err != nil {
 			if isIgnorableTemplateCleanupError(err) {
 				continue
 			}
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s on node %s: %w", templateID, locator.NodeID, err))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup template %s on node %s: %w", cleanupID, locator.NodeID, err))
 			continue
 		}
 		if rsp.GetRet() != nil && int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {

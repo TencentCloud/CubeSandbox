@@ -1594,6 +1594,12 @@ main(int argc, char **argv)
 		uint32_t short_valid = 2 * AIO_BLOCK_SIZE + 100;
 		uint32_t partial_off = 4 * AIO_BLOCK_SIZE;
 		uint64_t declined_before;
+		struct s3_cache_object_reservation *reservations[5] = {0};
+		struct async_ctx reserved_done = {0};
+		const struct s3_cache_object_id *reserve_ids[5] = {
+			&object_a, &other_key, &other_bucket, &other_endpoint,
+			&collision_a,
+		};
 
 		poll_until_populate_settled(cache);
 		s3_cache_destroy(cache);
@@ -1604,8 +1610,99 @@ main(int argc, char **argv)
 			goto out_cache;
 		}
 
+		for (uint32_t i = 0; i < 4; i++) {
+			rc = s3_cache_object_reserve(cache, reserve_ids[i],
+						     TEST_CHUNK_SIZE,
+						     &reservations[i]);
+			check_u64("each free slot can take a preheat reservation",
+				  (uint64_t)-rc, 0);
+		}
+		rc = s3_cache_object_reserve(cache, reserve_ids[4],
+					     TEST_CHUNK_SIZE, &reservations[4]);
+		check_u64("slot count stops preheat before the 32-wide window",
+			  (uint64_t)-rc, ENOSPC);
+		{
+			struct s3_cache_object_reservation *duplicate = NULL;
+
+			rc = s3_cache_object_reserve(cache, &object_a,
+						     TEST_CHUNK_SIZE, &duplicate);
+			check_u64("the same object cannot be reserved twice",
+				  (uint64_t)-rc, EALREADY);
+		}
+		s3_cache_object_reservation_cancel(reservations[0]);
+		reservations[0] = NULL;
+		rc = s3_cache_object_reserve(cache, reserve_ids[4],
+					     TEST_CHUNK_SIZE, &reservations[4]);
+		check_u64("releasing one ticket admits the next export",
+			  (uint64_t)-rc, 0);
+		for (uint32_t i = 1; i < 5; i++) {
+			s3_cache_object_reservation_cancel(reservations[i]);
+		}
+
+		{
+			struct s3_cache_opts wide_opts = opts;
+			struct s3_cache *wide = NULL;
+			struct s3_cache_object_reservation *ticket[6] = {0};
+			struct async_ctx done[6] = {0};
+			struct s3_cache_object_id ids[6];
+			char keys[6][32];
+
+			wide_opts.region_offset = TEST_REGION_OFF + TEST_REGION_SIZE;
+			wide_opts.region_size = 8 * TEST_CHUNK_SIZE;
+			rc = s3_cache_create(&wide_opts, &wide);
+			check_u64("wider cache for the preheat window",
+				  (uint64_t)-rc, 0);
+			check_true("preheat admission is 32 across the lvstore",
+				   S3_CACHE_PREHEAT_MAX == 32, NULL);
+			if (rc == 0) {
+				fill_pattern(src, 61, TEST_CHUNK_SIZE, 7);
+				for (uint32_t i = 0; i < 6; i++) {
+					snprintf(keys[i], sizeof(keys[i]),
+						 "preheat/object-%u", i);
+					ids[i].endpoint = "cos.example.test";
+					ids[i].bucket = "bucket-a";
+					ids[i].key = keys[i];
+					rc = s3_cache_object_reserve(
+						wide, &ids[i], TEST_CHUNK_SIZE,
+						&ticket[i]);
+					check_u64("six preheats share one window above 4",
+						  (uint64_t)-rc, 0);
+				}
+				for (uint32_t i = 0; i < 6; i++) {
+					if (!ticket[i]) {
+						continue;
+					}
+					rc = s3_cache_object_populate_reserved_notify(
+						ticket[i], src, TEST_CHUNK_SIZE,
+						read_cb, &done[i]);
+					ticket[i] = NULL;
+					check_u64("a finished GET waits for disk instead of failing",
+						  (uint64_t)-rc, 0);
+				}
+				for (uint32_t i = 0; i < 6; i++) {
+					check_true("queued preheat reaches disk",
+						   poll_until(&done[i].done) &&
+						   done[i].status == 0, NULL);
+				}
+				s3_cache_destroy(wide);
+			}
+		}
+
 		fill_pattern(src, 60, TEST_CHUNK_SIZE, 41);
-		object_populate_sync(cache, &object_a, src, TEST_CHUNK_SIZE);
+		rc = s3_cache_object_reserve(cache, &object_a, TEST_CHUNK_SIZE,
+					     &reservations[0]);
+		check_u64("a preheat ticket can be reacquired", (uint64_t)-rc, 0);
+		if (rc == 0) {
+			rc = s3_cache_object_populate_reserved_notify(
+				reservations[0], src, TEST_CHUNK_SIZE,
+				read_cb, &reserved_done);
+			reservations[0] = NULL;
+			check_u64("reserved populate submits without retry",
+				  (uint64_t)-rc, 0);
+			check_true("reserved populate reaches durable completion",
+				   rc == 0 && poll_until(&reserved_done.done) &&
+				   reserved_done.status == 0, NULL);
+		}
 		memset(dst, 0, TEST_CHUNK_SIZE);
 		rc = object_read_sync(cache, ch, &object_a, TEST_CHUNK_SIZE, 0,
 				      TEST_CHUNK_SIZE, dst);
@@ -1847,6 +1944,76 @@ main(int argc, char **argv)
 			  (uint64_t)-read_sync(cache, 20, &uuid_a, 0,
 					       AIO_BLOCK_SIZE, dst),
 			  0);
+	}
+
+	printf("\n[23] teardown waits for a preheat GET to release its slot\n");
+	{
+		struct s3_cache_opts hold_opts = {
+			.desc = desc,
+			.ch = ch,
+			.region_offset = TEST_REGION_OFF + TEST_REGION_SIZE +
+					 8 * TEST_CHUNK_SIZE,
+			.region_size = TEST_CHUNK_SIZE,
+			.chunk_size = TEST_CHUNK_SIZE,
+			.block_size = AIO_BLOCK_SIZE,
+			.num_chunks = TEST_NUM_CHUNKS,
+		};
+		struct s3_cache *hold = NULL;
+		struct s3_cache_object_reservation *ticket = NULL;
+		struct s3_cache_object_id object = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/still-downloading",
+		};
+		struct async_ctx done = {0};
+
+		rc = s3_cache_create(&hold_opts, &hold);
+		check_u64("cache for an in-flight preheat reservation",
+			  (uint64_t)-rc, 0);
+		if (rc == 0) {
+			check_true("an idle cache is quiesced",
+				   s3_cache_is_quiesced(hold), NULL);
+			rc = s3_cache_object_reserve(hold, &object, TEST_CHUNK_SIZE,
+						     &ticket);
+			check_u64("the GET holds a slot before any disk fill",
+				  (uint64_t)-rc, 0);
+			check_true("the reservation keeps teardown waiting",
+				   rc == 0 && !s3_cache_is_quiesced(hold), NULL);
+			s3_cache_stop_object_io(hold);
+			check_true("stop does not drop a GET that has not landed",
+				   ticket != NULL && !s3_cache_is_quiesced(hold),
+				   NULL);
+			s3_cache_object_reservation_cancel(ticket);
+			ticket = NULL;
+			check_true("cancelling the GET lets teardown continue",
+				   s3_cache_is_quiesced(hold), NULL);
+			s3_cache_destroy(hold);
+			hold = NULL;
+		}
+
+		rc = s3_cache_create(&hold_opts, &hold);
+		check_u64("cache for a GET that lands after stop",
+			  (uint64_t)-rc, 0);
+		if (rc == 0) {
+			fill_pattern(src, 70, TEST_CHUNK_SIZE, 47);
+			rc = s3_cache_object_reserve(hold, &object, TEST_CHUNK_SIZE,
+						     &ticket);
+			check_u64("second GET holds the slot", (uint64_t)-rc, 0);
+			if (rc == 0) {
+				s3_cache_stop_object_io(hold);
+				rc = s3_cache_object_populate_reserved_notify(
+					ticket, src, TEST_CHUNK_SIZE, read_cb,
+					&done);
+				ticket = NULL;
+				check_u64("a late GET releases its reservation",
+					  (uint64_t)-rc, ESHUTDOWN);
+				check_true("the late GET does not complete as a fill",
+					   !done.done, NULL);
+			}
+			check_true("the slot is gone once the late GET returns",
+				   s3_cache_is_quiesced(hold), NULL);
+			s3_cache_destroy(hold);
+		}
 	}
 
 	printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);

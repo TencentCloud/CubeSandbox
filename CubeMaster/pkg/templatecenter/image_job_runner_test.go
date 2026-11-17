@@ -222,7 +222,7 @@ func patchPersistErrCommon(patches *gomonkey.Patches, rec *persistErrCallChainRe
 		rec.jobUpdates = append(rec.jobUpdates, values)
 		return nil
 	})
-	patches.ApplyFunc(normalizeStoredTemplateRequest, func(req *types.CreateCubeSandboxReq) (*types.CreateCubeSandboxReq, error) {
+	patches.ApplyFunc(normalizeStoredTemplateRequest, func(req *types.CreateCubeSandboxReq, enableJFSVariants bool) (*types.CreateCubeSandboxReq, error) {
 		return req, nil
 	})
 	patches.ApplyFunc(ensureTemplateDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *types.CreateCubeSandboxReq, instanceType, version string, opts definitionCreateOptions) (bool, error) {
@@ -284,6 +284,11 @@ func TestFinishTemplateImageJobAfterArtifact_PersistErrMarksDefinitionFailed(t *
 	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
 		return targets, 1, 1, 0, nil
+	})
+	// Upstream loads the job row before replica creation to tell CREATE from
+	// a TC-forwarded REDO; this is a plain CREATE.
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, TemplateID: "tpl-1", Operation: JobOperationCreate}, nil
 	})
 	finalized := false
 	patches.ApplyFunc(finalizeTemplateReplicas, func(ctx context.Context, templateID, jobID, instanceType, version string, replicas []ReplicaStatus) (*TemplateInfo, string, error) {
@@ -370,7 +375,7 @@ func TestRunRedoTemplateImageJob_PersistErrMarksDefinitionFailed(t *testing.T) {
 			},
 		}, nil
 	})
-	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(ctx context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node, backend string) error {
+	patches.ApplyFunc(prepareRedoTemplateReplicas, func(ctx context.Context, templateID, instanceType string, existingReplicas []models.TemplateReplica, targets []*node.Node, backend string) error {
 		return nil
 	})
 	refreshed := false

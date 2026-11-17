@@ -141,6 +141,13 @@ type CommandOptions struct {
 	// User authenticates the envd process call (Basic auth). Empty defaults to
 	// "root" to match the Python SDK and avoid old-envd "no user specified".
 	User string
+
+	// OnStdout and OnStderr receive decoded output chunks while Run is reading
+	// the command stream. They run synchronously, in stream order, before Run
+	// returns, so callbacks should not block. Chunks are not necessarily lines.
+	// Output is still collected in CommandResult when callbacks are set.
+	OnStdout func(string)
+	OnStderr func(string)
 }
 
 type CommandResult struct {

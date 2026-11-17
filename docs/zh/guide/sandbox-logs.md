@@ -89,4 +89,4 @@ cubecli logs --tpl --all --stderr <template-id>
 ## 相关文档
 
 - [服务管理与日志](./service-management.md) — 宿主机服务日志、journalctl 及诊断包
-- [模板检查与请求预览](./template-inspection-and-preview.md)
+- [环境变量](./environment-variables.md)

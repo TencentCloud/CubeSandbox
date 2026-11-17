@@ -170,6 +170,48 @@ test_coredns_direct_outputs_prepare_file_path() {
   assert_not_contains "${ONE_CLICK_DIR}/scripts/systemd/common.sh" "require_cmd rg"
 }
 
+test_cube_jfs_mount_waits_for_fuse_propagation() {
+  local path="${ONE_CLICK_DIR}/scripts/cube-jfs/mount.sh"
+
+  assert_contains "${path}" 'CUBE_JFS_MOUNT_WAIT_SECONDS'
+  assert_contains "${path}" 'wait_for_juicefs_mount'
+  assert_contains "${path}" '[[ "${fs_type}" == "fuse.juicefs" ]]'
+  assert_not_contains "${path}" "findmnt -rn -T \"\${mount_path}\" -o FSTYPE | grep -q"
+}
+
+test_cube_jfs_metadata_password_is_separate_from_url() {
+  local install_sh="${ONE_CLICK_DIR}/install.sh"
+  local env_example="${ONE_CLICK_DIR}/env.example"
+  local init_sh="${ONE_CLICK_DIR}/scripts/cube-jfs/init.sh"
+  local check_sh="${ONE_CLICK_DIR}/scripts/cube-jfs/check.sh"
+  local service_sh="${ONE_CLICK_DIR}/scripts/systemd/cube-jfs-mount.sh"
+
+  assert_contains "${env_example}" 'CUBE_JFS_META_URL="redis://external-redis.example.com:6379/0"'
+  assert_contains "${env_example}" 'CUBE_JFS_META_PASSWORD="cube_jfs_redis_pass"'
+  assert_contains "${install_sh}" 'CUBE_JFS_META_URL="redis://${ONE_CLICK_CONTROL_PLANE_IP}:6380/0"'
+  assert_contains "${install_sh}" 'CUBE_JFS_META_URL="redis://${CUBE_SANDBOX_NODE_IP}:6380/0"'
+  assert_contains "${install_sh}" 'CUBE_JFS_BUCKET="${CUBE_S3_ENDPOINT%/}/cube-jfs"'
+  assert_contains "${install_sh}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_JFS_META_PASSWORD"'
+  assert_contains "${init_sh}" 'meta_env_args+=(--env META_PASSWORD)'
+  assert_contains "${check_sh}" 'meta_env_args+=(--env META_PASSWORD)'
+  assert_contains "${service_sh}" 'meta_env_args+=(--env META_PASSWORD)'
+}
+
+test_uninstall_preserves_container_images() {
+  local path="${ONE_CLICK_DIR}/scripts/one-click/uninstall.sh"
+  local docker_cleanup podman_cleanup
+
+  docker_cleanup="$(sed -n '/^remove_docker_objects()/,/^}/p' "${path}")"
+  podman_cleanup="$(sed -n '/^remove_podman_objects()/,/^}/p' "${path}")"
+  [[ "${docker_cleanup}" != *'docker image rm'* ]] \
+    || fail "uninstall Docker cleanup must preserve images"
+  [[ "${podman_cleanup}" != *'podman image rm'* ]] \
+    || fail "uninstall Podman cleanup must preserve images"
+  assert_contains "${path}" 'PRESERVED'
+  assert_contains "${path}" 'print_image_cleanup_hint'
+  assert_contains "${path}" 'docker image rm -f'
+}
+
 test_unit_dependency_order() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-proxy.service" "After=docker.service network-online.target cube-sandbox-redis.service cube-sandbox-dns.service cube-sandbox-cube-lifecycle-manager.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cubemaster.service" "After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service"
@@ -962,11 +1004,13 @@ test_external_redis_sentinel_wiring() {
   local volume_s3_mount="${volume_s3_dir}/internal/s3fsmnt/mount.go"
   local volume_s3_lock="${volume_s3_dir}/internal/lockfile/lockfile.go"
   local volume_s3_config="${volume_s3_dir}/internal/config/config.go"
+  local volume_s3_binding="${volume_s3_dir}/internal/binding/binding.go"
   assert_file "${volume_s3_main}"
   assert_file "${volume_s3_api}"
   assert_file "${volume_s3_mount}"
   assert_file "${volume_s3_lock}"
   assert_file "${volume_s3_config}"
+  assert_file "${volume_s3_binding}"
   assert_file "${volume_s3_dir}/go.mod"
 
   # The control plane must not shell out to an S3 command line tool: dropping
@@ -997,12 +1041,28 @@ test_external_redis_sentinel_wiring() {
   fi
 
   # s3fs 1.91+ stats the trailing-slash directory object when mounting a subdir,
-  # so create must PUT "volumes/<id>/" (not a .keep file).
+  # so create must PUT the volume's trailing-slash prefix (not a .keep file).
+  # The legacy default layout stays volumes/<id>/ even when create PUTs a
+  # caller-supplied prefix through CreatePrefix.
   if ! grep -Fq 'return "volumes/" + volumeID + "/"' "${volume_s3_config}"; then
     fail "VolumePrefix must be the trailing-slash directory object key"
   fi
-  if ! grep -Fq 'config.VolumePrefix(volumeID)' "${volume_s3_api}"; then
-    fail "CreateVolumeDir must PUT the trailing-slash directory object"
+  if ! grep -Fq 'return DefaultPrefixRoot + volumeID + "/"' "${volume_s3_binding}"; then
+    fail "binding.DefaultPrefix must keep the legacy trailing-slash volumes/<id>/ layout"
+  fi
+  if grep -Fq 'func (c *Client) CreateVolumeDir(' "${volume_s3_api}"; then
+    if ! grep -Fq 'key := config.VolumePrefix(volumeID)' "${volume_s3_api}" || \
+       ! grep -Fq 'c.inner.PutObject(ctx, c.bucket, key,' "${volume_s3_api}"; then
+      fail "CreateVolumeDir must PUT the trailing-slash directory object"
+    fi
+  else
+    # Newer S3 plugins pass the resolved prefix into a shared CreatePrefix API.
+    if ! grep -Fq 'client.CreatePrefix(ctx, volume.state.Prefix)' "${volume_s3_main}" || \
+       ! grep -Fq 'if err := checkPrefix(prefix); err != nil {' "${volume_s3_api}" || \
+       ! grep -Fq 'strings.HasSuffix(prefix, "/")' "${volume_s3_api}" || \
+       ! grep -Fq 'c.inner.PutObject(ctx, c.bucket, prefix,' "${volume_s3_api}"; then
+      fail "CreatePrefix must validate and PUT the trailing-slash directory object"
+    fi
   fi
   if grep -Fq -- '-ocompat_dir' "${volume_s3_mount}"; then
     fail "s3fs mount must not hardcode -ocompat_dir (unknown on s3fs 1.90; create writes dir/ instead)"
@@ -1119,6 +1179,9 @@ test_unit_prepare_hooks_are_wired
 test_support_compose_render_is_locked_and_atomic
 test_compose_wrappers_reject_directories
 test_coredns_direct_outputs_prepare_file_path
+test_cube_jfs_mount_waits_for_fuse_propagation
+test_cube_jfs_metadata_password_is_separate_from_url
+test_uninstall_preserves_container_images
 test_unit_dependency_order
 test_detect_glibc_version_consumes_full_ldd_output
 test_online_install_glibc_detection_avoids_head_pipe

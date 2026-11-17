@@ -160,6 +160,13 @@ func mergePauseBindings(ctx context.Context, req *types.ListCubeSandboxReq, rsp 
 				log.G(ctx).Warnf("ListSandbox: read sandbox specs: %v", specErr)
 			}
 			opts.specs = specs
+			// Carry the creation time the detail path reports for these rows;
+			// the pause binding only knows when the pause happened.
+			createdAts, createdAtErr := sandboxspec.GetCreatedAtMany(ctx, ids)
+			if createdAtErr != nil && !errors.Is(createdAtErr, sandboxspec.ErrSandboxSpecStoreNotReady) {
+				log.G(ctx).Warnf("ListSandbox: read sandbox creation times: %v", createdAtErr)
+			}
+			opts.createdAts = createdAts
 		}
 	}
 	rsp.Data = applyPauseBindings(ctx, rsp.Data, records, opts)
@@ -183,9 +190,11 @@ func shouldAppendShimlessPauseRows(req *types.ListCubeSandboxReq, rsp *types.Lis
 }
 
 // pauseBindingMerge is the extra input applyPauseBindings needs beyond the
-// node scan: specs for shimless rows, and whether this page may append them.
+// node scan: specs and creation times for shimless rows, and whether this
+// page may append them.
 type pauseBindingMerge struct {
 	specs         map[string]*types.CreateCubeSandboxReq
+	createdAts    map[string]time.Time
 	labelSelector map[string]string
 	appendMissing bool
 }
@@ -229,6 +238,9 @@ func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, re
 		}
 		if spec == nil {
 			recordPauseViewWithoutSpec("list")
+		}
+		if ts, ok := opts.createdAts[rec.SandboxID]; ok && !ts.IsZero() {
+			item.CreateAt = ts.UnixNano()
 		}
 		item.Annotations = overlayPauseAnnotations(item.Annotations, rec, "")
 		known[rec.SandboxID] = item

@@ -69,3 +69,29 @@ func TestCreateContextIsPauseResume(t *testing.T) {
 	require.False(t, (*CreateContext)(nil).IsGuestMountRestore())
 	require.False(t, (&CreateContext{}).IsGuestMountRestore())
 }
+
+func TestSnapshotTemplateIDUsesJFSVariant(t *testing.T) {
+	t.Parallel()
+
+	ctx := &CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{
+		InstanceType: cubebox.InstanceType_cubebox.String(),
+		Annotations: map[string]string{
+			constants.MasterAnnotationAppSnapshotTemplateID:    "tpl-a",
+			constants.MasterAnnotationJFSTemplateVariantID:     "tpl-a-hf1-deadbeef",
+			constants.MasterAnnotationJFSTemplateVariantPolicy: constants.MasterJFSTemplateVariantPolicyV1,
+		},
+	}}
+	templateID, ok := ctx.GetSnapshotTemplateID()
+	require.True(t, ok)
+	require.Equal(t, "tpl-a-hf1-deadbeef", templateID)
+
+	ctx.ReqInfo.Annotations = map[string]string{
+		constants.MasterAnnotationAppSnapshotTemplateID:    "tpl-a",
+		constants.MasterAnnotationJFSTemplateVariantID:     "tpl-a-hf1-deadbeef",
+		constants.MasterAnnotationJFSTemplateVariantPolicy: constants.MasterJFSTemplateVariantPolicyV1,
+		constants.MasterAnnotationRuntimeSnapshotID:        "snap-a",
+	}
+	templateID, ok = ctx.GetSnapshotTemplateID()
+	require.True(t, ok)
+	require.Equal(t, "snap-a", templateID)
+}

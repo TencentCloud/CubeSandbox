@@ -1,0 +1,598 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "CubeSandbox sandbox stdout/stderr logs and optional component container logs (Loki / LogQL).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Cluster metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-cluster",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Node metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-node",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Sandbox metrics",
+      "type": "link",
+      "url": "/d/cubesandbox-sandbox",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$loki_datasource"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "content": "## CubeSandbox logs\nSelect cluster and node, then filter sandbox stdout/stderr. Sandbox ID is a regex text filter so historical IDs remain searchable without high-cardinality index labels. The text filter uses RE2. The collapsed component log row requires observability.logs.components.enabled=true (Helm only).",
+        "mode": "markdown"
+      },
+      "pluginVersion": "10.4.0",
+      "title": "About",
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "id": 4,
+      "panels": [],
+      "title": "Sandbox logs",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$loki_datasource"
+      },
+      "description": "Counts sandbox stdout/stderr logs by Cluster, Node, Sandbox ID, Log Stream, and body regex.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki_datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum by (log_iostream) (count_over_time({service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} | cubesandbox_sandbox_id=~`${sandbox_id:raw}` | log_iostream=~`${log_stream:regex}` |~ `${log_query:raw}` | keep service_name, cubesandbox_cluster_id, host_name, log_iostream [$__interval]))",
+          "legendFormat": "{{log_iostream}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox log volume by stream",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$loki_datasource"
+      },
+      "description": "Queries sandbox stdout/stderr with the selected variables and RE2 regex.",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "id": 3,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki_datasource"
+          },
+          "direction": "backward",
+          "editorMode": "code",
+          "expr": "{service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} | cubesandbox_sandbox_id=~`${sandbox_id:raw}` | log_iostream=~`${log_stream:regex}` |~ `${log_query:raw}`",
+          "maxLines": 1000,
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Sandbox stdout/stderr log query",
+      "type": "logs"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 5,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki_datasource"
+          },
+          "description": "Component container log lines per component (Helm component logs).",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "lineWidth": 1,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 24
+          },
+          "id": 20,
+          "options": {
+            "legend": {
+              "calcs": [
+                "sum",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki_datasource"
+              },
+              "editorMode": "code",
+              "expr": "sum by (service_name) (count_over_time({service_name=~\"cubesandbox-(${component:regex})\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} |~ `${log_query:raw}` [$__interval]))",
+              "legendFormat": "{{service_name}}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Component log volume",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki_datasource"
+          },
+          "description": "Component log lines matching error/fatal/panic (case-insensitive).",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "lineWidth": 1
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 24
+          },
+          "id": 21,
+          "options": {
+            "legend": {
+              "calcs": [
+                "sum",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki_datasource"
+              },
+              "editorMode": "code",
+              "expr": "sum by (service_name) (count_over_time({service_name=~\"cubesandbox-(${component:regex})\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} |~ `(?i)(error|fatal|panic)` [$__interval]))",
+              "legendFormat": "{{service_name}}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Component error-like log volume",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki_datasource"
+          },
+          "description": "Component container logs for the selected components.",
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 31
+          },
+          "id": 22,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki_datasource"
+              },
+              "direction": "backward",
+              "editorMode": "code",
+              "expr": "{service_name=~\"cubesandbox-(${component:regex})\", cubesandbox_cluster_id=~\"${cluster:regex}\", host_name=~\"${node:regex}\"} |~ `${log_query:raw}`",
+              "maxLines": 1000,
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Component log query",
+          "type": "logs"
+        }
+      ],
+      "title": "Component logs (Kubernetes Helm opt-in)",
+      "type": "row"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "cubesandbox",
+    "otel",
+    "loki",
+    "logs",
+    "sandbox"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Loki",
+        "multi": false,
+        "name": "loki_datasource",
+        "options": [],
+        "query": "loki",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "$loki_datasource"
+        },
+        "definition": "label_values({service_name=\"cubesandbox-sandbox\"}, cubesandbox_cluster_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Cluster",
+        "multi": true,
+        "name": "cluster",
+        "options": [],
+        "query": {
+          "label": "cubesandbox_cluster_id",
+          "refId": "LokiVariableQueryEditor-Cluster",
+          "stream": "{service_name=\"cubesandbox-sandbox\"}",
+          "type": 1
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "$loki_datasource"
+        },
+        "definition": "label_values({service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\"}, host_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Node",
+        "multi": true,
+        "name": "node",
+        "options": [],
+        "query": {
+          "label": "host_name",
+          "refId": "LokiVariableQueryEditor-Node",
+          "stream": "{service_name=\"cubesandbox-sandbox\", cubesandbox_cluster_id=~\"${cluster:regex}\"}",
+          "type": 1
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": ".*",
+          "value": ".*"
+        },
+        "hide": 0,
+        "label": "Sandbox ID (Regex)",
+        "name": "sandbox_id",
+        "options": [
+          {
+            "selected": true,
+            "text": ".*",
+            "value": ".*"
+          }
+        ],
+        "query": ".*",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Log Stream",
+        "multi": true,
+        "name": "log_stream",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "stdout",
+            "value": "stdout"
+          },
+          {
+            "selected": false,
+            "text": "stderr",
+            "value": "stderr"
+          }
+        ],
+        "query": "stdout,stderr",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": ".*",
+          "value": ".*"
+        },
+        "hide": 0,
+        "label": "Log Filter (Regex)",
+        "name": "log_query",
+        "options": [
+          {
+            "selected": true,
+            "text": ".*",
+            "value": ".*"
+          }
+        ],
+        "query": ".*",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "allValue": "cube-master|cube-api|cube-ops|cube-templatecenter|cubelet|cube-proxy|cube-lifecycle-manager",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Component",
+        "multi": true,
+        "name": "component",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "cube-master",
+            "value": "cube-master"
+          },
+          {
+            "selected": false,
+            "text": "cube-api",
+            "value": "cube-api"
+          },
+          {
+            "selected": false,
+            "text": "cube-ops",
+            "value": "cube-ops"
+          },
+          {
+            "selected": false,
+            "text": "cube-templatecenter",
+            "value": "cube-templatecenter"
+          },
+          {
+            "selected": false,
+            "text": "cubelet",
+            "value": "cubelet"
+          },
+          {
+            "selected": false,
+            "text": "cube-proxy",
+            "value": "cube-proxy"
+          },
+          {
+            "selected": false,
+            "text": "cube-lifecycle-manager",
+            "value": "cube-lifecycle-manager"
+          }
+        ],
+        "query": "cube-master,cube-api,cube-ops,cube-templatecenter,cubelet,cube-proxy,cube-lifecycle-manager",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "CubeSandbox sandbox logs",
+  "uid": "cubesandbox-logs",
+  "version": 1,
+  "weekStart": ""
+}

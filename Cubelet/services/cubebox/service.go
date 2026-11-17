@@ -303,15 +303,9 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // the host can match a still-running shim back to the sandbox, and the new
 // attempt is handed a tap/IP that is still in use.
 //
-// The check runs here, at the entry point, rather than in the create flow's
-// cubebox step where it used to live. By that step the flow has already
-// allocated network and volume for the new attempt, so the only way to fail
-// without stranding those allocations was an error code the workflow engine
-// answers with a failover — and failover destroys the sandbox with this same
-// ID, which on this path is the PAUSED sandbox the user asked to resume. A
-// transient gate failure therefore destroyed the very state it existed to
-// protect. Running before any allocation removes the trade-off: the caller
-// gets a retryable PreConditionFailed, and nothing is allocated or destroyed.
+// The check runs here, before the create flow allocates network and volume:
+// failing later would strand those allocations and, via failover, destroy the
+// paused sandbox the user asked to resume.
 func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
 	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
 	if desired == "" {
@@ -350,11 +344,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	// Cross-node restore: the disk describing what to run is not on this
 	// node yet, and the reads below expect it.
-	if err := prepareCrossNodeRestore(ctx, req); err != nil {
-		rsp.Ret.RetMsg = err.Error()
+	preparedCtx, prepareErr := prepareCrossNodeRestore(ctx, req)
+	if prepareErr != nil {
+		rsp.Ret.RetMsg = prepareErr.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
 		return rsp, nil
 	}
+	ctx = preparedCtx
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
 	if err := expandPauseSnapshotPackage(req); err != nil {
@@ -385,10 +381,19 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 
+	// Unknown mode values must fail rather than silently default to full.
+	mode, modeErr := parseCommitSnapshotMode(req.GetSnapshotMode())
+	if modeErr != nil {
+		rsp.Ret.RetMsg = modeErr.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
+	}
+
 	start := time.Now()
 	createInfo := &workflow.CreateContext{
-		ReqInfo:  req,
-		Failover: true,
+		ReqInfo:      req,
+		Failover:     true,
+		SnapshotMode: mode,
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 
@@ -1000,6 +1005,10 @@ func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest)
 	})
 	res = &cubebox.ListCubeSandboxResponse{}
 
+	if req.GetId() != "" {
+		return &cubebox.ListCubeSandboxResponse{Items: s.filterGRPCContainer(nil, req)}, nil
+	}
+
 	cubeboxInStore := s.cubeboxMgr.cubeboxManger.List()
 	if len(cubeboxInStore) > maxListCubebox {
 
@@ -1022,22 +1031,26 @@ func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest)
 }
 
 func toGRPCContainer(c *cubeboxstore.Container) *cubebox.Container {
+	status := cubeboxstore.Status{CreatedAt: c.CreatedAt}
+	if c.Status != nil {
+		status = c.Status.Get()
+	}
 	cc := &cubebox.Container{
 		Id:         c.ID,
 		Image:      c.Config.GetImage().GetImage(),
 		Type:       constants.ContainerTypeContainer,
 		Resources:  c.Config.GetResources(),
-		State:      c.Status.Get().State(),
+		State:      status.State(),
 		CreatedAt:  c.CreatedAt,
-		FinishedAt: c.Status.Get().FinishedAt,
+		FinishedAt: status.FinishedAt,
 		Labels:     maps.Clone(c.Labels),
 	}
 
 	switch cc.State {
 	case cubebox.ContainerState_CONTAINER_PAUSING:
-		cc.PausedAt = c.Status.Status.PausingAt
+		cc.PausedAt = status.PausingAt
 	case cubebox.ContainerState_CONTAINER_PAUSED:
-		cc.PausedAt = c.Status.Status.PausedAt
+		cc.PausedAt = status.PausedAt
 	}
 
 	if mounts := c.Config.GetVolumeMounts(); len(mounts) > 0 {
@@ -1136,12 +1149,14 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		NumaNode:     box.NumaNode,
 	}
 
-	if box.GetStatus() != nil {
-		switch box.GetStatus().Get().State() {
+	if status := box.MainStatus(); status != nil {
+		stored := status.Get()
+		cb.ErrorReason = stored.Reason
+		switch stored.State() {
 		case cubebox.ContainerState_CONTAINER_PAUSING:
-			cb.PausedAt = box.GetStatus().Get().PausingAt
+			cb.PausedAt = stored.PausingAt
 		case cubebox.ContainerState_CONTAINER_PAUSED:
-			cb.PausedAt = box.GetStatus().Get().PausedAt
+			cb.PausedAt = stored.PausedAt
 		}
 	}
 
@@ -1167,7 +1182,10 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		cb.Containers = append(cb.Containers, cc)
 	}
 	if opt != nil && opt.GetPrivateWithCubeboxStore() {
-		v, err := jsoniter.MarshalIndent(box, "", "    ")
+		// Serialize a deep copy: MemoryLineage is mutated concurrently by
+		// Commit/Pause under its own lock, and marshaling the live object
+		// would race with those writers and could emit a half-updated tree.
+		v, err := jsoniter.MarshalIndent(box.DeepCopy(), "", "    ")
 		if err != nil {
 			log.L.Errorf("marshal cubebox to json failed: %v", err)
 		}

@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from framework.capabilities import COMMANDS, PAUSE_RESUME, ROLLBACK_CLONE
-from framework.cleanup import safe_kill
+from framework.cleanup import delete_snapshot_after_runtime_release, safe_kill
 from framework.lifecycle import (
     wait_until_data_plane_ready,
     wait_until_paused,
@@ -206,11 +206,7 @@ def test_snapshot_rollback_keeps_envd_cubecli_logs(
         cleanup_errors.extend(safe_kill(sdk_sandbox, sdk_e2e_config))
         if snapshot_id:
             try:
-                from cases.lifecycle.test_rollback_clone import (
-                    _delete_snapshot_after_runtime_release,
-                )
-
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,
@@ -257,9 +253,6 @@ def test_snapshot_start_envd_rpc_visible_in_cubecli_logs(
     cubecli_logs_target,
 ):
     from adapters.cubesandbox_adapter import CubeSandboxAdapter
-    from cases.lifecycle.test_rollback_clone import (
-        _delete_snapshot_after_runtime_release,
-    )
 
     cubecli, address = cubecli_logs_target
     _trigger_and_wait(
@@ -305,7 +298,7 @@ def test_snapshot_start_envd_rpc_visible_in_cubecli_logs(
             safe_kill(child, sdk_e2e_config)
         if snapshot_id:
             try:
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,

@@ -6,7 +6,8 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Node.js-18%2B-blue" alt="Node.js 18+" />
-  <img src="https://img.shields.io/badge/version-0.7.3-orange" alt="v0.7.3" />
+  <img src="https://img.shields.io/badge/version-0.8.0-orange" alt="v0.8.0" />
+  <a href="https://www.npmjs.com/package/@cubesandbox/sdk"><img src="https://img.shields.io/npm/v/%40cubesandbox/sdk" alt="npm version" /></a>
 </p>
 
 ---
@@ -18,7 +19,9 @@ manage files, and control the full sandbox lifecycle — including pause/resume
 with memory snapshot. It matches the Python SDK's surface with idiomatic
 JavaScript naming (camelCase, `async`/`await`).
 
-## Installation
+## Install from npm
+
+Install the published [`@cubesandbox/sdk` package](https://www.npmjs.com/package/@cubesandbox/sdk):
 
 ```bash
 npm install @cubesandbox/sdk
@@ -303,16 +306,21 @@ const { snapshots, nextToken } = await Sandbox.listSnapshots({
   limit: 100,
 });
 
-await Sandbox.deleteSnapshot(snap.snapshotId); // DELETE /templates/:id
+const deleted = await Sandbox.deleteSnapshot(snap.snapshotId); // DELETE /templates/:id?snapshot_only=true
+// `deleted` is false when the snapshot no longer exists; a name may be passed
+// instead of an ID. Only snapshots are matched, never templates; several
+// same-named snapshots throw (HTTP 409), so use the `snap-` ID.
 
 await sb.rollback(snap.snapshotId); // POST /sandboxes/:id/rollback
 
 const clones = await sb.clone(3, { concurrency: 3 });
 ```
 
-`clone` snapshots the sandbox, creates `n` sandboxes from it (capped by
-`concurrency`), then deletes the ephemeral snapshot. If any create fails, all
-successful siblings are killed and the first error is re-thrown.
+`deleteSnapshot` accepts a snapshot ID or name and resolves to `true`/`false`
+depending on whether the snapshot existed. `clone` snapshots the sandbox,
+creates `n` sandboxes from it (capped by `concurrency`), then deletes the
+ephemeral snapshot. If any create fails, all successful siblings are killed
+and the first error is re-thrown.
 
 ```ts
 // One server-side call: the backend snapshots sb once and derives N copies.
@@ -376,12 +384,41 @@ try {
 `VolumeInfo`'s `toString`/`console.log` output masks `token` (a data-plane
 credential) — read the field directly when the actual value is needed.
 
+To pass opaque plugin input, use the explicit new creation method. The API and
+selected plugin must support this feature; existing `Volume.create` calls remain
+on `/volumes`.
+
+```ts
+const volume = await Volume.createWithPrivateData({
+  name: "my-data",
+  driver: "my-storage",
+  privateData: JSON.stringify({ bucket: "my-bucket", prefix: "work/", cred_ref: "account-7" }),
+}); // POST /v2/volumes
+```
+
+This method requires CubeAPI, every serving CubeMaster, and Cubelet at
+**0.8.0 or newer**, a plugin that supports this protocol, and the Node SDK at
+**0.8.0 or newer**. `privateData` must be valid
+UTF-8 of at most 1024 bytes, contain no NUL, and contain no characters outside
+the BMP. Invalid surrogate pairs and supplementary-plane characters are
+rejected before any request. Empty strings are forwarded. API versions without
+`/v2/volumes` return an error without a legacy fallback. The returned `Volume`
+uses the existing query, delete and sandbox mount APIs.
+
+Upgrade order: check or upgrade the Controller/Node plugins for Create input A
+and Attach/Destroy state B, upgrade **all CubeMasters serving volume operations**,
+then deploy the new CubeAPI and begin using this method. A new API connected to
+an old Master can return 201 while silently dropping A; the old Master also omits
+B on Destroy. The SDK does not detect this mixed-version deployment. Keep compatible
+Masters serving existing A/B-dependent volumes during any rollback. See the
+[plugin upgrade guide](../../docs/guide/volume-plugin.md#private_data-upgrade-order).
+
 ### List & health check
 
 ```ts
-console.log(await Sandbox.health()); // { status: "ok", sandboxes: 4 }
+console.log(await Sandbox.health()); // { status: "ok" }
 console.log(await Sandbox.list()); // list of running sandboxes
-console.log(await Sandbox.listV2()); // v2 API (supports filtering)
+console.log(await Sandbox.listV2()); // v2 E2B view: running and paused only
 ```
 
 ### Templates
@@ -447,16 +484,17 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 | `Sandbox.create(options?)` | `POST /sandboxes` — create a new sandbox |
 | `Sandbox.connect(sandboxId, options?)` | `POST /sandboxes/:id/connect` — connect (auto-resumes if paused) |
 | `Sandbox.list(config?)` | `GET /sandboxes` — list running sandboxes (v1) |
-| `Sandbox.listV2(config?)` | `GET /v2/sandboxes` — list sandboxes (v2) |
+| `Sandbox.listV2(config?)` | `GET /v2/sandboxes` — list running and paused sandboxes (v2 E2B view) |
 | `Sandbox.health(config?)` | `GET /health` — service health check |
 | `Sandbox.listSnapshots(options?)` | `GET /snapshots` — list snapshots (paginated) |
-| `Sandbox.deleteSnapshot(snapshotId, options?)` | `DELETE /templates/:id` — delete a snapshot |
+| `Sandbox.deleteSnapshot(idOrName, options?)` | `DELETE /templates/:id?snapshot_only=true` — delete a snapshot by ID or name, returns `boolean` |
 
 ### `Volume` — static methods
 
 | Method | Description |
 |---|---|
 | `Volume.create(options?)` | `POST /volumes` — create a volume (`name`/`driver` optional) |
+| `Volume.createWithPrivateData(options)` | `POST /v2/volumes` — create with required `privateData` string |
 | `Volume.list(options?)` | `GET /volumes` — list volumes (no tokens) |
 | `Volume.getInfo(volumeId, options?)` | `GET /volumes/:id` — get one volume, includes `token` |
 | `Volume.connect(volumeId, options?)` | e2b-compatible connect (wraps `getInfo`) |
@@ -468,6 +506,7 @@ var**. Inline fields accepted by `create`: `apiUrl`, `proxyNodeIp`,
 |---|---|
 | `sb.runCode(code, options?)` | `POST /execute` — execute code, returns `Execution` |
 | `sb.getInfo()` | `GET /sandboxes/:id` — get sandbox state and metadata |
+| `sb.isRunning(options?)` | Report if the sandbox is running — checks control-plane state first, probes envd `/health` only when running/unknown; returns `boolean` (`false` on unreachable/transport errors) |
 | `sb.pause(options?)` | `POST /sandboxes/:id/pause` — pause sandbox |
 | `sb.resume(timeout?)` | `POST /sandboxes/:id/resume` — resume (deprecated, use `connect`) |
 | `sb.setTimeout(timeout)` | `POST /sandboxes/:id/timeout` — set sandbox idle timeout |

@@ -2,7 +2,7 @@
 
 This guide covers three advanced APIs provided by the Cube Sandbox Python SDK:
 
-- **Snapshot**: Persists the complete state (memory + filesystem) of a running sandbox as a reusable image. The snapshot can later be used to spawn new sandboxes or trigger a rollback.
+- **Snapshot**: Persists the state of a running sandbox as a reusable image. A **full** snapshot keeps memory and filesystem; an **fs-only** snapshot keeps the filesystem alone. Either can spawn new sandboxes; rollback requires a full snapshot.
 - **Clone**: Calls `clone()` on a running sandbox to immediately derive N fully independent copies. Each copy starts from the source sandbox's current state and runs in isolation.
 - **Rollback**: Restores a running sandbox to a previously captured snapshot state in place — the sandbox ID stays the same and execution can continue right away.
 
@@ -49,7 +49,7 @@ export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Snapshot
 
-`sb.create_snapshot()` persists the sandbox's current state (filesystem + memory) as a snapshot and returns a `SnapshotInfo` object. The `snapshot_id` field can be passed directly to `Sandbox.create(template=...)`.
+`sb.create_snapshot()` persists the sandbox's current state (filesystem + memory) as a snapshot and returns a `SnapshotInfo` object. An optional `name` must not start with `tpl-` or `snap-` (rejected with HTTP 400), since those prefixes denote IDs. The `snapshot_id` field can be passed directly to `Sandbox.create(template=...)`.
 
 ```python
 from cubesandbox import Sandbox
@@ -60,7 +60,113 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
     print(f"snapshot: {snap.snapshot_id}")
 ```
 
-A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id)` to clean up when it is no longer needed.
+A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id_or_name)` to clean up when it is no longer needed. It accepts either a snapshot ID or the name you passed to `create_snapshot`, and returns `True` when the snapshot was deleted or `False` when it did not exist. The SDK only matches snapshots, never templates: a name that matches no snapshot returns `False` even if a template alias has that name, and the template is left untouched. If a name matches several snapshots the call fails with HTTP 409 and nothing is deleted; use the `snap-` ID instead. This requires a CubeAPI that supports `snapshot_only`; older servers ignore it and still route a name that matches no snapshot to the template of that name.
+
+### Snapshot expiration
+
+Set a TTL for temporary checkpoints, experiment snapshots or short-lived restore
+backups so they can be cleaned up automatically when no longer needed. Omit it
+or pass zero for snapshots you want to keep until explicitly deleted.
+
+```python
+snap = sb.create_snapshot(name="checkpoint", ttl_seconds=3600)
+print(snap.expires_at)
+
+# Each restore creates a new sandbox while the snapshot is still valid.
+restored = Sandbox.create(template=snap.snapshot_id)
+```
+
+The TTL starts when the snapshot becomes ready. `expires_at` is its UTC expiration
+time, or `None` without a TTL. Use SDK, CubeAPI and CubeMaster versions that
+support snapshot expiration. Node accepts
+`sb.createSnapshot("checkpoint", { ttlSeconds: 3600 })`; Go accepts
+`sb.CreateSnapshot(ctx, "checkpoint", cubesandbox.CreateSnapshotOptions{TTLSeconds: 3600})`.
+
+After expiration, the snapshot cannot be used for new restores or rollbacks.
+Sandboxes already running from it continue to work. Cleanup runs periodically;
+storage is released only after running sandboxes and other dependencies have
+released their references, so expiration does not free disk space immediately.
+
+If a permanently lost node leaves a pending restore that prevents cleanup, an
+administrator can use `cubemastercli snapshot recover-create`. First fence the
+node so its VMs and queued requests cannot resume, retire the snapshot, and wait
+at least 24 hours for the pending reservation:
+
+```bash
+cubemastercli snapshot recover-create \
+  --snapshot-id snap-example --sandbox-id reserved-example \
+  --node-id retired-node --node-ip 192.0.2.10 \
+  --confirm-node-fenced --reason "Host powered off and prevented from restarting"
+```
+
+Use the node identity recorded for that pending restore. Recovery releases only
+the matching stale reservation; it refuses healthy nodes, known sandboxes and
+active snapshot operations. Physical cleanup continues on a later reconciliation
+pass. Normal expiration does not require this command.
+
+### Filesystem-only snapshots
+
+Pass `mode="fs-only"` to capture the filesystem without guest memory. The guest
+is never paused: it keeps running and stays writable as soon as the call
+returns. The price is that a sandbox created from such a snapshot **cold boots**
+— the files are there, but every process is new.
+
+```python
+snap = sb.create_snapshot(mode="fs-only")
+assert snap.mode == "fs-only"
+
+child = Sandbox.create(template=snap.snapshot_id)
+# Files written before the snapshot are visible...
+out = child.run_code("print(open('/tmp/data.txt').read())").logs.stdout[0]
+assert out.strip() == "hello"
+# ...but processes are not.
+```
+
+What to expect:
+
+| Aspect | `mode="full"` (default) | `mode="fs-only"` |
+|---|---|---|
+| Guest memory | saved | not saved |
+| Source sandbox during the call | briefly paused | stays running |
+| Sandbox created from it | memory restored, processes continue | cold boot, fresh processes |
+| `pause()` / `resume()` afterwards | memory kept | memory kept (first pause is a full capture) |
+| `rollback(snapshot)` to it | supported | **rejected** (`snapshot_filesystem_only_rollback_unsupported`) |
+| External mounts (plugin volume, host mount) | recorded in the snapshot and re-mounted | not recorded; re-declare them when you create from the snapshot |
+| `restart` with a restart policy | files preserved | files preserved (the captured writable layer is reused) |
+
+A few behaviors worth knowing:
+
+- Every fs-only snapshot is an independent point-in-time image, not an
+  incremental chain — take N snapshots and you store N images. Size for that
+  rather than assuming "filesystem only, so it must be small"; the real
+  footprint depends on the backend's CoW support.
+- A sandbox created from an fs-only snapshot behaves like any other sandbox
+  afterwards: `restart` reuses the captured writable layer so files survive,
+  and you can take another fs-only snapshot of it later.
+- An fs-only package records the root filesystem only and carries no external
+  mounts. Creating from one:
+  - **Re-declare** the plugin volumes and host mounts you need, including the
+    container paths; anything omitted is not mounted.
+  - There is no must-match check: the snapshot records no mounts, so the request
+    alone decides.
+  - The child may run on any node and a declared host path is resolved there; a
+    mount that cannot be established (host path missing, Volume gone) fails the
+    create instead of leaving an empty directory.
+
+If the call fails, the error code tells you why:
+
+| HTTP | Error code | Cause | What to do |
+|---|---|---|---|
+| 409 | `snapshot_filesystem_only_unsupported_node` | The control plane or the node agent does not support the fs-only mode | Upgrade whichever side is older; it never falls back to a full snapshot silently |
+| 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | The node cannot freeze the filesystem / this rootfs type | Cluster-side capability gap; check the node before retrying |
+| 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | Freeze or thaw failed mid-capture | Cluster-side problem; check the node before retrying |
+| 409 | `snapshot_filesystem_only_shared_volume_unsupported` | The sandbox has a **writable** plugin volume | A writable plugin volume is not part of the captured rootfs; create the sandbox without it before taking the snapshot |
+| 409 | `snapshot_filesystem_only_multi_container_unsupported` | The sandbox has extra user containers | One package records one writable layer; use a single-container sandbox |
+
+The response `mode` always reports what was actually recorded. When it differs
+from what you asked for, the call fails with 409 `snapshot_mode_conflict`
+instead of returning the artifact, so you never silently receive a full
+snapshot.
 
 ### Listing snapshots
 
@@ -142,7 +248,7 @@ Each fork succeeds or fails independently. The return value has exactly `count` 
 
 ## Rollback
 
-`sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable.
+`sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable. Rollback requires a **full** snapshot — rolling back to an fs-only snapshot is rejected with `snapshot_filesystem_only_rollback_unsupported` (see the comparison table above).
 
 ```python
 sb = Sandbox.create(template=TEMPLATE_ID)
@@ -177,6 +283,6 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 
 ## Reference
 
-- [Cross-Node Snapshots](./cross-node-snapshot.md) — S3 backend, `remote_status=ready`, and scheduler rules for Resume / FromSnap on another node
+- [Cross-Node Migration](./cross-node-snapshot/requirements.md) — shared backends, `remote_status=ready`, and scheduler rules for Resume / FromSnap on another node
 - Example code: [`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)
 - SDK source: [`sdk/python/`](https://github.com/TencentCloud/CubeSandbox/tree/master/sdk/python)

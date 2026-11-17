@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -129,13 +130,30 @@ func apiErrorFromStatus(statusCode int, message string) *APIError {
 	}
 }
 
+const maxErrorBodyBytes = 64 << 10
+
 func readErrorMessage(resp *http.Response) string {
 	if resp == nil || resp.Body == nil {
 		return ""
 	}
-	raw, err := io.ReadAll(resp.Body)
+	// Read one extra byte to detect truncation. The caller closes the body;
+	// do not drain an unbounded error response just to reuse the connection.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
 	if err != nil {
 		return ""
+	}
+	if len(raw) > maxErrorBodyBytes {
+		prefix := raw[:maxErrorBodyBytes]
+		// Drop an incomplete trailing rune rather than introduce invalid UTF-8
+		// by cutting valid server text in the middle of a multibyte character.
+		start := len(prefix) - 1
+		for start > 0 && !utf8.RuneStart(prefix[start]) {
+			start--
+		}
+		if !utf8.FullRune(prefix[start:]) {
+			prefix = prefix[:start]
+		}
+		return strings.TrimSpace(string(prefix)) + " [truncated]"
 	}
 	raw = []byte(strings.TrimSpace(string(raw)))
 	if len(raw) == 0 {

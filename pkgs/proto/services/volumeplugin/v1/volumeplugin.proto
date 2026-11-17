@@ -97,6 +97,11 @@ message CreateRequest {
   // name is the human-readable label.
   string name = 2;
   reserved 3;  // was driver; plugin is selected by CubeMaster before the RPC
+  // private_data is opaque caller input forwarded unchanged to Create.
+  // Only the plugin's returned private_data is persisted and used by Attach
+  // and Destroy. Max length: 1024 bytes. May be empty.
+  // Carry credential references, never plaintext credentials.
+  string private_data = 4;
 }
 
 message CreateResponse {
@@ -104,7 +109,8 @@ message CreateResponse {
   // volume_id and name come from the CreateRequest; plugins must not echo them.
   string token = 1;
   // private_data is opaque plugin state persisted in t_cube_volume and
-  // forwarded to Attach on sandbox create. Not returned to API/SDK clients.
+  // forwarded to Attach and Destroy. An empty value is stored as empty; the
+  // caller's input is never used as a fallback. Not returned to API/SDK clients.
   // Max length: 1024 bytes. May be empty.
   string private_data = 2;
 }
@@ -112,6 +118,10 @@ message CreateResponse {
 message DestroyRequest {
   string volume_id = 1;
   reserved 2;  // was driver; plugin is selected by CubeMaster before the RPC
+  // private_data is the plugin state returned by Create and persisted in
+  // t_cube_volume. Create rollback uses the returned state even if persistence
+  // or length validation failed. May be empty.
+  string private_data = 3;
 }
 
 message DestroyResponse {}

@@ -98,6 +98,10 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
         .route("/v2/sandboxes", post(sandboxes::create_sandbox_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
+        .route(
+            "/sandboxes/:sandboxID/exposed-ports/:containerPort",
+            get(sandboxes::get_sandbox_exposed_port),
+        )
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
             "/sandboxes/:sandboxID/logs",
@@ -216,6 +220,7 @@ fn build_long_template_routes(state: &AppState, auth_configured: bool) -> Router
 
 fn build_volume_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
+        .route("/v2/volumes", post(volumes::create_volume_v2))
         .route(
             "/volumes",
             get(volumes::list_volumes).post(volumes::create_volume),
@@ -364,6 +369,291 @@ mod tests {
         );
     }
 
+    /// Mock CubeMaster for `DELETE /templates/:id` routing tests. Records every
+    /// call so tests can assert which resource was (not) touched.
+    #[derive(Clone)]
+    struct DeleteMock {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        snapshot_ids: Vec<&'static str>,
+        template_exists: bool,
+    }
+
+    async fn delete_routing_server(
+        snapshot_ids: Vec<&'static str>,
+        template_exists: bool,
+    ) -> (TestServer, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{
+            extract::{Path, State},
+            routing::get,
+        };
+
+        type Mock = State<DeleteMock>;
+
+        async fn list_snapshots(State(m): Mock) -> Json<Value> {
+            m.calls.lock().unwrap().push("list_snapshots".into());
+            let items: Vec<Value> = m
+                .snapshot_ids
+                .iter()
+                .map(|id| serde_json::json!({ "snapshot_id": id, "status": "READY" }))
+                .collect();
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "data": items,
+                "next_token": ""
+            }))
+        }
+
+        async fn get_template(State(m): Mock) -> Json<Value> {
+            m.calls.lock().unwrap().push("get_template".into());
+            if m.template_exists {
+                Json(serde_json::json!({
+                    "RequestID": "req-1",
+                    "ret": { "ret_code": 0, "ret_msg": "success" },
+                    "template_id": "tpl-abc",
+                    "status": "ready",
+                    "replicas": []
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "RequestID": "req-1",
+                    "ret": { "ret_code": 130404, "ret_msg": "template not found" }
+                }))
+            }
+        }
+
+        async fn delete_snapshot(State(m): Mock, Path(id): Path<String>) -> Json<Value> {
+            m.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete_snapshot:{id}"));
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "snapshot_id": id,
+                "operation_id": "op-1",
+                "status": "READY"
+            }))
+        }
+
+        async fn delete_template(State(m): Mock, Json(body): Json<Value>) -> Json<Value> {
+            let id = body["template_id"].as_str().unwrap_or_default();
+            m.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete_template:{id}"));
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" }
+            }))
+        }
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mock = DeleteMock {
+            calls: calls.clone(),
+            snapshot_ids,
+            template_exists,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/cube/snapshot", get(list_snapshots))
+                    .route("/cube/snapshot/:id", delete(delete_snapshot))
+                    .route("/cube/template", get(get_template).delete(delete_template))
+                    .with_state(mock),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..ServerConfig::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+        (server, calls)
+    }
+
+    #[tokio::test]
+    async fn delete_by_snapshot_name_returns_204_with_operation_header() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], false).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "get_template", "delete_snapshot:snap-x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_shared_by_template_and_snapshot_returns_409_and_deletes_nothing() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 409);
+        assert!(
+            error.message.contains("template alias and a snapshot name"),
+            "unexpected message: {}",
+            error.message
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "get_template"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_duplicate_snapshot_name_returns_409_and_deletes_nothing() {
+        let (server, calls) = delete_routing_server(vec!["snap-a", "snap-b"], false).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 409);
+        assert!(error.message.contains("ambiguous"), "{}", error.message);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+    }
+
+    #[tokio::test]
+    async fn delete_by_tpl_id_goes_to_template_without_snapshot_lookup() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server.delete("/templates/tpl-abc").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert!(resp.maybe_header("x-operation-id").is_none());
+        assert_eq!(*calls.lock().unwrap(), vec!["delete_template:tpl-abc"]);
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_without_snapshot_falls_through_to_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "delete_template:prod"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_snap_id_deletes_snapshot_directly() {
+        let (server, calls) = delete_routing_server(vec![], false).await;
+
+        let resp = server.delete("/templates/snap-abc").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(*calls.lock().unwrap(), vec!["delete_snapshot:snap-abc"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_name_miss_is_404_and_never_deletes_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(*calls.lock().unwrap(), vec!["list_snapshots"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_ignores_same_named_template_and_deletes_snapshot() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "delete_snapshot:snap-x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_tpl_id_is_404_and_never_deletes_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server
+            .delete("/templates/tpl-abc")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_duplicate_names_are_409_and_snap_id_is_direct() {
+        let (server, calls) = delete_routing_server(vec!["snap-a", "snap-b"], false).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+
+        let resp = server
+            .delete("/templates/snap-a")
+            .add_query_param("snapshot_only", "true")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap(),
+            "delete_snapshot:snap-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_with_reserved_prefix_name_is_400() {
+        let (server, calls) = delete_routing_server(vec![], false).await;
+
+        let resp = server
+            .post("/sandboxes/sb-1/snapshots")
+            .json(&serde_json::json!({ "name": "snap-backup" }))
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 400);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn v2_create_forwards_flattened_body_without_v2_flags() {
         use axum::{extract::State, routing::post};
@@ -432,7 +722,9 @@ mod tests {
     async fn preserves_root_e2b_routes() {
         let server = test_server().await;
 
-        server.get("/health").await.assert_status_ok();
+        let health = server.get("/health").await;
+        health.assert_status_ok();
+        health.assert_json(&serde_json::json!({"status": "ok"}));
         assert_ne!(
             server.get("/v2/sandboxes").await.status_code(),
             StatusCode::NOT_FOUND
@@ -820,6 +1112,82 @@ mod tests {
         }
     }
 
+    /// `GET /snapshots?name=` must reach CubeMaster, and an empty/whitespace
+    /// name must be dropped rather than relayed as an empty query parameter.
+    #[tokio::test]
+    async fn list_snapshots_forwards_name_to_cubemaster() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{extract::Query, routing::get, Json, Router};
+        use serde_json::Value;
+
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_handler = Arc::clone(&seen);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            let router = Router::new().route(
+                "/cube/snapshot",
+                get(move |Query(params): Query<Value>| {
+                    let seen = Arc::clone(&seen_for_handler);
+                    async move {
+                        seen.lock().unwrap().push(
+                            params
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                        );
+                        Json(serde_json::json!({
+                            "requestID": "list-snapshots-request",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "data": [],
+                            "next_token": "",
+                        }))
+                    }
+                }),
+            );
+            axum::serve(listener, router)
+                .await
+                .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (query, expected) in [
+            (Some("prod"), Some("prod")),
+            (Some("snap-abc123"), Some("snap-abc123")),
+            (Some("   "), None),
+            (None, None),
+        ] {
+            let mut request = server.get("/snapshots");
+            if let Some(name) = query {
+                request = request.add_query_param("name", name);
+            }
+            let resp = request.await;
+            assert_eq!(
+                resp.status_code(),
+                StatusCode::OK,
+                "GET /snapshots?name={query:?} should succeed (got {} body={:?})",
+                resp.status_code(),
+                resp.text(),
+            );
+            let observed = seen.lock().unwrap().last().cloned().flatten();
+            assert_eq!(
+                observed.as_deref(),
+                expected,
+                "GET /snapshots?name={query:?} must send name={expected:?} to CubeMaster, got {observed:?}"
+            );
+        }
+    }
+
     /// `GET /v2/sandboxes` declared a `nextToken` query parameter and then
     /// ignored it: the handler never read it and the service always asked
     /// CubeMaster from the first entry, so every page returned the same first
@@ -943,6 +1311,154 @@ mod tests {
             let error: crate::models::ApiError = response.json();
             assert_eq!(error.code, 400);
         }
+    }
+
+    /// An E2B client sends `state=running,paused`; a typo anywhere in the value rejects the
+    /// whole request, as E2B's request validator does, instead of listing a subset.
+    #[tokio::test]
+    async fn list_sandboxes_v2_filters_by_state_and_rejects_a_bad_state() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-run", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-exited", "host_id": "h", "status": 2, "template_id": "t" },
+                    { "sandbox_id": "sb-pausing", "host_id": "h", "status": 4, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        let ok = server
+            .get("/v2/sandboxes")
+            .add_query_param("state", "running,paused")
+            .await;
+        assert_eq!(ok.status_code(), StatusCode::OK);
+        let body: Vec<Value> = ok.json();
+        let listed: Vec<(&str, &str)> = body
+            .iter()
+            .map(|sb| {
+                (
+                    sb["sandboxID"].as_str().unwrap_or_default(),
+                    sb["state"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(listed, [("sb-pausing", "paused"), ("sb-run", "running")]);
+
+        for state in ["running,pause", "pause", "", "running,"] {
+            let response = server
+                .get("/v2/sandboxes")
+                .add_query_param("state", state)
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "state={state:?} must be rejected rather than ignored"
+            );
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 400);
+        }
+    }
+
+    /// E2B's SDKs percent-encode `metadata` twice, so `a b/c` arrives as `a%2520b%2Fc`; both list
+    /// routes must still select it, and a value that is not key=value pairs is a 400, not "everything".
+    #[tokio::test]
+    async fn list_sandboxes_filter_metadata_as_e2b_sdks_send_it_and_reject_bad_values() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-special", "host_id": "h", "status": 1, "template_id": "t",
+                      "labels": { "owner": "a b/c" } },
+                    { "sandbox_id": "sb-other", "host_id": "h", "status": 1, "template_id": "t",
+                      "labels": { "owner": "x" } }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        for path in ["/sandboxes", "/v2/sandboxes"] {
+            for metadata in ["owner=a%2520b%2Fc", "owner=a b/c"] {
+                let response = server.get(path).add_query_param("metadata", metadata).await;
+                assert_eq!(response.status_code(), StatusCode::OK, "{path} {metadata}");
+                let body: Vec<Value> = response.json();
+                let ids: Vec<_> = body
+                    .iter()
+                    .filter_map(|sb| sb["sandboxID"].as_str())
+                    .collect();
+                assert_eq!(ids, ["sb-special"], "{path} {metadata}");
+            }
+
+            // E2B's JS SDK sends `metadata: {}` as `metadata=`; that is zero terms requested,
+            // so it must behave like `metadata` being omitted, not a 400.
+            let response = server.get(path).add_query_param("metadata", "").await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::OK,
+                "{path} metadata=\"\""
+            );
+            let body: Vec<Value> = response.json();
+            let mut ids: Vec<_> = body
+                .iter()
+                .filter_map(|sb| sb["sandboxID"].as_str())
+                .collect();
+            ids.sort_unstable();
+            assert_eq!(ids, ["sb-other", "sb-special"], "{path} metadata=\"\"");
+
+            for metadata in ["owner", "owner=x&oops"] {
+                let response = server.get(path).add_query_param("metadata", metadata).await;
+                assert_eq!(
+                    response.status_code(),
+                    StatusCode::BAD_REQUEST,
+                    "{path} metadata={metadata:?} must be rejected rather than ignored"
+                );
+                let error: crate::models::ApiError = response.json();
+                assert_eq!(error.code, 400);
+            }
+        }
+    }
+
+    /// v2 is the E2B view, whose `SandboxState` has no `pausing`, so it reports `paused`; v1 is
+    /// the Cube-native view the Cube SDKs read and keeps `pausing`, like `GET /sandboxes/{id}`.
+    #[tokio::test]
+    async fn list_routes_report_a_pausing_sandbox_per_their_contract() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-pausing", "host_id": "h", "status": 4, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        for (path, expected) in [("/sandboxes", "pausing"), ("/v2/sandboxes", "paused")] {
+            let response = server.get(path).await;
+            assert_eq!(response.status_code(), StatusCode::OK, "{path}");
+            let body: Vec<Value> = response.json();
+            let states: Vec<_> = body.iter().filter_map(|sb| sb["state"].as_str()).collect();
+            assert_eq!(states, [expected], "{path}");
+        }
+
+        // A caller that names `pausing` in v2 gets the state it asked for, not the E2B rewrite.
+        let response = server
+            .get("/v2/sandboxes")
+            .add_query_param("state", "pausing")
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK);
+        let body: Vec<Value> = response.json();
+        let states: Vec<_> = body.iter().filter_map(|sb| sb["state"].as_str()).collect();
+        assert_eq!(states, ["pausing"]);
     }
 
     async fn sandbox_list_server<F, Fut>(list_handler: F) -> TestServer

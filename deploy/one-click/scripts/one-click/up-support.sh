@@ -118,7 +118,7 @@ if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST}" || -n "${CUBE_EXTERNAL_POSTGRES_HOST}" ]]
 fi
 minio_dropped=0
 if [[ "${skip_local_mysql}" -eq 1 || -n "${CUBE_EXTERNAL_REDIS_HOST}" \
-    || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" || "${CUBE_SANDBOX_MINIO_ENABLED}" != "1" \
+    || -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" || "${CUBE_SANDBOX_MINIO_ENABLED}" != "1" \
     || -z "${SUPPORT_SERVICES}" ]]; then
   requested_services="${SUPPORT_SERVICES:-mysql redis minio}"
   filtered_services=""
@@ -138,7 +138,7 @@ if [[ "${skip_local_mysql}" -eq 1 || -n "${CUBE_EXTERNAL_REDIS_HOST}" \
         fi
         ;;
       redis)
-        if [[ -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
+        if [[ -n "${CUBE_EXTERNAL_REDIS_CLUSTER_NODES:-}" || -n "${CUBE_EXTERNAL_REDIS_HOST}" || -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
           if [[ -n "${CUBE_EXTERNAL_REDIS_MASTER_NAME}" ]]; then
             log "using external Redis Sentinel (${CUBE_EXTERNAL_REDIS_MASTER_NAME}), skipping local redis container"
           else

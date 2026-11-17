@@ -65,8 +65,13 @@ const (
 	CubeAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	CubeAnnotationsSystemDiskSize           = "cube.master.system_disk_size"
 
-	CubeAnnotationsAppSnapshotCreate         = "cube.master.appsnapshot.create"
-	CubeAnnotationAppSnapshotTemplateID      = "cube.master.appsnapshot.template.id"
+	CubeAnnotationsAppSnapshotCreate       = "cube.master.appsnapshot.create"
+	CubeAnnotationAppSnapshotTemplateID    = "cube.master.appsnapshot.template.id"
+	CubeAnnotationJFSTemplateVariantID     = "cube.master.jfs.template.variant.id"
+	CubeAnnotationJFSTemplateVariantPolicy = "cube.master.jfs.template.variant.policy"
+	// CubeAnnotationAppSnapshotTemplateAlias carries the template display_name
+	// (the alias) onto the sandbox so CubeAPI can echo it without a lookup.
+	CubeAnnotationAppSnapshotTemplateAlias   = "cube.master.appsnapshot.template.alias"
 	CubeAnnotationAppSnapshotVersion         = "cube.master.appsnapshot.version"
 	CubeAnnotationAppSnapshotTemplateVersion = "cube.master.appsnapshot.template.version"
 	CubeAnnotationRuntimeSnapshotID          = "cube.master.runtime.snapshot.id"
@@ -122,6 +127,7 @@ const (
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"
 	CubeAnnotationEnableIvshmem     = "cube.master.enable_ivshmem"
+	CubeAnnotationCgroupMode        = "cube.master.cgroup_mode"
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
 
@@ -142,6 +148,15 @@ const (
 	CubeAnnotationComponentCubeImageVersion  = "cube.master.components.cube-image.version"
 	CubeAnnotationComponentCubeAgentVersion  = "cube.master.components.cube-agent.version"
 )
+
+// TemplateManagedQosAnnotationKeys lists the internal annotations owned by the
+// template QoS contract. Public request paths reject them and response surfaces
+// strip them; keep this as the single source of truth.
+var TemplateManagedQosAnnotationKeys = []string{
+	CubeAnnotationsNetWork,
+	CubeAnnotationsBlkQos,
+}
+
 const (
 	CubeAnnotationsUseNetFileCache = "cube.instance.use_netfile_cache"
 	CubeAnnotationCollectMemOnExit = "cube.instance.collect_memory"

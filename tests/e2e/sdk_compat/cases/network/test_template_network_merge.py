@@ -12,11 +12,18 @@ import pytest
 
 from adapters import create_adapter
 from framework.build_throttle import template_build_slot
-from framework.capabilities import NETWORK_TEMPLATE_MERGE, capabilities_for_backend
+from framework.capabilities import (
+    NETWORK_TEMPLATE_MERGE,
+    capabilities_for_backend,
+    require_capabilities,
+)
 from framework.cleanup import safe_kill
 from framework.config import SdkE2EConfig
 from framework.parallel import scale_timeout_for_xdist
 from framework.network_probe import (
+    ALTERNATE_TCP_TARGET_IP,
+    TCP_TARGET_IP,
+    TCP_TARGET_PORT,
     assert_tcp_blocked,
     assert_tcp_reachable,
     tcp_probe_command,
@@ -26,10 +33,16 @@ from framework.network_probe import (
 def _env_true(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
-TEMPLATE_ALLOW_IP = os.environ.get("SDK_E2E_TEMPLATE_MERGE_ALLOW_IP", "8.8.8.8")
-CREATE_ALLOW_IP = os.environ.get("SDK_E2E_TEMPLATE_MERGE_CREATE_ALLOW_IP", "1.1.1.1")
+TEMPLATE_ALLOW_IP = os.environ.get(
+    "SDK_E2E_TEMPLATE_MERGE_ALLOW_IP", TCP_TARGET_IP
+)
+CREATE_ALLOW_IP = os.environ.get(
+    "SDK_E2E_TEMPLATE_MERGE_CREATE_ALLOW_IP", ALTERNATE_TCP_TARGET_IP
+)
 BLOCKED_IP = os.environ.get("SDK_E2E_TEMPLATE_MERGE_BLOCKED_IP", "9.9.9.9")
-TCP_PORT = int(os.environ.get("SDK_E2E_TEMPLATE_MERGE_TCP_PORT", "53"))
+TCP_PORT = int(
+    os.environ.get("SDK_E2E_TEMPLATE_MERGE_TCP_PORT", str(TCP_TARGET_PORT))
+)
 
 DEFAULT_TEMPLATE_IMAGE = (
     "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
@@ -59,11 +72,7 @@ pytestmark = [
 # Mirrors cases/volume/conftest.py: markers alone only gate sdk_sandbox.
 @pytest.fixture(autouse=True)
 def _gate_template_merge_case(sdk_backend: str) -> None:
-    if NETWORK_TEMPLATE_MERGE not in capabilities_for_backend(sdk_backend):
-        pytest.skip(
-            f"backend {sdk_backend!r} does not support capability "
-            f"{NETWORK_TEMPLATE_MERGE!r}"
-        )
+    require_capabilities(sdk_backend, NETWORK_TEMPLATE_MERGE)
     if _env_true("SDK_E2E_SKIP_INTERNET_TESTS"):
         pytest.skip(
             "internet-dependent SDK E2E tests disabled by SDK_E2E_SKIP_INTERNET_TESTS"
@@ -147,6 +156,12 @@ def network_merge_template_id(pytestconfig: pytest.Config):
     if NETWORK_TEMPLATE_MERGE not in capabilities_for_backend("cubesandbox"):
         yield None
         return
+    if TEMPLATE_ALLOW_IP == CREATE_ALLOW_IP:
+        pytest.fail(
+            "template and create-time allow targets must differ; set "
+            "SDK_E2E_TEMPLATE_MERGE_ALLOW_IP and "
+            "SDK_E2E_TEMPLATE_MERGE_CREATE_ALLOW_IP to distinct addresses"
+        )
 
     sdk_config = Config(api_url=base.cube_api_url)
     created_id: str | None = None

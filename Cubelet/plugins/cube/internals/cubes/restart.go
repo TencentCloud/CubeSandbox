@@ -17,6 +17,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 )
@@ -37,6 +38,7 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 			log.G(ctx).Errorf("Unmarshal to cubebox %s from meta: %v", id, err)
 			continue
 		}
+		cb.ReconcileRecoveredMemoryLineage(legacyRestoreBaseLabel(cb))
 
 		if cb.Namespace == "" {
 			cb.Namespace = namespaces.Default
@@ -69,6 +71,17 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 		}
 	}
 	return nil
+}
+
+// legacyRestoreBaseLabel reads the pre-MemoryLineage restore binding. Labels
+// only: create-request annotations are user controllable and were never
+// written by Cubelet, so they are not evidence. The row was just unmarshalled
+// and is not in the store yet, so reading Labels needs no lock.
+func legacyRestoreBaseLabel(cb *cubeboxstore.CubeBox) string {
+	if cb == nil {
+		return ""
+	}
+	return cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID]
 }
 
 func RecoverPod(ctx context.Context, client *containerd.Client, cb *cubeboxstore.CubeBox) (err error) {
@@ -182,6 +195,14 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 
 	if ctr.SandboxID == "" {
 		ctr.SandboxID = cb.ID
+	}
+	newStatus.Reason = oldStatus.Reason
+	// Exit reasons belong to a finished run; non-exit reasons such as PauseFailed can remain live.
+	if newStatus.FinishedAt == 0 {
+		switch restartpolicy.Reason(oldStatus.Reason) {
+		case restartpolicy.ReasonCompleted, restartpolicy.ReasonError, restartpolicy.ReasonOOMKilled, restartpolicy.ReasonSandboxCrashed:
+			newStatus.Reason = ""
+		}
 	}
 	ctr.Status = cubeboxstore.StoreStatus(*newStatus)
 	ctr.Container = cntr

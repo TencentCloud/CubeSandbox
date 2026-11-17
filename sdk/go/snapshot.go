@@ -21,6 +21,13 @@ import (
 type SnapshotInfo struct {
 	SnapshotID string   `json:"snapshotID"`
 	Names      []string `json:"names"`
+	ExpiresAt  string   `json:"expiresAt,omitempty"`
+}
+
+// CreateSnapshotOptions extends snapshot creation without changing existing
+// CreateSnapshot(ctx, name) callers. TTLSeconds=0 keeps the snapshot indefinitely.
+type CreateSnapshotOptions struct {
+	TTLSeconds int64
 }
 
 // ListSnapshotsOptions filters the snapshot listing. Zero values are omitted.
@@ -28,6 +35,7 @@ type ListSnapshotsOptions struct {
 	SandboxID string
 	Limit     int
 	NextToken string
+	Name      string
 }
 
 // CloneOptions controls Sandbox.Clone. N defaults to 1; Concurrency defaults to
@@ -60,7 +68,7 @@ func (c *cloneCleanup) release(ctx context.Context, sandboxID string) {
 	shouldCleanup := c.startCleanupLocked(c.remaining == 0)
 	c.mu.Unlock()
 	if shouldCleanup {
-		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+		_, _ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
 	}
 }
 
@@ -72,7 +80,7 @@ func (c *cloneCleanup) cleanup(ctx context.Context) {
 	shouldCleanup := c.startCleanupLocked(true)
 	c.mu.Unlock()
 	if shouldCleanup {
-		_ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
+		_, _ = c.client.DeleteSnapshot(context.WithoutCancel(ctx), c.snapshotID)
 	}
 }
 
@@ -86,15 +94,25 @@ func (c *cloneCleanup) startCleanupLocked(ready bool) bool {
 
 // CreateSnapshot captures the current sandbox state (POST
 // /sandboxes/:id/snapshots). The snapshot outlives the sandbox. An empty name
-// lets the server pick one; a known name attaches a new build to it.
-func (s *Sandbox) CreateSnapshot(ctx context.Context, name string) (*SnapshotInfo, error) {
+// lets the server pick one. A name starting with tpl-/snap- is rejected (HTTP 400).
+func (s *Sandbox) CreateSnapshot(ctx context.Context, name string, options ...CreateSnapshotOptions) (*SnapshotInfo, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
+	}
+	if len(options) > 1 {
+		return nil, errors.New("at most one CreateSnapshotOptions value is allowed")
 	}
 	// Always send a JSON object body: the server deserializes into a
 	// CreateSnapshotRequest struct and rejects an empty/null body with 422,
 	// even though every field is optional. An empty name simply omits it.
 	payload := map[string]any{}
+	if len(options) == 1 {
+		ttl := options[0].TTLSeconds
+		if ttl < 0 || ttl > 9_223_372_036 {
+			return nil, errors.New("snapshot TTLSeconds is out of range")
+		}
+		payload["ttlSeconds"] = ttl
+	}
 	if name != "" {
 		payload["name"] = name
 	}
@@ -118,6 +136,9 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (
 	}
 	if opts.NextToken != "" {
 		query.Set("nextToken", opts.NextToken)
+	}
+	if opts.Name != "" {
+		query.Set("name", opts.Name)
 	}
 	path := "/snapshots"
 	if encoded := query.Encode(); encoded != "" {
@@ -144,14 +165,23 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (
 	return items, resp.Header.Get("x-next-token"), nil
 }
 
-// DeleteSnapshot permanently removes a snapshot (DELETE /templates/:id).
-// Deleting the originating sandbox does not cascade-delete its snapshots.
-func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) error {
-	if snapshotID == "" {
-		return errors.New("snapshotID is required")
+// DeleteSnapshot removes a snapshot by ID or name; it never matches templates.
+// Reports false when it does not exist; several same-named snapshots are a 409.
+func (c *Client) DeleteSnapshot(ctx context.Context, idOrName string) (bool, error) {
+	if idOrName == "" {
+		return false, errors.New("snapshot id or name is required")
 	}
-	path := "/templates/" + url.PathEscape(snapshotID)
-	return c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	path := "/templates/" + url.PathEscape(idOrName) + "?snapshot_only=true"
+	err := c.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
+	if err != nil {
+		var apiErr *APIError
+		// With snapshot_only the server returns 404 only for a missing snapshot.
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Rollback reverts the sandbox to a snapshot (POST /sandboxes/:id/rollback).

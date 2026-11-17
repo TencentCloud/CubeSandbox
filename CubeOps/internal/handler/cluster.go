@@ -154,7 +154,16 @@ func (h *ClusterHandler) ListOperations(c *gin.Context) {
 		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httputil.WriteJSON(c, http.StatusOK, ops)
+	// Quota changes have their own history surface; keep them out of the
+	// operator-facing "Recent Operations" list.
+	filtered := make([]model.NodeOperation, 0, len(ops))
+	for _, op := range ops {
+		if op.Type == model.OpSetQuota || op.Type == model.OpSetClusterQuota {
+			continue
+		}
+		filtered = append(filtered, op)
+	}
+	httputil.WriteJSON(c, http.StatusOK, filtered)
 }
 
 // fetchUsedResources queries CubeMaster for running sandboxes to compute
