@@ -148,7 +148,11 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 	if req.HostID != "" {
 		n, exist = deps.getNode(req.HostID)
 		if !exist || n == nil {
-			setError(errorcode.ErrorCode_NotFound, rsp)
+			if req.SandboxID == "" {
+				setError(errorcode.ErrorCode_NotFound, rsp)
+			} else {
+				setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
+			}
 			return "", "", nil, false
 		}
 		locatedHost = n.IP
@@ -173,11 +177,7 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 		if req.HostID == "" && rec != nil && isShimlessPauseStatus(rec.Status) && pauseBindingOnHost(rec, locatedHost) {
 			return "", locatedHost, rec, true
 		}
-		if !exist {
-			setError(errorcode.ErrorCode_NotFound, rsp)
-		} else {
-			setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
-		}
+		setError(errorcode.ErrorCode_CubeletUnHealthy, rsp)
 		return "", "", nil, false
 	}
 	return deps.getCubeletAddr(locatedHost), locatedHost, rec, true

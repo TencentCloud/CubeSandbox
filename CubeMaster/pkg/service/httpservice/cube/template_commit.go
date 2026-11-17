@@ -127,13 +127,17 @@ func handleSandboxCommitAction(c *gin.Context) {
 			SandboxID: req.SandboxID,
 		})
 		if infoRsp == nil || infoRsp.Ret == nil || infoRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) || len(infoRsp.Data) == 0 {
-			msg := "sandbox not found"
-			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetMsg != "" {
-				msg = infoRsp.Ret.RetMsg
+			code := int(errorcode.ErrorCode_MasterInternalError)
+			msg := "unable to resolve sandbox host"
+			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
+				code = infoRsp.Ret.RetCode
+				if strings.TrimSpace(infoRsp.Ret.RetMsg) != "" {
+					msg = infoRsp.Ret.RetMsg
+				}
 			}
 			retCode = int(errorcode.ErrorCode_NotFound)
 			common.WriteAPI(c, &commitTemplateResponse{
-				Res:        &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_NotFound), RetMsg: msg}},
+				Res:        &types.Res{Ret: &types.Ret{RetCode: code, RetMsg: msg}},
 				TemplateID: req.TemplateID,
 			})
 			return
@@ -150,7 +154,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		retCode = int(errorcode.ErrorCode_NotFound)
 		common.WriteAPI(c, &commitTemplateResponse{
 			Res: &types.Res{Ret: &types.Ret{
-				RetCode: int(errorcode.ErrorCode_NotFound),
+				RetCode: int(errorcode.ErrorCode_CubeletUnHealthy),
 				RetMsg:  "unable to resolve sandbox host",
 			}},
 			TemplateID: req.TemplateID,
