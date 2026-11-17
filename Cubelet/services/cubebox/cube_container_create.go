@@ -477,6 +477,9 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
+		if flowOpts.ScheduleResumeRollback != nil {
+			return err
+		}
 		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
 		if cleanupErr == nil {
 			// The sandbox has already been torn down synchronously, so the outer

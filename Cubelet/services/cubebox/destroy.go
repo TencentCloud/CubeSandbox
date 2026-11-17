@@ -116,6 +116,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	// while the shim process may still hold the guest disks; storage Destroy
 	// is the next workflow step and must not delete those volumes yet.
 	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, sb)
+	if attempt, ok := ctx.Value(resumeRollbackContextKey{}).(*resumeRollback); ok {
+		runtimeEvidence = attempt.rememberRuntime(runtimeEvidence)
+	}
 	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)
 	if err != nil {
 		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())

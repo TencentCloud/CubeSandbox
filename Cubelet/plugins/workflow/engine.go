@@ -135,6 +135,9 @@ type CreateContext struct {
 	VolumeInfo interface{}
 
 	Failover bool
+	// ScheduleResumeRollback is called before Create returns so its caller can
+	// publish the pending rollback while it still holds the lifecycle lock.
+	ScheduleResumeRollback func()
 
 	UserData *cubeboxstore.UserData
 
@@ -349,6 +352,9 @@ type DestroyContext struct {
 	// and cubebox row. The VM, shim and cgroup are still torn down.
 	// What is kept is decided only by Retain.
 	IsRestartDestroy bool
+	// IsResumeRollback leaves a failed destroy for the lifecycle-locked retry
+	// instead of handing it to generic cleanup.
+	IsResumeRollback bool
 
 	// VolumeRefEvents collects node-level plugin_volume ref-count transitions
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
@@ -491,11 +497,11 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 				if flow_create == do {
 					rOpts := opts.(*CreateContext)
 					if rOpts.Failover {
-						go e.failover(ctx, opts)
+						e.scheduleFailover(ctx, rOpts)
 					}
 				}
 
-				if flow_destroy == do && !restartDestroyKeepsResources(opts) {
+				if flow_destroy == do && !restartDestroyKeepsResources(opts) && !opts.(*DestroyContext).IsResumeRollback {
 					e.cleanUp(ctx, opts)
 				}
 
@@ -508,7 +514,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 					if flow_create == do {
 						rOpts := opts.(*CreateContext)
 						if rOpts.Failover {
-							go e.failover(ctx, opts)
+							e.scheduleFailover(ctx, rOpts)
 						}
 					}
 					// A restart destroy that spent its deadline inside an earlier
@@ -645,6 +651,14 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 
 	}
 	return nil
+}
+
+func (e *Engine) scheduleFailover(ctx context.Context, opts *CreateContext) {
+	if opts.ScheduleResumeRollback != nil {
+		opts.ScheduleResumeRollback()
+		return
+	}
+	go e.failover(ctx, opts)
 }
 
 func (e *Engine) failover(ctx context.Context, opts ReqContext) {
