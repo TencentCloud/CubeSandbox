@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -57,10 +56,10 @@ func TestDecorateSandboxQosPrefersPersistedAnnotations(t *testing.T) {
 	t.Cleanup(func() { SetTemplateQosLookupHook(nil) })
 
 	item := &types.SandboxData{SandboxID: "sb-1", TemplateID: "tpl-1"}
-	decorateSandboxQos(context.Background(), item, func(context.Context, string) (map[string]string, error) {
-		return map[string]string{
+	decorateSandboxQos(context.Background(), item, &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
 			constants.CubeAnnotationsNetWork: `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}},"Version":1}`,
-		}, nil
+		},
 	})
 
 	if item.ConfiguredQos == nil || item.ConfiguredQos.Network == nil || item.ConfiguredQos.Network.BandwidthMbps != 100 {
@@ -83,12 +82,7 @@ func TestDecorateSandboxQosFallsBackWhenSpecHasNoQos(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			item := &types.SandboxData{SandboxID: "sb-1", TemplateID: "tpl-1"}
-			decorateSandboxQos(context.Background(), item, func(_ context.Context, sandboxID string) (map[string]string, error) {
-				if sandboxID != item.SandboxID {
-					t.Fatalf("sandboxID=%q, want %q", sandboxID, item.SandboxID)
-				}
-				return annotations, nil
-			})
+			decorateSandboxQos(context.Background(), item, &types.CreateCubeSandboxReq{Annotations: annotations})
 			if item.ConfiguredQos == nil || item.ConfiguredQos.Network == nil || item.ConfiguredQos.Network.BandwidthMbps != 100 {
 				t.Fatalf("configured qos=%+v, want template bandwidth", item.ConfiguredQos)
 			}
@@ -103,9 +97,7 @@ func TestDecorateSandboxQosFallsBackOnSpecError(t *testing.T) {
 	t.Cleanup(func() { SetTemplateQosLookupHook(nil) })
 
 	item := &types.SandboxData{SandboxID: "sb-1", TemplateID: "tpl-1"}
-	decorateSandboxQos(context.Background(), item, func(context.Context, string) (map[string]string, error) {
-		return nil, errors.New("spec unavailable")
-	})
+	decorateSandboxQos(context.Background(), item, nil)
 
 	if item.ConfiguredQos == nil || item.ConfiguredQos.BlockIO == nil || item.ConfiguredQos.BlockIO.IOPS != 1000 {
 		t.Fatalf("fallback qos state=%+v", item)
