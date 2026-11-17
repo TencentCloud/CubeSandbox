@@ -49,6 +49,7 @@ ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 snapshot_one_click_toggles "${ENV_FILE}"
 snapshot_one_click_database_intent "${ENV_FILE}"
 snapshot_one_click_observability_intent "${ENV_FILE}"
+capture_one_click_s3_addressing_intent
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
@@ -59,6 +60,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   # Preserve shell-interpreted observability values, including empty values
   # used to clear settings inherited from a previous runtime.
   capture_one_click_observability_dotenv_values
+  capture_one_click_s3_addressing_intent
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -295,6 +297,7 @@ fi
 # env.example default, which would otherwise ignore an explicit flip back.
 apply_one_click_toggles
 apply_one_click_observability_intent
+apply_one_click_s3_addressing_intent
 # Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
@@ -2317,6 +2320,7 @@ fi
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
 # mode is preserved across every later upsert rather than reverting to 0644.
 chmod 600 "${RUNTIME_ENV_FILE}"
+persist_one_click_compound_env_values "${RUNTIME_ENV_FILE}"
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
@@ -2439,6 +2443,15 @@ else
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_REGION"
   remove_env_kv "${RUNTIME_ENV_FILE}" "CUBE_S3_S3FS_EXTRA_OPTS"
 fi
+
+# Shared blobstore addressing and the optional CubeOps override must survive
+# service restarts, including values supplied through the installer environment.
+# Compound companions were saved independently immediately after the runtime
+# file copy. Append final style values without replacing the original rows.
+for _s3_style_key in CUBE_S3_ADDRESSING_STYLE CUBE_OPS_S3_ADDRESSING_STYLE; do
+  _s3_style_value="$(render_env_assignment_value "${_s3_style_key}" "${!_s3_style_key:-}")"
+  printf '\n%s=%s\n' "${_s3_style_key}" "${_s3_style_value}" >> "${RUNTIME_ENV_FILE}"
+done
 
 # CubeS3lvol (s3lvol) runtime env: persist the resolved defaults (mirroring
 # rcow_common.sh) so the systemd unit picks them up via EnvironmentFile

@@ -699,6 +699,37 @@ apply_one_click_observability_intent() {
   return 0
 }
 
+# Capture before .env and again after its real Bash load, before the upgrade
+# merge. The second capture keeps both dotenv results and untouched process
+# environment values. An absent key is not intent; a present empty value clears
+# it. Bash handles multi-assignment exports, quoting, and environment references.
+ONE_CLICK_S3_ADDRESSING_INTENT_KEYS=(
+  CUBE_S3_ADDRESSING_STYLE
+  CUBE_OPS_S3_ADDRESSING_STYLE
+)
+
+capture_one_click_s3_addressing_intent() {
+  local key
+  declare -gA ONE_CLICK_S3_ADDRESSING_INTENT_SNAPSHOT
+  ONE_CLICK_S3_ADDRESSING_INTENT_SNAPSHOT=()
+  for key in "${ONE_CLICK_S3_ADDRESSING_INTENT_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_S3_ADDRESSING_INTENT_SNAPSHOT["${key}"]="${!key}"
+    fi
+  done
+  return 0
+}
+
+apply_one_click_s3_addressing_intent() {
+  local key
+  for key in "${ONE_CLICK_S3_ADDRESSING_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_S3_ADDRESSING_INTENT_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_S3_ADDRESSING_INTENT_SNAPSHOT[${key}]}"
+    fi
+  done
+  return 0
+}
+
 # Database engine keys (and CUBE_EXTERNAL_REDIS_DB) are commented out of
 # env.example, so merge_env_three_way always re-appends the previous
 # .one-click.env markers as "preserved custom settings". Without a this-run
@@ -1254,6 +1285,103 @@ upsert_env_kv() {
   fi
 
   mv -f "${tmp_file}" "${env_file}"
+}
+
+# After the installer has loaded its configuration, save the effective values
+# of compound assignment rows independently, before any upsert can replace a
+# whole row. Values come from the existing Bash state, preserving evaluation
+# order without evaluating the file again or changing the upgrade merge parser.
+persist_one_click_compound_env_values() {
+  local _compound_env_file="$1" _compound_keys _compound_key _compound_value
+  [[ -f "${_compound_env_file}" ]] || return 0
+  _compound_keys="$(python3 - "${_compound_env_file}" <<'PY'
+import pathlib
+import re
+import sys
+
+def compound_assignments(line):
+    """Identify compound assignment keys without evaluating their values.
+
+    Only key names are used; Bash already evaluated the original file in order.
+    """
+    pairs = []
+    pos = 0
+    while pos < len(line):
+        while pos < len(line) and line[pos] in " \t":
+            pos += 1
+        if pos == len(line) or line[pos] == "#":
+            break
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", line[pos:])
+        if not match:
+            return None
+        key = match.group(1)
+        pos += match.end()
+        start = pos
+        stack = []
+        while pos < len(line):
+            char = line[pos]
+            top = stack[-1] if stack else None
+            if top in ("'", "ansi", "`"):
+                closing = "'" if top == "ansi" else top
+                if top != "'" and char == "\\":
+                    if pos + 1 == len(line):
+                        return None
+                    pos += 2
+                    continue
+                if char == closing:
+                    stack.pop()
+                pos += 1
+                continue
+            if char == "\\":
+                if pos + 1 == len(line):
+                    return None
+                pos += 2
+                continue
+            if top == '"' and char == '"':
+                stack.pop()
+            elif top != '"' and line.startswith("$'", pos):
+                stack.append("ansi")
+                pos += 2
+                continue
+            elif top != '"' and char == "'":
+                stack.append("'")
+            elif char in ('"', "`"):
+                stack.append(char)
+            elif line.startswith("$(", pos) or line.startswith("${", pos):
+                stack.append(")" if line[pos + 1] == "(" else "}")
+                pos += 2
+                continue
+            elif top == ")" and char == "(":
+                stack.append(")")
+            elif top in (")", "}") and char == top:
+                stack.pop()
+            elif not stack and char in " \t":
+                break
+            elif not stack and char in ";&|<>()":
+                return None
+            pos += 1
+        if stack:
+            return None
+        pairs.append((key, line[start:pos]))
+    return pairs if len(pairs) > 1 else None
+
+
+keys = set()
+for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = re.sub(r"^[ \t]*export[ \t]+", "", line.lstrip())
+    pairs = compound_assignments(line)
+    if pairs:
+        keys.update(key for key, _ in pairs)
+print("\n".join(sorted(keys)))
+PY
+)" || return 1
+  [[ -n "${_compound_keys}" ]] || return 0
+  while IFS= read -r _compound_key; do
+    if [[ -n "${!_compound_key+x}" ]]; then
+      _compound_value="$(render_env_assignment_value "${_compound_key}" "${!_compound_key}")"
+      printf '\n%s=%s\n' "${_compound_key}" "${_compound_value}" >> "${_compound_env_file}"
+    fi
+  done <<< "${_compound_keys}"
 }
 
 # remove_env_kv deletes KEY=... lines from env_file. Used when switching Redis

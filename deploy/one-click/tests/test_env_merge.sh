@@ -736,6 +736,120 @@ test_cidr_preflight_skip_conflict_param() {
     || fail "valid CIDR with skip=1 should pass"
 }
 
+test_compound_mysql_reference_survives_upgrade() {
+  local old="${TMP_DIR}/mysql-reference.env" out="${TMP_DIR}/mysql-reference-out.env"
+  cat > "${old}" <<'EOF'
+MYSQL_SECRET=fixture-password CUBE_SANDBOX_MYSQL_PASSWORD="${MYSQL_SECRET}"
+EOF
+  env -i PATH="${PATH}" bash -euo pipefail -c '
+    source "$1/lib/common.sh"
+    merge_env_three_way "$1/env.example" "$2" "$1/env.example" "" "$3" "$3.diff"
+    load_env_file "$3"
+    [[ "${CUBE_SANDBOX_MYSQL_PASSWORD:-}" == fixture-password ]] || {
+      echo "FAIL: compound MySQL password reference changed during upgrade" >&2
+      exit 1
+    }
+    persist_one_click_compound_env_values "$3"
+    persist_one_click_database_runtime_env "$3"
+    unset MYSQL_SECRET CUBE_SANDBOX_MYSQL_PASSWORD DATABASE_URL
+    load_env_file "$3"
+    [[ "${CUBE_SANDBOX_MYSQL_PASSWORD:-}" == fixture-password ]]
+    [[ "${DATABASE_URL}" == mysql://cube:fixture-password@127.0.0.1:3306/cube_mvp ]]
+    merge_env_three_way "$1/env.example" "$3" "$1/env.example" "" "$3.next" "$3.next.diff"
+    unset MYSQL_SECRET CUBE_SANDBOX_MYSQL_PASSWORD DATABASE_URL
+    load_env_file "$3.next"
+    [[ "${CUBE_SANDBOX_MYSQL_PASSWORD:-}" == fixture-password ]]
+    [[ "${DATABASE_URL}" == mysql://cube:fixture-password@127.0.0.1:3306/cube_mvp ]]
+  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
+}
+
+test_compound_persistence_preserves_evaluated_order() {
+  local old="${TMP_DIR}/ordered.env" out="${TMP_DIR}/ordered-out.env"
+  cat > "${old}" <<'EOF'
+FIRST=one SECOND="${FIRST}" THIRD="${SECOND}-suffix" EMPTY=
+FIRST=updated
+EOF
+  env -i PATH="${PATH}" bash -euo pipefail -c '
+    source "$1/lib/common.sh"
+    load_env_file "$2"
+    [[ "${FIRST}" == updated && "${SECOND}" == one && "${THIRD}" == one-suffix ]]
+    persist_one_click_compound_env_values "$2"
+    upsert_env_kv "$2" FIRST final
+    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
+    unset FIRST SECOND THIRD EMPTY
+    load_env_file "$3"
+    [[ "${FIRST}" == final && "${SECOND}" == one && "${THIRD}" == one-suffix && "${EMPTY}" == "" ]]
+  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
+}
+
+test_compound_persistence_preserves_quoting_and_export() {
+  local old="${TMP_DIR}/quoted.env" out="${TMP_DIR}/quoted-out.env"
+  cat > "${old}" <<'EOF'
+export FIRST=one QUOTED='literal A=B and #text' ESCAPED=hello\ world EMPTY= URL=https://example.test/#fragment
+PREFIX=${SEED:-fallback} ARITH=$((1 + 2)) NESTED="$(printf '%s' "$(printf '%s' 'nested value')")"
+ANSI=$'quoted\' value' BACKTICK=`printf '%s' 'tick value'`
+EOF
+  printf 'TAB_FIRST=one\tTAB_SECOND=two' >> "${old}"
+  env -i PATH="${PATH}" bash -euo pipefail -c '
+    source "$1/lib/common.sh"
+    load_env_file "$2"
+    persist_one_click_compound_env_values "$2"
+    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
+  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
+  env -i PATH="${PATH}" bash -euo pipefail -c '
+    source "$1"
+    [[ "${QUOTED}" == "literal A=B and #text" && "${ESCAPED}" == "hello world" ]]
+    [[ "${EMPTY}" == "" && "${URL}" == "https://example.test/#fragment" ]]
+    [[ "${PREFIX}" == fallback && "${ARITH}" == 3 && "${NESTED}" == "nested value" ]]
+    [[ "${ANSI}" == "quoted'"'"' value" && "${BACKTICK}" == "tick value" && "${TAB_SECOND}" == two ]]
+    [[ ! -v A ]]
+  ' _ "${out}"
+}
+
+test_compound_capture_does_not_evaluate_again() {
+  local old="${TMP_DIR}/side-effect.env" out="${TMP_DIR}/side-effect-out.env" marker="${TMP_DIR}/side-effect.marker"
+  cat > "${old}" <<'EOF'
+FIRST=one EFFECT=$(printf x >> "$MARKER_PATH"; printf value) AFTER=preserved
+EOF
+  env -i PATH="${PATH}" MARKER_PATH="${marker}" bash -euo pipefail -c '
+    source "$1/lib/common.sh"
+    load_env_file "$2"
+    [[ "$(cat "${MARKER_PATH}")" == x ]]
+    persist_one_click_compound_env_values "$2"
+    [[ "$(cat "${MARKER_PATH}")" == x ]]
+    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
+    [[ "$(cat "${MARKER_PATH}")" == x ]]
+    unset FIRST EFFECT AFTER
+    load_env_file "$3"
+    [[ "${EFFECT}" == value && "${AFTER}" == preserved ]]
+    [[ "$(cat "${MARKER_PATH}")" == x ]]
+  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
+}
+
+test_compound_capture_ignores_quoted_names_and_redacts_secrets() {
+  local old="${TMP_DIR}/opaque.env" out="${TMP_DIR}/opaque-out.env"
+  cat > "${old}" <<'EOF'
+OPAQUE="literal A=B and C=D" # retain comment
+FIRST=one API_SECRET='fixture-sensitive-value' OTHER=kept # trailing comment
+EOF
+  env -i PATH="${PATH}" bash -euo pipefail -c '
+    source "$1/lib/common.sh"
+    load_env_file "$2"
+    persist_one_click_compound_env_values "$2"
+    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
+    [[ ! -v A && ! -v C ]]
+  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
+  assert_value "${out}" OPAQUE '"literal A=B and C=D" # retain comment'
+  assert_value "${out}" API_SECRET fixture-sensitive-value
+  assert_not_contains "${out}.diff" fixture-sensitive-value
+}
+
+test_compound_mysql_reference_survives_upgrade
+test_compound_persistence_preserves_evaluated_order
+test_compound_persistence_preserves_quoting_and_export
+test_compound_capture_does_not_evaluate_again
+test_compound_capture_ignores_quoted_names_and_redacts_secrets
+
 test_preserves_user_customized_value
 test_adds_new_keys_with_defaults
 test_three_way_adopts_new_default_for_untouched_key
