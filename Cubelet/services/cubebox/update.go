@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -368,15 +367,8 @@ func (s *service) admitPausedReplace(
 	ctx context.Context,
 	req *cubebox.RunCubeSandboxRequest,
 ) *errorcode.Ret {
-	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
-	if desired == "" {
-		return nil
-	}
-	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
-		return nil
-	}
-	if st := sb.GetStatus(); st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+	sb, paused := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+	if !paused {
 		// Live or in-flight-pause collisions are rejected downstream as
 		// already exists; only a PAUSED tombstone is a resume replacement.
 		return nil

@@ -148,44 +148,42 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	// may be replaced (not PAUSING — pause may still own the lifecycle lock /
 	// cleanup). Reject PAUSING and other non-paused collisions as already exists.
 	if !workflow.ReuseFor(opts).CubeboxMeta {
-		if desired := strings.TrimSpace(realReq.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]); desired != "" {
-			if sb, err := l.cubeboxManger.Get(ctx, desired); err == nil && sb != nil && sb.SandboxID == desired {
-				st := sb.GetStatus()
-				if st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
-					// Everything below deletes the old sandbox's records, and this
-					// row is the last place its shim identity survives: once it is
-					// gone nothing on the host can match a still-running shim back
-					// to the sandbox, and this attempt is handed a tap the old one
-					// may still hold. So the eligibility wait runs before any of
-					// this, at the create entry point — see gatePausedReplace in
-					// service.go — and is deliberately not repeated here, where it
-					// would run after the records it protects are already gone.
-					// Resume replaces the paused row. Keep the restart bookkeeping
-					// so the next report is newer than the one CubeMaster already has.
-					if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
-						opts.RestartPrior = restartPriorFrom(sb)
-					}
-					opts.PriorWritableLayer = strings.TrimSpace(sb.RootfsWritableLayer)
-					// CDP user-delete hook requires UserMarkDeletedTime before store delete.
-					if sb.UserMarkDeletedTime == nil {
-						now := time.Now()
-						sb.UserMarkDeletedTime = &now
-						_ = l.cubeboxManger.SyncByID(ctx, desired)
-					}
-					// Pause post-cleanup may leave containerd metadata; wipe before recreate.
-					_ = runc.Clean(ctx, desired)
-					for _, id := range pausedTombstoneContainerIDs(sb) {
-						if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
-							log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
-						}
-					}
-					if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
-						return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
-							"failed to replace paused sandbox %s: %v", desired, delErr)
-					}
-				} else {
-					return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
+		if sb, paused := pausedReplaceTarget(ctx, l.cubeboxManger, realReq); sb != nil {
+			if paused {
+				// Everything below deletes the old sandbox's records, and this
+				// row is the last place its shim identity survives: once it is
+				// gone nothing on the host can match a still-running shim back
+				// to the sandbox, and this attempt is handed a tap the old one
+				// may still hold. So the eligibility wait runs before any of
+				// this, at the create entry point — see gatePausedReplace in
+				// service.go — and is deliberately not repeated here, where it
+				// would run after the records it protects are already gone.
+				// Resume replaces the paused row. Keep the restart bookkeeping
+				// so the next report is newer than the one CubeMaster already has.
+				desired := sb.SandboxID
+				if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
+					opts.RestartPrior = restartPriorFrom(sb)
 				}
+				opts.PriorWritableLayer = strings.TrimSpace(sb.RootfsWritableLayer)
+				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
+				if sb.UserMarkDeletedTime == nil {
+					now := time.Now()
+					sb.UserMarkDeletedTime = &now
+					_ = l.cubeboxManger.SyncByID(ctx, desired)
+				}
+				// Pause post-cleanup may leave containerd metadata; wipe before recreate.
+				_ = runc.Clean(ctx, desired)
+				for _, id := range pausedTombstoneContainerIDs(sb) {
+					if err := l.client.ContainerService().Delete(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+						log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
+					}
+				}
+				if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
+					return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
+						"failed to replace paused sandbox %s: %v", desired, delErr)
+				}
+			} else {
+				return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 			}
 		}
 	}
