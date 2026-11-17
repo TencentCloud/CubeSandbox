@@ -152,9 +152,12 @@ clients when `s3Backed=true`. A `CUBE_S3_ADDRESSING_STYLE` entry in `global.env`
 overrides the chart-generated value.
 
 Both values default to empty. A non-empty policy overrides the legacy
-path-style boolean; invalid values fail S3 store initialization. Leaving it
-empty preserves the existing behavior: `true` forces path style, and `false`
-uses minio-go auto detection. Existing bundled MinIO deployments are unchanged.
+path-style boolean. The chart rejects invalid values during rendering. Outside
+Helm, invalid values fail S3 store initialization, but services continue running:
+CubeOps disables its warehouse, CubeMaster retains existing artifact URLs,
+and CubeTemplateCenter falls back to local-disk behavior, with warnings logged.
+Leaving it empty preserves the existing behavior: `true` forces path style,
+and `false` uses minio-go auto detection. Existing bundled MinIO deployments are unchanged.
 `auto` does not guarantee virtual-hosted URLs for COS or OBS; select `virtual`
 explicitly when required. The policy applies to data requests and to signed
 GET URLs, including CubeOps's separate `nodeEndpoint`.

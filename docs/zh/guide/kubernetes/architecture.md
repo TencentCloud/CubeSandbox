@@ -149,8 +149,10 @@ controlPlane:
 `controlPlane.artifactStore.s3AddressingStyle` 在 `s3Backed=true` 时作用于共享
 artifact 客户端。`global.env` 中的 `CUBE_S3_ADDRESSING_STYLE` 会覆盖 Chart 生成的值。
 
-两个值均默认为空。非空的显式设置优先于旧的 path-style 布尔值，非法值会使 S3
-store 初始化失败。留空时完全保留原行为：`true` 强制 path style，`false` 使用
+两个值均默认为空。非空的显式设置优先于旧的 path-style 布尔值，Chart 会在渲染时
+拒绝非法值。不使用 Helm 时，非法值会使 S3 store 初始化失败，但进程继续运行：
+CubeOps 禁用 warehouse，CubeMaster 保留已有制品 URL，CubeTemplateCenter
+回退到本地磁盘行为，并记录警告。留空时完全保留原行为：`true` 强制 path style，`false` 使用
 minio-go 自动检测。现有内置 MinIO 部署无需修改。`auto` 不保证 COS 或 OBS 使用
 virtual-hosted URL；有此要求时应显式设置 `virtual`。同一策略同时用于数据请求和
 预签名 GET URL，也包括 CubeOps 单独配置的 `nodeEndpoint`。
