@@ -10,6 +10,7 @@ cubesandbox,e2b, the [e2b] variants are skipped with an explanation.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 
@@ -28,7 +29,8 @@ pytestmark = [
     pytest.mark.p1,
 ]
 
-DEFAULT_IMAGE = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
+_DEFAULT_IMAGE = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
+DEFAULT_IMAGE = os.environ.get("CUBE_TEMPLATE_E2E_IMAGE") or _DEFAULT_IMAGE
 DEFAULT_WRITABLE_LAYER_SIZE = "1G"
 
 _SKIP_REASON = (
