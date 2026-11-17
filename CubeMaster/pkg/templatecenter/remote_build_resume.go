@@ -706,6 +706,7 @@ func decodeImageConfigJSON(payload string) (DockerImageConfig, error) {
 	}
 	for _, candidate := range []DockerImageConfig{wrapper.Config, wrapper.ConfigUpper, wrapper.ContainerCfg} {
 		if !imageConfigEmpty(candidate) {
+			candidate.CubeEgressCABundlePath = cfg.CubeEgressCABundlePath
 			return candidate, nil
 		}
 	}

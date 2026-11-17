@@ -598,6 +598,13 @@ pub struct RestartBackoff {
     /// 0 or omitted uses the node default (0.1). It does not turn jitter off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<f64>,
+    /// Seconds of uninterrupted uptime after which the restart count is
+    /// reset. Zero or omitted uses the node default (600). The clock starts
+    /// when the current run starts being up -- on create, on a successful
+    /// restart, or on resume -- and a failed attempt does not restart it.
+    /// The reset is applied as soon as the window elapses; it does not wait
+    /// for the next exit, and it never revives a sandbox that already
+    /// reached maxRestarts.
     #[serde(
         rename = "stableDurationSecond",
         alias = "stable_duration_second",
@@ -2222,6 +2229,15 @@ pub struct CreateTemplateRequest {
     /// Omitted or null defaults to true on CubeMaster.
     #[serde(rename = "with_cube_ca", default)]
     pub with_cube_ca: Option<bool>,
+    /// Configure application CA environment defaults when CA baking is enabled.
+    /// False keeps CA baking without automatic runtime environment variables.
+    #[serde(rename = "with_cube_ca_env", default)]
+    pub with_cube_ca_env: Option<bool>,
+    /// Replace the default CA bundle environment variable names. Omitted or null
+    /// uses defaults; an empty list disables automatic variables. Names must
+    /// match [A-Za-z_][A-Za-z0-9_]* and accept a PEM bundle file path as their value.
+    #[serde(default)]
+    pub cube_ca_env_vars: Option<Vec<String>>,
     /// CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
     /// Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
     #[serde(rename = "backend", default)]
