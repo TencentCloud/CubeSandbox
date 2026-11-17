@@ -1381,6 +1381,55 @@ impl Container {
 }
 
 #[cfg(test)]
+mod pb_spec_tests {
+    use super::*;
+    use oci_spec::runtime::{LinuxBuilder, ProcessBuilder, SpecBuilder};
+    use tokio::sync::mpsc::channel;
+
+    fn test_container(no_new_privileges: bool) -> Container {
+        let process = ProcessBuilder::default()
+            .no_new_privileges(no_new_privileges)
+            .build()
+            .unwrap();
+        let spec = SpecBuilder::default()
+            .process(process)
+            .linux(LinuxBuilder::default().build().unwrap())
+            .build()
+            .unwrap();
+        let (tx_containerd, _) = channel(1);
+
+        Container {
+            sandbox_id: "sandbox".into(),
+            id: "container".into(),
+            real_id: "container".into(),
+            spec,
+            client: None,
+            ctx: Context::default(),
+            log: Log::default(),
+            sb_conf: Config::default(),
+            info: ContainerInfo::default(),
+            state: None,
+            tx_containerd,
+            execs: Arc::new(Mutex::new(HashMap::new())),
+            app_snapshot: false,
+            log_forward: LogForwardHandle::new(),
+        }
+    }
+
+    #[test]
+    fn get_pb_spec_preserves_no_new_privileges_true() {
+        let spec = test_container(true).get_pb_spec().unwrap();
+        assert!(spec.get_process().get_noNewPrivileges());
+    }
+
+    #[test]
+    fn get_pb_spec_preserves_no_new_privileges_false() {
+        let spec = test_container(false).get_pb_spec().unwrap();
+        assert!(!spec.get_process().get_noNewPrivileges());
+    }
+}
+
+#[cfg(test)]
 mod log_forward_tests {
     use super::LogForwardHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
