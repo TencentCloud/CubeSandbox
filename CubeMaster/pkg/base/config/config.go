@@ -832,7 +832,7 @@ func Init() (*Config, error) {
 		return nil, fmt.Errorf("validate config fail:%v", err)
 	}
 	cfg = newCfg
-	fmt.Printf("cfg:%+v\n", utils.InterfaceToString(cfg))
+	fmt.Printf("cfg:%s\n", configForLog(cfg))
 	return newCfg, nil
 }
 
@@ -1373,6 +1373,66 @@ func validate(cfg *Config) error {
 //go:noinline
 func GetConfig() *Config {
 	return cfg
+}
+
+const redactedConfigValue = "[REDACTED]"
+
+// redactedForLog returns a shallow configuration copy with credential-bearing
+// fields replaced. The original stays intact because it is still used to open
+// database, Redis, and authenticated service connections.
+func (c *Config) redactedForLog() *Config {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.InstanceDBConfig != nil {
+		db := *c.InstanceDBConfig
+		db.Pwd = redactConfigValue(db.Pwd)
+		out.InstanceDBConfig = &db
+	}
+	if c.RedisConf != nil {
+		redisConf := *c.RedisConf
+		redisConf.Password = redactConfigValue(redisConf.Password)
+		redisConf.SentinelPassword = redactConfigValue(redisConf.SentinelPassword)
+		out.RedisConf = &redisConf
+	}
+	if c.AuthConf != nil {
+		authConf := *c.AuthConf
+		authConf.SecretKeyMap = redactSecretKeyMap(authConf.SecretKeyMap)
+		out.AuthConf = &authConf
+	}
+	if c.CubeProxyConf != nil {
+		proxyConf := *c.CubeProxyConf
+		proxyConf.AdminToken = redactConfigValue(proxyConf.AdminToken)
+		out.CubeProxyConf = &proxyConf
+	}
+	return &out
+}
+
+func redactConfigValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	return redactedConfigValue
+}
+
+func redactSecretKeyMap(secretMap map[string]map[string]string) map[string]map[string]string {
+	if secretMap == nil {
+		return nil
+	}
+	out := make(map[string]map[string]string, len(secretMap))
+	for userID, secrets := range secretMap {
+		redacted := make(map[string]string, len(secrets))
+		for name, secret := range secrets {
+			redacted[name] = redactConfigValue(secret)
+		}
+		out[userID] = redacted
+	}
+	return out
+}
+
+func configForLog(c *Config) string {
+	return utils.InterfaceToString(c.redactedForLog())
 }
 
 // EnvMasterAddr is the deployment-wide "how to reach CubeMaster" address.
