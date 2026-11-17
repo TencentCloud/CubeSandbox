@@ -33,6 +33,7 @@ func OpenS3(cfg config.S3Config, putTimeout time.Duration) (BlobStore, error) {
 		Bucket:          cfg.Bucket,
 		Region:          cfg.Region,
 		PathStyle:       cfg.UsePathStyle(),
+		AddressingStyle: cfg.AddressingStyle,
 		CreateBucket:    cfg.ShouldCreateBucket(),
 		PutTimeout:      putTimeout,
 		PresignExpiry:   5 * time.Minute,
