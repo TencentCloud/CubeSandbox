@@ -161,6 +161,8 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 
 When connecting or resuming a paused sandbox while another lifecycle operation on it is still settling, CubeAPI returns HTTP 503 with `Retry-After: 2` if the sandbox is not running yet; wait at least that long and retry. If a concurrent request has already resumed it, connect succeeds and returns the connection info, while `POST /sandboxes/<id>/resume` returns 409 (already running). A connect 409 can also mean the sandbox's container has already exited: that state is permanent, so retrying will not help — see [State Model](#state-model).
 
+A retry during rollback of a failed resume also returns HTTP 503 with `Retry-After: 2`. If rollback times out, Cubelet retries resource cleanup in the background and keeps the original pause snapshot available for a later resume.
+
 The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 
 | `resume(timeout=...)` | Effect |
