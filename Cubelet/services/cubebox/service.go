@@ -299,6 +299,36 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 	return utils.InterfaceToString(tmpReq)
 }
 
+// pausedReplaceTarget resolves the local record a Create-from-pause request
+// would replace. CubeMaster sends a resume as a thin Create carrying
+// cube.master.desired_sandbox_id; when this node holds a record under that ID,
+// it is the tombstone the new sandbox replaces.
+//
+// sb is nil when the request is not a replacement or this node holds no record
+// for it (cross-node restore: Master's placement already ran the scheduler
+// filters against the target node). paused reports whether that record is a
+// fully PAUSED tombstone — the only state that may be replaced. A non-nil
+// record with paused == false is a live or pausing-in-flight collision that
+// callers must reject as already-exists rather than replace: PAUSING may still
+// own the lifecycle lock and its cleanup, and a live sandbox must not be
+// touched.
+func pausedReplaceTarget(
+	ctx context.Context,
+	mgr cubes.CubeboxAPI,
+	req *cubebox.RunCubeSandboxRequest,
+) (sb *cubeboxstore.CubeBox, paused bool) {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil, false
+	}
+	sb, err := mgr.Get(ctx, desired)
+	if err != nil || sb == nil || sb.SandboxID != desired {
+		return nil, false
+	}
+	st := sb.GetStatus()
+	return sb, st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED
+}
+
 // gatePausedReplace refuses to start a resume that would replace a PAUSED
 // sandbox whose previous runtime may still be running.
 //
@@ -311,21 +341,10 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // failing later would strand those allocations and, via failover, destroy the
 // paused sandbox the user asked to resume.
 func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
-	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
-	if desired == "" {
-		return nil
-	}
-	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
-		// No local record to replace: an ordinary create that happens to
-		// carry the annotation.
-		return nil
-	}
-	st := sb.GetStatus()
-	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
-		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
-		// lifecycle lock and its cleanup, and a live sandbox must not be
-		// touched; the create step rejects both as already exists.
+	sb, paused := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+	if !paused {
+		// No local PAUSED tombstone to replace; live or pausing collisions are
+		// rejected by the create step as already exists.
 		return nil
 	}
 	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)

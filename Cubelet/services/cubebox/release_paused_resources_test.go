@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
@@ -511,4 +512,85 @@ func TestCreateRejectsResumeOverQuotaBeforeTheFlowRuns(t *testing.T) {
 		"an over-quota resume must be rejected with the retriable Conflict code")
 	assert.Zero(t, flow.createCalls, "admission must run before the flow allocates anything")
 	assert.Zero(t, flow.destroyCalls, "a rejected resume must not roll the paused tombstone back")
+}
+
+// seedPausePackageForTest lays down the on-disk pause package a real Resume
+// reads: a catalog entry of kind pause_snapshot whose metadata dir holds the
+// packed sandbox_spec.json. It returns the entry so the caller can assert
+// against the resolved MetaDir.
+func seedPausePackageForTest(t *testing.T, snapID string, packed *cubebox.RunCubeSandboxRequest) *storage.SnapshotCatalogEntry {
+	t.Helper()
+	entry := &storage.SnapshotCatalogEntry{
+		SnapshotID: snapID,
+		Kind:       storage.CatalogKindPauseSnapshot,
+	}
+	seedCatalogForTest(t, entry) // fills SnapshotPath/MetaDir, writes catalog, registers cleanup
+	require.NoError(t, writePauseSandboxSpec(entry.MetaDir, packed))
+	return entry
+}
+
+// TestCreateRejectsResumeOverQuotaAfterPausePackageExpansion pins the real
+// Create-from-pause path, which the annotation-only test above cannot reach:
+// a thin Create carries cube.master.pause.snapshot.id, so Create runs
+// expandPauseSnapshotPackage, which does *req = *packed and then relies on
+// pauseRestoreBinding.applyTo to re-stamp the desired-id annotation the quota
+// gate reads. If that re-stamp ever regresses, the gate silently no-ops (an
+// empty desired-id is "not a replacement") and an over-quota resume slips
+// through — this test fails first, because the packed spec deliberately omits
+// the annotation so only applyTo can restore it.
+func TestCreateRejectsResumeOverQuotaAfterPausePackageExpansion(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// The packed spec is the sandbox as it ran: containers and resources, but
+	// no resume binding (no desired-id, no snapshot-id). Those only exist on the
+	// thin Create and must be re-stamped by applyTo after expansion.
+	seedPausePackageForTest(t, "snap-test", &cubebox.RunCubeSandboxRequest{
+		RequestID: "original-create",
+		Containers: []*cubebox.ContainerConfig{{
+			Name:      "main",
+			Resources: &cubebox.Resource{Cpu: "4000m", Mem: "8Gi"},
+		}},
+	})
+
+	// PAUSED tombstone whose shim is provably gone, so gatePausedReplace passes
+	// and only the quota admission can stop the resume.
+	sb := sandboxWithResourceForTest("sb-resume-expand", cubeboxstore.Status{
+		StartedAt: 1,
+		PausedAt:  time.Now().UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	sb.SandboxID = "sb-resume-expand"
+	flow := &fakeCreateFlow{}
+	s := createServiceForTest(sb, flow, time.Minute)
+
+	// pausedReplaceRequest is the production thin Create: desired-id + snapshot-id
+	// and no containers, exactly what CubeMaster sends for a same-node resume.
+	thinReq := pausedReplaceRequest("sb-resume-expand")
+	rsp, err := s.Create(context.Background(), thinReq)
+	require.NoError(t, err)
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rsp.Ret.RetCode,
+		"an over-quota resume must be rejected with the retriable Conflict code")
+	assert.Zero(t, flow.createCalls, "admission must run before the flow allocates anything")
+	assert.Zero(t, flow.destroyCalls, "a rejected resume must not roll the paused tombstone back")
+
+	// The gate fired because the desired-id survived expansion. Assert the
+	// post-expansion request directly: containers came from the packed spec and
+	// the resume binding was re-stamped onto them.
+	require.Len(t, thinReq.GetContainers(), 1, "expansion must pull containers from the packed spec")
+	assert.Equal(t, "main", thinReq.GetContainers()[0].GetName())
+	assert.Equal(t, "sb-resume-expand",
+		thinReq.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID],
+		"applyTo must re-stamp the desired-id the quota gate reads")
+	assert.Equal(t, "snap-test",
+		thinReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID],
+		"applyTo must re-stamp the pause snapshot id")
 }
