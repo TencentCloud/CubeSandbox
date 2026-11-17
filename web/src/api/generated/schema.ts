@@ -861,8 +861,7 @@ export interface components {
             diskSizeMB?: number | null;
             /**
              * Format: date-time
-             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
-             *     (no deadline) rather than being misreported as equal to startedAt.
+             * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
             endAt: string;
             envdVersion: string;
@@ -1203,8 +1202,7 @@ export interface components {
             domain?: string | null;
             /**
              * Format: date-time
-             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
-             *     (no deadline) rather than being misreported as equal to startedAt.
+             * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
             endAt: string;
             envdAccessToken?: string | null;

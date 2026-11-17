@@ -247,10 +247,17 @@ func echoNetworkConfig(cfg *types.CubeNetworkConfig) *types.CubeNetworkConfig {
 	if cfg == nil {
 		return nil
 	}
-	// DeepCopy so the echo never aliases the persisted spec's slices.
-	out := cfg.DeepCopy()
+	// Shallow copy plus slice clones: the echo must not alias the persisted
+	// spec's slices, and there is no point deep-copying rules we discard.
+	out := *cfg
+	out.AllowOut = append([]string(nil), cfg.AllowOut...)
+	out.DenyOut = append([]string(nil), cfg.DenyOut...)
+	if len(cfg.Rules) > 0 {
+		present := true
+		out.RulesPresent = &present
+	}
 	out.Rules = nil
-	return out
+	return &out
 }
 
 func briefFromPauseBinding(rec *pausesnap.Record, spec *types.CreateCubeSandboxReq) *types.SandboxBriefData {

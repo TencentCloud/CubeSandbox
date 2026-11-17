@@ -63,6 +63,49 @@ func TestApplySandboxConfigEchoesPersistedSpec(t *testing.T) {
 	}
 }
 
+func TestEndAtStatusFor(t *testing.T) {
+	never := types.NeverTimeout
+	finite := 600
+	for name, tc := range map[string]struct {
+		endAt   int64
+		timeout *int
+		want    string
+	}{
+		"real deadline":        {endAt: 1_700_000_000_000, timeout: &finite, want: types.EndAtStatusDeadline},
+		"true never-timeout":   {timeout: &never, want: types.EndAtStatusNever},
+		"finite but no meta":   {timeout: &finite, want: types.EndAtStatusUnknown},
+		"no timeout persisted": {want: types.EndAtStatusUnknown},
+	} {
+		if got := endAtStatusFor(tc.endAt, tc.timeout); got != tc.want {
+			t.Fatalf("%s: got %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+func TestApplySandboxConfigSetsEndAtStatus(t *testing.T) {
+	never := types.NeverTimeout
+	items := []*types.SandboxData{
+		{SandboxID: "sb-deadline", EndAt: 1_700_000_000_000},
+		{SandboxID: "sb-never"},
+		{SandboxID: "sb-missing-meta", EndAt: 0},
+	}
+	specs := map[string]*types.CreateCubeSandboxReq{
+		"sb-deadline":     {Timeout: nil},
+		"sb-never":        {Timeout: &never},
+		"sb-missing-meta": {Timeout: func() *int { v := 600; return &v }()},
+	}
+	applySandboxConfig(items, specs)
+	if items[0].EndAtStatus != types.EndAtStatusDeadline {
+		t.Fatalf("deadline: got %q", items[0].EndAtStatus)
+	}
+	if items[1].EndAtStatus != types.EndAtStatusNever {
+		t.Fatalf("never: got %q", items[1].EndAtStatus)
+	}
+	if items[2].EndAtStatus != types.EndAtStatusUnknown {
+		t.Fatalf("unknown: got %q", items[2].EndAtStatus)
+	}
+}
+
 func TestResponseMarshalScrubsEgressRules(t *testing.T) {
 	secret := "topsecret"
 	cfg := &types.CubeNetworkConfig{
@@ -89,8 +132,54 @@ func TestResponseMarshalScrubsEgressRules(t *testing.T) {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("%s: inject secret leaked onto the wire", name)
 		}
+		var decoded map[string]interface{}
+		if err := types.FastestJsoniter.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("%s: decode: %v", name, err)
+		}
+		if decoded["sandbox_id"] != "sb-1" {
+			t.Fatalf("%s: sandbox_id lost in marshal: %v", name, decoded)
+		}
+		if decoded["cube_network_config"] == nil {
+			t.Fatalf("%s: cube_network_config lost in marshal", name)
+		}
 	}
 	if len(cfg.Rules) != 1 {
 		t.Fatalf("source config rules mutated: %+v", cfg.Rules)
+	}
+}
+
+func TestEchoNetworkConfigMarksRulesPresence(t *testing.T) {
+	secret := "topsecret"
+	spec := &types.CreateCubeSandboxReq{
+		CubeNetworkConfig: &types.CubeNetworkConfig{
+			Rules: []*types.EgressRule{{
+				Name:   "inject-cred",
+				Action: &types.EgressRuleAction{Inject: []*types.EgressRuleInject{{Header: "Authorization", Secret: secret}}},
+			}},
+		},
+	}
+	items := []*types.SandboxData{{SandboxID: "sb-1"}}
+	applySandboxConfig(items, map[string]*types.CreateCubeSandboxReq{"sb-1": spec})
+
+	raw, err := types.FastestJsoniter.Marshal(items[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"rules_present":true`) {
+		t.Fatalf("rules_present missing on the wire: %s", raw)
+	}
+	if strings.Contains(string(raw), "rules") && strings.Contains(string(raw), secret) {
+		t.Fatalf("rules leaked onto the wire: %s", raw)
+	}
+	var decoded map[string]interface{}
+	if err := types.FastestJsoniter.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	net, _ := decoded["cube_network_config"].(map[string]interface{})
+	if _, ok := net["rules"]; ok {
+		t.Fatalf("rules key present on the wire: %v", net)
+	}
+	if net["rules_present"] != true {
+		t.Fatalf("rules_present not true: %v", net)
 	}
 }

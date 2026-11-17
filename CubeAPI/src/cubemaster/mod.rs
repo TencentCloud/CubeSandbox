@@ -911,6 +911,10 @@ pub struct CubeNetworkConfig {
     /// L7 egress rules, evaluated first-match-wins in list order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<CubeEgressRule>,
+    /// Set by CubeMaster when the persisted config carried rules (which are
+    /// scrubbed from this same payload).
+    #[serde(default, rename = "rules_present")]
+    pub rules_present: Option<bool>,
 }
 
 /// L7 egress rule forwarded to CubeMaster (camelCase wire keys).
@@ -1295,6 +1299,8 @@ pub struct SandboxInfo {
     pub auto_resume: Option<bool>,
     #[serde(default)]
     pub cube_network_config: Option<CubeNetworkConfig>,
+    #[serde(default)]
+    pub end_at_status: Option<String>,
 }
 
 // ─── Get single sandbox ────────────────────────────────────────────────────
@@ -1349,6 +1355,8 @@ pub struct GetSandboxDataItem {
     pub auto_resume: Option<bool>,
     #[serde(default)]
     pub cube_network_config: Option<CubeNetworkConfig>,
+    #[serde(default)]
+    pub end_at_status: Option<String>,
     #[serde(default)]
     pub host_ip: String,
     #[serde(default)]
@@ -1412,6 +1420,7 @@ pub struct SandboxDetail {
     pub auto_pause: Option<bool>,
     pub auto_resume: Option<bool>,
     pub cube_network_config: Option<CubeNetworkConfig>,
+    pub end_at_status: Option<String>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1654,6 +1663,7 @@ impl GetSandboxResponse {
             auto_pause: item.auto_pause,
             auto_resume: item.auto_resume,
             cube_network_config: item.cube_network_config,
+            end_at_status: item.end_at_status,
         })
     }
 }

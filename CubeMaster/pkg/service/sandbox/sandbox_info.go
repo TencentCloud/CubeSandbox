@@ -335,7 +335,18 @@ func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.Crea
 		item.AutoPause = &spec.AutoPause
 		item.AutoResume = &spec.AutoResume
 		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
+		item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
 	}
+}
+
+func endAtStatusFor(endAt int64, timeout *int) string {
+	if endAt > 0 {
+		return types.EndAtStatusDeadline
+	}
+	if timeout != nil && *timeout == types.NeverTimeout {
+		return types.EndAtStatusNever
+	}
+	return types.EndAtStatusUnknown
 }
 
 // decorateSandboxQos reports the QoS configuration of one sandbox. The
@@ -399,7 +410,6 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		return false
 	}
 	item := findSandboxData(rsp.Data, req.SandboxID)
-	var loadedSpec *types.CreateCubeSandboxReq
 	var observed int32
 	if item != nil {
 		observed = item.Status
@@ -431,11 +441,11 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		if req.HostID == "" && !pauseBindingOnHost(rec, locatedHost) {
 			return false
 		}
-		loadedSpec = loadSandboxSpec(ctx, req.SandboxID)
-		if loadedSpec == nil {
+		spec := loadSandboxSpec(ctx, req.SandboxID)
+		if spec == nil {
 			recordPauseViewWithoutSpec("info")
 		}
-		item = sandboxDataFromSpec(req.SandboxID, loadedSpec)
+		item = sandboxDataFromSpec(req.SandboxID, spec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
 		// The binding only knows when the pause happened; the durable spec
 		// carries when the sandbox was created.
@@ -447,12 +457,8 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
 	setPauseLocation(ctx, req, item, rec)
 	rsp.Data = []*types.SandboxData{item}
-	// The pause overlay replaced rsp.Data, so re-apply the config echo. The
-	// synthesized branch already holds the loaded spec; the overlay branch
-	// (item came from the node) still needs the batch read.
-	if loadedSpec != nil {
-		applySandboxConfig(rsp.Data, map[string]*types.CreateCubeSandboxReq{item.SandboxID: loadedSpec})
-	} else if item != nil {
+	// The pause overlay replaced rsp.Data, so re-apply the config echo.
+	if item != nil {
 		decorateSandboxConfig(ctx, rsp.Data)
 	}
 	if rsp.Ret == nil {

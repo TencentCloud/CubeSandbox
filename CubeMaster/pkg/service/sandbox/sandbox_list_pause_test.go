@@ -476,6 +476,43 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	require.Equal(t, infoRsp.Data[0].CreateAt, listed[0].CreateAt)
 }
 
+func TestListEndAtStatusFollowsTheEndAtFill(t *testing.T) {
+	never := types.NeverTimeout
+	finite := 600
+	items := []*types.SandboxBriefData{
+		{SandboxID: "sb-finite"},
+		{SandboxID: "sb-never"},
+		{SandboxID: "sb-missing-meta"},
+	}
+	specs := map[string]*types.CreateCubeSandboxReq{
+		"sb-finite":       {Timeout: &finite},
+		"sb-never":        {Timeout: &never},
+		"sb-missing-meta": {Timeout: &finite},
+	}
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return specs, nil
+	})
+	patches.ApplyFunc(lookupSandboxEndAts, func(context.Context, []string) map[string]int64 {
+		return map[string]int64{"sb-finite": 1_800_000_000_000}
+	})
+
+	enrichSandboxList(t.Context(), items)
+	enrichSandboxListEndAts(t.Context(), items)
+
+	if got := items[0].EndAtStatus; got != types.EndAtStatusDeadline {
+		t.Fatalf("finite: got %q, want deadline", got)
+	}
+	if got := items[1].EndAtStatus; got != types.EndAtStatusNever {
+		t.Fatalf("never: got %q, want never", got)
+	}
+	if got := items[2].EndAtStatus; got != types.EndAtStatusUnknown {
+		t.Fatalf("missing meta: got %q, want unknown", got)
+	}
+}
+
 func TestListSpecReadsStayBounded(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
@@ -510,4 +547,47 @@ func TestListSpecReadsStayBounded(t *testing.T) {
 	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
 	require.Equal(t, 2, calls, "one synthesized pause row: enrich + merge each read once")
 	require.Len(t, rsp.Data, 2)
+}
+
+func TestListSynthesizedPauseRowCarriesEndAtStatus(t *testing.T) {
+	never := types.NeverTimeout
+	spec := specWithIdentity()
+	spec.Timeout = &never
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return []*pausesnap.Record{readyInfoRecord("sb-paused")}, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return map[string]*types.CreateCubeSandboxReq{"sb-paused": spec}, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetCreatedAtMany, func(context.Context, []string) (map[string]time.Time, error) {
+		return nil, nil
+	})
+
+	rsp := &types.ListCubeSandboxRes{}
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Len(t, rsp.Data, 1)
+	require.Equal(t, types.EndAtStatusNever, rsp.Data[0].EndAtStatus)
+}
+
+func TestListEndAtUpgradeRequiresSpecRead(t *testing.T) {
+	items := []*types.SandboxBriefData{{SandboxID: "sb-scan"}}
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return map[string]*types.CreateCubeSandboxReq{}, nil
+	})
+	patches.ApplyFunc(lookupSandboxEndAts, func(context.Context, []string) map[string]int64 {
+		return map[string]int64{"sb-scan": 1_800_000_000_000}
+	})
+
+	enrichSandboxList(t.Context(), items)
+	enrichSandboxListEndAts(t.Context(), items)
+
+	if items[0].EndAtStatus != "" {
+		t.Fatalf("spec unread but status set: %q", items[0].EndAtStatus)
+	}
 }

@@ -116,16 +116,20 @@ pub struct SandboxNetworkConfigEcho {
     pub deny_out: Option<Vec<String>>,
     #[serde(rename = "maskRequestHost", skip_serializing_if = "Option::is_none")]
     pub mask_request_host: Option<String>,
+    /// True when the persisted config carried egress rules, which never
+    /// appear on the wire (plaintext inject secrets).
+    #[serde(rename = "rulesPresent", skip_serializing_if = "Option::is_none")]
+    pub rules_present: Option<bool>,
 }
 
 impl SandboxNetworkConfigEcho {
-    /// True when there is nothing worth echoing (e.g. the persisted config
-    /// carried only egress rules, which never appear on the wire).
+    /// True when there is nothing worth echoing.
     pub fn is_empty(&self) -> bool {
         self.allow_public_traffic.is_none()
             && self.allow_out.is_none()
             && self.deny_out.is_none()
             && self.mask_request_host.is_none()
+            && self.rules_present.is_none()
     }
 }
 
@@ -881,6 +885,9 @@ pub struct ListedSandbox {
     )]
     #[schema(required = true, nullable = false)]
     pub end_at: Option<DateTime<Utc>>,
+    /// "deadline" | "never" | "unknown"; absent when the backend did not report it.
+    #[serde(rename = "endAtStatus", skip_serializing_if = "Option::is_none")]
+    pub end_at_status: Option<String>,
     /// Persisted lifecycle config; absent when the spec was not read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SandboxLifecycleConfig>,
@@ -937,6 +944,9 @@ pub struct SandboxDetail {
     )]
     #[schema(required = true, nullable = false)]
     pub end_at: Option<DateTime<Utc>>,
+    /// "deadline" | "never" | "unknown"; absent when the backend did not report it.
+    #[serde(rename = "endAtStatus", skip_serializing_if = "Option::is_none")]
+    pub end_at_status: Option<String>,
     /// Persisted lifecycle config; absent when the spec was not read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SandboxLifecycleConfig>,
@@ -1387,6 +1397,7 @@ mod tests {
             lifecycle: None,
             allow_internet_access: None,
             network: None,
+            end_at_status: None,
         }
     }
 
@@ -1398,6 +1409,7 @@ mod tests {
             client_id: "host-1".into(),
             started_at: ts(1_700_000_000),
             end_at,
+            error_reason: None,
             envd_version: "v1".into(),
             envd_access_token: None,
             domain: None,
@@ -1413,6 +1425,7 @@ mod tests {
             lifecycle: None,
             allow_internet_access: None,
             network: None,
+            end_at_status: None,
         }
     }
 

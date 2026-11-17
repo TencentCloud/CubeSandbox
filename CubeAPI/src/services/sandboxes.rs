@@ -364,6 +364,7 @@ impl SandboxService {
             lifecycle,
             allow_internet_access,
             network,
+            end_at_status: d.end_at_status,
         })
     }
 
@@ -1572,6 +1573,12 @@ fn config_echo(
             allow_out: (!n.allow_out.is_empty()).then(|| n.allow_out.clone()),
             deny_out: (!n.deny_out.is_empty()).then(|| n.deny_out.clone()),
             mask_request_host: n.mask_request_host.clone(),
+            // Rules themselves are never echoed (inject secrets); CubeMaster
+            // sets the marker before scrubbing. The raw-rules fallback only
+            // covers hand-rolled backends that skip the scrub.
+            rules_present: n
+                .rules_present
+                .or_else(|| (!n.rules.is_empty()).then_some(true)),
         })
         .filter(|n| !n.is_empty());
     (lifecycle, allow_internet_access, network)
@@ -1620,6 +1627,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         lifecycle,
         allow_internet_access,
         network,
+        end_at_status: s.end_at_status,
     }
 }
 
@@ -2077,6 +2085,9 @@ pub(crate) fn build_cube_network_config(
         mask_request_host,
         allow_out,
         deny_out,
+        // Create carries the full rules; the marker travels with them so the
+        // echo derived from the persisted spec can report it after the scrub.
+        rules_present: (!rules.is_empty()).then_some(true),
         rules,
     }))
 }
@@ -2960,6 +2971,7 @@ mod tests {
                     "create_at": 1_700_000_000_000_000_000i64,
                     "auto_pause": true,
                     "auto_resume": true,
+                    "end_at_status": "never",
                     "cube_network_config": {
                         "allowInternetAccess": false,
                         "denyOut": ["1.2.3.4/32"]
@@ -2981,6 +2993,7 @@ mod tests {
             serde_json::json!({"onTimeout": "pause", "autoResume": true})
         );
         assert_eq!(wire["allowInternetAccess"], false);
+        assert_eq!(wire["endAtStatus"], "never");
         assert_eq!(
             wire["network"]["denyOut"],
             serde_json::json!(["1.2.3.4/32"])
@@ -3047,6 +3060,26 @@ mod tests {
             network.mask_request_host.as_deref(),
             Some("masked.example.com")
         );
+    }
+
+    #[test]
+    fn from_cubemaster_info_marks_rules_only_policy() {
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "end_at_status": "unknown",
+            "cube_network_config": { "rules_present": true }
+        }))
+        .unwrap();
+        let listed = from_cubemaster_info(info);
+
+        assert_eq!(listed.end_at_status.as_deref(), Some("unknown"));
+        let wire = serde_json::to_value(&listed).unwrap();
+        assert_eq!(wire["network"], serde_json::json!({"rulesPresent": true}));
+        let network = listed
+            .network
+            .expect("rules-only policy must still surface");
+        assert_eq!(network.rules_present, Some(true));
     }
 
     #[test]
@@ -4454,6 +4487,7 @@ mod tests {
             auto_pause: None,
             auto_resume: None,
             cube_network_config: None,
+            end_at_status: None,
         });
 
         assert_eq!(listed.cpu_count, 2);
@@ -4509,6 +4543,7 @@ mod tests {
             auto_pause: None,
             auto_resume: None,
             cube_network_config: None,
+            end_at_status: None,
         });
 
         assert_eq!(listed.alias.as_deref(), Some("python-runtime"));
@@ -4535,6 +4570,7 @@ mod tests {
             auto_pause: None,
             auto_resume: None,
             cube_network_config: None,
+            end_at_status: None,
         });
 
         assert_eq!(listed.cpu_count, 0);
