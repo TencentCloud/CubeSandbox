@@ -442,18 +442,25 @@ func getTemplate(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	if includeRequest {
 		createReq, err = getTemplateRequestFn(r.Context(), resolvedTemplateID)
 		if err != nil {
-			code := int(errorcode.ErrorCode_MasterInternalError)
-			if errors.Is(err, templatecenter.ErrTemplateNotFound) {
-				code = int(errorcode.ErrorCode_NotFound)
+			// A build can fail before its template definition is persisted (for
+			// example while pulling the source image). GetTemplateInfo still
+			// synthesizes the FAILED job detail; return it without create_request
+			// instead of hiding the known failure behind a not-found response.
+			if !(errors.Is(err, templatecenter.ErrTemplateNotFound) && info.Status == templatecenter.StatusFailed) {
+				code := int(errorcode.ErrorCode_MasterInternalError)
+				if errors.Is(err, templatecenter.ErrTemplateNotFound) {
+					code = int(errorcode.ErrorCode_NotFound)
+				}
+				rt.RetCode = int64(code)
+				return &templateResponse{
+					Res: &types.Res{Ret: &types.Ret{
+						RetCode: code,
+						RetMsg:  err.Error(),
+					}},
+					TemplateID: templateID,
+				}
 			}
-			rt.RetCode = int64(code)
-			return &templateResponse{
-				Res: &types.Res{Ret: &types.Ret{
-					RetCode: code,
-					RetMsg:  err.Error(),
-				}},
-				TemplateID: templateID,
-			}
+			createReq = nil
 		}
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
