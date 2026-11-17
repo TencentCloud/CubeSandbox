@@ -300,6 +300,24 @@ func TestTryDeletePausedRetriesDeleteFailedWithTombstone(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
+func TestPausedBindingDeleteFailureKeepsWarnOnlyResult(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb-binding-fail", "snap-binding-fail", statusReady, "10.0.0.7")
+	mockCubeletOK(t)
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register("webhook_binding_delete_failure", func(tx *gorm.DB) {
+		tx.AddError(errors.New("binding delete rejected"))
+	}))
+	handled, err := TryDeletePaused(context.Background(), "request", "sb-binding-fail", "10.0.0.7")
+	require.NoError(t, err, "retain historical warn-only business result")
+	require.True(t, handled)
+	_, err = GetBySandbox(context.Background(), "sb-binding-fail")
+	require.NoError(t, err)
+	require.NoError(t, db.Callback().Delete().Remove("webhook_binding_delete_failure"))
+	handled, err = TryDeletePaused(context.Background(), "request", "sb-binding-fail", "10.0.0.7")
+	require.NoError(t, err)
+	require.True(t, handled)
+}
+
 func TestCheckDestroyRet(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, checkDestroyRet(nil, "sb", "destroy"))
@@ -356,4 +374,57 @@ func TestDropPausedTombstoneReturnsRPCError(t *testing.T) {
 
 	err := DropPausedTombstone(context.Background(), "req-x", "sb-x", "10.0.0.8")
 	require.ErrorContains(t, err, "tombstone rpc failed")
+}
+
+func TestPausedDeleteToleratesExistingNodeReplies(t *testing.T) {
+	for _, status := range []string{statusReady, statusFailed, statusCreating, statusDeleteFailed} {
+		for _, reply := range []string{"success", "nil", "no-ret", "not-found", "failure"} {
+			t.Run(status+"/"+reply, func(t *testing.T) {
+				db := setupPauseDeleteTest(t)
+				seedPauseBinding(t, db, "sb", "snap", status, "127.0.0.1")
+				mockCubeletOK(t)
+				destroyOnCubelet = func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+					switch reply {
+					case "nil":
+						return nil, nil
+					case "no-ret":
+						return &cubebox.DestroyCubeSandboxResponse{}, nil
+					case "not-found":
+						return &cubebox.DestroyCubeSandboxResponse{Ret: &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_TaskStateInvalid, RetMsg: "not found"}}, nil
+					case "failure":
+						return nil, errors.New("node")
+					}
+					return &cubebox.DestroyCubeSandboxResponse{Ret: &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_Success}}, nil
+				}
+				handled, err := TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
+				require.True(t, handled)
+				if reply == "failure" {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
+	}
+}
+func TestPausedCleanupRetryRepeatsNodeOperation(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb", "snap", statusReady, "127.0.0.1")
+	destroys, _ := mockCubeletOK(t)
+	good := cleanupTemplateOnCubelet
+	cleanupTemplateOnCubelet = func(context.Context, string, *cubebox.CleanupTemplateRequest) (*cubebox.CleanupTemplateResponse, error) {
+		return nil, errors.New("package")
+	}
+	handled, err := TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
+	require.True(t, handled)
+	require.Len(t, *destroys, 1)
+	require.Error(t, err)
+	cleanupTemplateOnCubelet = good
+	handled, err = TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
+	require.True(t, handled)
+	require.NoError(t, err)
+	require.Len(t, *destroys, 2, "cleanup retry still invokes the existing tombstone destroy")
+	handled, err = TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
+	require.False(t, handled)
+	require.NoError(t, err)
 }

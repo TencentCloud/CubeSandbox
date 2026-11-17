@@ -19,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"gorm.io/gorm"
@@ -114,6 +115,17 @@ func TestBuildSnapshotRequestsUnnamedSnapshotHasNoAlias(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
+	publisher, err := webhook.NewBufferedPublisher(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetWebhookPublisher(publisher)
+	defer func() {
+		SetWebhookPublisher(nil)
+		if len(publisher.Events()) != 0 {
+			t.Fatal("reused request must not emit another checkpoint")
+		}
+	}()
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -157,6 +169,17 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
+	publisher, err := webhook.NewBufferedPublisher(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetWebhookPublisher(publisher)
+	defer func() {
+		SetWebhookPublisher(nil)
+		if len(publisher.Events()) != 0 {
+			t.Fatal("reused request must not emit another checkpoint")
+		}
+	}()
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
