@@ -38,6 +38,7 @@ const RET_CODE_CONFLICT: i32 = 130409;
 const RET_CODE_PRECONDITION: i32 = 130568;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;
+const RET_CODE_RESUME_ROLLBACK_PENDING: i32 = 130591;
 /// Sentinel for a fork result with neither sandbox nor ret (130502 is
 /// unassigned; 130500 is GrpcError in the shared enum).
 const RET_CODE_UNKNOWN_DERIVE: i32 = 130502;
@@ -1439,6 +1440,11 @@ fn map_delete_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
                 retry_after: 5,
             }
         }
+        CubeMasterError::Api { ret_code, ret_msg }
+            if ret_code == RET_CODE_RESUME_ROLLBACK_PENDING =>
+        {
+            resume_rollback_pending(ret_msg)
+        }
         other => sandbox_not_found_or_internal(other, sandbox_id),
     }
 }
@@ -1456,6 +1462,11 @@ fn delete_retry_message(ret_msg: String, sandbox_id: &str, fallback: &str) -> St
 // (ensure_update_result alone never runs on that path).
 fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
     match e {
+        CubeMasterError::Api { ret_code, ret_msg }
+            if ret_code == RET_CODE_RESUME_ROLLBACK_PENDING =>
+        {
+            resume_rollback_pending(ret_msg)
+        }
         CubeMasterError::Api { ret_code, .. } if ret_code == RET_CODE_NOT_FOUND => {
             AppError::NotFound(format!("sandbox {} not found", sandbox_id))
         }
@@ -1468,6 +1479,13 @@ fn map_update_cubemaster_err(e: CubeMasterError, sandbox_id: &str) -> AppError {
             AppError::Conflict(detail)
         }
         other => sandbox_not_found_or_internal(other, sandbox_id),
+    }
+}
+
+fn resume_rollback_pending(message: String) -> AppError {
+    AppError::ServiceUnavailable {
+        message,
+        retry_after: 2,
     }
 }
 
@@ -2169,7 +2187,7 @@ mod tests {
         map_volume_mounts, parse_metadata_filter, parse_state_filter, resolve_lifecycle_flags,
         sandbox_state_from_status, sandbox_state_from_str, template_alias_from_annotations,
         validate_mask_request_host, SandboxService, RET_CODE_CONFLICT, RET_CODE_NOT_FOUND,
-        RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
+        RET_CODE_RESUME_ROLLBACK_PENDING, RET_CODE_TASK_RESUME_FAILED, RET_CODE_TASK_STATE_INVALID,
     };
     use crate::constants::TEMPLATE_ALIAS_ANNOTATION;
     use crate::cubemaster::{
@@ -2689,6 +2707,38 @@ mod tests {
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
+    }
+
+    #[tokio::test]
+    async fn resume_and_connect_return_retry_after_while_rollback_is_pending() {
+        let service = spawn_fake_cubemaster(
+            Router::new()
+                .route(
+                    "/cube/sandbox/info",
+                    get(|| async { sandbox_detail_envelope(5) }),
+                )
+                .route(
+                    "/cube/sandbox/update",
+                    post(|| async {
+                        ret_envelope(
+                            RET_CODE_RESUME_ROLLBACK_PENDING,
+                            "previous resume rollback is in progress",
+                        )
+                    }),
+                ),
+        )
+        .await;
+
+        for result in [
+            service.resume_sandbox("sbx-1", None).await,
+            service.connect_sandbox("sbx-1", None).await,
+        ] {
+            let response = result
+                .expect_err("rollback is still pending")
+                .into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "2");
+        }
     }
 
     #[tokio::test]
