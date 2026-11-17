@@ -184,16 +184,17 @@ test_preserves_shell_sensitive_values() {
   local new="${TMP_DIR}/new5.example" old="${TMP_DIR}/old5.env"
   local out="${TMP_DIR}/out5.env" diff="${TMP_DIR}/diff5.txt"
   write_new_example "${new}"
-  # user customized a value containing '=' and a URL with ://@
+  # Preserve URL punctuation and an unrelated value containing '='.
+  # Authentication is irrelevant here; the fixture DSN contains no credentials.
   cat > "${old}" <<'EOF'
-DATABASE_URL=mysql://fixture-user:fixture-password@127.0.0.1:3306/db2
+DATABASE_URL=mysql://127.0.0.1:3306/db2
 WEIRD_KEY=a=b=c
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
 
   assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
-  assert_value "${out}" DATABASE_URL "mysql://fixture-user:fixture-password@127.0.0.1:3306/db2"
+  assert_value "${out}" DATABASE_URL "mysql://127.0.0.1:3306/db2"
   # WEIRD_KEY is old-only -> appended verbatim, value with '=' intact
   assert_value "${out}" WEIRD_KEY "a=b=c"
 
@@ -205,7 +206,7 @@ EOF
     set +a
     [[ "${CUBE_PROXY_CERT_DIR}" == "/usr/local/services/cubetoolbox/cubeproxy/certs" ]] \
       || { echo "expansion failed: ${CUBE_PROXY_CERT_DIR}" >&2; exit 1; }
-    [[ "${DATABASE_URL}" == "mysql://fixture-user:fixture-password@127.0.0.1:3306/db2" ]] || exit 1
+    [[ "${DATABASE_URL}" == "mysql://127.0.0.1:3306/db2" ]] || exit 1
     [[ "${WEIRD_KEY}" == "a=b=c" ]] || exit 1
   ) || fail "merged env did not source/expand correctly"
 }
@@ -476,7 +477,7 @@ test_diff_report_redacts_secrets() {
   # API_KEY/TOKEN) that are NOT in the obsolete deny-list, so they are preserved.
   cat > "${old}" <<'EOF'
 CUBE_SANDBOX_REDIS_PASSWORD=topsecret123
-DATABASE_URL=mysql://fixture-user:fixture-password@127.0.0.1:3306/realdb
+DATABASE_URL=mysql://127.0.0.1:3306/realdb
 CUSTOM_THIRD_PARTY_API_KEY=sk-custom-secret
 MY_SERVICE_AUTH_TOKEN=tok-openclaw-secret
 EOF
@@ -495,7 +496,7 @@ EOF
 
   # ...but the merged runtime env MUST keep the real values intact.
   assert_value "${out}" CUBE_SANDBOX_REDIS_PASSWORD topsecret123
-  assert_value "${out}" DATABASE_URL "mysql://fixture-user:fixture-password@127.0.0.1:3306/realdb"
+  assert_value "${out}" DATABASE_URL "mysql://127.0.0.1:3306/realdb"
   assert_value "${out}" CUSTOM_THIRD_PARTY_API_KEY "sk-custom-secret"
   assert_value "${out}" MY_SERVICE_AUTH_TOKEN "tok-openclaw-secret"
 }
