@@ -373,6 +373,7 @@ run_suite replay_registry bash ./test/tools/test_replay_registry.sh
 run_suite lvs_identity ./test/tools/test_lvs_identity.sh
 run_suite bstore_recovery ./test/tools/test_bstore_recovery.sh
 run_suite tgt_cpumask ./test/tools/test_tgt_cpumask.sh
+run_suite ctrl_patrol ./test/tools/test_ctrl_patrol.sh
 echo ""
 
 echo "--- integration (no S3, no root)"
