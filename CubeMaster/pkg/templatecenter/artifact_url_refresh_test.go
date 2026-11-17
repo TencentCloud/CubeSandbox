@@ -7,10 +7,42 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 )
+
+func TestArtifactStoreAddressingStyleFromEnv(t *testing.T) {
+	t.Setenv(configenv.EnvArtifactStoreBackend, "s3")
+	t.Setenv(configenv.EnvS3Endpoint, "https://storage.example.test")
+	t.Setenv(configenv.EnvS3Bucket, "artifacts")
+	t.Setenv(configenv.EnvS3AccessKeyID, "test-access-key")
+	t.Setenv(configenv.EnvS3SecretAccessKey, "test-secret-key")
+	t.Setenv(configenv.EnvS3Region, "us-east-1")
+	t.Setenv(configenv.EnvS3UseSSL, "true")
+	t.Setenv(configenv.EnvS3UsePathStyle, "true")
+	t.Setenv(configenv.EnvS3AddressingStyle, "virtual")
+	t.Setenv(configenv.EnvS3ArtifactPrefix, "templates")
+	st := loadArtifactStore()
+	if st == nil {
+		t.Fatal("expected configured artifact store")
+	}
+	defer st.store.Close()
+	raw, err := st.store.SignedGetURL(t.Context(), "rfs-test.ext4", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "artifacts.storage.example.test" || u.Path != "/templates/rfs-test.ext4" {
+		t.Fatalf("CUBE_S3_ADDRESSING_STYLE was not forwarded to artifact URL refresh: host=%q path=%q", u.Host, u.Path)
+	}
+}
 
 // stubPresign swaps the signing seam and restores it on cleanup.
 func stubPresign(t *testing.T, fn func(ctx context.Context, artifact *models.RootfsArtifact) (string, error)) {
