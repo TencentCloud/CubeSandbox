@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"testing"
@@ -21,7 +22,103 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	imagesv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	volpluginv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestListLooksUpIDBeforeSerializingStorage(t *testing.T) {
+	box := newCubeboxWithStatusForTest("sandbox-1", cubeboxstore.Status{FinishedAt: 1, Reason: "OOMKilled"})
+	other := newCubeboxWithStatusForTest("sandbox-2", cubeboxstore.Status{StartedAt: 1})
+	for _, tc := range []struct {
+		name      string
+		id        string
+		private   bool
+		getErr    error
+		wantIDs   []string
+		wantLists int
+	}{
+		{"detail with storage", box.ID, true, nil, []string{box.ID}, 0},
+		{"detail without storage", box.ID, false, nil, []string{box.ID}, 0},
+		{"missing sandbox", "missing", true, errors.New("not found"), nil, 0},
+		{"list all", "", false, nil, []string{box.ID, other.ID}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := &fakeCubeboxAPI{cb: box, list: []*cubeboxstore.CubeBox{box, other}, getErr: tc.getErr}
+			s := &service{cubeboxMgr: &local{cubeboxManger: manager}}
+			rsp, err := s.List(context.Background(), &cubeboxv1.ListCubeSandboxRequest{
+				Id:     &tc.id,
+				Option: &cubeboxv1.ListCubeSandboxOption{PrivateWithCubeboxStore: tc.private},
+			})
+			require.NoError(t, err)
+			encoded, err := proto.Marshal(rsp)
+			require.NoError(t, err)
+			rsp = &cubeboxv1.ListCubeSandboxResponse{}
+			require.NoError(t, proto.Unmarshal(encoded, rsp))
+			var ids []string
+			for _, item := range rsp.GetItems() {
+				ids = append(ids, item.GetId())
+				if item.GetId() == box.ID {
+					require.Equal(t, "OOMKilled", item.GetErrorReason())
+				} else {
+					require.Empty(t, item.GetErrorReason())
+				}
+				if tc.private {
+					var stored cubeboxstore.CubeBox
+					require.NoError(t, json.Unmarshal(item.GetPrivateCubeboxStorageData(), &stored))
+					require.Equal(t, "OOMKilled", stored.FirstContainer().Status.Get().Reason)
+				} else {
+					require.Empty(t, item.GetPrivateCubeboxStorageData())
+				}
+			}
+			require.Equal(t, tc.wantIDs, ids)
+			require.Equal(t, tc.wantLists, manager.listCalls)
+		})
+	}
+}
+
+func TestToGRPCCubeBoxErrorReason(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status cubeboxstore.Status
+		legacy bool
+	}{
+		{"terminated", cubeboxstore.Status{FinishedAt: 1, Reason: "OOMKilled"}, false},
+		{"pause failed", cubeboxstore.Status{StartedAt: 1, Unknown: true, Reason: "PauseFailed"}, false},
+		{"no reason", cubeboxstore.Status{StartedAt: 1}, false},
+		{"legacy primary name", cubeboxstore.Status{FinishedAt: 1, Reason: "OOMKilled"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			box := newCubeboxWithStatusForTest("sandbox-id", tc.status)
+			if tc.legacy {
+				box.FirstContainerName = ""
+			} else {
+				box.FirstContainerName = "primary"
+				box.ContainersMap.ContainerMap["primary"] = box.ContainersMap.ContainerMap[box.ID]
+				box.ContainersMap.ContainerMap["primary"].ID = "primary"
+				box.ContainersMap.ContainerMap[box.ID] = &cubeboxstore.Container{
+					Metadata: cubeboxstore.Metadata{ID: box.ID},
+					Status:   cubeboxstore.StoreStatus(cubeboxstore.Status{Reason: "OtherContainer"}),
+				}
+			}
+			box.LastExitReason = "Error"
+			got := toGRPCCubeBox(box, nil)
+			require.Equal(t, tc.status.Reason, got.GetErrorReason())
+			require.Empty(t, got.GetPrivateCubeboxStorageData())
+			require.Nil(t, box.Status, "serializing the public view must not populate the legacy status field")
+		})
+	}
+}
+
+func TestToGRPCCubeBoxWithoutPrimaryStatus(t *testing.T) {
+	box := newCubeboxWithStatusForTest("sandbox-created", cubeboxstore.Status{})
+	container := box.FirstContainer()
+	container.CreatedAt = box.CreatedAt
+	container.Status = nil
+	got := toGRPCCubeBox(box, nil)
+	require.Empty(t, got.GetErrorReason())
+	require.Nil(t, box.Status)
+	require.Nil(t, container.Status)
+	require.Equal(t, cubeboxv1.ContainerState_CONTAINER_CREATED, got.Containers[0].State)
+}
 
 func TestToGRPCContainerIncludesVolumeMounts(t *testing.T) {
 	container := &cubeboxstore.Container{

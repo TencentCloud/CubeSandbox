@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	createSnapshotFn       = templatecenter.SubmitSandboxSnapshot
+	createSnapshotFn       = templatecenter.SubmitSandboxSnapshotWithTTL
 	getSnapshotInfoFn      = templatecenter.GetSnapshotInfo
 	listSnapshotsFn        = templatecenter.ListSnapshots
 	listSnapshotStorageFn  = templatecenter.ListSnapshotStorageStatus
@@ -55,6 +55,7 @@ type snapshotCreateRequest struct {
 	DisplayName     string  `json:"display_name,omitempty"`
 	Backend         string  `json:"backend,omitempty"`
 	Mode            *string `json:"mode,omitempty"`
+	TTLSeconds      int64   `json:"ttl_seconds,omitempty"`
 }
 
 type snapshotRollbackRequest struct {
@@ -130,6 +131,7 @@ type snapshotResource struct {
 	RootfsSizeBytesAtSnapshot uint64                         `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                         `json:"last_error,omitempty"`
 	CreatedAt                 string                         `json:"created_at,omitempty"`
+	ExpiresAt                 string                         `json:"expires_at,omitempty"`
 	RuntimeRefCount           int64                          `json:"runtime_ref_count,omitempty"`
 	RuntimeRefSandboxes       []string                       `json:"runtime_ref_sandboxes,omitempty"`
 	Replicas                  []templatecenter.ReplicaStatus `json:"replicas,omitempty"`
@@ -527,6 +529,14 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			}},
 		}
 	}
+	if req.TTLSeconds < 0 {
+		return &snapshotResponse{
+			Res: &types.Res{Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_MasterParamsError),
+				RetMsg:  "ttl_seconds must be greater than or equal to zero",
+			}},
+		}
+	}
 	if resolved, ret := sandbox.NormalizeSandboxIDParam(r.Context(), req.SandboxID); ret != nil {
 		return &snapshotResponse{Res: &types.Res{Ret: ret}}
 	} else {
@@ -575,7 +585,7 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"RequestId":   requestID,
 		"SandboxHost": hostIP,
 	}))
-	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName, req.Backend, mode)
+	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName, req.Backend, mode, req.TTLSeconds)
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
@@ -853,6 +863,7 @@ func snapshotResourceFromInfo(info *templatecenter.SnapshotInfo) *snapshotResour
 		RootfsSizeBytesAtSnapshot: info.RootfsSizeBytesAtSnapshot,
 		LastError:                 info.LastError,
 		CreatedAt:                 info.CreatedAt,
+		ExpiresAt:                 info.ExpiresAt,
 		RuntimeRefCount:           info.RuntimeRefCount,
 		RuntimeRefSandboxes:       append([]string(nil), info.RuntimeRefSandboxes...),
 		Replicas:                  append([]templatecenter.ReplicaStatus(nil), info.Replicas...),
@@ -933,6 +944,7 @@ func parsePositiveIntQuery(r *http.Request, key string) int {
 func isSnapshotConflictError(err error) bool {
 	switch {
 	case errors.Is(err, templatecenter.ErrTemplateAttemptInProgress),
+		errors.Is(err, templatecenter.ErrSnapshotExpired),
 		errors.Is(err, templatecenter.ErrFilesystemOnlySharedVolume),
 		errors.Is(err, templatecenter.ErrTemplateInUse),
 		errors.Is(err, templatecenter.ErrTemplateHasNoReadyReplica),

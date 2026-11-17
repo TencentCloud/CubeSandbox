@@ -55,6 +55,23 @@ Cube Sandbox 是一款基于 RustVMM 与 KVM 构建的高性能、开箱即用�
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/zh/changelog/v0.8.0.md">
+        <img src="https://img.shields.io/badge/v0.8.0-2026.11.12-d63384?style=flat-square" alt="v0.8.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.8：JuiceFS 存储后端、调度插件系统、沙箱可观测性</strong><br/>
+      <b>JuiceFS COW 存储后端</b> — 模板跨节点共享，沙箱暂停后跨机恢复、从快照跨机启动（preview）<br/>
+      <b>调度插件系统</b> — 内置插件、CEL 表达式、外部 gRPC 插件灵活自定义调度策略<br/>
+      <b>沙箱可观测性</b> — 指标与日志接入 Prometheus/Grafana；另有 FS-only 快照、自动重启策略等<br/>
+      <a href="./docs/zh/changelog/v0.8.0.md">更新日志 →</a> ·
+      <a href="./docs/zh/guide/cross-node-snapshot/juicefs.md">JuiceFS →</a> ·
+      <a href="./docs/zh/guide/scheduler-plugin.md">调度插件 →</a> ·
+      <a href="./docs/zh/guide/observability.md">可观测性 →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/zh/changelog/v0.7.0.md">
         <img src="https://img.shields.io/badge/v0.7.0-2026.08.28-20c997?style=flat-square" alt="v0.7.0" />
       </a>
@@ -376,6 +393,7 @@ http://<控制节点 IP>:12088
 - [示例项目](./docs/zh/guide/tutorials/examples.md) — 展示各种使用场景的示例（涵盖代码执行、浏览器自动化、OpenClaw 集成与 RL 训练等）
 - 🖥️ [WebUI 控制台](./docs/zh/guide/webui.md) — 装完即用的可视化管理（`:12088`）
 - 🔐 [安全代理与凭证托管](./docs/zh/guide/security-proxy.md) — CubeEgress 域名过滤、注入与审计
+- 🧩 [调度插件](./docs/zh/guide/scheduler-plugin.md) — 内置插件、CEL 表达式或外部 gRPC 插件自定义沙箱调度策略
 - 🤖 [数字助手 AgentHub](./docs/zh/guide/digital-assistant.md) — OpenClaw 助手创建与管理（Preview）
 - 💻 [开发环境（QEMU 虚机）](./docs/zh/guide/dev-environment.md) — 暂时没有 KVM 访问权限？在一次性的 OpenCloudOS 9 虚机里体验 Cube Sandbox
 

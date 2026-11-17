@@ -108,7 +108,7 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 		return nil, err
 	}
 
-	result, err := parseProcessStartStream(resp.Body)
+	result, err := parseProcessStartStream(resp.Body, opts.OnStdout, opts.OnStderr)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (s *Sandbox) doEnvdFileGet(ctx context.Context, path string, options ...fil
 	}
 
 	query := newEnvdFileQuery(path, options...)
-	req, err := s.newEnvdRequest(ctx, http.MethodGet, "/files", query, nil)
+	req, err := s.newEnvdRequest(ctx, http.MethodGet, envdFilesPath, query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +222,7 @@ func newEnvdFileQuery(path string, options ...fileRequestOption) url.Values {
 }
 
 func (s *Sandbox) doEnvdUpload(ctx context.Context, query url.Values, body io.Reader, contentType string) (*http.Response, error) {
-	req, err := s.newEnvdRequest(ctx, http.MethodPost, "/files", query, body)
+	req, err := s.newEnvdRequest(ctx, http.MethodPost, envdFilesPath, query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -230,20 +230,39 @@ func (s *Sandbox) doEnvdUpload(ctx context.Context, query url.Values, body io.Re
 	return s.client.dataHTTP.Do(req)
 }
 
-func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
+const (
+	envdFilesPath        = "/files"
+	multipartFileField   = "file"
+	streamUploadFilename = "upload"
+)
+
+// multipartFileFraming shares the wire format without changing Write's legacy
+// filename or its buffered fallback. WriteFrom uses a constant safe filename.
+func multipartFileFraming(filename string) ([]byte, []byte, string, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-	part, err := writer.CreateFormFile("file", path)
+	if _, err := writer.CreateFormFile(multipartFileField, filename); err != nil {
+		return nil, nil, "", err
+	}
+	headerLen := buf.Len()
+	if err := writer.Close(); err != nil {
+		return nil, nil, "", err
+	}
+	raw := buf.Bytes()
+	return raw[:headerLen], raw[headerLen:], writer.FormDataContentType(), nil
+}
+
+func multipartFileBody(path string, data []byte) (io.Reader, string, error) {
+	header, footer, contentType, err := multipartFileFraming(path)
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := part.Write(data); err != nil {
-		return nil, "", err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, "", err
-	}
-	return &buf, writer.FormDataContentType(), nil
+	var buf bytes.Buffer
+	buf.Grow(len(header) + len(data) + len(footer))
+	buf.Write(header)
+	buf.Write(data)
+	buf.Write(footer)
+	return &buf, contentType, nil
 }
 
 func (s *Sandbox) newEnvdRequest(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Request, error) {
@@ -302,7 +321,7 @@ func setFilesystemRPCUser(req *http.Request, options ...fileRequestOption) {
 	}
 }
 
-func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
+func parseProcessStartStream(r io.Reader, onStdout, onStderr func(string)) (*processStartResult, error) {
 	var result processStartResult
 	var stdout strings.Builder
 	var stderr strings.Builder
@@ -343,6 +362,9 @@ func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
 					return nil, fmt.Errorf("decode stdout: %w", err)
 				}
 				stdout.WriteString(text)
+				if onStdout != nil {
+					onStdout(text)
+				}
 			}
 			if response.Event.Data.Stderr != "" {
 				text, err := decodeProcessBytes(response.Event.Data.Stderr)
@@ -350,6 +372,9 @@ func parseProcessStartStream(r io.Reader) (*processStartResult, error) {
 					return nil, fmt.Errorf("decode stderr: %w", err)
 				}
 				stderr.WriteString(text)
+				if onStderr != nil {
+					onStderr(text)
+				}
 			}
 		}
 		if response.Event.End != nil {
@@ -403,7 +428,7 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any,
 	defer originalBody.Close()
 	var reader io.Reader = originalBody
 	if resp.StatusCode >= http.StatusBadRequest {
-		reader = io.LimitReader(originalBody, maxErrorResponseBytes)
+		reader = io.LimitReader(originalBody, maxErrorBodyBytes)
 	}
 	body, err := io.ReadAll(reader)
 	if err != nil {

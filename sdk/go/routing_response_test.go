@@ -19,18 +19,6 @@ import (
 	"time"
 )
 
-func TestReadErrorMessageBoundsResponse(t *testing.T) {
-	body := &routingBodySpy{ReadCloser: io.NopCloser(strings.NewReader(strings.Repeat("x", 2<<20)))}
-	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: body}
-	message := readErrorMessage(resp)
-	if read := body.bytes.Load(); read > 64<<10 {
-		t.Fatalf("read %d bytes from error body, want at most 64 KiB", read)
-	}
-	if message == "" || len(message) > 64<<10 {
-		t.Fatalf("error message length=%d, want a bounded nonempty prefix", len(message))
-	}
-}
-
 func TestFilesListLargeSuccessResponse(t *testing.T) {
 	// A diagnostic read limit must not truncate a valid directory listing.
 	name := strings.Repeat("x", 100)

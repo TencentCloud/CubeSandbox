@@ -454,3 +454,29 @@ func TestHttpProbeForCubeboxWith200To400(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, errorcode.ErrorCode_Success, status.Code())
 }
+
+func TestTelnetDeadlineKeepsLastAttemptError(t *testing.T) {
+	l, err := net.Listen("tcp", "localhost:")
+	if err != nil {
+		assert.FailNow(t, err.Error())
+	}
+	addr := l.Addr().String()
+	l.Close()
+
+	cfg := &ProbeConfig{
+		Addr:             "localhost",
+		Port:             testGetPort(addr),
+		Timeout:          100 * time.Millisecond,
+		Period:           5 * time.Millisecond,
+		SuccessThreshold: 1,
+		FailureThreshold: 1 << 20,
+		Action:           ActionTCPSocket,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bTimeout, bErr := wait(ctx, Telnet(ctx, cfg))
+	assert.False(t, bTimeout)
+	assert.True(t, ret.IsErrorCode(bErr, errorcode.ErrorCode_PortBindingFailed))
+	assert.Contains(t, bErr.Error(), context.DeadlineExceeded.Error())
+	assert.Contains(t, bErr.Error(), "connection refused")
+}

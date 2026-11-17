@@ -2148,19 +2148,28 @@ impl cpu::Vcpu for KvmVcpu {
         // KVM interprets MSR_IA32_TSC_DEADLINE using the current guest TSC at
         // write time. Restore every deadline after all other MSRs (including
         // MSR_IA32_TSC), even for snapshots created before this ordering was
-        // enforced. A short KVM_SET_MSRS is a successful ioctl that restored
-        // only a prefix; fail closed rather than resuming with partial CPU
-        // state.
+        // enforced.
+        //
+        // If the number of MSRs set from SET_MSRS is different from the
+        // expected amount, fall back onto setting MSRs by chunks, skipping
+        // each rejected entry. Some hosts advertise MSRs in
+        // KVM_GET_MSR_INDEX_LIST that they refuse to take back, e.g.
+        // MSR_IA32_FEAT_CTL under kvm-pvm on nested AMD hosts.
         let ordered_msrs = x86_64::order_msrs_for_restore(&state.msrs);
-        if !ordered_msrs.is_empty() {
-            let completed = self.set_msrs(&ordered_msrs)?;
-            if completed != ordered_msrs.len() {
-                return Err(cpu::HypervisorCpuError::SetMsrEntriesIncomplete {
-                    expected: ordered_msrs.len(),
-                    completed,
-                    rejected: ordered_msrs[completed].index,
-                });
+        let mut start_pos = 0;
+        while start_pos < ordered_msrs.len() {
+            let faulty_msr_index = start_pos + self.set_msrs(&ordered_msrs[start_pos..])?;
+            if faulty_msr_index >= ordered_msrs.len() {
+                break;
             }
+
+            warn!(
+                "Detected faulty MSR 0x{:x} while setting MSRs",
+                ordered_msrs[faulty_msr_index].index
+            );
+
+            // Skip the bad MSR
+            start_pos = faulty_msr_index + 1;
         }
 
         self.set_vcpu_events(&state.vcpu_events)?;

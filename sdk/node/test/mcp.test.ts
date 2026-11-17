@@ -222,7 +222,7 @@ describe("Sandbox MCP accessors", () => {
 
   it("reads and caches the token from the sandbox", async () => {
     const exists = vi.spyOn(Filesystem.prototype, "exists").mockResolvedValue(true);
-    const read = vi.spyOn(Filesystem.prototype, "read").mockResolvedValue("tok\n");
+    const read = vi.spyOn(Filesystem.prototype, "read").mockResolvedValue("tok\n" as never);
     const sb = sandbox();
     await expect(sb.getMcpToken()).resolves.toBe("tok");
     await expect(sb.getMcpToken()).resolves.toBe("tok");

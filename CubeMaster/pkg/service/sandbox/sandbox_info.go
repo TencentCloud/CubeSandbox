@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -101,6 +102,15 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 	return ""
 }
 
+// sandboxInfoLookupDeps keeps external lookups injectable so tests don't rely
+// on toolchain-sensitive monkey patching.
+type sandboxInfoLookupDeps struct {
+	getPauseBinding    func(context.Context, string) (*pausesnap.Record, error)
+	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)
+	getNodesByIP       func(string) (*node.Node, bool)
+	getCubeletAddr     func(string) string
+}
+
 // checkValidAndGetReq locates the cubelet that should answer an Info query.
 //
 // ok is false when rsp already carries the error. An empty endpoint with ok
@@ -109,6 +119,16 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 // nil when there is none; callers must not read it again.
 func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cubeletReq *cubebox.ListCubeSandboxRequest,
 	rsp *types.GetCubeSandboxRes) (endpoint, locatedHost string, rec *pausesnap.Record, ok bool) {
+	return checkValidAndGetReqWithDeps(ctx, req, cubeletReq, rsp, sandboxInfoLookupDeps{
+		getPauseBinding:    pausesnap.GetBySandbox,
+		getSandboxProxyMap: localcache.GetSandboxProxyMap,
+		getNodesByIP:       localcache.GetNodesByIp,
+		getCubeletAddr:     cubelet.GetCubeletAddr,
+	})
+}
+
+func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxReq, cubeletReq *cubebox.ListCubeSandboxRequest,
+	rsp *types.GetCubeSandboxRes, deps sandboxInfoLookupDeps) (endpoint, locatedHost string, rec *pausesnap.Record, ok bool) {
 	if req.SandboxID == "" && req.HostID == "" {
 		setError(errorcode.ErrorCode_MasterParamsError, rsp)
 		return "", "", nil, false
@@ -116,7 +136,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 
 	if req.SandboxID != "" {
 		cubeletReq.Id = &req.SandboxID
-		rec = lookupPauseBinding(ctx, req.SandboxID)
+		rec = lookupPauseBindingWith(ctx, req.SandboxID, deps.getPauseBinding)
 	}
 
 	var (
@@ -131,7 +151,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 		}
 		locatedHost = n.IP
 	} else {
-		locatedHost = cachedSandboxHostIP(ctx, req.SandboxID)
+		locatedHost = cachedSandboxHostIPWith(ctx, req.SandboxID, deps.getSandboxProxyMap)
 		if locatedHost == "" && rec != nil {
 			locatedHost = strings.TrimSpace(rec.NodeIP)
 		}
@@ -139,7 +159,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 			setError(errorcode.ErrorCode_NotFound, rsp)
 			return "", "", nil, false
 		}
-		n, exist = localcache.GetNodesByIp(locatedHost)
+		n, exist = deps.getNodesByIP(locatedHost)
 	}
 
 	if !exist || !n.Healthy {
@@ -158,24 +178,26 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 		}
 		return "", "", nil, false
 	}
-	return cubelet.GetCubeletAddr(locatedHost), locatedHost, rec, true
+	return deps.getCubeletAddr(locatedHost), locatedHost, rec, true
 }
 
-// cachedSandboxHostIP is where the sandbox was last seen running. It wins
-// over the pause binding's node: after a cross-node resume whose binding
+// cachedSandboxHostIPWith returns where the sandbox was last seen running. It
+// wins over the pause binding's node: after a cross-node resume whose binding
 // cleanup failed, the binding still names the origin node.
-func cachedSandboxHostIP(ctx context.Context, sandboxID string) string {
+func cachedSandboxHostIPWith(ctx context.Context, sandboxID string,
+	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)) string {
 	if v := localcache.GetSandboxCache(sandboxID); v != nil {
 		return v.HostIP
 	}
-	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
+	if proxyMap, ok := getSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
 		return proxyMap.HostIP
 	}
 	return ""
 }
 
-func lookupPauseBinding(ctx context.Context, sandboxID string) *pausesnap.Record {
-	rec, err := pausesnap.GetBySandbox(ctx, sandboxID)
+func lookupPauseBindingWith(ctx context.Context, sandboxID string,
+	getPauseBinding func(context.Context, string) (*pausesnap.Record, error)) *pausesnap.Record {
+	rec, err := getPauseBinding(ctx, sandboxID)
 	if err != nil {
 		if !errors.Is(err, pausesnap.ErrNotFound) && !errors.Is(err, pausesnap.ErrNotReady) {
 			log.G(ctx).Warnf("GetSandboxInfo: read pause binding %s: %v", sandboxID, err)
@@ -199,8 +221,9 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 
 	for _, sandbox := range cubeRsp.GetItems() {
 		one := &types.SandboxData{
-			SandboxID: sandbox.GetId(),
-			NameSpace: sandbox.GetNamespace(),
+			SandboxID:   sandbox.GetId(),
+			NameSpace:   sandbox.GetNamespace(),
+			ErrorReason: sandbox.GetErrorReason(),
 		}
 		sandboxLabels := cloneStringMap(sandbox.GetLabels())
 

@@ -18,7 +18,7 @@ import (
 
 func TestSnapshotArtifactLifecycle(t *testing.T) {
 	db := newMigrateSharedStoreTestDB(t)
-	require.NoError(t, db.AutoMigrate(&models.SnapshotRecord{}, &models.TemplateReplica{}, &models.TemplateImageJob{}, &models.ArtifactNodePlacement{}))
+	require.NoError(t, db.AutoMigrate(&models.SnapshotRecord{}, &models.TemplateReplica{}, &models.TemplateImageJob{}, &models.ArtifactNodePlacement{}, &models.SnapshotRuntimeActive{}))
 	testSnapshotArtifactLifecycle(t, db)
 	testSnapshotArtifactCleanupRetry(t, db)
 	testSnapshotReferenceReleaseRollback(t, db)

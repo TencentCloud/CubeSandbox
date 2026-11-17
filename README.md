@@ -55,6 +55,23 @@ Cube Sandbox is a high-performance, out-of-the-box secure sandbox service built 
 <table>
   <tr>
     <td align="right" valign="top" width="100">
+      <a href="./docs/changelog/v0.8.0.md">
+        <img src="https://img.shields.io/badge/v0.8.0-2026.11.12-d63384?style=flat-square" alt="v0.8.0" />
+      </a>
+    </td>
+    <td valign="top">
+      <strong>v0.8: JuiceFS storage backend, scheduler plugins, sandbox observability</strong><br/>
+      <b>JuiceFS COW storage backend</b> — share templates across nodes, and resume a paused sandbox or boot from a snapshot on a different node (preview)<br/>
+      <b>Scheduler plugin system</b> — customize scheduling via built-in plugins, CEL expressions, or external gRPC plugins<br/>
+      <b>Sandbox observability</b> — sandbox metrics &amp; logs in Prometheus/Grafana; plus FS-only snapshots, auto-restart policies, and more<br/>
+      <a href="./docs/changelog/v0.8.0.md">Changelog →</a> ·
+      <a href="./docs/guide/cross-node-snapshot/juicefs.md">JuiceFS →</a> ·
+      <a href="./docs/guide/scheduler-plugin.md">Scheduler plugin →</a> ·
+      <a href="./docs/guide/observability.md">Observability →</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right" valign="top" width="100">
       <a href="./docs/changelog/v0.7.0.md">
         <img src="https://img.shields.io/badge/v0.7.0-2026.08.28-20c997?style=flat-square" alt="v0.7.0" />
       </a>
@@ -376,6 +393,7 @@ See the full [WebUI console guide](./docs/guide/webui.md).
 - [Example Projects](./docs/guide/tutorials/examples.md) — hands-on examples (code execution, browser automation, OpenClaw integration, RL training, and more)
 - 🖥️ [WebUI Console](./docs/guide/webui.md) — visual management right after install (`:12088`)
 - 🔐 [Security Proxy & Credential Vault](./docs/guide/security-proxy.md) — CubeEgress domain filtering, injection, and auditing
+- 🧩 [Scheduler Plugins](./docs/guide/scheduler-plugin.md) — customize sandbox scheduling with built-in plugins, CEL expressions, or external gRPC plugins
 - 🤖 [Digital Assistant AgentHub](./docs/guide/digital-assistant.md) — create and manage OpenClaw assistants (Preview)
 - 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) — no KVM access? Try Cube Sandbox inside a disposable OpenCloudOS 9 VM
 

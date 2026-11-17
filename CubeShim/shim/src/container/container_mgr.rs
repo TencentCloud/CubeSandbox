@@ -258,3 +258,96 @@ impl ContainerState {
         (*state).clone()
     }
 }
+
+#[cfg(test)]
+mod pause_vm_forbidding_tests {
+    use super::*;
+    use crate::container::{exec::Exec, Container, LogForwardHandle};
+    use crate::sandbox::config::Config;
+    use oci_spec::runtime::Spec;
+    use std::collections::HashMap;
+
+    async fn container_with_execs(states: &[TaskState]) -> Container {
+        let mut execs = HashMap::new();
+        for (index, task_state) in states.iter().enumerate() {
+            let state = ContainerState::new(Log::default());
+            if *task_state == TaskState::STOPPED {
+                state.set_container_stoped().await;
+            } else {
+                *state.state.lock().await = task_state.clone();
+            }
+            let id = format!("exec-{index}");
+            execs.insert(
+                id.clone(),
+                Exec {
+                    id,
+                    state: Some(state),
+                    ..Default::default()
+                },
+            );
+        }
+        let (tx_containerd, _) = channel(1);
+        Container {
+            sandbox_id: "sandbox".into(),
+            id: "container".into(),
+            real_id: "container".into(),
+            spec: Spec::default(),
+            client: None,
+            ctx: context::Context::default(),
+            log: Log::default(),
+            sb_conf: Config::default(),
+            info: ContainerInfo::default(),
+            state: None,
+            tx_containerd,
+            execs: Arc::new(Mutex::new(execs)),
+            app_snapshot: false,
+            log_forward: LogForwardHandle::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_execs_allow_pause() {
+        let container = container_with_execs(&[]).await;
+        assert!(!container.pause_vm_forbidding().await);
+    }
+
+    #[tokio::test]
+    async fn stopped_exec_allows_pause_without_losing_exit_info() {
+        let mut container = container_with_execs(&[TaskState::STOPPED]).await;
+
+        assert!(!container.pause_vm_forbidding().await);
+
+        let exec_id = "exec-0".to_string();
+        let info = container.get_container_info(&exec_id).await.unwrap();
+        assert_eq!(info.state, TaskState::STOPPED);
+        assert_eq!(info.exit_code, 0);
+        let (code, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            container.wait_container(&exec_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(code, 0);
+    }
+
+    #[tokio::test]
+    async fn running_exec_forbids_pause() {
+        let container = container_with_execs(&[TaskState::RUNNING]).await;
+        assert!(container.pause_vm_forbidding().await);
+    }
+
+    #[tokio::test]
+    async fn running_exec_among_stopped_execs_forbids_pause() {
+        let container = container_with_execs(&[TaskState::STOPPED, TaskState::RUNNING]).await;
+        assert!(container.pause_vm_forbidding().await);
+    }
+
+    #[tokio::test]
+    async fn unstarted_exec_forbids_pause() {
+        for state in [TaskState::UNKNOWN, TaskState::CREATED] {
+            let container = container_with_execs(&[state]).await;
+            assert!(container.pause_vm_forbidding().await);
+        }
+    }
+}

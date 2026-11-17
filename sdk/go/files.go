@@ -47,6 +47,7 @@ type fileReader interface {
 
 type fileWriter interface {
 	writeFile(context.Context, string, []byte, ...fileRequestOption) error
+	writeFileFrom(context.Context, string, io.Reader, ...fileRequestOption) error
 }
 
 type fileFiler interface {
@@ -103,6 +104,32 @@ func (f *Files) Write(ctx context.Context, path string, data []byte) error {
 		return fmt.Errorf("files is not attached to a sandbox")
 	}
 	return f.writer.writeFile(ctx, path, data, withUser(f.user))
+}
+
+// WriteFrom streams src to path in a single multipart upload without buffering
+// the entire file. It does not retry or follow redirects, since src may not be
+// replayable. The caller owns src; WriteFrom never closes it.
+//
+// With the standard HTTP transport, including wrappers preserving its trace
+// hooks, WriteFrom also checks the final request-write result. Custom transports
+// reporting GotConn and WroteHeaders must report WroteRequest; transports without
+// tracing remain responsible for their own write-error contract.
+//
+// The earlier of ctx's deadline and an injected client's Timeout bounds the
+// operation with the standard transport. Without either, completion after a 2xx
+// response is bounded by Config.RequestTimeout (default 30 seconds). A missing
+// callback returns an error; this fallback does not limit the upload before a
+// response. Custom transports must honor request cancellation.
+//
+// One demand-driven worker and a 32 KiB buffer let cancellation unblock the
+// transport without closing src. A source blocked in Read can retain that worker
+// until its owner unblocks it, even after this call returns. Ensure that Read has
+// exited before reusing src. Errors can leave partial files; writes are not atomic.
+func (f *Files) WriteFrom(ctx context.Context, path string, src io.Reader) error {
+	if f == nil || f.writer == nil {
+		return fmt.Errorf("files is not attached to a sandbox")
+	}
+	return f.writer.writeFileFrom(ctx, path, src, withUser(f.user))
 }
 
 // WriteFiles uploads multiple files. It stops at the first error and returns

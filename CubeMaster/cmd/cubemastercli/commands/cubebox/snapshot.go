@@ -33,6 +33,7 @@ type snapshotCreateRequest struct {
 	SandboxID   string `json:"sandbox_id,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 	Backend     string `json:"backend,omitempty"`
+	TTLSeconds  int64  `json:"ttl_seconds,omitempty"`
 }
 
 type snapshotResponse struct {
@@ -61,6 +62,7 @@ type snapshotResource struct {
 	RootfsSizeBytesAtSnapshot uint64                      `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string                      `json:"last_error,omitempty"`
 	CreatedAt                 string                      `json:"created_at,omitempty"`
+	ExpiresAt                 string                      `json:"expires_at,omitempty"`
 	RuntimeRefCount           int64                       `json:"runtime_ref_count,omitempty"`
 	RuntimeRefSandboxes       []string                    `json:"runtime_ref_sandboxes,omitempty"`
 	Replicas                  []replicaStatus             `json:"replicas,omitempty"`
@@ -126,6 +128,7 @@ var SnapshotCommand = cli.Command{
 		SnapshotListCommand,
 		SnapshotInfoCommand,
 		SnapshotDeleteCommand,
+		SnapshotRecoverCreateCommand,
 	},
 }
 
@@ -135,6 +138,7 @@ var SnapshotCreateCommand = cli.Command{
 	Flags: []cli.Flag{
 		cli.StringFlag{Name: "sandbox-id", Usage: "sandbox id to snapshot"},
 		cli.StringFlag{Name: "display-name", Usage: "snapshot display name (must not start with tpl-/snap-)"},
+		cli.Int64Flag{Name: "ttl-seconds", Usage: "expiration time in seconds; 0 means no expiration"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 	},
 	Action: func(c *cli.Context) error {
@@ -147,6 +151,7 @@ var SnapshotCreateCommand = cli.Command{
 			RequestID:   requestID,
 			SandboxID:   sandboxID,
 			DisplayName: c.String("display-name"),
+			TTLSeconds:  c.Int64("ttl-seconds"),
 		}
 		body, err := jsoniter.Marshal(req)
 		if err != nil {

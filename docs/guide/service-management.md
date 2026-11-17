@@ -299,7 +299,8 @@ The host-side policy should run hourly and use `rename` + `create`; do not use
 `copytruncate`.
 
 One-click installs this policy as `/etc/cube-sandbox/logrotate.d/cubesandbox`
-and enables an hourly `cube-sandbox-logrotate.timer`. The installer validates a
+and enables `cube-sandbox-logrotate.timer` with minute-level checks. The `hourly`
+directive still limits CubeShim/VMM rotation to once per hour. The installer validates a
 new policy before replacing the live one; if validation fails, the live policy
 stays, a new timer is not enabled, and an existing timer keeps running the
 previous policy. The one-click file is installer-managed and
@@ -340,6 +341,77 @@ user/group and the `create` owner/group to that account; otherwise logrotate
 cannot switch identity and a newly-created file may not be reopenable.
 The `0640` mode in this example applies to files created by `logrotate`; the
 CubeShim and VMM writers themselves continue to use the process umask.
+
+### Rotating S3lvol logs
+
+When `ONE_CLICK_ENABLE_S3LVOL=1`, the same installer adds
+`/etc/cube-sandbox/logrotate.d/s3lvol` to the shared timer. It rotates the resolved
+`RCOW_LOG` (default `/data/log/rcow/s3lvol_tgt.log`) at 256 MiB, retains eight
+archives and uses `copytruncate` with delayed compression. The service reads
+the policy directory with the private state file
+`/var/lib/cube-sandbox-logrotate/status`; the distro daily job does not read it.
+Disabling S3lvol and re-running the installer removes only its policy. The timer
+is host-level, survives role shutdown/upgrades, and is removed by uninstall.
+
+The installer validates both candidate policies before replacing either live
+policy. A rejected candidate is saved outside the policy directory and leaves
+the existing timer and policies untouched. `ONE_CLICK_LOGROTATE_BIN` may select
+a custom executable; if it is missing, discovery falls back to PATH,
+`/usr/sbin/logrotate`, then `/usr/bin/logrotate`.
+
+The storage `firstaction` hook requires room for a full copy, delayed compression
+of the previous archive, and a reserve of at least 1 GiB when sharing the source
+filesystem or 512 MiB on a separate archive filesystem. `prerotate` repeats the
+check immediately before the active-log copy. Insufficient space skips
+that entry without truncating its log. `RCOW_LOG_RESERVE_BYTES` raises the reserve;
+it cannot lower the floor. This is a check, not a reservation against concurrent
+writes. `copytruncate` can lose log lines written during its copy/truncate window;
+it does not modify WAL or volume contents.
+
+Set `RCOW_LOG_ARCHIVE_DIR` to choose the archive base. A per-source subdirectory
+keeps different logs separate. Paths and reserve settings are captured during
+installation; re-run `install.sh` after editing them. `RCOW_LOG_RESTART_RETAIN`
+is different: it is read by `rcow_start.sh` when archiving a previous run, and
+opt-in cleanup keeps the newest N timestamped restart logs. Leaving it unset
+preserves those logs. Periodic rotation never scans or removes restart archives.
+
+For an existing oversized log, schedule the initial copy when disk IO is
+acceptable. Stop the shared timer, wait for an in-progress rotation to finish,
+then force only the storage policy with the same state and space guard:
+
+```bash
+sudo systemctl stop cube-sandbox-logrotate.timer
+while sudo systemctl is-active --quiet cube-sandbox-logrotate.service; do
+    sleep 1
+done
+sudo install -d -m 0755 /var/lib/cube-sandbox-logrotate
+sudo /usr/sbin/logrotate --force \
+    --state /var/lib/cube-sandbox-logrotate/status \
+    /etc/cube-sandbox/logrotate.d/s3lvol
+```
+
+If `ONE_CLICK_LOGROTATE_BIN` selected another executable, use the path shown by
+`systemctl cat cube-sandbox-logrotate.service` instead of `/usr/sbin/logrotate`.
+Check the command's exit status and inspect the new `.1` archive in the policy's
+`olddir` directory before restarting the timer. On a space refusal, free space
+or select a larger archive filesystem and re-run the installer; do not truncate
+the source by hand. Restart the timer after the copy succeeds:
+
+```bash
+sudo systemctl start cube-sandbox-logrotate.timer
+sudo systemctl list-timers cube-sandbox-logrotate.timer
+sudo journalctl -u cube-sandbox-logrotate.service -n 30
+```
+
+There is no legacy-size refusal loop, bootstrap acceptance file, or fixed copy
+timeout. Without a manual initial rotation, the next scheduled size check uses
+the same guarded policy, including for an oversized log. Storage continues
+running throughout; the shared timer is paused only during the operator step.
+
+Kubernetes host-managed deployments can reuse `scripts/logrotate/s3lvol` and
+`s3lvol_policy.py` from the one-click bundle with their resolved host log path.
+They must install the helper and policy and arrange host scheduling explicitly;
+this change does not add Kubernetes scheduling.
 
 ### `journalctl` startup logs
 

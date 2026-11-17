@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -289,6 +290,9 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 	})
 	if err != nil {
 		return err
+	}
+	if lifecyclePublisher.Enabled() && t.InsType() == cubebox.InstanceType_cubebox.String() {
+		lifecyclePublisher.PublishContext(ctx, webhook.TypeKilled, req.GetSandboxID(), "", webhook.LifecycleFields{KillReason: webhook.KillReasonFromContext(ctx)})
 	}
 	return nil
 }

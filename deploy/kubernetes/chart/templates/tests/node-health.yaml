@@ -475,12 +475,16 @@ spec:
           test -e /dev/kvm
           test -d {{ .Values.hostPaths.dataCubelet | quote }}
           test -S {{ printf "%s/cubelet.sock" .Values.hostPaths.dataCubelet | quote }}
+          test -d /dev/shm/cubelet/network-runtime/state
           {{- if .Values.cubeJuiceFS.enabled }}
           awk '$2 == {{ .Values.cubeJuiceFS.mountPath | quote }} && $3 == "fuse.juicefs" { found=1 } END { exit !found }' /proc/mounts
           {{- end }}
       volumeMounts:
         - name: dev
           mountPath: /dev
+          readOnly: true
+        - name: dev-shm
+          mountPath: /dev/shm
           readOnly: true
         - name: data-cubelet
           mountPath: {{ .Values.hostPaths.dataCubelet }}
@@ -495,6 +499,10 @@ spec:
     - name: dev
       hostPath:
         path: {{ .Values.hostPaths.dev }}
+        type: Directory
+    - name: dev-shm
+      hostPath:
+        path: {{ .Values.hostPaths.devShm }}
         type: Directory
     - name: data-cubelet
       hostPath:

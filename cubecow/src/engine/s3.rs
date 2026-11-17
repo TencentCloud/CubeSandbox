@@ -1994,4 +1994,83 @@ mod tests {
         server.join().expect("server thread");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn snapshot_delete_accepts_deferred_and_retries_unacknowledged_busy() {
+        use crate::engine::Engine;
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        for initially_busy in [false, true] {
+            let dir = std::env::temp_dir().join(format!("cc-delete-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("rpc");
+            let listener = UnixListener::bind(&sock).unwrap();
+            let cfg = S3Config {
+                socket_path: sock.clone(),
+                state_dir: dir.clone(),
+                rpc_timeout_ms: 2_000,
+                rpc_connect_budget_ms: 2_000,
+                size_policy: "round_up".into(),
+            };
+            let engine = S3Engine {
+                rpc: Arc::new(JsonRpcClient::new(
+                    sock,
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                )),
+                cfg,
+                name_index: RwLock::new(HashMap::new()),
+                metrics: Arc::new(MetricsCollector::new()),
+            };
+            engine.name_index.write().unwrap().insert(
+                "source".into(),
+                NameKind::Snapshot {
+                    origin_volume: "origin".into(),
+                    size_bytes: BYTES_PER_GIB,
+                    created_at: "2026-11-13T00:00:00Z".into(),
+                    activated: None,
+                    export_uuid: String::new(),
+                },
+            );
+            engine.persist(&engine.name_index.read().unwrap()).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                for attempt in 0..if initially_busy { 2 } else { 1 } {
+                    for method in ["rcow_deactive_bdev", "rcow_delete_lvol"] {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        assert_eq!(request["method"], method);
+                        let mut reply = serde_json::json!({"jsonrpc":"2.0", "id":request["id"]});
+                        if initially_busy && attempt == 0 && method == "rcow_delete_lvol" {
+                            reply["error"] =
+                                serde_json::json!({"code":-16, "message":"snapshot busy"});
+                        } else {
+                            reply["result"] = serde_json::json!({"bool_value":true, "deferred":method == "rcow_delete_lvol"});
+                        }
+                        writeln!(stream, "{reply}").unwrap();
+                        stream.flush().unwrap();
+                    }
+                }
+            });
+            if initially_busy {
+                assert!(matches!(
+                    engine.delete_snapshot("source"),
+                    Err(CubecowError::PreconditionFailed(_))
+                ));
+                assert!(engine.name_index.read().unwrap().contains_key("source"));
+                assert!(load_index_file(&dir).unwrap().contains_key("source"));
+            }
+            engine.delete_snapshot("source").unwrap();
+            assert!(!engine.name_index.read().unwrap().contains_key("source"));
+            assert!(!load_index_file(&dir).unwrap().contains_key("source"));
+            server.join().unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }

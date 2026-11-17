@@ -5,11 +5,11 @@ lang: en-US
 
 # Node Operations
 
-This page covers the three main compute-node operations in a CubeSandbox cluster: adding a node, isolating a node for maintenance, and deleting a retired node.
+For day-to-day node management, use the `cubeopscli` CLI on the control node, or the WebUI node detail page (port 12088).
 
-Use `cubeopscli` on the control node or the WebUI node detail page for day-to-day node management. The examples below assume CubeOps is available at `127.0.0.1:3010`; use the control-plane IP in a multi-node deployment.
+> `cubeopscli` reaches the CubeOps service at `127.0.0.1:3010` by default. For split deployments such as the Terraform cluster edition, point it at the control-plane address with `--address` and `--port`.
 
-List nodes before and after an operation to confirm the node ID and current state:
+Use the following commands to confirm node IDs and the current state:
 
 ```bash
 cubeopscli node list
@@ -18,11 +18,11 @@ cubeopscli node list
 cubeopscli node list --hostid <node_id>
 ```
 
-## Group nodes by host facts
+## Node groups
 
-Cross-node restore (pause/resume, from-snapshot) requires the origin and the target node to share `cpuid_hash` and `host_kernel_release`: these are the two host-fact dimensions the restore-compatibility policy compares strictly. On a heterogeneous cluster — mixed CPU models or host kernels — the nodes therefore split into restore-compatibility classes, and a memory snapshot taken on one node can only be restored onto members of the same class.
+Cross-node restore of a sandbox requires the source and the target node to have exactly the same CPU and kernel; we call such machines the same node type. A memory snapshot taken on one node type can only be restored onto the same node type.
 
-List the classes and their members:
+List the node types in the cluster and their members:
 
 ```bash
 cubeopscli node groups
@@ -34,29 +34,17 @@ Example output (compact by default — group, CPU identity, member count and nod
 GROUP    CPU_VENDOR     CPU_MODEL             COUNT  NODES
 type-1   GenuineIntel   Intel(R) Xeon(R) ...  3      node-1,node-2,node-3
 type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5(cordoned)
-unknown  -              -                     1      node-6
-
-6 node(s) in 2 host-fact group(s) (1 unclassified)
-warning: 1 node(s) reported no cpuid_hash/host_kernel_release; their class is unknown and cross-node restore fails closed for them
 ```
 
 - Nodes in the same group can restore each other's memory snapshots cross-node; nodes in different groups cannot.
 - Node markers: `(down)` unhealthy, `(cordoned)` scheduling disabled, `(tainted)` the live KVM module carries a suspicious taint.
 - `unknown` groups nodes that reported no `cpuid_hash`/`host_kernel_release` (for example, a cubelet old enough to never collect them). Their class cannot be verified, so cross-node restore fails closed for them.
-- By default the table hides the raw `cpuid_hash`/`host_kernel_release` values; `cubeopscli node groups --detail` adds both columns (the hash is truncated for readability). `cubeopscli node groups --json` always prints full values plus per-node state for automation.
 
 Use this to see how many node types a cluster mixes before building templates on shared backends, scheduling cross-node restores, or planning rolling host-kernel upgrades.
 
 ## Add a node
 
-Adding a compute node means installing the compute-plane components and registering Cubelet with CubeOps. There is no separate `node add` CLI command: registration happens automatically when the compute-node service starts.
-
-### Prerequisites
-
-- A working control node installed with the same CubeSandbox release bundle.
-- A compute host that meets the hardware and software requirements.
-- Network access from the compute node to CubeOps on port `3010`.
-- Access to the cluster's S3-compatible storage endpoint. When using the bundled MinIO, the compute node must reach the control node on port `9000`.
+Adding a compute node means installing the compute-plane components and registering Cubelet with CubeOps. There is no separate `node add` CLI command; **registration completes automatically once the compute-node service starts**.
 
 ### Procedure
 
@@ -101,22 +89,9 @@ For complete environment variables, installation behavior, scheduler configurati
 
 ## Isolate a node
 
-Isolation temporarily prevents CubeMaster from scheduling new sandboxes onto a compute node. It is similar to Kubernetes `cordon`: the node may remain healthy and existing sandboxes continue running.
+**Isolation temporarily prevents CubeMaster from scheduling new sandboxes onto a compute node.** It is similar to Kubernetes `cordon`: the node may remain healthy and existing sandboxes continue running.
 
-| Aspect | Behavior after isolation |
-| --- | --- |
-| New sandbox scheduling | The node is skipped. Creation fails if no other schedulable node is available. |
-| Existing sandboxes | Unaffected; they are not destroyed or migrated automatically. |
-| Node health | Independent of isolation; an isolated node can remain `healthy=true`. |
-| Cubelet heartbeat | Continues normally and cannot clear the isolation state. |
-
-CubeOps records isolation with the reserved label:
-
-```text
-cube.cloud.tencentcloud.com/scheduling-disabled=true
-```
-
-The generic labels API and Cubelet registration cannot set or clear this label.
+For an isolated node, new sandbox scheduling skips it; creation fails if no other schedulable node is available. Existing sandboxes are unaffected and are not destroyed or migrated automatically.
 
 ::: warning Isolation is not drain
 Isolation does not evict existing sandboxes. Before maintenance that interrupts processes or networking, isolate the node and then explicitly destroy its sandboxes.

@@ -19,15 +19,25 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
-// ErrExt4RepairUnrecoverable is an e2fsck result that will not change on
-// retry: exit 4 leaves errors on the disk, exit 8 is an operational failure
-// of the check itself. The restart loop should stop instead of rewriting it.
+// ErrExt4RepairUnrecoverable stops the restart: e2fsck left errors on the
+// disk (exit bit 4), or ext4RepairMaxPasses did not reach a clean result.
 var ErrExt4RepairUnrecoverable = errors.New("ext4 repair unrecoverable")
 
-// restartExt4RepairTimeout bounds e2fsck of one retained rootfs. These
-// volumes are about a gigabyte and lightly used; the check has to finish
-// inside the restart destroy window.
-const restartExt4RepairTimeout = 60 * time.Second
+// Per-pass cap when the caller context has no tighter deadline.
+// Tests shorten this.
+var restartExt4RepairTimeout = 60 * time.Second
+
+// Recheck until the disk is clean, then boot.
+const ext4RepairMaxPasses = 3
+
+const (
+	ext4ExitCorrected = 1 << 0
+	ext4ExitReboot    = 1 << 1
+	ext4ExitLeftDirty = 1 << 2
+)
+
+// Tests replace this.
+var runExt4Fsck = utils.ExecVCtx
 
 func (l *local) repairRetainedRootfs(ctx context.Context, sandboxID string) error {
 	if l == nil || sandboxID == "" {
@@ -52,7 +62,7 @@ func (l *local) repairRetainedRootfs(ctx context.Context, sandboxID string) erro
 	}
 	var repaired error
 	for _, vol := range targets {
-		if err := repairExt4AfterCrash(vol.FilePath); err != nil {
+		if err := repairExt4AfterCrash(ctx, vol.FilePath); err != nil {
 			log.G(ctx).Errorf("restart repair ext4 %s (%s): %v", vol.FilePath, vol.VolumeName, err)
 			repaired = errors.Join(repaired, err)
 			continue
@@ -62,7 +72,6 @@ func (l *local) repairRetainedRootfs(ctx context.Context, sandboxID string) erro
 	return repaired
 }
 
-// retainedRootfsTargets picks the disk a restart may fsck.
 // Cubecow rootfs is only sb-<sandboxID>-rootfs-genN. A node that does not
 // use cubecow still has a default-medium ext4 with no volume name.
 func retainedRootfsTargets(sandboxID string, vols map[string]*BackendFileInfo) ([]*BackendFileInfo, error) {
@@ -90,14 +99,22 @@ func retainedRootfsTargets(sandboxID string, vols map[string]*BackendFileInfo) (
 	return plain, nil
 }
 
-// ext4RepairAccepted reports an e2fsck status the next mount can use.
-// 0 is clean, 1 is corrected, 2 is corrected and wants a reboot. The guest
-// is not running, so 2 is still a repaired disk.
+// Exit 1, 2, or 3 (1|2) changed the disk and needs another check.
 func ext4RepairAccepted(exitCode int) bool {
-	return exitCode == 0 || exitCode == 1 || exitCode == 2
+	if exitCode <= 0 || ext4RepairUnrecoverable(exitCode) {
+		return false
+	}
+	return exitCode&(ext4ExitCorrected|ext4ExitReboot) != 0 &&
+		exitCode&^(ext4ExitCorrected|ext4ExitReboot) == 0
 }
 
-func repairExt4AfterCrash(path string) error {
+// e2fsck runs under the caller context. A destroy deadline or a sibling
+// step cancels it with SIGKILL; that attempt stays retryable and the next
+// destroy runs e2fsck -fy again.
+func repairExt4AfterCrash(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil
@@ -109,22 +126,66 @@ func repairExt4AfterCrash(path string) error {
 	if !ext4 {
 		return nil
 	}
-	stdout, stderr, err := utils.ExecV([]string{"e2fsck", "-fy", path}, restartExt4RepairTimeout)
+	var lastCode int
+	var lastOut, lastErr string
+	for pass := 1; pass <= ext4RepairMaxPasses; pass++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("e2fsck %s: %w", path, err)
+		}
+		passCtx, cancel := context.WithTimeout(ctx, restartExt4RepairTimeout)
+		stdout, stderr, err := runExt4Fsck(passCtx, []string{"e2fsck", "-fy", path})
+		passErr := passCtx.Err()
+		cancel()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, ctxErr, trimFsckOutput(stdout), trimFsckOutput(stderr))
+		}
+		if passErr != nil {
+			return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, passErr, trimFsckOutput(stdout), trimFsckOutput(stderr))
+		}
+		code, ok := ext4FsckExitCode(err)
+		if !ok {
+			return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, err, trimFsckOutput(stdout), trimFsckOutput(stderr))
+		}
+		line := fmt.Sprintf("restart repair ext4 %s pass %d/%d exit %d: %s", path, pass, ext4RepairMaxPasses, code, trimFsckOutput(stdout))
+		if code == 0 {
+			log.G(ctx).Infof("%s", line)
+			return nil
+		}
+		log.G(ctx).Warnf("%s", line)
+		lastCode, lastOut, lastErr = code, stdout, stderr
+		if ext4RepairUnrecoverable(code) {
+			return fmt.Errorf("%w: e2fsck %s exit %d stdout=%s stderr=%s", ErrExt4RepairUnrecoverable, path, code, trimFsckOutput(stdout), trimFsckOutput(stderr))
+		}
+		if !ext4RepairAccepted(code) {
+			return fmt.Errorf("e2fsck %s exit %d stdout=%s stderr=%s", path, code, trimFsckOutput(stdout), trimFsckOutput(stderr))
+		}
+	}
+	return fmt.Errorf("%w: e2fsck %s still exit %d after %d passes stdout=%s stderr=%s",
+		ErrExt4RepairUnrecoverable, path, lastCode, ext4RepairMaxPasses, trimFsckOutput(lastOut), trimFsckOutput(lastErr))
+}
+
+func ext4FsckExitCode(err error) (int, bool) {
 	if err == nil {
-		return nil
+		return 0, true
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && ext4RepairAccepted(exitErr.ExitCode()) {
-		return nil
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), true
 	}
-	if errors.As(err, &exitErr) && ext4RepairUnrecoverable(exitErr.ExitCode()) {
-		return fmt.Errorf("%w: e2fsck %s exit %d stdout=%s stderr=%s", ErrExt4RepairUnrecoverable, path, exitErr.ExitCode(), stdout, stderr)
+	return 0, false
+}
+
+func trimFsckOutput(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	const max = 240
+	if len(s) <= max {
+		return s
 	}
-	return fmt.Errorf("e2fsck %s: %w stdout=%s stderr=%s", path, err, stdout, stderr)
+	return s[:max] + "..."
 }
 
 func ext4RepairUnrecoverable(exitCode int) bool {
-	return exitCode == 4 || exitCode == 8
+	return exitCode > 0 && exitCode&ext4ExitLeftDirty != 0
 }
 
 // hasExt4Superblock reads the little-endian magic at offset 0x438.

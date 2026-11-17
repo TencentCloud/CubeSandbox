@@ -460,6 +460,7 @@ func stripTransientSnapshotAnnotations(annotations map[string]string) {
 	if annotations == nil {
 		return
 	}
+	delete(annotations, constants.CubeAnnotationDesiredSandboxID)
 	delete(annotations, constants.CubeAnnotationRuntimeSnapshotID)
 	delete(annotations, constants.CubeAnnotationRuntimeSnapshotAttachedAt)
 }

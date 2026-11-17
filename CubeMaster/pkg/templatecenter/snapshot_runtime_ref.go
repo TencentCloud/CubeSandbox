@@ -226,6 +226,14 @@ func attachSnapshotRuntimeBindingTx(tx *gorm.DB, ref SnapshotRuntimeRefInfo, rea
 	if err := upsertSnapshotRuntimeActiveTx(tx, active); err != nil {
 		return err
 	}
+	if ref.BindingType == SnapshotRuntimeBindingMemoryBacking {
+		// Publish the live binding and drop the pre-create pin atomically.
+		if err := tx.Table(constants.SnapshotRuntimeActiveTableName).
+			Where("sandbox_id = ? AND binding_type = ?", ref.SandboxID, SnapshotRuntimeBindingCreatePending).
+			Delete(&models.SnapshotRuntimeActive{}).Error; err != nil {
+			return err
+		}
+	}
 	history := newActiveSnapshotRuntimeRefModel(ref, attachedAt, lastSeenAt)
 	history.LastError = strings.TrimSpace(reason)
 	return tx.Table(constants.SnapshotRuntimeRefTableName).Create(history).Error
@@ -438,7 +446,9 @@ func RefreshSnapshotRuntimeRefsFromNode(ctx context.Context, nodeID, nodeIP stri
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing []models.SnapshotRuntimeActive
 		query := tx.Table(constants.SnapshotRuntimeActiveTableName)
-		if nodeID != "" {
+		if nodeID != "" && nodeIP != "" {
+			query = query.Where("node_id = ? OR (node_id = '' AND node_ip = ?)", nodeID, nodeIP)
+		} else if nodeID != "" {
 			query = query.Where("node_id = ?", nodeID)
 		} else {
 			query = query.Where("node_ip = ?", nodeIP)
@@ -485,6 +495,17 @@ func RefreshSnapshotRuntimeRefsFromNode(ctx context.Context, nodeID, nodeIP stri
 		for _, item := range existing {
 			if _, ok := observedKeys[snapshotRuntimeBindingKey(item.SandboxID, item.BindingType)]; ok {
 				continue
+			}
+			if item.BindingType == SnapshotRuntimeBindingCreatePending {
+				if _, observed := observedKeys[snapshotRuntimeBindingKey(item.SandboxID, SnapshotRuntimeBindingMemoryBacking)]; observed {
+					// attachObservedSnapshotRuntimeBindingTx already converted it.
+					continue
+				}
+				// Inventory can race a create in flight. A missing reservation is
+				// released only after the orphan grace and a successful node list.
+				if now.Sub(item.AttachedAt) < snapshotOrphanRuntimeRefTTL {
+					continue
+				}
 			}
 			if retainUnobservedTombstoneRuntimeRef(ctx, item) {
 				continue
@@ -639,10 +660,10 @@ func RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica(
 
 // acquireCreatedSandboxRuntimeRef records a sandbox↔snapshot binding.
 // DELETED / DELETING skip validation so a create that bound before
-// retire can still register. The snapshot write lock serializes this
-// with DeleteSnapshot / finalize count-then-DELETING. Cleanup waits for
-// refs registered before physical delete starts; a create RPC that has
-// not finished yet is the same window as the pre-tombstone sync delete.
+// retire can still register. HTTP create/fork must call ReserveSnapshotCreate
+// before their node RPC: that durable pin, rather than this process-local
+// lock, fences physical cleanup across Masters and lost responses. Publishing
+// the final binding removes the pin in the same transaction.
 func acquireCreatedSandboxRuntimeRef(ctx context.Context, snapshotID, sandboxID, nodeID, nodeIP string, validate func() error) error {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if snapshotID == "" {

@@ -164,6 +164,23 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if and .Values.cubeNode.enabled (not .Values.images.cubeAgent.repository) }}
 {{- fail "cubeNode.enabled=true requires images.cubeAgent.repository (installer stages cube-agent.ext4)" }}
 {{- end }}
+{{- if .Values.cubeNode.enabled }}
+{{- $devShm := .Values.hostPaths.devShm | default "" }}
+{{- if or (not (regexMatch "^/[A-Za-z0-9._/-]+$" $devShm)) (eq $devShm "/") }}
+{{- fail "hostPaths.devShm must be an absolute path other than /" }}
+{{- end }}
+{{- range $component := splitList "/" (trimPrefix "/" $devShm) }}
+{{- if or (eq $component "") (eq $component ".") (eq $component "..") }}
+{{- fail "hostPaths.devShm must be a clean absolute path without empty, . or .. components" }}
+{{- end }}
+{{- end }}
+{{- if .Values.cubeS3lvol.enabled }}
+{{- $s3lvolShm := "/dev/shm/cube-s3lvol" }}
+{{- if or (eq $devShm $s3lvolShm) (hasPrefix (printf "%s/" $s3lvolShm) $devShm) }}
+{{- fail "hostPaths.devShm must not be /dev/shm/cube-s3lvol or a path inside it; cube-s3lvol mounts that directory as its own /dev/shm" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if hasKey (.Values.images | default dict) "pause" }}
 {{- fail "images.pause was removed; Big Pod placeholder slots (cube-slot-*) are gone. Remove images.pause from your values." }}
 {{- end }}

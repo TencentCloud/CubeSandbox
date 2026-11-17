@@ -448,7 +448,7 @@ func (p *Pty) unary(ctx context.Context, method string, payload any, allowNotFou
 	defer originalBody.Close()
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(io.LimitReader(originalBody, maxErrorResponseBytes))
+		body, _ := io.ReadAll(io.LimitReader(originalBody, maxErrorBodyBytes))
 		if isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
 			// A misrouted Web UI / gateway page must not masquerade as
 			// "not found" or a misclassified API error: report the routing

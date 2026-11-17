@@ -263,6 +263,25 @@ terraform: shared CFS when enabled, otherwise pod-local emptyDir with
 single-replica co-location. Because the directory is shared, a path recorded
 at build time remains valid for the reconciler even if TC has restarted since.
 
+When the object store is the durable copy, the ext4 TC writes is not one: it is
+only a build intermediate. TC therefore deletes it at build cleanup, so a build
+host stops accumulating one artifact per build:
+
+- Upload succeeded (`s3` backend): the copy is removed right after the BUILT
+  report. CubeMaster streams such an artifact from the store, so nothing ever
+  reads the local file again.
+- Upload failed: the build reports FAILED and the copy is removed too. Reporting
+  BUILT instead (the old behaviour) left the row with no storage backend, so the
+  artifact was served from TC's disk — which holds only while CubeMaster shares
+  that replica's artifact directory, not with a remote Master or a second
+  replica.
+
+Two cases keep the file. With `CUBE_ARTIFACT_STORE_BACKEND=fs` the store root
+may be this very directory, so the file *is* the durable copy. And when the
+upload succeeded but no download URL could be recorded, CubeMaster answers 502
+for that row (it never falls back to TC's disk), so the bytes are kept as the
+only recoverable copy instead of being deleted into nothing.
+
 ## 10. Known limitations and follow-ups
 
 Released with full awareness; each item lists the planned follow-up.
