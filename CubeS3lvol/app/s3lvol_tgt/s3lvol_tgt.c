@@ -92,6 +92,11 @@ main(int argc, char **argv)
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name     = "s3lvol_tgt";
 	opts.rpc_addr = "/var/run/s3lvol.sock";
+	/* SPDK's default trace buffer is mlocked before the RPC socket exists.
+	 * Nothing in this target reads it, and a failed mlock aborts startup.
+	 * Leave it off. --num-trace-entries is parsed below and still overrides
+	 * this. */
+	opts.num_entries = 0;
 
 	rc = spdk_app_parse_args(argc, argv, &opts, NULL, NULL, NULL, NULL);
 	if (rc != SPDK_APP_PARSE_ARGS_SUCCESS) {
