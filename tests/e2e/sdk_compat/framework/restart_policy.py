@@ -21,35 +21,116 @@ CRASH_COMMAND = "sh -c 'sleep 1; echo c > /proc/sysrq-trigger' >/dev/null 2>&1 &
 # Container init is uvicorn. It handles SIGTERM and exits 0. The kernel drops
 # SIGKILL sent to a pid-namespace init, so kill -9 1 does not end this guest.
 EXIT_ZERO_COMMAND = "sh -c 'sleep 1; kill -TERM 1' >/dev/null 2>&1 &"
-# uvicorn only handles SIGINT and SIGTERM, and both exit 0. exit_group(1)
-# is the main-process failure that means exit code != 0.
+# uvicorn only handles SIGINT and SIGTERM, and both exit 0. Injecting
+# exit_group(1) into the main process gives the restart manager a real non-zero
+# exit on both supported guest architectures.
 EXIT_ERROR_PATH = "/tmp/cube-e2e-exit1.py"
-EXIT_ERROR_LAUNCH = f"sh -c 'sleep 1; python3 {EXIT_ERROR_PATH}' >/dev/null 2>&1 &"
+EXIT_ERROR_LAUNCH = f"python3 {EXIT_ERROR_PATH}"
 EXIT_ERROR_SCRIPT = """\
-import ctypes, ctypes.util, os
-libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+import ctypes
+import ctypes.util
+import os
+import platform
 
-class Regs(ctypes.Structure):
-    _fields_ = [(n, ctypes.c_ulonglong) for n in (
-        "r15","r14","r13","r12","rbp","rbx","r11","r10",
-        "r9","r8","rax","rcx","rdx","rsi","rdi","orig_rax",
-        "rip","cs","eflags","rsp","ss","fs_base","gs_base","ds","es","fs","gs")]
+PTRACE_PEEKTEXT = 1
+PTRACE_POKETEXT = 4
+PTRACE_CONT = 7
+PTRACE_GETREGS = 12
+PTRACE_SETREGS = 13
+PTRACE_ATTACH = 16
+PTRACE_GETREGSET = 0x4204
+PTRACE_SETREGSET = 0x4205
+NT_PRSTATUS = 1
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+
+
+def ptrace(request, pid, addr=0, data=0):
+    ctypes.set_errno(0)
+    result = libc.ptrace(
+        request,
+        pid,
+        ctypes.c_void_p(addr),
+        ctypes.c_void_p(data) if isinstance(data, int) else ctypes.cast(data, ctypes.c_void_p),
+    )
+    if result == -1 and ctypes.get_errno() != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+    return result
+
+
+class X86Regs(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_ulonglong) for name in (
+        "r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10",
+        "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_rax",
+        "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base",
+        "ds", "es", "fs", "gs")]
+
+
+class Arm64Regs(ctypes.Structure):
+    _fields_ = [
+        ("regs", ctypes.c_ulonglong * 31),
+        ("sp", ctypes.c_ulonglong),
+        ("pc", ctypes.c_ulonglong),
+        ("pstate", ctypes.c_ulonglong),
+    ]
+
+
+class Iovec(ctypes.Structure):
+    _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
+
+
+def inject_x86_64(pid):
+    regs = X86Regs()
+    ptrace(PTRACE_GETREGS, pid, data=ctypes.byref(regs))
+    addr = regs.rip & ~7
+    ptrace(PTRACE_POKETEXT, pid, addr, 0x909090909090050F)
+    regs.rip = addr
+    regs.rax = 231
+    regs.rdi = 1
+    ptrace(PTRACE_SETREGS, pid, data=ctypes.byref(regs))
+
+
+def inject_aarch64(pid):
+    regs = Arm64Regs()
+    iov = Iovec(ctypes.addressof(regs), ctypes.sizeof(regs))
+    ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, ctypes.byref(iov))
+    addr = regs.pc & ~7
+    original = ptrace(PTRACE_PEEKTEXT, pid, addr)
+    word = bytearray(int(original & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little"))
+    offset = regs.pc - addr
+    word[offset:offset + 4] = (0xD4000001).to_bytes(4, "little")  # svc #0
+    ptrace(PTRACE_POKETEXT, pid, addr, int.from_bytes(word, "little"))
+    regs.regs[0] = 1
+    regs.regs[8] = 94
+    iov = Iovec(ctypes.addressof(regs), ctypes.sizeof(regs))
+    ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, ctypes.byref(iov))
+
 
 pid = 1
-if libc.ptrace(16, pid, None, None) != 0:
-    raise SystemExit(1)
-os.waitpid(pid, 0)
-regs = Regs()
-if libc.ptrace(12, pid, None, ctypes.byref(regs)) != 0:
-    raise SystemExit(2)
-addr = regs.rip & ~7
-libc.ptrace(4, pid, ctypes.c_void_p(addr), 0x909090909090050F)
-regs.rip = addr
-regs.rax = 231
-regs.rdi = 1
-if libc.ptrace(13, pid, None, ctypes.byref(regs)) != 0:
-    raise SystemExit(3)
-libc.ptrace(17, pid, None, None)
+machine = platform.machine().lower()
+if machine in ("x86_64", "amd64"):
+    inject = inject_x86_64
+elif machine in ("aarch64", "arm64"):
+    inject = inject_aarch64
+else:
+    raise RuntimeError(f"unsupported guest architecture: {machine}")
+
+attached = False
+try:
+    ptrace(PTRACE_ATTACH, pid)
+    attached = True
+    os.waitpid(pid, 0)
+    inject(pid)
+    ptrace(PTRACE_CONT, pid)
+    attached = False
+finally:
+    if attached:
+        try:
+            ptrace(PTRACE_CONT, pid)
+        except OSError:
+            pass
 """
 # Stop envd without killing the container init, so the default liveness probe
 # fails while the main process is still the one that was started.
@@ -119,14 +200,23 @@ def wait_for_restart_status(
     return last
 
 
-def signal_guest(adapter: Any, command: str, *, timeout: int) -> None:
-    """Run a background guest signal. A dropped connection means it landed."""
+def signal_guest(
+    adapter: Any,
+    command: str,
+    *,
+    timeout: int,
+    allow_signaled: bool = False,
+) -> None:
+    """Run a guest signal command. A dropped channel means the signal landed."""
     try:
         result = adapter.run_command(command, timeout=timeout)
     except Exception:
         return
     exit_code = getattr(result, "exit_code", 0)
-    if exit_code not in (0, None):
+    signal_landed = exit_code in (-1, 0, None) or (
+        allow_signaled and isinstance(exit_code, int) and exit_code >= 128
+    )
+    if not signal_landed:
         raise AssertionError(
             "guest signal command failed before the signal: "
             f"exit={exit_code} stdout={getattr(result, 'stdout', '')!r} "
@@ -147,7 +237,7 @@ def exit_main_zero(adapter: Any, *, timeout: int) -> None:
 def exit_main_error(adapter: Any, *, timeout: int) -> None:
     """Make the container init call exit_group(1)."""
     adapter.write_file(EXIT_ERROR_PATH, EXIT_ERROR_SCRIPT)
-    signal_guest(adapter, EXIT_ERROR_LAUNCH, timeout=timeout)
+    signal_guest(adapter, EXIT_ERROR_LAUNCH, timeout=timeout, allow_signaled=True)
 
 
 def stop_liveness_endpoint(adapter: Any, *, timeout: int) -> None:

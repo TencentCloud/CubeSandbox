@@ -5,14 +5,18 @@
 
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 from framework.restart_policy import (
     CRASH_COMMAND,
     EXIT_ERROR_LAUNCH,
+    EXIT_ERROR_PATH,
     EXIT_ERROR_SCRIPT,
     EXIT_ZERO_COMMAND,
     restart_status,
+    signal_guest,
 )
 
 pytestmark = pytest.mark.framework
@@ -78,7 +82,42 @@ def test_exit_zero_command_backgrounds_sigterm() -> None:
     assert EXIT_ZERO_COMMAND.rstrip().endswith("&")
 
 
-def test_exit_error_script_calls_exit_group() -> None:
+class _SignalAdapter:
+    def __init__(self, exit_code):
+        self.exit_code = exit_code
+
+    def run_command(self, command, *, timeout):
+        return type("Result", (), {"exit_code": self.exit_code})()
+
+
+@pytest.mark.parametrize("exit_code", [-1, 0, None])
+def test_signal_guest_accepts_dropped_channel(exit_code) -> None:
+    signal_guest(_SignalAdapter(exit_code), "signal", timeout=1)
+
+
+@pytest.mark.parametrize("exit_code", [128, 137, 143])
+def test_signal_guest_accepts_signaled_channel_when_allowed(exit_code) -> None:
+    signal_guest(
+        _SignalAdapter(exit_code),
+        "signal",
+        timeout=1,
+        allow_signaled=True,
+    )
+
+
+def test_signal_guest_rejects_unexpected_signaled_channel() -> None:
+    with pytest.raises(AssertionError, match="exit=137"):
+        signal_guest(_SignalAdapter(137), "signal", timeout=1)
+
+
+def test_exit_error_script_calls_exit_group_on_supported_architectures() -> None:
+    ast.parse(EXIT_ERROR_SCRIPT)
+    assert 'machine in ("x86_64", "amd64")' in EXIT_ERROR_SCRIPT
     assert "regs.rax = 231" in EXIT_ERROR_SCRIPT
     assert "regs.rdi = 1" in EXIT_ERROR_SCRIPT
-    assert EXIT_ERROR_LAUNCH.rstrip().endswith("&")
+    assert 'machine in ("aarch64", "arm64")' in EXIT_ERROR_SCRIPT
+    assert "regs.regs[8] = 94" in EXIT_ERROR_SCRIPT
+    assert "regs.regs[0] = 1" in EXIT_ERROR_SCRIPT
+    assert "0xD4000001" in EXIT_ERROR_SCRIPT
+    assert "unsupported guest architecture" in EXIT_ERROR_SCRIPT
+    assert EXIT_ERROR_LAUNCH == f"python3 {EXIT_ERROR_PATH}"
