@@ -404,3 +404,157 @@ func TestFingerprintOfIgnoresPEMWhitespace(t *testing.T) {
 		t.Fatalf("FingerprintOf differs on cosmetic re-encoding: %s vs %s", fpA, fpB)
 	}
 }
+
+// Test vectors generated with OpenSSL 3.x `openssl x509 -subject_hash`.
+// Subject shapes: single CN; O+CN (multi RDN); C/ST/L/O/OU/CN (six RDNs).
+var subjectHashVectors = []struct {
+	name string
+	pem  string
+	hash uint32
+}{
+	{
+		name: "single CN",
+		pem: `-----BEGIN CERTIFICATE-----
+MIIDDjCCAfagAwIBAgITK01MJagyN/WtCMt79QuhqXg6vTANBgkqhkiG9w0BAQsF
+ADAXMRUwEwYDVQQDDAxUZXN0IFJvb3QgQ0EwHhcNMjYxMDE1MDg1OTU1WhcNMjYx
+MTE0MDg1OTU1WjAXMRUwEwYDVQQDDAxUZXN0IFJvb3QgQ0EwggEiMA0GCSqGSIb3
+DQEBAQUAA4IBDwAwggEKAoIBAQCZ0SrWe4jSxmBozUMYb9AgRb8E2/abxO/6gODS
+3wrIY8GrpNZ+cni5dSgJ57P+BVP3OLLc1Upyjp4JWoKrcQrNmauJboL/PKO7RFCE
+BgTWTWpjian9lUpz40GM45X2IBWzfCd0cTtR+/R6zKHyNjR0Vk6fJVmsHB6bzSEb
+AWjAHKBV2IaMxIO33YqtBJlJy85lL30lvLZGJtbQkkiywZQSw23XlCdVfc6yivHO
+aXGJ3kCVmqpBg8GgkbpeNm+oeWnWEXVeUZEXp8WFwe+vy+RwfSBq2rpkrmDEglWz
+8AMeaBsBVd1UhCVpPpGLdx1YG55DousBvm6MqLYcyrOhCBg3AgMBAAGjUzBRMB0G
+A1UdDgQWBBQ2sebnET8NCP+X13PKTEm7e+ewNjAfBgNVHSMEGDAWgBQ2sebnET8N
+CP+X13PKTEm7e+ewNjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IB
+AQB2winrAxjXIbtKQshnGk+vbP9/CWzh1rkHafhgciNd1XnP6ejvGxr4hNiC51L7
+rKt1JcmtX70KWIUX9EF5jis33535zMtPM9bWbtl/qXJwuqNsD//Yrb5tsFLNaQAG
+03W4JNHxiZCSMuzQNiCsvnlL8pG2Rj4ewPcao7hejhTgx/JXHBFWAQekGrXFLwJI
+N8Asf92BmH5N4AbZ+thShPdFO4w7sXnHmcQY/egNC5ZQw3VTZLPKGJSzo114R8tu
+RRyD7FUq3+SAU4PM1EpDN/Ah1HYS500Tc1QtOtl70y1+JURSJsbzU76iRDFEswDc
+yoKrYRyh/Zb6ZhLbsJtgT5v4
+-----END CERTIFICATE-----`,
+		hash: 0x43203952,
+	},
+	{
+		name: "O + CN",
+		pem: `-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgIULizYQ2ti0rLac/14MXf1Pu5ZMmYwDQYJKoZIhvcNAQEL
+BQAwMDEVMBMGA1UECgwMVGVzdCBPcmcgTHRkMRcwFQYDVQQDDA5TZWNvbmQgUm9v
+dCBDQTAeFw0yNjEwMTUwOTI2MzlaFw0yNjExMTQwOTI2MzlaMDAxFTATBgNVBAoM
+DFRlc3QgT3JnIEx0ZDEXMBUGA1UEAwwOU2Vjb25kIFJvb3QgQ0EwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCrhE0Eo0hV31KBDZB1hEZpJa+VcuzlCev7
+P3r6YQM4eAdOuhuSB3Xxe7IuG8qcRw4YzdSvLd1dTmhAMaDHH/6/Nw2IiPc2fyow
+kWVBRJ8hYRI7FSg3nlQP6zArO/D/LiPzlYGKU79YJiQ+mwftSWBe+vrCOkdy0Inx
+YRc0pbXWDvVEgY7IVbrQUosCf0Mf7EYU6Mo4c+BLgTW0Ypr04bHTFeZ3QaegKcDR
+bsyKOUm4lpdPBBGhdOR1qreDvrjvl1Mtrf8xdSnGWHE7UdfDDIr7qXz4UiCPqrGX
+R7XmYuqH5RvZX3XgHDzzD8SXJVGJGA1to2wWvh1/lhddsOe5hxNrAgMBAAGjUzBR
+MB0GA1UdDgQWBBTw4V3YL0eTMAhjdcB2Usccjuv7rjAfBgNVHSMEGDAWgBTw4V3Y
+L0eTMAhjdcB2Usccjuv7rjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUA
+A4IBAQAdZO9NYMldZKtHgV3jRxc7gLIg9kPJ5mXPAHqbao20b5rXfL8mDTiRE/oA
+9NXHotr5mNSc8/5cXCz0abh+CRnufI2mEc/KwwtlLX04p9ZGX4jZb1tly3OOg5mQ
+hnTOcYvRqrLgsLkdLtEANYt8AYjuESL+W/SrfROAjehW7pUSYfoF+UBR0z2MYJkQ
+760wjO7VzbG4b3aoHKBgbvwQZZqbxGKlSBmDcCeYF3DqsanVuh5xaXkOufbS2RUV
+Wlz418iFkb9ZFqw9uzSZRR6VUPa+DBu5mMLhLrByCzLbQc5Z/w/cPwY7LcoGdh4h
+wGgoybf3zSGfzZaH0OHjb2SPZAPm
+-----END CERTIFICATE-----`,
+		hash: 0x3330afd4,
+	},
+	{
+		name: "C/ST/L/O/OU/CN",
+		pem: `-----BEGIN CERTIFICATE-----
+MIID0TCCArmgAwIBAgIUJADgX3+Xn6RhZIebftF2N1JzEOQwDQYJKoZIhvcNAQEL
+BQAweDELMAkGA1UEBhMCQ04xEjAQBgNVBAgMCUd1YW5nZG9uZzERMA8GA1UEBwwI
+U2hlbnpoZW4xEDAOBgNVBAoMB1RlbmNlbnQxFDASBgNVBAsMC0N1YmVTYW5kYm94
+MRowGAYDVQQDDBFNdWx0aSBSRE4gVGVzdCBDQTAeFw0yNjEwMTUwODU5NTVaFw0y
+NjExMTQwODU5NTVaMHgxCzAJBgNVBAYTAkNOMRIwEAYDVQQIDAlHdWFuZ2Rvbmcx
+ETAPBgNVBAcMCFNoZW56aGVuMRAwDgYDVQQKDAdUZW5jZW50MRQwEgYDVQQLDAtD
+dWJlU2FuZGJveDEaMBgGA1UEAwwRTXVsdGkgUkROIFRlc3QgQ0EwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCR9a9wna5LAbfffhxXzhBzjxs8zYgOtNn3
+yM3pVWjnmJjdEmIvNp+dryrUeWrhMp1IOnnBS+GgbOJFLzyhU9V/Vrdp+nrOUd1b
+TJOBSmd7rWpEuABTL/uHgJe4w+r0TvNYsT4MAh9r3cE7M3e2xMiOPGxXcbKoPXoW
+9qPTh3Alm0wyUp7XGAee6zUrijt9k5G7bjzHX7AGFSh8dBJuD0FamuSt1eAJzylt
+GgGmeDnqrytFnJDKwSCYWkmfvVizSEl6B7p93SeNWKmZ0XRDgeVRJYiWWxGhKD5C
+g7lCKoYCD406QV00tyNuFxpIUUnCRmFl7BJVFyNAmfK/h3SUOjpbAgMBAAGjUzBR
+MB0GA1UdDgQWBBTmmDBkFqSL4Rfkc8ULEjod2rpI4zAfBgNVHSMEGDAWgBTmmDBk
+FqSL4Rfkc8ULEjod2rpI4zAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUA
+A4IBAQCKUO83Qpv9In+4FrvnTZMFTp6TztjmPvQamIkzjFzo5X7raMNQz+3a5lgu
+LD+fMuCXjs6BZG/ZkGH7NbypZrvTKWOq2o+bc5l1obOSGPDGKh8BiXVInB1NBKr5
+yTSrK/P7yCtOP7GVtCBg7mPxwA3N2H0d2CX11OK6/v6pZbsDZ3aO8frMNqw8Xt8Y
+YCeo+bSB+skgJx0bkzDy/9Zt+es6LPX5oLDmx+YIXWeYXeSxVSrM7jZlRMm++BSl
+7PlcW6rgBYNUZLhNgO7+P+FmgpklUxxjGCFvrpP/u5P2rFCBcrbCqEBAC4tJ2SCc
+atzG+Xu+JPNiwGGsLfkNFxpunyXJ
+-----END CERTIFICATE-----`,
+		hash: 0x101024f9,
+	},
+}
+
+func TestOpenSSLSubjectHashVectors(t *testing.T) {
+	for _, tc := range subjectHashVectors {
+		t.Run(tc.name, func(t *testing.T) {
+			block, _ := pem.Decode([]byte(tc.pem))
+			if block == nil {
+				t.Fatalf("vector PEM does not decode")
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				t.Fatalf("vector PEM does not parse: %v", err)
+			}
+			got, err := opensslSubjectHash(cert)
+			if err != nil {
+				t.Fatalf("opensslSubjectHash: %v", err)
+			}
+			if got != tc.hash {
+				t.Fatalf("subject hash = %08x, want %08x (openssl x509 -subject_hash)", got, tc.hash)
+			}
+		})
+	}
+}
+
+func TestBakeAndroidAnchorUsesSubjectHashName(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, root, androidCacertsDir)
+
+	vector := subjectHashVectors[0] // CN=Test Root CA, hash 43203952
+	res, err := Bake(root, []byte(vector.pem))
+	if err != nil {
+		t.Fatalf("Bake: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true, got %+v", res)
+	}
+	wantName := filepath.Join(root, androidCacertsDir, "43203952.0")
+	if _, err := os.Stat(wantName); err != nil {
+		t.Fatalf("Android anchor must be written as <subject_hash>.0: %v", err)
+	}
+	// The generic anchor name must NOT be planted into the Android store.
+	if _, err := os.Stat(filepath.Join(root, androidCacertsDir, AnchorFileName)); err == nil {
+		t.Fatalf("Android trust store must not carry the generic %s name", AnchorFileName)
+	}
+}
+
+func TestBakeSymlinkEscapeBlocked(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// etc -> <outside> (absolute symlink, like Android's /etc -> /system/etc),
+	// and the "host" side actually carries a bundle file to tempt the append.
+	if err := os.MkdirAll(filepath.Join(outside, "ssl/certs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostBundle := filepath.Join(outside, "ssl/certs/ca-certificates.crt")
+	if err := os.WriteFile(hostBundle, []byte("existing host content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Escape Test CA")
+	_, err := Bake(root, caPEM)
+	if err == nil || !strings.Contains(err.Error(), "outside the rootfs") {
+		t.Fatalf("expected symlink-escape error, got %v", err)
+	}
+	if got := mustReadFile(t, hostBundle); got != "existing host content" {
+		t.Fatalf("host file was modified through the symlink: %q", got)
+	}
+}
