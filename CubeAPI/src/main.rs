@@ -98,7 +98,12 @@ struct Cli {
     #[arg(long, value_name = "PREFIX")]
     log_prefix: Option<String>,
 
-    /// Rate limit: max requests per second per API key (default: 100).
+    /// Shared rate limit: max requests per second per API key for requests
+    /// without a dedicated read/write quota (default: 100).
+    ///
+    /// When RATE_LIMIT_READ_PER_SEC and RATE_LIMIT_WRITE_PER_SEC are both
+    /// set, this value only covers unclassified methods and no longer acts
+    /// as a total ceiling.
     ///
     /// Overrides the RATE_LIMIT_PER_SEC environment variable.
     #[arg(long, value_name = "N")]
