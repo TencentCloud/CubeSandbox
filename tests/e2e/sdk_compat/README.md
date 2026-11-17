@@ -469,7 +469,10 @@ Optional:
   `examples/mcp-gateway/template/Dockerfile`. Defaults to `mcp-gateway`. `cases/mcp`
   is skipped when the template does not exist.
 - `SDK_E2E_VOLUME_PLUGIN`: run Volume Plugin cases (CRUD and sandbox
-  `volumeMounts` bind/unbind). Defaults to `true`; set `false` to skip.
+  `volumeMounts` bind/unbind). Defaults to `true`; set `false` to skip. Before
+  running these cases, the suite probes `SDK_E2E_VOLUME_DRIVER` against the
+  installed Cube system and skips automatically when that driver is not
+  configured or the Volume API is unavailable.
 - `SDK_E2E_VOLUME_DRIVER`: driver/plugin name for legacy and v2 volume creates. Defaults to `s3`.
 - `SDK_E2E_VOLUME_CRED_REF`: server-side credential reference for the two dynamic
   S3 mount cases. Missing or blank skips only those two cases.
@@ -614,7 +617,8 @@ Capability markers:
 - `@pytest.mark.requires_capability("<name>")`: skip or deselect unsupported backends.
 - `@pytest.mark.sandbox_create_options(...)`: pass SDK create-time options such as `network`, `env_vars`, or `lifecycle`.
 - `@pytest.mark.requires_cubeproxy`: platform lifecycle cases that depend on cube-proxy and lifecycle-manager coordination. Skipped unless `SDK_E2E_PLATFORM_LIFECYCLE=true`.
-- `@pytest.mark.volume`: Volume Plugin cases. Run with `--run-e2e`; skipped when `SDK_E2E_VOLUME_PLUGIN=false`.
+- `@pytest.mark.volume`: Volume cases. Run with `--run-e2e`; skipped when `SDK_E2E_VOLUME_PLUGIN=false`.
+- `@pytest.mark.volume_api_only`: Volume API validation that keeps the `volume` capability gate but does not require the configured driver probe.
 - `@pytest.mark.restart_policy`: node-local restart policy cases. Run with `--run-e2e`; e2b skips via the `restart_policy` capability.
 - `@pytest.mark.auth`: `CUBE_API_KEY` simple-key auth cases. Skipped unless `CUBE_API_KEY` is set for the runner and the backend supports `auth_simple_key` (CubeSandbox only).
 - Common capabilities include `lifecycle`, `commands`, `filesystem`,

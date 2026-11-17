@@ -402,7 +402,9 @@ cp env.example .env
   `examples/mcp-gateway/template/Dockerfile` 构建，默认 `mcp-gateway`。该模板不存在时跳过
   `cases/mcp`；
 - `SDK_E2E_VOLUME_PLUGIN`：运行 Volume Plugin 用例（CRUD 与 sandbox
-  `volumeMounts` 绑定/解绑），默认 `true`；设为 `false` 可跳过；
+  `volumeMounts` 绑定/解绑），默认 `true`；设为 `false` 可跳过。运行这些用例前，
+  测试会针对已安装的 Cube 系统探测 `SDK_E2E_VOLUME_DRIVER`；该 driver 未配置或
+  Volume API 不可用时自动跳过；
 - `SDK_E2E_VOLUME_DRIVER`：旧版和 v2 创建卷时使用的 driver/插件名，默认 `s3`；
 - `SDK_E2E_VOLUME_CRED_REF`：两个动态 S3 挂载用例使用的服务端凭证引用；
   未设置或仅空白时只跳过这两个用例；
@@ -571,8 +573,10 @@ Capability marker：
   覆盖模板 ID；未设置时使用 `CUBE_TEMPLATE_ID` 或 `--cube-template-id`；
 - `@pytest.mark.requires_cubeproxy`：依赖 CubeProxy/lifecycle-manager
   协调，未设置 `SDK_E2E_PLATFORM_LIFECYCLE=true` 时跳过；
-- `@pytest.mark.volume`：Volume Plugin 用例，随 `--run-e2e` 执行；设置
+- `@pytest.mark.volume`：Volume 用例，随 `--run-e2e` 执行；设置
   `SDK_E2E_VOLUME_PLUGIN=false` 时跳过；
+- `@pytest.mark.volume_api_only`：保留 `volume` capability 门控但无需执行已配置
+  driver 探测的 Volume API 校验用例；
 - `@pytest.mark.restart_policy`：节点本地重启策略用例，随 `--run-e2e` 执行；
   e2b 因没有 `restart_policy` capability 而跳过。
 - `@pytest.mark.auth`：`CUBE_API_KEY` 简单密钥鉴权用例，未为 runner 设置

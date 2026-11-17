@@ -6,7 +6,10 @@ from __future__ import annotations
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
+
+import requests
 
 from adapters.api_adapter import ApiClient
 from framework.config import SdkE2EConfig
@@ -22,12 +25,106 @@ __all__ = [
     "VOLUME_PLUGIN_GUIDE_URL",
     "VOLUME_PLUGIN_SKIP_REASON",
     "volume_plugin_misconfigured_hint",
+    "VolumePluginProbe",
+    "probe_volume_plugin",
     "volume_id_from_payload",
     "volume_in_list",
     "wait_delete_volume_status",
     "safe_delete_volume",
     "managed_volume",
 ]
+
+
+@dataclass(frozen=True)
+class VolumePluginProbe:
+    available: bool
+    reason: str = ""
+
+
+def probe_volume_plugin(config: SdkE2EConfig) -> VolumePluginProbe:
+    """Check that the configured driver exists by creating and deleting a probe volume.
+
+    An absent driver, its absent config file, or an older CubeAPI without the
+    volume route is a skip. Authentication, transport, backend, malformed-config,
+    and cleanup failures remain test errors so infrastructure regressions are not
+    hidden as missing optional functionality.
+    """
+    api = ApiClient(config)
+    name = f"sdk-e2e-volume-probe-{uuid.uuid4().hex[:12]}"
+    volume_id: str | None = None
+    cleanup_attempted = False
+    try:
+        try:
+            response = api.create_volume_raw(name, driver=config.volume_driver)
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                "volume plugin probe create outcome is unknown; "
+                f"inspect volume {name!r} before cleanup"
+            ) from exc
+        if response.status_code == 201:
+            # Named creates use the name as volumeID. Remember it before parsing so
+            # a malformed success response still gets a best-effort cleanup.
+            volume_id = name
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"volume plugin probe {name!r} returned invalid JSON"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError(
+                    f"volume plugin probe {name!r} returned non-object body: {payload!r}"
+                )
+            try:
+                volume_id = volume_id_from_payload(payload)
+            except AssertionError as exc:
+                raise RuntimeError(
+                    f"volume plugin probe {name!r} returned an invalid volume ID"
+                ) from exc
+        elif response.status_code == 404:
+            return VolumePluginProbe(
+                False,
+                "CubeAPI does not expose the Volume API (HTTP 404)",
+            )
+        else:
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            message = body.get("message", "") if isinstance(body, dict) else ""
+            driver_absent = (
+                response.status_code == 400
+                and isinstance(message, str)
+                and "unknown driver:" in message
+            )
+            driver_config_absent = (
+                response.status_code == 500
+                and isinstance(message, str)
+                and f'binary plugin "{config.volume_driver}" create:' in message
+                and "open config " in message
+                and "no such file or directory" in message.lower()
+            )
+            if driver_absent or driver_config_absent:
+                detail = "plugin config file is absent" if driver_config_absent else "driver is absent"
+                return VolumePluginProbe(
+                    False,
+                    f"volume driver {config.volume_driver!r} is not configured ({detail})",
+                )
+            raise RuntimeError(
+                f"volume plugin probe failed: HTTP {response.status_code} {response.text}. "
+                f"{volume_plugin_misconfigured_hint()}"
+            )
+
+        cleanup_attempted = True
+        cleaned, cleanup_errors = _delete_volume_with_retries(api, volume_id)
+        if not cleaned:
+            raise RuntimeError("volume plugin probe cleanup failed: " + "; ".join(cleanup_errors))
+        volume_id = None
+        return VolumePluginProbe(True)
+    finally:
+        if volume_id is not None and not cleanup_attempted:
+            safe_delete_volume(api, volume_id)
+        api.close()
 
 
 def volume_id_from_payload(payload: dict) -> str:
@@ -80,7 +177,9 @@ def wait_delete_volume_status(
     )
 
 
-def safe_delete_volume(api: ApiClient, volume_id: str, *, attempts: int = 5) -> list[str]:
+def _delete_volume_with_retries(
+    api: ApiClient, volume_id: str, *, attempts: int = 5
+) -> tuple[bool, list[str]]:
     errors: list[str] = []
     for _ in range(attempts):
         try:
@@ -90,13 +189,18 @@ def safe_delete_volume(api: ApiClient, volume_id: str, *, attempts: int = 5) -> 
             time.sleep(2)
             continue
         if status in (204, 404):
-            return errors
+            return True, errors
         if status == 409:
             time.sleep(2)
             continue
         errors.append(f"DELETE /volumes/{volume_id} returned HTTP {status}")
         time.sleep(2)
     errors.append(f"DELETE /volumes/{volume_id} did not reach 204/404")
+    return False, errors
+
+
+def safe_delete_volume(api: ApiClient, volume_id: str, *, attempts: int = 5) -> list[str]:
+    _, errors = _delete_volume_with_retries(api, volume_id, attempts=attempts)
     return errors
 
 

@@ -47,7 +47,9 @@ MISMATCH_ERROR = "must match the snapshot's volume mounts"
 
 
 @pytest.fixture(autouse=True)
-def _require_snapshot_prerequisites(sdk_backend, sdk_e2e_config):
+def _require_snapshot_prerequisites(
+    volume_plugin_gate, sdk_backend, sdk_e2e_config
+):
     if ROLLBACK_CLONE not in capabilities_for_backend(sdk_backend):
         pytest.skip(f"backend {sdk_backend!r} does not support capability {ROLLBACK_CLONE!r}")
     if not sdk_e2e_config.cube_template_id:
