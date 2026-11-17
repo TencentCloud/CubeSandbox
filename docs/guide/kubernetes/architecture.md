@@ -121,6 +121,52 @@ flowchart TB
 | External S3 | `minio.enabled=false` plus `volumeS3.endpoint` / `volumeS3.existingSecret` → do not deploy the built-in MinIO; `volume-s3.conf` is generated from `volumeS3.*` |
 | Local-disk blobstore | `artifactStore.backend=fs` / `cubeOps.store.backend=fs` for templates and warehouse (default `s3`); S3 volumes unchanged |
 
+#### S3 addressing for the component warehouse and template artifacts
+
+The shared S3 blobstore used by CubeOps, CubeMaster, and CubeTemplateCenter
+supports an explicit bucket addressing policy:
+
+| Policy | Request URL shape |
+| --- | --- |
+| `auto` | minio-go chooses using endpoint and bucket heuristics. |
+| `path` | `https://s3.example.com/bucket/key` |
+| `virtual` | `https://bucket.s3.example.com/key` |
+
+For a COS or OBS endpoint that requires virtual-hosted requests, use these
+Helm overrides alongside your existing endpoint, bucket, region, and secret
+settings. Use the provider's regional S3 endpoint without a bucket or path
+prefix; DNS and TLS must support the bucket-prefixed hostname.
+
+```yaml
+cubeOps:
+  s3:
+    addressingStyle: "virtual"
+controlPlane:
+  artifactStore:
+    s3Backed: true
+    s3AddressingStyle: "virtual"
+```
+
+`controlPlane.artifactStore.s3AddressingStyle` applies to the shared artifact
+clients when `s3Backed=true`. A `CUBE_S3_ADDRESSING_STYLE` entry in `global.env`
+overrides the chart-generated value.
+
+Both values default to empty. A non-empty policy overrides the legacy
+path-style boolean; invalid values fail S3 store initialization. Leaving it
+empty preserves the existing behavior: `true` forces path style, and `false`
+uses minio-go auto detection. Existing bundled MinIO deployments are unchanged.
+`auto` does not guarantee virtual-hosted URLs for COS or OBS; select `virtual`
+explicitly when required. The policy applies to data requests and to signed
+GET URLs, including CubeOps's separate `nodeEndpoint`.
+
+Outside Helm, use CubeOps YAML `s3.addressing_style` or env
+`CUBE_OPS_S3_ADDRESSING_STYLE` (env overrides YAML); set
+`CUBE_S3_ADDRESSING_STYLE` in both CubeMaster and CubeTemplateCenter. The legacy
+`CUBE_OPS_S3_PATH_STYLE` / `CUBE_S3_USE_PATH_STYLE` variables remain supported.
+These options configure component packages and template artifacts. The S3
+Volume plugin (`volumeS3.*`) and S3lvol/SPDK (`cubeS3lvol.s3.*`) use separate
+settings.
+
 ### 2.3 Compute plane: four core DaemonSets plus optional storage
 
 `cube-node` / `cube-node-installer` / `cube-node-bootstrap` use `placement.compute` (**without** `allow-pvm-bootstrap`). `cube-node-pvm` uses `placement.pvm` (includes `allow-pvm-bootstrap`), so non-PVM nodes do not pull the large `cube-pvm-host-bootstrap` image.
