@@ -6,6 +6,11 @@
 {{- $templateCenter := .Values.controlPlane.templateCenter -}}
 {{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
 {{- $artifactBackend := include "cube.artifactStoreBackend" . -}}
+{{- range $setting, $style := dict "controlPlane.artifactStore.s3AddressingStyle" (.Values.controlPlane.artifactStore).s3AddressingStyle "cubeOps.s3.addressingStyle" (.Values.cubeOps.s3).addressingStyle }}
+{{- if not (or (kindIs "invalid" $style) (has $style (list "" "auto" "path" "virtual"))) }}
+{{- fail (printf "%s must be empty, auto, path, or virtual" $setting) }}
+{{- end }}
+{{- end }}
 {{- if and $s3Backed (eq $artifactBackend "fs") }}
 {{- fail "controlPlane.artifactStore.backend=fs cannot be combined with controlPlane.artifactStore.s3Backed=true" }}
 {{- end }}
