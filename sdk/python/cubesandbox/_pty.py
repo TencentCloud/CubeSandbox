@@ -83,6 +83,9 @@ class PtyHandle:
         self._exit_code: Optional[int] = None
         self._error: Optional[str] = None
         self._exited: bool = False
+        self._signal: Optional[int] = None
+        self._oom_killed: bool = False
+        self._killed_by: Optional[str] = None
 
     @property
     def pid(self) -> int:
@@ -99,6 +102,21 @@ class PtyHandle:
         """Error message reported by envd for the PTY, if any."""
         return self._error
 
+    @property
+    def signal(self) -> Optional[int]:
+        """Numeric signal that terminated the PTY, when reported by envd."""
+        return self._signal
+
+    @property
+    def oom_killed(self) -> bool:
+        """Whether envd observed a cgroup memory OOM kill."""
+        return self._oom_killed
+
+    @property
+    def killed_by(self) -> Optional[str]:
+        """envd-side termination cause, such as ``timeout`` or ``user``."""
+        return self._killed_by
+
     def __iter__(self) -> Generator[PtyOutput, None, None]:
         return self._handle_events()
 
@@ -114,6 +132,9 @@ class PtyHandle:
                 if end is not None:
                     self._exit_code = _extract_exit_code(end)
                     self._error = end.get("error") or None
+                    self._signal = int(end["signal"]) if end.get("signal") is not None else None
+                    self._oom_killed = end.get("oomKilled") is True
+                    self._killed_by = end.get("killedBy") or None
                     self._exited = True
         finally:
             try:

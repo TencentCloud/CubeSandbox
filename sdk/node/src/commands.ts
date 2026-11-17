@@ -19,6 +19,9 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  signal?: number;
+  oomKilled?: boolean;
+  killedBy?: string;
 }
 
 /** Options for {@link Commands.run}. */
@@ -308,6 +311,9 @@ export class Commands {
     const stdout: string[] = [];
     const stderr: string[] = [];
     let exitCode: number | null = null;
+    let signal: number | undefined;
+    let oomKilled = false;
+    let killedBy: string | undefined;
 
     for await (const { flags, payload } of readConnectFrames(body)) {
       onActivity?.();
@@ -346,12 +352,26 @@ export class Commands {
         } else {
           throw new Error("process EndEvent missing exit code");
         }
+        if (end.signal !== undefined && end.signal !== null) {
+          signal = Number(end.signal);
+        }
+        oomKilled = end.oomKilled === true;
+        if (typeof end.killedBy === "string" && end.killedBy.length > 0) {
+          killedBy = end.killedBy;
+        }
       }
     }
 
     if (exitCode === null) {
       throw new Error("process stream ended without EndEvent");
     }
-    return { stdout: stdout.join(""), stderr: stderr.join(""), exitCode };
+    return {
+      stdout: stdout.join(""),
+      stderr: stderr.join(""),
+      exitCode,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(oomKilled ? { oomKilled: true } : {}),
+      ...(killedBy !== undefined ? { killedBy } : {}),
+    };
   }
 }
