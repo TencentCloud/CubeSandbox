@@ -163,6 +163,8 @@ impl TemplateService {
             enable_ivshmem: body.enable_ivshmem,
             qos,
             with_cube_ca: body.with_cube_ca,
+            with_cube_ca_env: body.with_cube_ca_env,
+            cube_ca_env_vars: body.cube_ca_env_vars,
             backend: non_empty_option(body.backend),
         };
 
@@ -845,9 +847,37 @@ mod tests {
             enable_ivshmem: Some(true),
             qos: None,
             with_cube_ca: Some(false),
+            with_cube_ca_env: Some(false),
+            cube_ca_env_vars: Some(vec!["CARGO_HTTP_CAINFO".into(), "CUSTOM_CA_FILE".into()]),
             backend: Some("s3".to_string()),
             user: None,
         }
+    }
+
+    #[test]
+    fn runtime_ca_option_preserves_omission_and_explicit_false() {
+        let omitted: CreateTemplateRequest =
+            serde_json::from_str(r#"{"image":"python:3.11-slim"}"#).unwrap();
+        assert_eq!(omitted.with_cube_ca_env, None);
+        assert_eq!(omitted.cube_ca_env_vars, None);
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(["CARGO_HTTP_CAINFO", "CUSTOM_CA_FILE"]),
+        ] {
+            let request: CreateTemplateRequest = serde_json::from_value(
+                serde_json::json!({"image":"python:3.12", "cube_ca_env_vars": value}),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(request.cube_ca_env_vars).unwrap(),
+                value
+            );
+        }
+        let disabled: CreateTemplateRequest =
+            serde_json::from_str(r#"{"image":"python:3.11-slim","with_cube_ca_env":false}"#)
+                .unwrap();
+        assert_eq!(disabled.with_cube_ca_env, Some(false));
     }
 
     #[test]
@@ -1168,6 +1198,12 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert_eq!(body["alias"], "stable-python");
+        assert_eq!(body["with_cube_ca"], false);
+        assert_eq!(body["with_cube_ca_env"], false);
+        assert_eq!(
+            body["cube_ca_env_vars"],
+            serde_json::json!(["CARGO_HTTP_CAINFO", "CUSTOM_CA_FILE"])
+        );
     }
 
     #[tokio::test]
