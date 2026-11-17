@@ -13,6 +13,22 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
+func TestRestartDestroyKeepsResources(t *testing.T) {
+	t.Parallel()
+	require.False(t, restartDestroyKeepsResources(nil))
+	require.False(t, restartDestroyKeepsResources(&DestroyContext{}))
+	require.False(t, restartDestroyKeepsResources(&CreateContext{IsRestart: true}))
+	require.True(t, restartDestroyKeepsResources(&DestroyContext{IsRestartDestroy: true}))
+}
+
+func TestReuseForMirrorsRestart(t *testing.T) {
+	t.Parallel()
+	require.False(t, ReuseFor(nil).Storage)
+	require.False(t, ReuseFor(&CreateContext{}).Network)
+	got := ReuseFor(&CreateContext{IsRestart: true})
+	require.True(t, got.Storage && got.Network && got.Volume && got.CubeboxMeta)
+}
+
 func TestCreateContextIsPauseResume(t *testing.T) {
 	t.Parallel()
 
@@ -52,4 +68,30 @@ func TestCreateContextIsPauseResume(t *testing.T) {
 	require.True(t, fromSnap.IsGuestMountRestore())
 	require.False(t, (*CreateContext)(nil).IsGuestMountRestore())
 	require.False(t, (&CreateContext{}).IsGuestMountRestore())
+}
+
+func TestSnapshotTemplateIDUsesJFSVariant(t *testing.T) {
+	t.Parallel()
+
+	ctx := &CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{
+		InstanceType: cubebox.InstanceType_cubebox.String(),
+		Annotations: map[string]string{
+			constants.MasterAnnotationAppSnapshotTemplateID:    "tpl-a",
+			constants.MasterAnnotationJFSTemplateVariantID:     "tpl-a-hf1-deadbeef",
+			constants.MasterAnnotationJFSTemplateVariantPolicy: constants.MasterJFSTemplateVariantPolicyV1,
+		},
+	}}
+	templateID, ok := ctx.GetSnapshotTemplateID()
+	require.True(t, ok)
+	require.Equal(t, "tpl-a-hf1-deadbeef", templateID)
+
+	ctx.ReqInfo.Annotations = map[string]string{
+		constants.MasterAnnotationAppSnapshotTemplateID:    "tpl-a",
+		constants.MasterAnnotationJFSTemplateVariantID:     "tpl-a-hf1-deadbeef",
+		constants.MasterAnnotationJFSTemplateVariantPolicy: constants.MasterJFSTemplateVariantPolicyV1,
+		constants.MasterAnnotationRuntimeSnapshotID:        "snap-a",
+	}
+	templateID, ok = ctx.GetSnapshotTemplateID()
+	require.True(t, ok)
+	require.Equal(t, "snap-a", templateID)
 }

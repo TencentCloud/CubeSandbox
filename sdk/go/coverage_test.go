@@ -646,3 +646,40 @@ func (b cancelOnCloseBody) Close() error {
 	b.cancel()
 	return nil
 }
+
+func TestGetExposedPortEndpoint(t *testing.T) {
+	t.Run("returns host port endpoint without caller query", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/sandboxes/sb-x/exposed-ports/8080" {
+				t.Fatalf("path=%q", r.URL.Path)
+			}
+			if r.URL.RawQuery != "" {
+				t.Fatalf("query=%q, want empty", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"sandboxID":"sb-x","containerPort":8080,"mode":"host_port","endpoint":"9.135.152.214:20006","hostIP":"9.135.152.214","hostPort":20006,"sandboxIP":"192.168.0.20"}`)
+		}))
+		defer server.Close()
+
+		sb := &Sandbox{client: NewClient(Config{APIURL: server.URL}), SandboxID: "sb-x"}
+		endpoint, err := sb.GetExposedPortEndpoint(context.Background(), 8080)
+		if err != nil {
+			t.Fatalf("GetExposedPortEndpoint: %v", err)
+		}
+		if endpoint != "9.135.152.214:20006" {
+			t.Fatalf("endpoint=%q", endpoint)
+		}
+	})
+
+	t.Run("not exposed maps to not found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"port 8081 is not exposed"}`, http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		sb := &Sandbox{client: NewClient(Config{APIURL: server.URL}), SandboxID: "sb-x"}
+		if _, err := sb.GetExposedPortEndpoint(context.Background(), 8081); !errors.Is(err, ErrSandboxNotFound) {
+			t.Fatalf("error=%v, want ErrSandboxNotFound", err)
+		}
+	})
+}

@@ -98,12 +98,16 @@ type SandboxLifecycleMeta struct {
 	EndAt int64 `json:"end_at,omitempty"`
 }
 
-// State values carried by StatePayload.State. Only terminal states are
-// broadcast — transition markers ("pausing", "resuming") remain private to
-// the CLM's state-key coordination logic.
+// State values carried by StatePayload.State. Pause and resume broadcast
+// only their terminal states. Restart states are also broadcast so the CLM
+// can leave a sandbox alone while Cubelet is bringing it back. Transition
+// markers ("pausing", "resuming") stay private to the CLM.
 const (
-	StatePaused  = "paused"
-	StateRunning = "running"
+	StatePaused     = "paused"
+	StateRunning    = "running"
+	StateRestarting = "restarting"
+	StateBackOff    = "backoff"
+	StateGaveUp     = "gaveup"
 )
 
 // Actor values distinguishing who initiated the state change. The CLM

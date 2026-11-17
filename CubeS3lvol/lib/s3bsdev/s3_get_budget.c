@@ -92,13 +92,6 @@ s3_whole_get_token_acquire_ex(bool low_priority, s3_get_token_cb cb_fn,
 	return 0;
 }
 
-int
-s3_whole_get_token_acquire(bool low_priority, s3_get_token_cb cb_fn,
-			   void *cb_arg)
-{
-	return s3_whole_get_token_acquire_ex(low_priority, cb_fn, NULL, cb_arg);
-}
-
 void
 s3_whole_get_token_release(void)
 {

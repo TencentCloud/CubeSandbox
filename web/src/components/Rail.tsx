@@ -47,7 +47,11 @@ export function Rail() {
         </div>
         {NAV_ITEMS.map(({ to, icon: Icon, key }) => {
           const label = t(key);
-          const active = to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(to);
+          const active =
+            to === '/'
+              ? loc.pathname === '/'
+              : loc.pathname.startsWith(to) ||
+                (to === '/templates' && loc.pathname.startsWith('/snapshots'));
           return (
             <NavLink
               key={to}

@@ -10,7 +10,7 @@
 
 #![allow(clippy::significant_drop_in_scrutinee)]
 
-use block_util::{build_disk_image_id, Request, VirtioBlockConfig};
+use block_util::{build_disk_image_id, Request, RequestType, VirtioBlockConfig};
 use libc::EFD_NONBLOCK;
 use log::*;
 use option_parser::{OptionParser, OptionParserError, Toggle};
@@ -51,6 +51,13 @@ const BLK_SIZE: u32 = 512;
 // Polling for 50us should be enough to cover for the device latency
 // and the overhead of the emulation layer.
 const POLL_QUEUE_US: u128 = 50;
+
+fn used_len(request_type: RequestType, guest_data_bytes: u32) -> u32 {
+    match request_type {
+        RequestType::In | RequestType::GetDeviceId => guest_data_bytes.saturating_add(1),
+        RequestType::Out | RequestType::Flush | RequestType::Unsupported(_) => 1,
+    }
+}
 
 trait DiskFile: Read + Seek + Write + Send {}
 impl<D: Read + Seek + Write + Send> DiskFile for D {}
@@ -146,7 +153,15 @@ impl VhostUserBlkThread {
                         &self.disk_image_id,
                     ) {
                         Ok(l) => {
-                            len = l;
+                            // `execute` only reports the byte count for `In`;
+                            // `GetDeviceId` writes the ID to guest memory but
+                            // returns 0, so account for it explicitly to mirror
+                            // the async block backend.
+                            let guest_data_bytes = match request.request_type {
+                                RequestType::GetDeviceId => self.disk_image_id.len() as u32,
+                                _ => l,
+                            };
+                            len = used_len(request.request_type, guest_data_bytes);
                             VIRTIO_BLK_S_OK
                         }
                         Err(e) => {
@@ -500,6 +515,20 @@ impl VhostUserBlkBackendConfig {
             direct,
             poll_queue,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn used_len_reports_bytes_written_to_guest() {
+        assert_eq!(used_len(RequestType::In, 512), 513);
+        assert_eq!(used_len(RequestType::Out, 0), 1);
+        assert_eq!(used_len(RequestType::Flush, 0), 1);
+        assert_eq!(used_len(RequestType::GetDeviceId, 20), 21);
+        assert_eq!(used_len(RequestType::Unsupported(42), 0), 1);
     }
 }
 

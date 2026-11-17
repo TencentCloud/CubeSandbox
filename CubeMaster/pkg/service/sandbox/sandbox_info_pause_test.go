@@ -303,21 +303,21 @@ func TestApplyPauseBindingToInfoDoesNotRequireProxyMap(t *testing.T) {
 
 func TestCheckValidAndGetReqFallsBackToPauseBinding(t *testing.T) {
 	const sandboxID = "sb-locate"
-	patches := gomonkey.NewPatches()
-	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
-		return nil, false
-	})
-	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
-		return readyInfoRecord(sandboxID), nil
-	})
-	patches.ApplyFunc(localcache.GetNodesByIp, func(ip string) (*node.Node, bool) {
-		return &node.Node{IP: ip, InsID: "node-a", Healthy: true}, true
-	})
-	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP + ":50051" })
+	deps := sandboxInfoLookupDeps{
+		getPauseBinding: func(context.Context, string) (*pausesnap.Record, error) {
+			return readyInfoRecord(sandboxID), nil
+		},
+		getSandboxProxyMap: func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
+			return nil, false
+		},
+		getNodesByIP: func(ip string) (*node.Node, bool) {
+			return &node.Node{IP: ip, InsID: "node-a", Healthy: true}, true
+		},
+		getCubeletAddr: func(hostIP string) string { return hostIP + ":50051" },
+	}
 
 	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
-	endpoint, locatedHost, rec, ok := checkValidAndGetReq(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp)
+	endpoint, locatedHost, rec, ok := checkValidAndGetReqWithDeps(context.Background(), &types.GetCubeSandboxReq{SandboxID: sandboxID}, &cubebox.ListCubeSandboxRequest{}, rsp, deps)
 	require.True(t, ok)
 	require.Equal(t, "10.0.0.1:50051", endpoint)
 	require.Equal(t, "10.0.0.1", locatedHost)

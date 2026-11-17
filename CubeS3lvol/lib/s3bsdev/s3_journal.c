@@ -1,7 +1,7 @@
 /* Copyright (c) 2026 Tencent Inc.
  * SPDX-License-Identifier: Apache-2.0 */
 /*
- *   s3_journal -- change log for the chunk map 
+ *   s3_journal -- change log for the chunk map
  *
  *   The design rationale, including why this is fully asynchronous and why the
  *   synchronous version was deleted, lives in the header comment of
@@ -1037,12 +1037,6 @@ uint64_t
 s3_journal_get_capacity_bytes(struct s3_journal *journal)
 {
 	return journal ? journal->region_size : 0;
-}
-
-uint64_t
-s3_journal_get_next_lsn(struct s3_journal *journal)
-{
-	return journal ? journal->next_lsn : 0;
 }
 
 SPDK_LOG_REGISTER_COMPONENT(s3_journal)

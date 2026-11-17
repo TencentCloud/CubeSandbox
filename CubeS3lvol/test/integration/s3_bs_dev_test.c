@@ -325,8 +325,7 @@ main(int argc, char **argv)
 	};
 	struct spdk_bs_dev *bs_dev = NULL;
 
-	int rc = s3_bs_dev_create(&lvs_opts, NULL, NULL, client, TEST_CAPACITY,
-				  &bs_dev);
+	int rc = s3_bs_dev_create(&lvs_opts, client, TEST_CAPACITY, &bs_dev);
 	check("s3_bs_dev_create", rc, 0);
 	if (rc != 0 || !bs_dev) {
 		goto out_client;

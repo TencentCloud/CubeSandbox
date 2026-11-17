@@ -6,6 +6,7 @@ CubeSandbox 的所有发布物都在同一个 [Releases 页面](https://cnb.cool
 | --- | --- | --- |
 | 标准部署（[快速开始](./quickstart.md)、[裸金属](./bare-metal-deploy.md)） | 什么都不用 | [标准部署](#标准部署-无需手动下载) |
 | PVM 部署（云服务器无 `/dev/kvm`） | 宿主机内核包（rpm/deb） | [PVM 部署](#pvm-部署-下载宿主机内核包) |
+| 离线部署 | 安装包、容器镜像、系统软件包 | [离线部署](./offline-deploy.md) |
 | 自建发布包 / 替换内核或镜像 | guest 内核、guest 镜像 | [自建部署](#自建部署-下载-guest-内核与镜像) |
 
 ::: tip 只是照着快速开始部署？

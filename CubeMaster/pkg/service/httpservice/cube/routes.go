@@ -25,6 +25,7 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	g.POST(SandboxCommitAction, handleSandboxCommitAction)
 	g.POST(SandboxRollbackAction, handleSandboxRollbackAction)
 	g.POST(SandboxAction+"/:sandbox_id/rollback", handleSandboxRollbackAction)
+	g.POST(SandboxAction+"/:sandbox_id/fork", handleForkSandboxFromSandboxAction)
 	g.POST(SandboxUpdateAction, handleUpdateAction)
 	g.POST(SandboxNetworkAction, handleSandboxNetworkAction)
 	g.POST(SandboxTimeoutAction, handleSandboxTimeoutAction)
@@ -41,6 +42,9 @@ func RegisterCubeRoutes(g *gin.RouterGroup) {
 	// Image
 	g.POST(ImageAction, createImageGinHandler)
 	g.DELETE(ImageAction, deleteImageGinHandler)
+
+	// Control-plane capabilities so clients can fail fast on unsupported modes.
+	g.GET(CapabilitiesAction, handleCapabilitiesAction)
 
 	// Snapshot (NOTE: DELETE /snapshot collection-level is NOT registered —
 	// the original mux only registered DELETE /snapshot/{snapshot_id})

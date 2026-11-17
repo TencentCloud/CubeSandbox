@@ -11,7 +11,6 @@ import (
 
 	"github.com/patrickmn/go-cache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
-	fwk "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/framework"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 )
@@ -159,25 +158,25 @@ func TestGetHealthyNodesByInstanceType(t *testing.T) {
 	}
 }
 
-func TestSyncNodeTemplatesReconcilesHeartbeatState(t *testing.T) {
+func isolatePackageLocality(t *testing.T) {
+	t.Helper()
 	origCache := l.cache
-	origImageCache := l.imageCache
-	origTemplateNodeCache := l.templateNodeCache
-	defer func() {
-		l.cache = origCache
-		l.imageCache = origImageCache
-		l.templateNodeCache = origTemplateNodeCache
-	}()
-
+	origLocality := l.locality
 	l.cache = cache.New(0, 0)
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
+	l.locality = newTemplateLocality()
+	t.Cleanup(func() {
+		l.cache = origCache
+		l.locality = origLocality
+	})
+}
+
+func TestSyncNodeTemplatesReconcilesHeartbeatState(t *testing.T) {
+	isolatePackageLocality(t)
 	l.cache.SetDefault("node-a", &node.Node{InsID: "node-a", IP: "127.0.0.1", Healthy: true})
 
-	RegisterTemplateReplica("tpl-old", "node-a", 1)
-	RegisterTemplateReplica("tpl-keep", "node-a", 1)
-
-	SyncNodeTemplates(context.Background(), "node-a", []string{"tpl-keep", "tpl-new"})
+	ctx := context.Background()
+	SyncNodeTemplates(ctx, "node-a", []string{"tpl-old", "tpl-keep"})
+	SyncNodeTemplates(ctx, "node-a", []string{"tpl-keep", "tpl-new"})
 
 	if state := GetImageStateByNode("tpl-old", "node-a"); state != nil {
 		t.Fatal("tpl-old should be removed from node locality after heartbeat sync")
@@ -188,84 +187,34 @@ func TestSyncNodeTemplatesReconcilesHeartbeatState(t *testing.T) {
 	if state := GetImageStateByNode("tpl-new", "node-a"); state == nil {
 		t.Fatal("tpl-new should be added to node locality after heartbeat sync")
 	}
-	if templates, ok := getCachedNodeTemplateSet("node-a"); !ok {
-		t.Fatal("expected node template membership cache to be populated")
-	} else {
-		if _, ok := templates["tpl-old"]; ok {
-			t.Fatal("stale template membership should be removed from reverse index")
-		}
-		if _, ok := templates["tpl-keep"]; !ok {
-			t.Fatal("tpl-keep should be present in reverse index")
-		}
-		if _, ok := templates["tpl-new"]; !ok {
-			t.Fatal("tpl-new should be present in reverse index")
-		}
+
+	RegisterTemplateReplica("tpl-reg", "node-a", 1)
+	SyncNodeTemplates(ctx, "node-a", []string{"tpl-new"})
+	if state := GetImageStateByNode("tpl-reg", "node-a"); state == nil {
+		t.Fatal("template-center registration must survive a heartbeat that omits it")
+	}
+	if state := GetImageStateByNode("tpl-keep", "node-a"); state != nil {
+		t.Fatal("heartbeat-only tpl-keep should be removed when the next heartbeat omits it")
 	}
 }
 
-func TestSyncNodeTemplatesDiscoversWarmStateWithoutReverseIndex(t *testing.T) {
-	origImageCache := l.imageCache
-	origTemplateNodeCache := l.templateNodeCache
-	defer func() {
-		l.imageCache = origImageCache
-		l.templateNodeCache = origTemplateNodeCache
-	}()
-
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
-	l.addImageCache("tpl-stale", fwk.NewImageStateSummary(1, "", "node-a"))
-	l.addImageCache("tpl-keep", fwk.NewImageStateSummary(1, "", "node-a"))
-
-	SyncNodeTemplates(context.Background(), "node-a", []string{"tpl-keep"})
-
-	if state := GetImageStateByNode("tpl-stale", "node-a"); state != nil {
-		t.Fatal("tpl-stale should be removed when syncing from discovered warm cache state")
-	}
-	if state := GetImageStateByNode("tpl-keep", "node-a"); state == nil {
-		t.Fatal("tpl-keep should remain after syncing from discovered warm cache state")
-	}
-}
-
-func TestInvalidateImageStateAllowsHeartbeatToRebuildLocality(t *testing.T) {
-	origCache := l.cache
-	origImageCache := l.imageCache
-	origTemplateNodeCache := l.templateNodeCache
-	defer func() {
-		l.cache = origCache
-		l.imageCache = origImageCache
-		l.templateNodeCache = origTemplateNodeCache
-	}()
-
-	l.cache = cache.New(0, 0)
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
+func TestInvalidateImageStateKeepsReportedLocality(t *testing.T) {
+	isolatePackageLocality(t)
 	l.cache.SetDefault("node-a", &node.Node{InsID: "node-a", IP: "127.0.0.1", Healthy: true})
+	l.cache.SetDefault("node-b", &node.Node{InsID: "node-b", IP: "127.0.0.2", Healthy: true})
 
-	RegisterTemplateReplica("tpl-replay", "node-a", 1)
-	if _, ok := getCachedNodeTemplateSet("node-a"); !ok {
-		t.Fatal("expected reverse index before invalidation")
+	ctx := context.Background()
+	SyncNodeTemplates(ctx, "node-b", []string{"tpl"})
+	RegisterTemplateReplica("tpl", "node-b", 1)
+	RegisterTemplateReplica("tpl", "node-a", 1)
+
+	InvalidateImageState("tpl")
+
+	if state := GetImageStateByNode("tpl", "node-a"); state != nil {
+		t.Fatal("invalidation must drop a node that was only registered")
 	}
-
-	InvalidateImageState("tpl-replay")
-
-	if state := GetImageStateByNode("tpl-replay", "node-a"); state != nil {
-		t.Fatal("image cache should be empty immediately after invalidation")
-	}
-	if templates, ok := getCachedNodeTemplateSet("node-a"); !ok {
-		t.Fatal("expected reverse index entry to remain addressable after invalidation cleanup")
-	} else if _, exists := templates["tpl-replay"]; exists {
-		t.Fatal("reverse index should drop invalidated template membership")
-	}
-
-	SyncNodeTemplates(context.Background(), "node-a", []string{"tpl-replay"})
-
-	if state := GetImageStateByNode("tpl-replay", "node-a"); state == nil {
-		t.Fatal("heartbeat replay should rebuild template locality after invalidation")
-	}
-	if templates, ok := getCachedNodeTemplateSet("node-a"); !ok {
-		t.Fatal("expected reverse index after heartbeat replay")
-	} else if _, exists := templates["tpl-replay"]; !exists {
-		t.Fatal("reverse index should be rebuilt after heartbeat replay")
+	if state := GetImageStateByNode("tpl", "node-b"); state == nil {
+		t.Fatal("invalidation must keep a node the heartbeat still reports")
 	}
 }
 
@@ -423,24 +372,14 @@ func TestNodeConcurrentCountersUpdateCachedNodeFromReadClone(t *testing.T) {
 }
 
 func TestSyncNodeTemplates_EmptyListCleansUp(t *testing.T) {
-	origCache := l.cache
-	origImageCache := l.imageCache
-	origTemplateNodeCache := l.templateNodeCache
-	defer func() {
-		l.cache = origCache
-		l.imageCache = origImageCache
-		l.templateNodeCache = origTemplateNodeCache
-	}()
-
-	l.cache = cache.New(0, 0)
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
+	isolatePackageLocality(t)
 	l.cache.SetDefault("node-a", &node.Node{InsID: "node-a", IP: "127.0.0.1", Healthy: true})
 
-	RegisterTemplateReplica("tpl-old", "node-a", 1)
-	RegisterTemplateReplica("tpl-stale", "node-a", 1)
+	ctx := context.Background()
+	SyncNodeTemplates(ctx, "node-a", []string{"tpl-old", "tpl-stale"})
+	RegisterTemplateReplica("tpl-reg", "node-a", 1)
 
-	SyncNodeTemplates(context.Background(), "node-a", []string{})
+	SyncNodeTemplates(ctx, "node-a", []string{})
 
 	if state := GetImageStateByNode("tpl-old", "node-a"); state != nil {
 		t.Fatal("tpl-old should be removed after empty heartbeat")
@@ -448,28 +387,23 @@ func TestSyncNodeTemplates_EmptyListCleansUp(t *testing.T) {
 	if state := GetImageStateByNode("tpl-stale", "node-a"); state != nil {
 		t.Fatal("tpl-stale should be removed after empty heartbeat")
 	}
-	if templates, ok := getCachedNodeTemplateSet("node-a"); !ok || len(templates) != 0 {
-		t.Fatalf("expected empty template set, got %v", templates)
+	if state := GetImageStateByNode("tpl-reg", "node-a"); state == nil {
+		t.Fatal("registered replica must survive an empty heartbeat")
+	}
+	if reported := l.locality.reported["node-a"]; reported.Len() != 0 {
+		t.Fatalf("expected empty heartbeat inventory, got %v", reported)
 	}
 }
 
 func TestSyncAllFromDB_ExternalLoaderSyncsTemplates(t *testing.T) {
 	origLoader := externalNodeLoader
-	origCache := l.cache
-	origImageCache := l.imageCache
-	origTemplateNodeCache := l.templateNodeCache
 	origSorted := l.sortedNodesByClusters
-	defer func() {
+	isolatePackageLocality(t)
+	t.Cleanup(func() {
 		externalNodeLoader = origLoader
-		l.cache = origCache
-		l.imageCache = origImageCache
-		l.templateNodeCache = origTemplateNodeCache
 		l.sortedNodesByClusters = origSorted
-	}()
+	})
 
-	l.cache = cache.New(0, 0)
-	l.imageCache = cache.New(0, 0)
-	l.templateNodeCache = cache.New(0, 0)
 	l.sortedNodesByClusters = map[string]node.NodeList{
 		constants.DefaultInstanceTypeName: {},
 	}
@@ -502,15 +436,5 @@ func TestSyncAllFromDB_ExternalLoaderSyncsTemplates(t *testing.T) {
 	}
 	if state := GetImageStateByNode("tpl-2", "node-1"); state == nil {
 		t.Fatal("expected tpl-2 locality")
-	}
-	if templates, ok := getCachedNodeTemplateSet("node-1"); !ok {
-		t.Fatal("expected node template membership cache")
-	} else {
-		if _, exists := templates["tpl-1"]; !exists {
-			t.Fatal("tpl-1 missing from membership cache")
-		}
-		if _, exists := templates["tpl-2"]; !exists {
-			t.Fatal("tpl-2 missing from membership cache")
-		}
 	}
 }

@@ -15,6 +15,8 @@ use virtio_queue::{Queue, QueueT};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable};
 use vm_virtio::AccessPlatform;
 
+pub(super) const VIRTQ_MSI_NO_VECTOR: u16 = 0xffff;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VirtioPciCommonConfigState {
     pub driver_status: u8,
@@ -162,7 +164,13 @@ impl VirtioPciCommonConfig {
             0x12 => queues.len() as u16, // num_queues
             0x16 => self.queue_select,
             0x18 => self.with_queue(queues, |q| q.size()).unwrap_or(0),
-            0x1a => self.msix_queues.lock().unwrap()[self.queue_select as usize],
+            0x1a => self
+                .msix_queues
+                .lock()
+                .unwrap()
+                .get(self.queue_select as usize)
+                .copied()
+                .unwrap_or(VIRTQ_MSI_NO_VECTOR),
             0x1c => u16::from(self.with_queue(queues, |q| q.ready()).unwrap_or(false)),
             0x1e => self.queue_select, // notify_off
             _ => {
@@ -178,31 +186,63 @@ impl VirtioPciCommonConfig {
             0x10 => self.msix_config.store(value, Ordering::Release),
             0x16 => self.queue_select = value,
             0x18 => self.with_queue_mut(queues, |q| q.set_size(value)),
-            0x1a => self.msix_queues.lock().unwrap()[self.queue_select as usize] = value,
-            0x1c => self.with_queue_mut(queues, |q| {
-                let ready = value == 1;
-                q.set_ready(ready);
-                // Translate address of descriptor table and vrings.
-                if let Some(access_platform) = &self.access_platform {
-                    if ready {
-                        let desc_table = access_platform.translate_gva(q.desc_table(), 0).unwrap();
-                        let avail_ring = access_platform.translate_gva(q.avail_ring(), 0).unwrap();
-                        let used_ring = access_platform.translate_gva(q.used_ring(), 0).unwrap();
-                        q.set_desc_table_address(
-                            Some((desc_table & 0xffff_ffff) as u32),
-                            Some((desc_table >> 32) as u32),
-                        );
-                        q.set_avail_ring_address(
-                            Some((avail_ring & 0xffff_ffff) as u32),
-                            Some((avail_ring >> 32) as u32),
-                        );
-                        q.set_used_ring_address(
-                            Some((used_ring & 0xffff_ffff) as u32),
-                            Some((used_ring >> 32) as u32),
-                        );
-                    }
+            0x1a => {
+                if let Some(vector) = self
+                    .msix_queues
+                    .lock()
+                    .unwrap()
+                    .get_mut(self.queue_select as usize)
+                {
+                    *vector = value;
+                } else {
+                    warn!(
+                        "invalid queue_select {} for queue_msix_vector write",
+                        self.queue_select
+                    );
                 }
-            }),
+            }
+            0x1c => {
+                if let Some(q) = queues.get_mut(self.queue_select as usize) {
+                    let ready = value == 1;
+                    if ready {
+                        if let Some(access_platform) = &self.access_platform {
+                            // Resolve every IOVA before changing the queue. A guest can
+                            // enable a queue before mapping any of these addresses; that
+                            // must fail the device rather than panic the VMM.
+                            let translated = (
+                                access_platform.translate_gva(q.desc_table(), 0),
+                                access_platform.translate_gva(q.avail_ring(), 0),
+                                access_platform.translate_gva(q.used_ring(), 0),
+                            );
+                            if let (Ok(desc_table), Ok(avail_ring), Ok(used_ring)) = translated {
+                                q.set_desc_table_address(
+                                    Some((desc_table & 0xffff_ffff) as u32),
+                                    Some((desc_table >> 32) as u32),
+                                );
+                                q.set_avail_ring_address(
+                                    Some((avail_ring & 0xffff_ffff) as u32),
+                                    Some((avail_ring >> 32) as u32),
+                                );
+                                q.set_used_ring_address(
+                                    Some((used_ring & 0xffff_ffff) as u32),
+                                    Some((used_ring >> 32) as u32),
+                                );
+                            } else {
+                                error!("Failed translating virtio queue IOVA");
+                                q.set_ready(false);
+                                self.driver_status |= crate::DEVICE_FAILED as u8;
+                                return;
+                            }
+                        }
+                    }
+                    q.set_ready(ready);
+                } else {
+                    warn!(
+                        "invalid queue_select {} for queue_enable write",
+                        self.queue_select
+                    );
+                }
+            }
             _ => {
                 warn!("invalid virtio register word write: 0x{:x}", offset);
             }
@@ -410,5 +450,70 @@ mod tests {
         regs.read(0x16, &mut read_back, &mut queues, dev);
         assert_eq!(read_back[0], 0xaa);
         assert_eq!(read_back[1], 0x55);
+    }
+
+    #[test]
+    fn invalid_queue_select_does_not_panic_msix_access() {
+        let mut regs = VirtioPciCommonConfig {
+            access_platform: None,
+            driver_status: 0,
+            config_generation: 0,
+            device_feature_select: 0,
+            driver_feature_select: 0,
+            queue_select: 1,
+            msix_config: Arc::new(AtomicU16::new(0)),
+            msix_queues: Arc::new(Mutex::new(vec![7])),
+        };
+        let mut queues = vec![Queue::new(QUEUE_SIZE).unwrap()];
+
+        assert_eq!(
+            regs.read_common_config_word(0x1a, &queues),
+            VIRTQ_MSI_NO_VECTOR
+        );
+        regs.write_common_config_word(0x1a, 9, &mut queues);
+        assert_eq!(regs.msix_queues.lock().unwrap().as_slice(), &[7]);
+    }
+
+    #[derive(Debug)]
+    struct FailingAccessPlatform;
+
+    impl AccessPlatform for FailingAccessPlatform {
+        fn translate_gva(
+            &self,
+            _base: u64,
+            _size: u64,
+        ) -> std::result::Result<u64, std::io::Error> {
+            Err(std::io::Error::from(std::io::ErrorKind::Other))
+        }
+        fn translate_gpa(
+            &self,
+            _base: u64,
+            _size: u64,
+        ) -> std::result::Result<u64, std::io::Error> {
+            Err(std::io::Error::from(std::io::ErrorKind::Other))
+        }
+    }
+
+    #[test]
+    fn queue_enable_fails_device_when_iova_translation_fails() {
+        let mut regs = VirtioPciCommonConfig {
+            access_platform: Some(Arc::new(FailingAccessPlatform)),
+            driver_status: 0,
+            config_generation: 0,
+            device_feature_select: 0,
+            driver_feature_select: 0,
+            queue_select: 0,
+            msix_config: Arc::new(AtomicU16::new(0)),
+            msix_queues: Arc::new(Mutex::new(vec![0])),
+        };
+        let mut queues = vec![Queue::new(QUEUE_SIZE).unwrap()];
+
+        // Enabling the queue (0x1c = 1) forces IOVA translation of the rings.
+        // A guest that enables a queue before mapping them must fail the device
+        // gracefully instead of panicking the VMM.
+        regs.write_common_config_word(0x1c, 1, &mut queues);
+
+        assert!(!queues[0].ready());
+        assert_ne!(regs.driver_status & (crate::DEVICE_FAILED as u8), 0);
     }
 }

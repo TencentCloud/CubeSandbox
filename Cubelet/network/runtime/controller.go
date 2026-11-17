@@ -43,9 +43,9 @@ type managedState struct {
 	// with legacyStatePath. Cleanup retires legacy first and this record second.
 	migrationStateRecord *StateRecord
 
-	// restoreBeforeCleanup asks TapCleaner to re-run TAP restore before removing
+	// restoreAfterCleanup asks TapCleaner to restore the link after removing
 	// residue. Startup recovery uses it for no-state TAPs from smooth upgrades.
-	restoreBeforeCleanup bool
+	restoreAfterCleanup bool
 }
 
 // NetworkController coordinates the embedded runtime's durable state, host
@@ -83,6 +83,10 @@ type NetworkController struct {
 	// paying a netlink probe (and its RTNL queueing under bursts) per create.
 	routeMu      sync.Mutex
 	routeEnsured bool
+
+	// attachedFilters records ifindexes whose AttachFilter succeeded in this
+	// process. Destroy deletes the record.
+	attachedFilters sync.Map
 
 	// cubeEgressAdapter is the loopback admin adapter toward CubeEgress. nil when
 	// CubeEgressAdminURL is empty (dev / test setups). The push and
@@ -305,7 +309,16 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 	}}); err != nil {
 		return nil, fmt.Errorf("set egress snat ip failed: %w", err)
 	}
+	// DNS-learned egress rules are written from user space, so the poller is
+	// not optional: without it a sandbox whose policy names a domain would
+	// resolve the name and then be denied the address it resolved. Fail
+	// startup rather than come up with DNS-based policy silently broken.
+	poller, err := cubevs.StartDNSPoller()
+	if err != nil {
+		return nil, fmt.Errorf("start dns poller failed: %w", err)
+	}
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_local_port_range", []byte("10000\t19999"), 0644); err != nil {
+		poller.Stop()
 		return nil, fmt.Errorf("set ip_local_port_range failed: %w", err)
 	}
 	// Direct mode (no cube-router): the datapath resolves on-link neighbors via
@@ -314,14 +327,16 @@ func initCubeVS(cfg Config, device *systemnet.HostDevice, cubeDev *systemnet.Cub
 	// the direct on-link path, so there is nothing to scan.
 	if params.EgressRedirectFlags == 0 {
 		if err := cubevs.StartDirectNeighScanner(params.NodeIP); err != nil {
+			poller.Stop()
 			return nil, fmt.Errorf("start direct neighbor scanner failed: %w", err)
 		}
 	}
+	startDNSPollerStatsDrain(poller)
 	return cubeRouter, nil
 }
 
 // l7MarksConfigPath is the install-time config shared with the
-// cube-proxy-iptables-init script, so the dataplane (eBPF globals) and the
+// cube-egress-iptables-init script, so the dataplane (eBPF globals) and the
 // iptables TPROXY rules stamp/match the same skb->mark values. It is a var so
 // tests can point it at a temp file instead of the real /etc path.
 var l7MarksConfigPath = "/etc/cubeegress/l7-marks.conf"
@@ -378,6 +393,38 @@ func loadL7MarksConfig(params *cubevs.Params) error {
 	return nil
 }
 
+// dnsPollerStatsInterval is how often the DNS poller's counters are logged. The
+// counters are the only way a dropped DNS reply becomes visible — a lost perf
+// sample or a failed re-injection means one resolution silently did not get
+// learned — so they need a reader, but they move slowly enough that a minute is
+// plenty.
+const dnsPollerStatsInterval = time.Minute
+
+// startDNSPollerStatsDrain logs the poller's counters whenever they change.
+// The poller owns its own lifecycle, exactly like StartSessionReaper; the
+// controller only surfaces its health in Cubelet logs.
+func startDNSPollerStatsDrain(poller *cubevs.DNSPoller) {
+	go func() {
+		logger := CubeLog.WithContext(context.Background())
+		ticker := time.NewTicker(dnsPollerStatsInterval)
+		defer ticker.Stop()
+		var last cubevs.DNSPollerStats
+		for range ticker.C {
+			cur := poller.Stats()
+			if cur == last {
+				continue
+			}
+			last = cur
+			if cur.EventsLost > 0 || cur.ParseErrors > 0 || cur.LearnErrors > 0 || cur.InjectErrors > 0 {
+				logger.Warnf("cubevs dns poller: seen=%d lost=%d parse_err=%d learn_err=%d inject_err=%d",
+					cur.EventsSeen, cur.EventsLost, cur.ParseErrors, cur.LearnErrors, cur.InjectErrors)
+				continue
+			}
+			logger.Infof("cubevs dns poller: seen=%d", cur.EventsSeen)
+		}
+	}()
+}
+
 func startCubeVSSessionLogDrain() {
 	sessionEvents := cubevs.StartSessionReaper()
 	go func() {
@@ -401,6 +448,11 @@ func (s *NetworkController) startControllerRuntime() error {
 	// controller to request-serving code so it cannot race a new TAP lifecycle.
 	s.runStaleNetPolicyMapGC()
 	startCubeVSSessionLogDrain()
+
+	// Recovered TAPs attach off this path. acquireTap attaches any ifindex
+	// the background job has not recorded yet. A failure there does not fail
+	// startup; the next acquire retries.
+	s.startAsyncAttachFilters()
 
 	// Pool warmup runs in the background so first-deploy startup
 	// (~63ms × TapInitNum) does not block NewNetworkController and trip
@@ -817,6 +869,9 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		// GetTapFile handoff is a cache hit. Nil after a runtime restart;
 		// GetTapFile then falls back to a lazy open.
 		tap.File = s.takePooledTapFD(entry.TapName)
+		if err := s.ensureAttachFilter(tap.Index); err != nil {
+			return nil, nil, s.rollbackUnattachedAcquire(owner, tap, entry, err)
+		}
 		return tap, entry, nil
 	}
 	ip, err := s.allocator.Allocate()
@@ -832,24 +887,29 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
+	// newTap already attached. Record it so the ensure below does not attach again.
+	s.markFilterAttached(tap.Index)
 	if err := s.resetTapPolicyForPool(tap); err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
 	entry, err = tapPoolEntryFromDevice(tap, "", TapPoolReady)
 	if err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return nil, nil, err
 	}
 	if err := s.tapPool.AddReserved(entry, owner); err != nil {
 		s.tapAdapter.Close(tap.File)
-		_ = s.tapAdapter.Destroy(tap.Index)
+		_ = s.destroyTapIndex(tap.Index)
 		s.allocator.Release(ip)
 		return nil, nil, err
+	}
+	if err := s.ensureAttachFilter(tap.Index); err != nil {
+		return nil, nil, s.rollbackUnattachedAcquire(owner, tap, entry, err)
 	}
 	return tap, entry, nil
 }
@@ -869,7 +929,7 @@ func (s *NetworkController) releaseAcquiredTap(owner string, tap *tapDevice, ent
 					TapName:    tap.Name,
 					TapIfIndex: tap.Index,
 					SandboxIP:  tap.IP.String(),
-				}, tap: tap, restoreBeforeCleanup: true}
+				}, tap: tap, restoreAfterCleanup: true}
 				_ = s.cleanupTapOnce(state, "", "pre_create_reservation_rollback")
 			}
 			return
@@ -1079,7 +1139,10 @@ func (s *NetworkController) cleanupCubeVSTapState(ifindex int, ip net.IP) error 
 	if err := s.cubevsAdapter.CleanupTAPPolicy(uint32(ifindex)); err != nil {
 		return err
 	}
-	return s.cleanupCubeVSTapMetadata(ifindex, ip)
+	if err := s.cleanupCubeVSTapMetadata(ifindex, ip); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *NetworkController) cleanupCubeVSTapMetadata(ifindex int, ip net.IP) error {

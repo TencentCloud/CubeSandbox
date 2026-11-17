@@ -87,7 +87,7 @@ func probe(ctx context.Context, p *ProbeConfig, retCh chan error) {
 	for {
 		select {
 		case <-innerCtx.Done():
-			err = innerCtx.Err()
+			err = deadlineError(innerCtx.Err(), err)
 			goto exitDetect
 		case <-ctx.Done():
 			return
@@ -143,6 +143,21 @@ exitDetect:
 	}
 }
 
+// deadlineError keeps the last attempt's error when the probe runs out of time.
+// With the template defaults (300 attempts, 100ms apart, 30s budget) the
+// deadline usually expires just before the failure threshold, so returning the
+// bare context error hid whether the port refused, timed out or answered badly.
+func deadlineError(ctxErr, last error) error {
+	if last == nil {
+		return ctxErr
+	}
+	code := errorcode.ErrorCode_PortBindingFailed
+	if s, ok := ret.FromError(last); ok {
+		code = s.Code()
+	}
+	return ret.Errorf(code, "%v, last attempt: %v", ctxErr, last)
+}
+
 func wrapError(err error, code errorcode.ErrorCode) error {
 	if err == nil {
 		return nil
@@ -161,6 +176,11 @@ func Telnet(ctx context.Context, p *ProbeConfig) chan error {
 	}
 	go probe(ctx, p, retCh)
 	return retCh
+}
+
+// DoTCPDetect dials address once. address is host:port.
+func DoTCPDetect(address string, dialTimeout time.Duration) error {
+	return doTCPDetect(address, dialTimeout)
 }
 
 func doTCPDetect(address string, dialTimeout time.Duration) error {
@@ -187,6 +207,11 @@ func logError(err error) error {
 	}
 
 	return fmt.Errorf("network connectivity probe failed: %+v, timeout: %+v", opErr, netErr.Timeout())
+}
+
+// DoPing sends one ICMP (or UDP) echo to address.
+func DoPing(ctx context.Context, address string, dialTimeout time.Duration, udp bool) error {
+	return doPing(ctx, address, dialTimeout, udp)
 }
 
 func doPing(ctx context.Context, address string, dialTimeout time.Duration, udp bool) error {

@@ -91,9 +91,10 @@ create_lvstore()
 	local force="$1"
 
 	rpc rcow_create_lvstore "$(printf \
-		'{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","capacity_gib":%d,"force":%s}' \
+		'{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","capacity_gib":%d,"journal_size_mb":%d,"wal_size_mb":%d,"force":%s}' \
 		"${RCOW_LVS_NAME}" "${BUCKET}" "${RCOW_WAL_BDEV}" \
-		"${RCOW_CAPACITY_GB}" "${force}")" 2>&1
+		"${RCOW_CAPACITY_GB}" "${RCOW_JOURNAL_MB}" "${RCOW_WAL_MB}" \
+		"${force}")" 2>&1
 }
 
 attach_lvstore()
@@ -316,16 +317,27 @@ echo "=== [4] force=true still takes the prefix over"
 rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" \
 	>/dev/null 2>&1 || fail "second unload failed"
 
-OUT="$(create_lvstore true)"
-if echo "${OUT}" | grep -qiE '"error"'; then
-	fail "create with force=true was refused: ${OUT}"
-else
+# Model takeover from a node without the old local device. Reusing the formatted
+# WAL image would make SPDK reject a second blobstore for local ENOSPC reasons
+# before the S3 force path is reached.
+rpc bdev_aio_delete "$(printf '{"name":"%s"}' "${RCOW_WAL_BDEV}")" \
+	>/dev/null 2>&1 || fail "could not remove the old WAL bdev"
+rm -f "${RCOW_WAL_IMG}"
+truncate -s 1G "${RCOW_WAL_IMG}"
+rpc bdev_aio_create "$(printf \
+	'{"name":"%s","filename":"%s","block_size":4096}' \
+	"${RCOW_WAL_BDEV}" "${RCOW_WAL_IMG}")" \
+	>/dev/null 2>&1 || fail "could not recreate a clean WAL bdev"
+
+if OUT="$(create_lvstore true)"; then
 	pass "create with force=true goes through"
 	if grep -q "force=true, so not checking" "${RCOW_LOG}" 2>/dev/null; then
 		pass "and it is loud about having skipped the check"
 	else
 		fail "no warning logged for the skipped check"
 	fi
+else
+	fail "create with force=true was refused: ${OUT}"
 fi
 
 # It really did create: the volume from before must be gone.
@@ -334,6 +346,46 @@ if rpc bdev_get_bdevs "$(printf '{"name":"%s/guard-a"}' "${RCOW_LVS_NAME}")" \
 	fail "guard-a survived a forced create, so it did not actually create"
 else
 	pass "the forced create really formatted: guard-a is gone as expected"
+fi
+
+# ==========================================================================
+echo ""
+echo "=== [4b] attach refuses when meta/checkpoint was wiped after a checkpoint"
+#
+# Once the super block records checkpoint_lsn > 0, the journal ring may already
+# have truncated records at or below that LSN. Treating an out-of-band deletion
+# of `<prefix>/meta/checkpoint` as "no checkpoint ever ran" would replay from
+# whatever remains in the ring and come up missing earlier mappings.
+#
+# This runs after [4], so that [4] still proves force=true can take over a prefix
+# while its checkpoint object exists.
+
+rpc rcow_checkpoint_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" \
+	>/dev/null 2>&1 && pass "checkpointed the replacement lvstore" \
+	|| fail "checkpoint before missing-checkpoint check failed"
+
+rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" \
+	>/dev/null 2>&1 || fail "unload before missing-checkpoint check failed"
+
+rcow_load_credentials
+python3 "${PREFIX_RM}" -e "$(rcow_cfg_get endpoint)" -b "${BUCKET}" \
+	-r "$(rcow_cfg_get region)" -p "${RCOW_LVS_NAME}/meta/checkpoint" \
+	>/dev/null 2>&1 || fail "could not delete ${RCOW_LVS_NAME}/meta/checkpoint"
+
+if OUT="$(attach_lvstore)"; then
+	fail "attach succeeded despite missing meta/checkpoint: ${OUT}"
+	rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${RCOW_LVS_NAME}")" \
+		>/dev/null 2>&1
+elif echo "${OUT}" | grep -qE '"code"[[:space:]]*:[[:space:]]*-2([,}])'; then
+	pass "attach returns ENOENT when meta/checkpoint is missing after a checkpoint"
+	if grep -q "${RCOW_LVS_NAME}/meta/checkpoint' is missing in S3" \
+			"${RCOW_LOG}" 2>/dev/null; then
+		pass "and the log names the missing meta/checkpoint object"
+	else
+		fail "missing meta/checkpoint was not named in the target log"
+	fi
+else
+	fail "attach failed with the wrong error for a missing checkpoint: ${OUT}"
 fi
 
 # ==========================================================================

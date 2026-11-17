@@ -2,7 +2,7 @@
 
 This guide covers three advanced APIs provided by the Cube Sandbox Python SDK:
 
-- **Snapshot**: Persists the complete state (memory + filesystem) of a running sandbox as a reusable image. The snapshot can later be used to spawn new sandboxes or trigger a rollback.
+- **Snapshot**: Persists the state of a running sandbox as a reusable image. A **full** snapshot keeps memory and filesystem; an **fs-only** snapshot keeps the filesystem alone. Either can spawn new sandboxes; rollback requires a full snapshot.
 - **Clone**: Calls `clone()` on a running sandbox to immediately derive N fully independent copies. Each copy starts from the source sandbox's current state and runs in isolation.
 - **Rollback**: Restores a running sandbox to a previously captured snapshot state in place — the sandbox ID stays the same and execution can continue right away.
 
@@ -49,7 +49,7 @@ export CUBE_TEMPLATE_ID=tpl-xxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Snapshot
 
-`sb.create_snapshot()` persists the sandbox's current state (filesystem + memory) as a snapshot and returns a `SnapshotInfo` object. The `snapshot_id` field can be passed directly to `Sandbox.create(template=...)`.
+`sb.create_snapshot()` persists the sandbox's current state (filesystem + memory) as a snapshot and returns a `SnapshotInfo` object. An optional `name` must not start with `tpl-` or `snap-` (rejected with HTTP 400), since those prefixes denote IDs. The `snapshot_id` field can be passed directly to `Sandbox.create(template=...)`.
 
 ```python
 from cubesandbox import Sandbox
@@ -60,7 +60,71 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
     print(f"snapshot: {snap.snapshot_id}")
 ```
 
-A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id)` to clean up when it is no longer needed.
+A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id_or_name)` to clean up when it is no longer needed. It accepts either a snapshot ID or the name you passed to `create_snapshot`, and returns `True` when the snapshot was deleted or `False` when it did not exist. The SDK only matches snapshots, never templates: a name that matches no snapshot returns `False` even if a template alias has that name, and the template is left untouched. If a name matches several snapshots the call fails with HTTP 409 and nothing is deleted; use the `snap-` ID instead. This requires a CubeAPI that supports `snapshot_only`; older servers ignore it and still route a name that matches no snapshot to the template of that name.
+
+### Filesystem-only snapshots
+
+Pass `mode="fs-only"` to capture the filesystem without guest memory. The guest
+is never paused: it keeps running and stays writable as soon as the call
+returns. The price is that a sandbox created from such a snapshot **cold boots**
+— the files are there, but every process is new.
+
+```python
+snap = sb.create_snapshot(mode="fs-only")
+assert snap.mode == "fs-only"
+
+child = Sandbox.create(template=snap.snapshot_id)
+# Files written before the snapshot are visible...
+out = child.run_code("print(open('/tmp/data.txt').read())").logs.stdout[0]
+assert out.strip() == "hello"
+# ...but processes are not.
+```
+
+What to expect:
+
+| Aspect | `mode="full"` (default) | `mode="fs-only"` |
+|---|---|---|
+| Guest memory | saved | not saved |
+| Source sandbox during the call | briefly paused | stays running |
+| Sandbox created from it | memory restored, processes continue | cold boot, fresh processes |
+| `pause()` / `resume()` afterwards | memory kept | memory kept (first pause is a full capture) |
+| `rollback(snapshot)` to it | supported | **rejected** (`snapshot_filesystem_only_rollback_unsupported`) |
+| External mounts (plugin volume, host mount) | recorded in the snapshot and re-mounted | not recorded; re-declare them when you create from the snapshot |
+| `restart` with a restart policy | files preserved | files preserved (the captured writable layer is reused) |
+
+A few behaviors worth knowing:
+
+- Every fs-only snapshot is an independent point-in-time image, not an
+  incremental chain — take N snapshots and you store N images. Size for that
+  rather than assuming "filesystem only, so it must be small"; the real
+  footprint depends on the backend's CoW support.
+- A sandbox created from an fs-only snapshot behaves like any other sandbox
+  afterwards: `restart` reuses the captured writable layer so files survive,
+  and you can take another fs-only snapshot of it later.
+- An fs-only package records the root filesystem only and carries no external
+  mounts. Creating from one:
+  - **Re-declare** the plugin volumes and host mounts you need, including the
+    container paths; anything omitted is not mounted.
+  - There is no must-match check: the snapshot records no mounts, so the request
+    alone decides.
+  - The child may run on any node and a declared host path is resolved there; a
+    mount that cannot be established (host path missing, Volume gone) fails the
+    create instead of leaving an empty directory.
+
+If the call fails, the error code tells you why:
+
+| HTTP | Error code | Cause | What to do |
+|---|---|---|---|
+| 409 | `snapshot_filesystem_only_unsupported_node` | The control plane or the node agent does not support the fs-only mode | Upgrade whichever side is older; it never falls back to a full snapshot silently |
+| 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | The node cannot freeze the filesystem / this rootfs type | Cluster-side capability gap; check the node before retrying |
+| 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | Freeze or thaw failed mid-capture | Cluster-side problem; check the node before retrying |
+| 409 | `snapshot_filesystem_only_shared_volume_unsupported` | The sandbox has a **writable** plugin volume | A writable plugin volume is not part of the captured rootfs; create the sandbox without it before taking the snapshot |
+| 409 | `snapshot_filesystem_only_multi_container_unsupported` | The sandbox has extra user containers | One package records one writable layer; use a single-container sandbox |
+
+The response `mode` always reports what was actually recorded. When it differs
+from what you asked for, the call fails with 409 `snapshot_mode_conflict`
+instead of returning the artifact, so you never silently receive a full
+snapshot.
 
 ### Listing snapshots
 
@@ -109,9 +173,40 @@ Clones returned by `clone()` satisfy three properties:
 | **Isolation** | Writes in one clone are invisible to others and to the source sandbox |
 | **Continuity** | The source sandbox keeps running after `clone()` returns, unaffected |
 
+## Fork
+
+`sb.fork(count=N)` derives N running copies in a **single server-side call**: the backend snapshots the source once and derives every copy from that snapshot. The source keeps running, and the temporary snapshot is managed by the server — no client-side cleanup.
+
+```python
+src = Sandbox.create(template=TEMPLATE_ID)
+forks = src.fork(count=3)
+for sb in forks:
+    if isinstance(sb, Sandbox):
+        sb.run_code("print('alive')")  # a running copy
+    else:
+        print(f"fork failed: {sb}")    # that slot's exception
+```
+
+Each fork succeeds or fails independently. The return value has exactly `count` entries — a `Sandbox` or the `Exception` that prevented that fork from starting. Partial success keeps the copies and does not raise; only whole-request failures raise (e.g. the source sandbox does not exist).
+
+### clone vs fork
+
+| | `clone(n=N)` | `fork(count=N)` |
+|---|---|---|
+| Failure semantics | All-or-nothing: failures kill siblings and raise | Per-fork independent: partial success keeps winners |
+| Orchestration | Client-side: snapshot + N creates | One server-side call (single snapshot, N derivations) |
+| Temp snapshot | Deleted by the SDK after the last clone is killed | Managed by the server |
+| Concurrency | `concurrency` option (default 1) | Server-governed |
+
+### Parameters and errors
+
+- `count`: 1..100, default 1. Out-of-range values raise in every SDK.
+- `timeout` — idle TTL of the forked sandboxes; the source is unaffected. Units differ per SDK: **seconds** (Python), **milliseconds** via `timeoutMs` (Node), a `time.Duration` (Go). The wire unit is seconds.
+- `404` source sandbox not found. `409` source not in a forkable state — a freshly created sandbox may need a moment before it can be snapshotted; retry shortly.
+
 ## Rollback
 
-`sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable.
+`sb.rollback(snapshot_id)` restores the sandbox **in place** to the specified snapshot state: the filesystem is fully reset, the **sandbox ID stays the same**, and the `sb` object remains usable. Rollback requires a **full** snapshot — rolling back to an fs-only snapshot is rejected with `snapshot_filesystem_only_rollback_unsupported` (see the comparison table above).
 
 ```python
 sb = Sandbox.create(template=TEMPLATE_ID)
@@ -142,10 +237,10 @@ with Sandbox.create(template=new_snap.snapshot_id) as forked:
 - **Snapshots are not free.** Each snapshot corresponds to a full image in persistent storage. Delete snapshots when they are no longer needed, or run `list_snapshots()` periodically to clean up.
 - **`with` blocks do not delete snapshots.** The context manager only calls `kill()` on the sandbox. Snapshots created with `create_snapshot()` must be deleted explicitly with `Sandbox.delete_snapshot()`.
 - **`clone()` cleans up its internal snapshot automatically.** For temporary fan-out you do not need to manage snapshot lifecycle yourself — just call `clone()`.
-- **For large-scale fan-out**, prefer `clone(n=N, concurrency=C)`. The SDK handles cleanup on failure and avoids orphaned resources.
+- **For large-scale fan-out**, prefer `fork(count=N)` — one round-trip, per-fork independence, server-managed cleanup. Use `clone(n=N, concurrency=C)` when you need all-or-nothing semantics.
 
 ## Reference
 
-- [Cross-Node Snapshots](./cross-node-snapshot.md) — S3 backend, `remote_status=ready`, and scheduler rules for Resume / FromSnap on another node
+- [Cross-Node Migration](./cross-node-snapshot/requirements.md) — shared backends, `remote_status=ready`, and scheduler rules for Resume / FromSnap on another node
 - Example code: [`examples/snapshot-rollback-clone/`](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/snapshot-rollback-clone)
 - SDK source: [`sdk/python/`](https://github.com/TencentCloud/CubeSandbox/tree/master/sdk/python)

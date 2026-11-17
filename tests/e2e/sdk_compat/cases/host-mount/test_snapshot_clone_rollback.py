@@ -17,7 +17,6 @@ not collide or leave payload files on the host.
 from __future__ import annotations
 
 import shlex
-import time
 import uuid
 from dataclasses import dataclass, replace
 
@@ -26,7 +25,7 @@ import pytest
 from adapters import create_adapter_with_capacity_retry
 from framework.assertions import assert_command_ok
 from framework.capabilities import HOST_MOUNT, ROLLBACK_CLONE
-from framework.cleanup import safe_kill
+from framework.cleanup import delete_snapshot_after_runtime_release, safe_kill
 from framework.host_mount import (
     host_mount_metadata,
     mount_option,
@@ -126,28 +125,6 @@ def _assert_ro_mount_rejects_write(sandbox, path: str, *, timeout: int) -> None:
     )
 
 
-def _delete_snapshot_after_runtime_release(
-    sandbox,
-    snapshot_id: str,
-    *,
-    timeout: float,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            sandbox.delete_snapshot(snapshot_id)
-            return
-        except Exception as exc:  # noqa: BLE001 - normalize asynchronous ref release
-            message = str(exc).lower()
-            retryable = (
-                "active runtime ref" in message
-                or "attempt is already in progress" in message
-            )
-            if not retryable or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
-
-
 def test_snapshot_restore_reverts_guest_and_keeps_external_mounts_current(
     sdk_sandbox,
     sdk_backend,
@@ -241,7 +218,7 @@ def test_snapshot_restore_reverts_guest_and_keeps_external_mounts_current(
             cleanup_errors.extend(safe_kill(restored, sdk_e2e_config))
         for snapshot_id in reversed(snapshot_ids):
             try:
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,
@@ -362,7 +339,7 @@ def test_snapshot_restore_chain_remaps_host_mounts_each_generation(
             cleanup_errors.extend(safe_kill(first_restore, sdk_e2e_config))
         for snapshot_id in reversed(snapshot_ids):
             try:
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,
@@ -466,7 +443,7 @@ def test_rollback_restores_guest_state_but_not_host_mount_data(
         cleanup_errors.extend(safe_kill(sdk_sandbox, sdk_e2e_config))
         for snapshot_id in reversed(snapshot_ids):
             try:
-                _delete_snapshot_after_runtime_release(
+                delete_snapshot_after_runtime_release(
                     sdk_sandbox,
                     snapshot_id,
                     timeout=sdk_e2e_config.default_timeout,

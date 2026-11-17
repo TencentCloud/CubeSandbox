@@ -35,6 +35,9 @@ const PAUSE_RESUME_ROUTE_TIMEOUT: Duration = Duration::from_secs(120);
 /// delete (`DELETE /templates/:id`).
 const SNAPSHOT_LONG_ROUTE_TIMEOUT: Duration = Duration::from_secs(240);
 
+/// Fork = snapshot + derive fan-out on CubeMaster.
+const FORK_ROUTE_TIMEOUT: Duration = Duration::from_secs(1560);
+
 pub fn build_router(state: AppState) -> Router {
     let auth_configured = state
         .config
@@ -59,11 +62,16 @@ pub fn build_router(state: AppState) -> Router {
         Router::new().merge(build_e2b_snapshot_long_router(&state, auth_configured)),
         SNAPSHOT_LONG_ROUTE_TIMEOUT,
     );
+    let fork_router = apply_http_layers(
+        Router::new().merge(build_fork_routes(&state, auth_configured)),
+        FORK_ROUTE_TIMEOUT,
+    );
 
     Router::new()
         .merge(standard_router)
         .merge(pause_resume_router)
         .merge(snapshot_long_router)
+        .merge(fork_router)
         .with_state(state)
 }
 
@@ -88,7 +96,12 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/sandboxes", get(sandboxes::list_sandboxes))
         .route("/sandboxes", post(sandboxes::create_sandbox))
         .route("/v2/sandboxes", get(sandboxes::list_sandboxes_v2))
+        .route("/v2/sandboxes", post(sandboxes::create_sandbox_v2))
         .route("/sandboxes/:sandboxID", get(sandboxes::get_sandbox))
+        .route(
+            "/sandboxes/:sandboxID/exposed-ports/:containerPort",
+            get(sandboxes::get_sandbox_exposed_port),
+        )
         .route("/sandboxes/:sandboxID", delete(sandboxes::kill_sandbox))
         .route(
             "/sandboxes/:sandboxID/logs",
@@ -130,6 +143,10 @@ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Rou
         .route(
             "/sandboxes/:sandboxID/connect",
             post(sandboxes::connect_sandbox),
+        )
+        .route(
+            "/v2/sandboxes/:sandboxID/connect",
+            post(sandboxes::connect_sandbox_v2),
         );
 
     with_auth_and_rate_limit(routes, state, auth_configured)
@@ -146,6 +163,14 @@ fn build_long_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<
             "/sandboxes/:sandboxID/rollback",
             post(snapshots::rollback_sandbox),
         );
+
+    with_auth_and_rate_limit(routes, state, auth_configured)
+}
+
+/// Fork runs on its own budget: the snapshot step alone may take the full
+/// 15-minute snapshot budget, before any derivation starts.
+fn build_fork_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
+    let routes = Router::new().route("/sandboxes/:sandboxID/fork", post(sandboxes::fork_sandbox));
 
     with_auth_and_rate_limit(routes, state, auth_configured)
 }
@@ -195,6 +220,7 @@ fn build_long_template_routes(state: &AppState, auth_configured: bool) -> Router
 
 fn build_volume_routes(state: &AppState, auth_configured: bool) -> Router<AppState> {
     let routes = Router::new()
+        .route("/v2/volumes", post(volumes::create_volume_v2))
         .route(
             "/volumes",
             get(volumes::list_volumes).post(volumes::create_volume),
@@ -255,7 +281,7 @@ mod tests {
     use axum::{
         extract::Json,
         http::{header::RETRY_AFTER, StatusCode},
-        routing::delete,
+        routing::{delete, post},
         Router,
     };
     use axum_test::TestServer;
@@ -343,11 +369,362 @@ mod tests {
         );
     }
 
+    /// Mock CubeMaster for `DELETE /templates/:id` routing tests. Records every
+    /// call so tests can assert which resource was (not) touched.
+    #[derive(Clone)]
+    struct DeleteMock {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        snapshot_ids: Vec<&'static str>,
+        template_exists: bool,
+    }
+
+    async fn delete_routing_server(
+        snapshot_ids: Vec<&'static str>,
+        template_exists: bool,
+    ) -> (TestServer, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{
+            extract::{Path, State},
+            routing::get,
+        };
+
+        type Mock = State<DeleteMock>;
+
+        async fn list_snapshots(State(m): Mock) -> Json<Value> {
+            m.calls.lock().unwrap().push("list_snapshots".into());
+            let items: Vec<Value> = m
+                .snapshot_ids
+                .iter()
+                .map(|id| serde_json::json!({ "snapshot_id": id, "status": "READY" }))
+                .collect();
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "data": items,
+                "next_token": ""
+            }))
+        }
+
+        async fn get_template(State(m): Mock) -> Json<Value> {
+            m.calls.lock().unwrap().push("get_template".into());
+            if m.template_exists {
+                Json(serde_json::json!({
+                    "RequestID": "req-1",
+                    "ret": { "ret_code": 0, "ret_msg": "success" },
+                    "template_id": "tpl-abc",
+                    "status": "ready",
+                    "replicas": []
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "RequestID": "req-1",
+                    "ret": { "ret_code": 130404, "ret_msg": "template not found" }
+                }))
+            }
+        }
+
+        async fn delete_snapshot(State(m): Mock, Path(id): Path<String>) -> Json<Value> {
+            m.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete_snapshot:{id}"));
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "snapshot_id": id,
+                "operation_id": "op-1",
+                "status": "READY"
+            }))
+        }
+
+        async fn delete_template(State(m): Mock, Json(body): Json<Value>) -> Json<Value> {
+            let id = body["template_id"].as_str().unwrap_or_default();
+            m.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete_template:{id}"));
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" }
+            }))
+        }
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mock = DeleteMock {
+            calls: calls.clone(),
+            snapshot_ids,
+            template_exists,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/cube/snapshot", get(list_snapshots))
+                    .route("/cube/snapshot/:id", delete(delete_snapshot))
+                    .route("/cube/template", get(get_template).delete(delete_template))
+                    .with_state(mock),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..ServerConfig::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+        (server, calls)
+    }
+
+    #[tokio::test]
+    async fn delete_by_snapshot_name_returns_204_with_operation_header() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], false).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "get_template", "delete_snapshot:snap-x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_shared_by_template_and_snapshot_returns_409_and_deletes_nothing() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 409);
+        assert!(
+            error.message.contains("template alias and a snapshot name"),
+            "unexpected message: {}",
+            error.message
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "get_template"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_duplicate_snapshot_name_returns_409_and_deletes_nothing() {
+        let (server, calls) = delete_routing_server(vec!["snap-a", "snap-b"], false).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 409);
+        assert!(error.message.contains("ambiguous"), "{}", error.message);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+    }
+
+    #[tokio::test]
+    async fn delete_by_tpl_id_goes_to_template_without_snapshot_lookup() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server.delete("/templates/tpl-abc").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert!(resp.maybe_header("x-operation-id").is_none());
+        assert_eq!(*calls.lock().unwrap(), vec!["delete_template:tpl-abc"]);
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_without_snapshot_falls_through_to_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server.delete("/templates/prod").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "delete_template:prod"]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_by_snap_id_deletes_snapshot_directly() {
+        let (server, calls) = delete_routing_server(vec![], false).await;
+
+        let resp = server.delete("/templates/snap-abc").await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(*calls.lock().unwrap(), vec!["delete_snapshot:snap-abc"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_name_miss_is_404_and_never_deletes_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(*calls.lock().unwrap(), vec!["list_snapshots"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_ignores_same_named_template_and_deletes_snapshot() {
+        let (server, calls) = delete_routing_server(vec!["snap-x"], true).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.header("x-operation-id"), "op-1");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["list_snapshots", "delete_snapshot:snap-x"]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_tpl_id_is_404_and_never_deletes_template() {
+        let (server, calls) = delete_routing_server(vec![], true).await;
+
+        let resp = server
+            .delete("/templates/tpl-abc")
+            .add_query_param("snapshot_only", "true")
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_duplicate_names_are_409_and_snap_id_is_direct() {
+        let (server, calls) = delete_routing_server(vec!["snap-a", "snap-b"], false).await;
+
+        let resp = server
+            .delete("/templates/prod")
+            .add_query_param("snapshot_only", "true")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::CONFLICT);
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("delete_")));
+
+        let resp = server
+            .delete("/templates/snap-a")
+            .add_query_param("snapshot_only", "true")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap(),
+            "delete_snapshot:snap-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_with_reserved_prefix_name_is_400() {
+        let (server, calls) = delete_routing_server(vec![], false).await;
+
+        let resp = server
+            .post("/sandboxes/sb-1/snapshots")
+            .json(&serde_json::json!({ "name": "snap-backup" }))
+            .await;
+
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+        let error: crate::models::ApiError = resp.json();
+        assert_eq!(error.code, 400);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_create_forwards_flattened_body_without_v2_flags() {
+        use axum::{extract::State, routing::post};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().unwrap() = Some(body);
+            Json(serde_json::json!({
+                "requestID": "req-1",
+                "sandbox_id": "sb-123",
+                "ret": { "ret_code": 0, "ret_msg": "ok" }
+            }))
+        }
+
+        let capture = Capture::default();
+        let server_capture = capture.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/cube/sandbox", post(create_handler))
+                    .with_state(server_capture),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let mut config = ServerConfig::default();
+        config.cubemaster_url = format!("http://{address}");
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        let resp = server
+            .post("/v2/sandboxes")
+            .json(&serde_json::json!({
+                "templateID": "tpl-1",
+                "timeout": 120,
+                "autoPauseMemory": true
+            }))
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::CREATED);
+
+        let body = capture.body.lock().unwrap().clone().expect("create body");
+        // The v1 body reaches CubeMaster with the template id intact.
+        assert_eq!(
+            body["annotations"]["cube.master.appsnapshot.template.id"],
+            "tpl-1"
+        );
+        // v2-only autoPauseMemory must not leak through to CubeMaster.
+        assert!(body.get("autoPauseMemory").is_none());
+    }
+
     #[tokio::test]
     async fn preserves_root_e2b_routes() {
         let server = test_server().await;
 
-        server.get("/health").await.assert_status_ok();
+        let health = server.get("/health").await;
+        health.assert_status_ok();
+        health.assert_json(&serde_json::json!({"status": "ok"}));
         assert_ne!(
             server.get("/v2/sandboxes").await.status_code(),
             StatusCode::NOT_FOUND
@@ -359,10 +736,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_sandbox_create_and_connect_routes_are_mounted() {
+        let server = test_server().await;
+
+        // POST /v2/sandboxes is mounted: with an unreachable CubeMaster it must
+        // fail with a 5xx, never 404/405 (which would mean the route is missing).
+        let resp = server
+            .post("/v2/sandboxes")
+            .json(&serde_json::json!({ "templateID": "tpl-1" }))
+            .await;
+        assert_ne!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_ne!(resp.status_code(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // POST /v2/sandboxes/{id}/connect is mounted (empty body is valid).
+        let resp = server
+            .post("/v2/sandboxes/sb-1/connect")
+            .json(&serde_json::json!({}))
+            .await;
+        assert_ne!(resp.status_code(), StatusCode::NOT_FOUND);
+        assert_ne!(resp.status_code(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn v2_create_rejects_unsupported_auto_pause_memory_false() {
+        let server = test_server().await;
+
+        let resp = server
+            .post("/v2/sandboxes")
+            .json(&serde_json::json!({
+                "templateID": "tpl-1",
+                "autoPauseMemory": false
+            }))
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn v2_connect_rejects_unsupported_memory_false() {
+        let server = test_server().await;
+
+        let resp = server
+            .post("/v2/sandboxes/sb-1/connect")
+            .json(&serde_json::json!({ "memory": false }))
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn resume_and_connect_reject_invalid_timeout_before_cubemaster() {
         let server = test_server().await;
 
-        for path in ["/sandboxes/sb-1/resume", "/sandboxes/sb-1/connect"] {
+        for path in [
+            "/sandboxes/sb-1/resume",
+            "/sandboxes/sb-1/connect",
+            "/v2/sandboxes/sb-1/connect",
+        ] {
             let response = server
                 .post(path)
                 .json(&serde_json::json!({ "timeout": -2 }))
@@ -374,11 +802,17 @@ mod tests {
             );
         }
 
-        let response = server
-            .post("/sandboxes/sb-1/connect")
-            .json(&serde_json::json!({ "timeout": 0 }))
-            .await;
-        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+        for path in ["/sandboxes/sb-1/connect", "/v2/sandboxes/sb-1/connect"] {
+            let response = server
+                .post(path)
+                .json(&serde_json::json!({ "timeout": 0 }))
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "path={path}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -579,5 +1013,477 @@ mod tests {
             resp.status_code(),
             resp.text(),
         );
+    }
+
+    /// `GET /snapshots` documents `limit` as "default 100, max 100". CubeAPI
+    /// used to forward the value to CubeMaster untouched, so CubeAPI's own
+    /// documented default was never applied — callers omitting `limit` got
+    /// CubeMaster's default of 20 instead of the advertised 100.
+    ///
+    /// This exercises the whole handler → service → CubeMaster path and
+    /// asserts the value that actually leaves the process, so removing the
+    /// normalisation at any layer turns this red.
+    #[tokio::test]
+    async fn list_snapshots_clamps_limit_before_reaching_cubemaster() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{extract::Query, routing::get, Json, Router};
+        use serde_json::Value;
+
+        // CubeMaster receives `limit` as a query parameter (see
+        // `cubemaster::CubeMasterClient::list_snapshots`), so recording the
+        // observed query string is enough to pin the value end to end.
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_handler = Arc::clone(&seen);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            let router = Router::new().route(
+                "/cube/snapshot",
+                get(move |Query(params): Query<Value>| {
+                    let seen = Arc::clone(&seen_for_handler);
+                    async move {
+                        seen.lock().unwrap().push(
+                            params
+                                .get("limit")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                        );
+                        Json(serde_json::json!({
+                            "requestID": "list-snapshots-request",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "data": [],
+                            "next_token": "",
+                        }))
+                    }
+                }),
+            );
+            axum::serve(listener, router)
+                .await
+                .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (query, expected) in [
+            // Omitted → documented default.
+            (None, "100"),
+            // Oversized → capped at the documented maximum.
+            (Some("100000"), "100"),
+            (Some("101"), "100"),
+            // Non-positive → falls back to the default rather than asking
+            // CubeMaster for no page at all.
+            (Some("0"), "100"),
+            (Some("-5"), "100"),
+            // In-range values pass through untouched.
+            (Some("1"), "1"),
+            (Some("100"), "100"),
+        ] {
+            // `axum_test`'s `get()` treats a `?`-bearing string as a path, so
+            // the parameter is attached through `add_query_param` instead.
+            let mut request = server.get("/snapshots");
+            if let Some(limit) = query {
+                request = request.add_query_param("limit", limit);
+            }
+            let resp = request.await;
+            assert_eq!(
+                resp.status_code(),
+                StatusCode::OK,
+                "GET /snapshots?limit={query:?} should succeed (got {} body={:?})",
+                resp.status_code(),
+                resp.text(),
+            );
+            let observed = seen.lock().unwrap().last().cloned().flatten();
+            assert_eq!(
+                observed.as_deref(),
+                Some(expected),
+                "GET /snapshots?limit={query:?} must send limit={expected} to \
+                 CubeMaster, got {observed:?} — the documented \"default 100, \
+                 max 100\" contract is not being applied"
+            );
+        }
+    }
+
+    /// `GET /snapshots?name=` must reach CubeMaster, and an empty/whitespace
+    /// name must be dropped rather than relayed as an empty query parameter.
+    #[tokio::test]
+    async fn list_snapshots_forwards_name_to_cubemaster() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{extract::Query, routing::get, Json, Router};
+        use serde_json::Value;
+
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_handler = Arc::clone(&seen);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            let router = Router::new().route(
+                "/cube/snapshot",
+                get(move |Query(params): Query<Value>| {
+                    let seen = Arc::clone(&seen_for_handler);
+                    async move {
+                        seen.lock().unwrap().push(
+                            params
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                        );
+                        Json(serde_json::json!({
+                            "requestID": "list-snapshots-request",
+                            "ret": { "ret_code": 0, "ret_msg": "ok" },
+                            "data": [],
+                            "next_token": "",
+                        }))
+                    }
+                }),
+            );
+            axum::serve(listener, router)
+                .await
+                .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        let server = TestServer::new(build_router(state)).expect("router should build");
+
+        for (query, expected) in [
+            (Some("prod"), Some("prod")),
+            (Some("snap-abc123"), Some("snap-abc123")),
+            (Some("   "), None),
+            (None, None),
+        ] {
+            let mut request = server.get("/snapshots");
+            if let Some(name) = query {
+                request = request.add_query_param("name", name);
+            }
+            let resp = request.await;
+            assert_eq!(
+                resp.status_code(),
+                StatusCode::OK,
+                "GET /snapshots?name={query:?} should succeed (got {} body={:?})",
+                resp.status_code(),
+                resp.text(),
+            );
+            let observed = seen.lock().unwrap().last().cloned().flatten();
+            assert_eq!(
+                observed.as_deref(),
+                expected,
+                "GET /snapshots?name={query:?} must send name={expected:?} to CubeMaster, got {observed:?}"
+            );
+        }
+    }
+
+    /// `GET /v2/sandboxes` declared a `nextToken` query parameter and then
+    /// ignored it: the handler never read it and the service always asked
+    /// CubeMaster from the first entry, so every page returned the same first
+    /// `limit` sandboxes and a client could never reach past it.
+    ///
+    /// Driven through the real router so the assertions cover what a client
+    /// actually observes — the `x-next-token` header and the cursor being
+    /// accepted on the next request.
+    #[tokio::test]
+    async fn list_sandboxes_v2_returns_a_usable_next_token_header() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-2", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-3", "host_id": "h", "status": 1, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        let first = server
+            .get("/v2/sandboxes")
+            .add_query_param("limit", "2")
+            .await;
+        assert_eq!(first.status_code(), StatusCode::OK);
+        let cursor = first
+            .headers()
+            .get("x-next-token")
+            .expect("a third sandbox remains, so the cursor header must be present")
+            .to_str()
+            .expect("the cursor should be valid ASCII")
+            .to_string();
+        assert!(!cursor.is_empty(), "the cursor must carry a value");
+
+        let first_page: Vec<Value> = first.json();
+        assert_eq!(first_page.len(), 2, "limit caps the page");
+
+        let second = server
+            .get("/v2/sandboxes")
+            .add_query_param("limit", "2")
+            .add_query_param("nextToken", cursor.clone())
+            .await;
+        assert_eq!(second.status_code(), StatusCode::OK);
+        let trailing_cursor = second
+            .headers()
+            .get("x-next-token")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            trailing_cursor.is_empty(),
+            "the last page must not advertise another one, got {trailing_cursor:?}"
+        );
+
+        let second_page: Vec<Value> = second.json();
+        assert_eq!(second_page.len(), 1, "only one sandbox is left");
+        assert_eq!(
+            second_page[0]["sandboxID"], "sb-3",
+            "the cursor must continue past the first page"
+        );
+    }
+
+    /// A cursor the client could not have obtained from us is a client mistake,
+    /// not a reason to silently restart from the first page — which is exactly
+    /// the behaviour being replaced.
+    #[tokio::test]
+    async fn list_sandboxes_v2_rejects_an_unknown_next_token() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [{ "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" }]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+        let response = server
+            .get("/v2/sandboxes")
+            .add_query_param("limit", "2")
+            .add_query_param("nextToken", "garbage")
+            .await;
+
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+        let error: crate::models::ApiError = response.json();
+        assert_eq!(error.code, 400);
+    }
+
+    /// `limit` used to fall through `.max(1)`, so `limit=0`/`-1` silently
+    /// returned one item per page — and because every page costs a full
+    /// node-window walk, a client paging one item at a time forced one cluster
+    /// sweep *per sandbox*. It is rejected instead.
+    #[tokio::test]
+    async fn list_sandboxes_v2_rejects_an_out_of_range_limit() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [{ "sandbox_id": "sb-1", "host_id": "h", "status": 1, "template_id": "t" }]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+        for limit in ["0", "-1", "1001"] {
+            let response = server
+                .get("/v2/sandboxes")
+                .add_query_param("limit", limit)
+                .await;
+
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "limit={limit} must be rejected rather than silently clamped"
+            );
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 400);
+        }
+    }
+
+    /// An E2B client sends `state=running,paused`; a typo anywhere in the value rejects the
+    /// whole request, as E2B's request validator does, instead of listing a subset.
+    #[tokio::test]
+    async fn list_sandboxes_v2_filters_by_state_and_rejects_a_bad_state() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-run", "host_id": "h", "status": 1, "template_id": "t" },
+                    { "sandbox_id": "sb-exited", "host_id": "h", "status": 2, "template_id": "t" },
+                    { "sandbox_id": "sb-pausing", "host_id": "h", "status": 4, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        let ok = server
+            .get("/v2/sandboxes")
+            .add_query_param("state", "running,paused")
+            .await;
+        assert_eq!(ok.status_code(), StatusCode::OK);
+        let body: Vec<Value> = ok.json();
+        let listed: Vec<(&str, &str)> = body
+            .iter()
+            .map(|sb| {
+                (
+                    sb["sandboxID"].as_str().unwrap_or_default(),
+                    sb["state"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(listed, [("sb-pausing", "paused"), ("sb-run", "running")]);
+
+        for state in ["running,pause", "pause", "", "running,"] {
+            let response = server
+                .get("/v2/sandboxes")
+                .add_query_param("state", state)
+                .await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "state={state:?} must be rejected rather than ignored"
+            );
+            let error: crate::models::ApiError = response.json();
+            assert_eq!(error.code, 400);
+        }
+    }
+
+    /// E2B's SDKs percent-encode `metadata` twice, so `a b/c` arrives as `a%2520b%2Fc`; both list
+    /// routes must still select it, and a value that is not key=value pairs is a 400, not "everything".
+    #[tokio::test]
+    async fn list_sandboxes_filter_metadata_as_e2b_sdks_send_it_and_reject_bad_values() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-special", "host_id": "h", "status": 1, "template_id": "t",
+                      "labels": { "owner": "a b/c" } },
+                    { "sandbox_id": "sb-other", "host_id": "h", "status": 1, "template_id": "t",
+                      "labels": { "owner": "x" } }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        for path in ["/sandboxes", "/v2/sandboxes"] {
+            for metadata in ["owner=a%2520b%2Fc", "owner=a b/c"] {
+                let response = server.get(path).add_query_param("metadata", metadata).await;
+                assert_eq!(response.status_code(), StatusCode::OK, "{path} {metadata}");
+                let body: Vec<Value> = response.json();
+                let ids: Vec<_> = body
+                    .iter()
+                    .filter_map(|sb| sb["sandboxID"].as_str())
+                    .collect();
+                assert_eq!(ids, ["sb-special"], "{path} {metadata}");
+            }
+
+            // E2B's JS SDK sends `metadata: {}` as `metadata=`; that is zero terms requested,
+            // so it must behave like `metadata` being omitted, not a 400.
+            let response = server.get(path).add_query_param("metadata", "").await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::OK,
+                "{path} metadata=\"\""
+            );
+            let body: Vec<Value> = response.json();
+            let mut ids: Vec<_> = body
+                .iter()
+                .filter_map(|sb| sb["sandboxID"].as_str())
+                .collect();
+            ids.sort_unstable();
+            assert_eq!(ids, ["sb-other", "sb-special"], "{path} metadata=\"\"");
+
+            for metadata in ["owner", "owner=x&oops"] {
+                let response = server.get(path).add_query_param("metadata", metadata).await;
+                assert_eq!(
+                    response.status_code(),
+                    StatusCode::BAD_REQUEST,
+                    "{path} metadata={metadata:?} must be rejected rather than ignored"
+                );
+                let error: crate::models::ApiError = response.json();
+                assert_eq!(error.code, 400);
+            }
+        }
+    }
+
+    /// v2 is the E2B view, whose `SandboxState` has no `pausing`, so it reports `paused`; v1 is
+    /// the Cube-native view the Cube SDKs read and keeps `pausing`, like `GET /sandboxes/{id}`.
+    #[tokio::test]
+    async fn list_routes_report_a_pausing_sandbox_per_their_contract() {
+        async fn list_handler(Json(_request): Json<Value>) -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-list",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "size": 1,
+                "data": [
+                    { "sandbox_id": "sb-pausing", "host_id": "h", "status": 4, "template_id": "t" }
+                ]
+            }))
+        }
+
+        let server = sandbox_list_server(list_handler).await;
+
+        for (path, expected) in [("/sandboxes", "pausing"), ("/v2/sandboxes", "paused")] {
+            let response = server.get(path).await;
+            assert_eq!(response.status_code(), StatusCode::OK, "{path}");
+            let body: Vec<Value> = response.json();
+            let states: Vec<_> = body.iter().filter_map(|sb| sb["state"].as_str()).collect();
+            assert_eq!(states, [expected], "{path}");
+        }
+
+        // A caller that names `pausing` in v2 gets the state it asked for, not the E2B rewrite.
+        let response = server
+            .get("/v2/sandboxes")
+            .add_query_param("state", "pausing")
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK);
+        let body: Vec<Value> = response.json();
+        let states: Vec<_> = body.iter().filter_map(|sb| sb["state"].as_str()).collect();
+        assert_eq!(states, ["pausing"]);
+    }
+
+    async fn sandbox_list_server<F, Fut>(list_handler: F) -> TestServer
+    where
+        F: Fn(Json<Value>) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Json<Value>> + Send,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock CubeMaster listener should bind");
+        let address = listener.local_addr().expect("mock CubeMaster address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/cube/sandbox/list", post(list_handler)),
+            )
+            .await
+            .expect("mock CubeMaster server should run");
+        });
+
+        let config = ServerConfig {
+            cubemaster_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let state = AppState::new(config, arc(NoopLogger)).await;
+        TestServer::new(build_router(state)).expect("router should build")
     }
 }

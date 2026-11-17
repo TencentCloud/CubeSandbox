@@ -42,9 +42,9 @@ use opentelemetry::global;
 use protobuf::MessageDyn;
 use protobuf::MessageField;
 use protocols::agent::{
-    self, AddSwapRequest, AgentDetails, CopyFileRequest, GetIPTablesRequest, GetIPTablesResponse,
-    GuestDetailsResponse, Interfaces, Metrics, OOMEvent, ReadStreamResponse, Routes,
-    SetIPTablesRequest, SetIPTablesResponse, StatsContainerResponse, VolumeStatsRequest,
+    self, AddSwapRequest, AgentDetails, CopyFileRequest, FreezeRootfsResponse, GetIPTablesRequest,
+    GetIPTablesResponse, GuestDetailsResponse, Interfaces, Metrics, OOMEvent, ReadStreamResponse,
+    Routes, SetIPTablesRequest, SetIPTablesResponse, StatsContainerResponse, VolumeStatsRequest,
     WaitProcessResponse, WriteStreamResponse,
 };
 use protocols::csi::{volume_usage, VolumeCondition, VolumeStatsResponse, VolumeUsage};
@@ -76,6 +76,7 @@ use crate::device::{
     add_devices, get_virtio_blk_pci_device_name, update_device_cgroup, update_env_pci,
     wait_for_pci_net,
 };
+use crate::fsfreeze;
 use crate::linux_abi::*;
 use crate::metrics::get_metrics;
 use crate::mount::add_virtiofs_storages;
@@ -108,6 +109,11 @@ const ERR_NO_SANDBOX_PIDNS: &str = "Sandbox does not have sandbox_pidns";
 // filesystem lock. Based on this, 5 seconds seems a resonable timeout period in case the lock is
 // not available.
 const IPTABLES_RESTORE_WAIT_SEC: u64 = 5;
+
+/// Upper bound for one FIFREEZE / FITHAW ioctl. The ioctl flushes the journal
+/// and can legitimately take seconds on a large dirty filesystem; beyond this
+/// the result is unknown and the caller must treat the sandbox as failed.
+const FSFREEZE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ANNOTATION_K_ROOTFS_WL_PATH: &str = "cube.rootfs.wlayer.path";
 const PROC_PATH_NFS_CLIENT_IDENT: &str = "/sys/fs/nfs/net/nfs_client/identifier";
@@ -1642,8 +1648,59 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         // to get agent details
         let detail = get_agent_details();
         resp.agent_details = MessageField::some(detail);
+        // Advertise freeze only when both endpoints are servable: advertising
+        // an RPC behind a restrictive allowlist would wedge the freeze window.
+        {
+            let cfg = AGENT_CONFIG.read().await;
+            resp.support_filesystem_freeze = cfg.is_allowed_endpoint("FreezeRootfsRequest")
+                && cfg.is_allowed_endpoint("ThawRootfsRequest");
+        }
 
         Ok(resp)
+    }
+
+    async fn freeze_rootfs(
+        &self,
+        ctx: &TtrpcContext,
+        req: protocols::agent::FreezeRootfsRequest,
+    ) -> ttrpc::Result<FreezeRootfsResponse> {
+        trace_rpc_call!(ctx, "freeze_rootfs", req);
+        is_allowed!(req);
+
+        let mount_point = PathBuf::from(&req.mount_point);
+        let device = tokio::time::timeout(
+            FSFREEZE_TIMEOUT,
+            tokio::task::spawn_blocking(move || fsfreeze::freeze(&mount_point)),
+        )
+        .await
+        .map_err(|_| ttrpc_error!(ttrpc::Code::DEADLINE_EXCEEDED, "freeze timed out"))?
+        .map_err(|e| ttrpc_error!(ttrpc::Code::INTERNAL, e.to_string()))?
+        .map_err(|e| ttrpc_error!(ttrpc::Code::INTERNAL, format!("{e:#}")))?;
+
+        let mut resp = FreezeRootfsResponse::new();
+        resp.device = device;
+        Ok(resp)
+    }
+
+    async fn thaw_rootfs(
+        &self,
+        ctx: &TtrpcContext,
+        req: protocols::agent::ThawRootfsRequest,
+    ) -> ttrpc::Result<Empty> {
+        trace_rpc_call!(ctx, "thaw_rootfs", req);
+        is_allowed!(req);
+
+        let mount_point = PathBuf::from(&req.mount_point);
+        tokio::time::timeout(
+            FSFREEZE_TIMEOUT,
+            tokio::task::spawn_blocking(move || fsfreeze::thaw(&mount_point)),
+        )
+        .await
+        .map_err(|_| ttrpc_error!(ttrpc::Code::DEADLINE_EXCEEDED, "thaw timed out"))?
+        .map_err(|e| ttrpc_error!(ttrpc::Code::INTERNAL, e.to_string()))?
+        .map_err(|e| ttrpc_error!(ttrpc::Code::INTERNAL, format!("{e:#}")))?;
+
+        Ok(Empty::new())
     }
 
     async fn mem_hotplug_by_probe(

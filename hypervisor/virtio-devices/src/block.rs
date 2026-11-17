@@ -20,8 +20,8 @@ use crate::GuestMemoryMmap;
 use crate::VirtioInterrupt;
 use anyhow::anyhow;
 use block_util::{
-    async_io::AsyncIo, async_io::AsyncIoError, async_io::DiskFile, build_disk_image_id, Request,
-    RequestType, VirtioBlockConfig,
+    async_io::AsyncIo, async_io::DiskFile, build_disk_image_id, Request, RequestType,
+    VirtioBlockConfig,
 };
 use rate_limiter::{BucketReduction, RateLimiter, TokenType};
 use seccompiler::SeccompAction;
@@ -52,6 +52,44 @@ pub const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 
 pub const MINIMUM_BLOCK_QUEUE_SIZE: u16 = 2;
 
+// Used-ring len is the number of bytes written by the device into guest memory,
+// not the backend operation's result. Every completed request writes status.
+fn used_len(request_type: RequestType, guest_data_bytes: u32) -> u32 {
+    match request_type {
+        RequestType::In | RequestType::GetDeviceId => guest_data_bytes.saturating_add(1),
+        RequestType::Out | RequestType::Flush | RequestType::Unsupported(_) => 1,
+    }
+}
+
+fn async_completion_status_and_used_len(
+    request_type: RequestType,
+    result: i32,
+    expected_data_bytes: u32,
+) -> (u32, u32) {
+    if result < 0 {
+        return (VIRTIO_BLK_S_IOERR, used_len(request_type, 0));
+    }
+
+    let completed_data_bytes = result as u32;
+    let completed = match request_type {
+        RequestType::In | RequestType::Out => completed_data_bytes == expected_data_bytes,
+        RequestType::Flush => completed_data_bytes == 0,
+        RequestType::GetDeviceId | RequestType::Unsupported(_) => false,
+    };
+    let status = if completed {
+        VIRTIO_BLK_S_OK
+    } else {
+        VIRTIO_BLK_S_IOERR
+    };
+    let guest_data_bytes = if request_type == RequestType::In {
+        completed_data_bytes.min(expected_data_bytes)
+    } else {
+        0
+    };
+
+    (status, used_len(request_type, guest_data_bytes))
+}
+
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // New completed tasks are pending on the completion ring.
@@ -72,18 +110,12 @@ const PAUSE_DRAIN_POLL_MS: i32 = 100;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Failed to parse the request: {0}")]
-    RequestParsing(block_util::Error),
     #[error("Failed to execute the request: {0}")]
     RequestExecuting(block_util::ExecuteError),
     #[error("Failed to complete the request: {0}")]
     RequestCompleting(block_util::Error),
     #[error("Missing the expected entry in the list of requests")]
     MissingEntryRequestList,
-    #[error("The asynchronous request returned with failure")]
-    AsyncRequestFailure,
-    #[error("Failed synchronizing the file: {0}")]
-    Fsync(AsyncIoError),
     #[error("Failed adding used index: {0}")]
     QueueAddUsed(virtio_queue::Error),
     #[error("Failed creating an iterator over the queue: {0}")]
@@ -143,8 +175,18 @@ impl BlockEpollHandler {
         let mut limit_by_ops = Wrapping(0);
 
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(self.mem.memory()) {
-            let mut request = Request::parse(&mut desc_chain, self.access_platform.as_ref())
-                .map_err(Error::RequestParsing)?;
+            let mut request = match Request::parse(&mut desc_chain, self.access_platform.as_ref()) {
+                Ok(request) => request,
+                Err(e) => {
+                    error!("Failed parsing block request: {:?}", e);
+                    // A malformed chain may not contain a valid status descriptor.
+                    // Consume only that chain rather than terminating the VM.
+                    queue
+                        .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
+                        .map_err(Error::QueueAddUsed)?;
+                    continue;
+                }
+            };
 
             // For virtio spec compliance
             // "A device MUST set the status byte to VIRTIO_BLK_S_IOERR for a write request
@@ -161,7 +203,11 @@ impl BlockEpollHandler {
                 // If no asynchronous operation has been submitted, we can
                 // simply return the used descriptor.
                 queue
-                    .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
+                    .add_used(
+                        desc_chain.memory(),
+                        desc_chain.head_index(),
+                        used_len(request.request_type, 0),
+                    )
                     .map_err(Error::QueueAddUsed)?;
                 queue
                     .enable_notification(self.mem.memory().deref())
@@ -207,10 +253,12 @@ impl BlockEpollHandler {
                             break;
                         }
                         BucketReduction::OverConsumption(_r) => {
+                            // The oversized request consumed its debt and armed the
+                            // limiter timer. It must still be submitted once; dropping
+                            // it here would advance avail without adding a used entry.
                             limit_by_bytes = Wrapping(1);
                             self.rate_limited
                                 .call_once(|| info!("{} block bw ratelimit fired", self.id));
-                            break;
                         }
                         BucketReduction::Success => {}
                     }
@@ -219,16 +267,41 @@ impl BlockEpollHandler {
 
             request.set_writeback(self.writeback.load(Ordering::Acquire));
 
-            if request
-                .execute_async(
-                    desc_chain.memory(),
-                    self.disk_nsectors,
-                    self.disk_image.as_mut(),
-                    &self.disk_image_id,
-                    desc_chain.head_index() as u64,
-                )
-                .map_err(Error::RequestExecuting)?
-            {
+            let submitted = match request.execute_async(
+                desc_chain.memory(),
+                self.disk_nsectors,
+                self.disk_image.as_mut(),
+                &self.disk_image_id,
+                desc_chain.head_index() as u64,
+            ) {
+                Ok(submitted) => submitted,
+                Err(
+                    e @ (block_util::ExecuteError::BadRequest(_)
+                    | block_util::ExecuteError::GetHostAddress(_)
+                    | block_util::ExecuteError::Write(_)
+                    | block_util::ExecuteError::Unsupported(_)
+                    | block_util::ExecuteError::TemporaryBufferAllocation(_)),
+                ) => {
+                    error!("Rejected block request: {:?}", e);
+                    request
+                        .complete_async(0)
+                        .map_err(Error::RequestCompleting)?;
+                    desc_chain
+                        .memory()
+                        .write_obj(e.status() as u8, request.status_addr)
+                        .map_err(Error::RequestStatus)?;
+                    queue
+                        .add_used(
+                            desc_chain.memory(),
+                            desc_chain.head_index(),
+                            used_len(request.request_type, 0),
+                        )
+                        .map_err(Error::QueueAddUsed)?;
+                    continue;
+                }
+                Err(e) => return Err(Error::RequestExecuting(e)),
+            };
+            if submitted {
                 self.request_list.insert(desc_chain.head_index(), request);
             } else {
                 desc_chain
@@ -237,9 +310,14 @@ impl BlockEpollHandler {
                     .map_err(Error::RequestStatus)?;
 
                 // If no asynchronous operation has been submitted, we can
-                // simply return the used descriptor.
+                // simply return the used descriptor. GetDeviceId writes the ID
+                // bytes as well as the status byte.
                 queue
-                    .add_used(desc_chain.memory(), desc_chain.head_index(), 0)
+                    .add_used(
+                        desc_chain.memory(),
+                        desc_chain.head_index(),
+                        used_len(request.request_type, self.disk_image_id.len() as u32),
+                    )
                     .map_err(Error::QueueAddUsed)?;
                 queue
                     .enable_notification(self.mem.memory().deref())
@@ -299,37 +377,52 @@ impl BlockEpollHandler {
                 .request_list
                 .remove(&desc_index)
                 .ok_or(Error::MissingEntryRequestList)?;
-            request.complete_async().map_err(Error::RequestCompleting)?;
+            request
+                .complete_async(result.max(0) as usize)
+                .map_err(Error::RequestCompleting)?;
 
-            let (status, len) = if result >= 0 {
+            let expected_data_bytes = request
+                .data_descriptors
+                .iter()
+                .fold(0u32, |total, (_, len)| total.saturating_add(*len));
+            let (mut status, len) = async_completion_status_and_used_len(
+                request.request_type,
+                result,
+                expected_data_bytes,
+            );
+
+            if status == VIRTIO_BLK_S_OK {
                 match request.request_type {
                     RequestType::In => {
-                        for (_, data_len) in &request.data_descriptors {
-                            read_bytes += Wrapping(*data_len as u64);
-                        }
+                        read_bytes += Wrapping(result as u64);
                         read_ops += Wrapping(1);
                     }
                     RequestType::Out => {
                         if !request.writeback {
-                            self.disk_image.fsync(None).map_err(Error::Fsync)?;
+                            if let Err(e) = self.disk_image.fsync(None) {
+                                error!("Request flush failed: {:x?} {:?}", request, e);
+                                status = VIRTIO_BLK_S_IOERR;
+                            }
                         }
-                        for (_, data_len) in &request.data_descriptors {
-                            write_bytes += Wrapping(*data_len as u64);
+                        if status == VIRTIO_BLK_S_OK {
+                            write_bytes += Wrapping(result as u64);
+                            write_ops += Wrapping(1);
                         }
-                        write_ops += Wrapping(1);
                     }
                     _ => {}
                 }
-
-                (VIRTIO_BLK_S_OK, result as u32)
-            } else {
+            } else if result < 0 {
                 error!(
                     "Request failed: {:x?} {:?}",
                     request,
                     io::Error::from_raw_os_error(-result)
                 );
-                return Err(Error::AsyncRequestFailure);
-            };
+            } else {
+                error!(
+                    "Request completed partially: {:x?}, expected {} bytes, completed {}",
+                    request, expected_data_bytes, result
+                );
+            }
 
             mem.write_obj(status, request.status_addr)
                 .map_err(Error::RequestStatus)?;
@@ -910,3 +1003,57 @@ impl Snapshottable for Block {
 }
 impl Transportable for Block {}
 impl Migratable for Block {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_used_len_reports_bytes_written_to_guest() {
+        assert_eq!(used_len(RequestType::In, 512), 513);
+        assert_eq!(used_len(RequestType::Out, 512), 1);
+        assert_eq!(used_len(RequestType::Flush, 0), 1);
+        assert_eq!(used_len(RequestType::GetDeviceId, 20), 21);
+        assert_eq!(used_len(RequestType::Unsupported(42), 0), 1);
+    }
+
+    #[test]
+    fn test_async_completion_used_len() {
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::In, 512, 512),
+            (VIRTIO_BLK_S_OK, 513)
+        );
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::Out, 512, 512),
+            (VIRTIO_BLK_S_OK, 1)
+        );
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::Flush, 0, 0),
+            (VIRTIO_BLK_S_OK, 1)
+        );
+    }
+
+    #[test]
+    fn test_async_completion_errors_include_status_and_partial_read() {
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::In, -libc::EIO, 512),
+            (VIRTIO_BLK_S_IOERR, 1)
+        );
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::Out, -libc::EIO, 512),
+            (VIRTIO_BLK_S_IOERR, 1)
+        );
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::Flush, -libc::EIO, 0),
+            (VIRTIO_BLK_S_IOERR, 1)
+        );
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::In, 256, 512),
+            (VIRTIO_BLK_S_IOERR, 257)
+        );
+        assert_eq!(
+            async_completion_status_and_used_len(RequestType::Out, 256, 512),
+            (VIRTIO_BLK_S_IOERR, 1)
+        );
+    }
+}

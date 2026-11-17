@@ -9,6 +9,7 @@ import "time"
 type Sandbox struct {
 	client       *Client       `json:"-"`
 	cloneCleanup *cloneCleanup `json:"-"`
+	mcpToken     string
 
 	TemplateID         string `json:"templateID"`
 	SandboxID          string `json:"sandboxID"`
@@ -75,7 +76,12 @@ type CreateOptions struct {
 	// mount's Name must be an existing volumeID (see Client.CreateVolume) and
 	// Path a clean absolute path inside the sandbox.
 	VolumeMounts []VolumeMount
-	Extra        map[string]any
+	// MCP starts mcp-gateway with these servers after the sandbox is created.
+	// Without TemplateID, Config.MCPTemplateID is tried first and
+	// Config.TemplateID is used only if that template does not exist. Connect
+	// with Sandbox.GetMCPURL and Sandbox.GetMCPToken.
+	MCP   MCPServers
+	Extra map[string]any
 }
 
 // UpdateNetworkOptions is the desired egress policy for Sandbox.UpdateNetwork.
@@ -100,6 +106,12 @@ type UpdateNetworkOptions struct {
 // means "not provided; let the server decide".
 func DurationPtr(d time.Duration) *time.Duration {
 	return &d
+}
+
+// IntPtr returns a pointer to i, for optional int fields such as
+// ForkOptions.Count, where nil means "not provided; use the default".
+func IntPtr(i int) *int {
+	return &i
 }
 
 // NeverTimeout requests a sandbox that never idle-times-out. See docs/guide/lifecycle.md.
@@ -129,6 +141,13 @@ type CommandOptions struct {
 	// User authenticates the envd process call (Basic auth). Empty defaults to
 	// "root" to match the Python SDK and avoid old-envd "no user specified".
 	User string
+
+	// OnStdout and OnStderr receive decoded output chunks while Run is reading
+	// the command stream. They run synchronously, in stream order, before Run
+	// returns, so callbacks should not block. Chunks are not necessarily lines.
+	// Output is still collected in CommandResult when callbacks are set.
+	OnStdout func(string)
+	OnStderr func(string)
 }
 
 type CommandResult struct {

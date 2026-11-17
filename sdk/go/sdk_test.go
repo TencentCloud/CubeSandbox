@@ -233,7 +233,7 @@ func TestLifecycleEndpoints(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/sandboxes":
 			fmt.Fprint(w, "["+sandboxInfoJSON(testSandboxID, "paused")+"]")
 		case r.Method == http.MethodGet && r.URL.Path == "/health":
-			fmt.Fprint(w, `{"status":"ok","sandboxes":1}`)
+			fmt.Fprint(w, `{"status":"ok"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/"+testSandboxID:
 			fmt.Fprint(w, sandboxInfoJSON(testSandboxID, "paused"))
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/"+testSandboxID+"/pause":
@@ -534,6 +534,137 @@ func TestRunCodeUsesConfiguredProxyScheme(t *testing.T) {
 	}
 }
 
+// isRunningHandler routes control-plane GET /sandboxes/:id to a state JSON and
+// data-plane GET /health to a fixed status. Returns the data-plane host seen.
+func isRunningHandler(t *testing.T, state string, healthStatus int) (roundTripFunc, *string, *int) {
+	t.Helper()
+	var dataHost string
+	var dataHits int
+	f := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/health" {
+			dataHost = req.URL.Host
+			dataHits++
+			return &http.Response{
+				StatusCode: healthStatus,
+				Body:       http.NoBody,
+				Request:    req,
+			}, nil
+		}
+		body := fmt.Sprintf(`{"sandboxID":"%s","templateID":"tpl-test","state":%q}`, req.URL.Path, state)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	return f, &dataHost, &dataHits
+}
+
+func TestIsRunningTrueWhenRunningAndHealthy(t *testing.T) {
+	handler, dataHost, dataHits := isRunningHandler(t, "running", http.StatusNoContent)
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-run", Domain: "cube.test"}
+
+	ok, err := sb.IsRunning(context.Background())
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if !ok {
+		t.Fatalf("IsRunning() = false, want true")
+	}
+	if *dataHits != 1 {
+		t.Fatalf("data-plane hits = %d, want 1", *dataHits)
+	}
+	if *dataHost != "49983-sb-run.cube.test" {
+		t.Fatalf("data host = %q, want 49983-sb-run.cube.test", *dataHost)
+	}
+}
+
+func TestIsRunningPausedSkipsDataPlane(t *testing.T) {
+	for _, state := range []string{"paused", "pausing"} {
+		t.Run(state, func(t *testing.T) {
+			handler, _, dataHits := isRunningHandler(t, state, http.StatusInternalServerError)
+			client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+			sb := &Sandbox{client: client, SandboxID: "sb-paused", Domain: "cube.test"}
+
+			ok, err := sb.IsRunning(context.Background())
+			if err != nil {
+				t.Fatalf("IsRunning: %v", err)
+			}
+			if ok {
+				t.Fatalf("IsRunning() = true, want false for %s", state)
+			}
+			if *dataHits != 0 {
+				t.Fatalf("data-plane hits = %d, want 0 for %s", *dataHits, state)
+			}
+		})
+	}
+}
+
+func TestIsRunningReturnsFalseOnUnavailableStatuses(t *testing.T) {
+	for _, status := range []int{
+		http.StatusNotFound,           // 404 deleted
+		http.StatusBadGateway,         // 502 envd down
+		http.StatusServiceUnavailable, // 503 pausing/paused
+		http.StatusGone,               // 410 killing/killed
+	} {
+		status := status
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			handler, _, _ := isRunningHandler(t, "running", status)
+			client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+			sb := &Sandbox{client: client, SandboxID: "sb-unavail", Domain: "cube.test"}
+
+			ok, err := sb.IsRunning(context.Background())
+			if err != nil {
+				t.Fatalf("IsRunning: %v", err)
+			}
+			if ok {
+				t.Fatalf("IsRunning() = true, want false on %d", status)
+			}
+		})
+	}
+}
+
+func TestIsRunningRaisesOnServerError(t *testing.T) {
+	handler, _, _ := isRunningHandler(t, "running", http.StatusInternalServerError)
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-err", Domain: "cube.test"}
+
+	if _, err := sb.IsRunning(context.Background()); err == nil {
+		t.Fatalf("IsRunning() = nil error, want error on 500")
+	}
+}
+
+func TestIsRunningRaisesOnForbidden(t *testing.T) {
+	handler, _, _ := isRunningHandler(t, "running", http.StatusForbidden)
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-403", Domain: "cube.test"}
+
+	if _, err := sb.IsRunning(context.Background()); err == nil {
+		t.Fatalf("IsRunning() = nil error, want error on 403")
+	}
+}
+
+func TestIsRunningTransportErrorReturnsFalse(t *testing.T) {
+	handler := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/health" {
+			body := fmt.Sprintf(`{"sandboxID":"%s","templateID":"tpl-test","state":"running"}`, req.URL.Path)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		return nil, errors.New("connection refused")
+	})
+	client := NewClient(Config{}, WithHTTPClient(&http.Client{Transport: handler}))
+	sb := &Sandbox{client: client, SandboxID: "sb-conn", Domain: "cube.test"}
+
+	ok, err := sb.IsRunning(context.Background())
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v, want nil (transport error maps to false)", err)
+	}
+	if ok {
+		t.Fatalf("IsRunning() = true, want false on transport error")
+	}
+}
+
 func TestCommandsRun(t *testing.T) {
 	starter := &fakeProcessStarter{
 		result: &processStartResult{
@@ -823,6 +954,58 @@ func TestFilesReadUsesEnvdHTTPFileAPI(t *testing.T) {
 	}
 }
 
+func TestFilesReadBytesPreservesBinary(t *testing.T) {
+	png := []byte{0x89, 0x50, 0x4e, 0x47}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/files" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Write(png)
+	}))
+	defer server.Close()
+
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{
+		ProxyNodeIP:    host,
+		ProxyPortHTTP:  port,
+		SandboxDomain:  "cube.test",
+		RequestTimeout: time.Second,
+	})
+	sb := &Sandbox{client: client, SandboxID: "sb-bin", TemplateID: "tpl-test"}
+
+	got, err := sb.Files().ReadBytes(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("ReadBytes: %v", err)
+	}
+	if !bytes.Equal(got, png) {
+		t.Fatalf("got=%x want=%x", got, png)
+	}
+
+	stream, err := sb.Files().ReadStream(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("ReadStream: %v", err)
+	}
+	defer stream.Close()
+	streamed, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(streamed, png) {
+		t.Fatalf("streamed=%x want=%x", streamed, png)
+	}
+
+	// Go strings hold arbitrary bytes (unlike JS/Python UTF-8 text paths), so
+	// Read still round-trips binary. ReadBytes is the e2b format=bytes surface
+	// for callers that want an explicit []byte API.
+	textContent, err := sb.Files().Read(context.Background(), "/tmp/x.png")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal([]byte(textContent), png) {
+		t.Fatalf("Read round-trip=%x want=%x", []byte(textContent), png)
+	}
+}
+
 func TestFilesReadReturnsEnvdFileError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"file not found"}`, http.StatusNotFound)
@@ -889,14 +1072,37 @@ type fakeFileReader struct {
 	path    string
 	user    string
 	content string
+	raw     []byte
 	err     error
 }
 
-func (r *fakeFileReader) readFile(_ context.Context, path string, options ...fileRequestOption) (string, error) {
+func (r *fakeFileReader) readFile(ctx context.Context, path string, options ...fileRequestOption) (string, error) {
+	raw, err := r.readFileBytes(ctx, path, options...)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func (r *fakeFileReader) readFileBytes(_ context.Context, path string, options ...fileRequestOption) ([]byte, error) {
 	r.path = path
 	opts := resolveFileRequestOptions(options...)
 	r.user = opts.user
-	return r.content, r.err
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.raw != nil {
+		return append([]byte(nil), r.raw...), nil
+	}
+	return []byte(r.content), nil
+}
+
+func (r *fakeFileReader) openFileStream(ctx context.Context, path string, options ...fileRequestOption) (io.ReadCloser, error) {
+	raw, err := r.readFileBytes(ctx, path, options...)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(raw)), nil
 }
 
 func connectEnvelope(flags byte, payload string) []byte {
@@ -928,6 +1134,12 @@ func clearEnv(t *testing.T) {
 
 func sandboxJSON(sandboxID, templateID string) string {
 	return fmt.Sprintf(`{"sandboxID":%q,"templateID":%q,"clientID":"client-1","envdVersion":"0.0.1","domain":"cube.app"}`, sandboxID, templateID)
+}
+
+// sandboxField renders the `"sandbox":{...}` fragment inside one element of a
+// server-side fork response array.
+func sandboxField(sandboxID string) string {
+	return `"sandbox":` + sandboxJSON(sandboxID, "tpl-test")
 }
 
 func sandboxInfoJSON(sandboxID, state string) string {
@@ -1666,6 +1878,8 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 		DNS:                 []string{"8.8.8.8", "1.1.1.1"},
 		AllowOut:            []string{"172.67.0.0/16"},
 		DenyOut:             []string{"10.0.0.0/8"},
+		Backend:             "s3",
+		User:                "1000:1000",
 	})
 	if err != nil {
 		t.Fatalf("BuildTemplate returned error: %v", err)
@@ -1674,6 +1888,8 @@ func TestBuildTemplateForwardsCreateFromImageOptions(t *testing.T) {
 	assertString(t, got, "image", "registry.example.com/app:latest")
 	assertString(t, got, "writableLayerSize", "20Gi")
 	assertString(t, got, "networkType", "tap")
+	assertString(t, got, "backend", "s3")
+	assertString(t, got, "user", "1000:1000")
 	assertString(t, got, "registryUsername", "pull-user")
 	assertString(t, got, "registryPassword", "pull-pass")
 	assertString(t, got, "probePath", "/health")
@@ -1696,6 +1912,33 @@ func TestBuildTemplateRequiresImage(t *testing.T) {
 	client := NewClient(Config{APIURL: "http://example.com", Timeout: 300 * time.Second})
 	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{}); err == nil {
 		t.Fatal("BuildTemplate without image returned nil error")
+	}
+}
+
+func TestBuildTemplateOmitsBackendWhenBlank(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobID":"job-1","templateID":"tpl-1","status":"accepted"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+	if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+		Image:   "python:3.11-slim",
+		Backend: "   ",
+	}); err != nil {
+		t.Fatalf("BuildTemplate returned error: %v", err)
+	}
+	if _, ok := got["backend"]; ok {
+		t.Fatalf("blank backend must be omitted, got %#v", got["backend"])
+	}
+	if _, ok := got["user"]; ok {
+		t.Fatalf("empty user must be omitted, got %#v", got["user"])
 	}
 }
 

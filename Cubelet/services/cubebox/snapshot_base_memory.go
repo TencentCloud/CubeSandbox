@@ -32,35 +32,16 @@ var (
 // to the user instead of silently degrading to a full snapshot.
 var ErrNoBaseMemoryForIncremental = errors.New("no base memory object for incremental snapshot")
 
-// resolveBaseSnapshotID returns the logical snapshot id the running sandbox is
-// currently bound to, in priority order:
-//
-//  1. cb.Labels[MasterAnnotationRuntimeSnapshotID]: stamped by RollbackSandbox
-//     after a successful rollback, so it always reflects the most recent
-//     runtime-snapshot ancestor.
-//  2. cb.Annotations[MasterAnnotationRuntimeSnapshotID]: present when the
-//     sandbox was directly created from a runtime snapshot and never rolled
-//     back; this is what the create flow stamps into the request annotations.
-//  3. cb.Annotations[MasterAnnotationAppSnapshotTemplateID]: the original
-//     template id used at create time; this is the lowest-priority fallback
-//     because a more recent runtime snapshot supersedes it.
-//
-// Returns "" when none of these are set (e.g. fresh image-based sandbox with
-// no template lineage), which the caller must treat as "no base available".
+// resolveBaseSnapshotID returns the snapshot the next soft-dirty commit
+// clones. Only the sandbox's memory lineage is consulted. Create-request
+// annotations are not a memory base: a restart rebuilds the CubeBox with an
+// empty lineage, and reading the original template id here would overlay
+// the new VM's dirty pages onto pre-restart memory.
 func resolveBaseSnapshotID(cb *cubeboxstore.CubeBox) string {
 	if cb == nil {
 		return ""
 	}
-	if v := strings.TrimSpace(cb.Labels[constants.MasterAnnotationRuntimeSnapshotID]); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(cb.Annotations[constants.MasterAnnotationRuntimeSnapshotID]); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(cb.Annotations[constants.MasterAnnotationAppSnapshotTemplateID]); v != "" {
-		return v
-	}
-	return ""
+	return cb.RuntimeBaseID()
 }
 
 // resolveBaseMemoryObject looks up the cubecow memory object that backs the
@@ -82,39 +63,15 @@ func resolveBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBox, back
 	return resolveMemoryObjectFromSnapshotID(ctx, backend, resolveBaseSnapshotID(cb))
 }
 
-// resolveRestoreBaseSnapshotID returns the snapshot id whose memory image
-// the running VM was last *restored* from. Set by Create's restore path and
-// by Rollback; intentionally NOT updated by Commit. The pagemap_anon
-// fallback in prepareCommitMemoryArtifact uses this to find a base file
-// whose contents match the VM's "everything not dirty since last restore"
-// state, which is exactly the precondition pagemap_anon requires.
-//
-// Falls back to the create-time annotation as best-effort for sandboxes
-// that predate the new label, so first-commit-after-upgrade still gets the
-// pagemap_anon path instead of the full-rewrite path.
+// resolveRestoreBaseSnapshotID returns the snapshot whose memory image the
+// running VM was last restored from. Set by Create's restore path and by
+// Rollback; Commit does not advance it. Empty means there is no pagemap_anon
+// base. Create-request annotations are never a fallback.
 func resolveRestoreBaseSnapshotID(cb *cubeboxstore.CubeBox) string {
 	if cb == nil {
 		return ""
 	}
-	if v := strings.TrimSpace(cb.Labels[constants.MasterAnnotationRuntimeRestoreSnapshotID]); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(cb.Annotations[constants.MasterAnnotationRuntimeRestoreSnapshotID]); v != "" {
-		return v
-	}
-	// Best-effort backstop for sandboxes created before
-	// MasterAnnotationRuntimeRestoreSnapshotID was introduced. Note that
-	// this is only correct if the sandbox has not been rolled back since
-	// create — once it has been rolled back, only the new label tracks
-	// the post-rollback restore source. Caller has nothing better here,
-	// so we return it and let the catalog lookup decide.
-	if v := strings.TrimSpace(cb.Annotations[constants.MasterAnnotationRuntimeSnapshotID]); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(cb.Annotations[constants.MasterAnnotationAppSnapshotTemplateID]); v != "" {
-		return v
-	}
-	return ""
+	return cb.RestoreBaseID()
 }
 
 // resolveRestoreBaseMemoryObject is the pagemap_anon fallback's analogue
@@ -126,15 +83,25 @@ func resolveRestoreBaseMemoryObject(ctx context.Context, cb *cubeboxstore.CubeBo
 
 // resolveLaunchAncestorSnapshotID is the memory base Pause copies from:
 // the template or customer snapshot this sandbox was first started from.
-// It ignores last-commit / last-restore labels and the pause snap itself
-// (those change across Pause/Resume/Commit).
+// It ignores the last-commit / last-restore bindings and the pause snap
+// itself (those change across Pause/Resume/Commit).
 func resolveLaunchAncestorSnapshotID(cb *cubeboxstore.CubeBox) string {
+	if cb == nil {
+		return ""
+	}
+	return cb.LaunchAncestorID()
+}
+
+// launchAncestorFromRequest is the create-time translation of the request
+// into a launch ancestor. It is the only place a create annotation may
+// become a memory base, and only when this create actually restores memory.
+// Restart does not call it.
+func launchAncestorFromRequest(cb *cubeboxstore.CubeBox) string {
 	if cb == nil {
 		return ""
 	}
 	pauseID := stampedPauseSnapshotID(cb)
 	for _, id := range []string{
-		cb.Labels[constants.MasterAnnotationLaunchMemorySnapshotID],
 		cb.Annotations[constants.MasterAnnotationLaunchMemorySnapshotID],
 		cb.Annotations[constants.MasterAnnotationRuntimeSnapshotID],
 		cb.Annotations[constants.MasterAnnotationAppSnapshotTemplateID],
@@ -159,28 +126,21 @@ func resolveLaunchAncestorSnapshotID(cb *cubeboxstore.CubeBox) string {
 // every page that landed in the pause image and stayed clean. The next
 // restore then comes up holey: agent health can still answer, then
 // set_guest_date_time/reseed hang on ttrpc.
-func launchAncestorIsLastRestore(cb *cubeboxstore.CubeBox, ancestorID string) bool {
+func launchAncestorIsLastRestore(restoreID, ancestorID string) bool {
 	ancestorID = strings.TrimSpace(ancestorID)
 	if ancestorID == "" {
 		return false
 	}
-	restoreID := strings.TrimSpace(resolveRestoreBaseSnapshotID(cb))
-	if restoreID == runtimeSnapshotBindingInvalidID {
-		return false
-	}
-	if restoreID == "" {
-		// No restore-base label: image-based start, or a sandbox that
-		// predates the label. Ancestor incremental matches first Pause
-		// after Create-from-template. Do not consult the in-progress
-		// pause id — Pause stamps that *before* this function runs.
-		return true
-	}
-	return restoreID == ancestorID
+	// No restore base means this VM's memory is not the ancestor image.
+	// Create-from-template stamps both together. Opaque resume and restart
+	// leave the restore base empty on purpose; treating that as "ancestor
+	// incremental is fine" would overlay fresh pages onto stale memory.
+	return strings.TrimSpace(restoreID) == ancestorID
 }
 
 func isUsableLaunchAncestorID(id, pauseID string) bool {
 	id = strings.TrimSpace(id)
-	if id == "" || id == runtimeSnapshotBindingInvalidID {
+	if id == "" {
 		return false
 	}
 	if pauseID != "" && id == pauseID {
@@ -193,20 +153,14 @@ func stampLaunchMemoryAncestorOnce(cb *cubeboxstore.CubeBox, id string) {
 	if cb == nil {
 		return
 	}
-	id = strings.TrimSpace(id)
 	if !isUsableLaunchAncestorID(id, stampedPauseSnapshotID(cb)) {
 		return
 	}
-	if strings.TrimSpace(cb.Labels[constants.MasterAnnotationLaunchMemorySnapshotID]) != "" ||
-		strings.TrimSpace(cb.Annotations[constants.MasterAnnotationLaunchMemorySnapshotID]) != "" {
-		return
-	}
-	cb.AddLabels(map[string]string{constants.MasterAnnotationLaunchMemorySnapshotID: id})
-	cb.AddAnnotations(map[string]string{constants.MasterAnnotationLaunchMemorySnapshotID: id})
+	cb.BindLaunchAncestorOnce(id)
 }
 
 func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID string) (*storage.CowSnapshotObject, error) {
-	if snapshotID == "" || snapshotID == runtimeSnapshotBindingInvalidID {
+	if snapshotID == "" {
 		return nil, fmt.Errorf("%w: sandbox is not bound to any snapshot or template", ErrNoBaseMemoryForIncremental)
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapshotID)
@@ -250,7 +204,7 @@ func preparePauseMemoryArtifact(
 	ctx context.Context,
 	stepLog *log.CubeWrapperLogEntry,
 	cb *cubeboxstore.CubeBox,
-	templateID string,
+	templateID, priorPauseID string,
 	memorySizeBytes uint64,
 	backend string,
 ) (*storage.CowSnapshotObject, string, error) {
@@ -262,21 +216,35 @@ func preparePauseMemoryArtifact(
 			sandboxID = strings.TrimSpace(cb.SandboxID)
 		}
 	}
-	if live, liveErr := storage.GetImportedSandboxMemoryFor(ctx, backend, sandboxID); liveErr != nil {
-		stepLog.Warnf("pause memory artifact: own volume lookup failed (%v); trying a catalog base", liveErr)
-	} else if live != nil {
-		memoryObject, cloneErr := storage.CommitMemoryFromBaseFor(ctx, backend, live, templateID, memorySizeBytes)
-		if cloneErr == nil {
-			stepLog.Infof("pause memory artifact: cloned own volume %s/%s -> %s, snapshot type=%s",
-				live.Name, live.Kind, memoryObject.Name, snapshotTypeIncremental)
-			return memoryObject, snapshotTypeIncremental, nil
-		}
-		stepLog.Warnf("pause memory artifact: own volume %s clone failed (%v); trying a catalog base", live.Name, cloneErr)
-	}
-
+	// Resolve the lineage once for the decision below. Pause already holds the
+	// sandbox lifecycle lock, so this is about one decision reading one sample
+	// rather than bracing for concurrent writers.
 	ancestorID := resolveLaunchAncestorSnapshotID(cb)
 	restoreID := resolveRestoreBaseSnapshotID(cb)
-	if launchAncestorIsLastRestore(cb, ancestorID) {
+	if live, liveErr := getImportedSandboxMemoryFor(ctx, backend, sandboxID); liveErr != nil {
+		stepLog.Warnf("pause memory artifact: own volume lookup failed (%v); trying a catalog base", liveErr)
+	} else if live != nil {
+		// The imported/cloned disk is only a valid pagemap_anon base while it
+		// is still the image this VM was restored from. Restart and opaque
+		// resume leave the disk behind but replace guest memory, so cloning it
+		// would overlay the new VM's anon pages onto pre-restart bytes. Commit
+		// applies the same gate through importedMemoryIsCurrentRestore; Pause
+		// must not skip it.
+		switch {
+		case !importedMemoryWasLivePauseBase(restoreID, priorPauseID, ancestorID, sandboxRolledBackSinceCreate(cb)):
+			stepLog.Warnf("pause memory artifact: own volume %s is not the live restore base for %s; skipping it", live.Name, sandboxID)
+		default:
+			memoryObject, cloneErr := commitMemoryFromBaseFor(ctx, backend, live, templateID, memorySizeBytes)
+			if cloneErr == nil {
+				stepLog.Infof("pause memory artifact: cloned own volume %s/%s -> %s, snapshot type=%s",
+					live.Name, live.Kind, memoryObject.Name, snapshotTypeIncremental)
+				return memoryObject, snapshotTypeIncremental, nil
+			}
+			stepLog.Warnf("pause memory artifact: own volume %s clone failed (%v); trying a catalog base", live.Name, cloneErr)
+		}
+	}
+
+	if launchAncestorIsLastRestore(restoreID, ancestorID) {
 		base, err := resolveMemoryObjectFromSnapshotID(ctx, backend, ancestorID)
 		if err == nil {
 			memoryObject, cloneErr := storage.CommitMemoryFromBaseFor(ctx, backend, base, templateID, memorySizeBytes)
@@ -294,7 +262,7 @@ func preparePauseMemoryArtifact(
 	} else {
 		stepLog.Warnf("pause memory artifact: launch ancestor %s is not last restore %s; skipping ancestor incremental",
 			ancestorID, restoreID)
-		if restoreID != "" && restoreID != runtimeSnapshotBindingInvalidID {
+		if restoreID != "" {
 			base, err := resolveMemoryObjectFromSnapshotID(ctx, backend, restoreID)
 			if err == nil {
 				memoryObject, cloneErr := storage.CommitMemoryFromBaseFor(ctx, backend, base, templateID, memorySizeBytes)
@@ -312,7 +280,7 @@ func preparePauseMemoryArtifact(
 		}
 	}
 
-	memoryObject, createErr := storage.CreateMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
+	memoryObject, createErr := createMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
 	if createErr != nil {
 		return nil, "", createErr
 	}
@@ -340,13 +308,13 @@ func preparePauseMemoryArtifact(
 // Tier 2 — incremental(pagemap_anon) + reflink from last-restore base.
 // Reached when the runtime-binding snapshot's memory file no longer exists
 // (e.g. operator deleted the most recent commit between commits). We look
-// up the snapshot the VM was last *restored* from (tracked by a separate
-// label that Commit does not advance) and reflink from its memory file.
+// up the snapshot the VM was last *restored* from (a separate lineage
+// binding that Commit does not advance) and reflink from its memory file.
 // pagemap_anon's bitmap captures every anon page dirty *since the last
 // restore*, which is exactly the delta we need to overlay onto that base to
 // produce a self-contained image. If the VM is later restored from an
-// opaque source that Cubelet cannot reflink from, that restore path
-// invalidates this label so this tier is skipped. Pause uses
+// opaque source that Cubelet cannot reflink from, that restore path clears
+// this binding so this tier is skipped. Pause uses
 // preparePauseMemoryArtifact: own vol, then ancestor only when it is
 // the last restore, otherwise last-restore catalog or full.
 //
@@ -355,9 +323,9 @@ func preparePauseMemoryArtifact(
 // sb-*-memory disk is the restore image. Same-node Resume keeps the
 // pause catalog (tier 1/2); 2b is also the fallback if that catalog is
 // later lost. Only used when ImportedMemoryVol is still the last
-// restore (restore-base label equals the pause id). Rollback restamps
-// restore-base and opaque resume invalidates it; both leave a stale
-// import that must not become a pagemap_anon dest.
+// restore (restore-base binding equals the pause id). Rollback restamps
+// restore-base and opaque resume clears it; both leave a stale import that
+// must not become a pagemap_anon dest.
 //
 // Tier 3 — full + fresh empty volume. The last-resort fallback when even
 // the last-restore base file is gone (e.g. the source template was deleted
@@ -398,7 +366,7 @@ func prepareCommitMemoryArtifact(
 	// state would not match the older last-restore file we're reflinking
 	// from. pagemap_anon's "anon pages currently dirty" set, on the other
 	// hand, was last reset at the VM's last restore — exactly the moment
-	// captured by the snapshot id stored in the restore-base label —
+	// captured by the snapshot id stored in the restore-base binding —
 	// which makes its bitmap consistent with this base.
 	restoreBase, restoreErr := resolveRestoreBaseMemoryObjectFn(ctx, cb, backend)
 	if restoreErr == nil {
@@ -470,28 +438,85 @@ func importedSandboxMemoryForCommit(
 
 // importedMemoryIsCurrentRestore is the Tier 2b gate. ImportedMemoryVol
 // is minted at Create/Resume (same-node clone or cross-node import).
-// Rollback restamps RuntimeRestoreSnapshotID onto the rollback target
-// and leaves the import pointing at the pre-rollback disk. Opaque
-// resume writes invalid-runtime-restore-base and also leaves the vol
-// stale. Incremental onto that disk would drop pages that landed in
-// the new restore image.
+// Rollback restamps the restore base onto the rollback target and
+// leaves the import pointing at the pre-rollback disk. Opaque resume
+// clears the restore base and also leaves the vol stale. Incremental
+// onto that disk would drop pages that landed in the new restore image.
 //
-// Require Cubelet-stamped Labels only, and require restore-base ==
-// pause id: that is the Resume path this fallback is for. FromSnap
-// without a pause binding stays on catalog / full.
+// Require the Cubelet-stamped pause binding, and require
+// restore-base == pause id: that is the Resume path this fallback is for.
+// FromSnap without a pause binding stays on catalog / full.
 func importedMemoryIsCurrentRestore(cb *cubeboxstore.CubeBox) bool {
 	if cb == nil {
 		return false
 	}
-	restoreID := cubeBoxLabel(cb, constants.MasterAnnotationRuntimeRestoreSnapshotID)
-	if restoreID == "" || restoreID == runtimeSnapshotBindingInvalidID {
+	restoreID := cb.RestoreBaseID()
+	if restoreID == "" {
 		return false
 	}
 	pauseID := cubeBoxLabel(cb, constants.MasterAnnotationPauseSnapshotID)
-	if pauseID == "" || pauseID == runtimeSnapshotBindingInvalidID {
+	if pauseID == "" {
 		return false
 	}
 	return restoreID == pauseID
+}
+
+// importedMemoryWasLivePauseBase is the Pause-side gate. Pause stamps the new
+// snapshot id before preparing the artifact, so comparing against the current
+// pause binding would always fail. Instead it asks whether the imported/cloned
+// disk is still the image this VM was restored from.
+//
+// Two shapes mint that disk:
+//   - pause resume: the source is a pause package, and the live pause id is the
+//     restore base until this Pause replaces it;
+//   - cross-node FromSnap: the source is the customer snapshot itself and no
+//     pause package exists yet, so the disk is the live base only while the VM
+//     still sits on its launch ancestor (and has never been anywhere else).
+//
+// Restart and opaque resume leave the disk behind but replace guest memory;
+// both have an empty restoreID, so every arm rejects them.
+//
+// The FromSnap arm additionally requires that no rollback followed the create.
+// A rollback to the launch ancestor makes restoreID == ancestorID again, and
+// the stale import is only released best-effort (releaseImportedMemoryAfterRollback
+// returns nil on a metadata read error), so the ids alone cannot prove the disk
+// still describes this guest. Refusing costs one full capture; getting it wrong
+// would silently drop every page the rollback target brought in.
+//
+// Takes the ids the caller already resolved so the own-volume decision reads
+// the lineage once, next to the ancestor lookup that uses the same values.
+func importedMemoryWasLivePauseBase(restoreID, priorPauseID, ancestorID string, rolledBack bool) bool {
+	restoreID = strings.TrimSpace(restoreID)
+	if restoreID == "" {
+		return false
+	}
+	// A rollback replaces guest memory from a different image, and the import is
+	// only released best-effort. Nothing about the ids proves the disk survived
+	// intact, so refuse both arms rather than reason about which one matched.
+	if rolledBack {
+		return false
+	}
+	if priorPauseID = strings.TrimSpace(priorPauseID); priorPauseID != "" {
+		return restoreID == priorPauseID
+	}
+	return restoreID == strings.TrimSpace(ancestorID)
+}
+
+// sandboxRolledBackSinceCreate reports whether a rollback happened since this
+// VM's current incarnation was created.
+//
+// Scope matters here. The guest metrics epoch is reset to fresh_create by every
+// successful Create, and pause resume is a Create: it rebuilds the sandbox row
+// and re-mints the sandbox-private memory disk from the pause package
+// (prefetchRestoreMemoryVolURL -> CloneSandboxMemory), so the epoch's window and
+// the imported disk's lifetime start together. Within that window the reason
+// only ever moves away from rollback by another rollback.
+//
+// A missing epoch (non-cubecow, or a row predating the field) means "not known
+// to be rolled back", which matches master's behaviour for the same rows.
+func sandboxRolledBackSinceCreate(cb *cubeboxstore.CubeBox) bool {
+	epoch := cb.GuestMetricsEpochCopy()
+	return epoch != nil && epoch.Reason == cubeboxstore.GuestMetricsEpochRollback
 }
 
 // shouldUseImportedMemoryForCommit is the testable Tier 2b decision:

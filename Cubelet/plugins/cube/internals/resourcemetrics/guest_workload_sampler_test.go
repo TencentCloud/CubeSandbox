@@ -759,6 +759,136 @@ func TestGuestWorkloadSamplerListsCopiedCacheInStableOrder(t *testing.T) {
 	require.Equal(t, "a", sampler.ListLatest(time.Unix(11, 0))[0].Snapshot.BaselineID)
 }
 
+func TestGuestWorkloadSamplerRecoversWhenEpochIdentityResets(t *testing.T) {
+	cb := testSamplerCubeBox(t, cubeboxstore.Status{StartedAt: 1})
+	store := &fakeGuestWorkloadStore{boxes: []*cubeboxstore.CubeBox{cb}}
+	reader := &fakeGuestWorkloadReader{metrics: []*types.Metric{
+		testContainerdMetric(t, time.Unix(10, 0), testGuestValues{cpuTotal: 100, memoryLimit: 16384}),
+		testContainerdMetric(t, time.Unix(15, 0), testGuestValues{cpuTotal: 150, memoryLimit: 16384}),
+		testContainerdMetric(t, time.Unix(20, 0), testGuestValues{cpuTotal: 40, memoryLimit: 16384}),
+	}}
+	sampler := testGuestWorkloadSampler(t, store, reader)
+	workload := WorkloadRef{SandboxID: cb.ID, ContainerID: cb.ID}
+
+	sampleDirect(sampler, cb, workload)
+	first, ok := sampler.Latest(workload, time.Unix(11, 0))
+	require.True(t, ok)
+	require.Equal(t, uint64(1), first.EpochGeneration)
+	require.Equal(t, time.Unix(1, 0).UTC(), first.EpochStartedAt)
+
+	// A rollback raises the cached window to generation 2. This is the state
+	// the sampler is in when pause/resume restarts the epoch at generation 1.
+	require.NoError(t, cb.BeginGuestMetricsEpoch(cubeboxstore.GuestMetricsEpochRollback, time.Unix(15, 0)))
+	sampleDirect(sampler, cb, workload)
+	rolledBack, ok := sampler.Latest(workload, time.Unix(16, 0))
+	require.True(t, ok)
+	require.Equal(t, uint64(2), rolledBack.EpochGeneration)
+	require.Equal(t, GuestWorkloadAvailable, rolledBack.Availability)
+
+	// Resume recreates the sandbox row and restarts the epoch at generation 1
+	// with a newer start time. Generation alone treats this as the same window.
+	reset := cb.GuestMetricsEpochCopy().DeepCopy()
+	reset.Generation = 1
+	reset.StartedAt = time.Unix(20, 0).UTC()
+	reset.Reason = cubeboxstore.GuestMetricsEpochFreshCreate
+	reset.State = cubeboxstore.GuestMetricsEpochReady
+	reset.ReadyAt = nil
+	reset.Baseline = &cubeboxstore.GuestMetricsEpochBaseline{ContainerID: workload.ContainerID}
+	cb.RestoreGuestMetricsEpoch(reset)
+
+	sampleDirect(sampler, cb, workload)
+	latest, ok := sampler.Latest(workload, time.Unix(21, 0))
+	require.True(t, ok)
+	require.Equal(t, uint64(1), latest.EpochGeneration)
+	require.Equal(t, time.Unix(20, 0).UTC(), latest.EpochStartedAt)
+	require.True(t, latest.CumulativeAvailable)
+	require.Equal(t, uint64(40), latest.Snapshot.Counters.CPUUsageTotalNS)
+}
+
+func TestGuestWorkloadSamplerResetsCacheWhenEpochStartTimeChanges(t *testing.T) {
+	cb := testSamplerCubeBox(t, cubeboxstore.Status{StartedAt: 1})
+	store := &fakeGuestWorkloadStore{boxes: []*cubeboxstore.CubeBox{cb}}
+	reader := &fakeGuestWorkloadReader{metrics: []*types.Metric{
+		testContainerdMetric(t, time.Unix(10, 0), testGuestValues{cpuTotal: 100, memoryLimit: 16384}),
+	}}
+	sampler := testGuestWorkloadSampler(t, store, reader)
+	workload := WorkloadRef{SandboxID: cb.ID, ContainerID: cb.ID}
+	sampleDirect(sampler, cb, workload)
+
+	// Same generation, newer start time: the cache must still be reset.
+	reset := cb.GuestMetricsEpochCopy().DeepCopy()
+	reset.StartedAt = time.Unix(20, 0).UTC()
+	reset.State = cubeboxstore.GuestMetricsEpochReady
+	reset.Baseline = &cubeboxstore.GuestMetricsEpochBaseline{ContainerID: workload.ContainerID}
+	cb.RestoreGuestMetricsEpoch(reset)
+	sampler.invalidateIfEpochChanged(workload, cb.GuestMetricsEpochCopy())
+
+	latest, ok := sampler.Latest(workload, time.Unix(21, 0))
+	require.True(t, ok)
+	require.Equal(t, GuestWorkloadUnavailable, latest.Availability)
+	require.False(t, latest.CumulativeAvailable)
+	require.Equal(t, time.Unix(20, 0).UTC(), latest.EpochStartedAt)
+}
+
+func TestGuestWorkloadSamplerDropsSampleWhenOnlyEpochStartTimeChanged(t *testing.T) {
+	sampler := testGuestWorkloadSampler(t, &fakeGuestWorkloadStore{}, &fakeGuestWorkloadReader{})
+	workload := WorkloadRef{SandboxID: "sandbox", ContainerID: "sandbox"}
+
+	sampler.record(0, GuestWorkloadLatest{
+		Workload:            workload,
+		EpochGeneration:     1,
+		EpochStartedAt:      time.Unix(10, 0),
+		CollectedAt:         time.Unix(11, 0),
+		Availability:        GuestWorkloadAvailable,
+		CumulativeAvailable: true,
+	})
+	sampler.record(0, GuestWorkloadLatest{
+		Workload:            workload,
+		EpochGeneration:     1,
+		EpochStartedAt:      time.Unix(20, 0),
+		CollectedAt:         time.Unix(21, 0),
+		Availability:        GuestWorkloadAvailable,
+		CumulativeAvailable: true,
+	})
+	sampler.recordError(workload, guestEpochID{Generation: 1, StartedAt: time.Unix(20, 0)}, 0, errors.New("stale epoch"))
+
+	latest, ok := sampler.Latest(workload, time.Unix(12, 0))
+	require.True(t, ok)
+	require.Equal(t, time.Unix(10, 0), latest.EpochStartedAt)
+	require.Empty(t, latest.LastError)
+}
+
+func TestGuestWorkloadSamplerDropsSamplesFromReplacedEpoch(t *testing.T) {
+	sampler := testGuestWorkloadSampler(t, &fakeGuestWorkloadStore{}, &fakeGuestWorkloadReader{})
+	workload := WorkloadRef{SandboxID: "sandbox", ContainerID: "sandbox"}
+
+	sampler.record(0, GuestWorkloadLatest{
+		Workload:            workload,
+		EpochGeneration:     2,
+		EpochStartedAt:      time.Unix(10, 0),
+		CollectedAt:         time.Unix(11, 0),
+		Availability:        GuestWorkloadAvailable,
+		CumulativeAvailable: true,
+	})
+	// A sample produced before the reset carries the old identity and must not
+	// overwrite the newer epoch.
+	sampler.record(0, GuestWorkloadLatest{
+		Workload:            workload,
+		EpochGeneration:     1,
+		EpochStartedAt:      time.Unix(20, 0),
+		CollectedAt:         time.Unix(21, 0),
+		Availability:        GuestWorkloadAvailable,
+		CumulativeAvailable: true,
+	})
+	sampler.recordError(workload, guestEpochID{Generation: 1, StartedAt: time.Unix(20, 0)}, 0, errors.New("stale epoch"))
+
+	latest, ok := sampler.Latest(workload, time.Unix(12, 0))
+	require.True(t, ok)
+	require.Equal(t, uint64(2), latest.EpochGeneration)
+	require.Equal(t, time.Unix(10, 0), latest.EpochStartedAt)
+	require.Empty(t, latest.LastError)
+}
+
 func testSamplerCubeBox(t *testing.T, status cubeboxstore.Status) *cubeboxstore.CubeBox {
 	return testSamplerCubeBoxWithID(t, "container", status)
 }
@@ -798,13 +928,16 @@ func sampleDirect(sampler *GuestWorkloadSampler, cb *cubeboxstore.CubeBox, workl
 	if err != nil {
 		panic(err)
 	}
+	epoch := cb.GuestMetricsEpochCopy()
+	sampler.invalidateIfEpochChanged(workload, epoch)
+	epochID := guestEpochIDOf(epoch)
 	sampler.collect(
 		context.Background(),
 		cb,
 		workload,
 		namespace,
 		cpuLimitMillicores,
-		cb.GuestMetricsEpochCopy().Generation,
+		epochID,
 		token,
 	)
 }

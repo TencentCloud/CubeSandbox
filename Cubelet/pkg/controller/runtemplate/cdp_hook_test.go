@@ -6,6 +6,7 @@ package runtemplate
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -258,10 +259,13 @@ func createMockStore(t *testing.T) *membolt.BoltCacheStore[*templatetypes.LocalR
 }
 
 type mockMetadataDB struct {
+	mu   sync.RWMutex
 	data map[string][]byte
 }
 
 func (m *mockMetadataDB) Get(bucket, key string) ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	fullKey := bucket + "/" + key
 	data, ok := m.data[fullKey]
 	if !ok {
@@ -271,14 +275,17 @@ func (m *mockMetadataDB) Get(bucket, key string) ([]byte, error) {
 }
 
 func (m *mockMetadataDB) Set(bucket, key string, value []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	fullKey := bucket + "/" + key
 	m.data[fullKey] = value
 	return nil
 }
 
 func (m *mockMetadataDB) SetWithTx(bucket, key string, value []byte, callback func() error) error {
-	fullKey := bucket + "/" + key
-	m.data[fullKey] = value
+	if err := m.Set(bucket, key, value); err != nil {
+		return err
+	}
 	if callback != nil {
 		return callback()
 	}
@@ -286,14 +293,17 @@ func (m *mockMetadataDB) SetWithTx(bucket, key string, value []byte, callback fu
 }
 
 func (m *mockMetadataDB) Delete(bucket, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	fullKey := bucket + "/" + key
 	delete(m.data, fullKey)
 	return nil
 }
 
 func (m *mockMetadataDB) DeleteWithTx(bucket, key string, callback func() error) error {
-	fullKey := bucket + "/" + key
-	delete(m.data, fullKey)
+	if err := m.Delete(bucket, key); err != nil {
+		return err
+	}
 	if callback != nil {
 		return callback()
 	}
@@ -301,6 +311,8 @@ func (m *mockMetadataDB) DeleteWithTx(bucket, key string, callback func() error)
 }
 
 func (m *mockMetadataDB) List(bucket string) (map[string][]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	result := make(map[string][]byte)
 	prefix := bucket + "/"
 	for k, v := range m.data {

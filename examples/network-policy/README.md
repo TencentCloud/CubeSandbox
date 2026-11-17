@@ -97,10 +97,18 @@ Two things set this apart from the create-time modes:
 This is a CubeSandbox extension, so the example uses the `cubesandbox` SDK
 (`sandbox.updateNetwork(...)` in Node, `sandbox.UpdateNetwork(...)` in Go).
 
-The script walks four scenarios, in order: an IP allow list, a live connection
-carried across a revoking update, a domain allow list, and switching on L7
-interception mid-run. Unlike E2B — where `network.rules` is create-only — L7
-rules can be changed on a running sandbox.
+The script walks five scenarios, in order: an IP allow list, a live connection
+carried across a revoking update, a domain allow list, revoking a domain seen
+from the address it taught, and switching on L7 interception mid-run. Unlike
+E2B — where `network.rules` is create-only — L7 rules can be changed on a
+running sandbox.
+
+The fourth is worth calling out. A domain rule does not filter by name at
+connect time: DNS replies are learned, and the addresses they carry become
+allow entries carrying the record's TTL. Revoking the rule retires those
+entries with it, so access is gone at once rather than when the TTL — floored
+at 300s — runs out. Probing the resolved address rather than the domain is what
+distinguishes the two.
 
 ## 3. Policy Summary
 

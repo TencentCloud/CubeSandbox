@@ -18,6 +18,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -27,6 +28,12 @@ import (
 )
 
 var (
+	// createdAtCache memoizes the immutable sandbox creation time. Only the
+	// read paths fill it, so every value is exactly what the durable row
+	// holds; the LRU cap keeps the footprint bounded when a destroy or an
+	// out-of-process purge never reaches Delete.
+	createdAtCache = newCreatedAtMemo(createdAtCacheSize)
+
 	// ErrSandboxSpecNotFound is returned when no spec is registered for the sandbox.
 	ErrSandboxSpecNotFound = errors.New("sandbox spec not found")
 	// ErrSandboxSpecStoreNotReady is returned when Init has not been called.
@@ -196,6 +203,78 @@ func Get(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandbox
 	return decodeSpec(&rec)
 }
 
+// GetCreatedAt returns the durable creation time of the sandbox spec. The
+// timestamp is set on first insert and preserved on later upserts, so it
+// matches the sandbox creation time for normally-created sandboxes. For
+// backfilled specs it is the backfill time.
+//
+// Reads populate the memo; writes do not, because an upsert cannot tell
+// whether it inserted the row or merely refreshed it.
+func GetCreatedAt(ctx context.Context, sandboxID string) (time.Time, error) {
+	client := getDB()
+	if client == nil {
+		return time.Time{}, ErrSandboxSpecStoreNotReady
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return time.Time{}, errors.New("sandboxspec.GetCreatedAt: sandbox_id is required")
+	}
+	if ts, ok := createdAtCache.load(sandboxID); ok {
+		return ts, nil
+	}
+	var rec models.SandboxSpec
+	if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+		Select("created_at").Where("sandbox_id = ?", sandboxID).First(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return time.Time{}, ErrSandboxSpecNotFound
+		}
+		return time.Time{}, err
+	}
+	createdAtCache.store(sandboxID, rec.CreatedAt)
+	return rec.CreatedAt, nil
+}
+
+// GetCreatedAtMany returns the durable creation time for every id that has a
+// spec row; ids without one are absent from the result. It exists so the list
+// path can carry the same creation time as the detail path without one query
+// per sandbox. A query error stops further batches and returns the values
+// collected so far together with the error.
+func GetCreatedAtMany(ctx context.Context, sandboxIDs []string) (map[string]time.Time, error) {
+	client := getDB()
+	if client == nil {
+		return nil, ErrSandboxSpecStoreNotReady
+	}
+	ids := uniqueTrimmedIDs(sandboxIDs)
+	out := make(map[string]time.Time, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	batchSize := getManyBatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var recs []models.SandboxSpec
+		if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+			Select("sandbox_id", "created_at").
+			Where("sandbox_id IN ?", ids[start:end]).Find(&recs).Error; err != nil {
+			return out, err
+		}
+		for i := range recs {
+			if recs[i].CreatedAt.IsZero() {
+				continue
+			}
+			out[recs[i].SandboxID] = recs[i].CreatedAt
+			createdAtCache.store(recs[i].SandboxID, recs[i].CreatedAt)
+		}
+	}
+	return out, nil
+}
+
 // getManyBatchSize bounds one IN list. Tests lower it to exercise batching.
 var getManyBatchSize = 500
 
@@ -272,6 +351,43 @@ func decodeSpec(rec *models.SandboxSpec) (*sandboxtypes.CreateCubeSandboxReq, er
 	return out, nil
 }
 
+// GetAnnotations returns a copy of the persisted request annotations without
+// decoding the rest of the sandbox create request.
+func GetAnnotations(ctx context.Context, sandboxID string) (map[string]string, error) {
+	client := getDB()
+	if client == nil {
+		return nil, ErrSandboxSpecStoreNotReady
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil, errors.New("sandboxspec.GetAnnotations: sandbox_id is required")
+	}
+	var rec struct {
+		RequestJSON string `gorm:"column:request_json"`
+	}
+	if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+		Select("request_json").Where("sandbox_id = ?", sandboxID).First(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrSandboxSpecNotFound
+		}
+		return nil, err
+	}
+	var stored struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if err := json.Unmarshal([]byte(rec.RequestJSON), &stored); err != nil {
+		return nil, err
+	}
+	if len(stored.Annotations) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(stored.Annotations))
+	for key, value := range stored.Annotations {
+		out[key] = value
+	}
+	return out, nil
+}
+
 // Delete removes the spec record for sandboxID. Missing records are a no-op.
 func Delete(ctx context.Context, sandboxID string) error {
 	client := getDB()
@@ -282,9 +398,13 @@ func Delete(ctx context.Context, sandboxID string) error {
 	if sandboxID == "" {
 		return errors.New("sandboxspec.Delete: sandbox_id is required")
 	}
-	return client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+	err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
 		Where("sandbox_id = ?", sandboxID).
 		Delete(&models.SandboxSpec{}).Error
+	if err == nil {
+		createdAtCache.delete(sandboxID)
+	}
+	return err
 }
 
 // CanonicalizeRequest strips transient fields that are not part of the

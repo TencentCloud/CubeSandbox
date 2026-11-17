@@ -1,6 +1,11 @@
 aiohttp>=3.9
 cubesandbox>=0.6
-e2b-code-interpreter>=2.4,<3
+# CubeAPI create is POST /sandboxes. e2b 2.51.0+ Sandbox.create posts
+# /v2/sandboxes and gets 405 (that route is GET-only). e2b-code-interpreter
+# 2.10.1+ requires e2b>=2.52, so both caps are required: 2.10.0 still
+# accepts e2b>=2.44 and would otherwise pull 2.51+.
+e2b>=2.7.0,<2.51
+e2b-code-interpreter>=2.4,<2.10.1
 httpx>=0.27
 python-dotenv
 rich>=13.0

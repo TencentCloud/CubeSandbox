@@ -192,6 +192,123 @@ func TestExtractL7PortScheme(t *testing.T) {
 	}
 }
 
+func TestCubeVSTapRegistrationCatchAllSkipsNameExtraction(t *testing.T) {
+	star := "*"
+	specific := "api.example.com"
+	httpScheme := "http"
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{
+			{Name: "all-http", Match: &EgressRuleMatch{Host: &star, Scheme: &httpScheme}},
+			{Name: "all-https", Match: &EgressRuleMatch{SNI: &star, Host: &specific}},
+			{Name: "exact", Match: &EgressRuleMatch{Host: &specific}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || len(opts.DNSCatchAll.Ports) != 2 ||
+		opts.DNSCatchAll.Ports[0].Port != 80 || opts.DNSCatchAll.Ports[0].Scheme != cubevs.L7SchemeHTTP ||
+		opts.DNSCatchAll.Ports[1].Port != 443 || opts.DNSCatchAll.Ports[1].Scheme != cubevs.L7SchemeHTTPS {
+		t.Fatalf("DNSCatchAll=%+v, want explicit 80/http and 443/https", opts.DNSCatchAll)
+	}
+	if opts.L7AllowOut == nil || len(*opts.L7AllowOut) != 1 || (*opts.L7AllowOut)[0].Host != specific {
+		t.Fatalf("L7AllowOut=%v, want only %s", opts.L7AllowOut, specific)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllHTTPOnly(t *testing.T) {
+	star := "*"
+	httpScheme := "http"
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{{
+			Name:  "all-http",
+			Match: &EgressRuleMatch{Host: &star, Scheme: &httpScheme},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || len(opts.DNSCatchAll.Ports) != 1 ||
+		opts.DNSCatchAll.Ports[0].Port != 80 || opts.DNSCatchAll.Ports[0].Scheme != cubevs.L7SchemeHTTP {
+		t.Fatalf("DNSCatchAll=%+v, want port 80/http", opts.DNSCatchAll)
+	}
+	if opts.L7AllowOut != nil {
+		t.Fatalf("L7AllowOut=%v, want none", opts.L7AllowOut)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllDefaultSet(t *testing.T) {
+	star := "*"
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{{
+			Name:  "all",
+			Match: &EgressRuleMatch{Host: &star},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || len(opts.DNSCatchAll.Ports) != 0 {
+		t.Fatalf("DNSCatchAll=%+v, want default port set", opts.DNSCatchAll)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllCustomPort(t *testing.T) {
+	star := "*"
+	https := "https"
+	port := 8443
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{{
+			Name:  "wide",
+			Match: &EgressRuleMatch{Host: &star, Scheme: &https, Port: &port},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || len(opts.DNSCatchAll.Ports) != 1 ||
+		opts.DNSCatchAll.Ports[0].Port != 8443 || opts.DNSCatchAll.Ports[0].Scheme != cubevs.L7SchemeHTTPS {
+		t.Fatalf("DNSCatchAll=%+v, want port 8443/https", opts.DNSCatchAll)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllMergesSchemeDefaultAndCustomPort(t *testing.T) {
+	star := "*"
+	httpScheme := "http"
+	https := "https"
+	port := 8443
+	opts, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{
+			{Name: "all-http", Match: &EgressRuleMatch{Host: &star, Scheme: &httpScheme}},
+			{Name: "wide", Match: &EgressRuleMatch{SNI: &star, Scheme: &https, Port: &port}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cubeVSTapRegistration error=%v", err)
+	}
+	if opts.DNSCatchAll == nil || len(opts.DNSCatchAll.Ports) != 2 ||
+		opts.DNSCatchAll.Ports[0].Port != 80 || opts.DNSCatchAll.Ports[0].Scheme != cubevs.L7SchemeHTTP ||
+		opts.DNSCatchAll.Ports[1].Port != 8443 || opts.DNSCatchAll.Ports[1].Scheme != cubevs.L7SchemeHTTPS {
+		t.Fatalf("DNSCatchAll=%+v, want 80/http and 8443/https", opts.DNSCatchAll)
+	}
+}
+
+func TestCubeVSTapRegistrationCatchAllRejectsSchemeConflict(t *testing.T) {
+	star := "*"
+	httpScheme := "http"
+	https := "https"
+	port := 8443
+	_, err := cubeVSTapRegistration(&CubeNetworkConfig{
+		Rules: []*EgressRule{
+			{Name: "http", Match: &EgressRuleMatch{Host: &star, Scheme: &httpScheme, Port: &port}},
+			{Name: "https", Match: &EgressRuleMatch{Host: &star, Scheme: &https, Port: &port}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "scheme conflict") {
+		t.Fatalf("error=%v, want catch-all scheme conflict", err)
+	}
+}
+
 func TestCubeVSTapRegistrationRejectsEntireInvalidL7Policy(t *testing.T) {
 	host := "api.example.com"
 	https := "https"

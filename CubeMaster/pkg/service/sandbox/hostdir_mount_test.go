@@ -337,3 +337,23 @@ func TestCreateRequestHasHostMount(t *testing.T) {
 		t.Fatal("HostDir volume must pin")
 	}
 }
+
+func TestWritablePluginVolumeMounts(t *testing.T) {
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		AnnotationPluginVolumeMounts: `[{"name":"ro","readonly":true},{"name":"rw"},{"name":"","readonly":false}]`,
+	}}
+	got, err := WritablePluginVolumeMounts(req)
+	if err != nil {
+		t.Fatalf("WritablePluginVolumeMounts: %v", err)
+	}
+	if len(got) != 1 || got[0] != "rw" {
+		t.Fatalf("writable = %v, want [rw]", got)
+	}
+}
+
+func TestWritablePluginVolumeMountsWithoutAnnotation(t *testing.T) {
+	got, err := WritablePluginVolumeMounts(&types.CreateCubeSandboxReq{})
+	if err != nil || got != nil {
+		t.Fatalf("got %v, %v", got, err)
+	}
+}

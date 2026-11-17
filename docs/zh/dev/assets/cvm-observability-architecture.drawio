@@ -1,0 +1,69 @@
+<mxfile host="app.diagrams.net" modified="2026-10-20T00:00:00.000Z" agent="CubeSandbox" version="24.7.8" type="device">
+  <diagram id="sandbox-observability" name="sandbox-only 可观测性架构">
+    <mxGraphModel dx="1180" dy="640" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1120" pageHeight="560" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="CubeSandbox sandbox-only 可观测性架构" style="text;html=1;strokeColor=none;fillColor=none;fontSize=18;fontStyle=1;fontColor=#0F172A;align=left;" vertex="1" parent="1">
+          <mxGeometry x="32" y="14" width="1056" height="32" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="node_group" value="沙箱计算节点" style="swimlane;whiteSpace=wrap;html=1;rounded=1;fillColor=#F8FAFC;strokeColor=#94A3B8;strokeWidth=1.5;fontSize=14;fontStyle=1;startSize=32;" vertex="1" parent="1">
+          <mxGeometry x="32" y="64" width="650" height="350" as="geometry"/>
+        </mxCell>
+        <mxCell id="cubelet" value="&lt;b&gt;Cubelet 沙箱资源接口&lt;/b&gt;&lt;br&gt;127.0.0.1:9998/v1/metrics/resource&lt;br&gt;cubesandbox_* CPU / Memory / Count" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=1.5;fontSize=12;fontColor=#1E3A8A;" vertex="1" parent="node_group">
+          <mxGeometry x="26" y="54" width="250" height="82" as="geometry"/>
+        </mxCell>
+        <mxCell id="sandbox_logs" value="&lt;b&gt;沙箱标准输出/标准错误日志&lt;/b&gt;&lt;br&gt;/data/cubelet/log/&amp;lt;sandbox-id&amp;gt;/&lt;br&gt;stdout / stderr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=1.5;fontSize=12;fontColor=#78350F;" vertex="1" parent="node_group">
+          <mxGeometry x="26" y="180" width="250" height="82" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="collector" value="OTel Collector Contrib" style="swimlane;whiteSpace=wrap;html=1;rounded=1;fillColor=#ECFDF5;strokeColor=#10B981;strokeWidth=1.5;fontSize=13;fontStyle=1;fontColor=#065F46;startSize=32;" vertex="1" parent="node_group">
+          <mxGeometry x="368" y="40" width="250" height="250" as="geometry"/>
+        </mxCell>
+        <mxCell id="metrics_pipeline" value="&lt;b&gt;Metrics Pipeline&lt;/b&gt;&lt;br&gt;prometheus receiver + batch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2563EB;strokeWidth=1.3;fontSize=12;fontColor=#1E3A8A;" vertex="1" parent="collector">
+          <mxGeometry x="22" y="50" width="206" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="logs_pipeline" value="&lt;b&gt;Logs Pipeline&lt;/b&gt;&lt;br&gt;filelog/sandbox + file_storage" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D97706;strokeWidth=1.3;fontSize=12;fontColor=#78350F;" vertex="1" parent="collector">
+          <mxGeometry x="22" y="136" width="206" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="pull_edge" value="Pull" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2563EB;strokeWidth=2;fontSize=11;fontStyle=1;fontColor=#1D4ED8;" edge="1" parent="node_group" source="cubelet" target="metrics_pipeline">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="tail_edge" value="Tail" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D97706;strokeWidth=2;fontSize=11;fontStyle=1;fontColor=#B45309;" edge="1" parent="node_group" source="sandbox_logs" target="logs_pipeline">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="backend_group" value="可选后端" style="swimlane;whiteSpace=wrap;html=1;rounded=1;fillColor=#F8FAFC;strokeColor=#94A3B8;strokeWidth=1.5;fontSize=14;fontStyle=1;startSize=32;" vertex="1" parent="1">
+          <mxGeometry x="792" y="64" width="296" height="350" as="geometry"/>
+        </mxCell>
+        <mxCell id="prometheus" value="&lt;b&gt;Prometheus :9092&lt;/b&gt;&lt;br&gt;OTLP/HTTP 或 Remote Write" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF1F2;strokeColor=#E11D48;strokeWidth=1.5;fontSize=12;fontColor=#881337;" vertex="1" parent="backend_group">
+          <mxGeometry x="26" y="52" width="244" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="elasticsearch" value="&lt;b&gt;Loki :3100（默认）&lt;/b&gt;&lt;br&gt;或 Elasticsearch :9200" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0F9FF;strokeColor=#0284C7;strokeWidth=1.5;fontSize=12;fontColor=#0C4A6E;" vertex="1" parent="backend_group">
+          <mxGeometry x="26" y="156" width="244" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="grafana" value="&lt;b&gt;Grafana :3001&lt;/b&gt;&lt;br&gt;沙箱资源 + 沙箱日志看板" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#7C3AED;strokeWidth=1.5;fontSize=12;fontColor=#4C1D95;" vertex="1" parent="backend_group">
+          <mxGeometry x="26" y="260" width="244" height="62" as="geometry"/>
+        </mxCell>
+        <mxCell id="push_metrics" value="Push metrics" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2563EB;strokeWidth=2;fontSize=11;fontStyle=1;fontColor=#1D4ED8;" edge="1" parent="1" source="metrics_pipeline" target="prometheus">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="push_logs" value="Push logs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D97706;strokeWidth=2;fontSize=11;fontStyle=1;fontColor=#B45309;" edge="1" parent="1" source="logs_pipeline" target="elasticsearch">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="prom_query" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7C3AED;strokeWidth=1.5;" edge="1" parent="backend_group" source="prometheus" target="grafana">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="es_query" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7C3AED;strokeWidth=1.5;" edge="1" parent="backend_group" source="elasticsearch" target="grafana">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="excluded" value="&lt;b&gt;明确不采集&lt;/b&gt;&lt;br&gt;节点整体 CPU / 内存 / 磁盘 / 网络；模板和平台组件日志；systemd journal；OCI Exec 独立日志。&lt;br&gt;后端可以部署在控制节点，但采集面只发送沙箱遥测。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF2F2;strokeColor=#F87171;strokeWidth=1.2;fontSize=12;fontColor=#991B1B;align=left;spacingLeft=16;" vertex="1" parent="1">
+          <mxGeometry x="32" y="442" width="1056" height="86" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

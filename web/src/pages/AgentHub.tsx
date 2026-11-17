@@ -2247,7 +2247,8 @@ function EngineChip({ engine }: { engine: Agent['engine'] }) {
 }
 
 function EnvChip({ env }: { env: Agent['env'] }) {
-  const label = env === 'linux' ? 'Linux' : '个人 Mac 设备';
+  const { t } = useTranslation('agentHub');
+  const label = t(env === 'linux' ? 'env.linux' : 'env.mac');
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-border/60">
       {label}

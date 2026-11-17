@@ -10,9 +10,13 @@
 #      repositories move int → cn.
 #   2. Points mysql / redis / minio / kubectl (cube.image, no registry rewrite) at the
 #      mirrored CN repositories under cube-sandbox/.
+#   3. Points the dedicated JuiceFS metadata Redis at the mirrored CN redis.
+#      The JuiceFS client image (images.juicefs) needs no override here: it is
+#      rendered with cube.cubeImage, so global.imageRegistry rewrites it to cn
+#      like every other Cube-owned image.
 #
 # Prerequisites: CN images already published, including
-#   cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/{mysql,redis,minio,alpine-k8s,...}
+#   cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/{mysql,redis,minio,juicefs,alpine-k8s,...}
 
 global:
   # Host only — path /cube-sandbox/<image> is preserved from values.yaml.
@@ -37,3 +41,12 @@ minio:
   image:
     repository: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/minio
     tag: "RELEASE.2025-09-07T16-13-09Z"
+
+# The dedicated JuiceFS metadata Redis renders with cube.image (no registry
+# rewrite), so it needs its own override to pull from the CN mirror.
+cubeJuiceFS:
+  metadata:
+    redis:
+      image:
+        repository: cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/redis
+        tag: "7-alpine"

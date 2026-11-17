@@ -192,6 +192,9 @@ const (
 	MasterAnnotationsFallbackToSlowPath       = "cube.master.fallback_to_slow_path"
 	MasterAnnotationsAppSnapshotCreate        = "cube.master.appsnapshot.create"
 	MasterAnnotationAppSnapshotTemplateID     = "cube.master.appsnapshot.template.id"
+	MasterAnnotationJFSTemplateVariantID      = "cube.master.jfs.template.variant.id"
+	MasterAnnotationJFSTemplateVariantPolicy  = "cube.master.jfs.template.variant.policy"
+	MasterJFSTemplateVariantPolicyV1          = "hf1"
 	MasterAnnotationRuntimeSnapshotID         = "cube.master.runtime.snapshot.id"
 	MasterAnnotationRuntimeSnapshotAttachedAt = "cube.master.runtime.snapshot.attached_at"
 	// MasterAnnotationRuntimeRestoreSnapshotID tracks the snapshot id whose
@@ -250,7 +253,22 @@ const (
 	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
 	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"
 	MasterAnnotationInstanceType            = "cube.master.instance.type"
+	// MasterAnnotationCgroupMode is the guest cgroup hierarchy selector for
+	// the template and every sandbox created from it: empty = default unified
+	// v2 hierarchy; "legacy" lets the guest mount cgroup v1 controllers itself
+	// (required by Android init).
+	MasterAnnotationCgroupMode = "cube.master.cgroup_mode"
 )
+
+// GuestAffectingMasterAnnotations lists the cube.master.* request-level
+// annotations that alter the guest environment and therefore must be copied
+// from the sandbox request into the sandbox OCI spec annotations. The
+// annotation map assembled in CreateSandbox otherwise carries only
+// platform-internal keys, so without this passthrough these flags are
+// silently dropped before the shim can see them.
+var GuestAffectingMasterAnnotations = []string{
+	MasterAnnotationCgroupMode,
+}
 
 // Inventory version annotations used by Ensure
 const (

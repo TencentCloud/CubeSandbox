@@ -36,7 +36,10 @@ pytest --run-e2e -m "lifecycle and slow"
 | `cases/lifecycle/test_rollback_clone.py` | rollback 异常/文件系统/kernel 状态，以及默认/并发 clone 和临时快照清理 | `rollback_clone`（仅 CubeSandbox），部分依赖 Code Interpreter | P1 |
 | `cases/lifecycle/test_negative_and_timeout.py` | create/connect 目标不存在、删除后 pause、在线更新 timeout | `lifecycle`、`pause_resume`、`set_timeout` | P1 |
 | `cases/lifecycle/test_kill.py` | kill 后不可连接、列表移除、重复 kill 终态语义 | `lifecycle` | P1 |
+| `cases/lifecycle/test_list_metadata_filter.py` | 沙箱列表 `metadata` 过滤：E2B SDK 双重百分号编码的取值（空格、`/`、非 ASCII、`=`、`&`、`%`）、多 key 取 AND、旧调用方的单层编码（原样、`urlencode`、`quote`；被转义的 `&` 保留在值内）、手工拼 URL 时值内的 `&`/`=` 需双重编码、值不是 key=value 键值对时返回 400（v1 与 v2） | `lifecycle`；SDK 用例仅 `e2b` 后端执行 | P1 |
+| `cases/lifecycle/test_list_state_filter.py` | `GET /v2/sandboxes` 的 `state` 逗号多值、任一非法值整体 400、默认列表只含 E2B 可解析状态、paused/running 隔离；E2B SDK `SandboxQuery(state=...)` | `lifecycle`；paused 用例另需 `pause_resume`；SDK 用例仅 `e2b` 后端执行 | P1 |
 | `cases/lifecycle/test_auto_lifecycle.py` | auto-pause、手动/自动恢复、重入、auto-kill、主动 pause 与 timeout 的交互 | `platform_lifecycle`、CubeProxy、lifecycle-manager；部分需 Code Interpreter | P1 + `slow`，每日运行 |
+| `cases/lifecycle/test_restart_policy.py` | info 中的策略、默认 Never、非法取值拒绝、健康沙箱不重启、guest 崩溃后同 ID 且落盘文件仍在、删除不重启、达到 maxRestarts 放弃、退出码 0 只有 Always 重启、主进程非 0 退出、退避间隔、稳定期清零、退避中暂停、冷启动后暂停再恢复、退避中删除、存活探测失败 | `restart_policy`（仅 CubeSandbox）。随 `--run-e2e` 执行。模板暴露 envd 49983。暂停类另需 `pause_resume` | P1 控制面；崩溃、退出、退避与放弃为 P2/P3 + `slow` |
 
 当前清单中的 `platform_lifecycle` 前提只代表本分支的执行配置：
 它依赖 CubeProxy 与 lifecycle-manager 协调，但 E2B 暂未启用是因为其 SDK
@@ -69,7 +72,8 @@ pytest --run-e2e -m "lifecycle and slow"
 - 覆盖写、多行文本和较深路径；
 - 较大文本；
 - 文件 API 与 shell 双向互操作；
-- 读取不存在文件的错误语义。
+- 读取不存在文件的错误语义；
+- 二进制 `bytes` 和 `stream` 读取，包括空文件和 shell 创建的文件。
 
 `cases/filesystem/test_extended.py` 覆盖 SDK 文件 API 的文件和目录元数据、
 嵌套及空目录 list、exists、remove、rename 和 mkdir。
@@ -77,7 +81,7 @@ pytest --run-e2e -m "lifecycle and slow"
 `cases/filesystem/test_batch_and_watch.py` 覆盖两个 SDK backend 的批量文件写入，
 以及目录 create/write/remove 实时事件。
 
-当前内容覆盖仍以文本文件为主，尚未覆盖非 root 权限行为、二进制往返、
+二进制内容已覆盖 `bytes` 和 `stream` 读取。尚未覆盖非 root 权限行为、
 原子替换和并发文件访问。
 
 ### 2.4 Run code
@@ -124,6 +128,15 @@ pytest --run-e2e -m "lifecycle and slow"
   不是 network runtime 的 state file；
 - 反复更新可收敛，守住增量 map diff 不漏删、不重复删。
 
+`cases/network/test_l7_catch_all.py` 覆盖 `"*"` L7 规则
+（`network_l7_egress` + `network_dns_allow`，仅 CubeSandbox）：
+
+- 沙箱里解析出的名字可以访问 80 和 443，HTTPS 响应由 catch-all 放行；
+- 该名字上另一个本来开放的端口仍然不通；
+- 没有做过 DNS 查询的公网 IP 不通；
+- 针对单个名字的规则先于 catch-all 生效；
+- 创建带凭证注入的 catch-all 规则会被接受。
+
 存量连接相关用例使用 `framework/network_probe.py` 里的 guest 侧 holder，它会
 刻意持续向对端发包：被撤销的流是在 guest 下一次发包时才被重判的，光挂着一个
 空闲 socket 观察不到任何现象。
@@ -148,6 +161,13 @@ pytest --run-e2e -m "lifecycle and slow"
 此外会使用 writable layer 大小、暴露端口、HTTP probe 和环境变量构建模板，
 并从 CubeAPI 返回的模板详情中校验这些高级参数。模板操作仅支持 CubeSandbox。
 
+`cases/mcp/test_mcp_gateway.py` 在两个后端上覆盖与 E2B 兼容的 `mcp` 创建参数：
+经 CubeProxy 列出并调用工具、Token 缺失或错误时返回 `401`、`connect` 后重新获取
+Token、暂停/恢复、克隆（仅 CubeSandbox）、`mcp` 格式错误时 CubeAPI 返回 `400`，
+以及服务名未知时 SDK 报错。用例依赖基于 `examples/mcp-gateway/template/Dockerfile`
+构建的模板，通过 `SDK_E2E_MCP_TEMPLATE_ID` 指定（默认别名 `mcp-gateway`）。该模板不存在时，
+整组用例跳过，不影响其他用例。
+
 ### 2.7 Concurrency
 
 `cases/concurrency/test_isolation.py` 目前覆盖两个 sandbox 同路径不同内容的文件
@@ -163,10 +183,10 @@ pytest --run-e2e -m "lifecycle and slow"
 
 当前 suite 主要验证 Python SDK 的同步常用路径和 CubeSandbox/E2B 兼容表面：
 
-- 已验证：创建、查询、命令、文本文件、Python code、pause/resume、kill、
+- 已验证：创建、查询、命令、文本和二进制文件读取、Python code、pause/resume、kill、
   部分自动生命周期、基本出站策略、两实例文件隔离；
-- 未验证：异步 SDK、流式输出、template/snapshot/metadata 完整 API、目录与
-  二进制文件、完整 HTTP/HTTPS/L7/UDP-DNS 网络语义、取消与资源限制、真实并发
+- 未验证：异步 SDK、流式输出、template/snapshot/metadata 完整 API、
+  非 root 文件权限、完整 HTTP/HTTPS/L7/UDP-DNS 网络语义、取消与资源限制、真实并发
   负载、多节点故障恢复。
 
 这不是缺陷清单本身；是否增加用例取决于 API 契约成熟度、环境可重复性和 CI
@@ -190,7 +210,7 @@ pytest --run-e2e -m "lifecycle and slow"
 | --- | --- | --- | --- |
 | 生命周期竞争 | pause 与 timeout 同时发生、resume 请求重入、kill 与 resume 竞争 | 定位状态机与分布式锁问题 | `cases/lifecycle/` |
 | 生命周期时间语义 | timeout 刷新、手动 pause 后 timeout、manual connect 后新 idle 周期、endAt 漂移边界 | 验证 lifecycle contract 而非单次状态 | `cases/lifecycle/` |
-| 文件系统 | 目录创建/列举、权限与非 root user、二进制 round-trip、空文件、删除/rename | 扩大 SDK 文件 API 兼容表面 | `cases/filesystem/` |
+| 文件系统 | 非 root 权限、原子替换、并发文件访问 | 扩大 SDK 文件 API 兼容表面 | `cases/filesystem/` |
 | 命令 | 工作目录、用户切换、信号/取消、输出截断、大输出与 timeout 后资源释放 | 捕获 process/stream 清理问题 | `cases/commands/` |
 | Run code | 多单元异常后 kernel 是否可继续、超时、资源超限、富结果与图表、语言参数 | 验证解释器韧性 | `cases/run_code/` |
 | Network DNS/UDP | 域名 allow/deny、DNS 解析失败、UDP DNS 请求响应 | 不能用 TCP 结果代替 DNS/UDP 策略 | `cases/network/` |

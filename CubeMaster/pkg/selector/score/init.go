@@ -7,6 +7,7 @@ package score
 
 import (
 	"context"
+	"errors"
 	"reflect"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -25,6 +26,15 @@ type Selector interface {
 	Disable() bool
 }
 
+// ErrNotApplicable is returned (possibly wrapped) by a score plugin whose
+// dimension genuinely does not apply to the current request. The profile
+// pipeline treats it as an explicit skip: the plugin contributes no scores
+// and no weight, and it is not treated as a failure even for a ForceEnabled
+// plugin under the fail-closed or default-score policies. This is distinct
+// from returning an empty list with a nil error, which a ForceEnabled plugin
+// is not allowed to do (every candidate must be scored).
+var ErrNotApplicable = errors.New("score plugin not applicable to this request")
+
 func NewSelector(ctx context.Context) []Selector {
 	conf := config.GetConfig().Scheduler
 	if conf == nil || conf.Score == nil || conf.Score.ResourceWeights == nil || len(conf.Score.EnableScorers) == 0 {
@@ -41,12 +51,21 @@ func NewSelector(ctx context.Context) []Selector {
 		ss = append(ss, fn.Call(nil)[0].Interface().(Selector))
 	}
 
-	if conf.Score.ScorePluginConf.MultiFactorWeightedAverage != nil {
-		recov.GoWithRecover(func() {
-			loopAsyncScore(ctx)
-		})
-	}
+	StartAsyncScore(ctx)
 	return ss
+}
+
+// StartAsyncScore starts the legacy background score refresher when enabled.
+// The profile-based scheduler builds score plugins one by one through the
+// unified registry, so background initialization is kept as an explicit hook.
+func StartAsyncScore(ctx context.Context) {
+	conf := config.GetConfig().Scheduler
+	if conf == nil || conf.Score == nil || conf.Score.ScorePluginConf.MultiFactorWeightedAverage == nil {
+		return
+	}
+	recov.GoWithRecover(func() {
+		loopAsyncScore(ctx)
+	})
 }
 
 var scores = map[string]interface{}{

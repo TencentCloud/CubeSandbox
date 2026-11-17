@@ -1,4 +1,6 @@
 common:
+  # Administrator-owned IPv4 CIDRs; all ports. Restart Cubelet after changes.
+  operator_allow_out: []
   enable_pf_mode: false
   sandbox_exec_cmd_time_out: 5s
   enable_sandbox_exec_cmd_before_exist: false

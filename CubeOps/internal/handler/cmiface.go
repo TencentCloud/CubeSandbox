@@ -28,6 +28,7 @@ type CubeMasterClient interface {
 
 	CreateSnapshot(ctx context.Context, body interface{}) (json.RawMessage, error)
 	ListSnapshots(ctx context.Context, params map[string]string) (json.RawMessage, error)
+	GetSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error)
 	DeleteSnapshot(ctx context.Context, snapshotID string) (json.RawMessage, error)
 	RollbackSandbox(ctx context.Context, sandboxID string, body interface{}) (json.RawMessage, error)
 

@@ -15,9 +15,13 @@ spec:
       app.kubernetes.io/component: master
   template:
     metadata:
+      annotations:
+        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-master/conf.yaml") . | sha256sum }}
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master
+      annotations:
+        checksum/config: {{ include "cube.masterConf" . | sha256sum | quote }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -134,11 +138,9 @@ spec:
               subPath: volume-s3.conf
               readOnly: true
           {{- end }}
-          {{- if .Values.cubeEgress.enabled }}
             - name: cube-egress-ca
               mountPath: /etc/cube/ca
               readOnly: true
-          {{- end }}
             - name: cube-master-log
               mountPath: /data/log/CubeMaster
             - name: cube-master-storage
@@ -163,11 +165,9 @@ spec:
             secretName: {{ include "cube.volumeS3SecretName" . }}
             defaultMode: 0400
       {{- end }}
-      {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
-      {{- end }}
         - name: cube-master-log
           emptyDir: {}
         - name: cube-master-storage

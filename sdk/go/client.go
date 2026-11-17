@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,11 +70,46 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, erro
 		return nil, err
 	}
 
+	// A templateID in Extra is an explicit choice: it is sent verbatim, without
+	// the MCP template fallback.
+	var templates []string
+	if _, extraTemplate := opts.Extra["templateID"]; !extraTemplate && opts.TemplateID == "" && opts.MCP != nil {
+		templates = []string{c.config.MCPTemplateID}
+		if c.config.TemplateID != "" && c.config.TemplateID != c.config.MCPTemplateID {
+			templates = append(templates, c.config.TemplateID)
+		}
+	}
 	var sandbox Sandbox
-	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes", payload, &sandbox, http.StatusOK, http.StatusCreated); err != nil {
+	if len(templates) == 0 {
+		err = c.doJSON(ctx, http.MethodPost, "/sandboxes", payload, &sandbox, http.StatusOK, http.StatusCreated)
+	}
+	for i, templateID := range templates {
+		payload["templateID"] = templateID
+		err = c.doJSON(ctx, http.MethodPost, "/sandboxes", payload, &sandbox, http.StatusOK, http.StatusCreated)
+		if err == nil || !errors.Is(err, ErrTemplateNotFound) {
+			break
+		}
+		if i == len(templates)-1 {
+			err = &APIError{
+				StatusCode: http.StatusNotFound,
+				Kind:       apiErrorKindTemplateNotFound,
+				Message: fmt.Sprintf("no template for mcp: tried %q. Build a template that provides mcp-gateway "+
+					"(see docs/guide/mcp-gateway.md), then set TemplateID or CUBE_MCP_TEMPLATE_ID", templates),
+			}
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 	c.attachSandbox(&sandbox)
+	if opts.MCP != nil {
+		if err := sandbox.startMCPGateway(ctx, opts.MCP); err != nil {
+			killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.config.RequestTimeout)
+			defer cancel()
+			_ = sandbox.Kill(killCtx)
+			return nil, err
+		}
+	}
 	return &sandbox, nil
 }
 
@@ -97,12 +133,58 @@ func (c *Client) List(ctx context.Context) ([]SandboxInfo, error) {
 	return sandboxes, nil
 }
 
+// ListV2 lists sandboxes in the E2B view through the v2 endpoint.
+//
+// It returns running and paused sandboxes; `unknown` (exited, still creating)
+// is omitted unless the server is asked for it, which this method does not do.
+// Use List for the Cube-native view that includes `unknown`.
+//
+// `GET /v2/sandboxes` answers one page at a time (`limit`, 100 by default) and
+// reports the next page's position in the `x-next-token` response header. This
+// follows that cursor until it is absent, so the result is every matching
+// sandbox rather than only the first page.
 func (c *Client) ListV2(ctx context.Context) ([]SandboxInfo, error) {
-	var sandboxes []SandboxInfo
-	if err := c.doJSON(ctx, http.MethodGet, "/v2/sandboxes", nil, &sandboxes, http.StatusOK); err != nil {
-		return nil, err
+	var collected []SandboxInfo
+	// `nextToken` is the query parameter the endpoint declares; the first
+	// request carries none, which is what fetches page one.
+	nextToken := ""
+	for {
+		path := "/v2/sandboxes"
+		if nextToken != "" {
+			path += "?nextToken=" + url.QueryEscape(nextToken)
+		}
+		req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.controlHTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var page []SandboxInfo
+		// Status first: an error body is not the array this decodes.
+		if !statusOK(resp.StatusCode, []int{http.StatusOK}) {
+			err := apiErrorFromResponse(resp)
+			resp.Body.Close()
+			return nil, err
+		}
+		decErr := json.NewDecoder(resp.Body).Decode(&page)
+		closeErr := resp.Body.Close()
+		if decErr != nil {
+			return nil, decErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		collected = append(collected, page...)
+
+		// Absent (or blank) header means the last page has been returned.
+		nextToken = resp.Header.Get("x-next-token")
+		if nextToken == "" {
+			return collected, nil
+		}
 	}
-	return sandboxes, nil
 }
 
 func (c *Client) Health(ctx context.Context) (map[string]any, error) {
@@ -115,6 +197,9 @@ func (c *Client) Health(ctx context.Context) (map[string]any, error) {
 
 func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 	templateID := opts.TemplateID
+	if templateID == "" && opts.MCP != nil {
+		templateID = c.config.MCPTemplateID
+	}
 	if templateID == "" {
 		templateID = c.config.TemplateID
 	}
@@ -155,6 +240,10 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 		payload["volumeMounts"] = opts.VolumeMounts
 	}
 
+	if opts.MCP != nil {
+		payload["mcp"] = opts.MCP
+	}
+
 	for key, value := range opts.Extra {
 		payload[key] = value
 	}
@@ -170,12 +259,18 @@ func (c *Client) attachSandbox(sandbox *Sandbox) {
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any, okStatuses ...int) error {
+	return c.doJSONWith(c.controlHTTP, ctx, method, path, body, out, okStatuses...)
+}
+
+// doJSONWith is doJSON on an explicit client; Fork uses a client without the
+// overall timeout so its long deadline is governed by ctx alone.
+func (c *Client) doJSONWith(httpClient *http.Client, ctx context.Context, method, path string, body any, out any, okStatuses ...int) error {
 	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
 
-	resp, err := c.controlHTTP.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

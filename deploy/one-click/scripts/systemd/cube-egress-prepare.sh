@@ -42,7 +42,7 @@ PH_CERT="${CA_DIR}/placeholder.crt"
 PH_KEY="${CA_DIR}/placeholder.key"
 
 # uid 8049 is the cube-proxy worker uid baked into the CubeEgress image
-# (matches scripts/cube-proxy-iptables-init.sh PROXY_UID and the
+# (matches scripts/cube-egress-iptables-init.sh PROXY_UID and the
 # Dockerfile's `addgroup -g 8049 / adduser -u 8049`). The CA key needs
 # to be readable by that uid AT RUNTIME (in the container), so on the
 # host we set group=8049 + mode 0640. The host doesn't need a real

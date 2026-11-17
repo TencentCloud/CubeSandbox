@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -16,15 +17,27 @@ type fakeCubeVSAdapter struct {
 	deletePortMappings     []PortMapping
 	cleanupPolicyCalls     []uint32
 	defaultDenyPolicyCalls []uint32
+	defaultDenyPolicyErr   error
+	defaultDenyInstalled   map[uint32]bool
+	ensuredMetricsIPs      []string
 	listPortMappings       map[uint16]cubevs.MVMPort
 	getTAPDeviceByIndex    map[uint32]*cubevs.TAPDevice
 	deletedTAPDevices      map[uint32]struct{}
 	cleanupPolicyErr       error
 	deleteMetadataErr      error
+	ensureMetricsErr       error
 	deletePortMappingErr   error
 	updatedPolicies        []updatedPolicy
+	installedPolicies      []cubevs.MVMOptions
 	updateTAPPolicyErr     error
 	recorder               *createOrderRecorder
+	attachFilterMu         sync.Mutex
+	attachFilterCalls      []uint32
+	attachFilterErr        error
+	attachFilterEntered    chan struct{}
+	attachFilterRelease    chan struct{}
+	attachInFlight         int
+	attachMaxInFlight      int
 }
 
 // updatedPolicy records one UpdateTAPPolicy call so tests can assert both that
@@ -34,14 +47,16 @@ type updatedPolicy struct {
 	opts    cubevs.MVMOptions
 }
 
-func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
+func (f *fakeCubeVSAdapter) AddTAPDevice(_ uint32, _ net.IP, _ string, _ uint32, opts cubevs.MVMOptions) error {
+	f.installedPolicies = append(f.installedPolicies, opts)
 	if f.recorder != nil {
 		f.recorder.record("cubevs_tap")
 	}
 	return nil
 }
 
-func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, _ uint32, _ cubevs.MVMOptions) error {
+func (f *fakeCubeVSAdapter) UpsertTAPDevice(ifindex uint32, _ net.IP, _ string, _ uint32, opts cubevs.MVMOptions) error {
+	f.installedPolicies = append(f.installedPolicies, opts)
 	f.upsertTAPDeviceCalls = append(f.upsertTAPDeviceCalls, ifindex)
 	return nil
 }
@@ -72,6 +87,7 @@ func (f *fakeCubeVSAdapter) CleanupTAPPolicy(ifindex uint32) error {
 	if f.recorder != nil {
 		f.recorder.record("cubevs_policy_cleaned")
 	}
+	delete(f.defaultDenyInstalled, ifindex)
 	f.cleanupPolicyCalls = append(f.cleanupPolicyCalls, ifindex)
 	return f.cleanupPolicyErr
 }
@@ -87,19 +103,71 @@ func (f *fakeCubeVSAdapter) DeleteTAPDeviceMetadata(ifindex uint32, _ net.IP) er
 		f.deletedTAPDevices = make(map[uint32]struct{})
 	}
 	f.deletedTAPDevices[ifindex] = struct{}{}
+	if f.recorder != nil {
+		f.recorder.record("cubevs_metrics_deleted")
+	}
 	return nil
 }
 
-func (f *fakeCubeVSAdapter) AttachFilter(_ uint32) error {
-	return nil
+func (f *fakeCubeVSAdapter) EnsureSandboxTrafficMetrics(ip net.IP) error {
+	f.ensuredMetricsIPs = append(f.ensuredMetricsIPs, ip.String())
+	return f.ensureMetricsErr
+}
+
+func (f *fakeCubeVSAdapter) AttachFilter(ifindex uint32) error {
+	if f.attachFilterEntered != nil || f.attachFilterRelease != nil {
+		f.attachFilterMu.Lock()
+		f.attachInFlight++
+		if f.attachInFlight > f.attachMaxInFlight {
+			f.attachMaxInFlight = f.attachInFlight
+		}
+		f.attachFilterMu.Unlock()
+		if f.attachFilterEntered != nil {
+			f.attachFilterEntered <- struct{}{}
+		}
+		if f.attachFilterRelease != nil {
+			<-f.attachFilterRelease
+		}
+		f.attachFilterMu.Lock()
+		f.attachInFlight--
+		f.attachFilterMu.Unlock()
+	}
+	f.attachFilterMu.Lock()
+	defer f.attachFilterMu.Unlock()
+	f.attachFilterCalls = append(f.attachFilterCalls, ifindex)
+	return f.attachFilterErr
+}
+
+func (f *fakeCubeVSAdapter) attachFilterCount() int {
+	if f == nil {
+		return 0
+	}
+	f.attachFilterMu.Lock()
+	defer f.attachFilterMu.Unlock()
+	return len(f.attachFilterCalls)
+}
+
+func (f *fakeCubeVSAdapter) attachFilterMaxInFlight() int {
+	if f == nil {
+		return 0
+	}
+	f.attachFilterMu.Lock()
+	defer f.attachFilterMu.Unlock()
+	return f.attachMaxInFlight
 }
 
 func (f *fakeCubeVSAdapter) InstallTAPDefaultDenyPolicy(ifindex uint32) error {
 	if f.recorder != nil {
 		f.recorder.record("cubevs_default_deny")
 	}
+	if f.defaultDenyPolicyErr == nil {
+		if f.defaultDenyInstalled == nil {
+			f.defaultDenyInstalled = make(map[uint32]bool)
+		}
+		f.defaultDenyInstalled[ifindex] = true
+	}
 	f.defaultDenyPolicyCalls = append(f.defaultDenyPolicyCalls, ifindex)
-	return nil
+	return f.defaultDenyPolicyErr
 }
 
 func (f *fakeCubeVSAdapter) GCStaleNetPolicyMaps(_ map[uint32]struct{}, _ func(uint32) bool, _ func(uint32)) (int, error) {

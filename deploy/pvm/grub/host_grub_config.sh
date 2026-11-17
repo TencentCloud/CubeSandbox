@@ -16,10 +16,10 @@ set -euo pipefail
 GRUB_CMDLINE_LINUX_APPEND="quiet elevator=noop console=ttyS0,115200 console=tty0 vconsole.keymap=us \
 crashkernel=1800M-64G:256M,64G-128G:512M,128G-486G:768M,486G-972G:1024M,972G-:2048M \
 vconsole.font=latarcyrheb-sun16 net.ifnames=0 biosdevname=0 intel_idle.max_cstate=1 intel_pstate=disable cgroup.memory=nokmem transparent_hugepage=never \
-ipv6.disable=1 systemd.unified_cgroup_hierarchy=1 module.sig_enforce=1 \
+ipv6.disable=1 systemd.unified_cgroup_hierarchy=1 \
 clearcpuid=27,28,54,57,104,107,118,120,122,131,152,158,193,196,198,199,200,201,214,215,225,241,249,250,254,289,292,295,297,299,302,306,307,309,311,312,317,321,322,323,389,416,418,425,513,514,517,518,520,521,522,523,524,526,534,537,539,540,580 \
 clocksource=tsc pti=off no5lvl mitigations=on spec_store_bypass_disable=prctl retbleed=off \
-kvm.nx_huge_pages=never tsc=reliable kmem_cache.max_num=16000"
+kvm.nx_huge_pages=never tsc=reliable kmem_cache.max_num=0 kmem_cache.sleep_ms=0 idle=halt processor.max_cstate=1"
 
 [[ $EUID -eq 0 ]] || {
     echo "please run as root" >&2

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/containerd/cgroups/v3"
 	"github.com/containerd/cgroups/v3/cgroup1"
@@ -116,16 +117,21 @@ func TestPoolBasicOP(t *testing.T) {
 	assert.ElementsMatch(t, []uint32{0, 1}, p.All())
 
 	p.Put(context.TODO(), uint32(1))
-	assert.ElementsMatch(t, []uint32{0}, p.All())
+	// Release happens after the background baseline read.
+	require.Eventually(t, func() bool {
+		all := p.All()
+		return len(all) == 1 && all[0] == 0
+	}, 5*time.Second, 10*time.Millisecond, "worker releases the returned slot after reading its baseline")
 
+	// The lowest free id is deterministically reused.
 	cg, err = p.Get(ctx, "test3", false, 0)
 	require.NoError(t, err)
-	assert.Equal(t, uint32(2), *cg)
-	assert.ElementsMatch(t, []uint32{0, 2}, p.All())
+	assert.Equal(t, uint32(1), *cg)
+	assert.ElementsMatch(t, []uint32{0, 1}, p.All())
 
 	err = db.Set(bucket, "test1", []byte("0"))
 	require.NoError(t, err)
-	err = db.Set(bucket, "test3", []byte("2"))
+	err = db.Set(bucket, "test3", []byte("1"))
 	require.NoError(t, err)
 
 	p.init()
@@ -136,7 +142,7 @@ func TestPoolBasicOP(t *testing.T) {
 		err = fmt.Errorf("Tidy() returned errors: %v", errs)
 	}
 	assert.NoError(t, err)
-	assert.ElementsMatch(t, []uint32{0, 2}, p.All())
+	assert.ElementsMatch(t, []uint32{0, 1}, p.All())
 
 	cgList, err = p.poolV1Handle.List()
 	assert.NoError(t, err)
@@ -149,7 +155,11 @@ func TestPoolBasicOP(t *testing.T) {
 		err = fmt.Errorf("Tidy() returned errors: %v", errs)
 	}
 	assert.NoError(t, err)
-	assert.ElementsMatch(t, []uint32{2}, p.All())
+	// Tidy re-puts the dirty slot; its release is asynchronous.
+	require.Eventually(t, func() bool {
+		all := p.All()
+		return len(all) == 1 && all[0] == 1
+	}, 5*time.Second, 10*time.Millisecond, "tidied slot is released after its baseline read")
 
 	cgList, err = p.poolV1Handle.List()
 	assert.NoError(t, err)

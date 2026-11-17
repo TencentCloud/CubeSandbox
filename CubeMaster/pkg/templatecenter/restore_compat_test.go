@@ -25,10 +25,35 @@ func intelFacts() *nodemeta.HostFacts {
 	}
 }
 
+func TestBuildHostFactDimensions_FilesystemOnlyDoesNotRequireHostFacts(t *testing.T) {
+	origin := intelFacts()
+	target := &nodemeta.HostFacts{
+		CPUVendor:         "AuthenticAMD",
+		CPUModel:          "EPYC 9K84",
+		CPUIDHash:         "sha256:amd",
+		HostKernelRelease: "6.6.0",
+	}
+
+	dims := buildHostFactDimensions(origin, target, false)
+	for _, d := range dims {
+		if (d.Name == "cpuid_hash" || d.Name == "host_kernel_release") && d.Required {
+			t.Fatalf("%s must not be required for a filesystem-only snapshot: %+v", d.Name, d)
+		}
+	}
+	if !allRequiredDimensionsMatch(dims) {
+		t.Fatalf("mismatched host facts must not block a filesystem-only snapshot: %+v", dims)
+	}
+
+	tainted := &nodemeta.HostFacts{CPUIDHash: "sha256:intel", HostKernelRelease: "5.15.0", KVMModuleTaint: "E"}
+	if allRequiredDimensionsMatch(buildHostFactDimensions(origin, tainted, false)) {
+		t.Fatal("a tainted target KVM module must still block a cold boot")
+	}
+}
+
 // The v1 policy makes ONLY cpuid_hash and host_kernel_release required; every
 // other host-fact dimension is informational.
 func TestBuildHostFactDimensions_Identical(t *testing.T) {
-	dims := buildHostFactDimensions(intelFacts(), intelFacts())
+	dims := buildHostFactDimensions(intelFacts(), intelFacts(), true)
 	if !allRequiredDimensionsMatch(dims) {
 		t.Fatalf("identical hosts must be compatible, dims=%+v", dims)
 	}
@@ -70,7 +95,7 @@ func TestBuildHostFactDimensions_Mismatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			target := intelFacts()
 			tc.mutate(target)
-			dims := buildHostFactDimensions(intelFacts(), target)
+			dims := buildHostFactDimensions(intelFacts(), target, true)
 			if got := !allRequiredDimensionsMatch(dims); got != tc.wantBlocked {
 				t.Fatalf("mismatch on %s blocked=%v, want %v", tc.name, got, tc.wantBlocked)
 			}
@@ -99,7 +124,7 @@ func TestBuildHostFactDimensions_BothEmptyRequiredFailsClosed(t *testing.T) {
 	target := intelFacts()
 	target.CPUIDHash = ""
 
-	dims := buildHostFactDimensions(origin, target)
+	dims := buildHostFactDimensions(origin, target, true)
 	if allRequiredDimensionsMatch(dims) {
 		t.Fatalf("both-empty required cpuid_hash must fail closed")
 	}
@@ -121,7 +146,7 @@ func TestBuildHostFactDimensions_BothEmptyInformationalNotVerified(t *testing.T)
 	target.KVMAPIVersion = 0
 	target.KVMModuleFingerprint = ""
 
-	dims := buildHostFactDimensions(origin, target)
+	dims := buildHostFactDimensions(origin, target, true)
 	// Required keys still match, so the verdict stays compatible...
 	if !allRequiredDimensionsMatch(dims) {
 		t.Fatalf("required keys match; verdict should stay compatible")
@@ -144,7 +169,7 @@ func TestBuildHostFactDimensions_KernelFingerprintFallback(t *testing.T) {
 	target.HostKernelFingerprint = "" // old cubelet: release-only
 	target.HostKernelRelease = "5.15.0"
 
-	dims := buildHostFactDimensions(origin, target)
+	dims := buildHostFactDimensions(origin, target, true)
 	var found bool
 	for _, d := range dims {
 		if d.Name == "host_kernel_fingerprint" {
@@ -163,7 +188,7 @@ func TestBuildHostFactDimensions_KernelFingerprintFallback(t *testing.T) {
 
 	// A genuine release mismatch under the fallback must report match:false.
 	target.HostKernelRelease = "6.1.0"
-	for _, d := range buildHostFactDimensions(origin, target) {
+	for _, d := range buildHostFactDimensions(origin, target, true) {
 		if d.Name == "host_kernel_fingerprint" && d.Match {
 			t.Errorf("differing release under fallback must not match")
 		}
@@ -198,7 +223,7 @@ func TestBuildHostFactDimensions_KVMModuleTaintGate(t *testing.T) {
 			target := intelFacts()
 			target.KVMModuleTaint = tc.targetTaint
 
-			dims := buildHostFactDimensions(origin, target)
+			dims := buildHostFactDimensions(origin, target, true)
 			var taintDim *RestoreCompatDimension
 			for i := range dims {
 				if dims[i].Name == "kvm_module_taint" {

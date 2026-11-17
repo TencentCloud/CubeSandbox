@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use container_mgr::{ContainerInfo, ContainerState, TaskState};
 use containerd_shim::protos::protobuf::MessageDyn;
 use containerd_shim::{Error, Result};
-use exec::{Exec, Tty};
+use exec::{resolve_pty_size, Exec, Tty};
 use oci_spec::runtime::{LinuxResources, Mount, Process, Spec};
 use protoc::{agent, agent_ttrpc, oci};
 use serde_json;
@@ -450,7 +450,7 @@ impl Container {
             .map_err(|e| format!("deserialize spec failed:{}", e))?;
 
         let proc = spec.mut_process();
-        proc.set_noNewPrivileges(false);
+        // Keep the caller's no_new_privs: the Cubelet already defaults it to false.
         proc.set_selinuxLabel(String::new());
 
         let res = spec.mut_linux().mut_resources();
@@ -597,8 +597,13 @@ impl Container {
         )
     }
 
+    /// True when the guest has no process for this container yet, so the agent
+    /// must create and start it. A memory restore (pause resume / FromSnap)
+    /// reconnects to the running process instead. The guest container id is not
+    /// a safe signal: after a cold restart it equals the sandbox id, which made
+    /// resume call StartContainer on a process that was already running.
     fn is_cold_start(&self) -> bool {
-        self.id == self.real_id
+        !self.sb_conf.app_snapshot_restore
     }
 
     /// Passfd stays compiled in but is opt-in. Cubelet must set
@@ -884,6 +889,76 @@ impl Container {
         Ok(())
     }
 
+    async fn do_tty_win_resize(
+        &self,
+        client: &agent_ttrpc::AgentServiceClient,
+        exec_id: &String,
+        height: u32,
+        width: u32,
+    ) -> Result<()> {
+        let req = agent::TtyWinResizeRequest {
+            container_id: self.id.clone(),
+            exec_id: exec_id.clone(),
+            row: height,
+            column: width,
+            ..Default::default()
+        };
+        client
+            .tty_win_resize(self.ctx.clone(), &req)
+            .await
+            .map_err(|e| Error::Other(format!("tty_win_resize execid:{} failed:{}", exec_id, e)))?;
+        Ok(())
+    }
+
+    pub async fn resize_pty(&self, exec_id: &String, height: u32, width: u32) -> Result<()> {
+        if height == 0 || width == 0 {
+            return Ok(());
+        }
+        if !exec_id.is_empty() {
+            let mut execs = self.execs.lock().await;
+            match execs.get_mut(exec_id) {
+                Some(exec) => {
+                    exec.tty.height = height;
+                    exec.tty.width = width;
+                }
+                None => {
+                    return Err(Error::NotFoundError(format!(
+                        "Exec id:{} not found, container:{}",
+                        exec_id, &self.real_id
+                    )));
+                }
+            }
+        }
+
+        let client = match &self.client {
+            Some(c) => c.lock().await,
+            None => return Ok(()),
+        };
+        if let Err(e) = self
+            .do_tty_win_resize(&client, exec_id, height, width)
+            .await
+        {
+            let msg = e.to_string();
+            // Guest has no exec TTY yet before Start; keep the cached size.
+            if msg.contains("no tty")
+                || msg.contains("invalid argument")
+                || msg.contains("Invalid exec")
+                || msg.contains("not found")
+                || msg.contains("UNAVAILABLE")
+            {
+                warnf!(
+                    self.log,
+                    "resize_pty deferred, exec:{}, err:{}",
+                    exec_id,
+                    msg
+                );
+                return Ok(());
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     pub async fn signal_container(&mut self, exec_id: &String, sig: u32) -> Result<()> {
         {
             let state = self.state.as_ref().unwrap();
@@ -1098,6 +1173,21 @@ impl Container {
         proc.set_env(exec.proc.env().clone().unwrap_or(Vec::new()).into());
         proc.set_cwd(exec.proc.cwd().clone().to_str().unwrap_or("").to_string());
 
+        // HandleConsoleResize often arrives before Start; overlay the cached size.
+        let pty_size = {
+            let execs = self.execs.lock().await;
+            execs
+                .get(exec_id)
+                .and_then(|e| resolve_pty_size(&e.tty, e.proc.console_size()))
+                .or_else(|| resolve_pty_size(&exec.tty, exec.proc.console_size()))
+        };
+        if let Some((height, width)) = pty_size {
+            let mut console = oci::Box::new();
+            console.set_height(height);
+            console.set_width(width);
+            proc.set_consoleSize(console);
+        }
+
         let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
                 &self.sandbox_id,
@@ -1146,6 +1236,25 @@ impl Container {
             .exec_process(self.ctx.clone(), &req)
             .await
             .map_err(|e| Error::Other(format!("start execid:{} failed:{}", exec_id, e)))?;
+        if let Some((height, width)) = {
+            let execs = self.execs.lock().await;
+            execs
+                .get(exec_id)
+                .and_then(|e| resolve_pty_size(&e.tty, e.proc.console_size()))
+        } {
+            // rustjail openpty uses console_size; ioctl again for a pre-Start resize.
+            if let Err(e) = self
+                .do_tty_win_resize(&client, exec_id, height, width)
+                .await
+            {
+                warnf!(
+                    self.log,
+                    "tty_win_resize after start exec:{} failed:{}",
+                    exec_id,
+                    e
+                );
+            }
+        }
         let mut state = exec.state.clone().unwrap();
         let client_wait = client.clone();
         let cid = self.id.clone();

@@ -10,9 +10,9 @@ use super::VirtioPciCommonConfig;
 use crate::transport::VirtioTransport;
 use crate::GuestMemoryMmap;
 use crate::{
-    ActivateResult, VirtioDevice, VirtioDeviceType, VirtioInterrupt, VirtioInterruptType,
-    DEVICE_ACKNOWLEDGE, DEVICE_DRIVER, DEVICE_DRIVER_OK, DEVICE_FAILED, DEVICE_FEATURES_OK,
-    DEVICE_INIT,
+    ActivateError, ActivateResult, VirtioDevice, VirtioDeviceType, VirtioInterrupt,
+    VirtioInterruptType, DEVICE_ACKNOWLEDGE, DEVICE_DRIVER, DEVICE_DRIVER_OK, DEVICE_FAILED,
+    DEVICE_FEATURES_OK, DEVICE_INIT,
 };
 use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
@@ -36,13 +36,14 @@ use vm_device::interrupt::{
     InterruptIndex, InterruptManager, InterruptSourceGroup, MsiIrqGroupConfig,
 };
 use vm_device::{BusDevice, PciBarType, Resource};
-use vm_memory::{Address, ByteValued, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, Le32};
+use vm_memory::{
+    Address, ByteValued, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, Le32,
+};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vm_virtio::AccessPlatform;
 use vmm_sys_util::{errno::Result, eventfd::EventFd};
 
-/// Vector value used to disable MSI for a queue.
-const VIRTQ_MSI_NO_VECTOR: u16 = 0xffff;
+use super::pci_common_config::VIRTQ_MSI_NO_VECTOR;
 
 pub enum Error {
     /// Failed to retrieve queue ring's index.
@@ -301,6 +302,17 @@ pub struct VirtioPciDeviceActivator {
     queues: Option<Vec<(usize, Queue, EventFd)>>,
     barrier: Option<Arc<Barrier>>,
     id: String,
+}
+
+fn queue_ranges_valid(queue: &Queue, memory: &GuestMemoryMmap) -> bool {
+    let size = usize::from(queue.size());
+    // Prove the full split-virtqueue rings are mapped in guest memory:
+    //   - descriptor table: 16 bytes per descriptor;
+    //   - available ring:   flags + idx + used_event (6 bytes) + 2 bytes per entry;
+    //   - used ring:        flags + idx + avail_event (6 bytes) + 8 bytes per entry.
+    memory.check_range(GuestAddress(queue.desc_table()), size * 16)
+        && memory.check_range(GuestAddress(queue.avail_ring()), 6 + size * 2)
+        && memory.check_range(GuestAddress(queue.used_ring()), 6 + size * 8)
 }
 
 impl VirtioPciDeviceActivator {
@@ -710,7 +722,10 @@ impl VirtioPciDevice {
         self.device.clone()
     }
 
-    fn prepare_activator(&mut self, barrier: Option<Arc<Barrier>>) -> VirtioPciDeviceActivator {
+    fn prepare_activator(
+        &mut self,
+        barrier: Option<Arc<Barrier>>,
+    ) -> std::result::Result<VirtioPciDeviceActivator, ActivateError> {
         let mut queues = Vec::new();
 
         for (queue_index, queue) in self.queues.iter().enumerate() {
@@ -718,8 +733,11 @@ impl VirtioPciDevice {
                 continue;
             }
 
-            if !queue.is_valid(self.memory.memory().deref()) {
+            if !queue.is_valid(self.memory.memory().deref())
+                || !queue_ranges_valid(queue, self.memory.memory().deref())
+            {
                 error!("Queue {} is not valid", queue_index);
+                return Err(ActivateError::BadActivate);
             }
 
             queues.push((
@@ -729,7 +747,7 @@ impl VirtioPciDevice {
             ));
         }
 
-        VirtioPciDeviceActivator {
+        Ok(VirtioPciDeviceActivator {
             interrupt: self.virtio_interrupt.take(),
             memory: Some(self.memory.clone()),
             device: self.device.clone(),
@@ -737,11 +755,11 @@ impl VirtioPciDevice {
             device_activated: self.device_activated.clone(),
             barrier,
             id: self.id.clone(),
-        }
+        })
     }
 
     fn activate(&mut self) -> ActivateResult {
-        self.prepare_activator(None).activate()
+        self.prepare_activator(None)?.activate()
     }
 
     fn needs_activation(&self) -> bool {
@@ -1115,15 +1133,22 @@ impl PciDevice for VirtioPciDevice {
         // Try and activate the device if the driver status has changed
         if self.needs_activation() {
             let barrier = Arc::new(Barrier::new(2));
-            let activator = self.prepare_activator(Some(barrier.clone()));
-            self.pending_activations.lock().unwrap().push(activator);
-            info!(
-                "{}: Needs activation; writing to activate event fd",
-                self.id
-            );
-            self.activate_evt.write(1).ok();
-            info!("{}: Needs activation; returning barrier", self.id);
-            return Some(barrier);
+            match self.prepare_activator(Some(barrier.clone())) {
+                Ok(activator) => {
+                    self.pending_activations.lock().unwrap().push(activator);
+                    info!(
+                        "{}: Needs activation; writing to activate event fd",
+                        self.id
+                    );
+                    self.activate_evt.write(1).ok();
+                    info!("{}: Needs activation; returning barrier", self.id);
+                    return Some(barrier);
+                }
+                Err(e) => {
+                    error!("{}: Failed preparing device activation: {:?}", self.id, e);
+                    self.common_config.driver_status |= DEVICE_FAILED as u8;
+                }
+            }
         }
 
         // Device has been reset by the driver
@@ -1252,3 +1277,160 @@ impl Snapshottable for VirtioPciDevice {
 }
 impl Transportable for VirtioPciDevice {}
 impl Migratable for VirtioPciDevice {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ActivateResult;
+    use std::sync::atomic::AtomicBool;
+    use vm_device::interrupt::InterruptSourceConfig;
+
+    const QUEUE_SIZE: u16 = 16;
+    const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
+
+    struct TestDevice {
+        activated: Arc<AtomicBool>,
+    }
+
+    impl VirtioDevice for TestDevice {
+        fn device_type(&self) -> u32 {
+            VirtioDeviceType::Rng as u32
+        }
+
+        fn queue_max_sizes(&self) -> &[u16] {
+            QUEUE_SIZES
+        }
+
+        fn activate(
+            &mut self,
+            _mem: GuestMemoryAtomic<GuestMemoryMmap>,
+            _interrupt_evt: Arc<dyn VirtioInterrupt>,
+            _queues: Vec<(usize, Queue, EventFd)>,
+        ) -> ActivateResult {
+            self.activated.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct TestInterruptSourceGroup;
+
+    impl InterruptSourceGroup for TestInterruptSourceGroup {
+        fn trigger(&self, _index: InterruptIndex) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn notifier(&self, _index: InterruptIndex) -> Option<EventFd> {
+            None
+        }
+
+        fn update(
+            &self,
+            _index: InterruptIndex,
+            _config: InterruptSourceConfig,
+            _masked: bool,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct TestInterruptManager;
+
+    impl InterruptManager for TestInterruptManager {
+        type GroupConfig = MsiIrqGroupConfig;
+
+        fn create_group(
+            &self,
+            _config: Self::GroupConfig,
+        ) -> std::io::Result<Arc<dyn InterruptSourceGroup>> {
+            Ok(Arc::new(TestInterruptSourceGroup))
+        }
+
+        fn destroy_group(&self, _group: Arc<dyn InterruptSourceGroup>) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_pci_device(
+        memory: GuestMemoryMmap,
+        activated: Arc<AtomicBool>,
+    ) -> (VirtioPciDevice, Arc<Mutex<Vec<VirtioPciDeviceActivator>>>) {
+        let interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>> =
+            Arc::new(TestInterruptManager);
+        let pending_activations = Arc::new(Mutex::new(Vec::new()));
+        let pci_device = VirtioPciDevice::new(
+            "test".to_string(),
+            GuestMemoryAtomic::new(memory),
+            Arc::new(Mutex::new(TestDevice { activated })),
+            1,
+            None,
+            &interrupt_manager,
+            0,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            true,
+            None,
+            pending_activations.clone(),
+        )
+        .unwrap();
+        (pci_device, pending_activations)
+    }
+
+    #[test]
+    fn queue_ranges_may_span_adjacent_memory_regions() {
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0), 0x1000),
+            (GuestAddress(0x1000), 0x1000),
+        ])
+        .unwrap();
+        let mut queue = Queue::new(8).unwrap();
+        queue
+            .try_set_desc_table_address(GuestAddress(0x0fc0))
+            .unwrap();
+        queue
+            .try_set_avail_ring_address(GuestAddress(0x1100))
+            .unwrap();
+        queue
+            .try_set_used_ring_address(GuestAddress(0x1200))
+            .unwrap();
+
+        assert!(queue_ranges_valid(&queue, &memory));
+    }
+
+    #[test]
+    fn invalid_queue_is_rejected_before_device_activation() {
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0), 0x1000),
+            (GuestAddress(0x2000), 0x1000),
+        ])
+        .unwrap();
+        let activated = Arc::new(AtomicBool::new(false));
+        let (mut pci_device, pending_activations) = test_pci_device(memory, activated.clone());
+        let queue = &mut pci_device.queues[0];
+
+        queue.set_ready(true);
+        queue
+            .try_set_desc_table_address(GuestAddress(0x0f80))
+            .unwrap();
+        queue
+            .try_set_avail_ring_address(GuestAddress(0x2000))
+            .unwrap();
+        queue
+            .try_set_used_ring_address(GuestAddress(0x2100))
+            .unwrap();
+
+        assert!(pci_device.activate().is_err());
+        assert!(!activated.load(Ordering::SeqCst));
+        assert!(!pci_device.device_activated.load(Ordering::SeqCst));
+
+        pci_device.common_config.driver_status =
+            (DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_DRIVER_OK | DEVICE_FEATURES_OK) as u8;
+        assert!(pci_device
+            .write_bar(0, COMMON_CONFIG_BAR_OFFSET, &[])
+            .is_none());
+        assert!(pending_activations.lock().unwrap().is_empty());
+        assert_ne!(
+            pci_device.common_config.driver_status & DEVICE_FAILED as u8,
+            0
+        );
+        assert!(!activated.load(Ordering::SeqCst));
+    }
+}

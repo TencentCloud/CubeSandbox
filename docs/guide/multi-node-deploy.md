@@ -39,9 +39,14 @@ Each compute node must meet the same hardware and software requirements as the c
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
 - **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
+- **Time synchronization** enabled on every cluster node, including the control node and all compute nodes, using `chrony`, `ntpd`, `systemd-timesyncd`, PTP, or another suitable time synchronization solution
 - **Network connectivity** to the control node (specifically to `CubeOps` on port `3010` for node registration, and to the S3 endpoint — port `9000` with the bundled MinIO)
 
-For the full requirements list, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
+For the control node prerequisites, see [Self-Build Deployment — Prerequisites](./self-build-deploy.md#prerequisites).
+
+:::: warning Keep node clocks synchronized
+If a compute node's clock lags behind the control node, its heartbeat can appear older than the 15-second expiry window, causing the node to be reported as unhealthy and preventing templates from being distributed to it. After time synchronization is restored, CubeMaster normally backfills missing template replicas automatically; run [template redo](./cubemaster-scheduler-config.md#template-redo-after-adding-compute-nodes) to trigger redistribution immediately.
+::::
 
 ## Step 1: Prepare the Release Bundle
 
@@ -185,6 +190,7 @@ Client applications need the CubeAPI control-plane address and a route to sandbo
 | --- | --- | :---: | :---: |
 | CubeSandbox SDK with `CUBE_PROXY_NODE_IP` | Python, Go, and Node.js SDKs | No | No |
 | CubeProxy path mode | curl, backend services, generic HTTP clients | No | No |
+| E2B header mode | Official E2B SDK on a fixed address (no wildcard DNS) | No | No |
 | Wildcard DNS | Production, browsers, SPAs, official E2B SDK | Yes | No |
 | E2B dev sidecar | Official E2B SDK in local development without DNS | No | Yes |
 
@@ -217,6 +223,18 @@ curl http://10.0.0.5/sandbox/abc123/49999/health
 
 Path mode requires no DNS or certificate setup and supports WebSocket upgrades. It is not suitable for SPAs that load assets from root-absolute paths such as `/static/app.js`; use wildcard DNS for those applications.
 
+### E2B SDKs on a fixed address: header mode
+
+When a request's Host carries no `<port>-<sandbox-id>.<domain>` routing attributes, CubeProxy falls back to the official E2B routing headers: `E2b-Sandbox-Id` (required) and `E2b-Sandbox-Port` (optional, defaults to the envd port `49983`). The official E2B SDKs read `E2B_SANDBOX_URL` as the data-plane gateway address and attach the `E2b-Sandbox-*` routing headers to sandbox data-plane requests, so they can target CubeProxy directly by IP:
+
+```bash
+export E2B_API_URL="http://<cubeapi-host>:<api-port>"
+export E2B_SANDBOX_URL="http://<cubeproxy-host>:<http-port>"
+export E2B_API_KEY="<your-api-key>"
+```
+
+Host-based routing keeps priority, so existing wildcard-domain traffic is unaffected. Like path mode, header mode exposes the whole data plane on the plaintext listener to anything that can reach CubeProxy — use it on trusted networks only.
+
 ### Production and browser access: wildcard DNS
 
 Host-based routing uses sandbox domains in the form `<port>-<sandbox-id>.<domain>`. Configure a wildcard A record that points to CubeProxy:
@@ -237,7 +255,7 @@ See [HTTPS Certificates & Domain Resolution](./https-and-domain.md) for TLS and 
 
 ### Official E2B SDK without wildcard DNS: dev sidecar
 
-The official E2B SDK does not expose the CubeSandbox SDK's direct-IP option. When wildcard DNS is unavailable in local development, use the [E2B dev sidecar example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar):
+Only E2B SDK versions that read `E2B_SANDBOX_URL` can target a fixed address directly (see [header mode](#e2b-sdks-on-a-fixed-address-header-mode) above). For SDK versions without that knob, use the [E2B dev sidecar example](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar):
 
 ```bash
 cd examples/e2b-dev-sidecar
@@ -271,6 +289,25 @@ sudo ./down.sh
 ```
 
 In compute-node mode, this only stops `cubelet`. It does not affect the control plane or other compute nodes.
+
+### Uninstall
+
+Run the uninstall separately on every control and compute node being removed. It deletes CubeSandbox services, containers, volumes, network configuration, runtime data, and logs from the current node. Uninstalling the control node also removes the cluster's templates, sandboxes, and snapshots. Back up anything you need, and follow [Node Operations](./node-operations.md) to isolate and clean a compute node before removing it.
+
+Run these commands on every node to uninstall:
+
+```bash
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
+```
+
+Once the check passes and you no longer need the uninstall script or installed bundle, remove the preserved toolbox directory manually:
+
+```bash
+sudo rm -rf /usr/local/services/cubetoolbox
+```
+
+> The uninstall script does not delete Cube-related Docker images. To remove them as well, follow the command printed by the script.
 
 ### Reinstall
 

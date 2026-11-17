@@ -6,6 +6,7 @@ package s3api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,41 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/config"
 )
+
+func testClient(t *testing.T, endpoint string) *Client {
+	t.Helper()
+	client, err := NewFor(context.Background(), Options{
+		Bucket: "test-bucket", Endpoint: endpoint, Region: "us-east-1",
+		Addressing: config.AddressingPath, AccessKeyID: "test-ak", SecretAccessKey: "test-sk",
+	})
+	if err != nil {
+		t.Fatalf("NewFor: %v", err)
+	}
+	return client
+}
+
+func TestPrefixHasDataDistinguishesEmptyDirectoryMarker(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		size int
+		want bool
+	}{
+		{"workspace/", 0, false},
+		{"workspace/", 1, true},
+		{"workspace/file", 0, true},
+	} {
+		t.Run(fmt.Sprintf("%s-%d", tc.key, tc.size), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `<ListBucketResult><Name>test-bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>%s</Key><Size>%d</Size></Contents></ListBucketResult>`, tc.key, tc.size)
+			}))
+			defer srv.Close()
+			got, err := testClient(t, srv.URL).PrefixHasData(context.Background(), "workspace/")
+			if err != nil || got != tc.want {
+				t.Fatalf("hasData=%v err=%v, want %v", got, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseEndpoint(t *testing.T) {
 	for _, tc := range []struct {

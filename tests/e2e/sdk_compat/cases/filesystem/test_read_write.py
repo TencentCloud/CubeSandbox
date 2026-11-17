@@ -90,6 +90,38 @@ def test_command_created_file_is_visible_to_files_api(sdk_sandbox, sdk_e2e_confi
     assert sdk_sandbox.read_file(path) == "command-created"
 
 
+def test_binary_read_preserves_payload(sdk_sandbox, sdk_e2e_config):
+    path = "/tmp/sdk-compat-binary.bin"
+    shell_path = "/tmp/sdk-compat-shell.bin"
+    payload = bytes([0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF])
+
+    sdk_sandbox.write_bytes(path, payload)
+
+    assert sdk_sandbox.read_bytes(path) == payload
+    assert sdk_sandbox.read_stream(path) == payload
+    text = sdk_sandbox.read_file(path)
+    assert isinstance(text, str)
+    assert text.encode("utf-8") != payload
+
+    result = sdk_sandbox.run_command(
+        "python3 -c \"open('/tmp/sdk-compat-shell.bin','wb').write(bytes([137,80,78,71,0,255]))\"",
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    assert_command_ok(result)
+    assert sdk_sandbox.read_bytes(shell_path) == payload
+    assert sdk_sandbox.read_stream(shell_path) == payload
+
+
+def test_empty_binary_read(sdk_sandbox):
+    path = "/tmp/sdk-compat-empty.bin"
+
+    sdk_sandbox.write_bytes(path, b"")
+
+    assert sdk_sandbox.read_bytes(path) == b""
+    assert sdk_sandbox.read_stream(path) == b""
+    assert sdk_sandbox.read_file(path) == ""
+
+
 def test_reading_missing_file_raises(sdk_sandbox):
     with pytest.raises(
         Exception,

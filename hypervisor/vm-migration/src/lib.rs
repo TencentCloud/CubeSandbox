@@ -158,7 +158,7 @@ pub struct SnapshotMetadata {
 }
 
 /// Configuration for creating a snapshot
-#[derive(Clone, Default, serde::Deserialize, serde::Serialize, Debug)]
+#[derive(Clone, serde::Deserialize, serde::Serialize, Debug)]
 pub struct SnapshotConfig {
     /// The snapshot destination URL
     pub destination_url: String,
@@ -171,6 +171,30 @@ pub struct SnapshotConfig {
     /// URL. Other JSON data (config, state) is still saved to destination_url.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_vol_url: Option<String>,
+    /// When false the snapshot is config-only: the VM configuration is
+    /// serialized but no state or memory is written. Used by filesystem-only
+    /// snapshots, which keep the guest running and capture only the disk.
+    ///
+    /// `serde(default)` only covers deserialization, so `Default` is written
+    /// by hand below; deriving it would make config-only the default for every
+    /// `..Default::default()` literal.
+    #[serde(default = "default_include_memory")]
+    pub include_memory: bool,
+}
+
+fn default_include_memory() -> bool {
+    true
+}
+
+impl Default for SnapshotConfig {
+    fn default() -> Self {
+        Self {
+            destination_url: String::new(),
+            snapshot_type: SnapshotType::default(),
+            memory_vol_url: None,
+            include_memory: true,
+        }
+    }
 }
 
 /// A Snapshottable component's snapshot is a tree of snapshots, where leafs
@@ -333,5 +357,33 @@ pub trait Migratable: Send + Pausable + Snapshottable + Transportable {
 
     fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod snapshot_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_snapshot_config_includes_memory() {
+        // Deriving Default would make every `..Default::default()` literal a
+        // config-only snapshot, silently dropping guest memory.
+        assert!(SnapshotConfig::default().include_memory);
+    }
+
+    #[test]
+    fn legacy_payload_without_include_memory_includes_memory() {
+        let config: SnapshotConfig =
+            serde_json::from_str(r#"{"destination_url":"file:///tmp/snap"}"#).unwrap();
+        assert!(config.include_memory);
+    }
+
+    #[test]
+    fn config_only_payload_is_honoured() {
+        let config: SnapshotConfig = serde_json::from_str(
+            r#"{"destination_url":"file:///tmp/snap","include_memory":false}"#,
+        )
+        .unwrap();
+        assert!(!config.include_memory);
     }
 }

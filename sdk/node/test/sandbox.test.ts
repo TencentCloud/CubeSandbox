@@ -375,14 +375,49 @@ describe("Sandbox list / health", () => {
     expect(await Sandbox.listV2(makeConfig())).toEqual([]);
   });
 
+  it("follows x-next-token so 'list all' really is all", async () => {
+    // 250 sandboxes over a 100-per-page endpoint: three pages.
+    const page = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => ({
+        sandboxID: `sb-${String(from + i).padStart(3, "0")}`,
+      }));
+
+    setHandler((req) => {
+      const cursor = req.url.searchParams.get("nextToken");
+      if (cursor === "c100") {
+        return {
+          status: 200,
+          json: page(100, 200),
+          headers: { "x-next-token": "c200" },
+        };
+      }
+      if (cursor === "c200") {
+        // No header on the last page: that is the end of the list.
+        return { status: 200, json: page(200, 250) };
+      }
+      return { status: 200, json: page(0, 100), headers: { "x-next-token": "c100" } };
+    });
+
+    const result = await Sandbox.listV2(makeConfig());
+    expect(result).toHaveLength(250);
+    expect(result.map((sb) => sb.sandboxID)).toEqual(
+      Array.from({ length: 250 }, (_, i) => `sb-${String(i).padStart(3, "0")}`),
+    );
+    // The cursor rides back as the query parameter the endpoint declares.
+    const sent = requests.filter((r) => r.pathname === "/v2/sandboxes");
+    expect(sent).toHaveLength(3);
+    expect(sent[0].url.searchParams.get("nextToken")).toBeNull();
+    expect(sent[1].url.searchParams.get("nextToken")).toBe("c100");
+    expect(sent[2].url.searchParams.get("nextToken")).toBe("c200");
+  });
+
   it("reports health", async () => {
     setHandler((req) => {
       expect(req.pathname).toBe("/health");
-      return { status: 200, json: { status: "ok", sandboxes: 2 } };
+      return { status: 200, json: { status: "ok" } };
     });
     const health = await Sandbox.health(makeConfig());
-    expect(health.status).toBe("ok");
-    expect(health.sandboxes).toBe(2);
+    expect(health).toEqual({ status: "ok" });
   });
 });
 
@@ -410,6 +445,134 @@ describe("Sandbox instance operations", () => {
     });
     const info = await sb.getInfo();
     expect(info.state).toBe("paused");
+    sb.close();
+  });
+
+  it("isRunning returns true when running and envd /health is 204", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.pathname === `/sandboxes/${SANDBOX_ID}`) {
+        return { status: 200, json: { ...SANDBOX_DATA, state: "running" } };
+      }
+      expect(req.pathname).toBe("/health");
+      expect(req.headers.host).toBe(`49983-${SANDBOX_ID}.${DOMAIN}`);
+      return { status: 204 };
+    });
+    await expect(sb.isRunning()).resolves.toBe(true);
+    sb.close();
+  });
+
+  it("isRunning returns false when control-plane state is paused (no data-plane probe)", async () => {
+    const sb = await createSandbox();
+    const seen: string[] = [];
+    setHandler((req) => {
+      seen.push(req.pathname);
+      return { status: 200, json: { ...SANDBOX_DATA, state: "paused" } };
+    });
+    await expect(sb.isRunning()).resolves.toBe(false);
+    expect(seen).toEqual([`/sandboxes/${SANDBOX_ID}`]); // no /health request
+    sb.close();
+  });
+
+  it("isRunning returns false on a data-plane transport error", async () => {
+    // Control plane is the live test server; the data plane points at a dead
+    // port so the envd /health fetch rejects with a connection error.
+    const sb = new Sandbox(
+      { ...SANDBOX_DATA, sandboxID: SANDBOX_ID },
+      new Config({
+        apiUrl: `http://127.0.0.1:${port}`,
+        proxyNodeIp: "127.0.0.1",
+        proxyPort: 1, // nothing listens here → ECONNREFUSED
+        sandboxDomain: DOMAIN,
+      }),
+    );
+    setHandler((req) => {
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}`);
+      return { status: 200, json: { ...SANDBOX_DATA, state: "running" } };
+    });
+    await expect(sb.isRunning()).resolves.toBe(false);
+    sb.close();
+  });
+
+  it("isRunning returns false when control-plane state is pausing", async () => {
+    const sb = await createSandbox();
+    setHandler(() => ({ status: 200, json: { ...SANDBOX_DATA, state: "pausing" } }));
+    await expect(sb.isRunning()).resolves.toBe(false);
+    sb.close();
+  });
+
+  it("isRunning returns false when getInfo reports sandbox not found", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.pathname === `/sandboxes/${SANDBOX_ID}`) {
+        return { status: 404, json: { message: "not found" } };
+      }
+      return { status: 204 };
+    });
+    await expect(sb.isRunning()).resolves.toBe(false);
+    sb.close();
+  });
+
+  it("isRunning returns false on data-plane 404/502/503/410", async () => {
+    for (const status of [404, 502, 503, 410]) {
+      const sb = await createSandbox();
+      setHandler((req) => {
+        if (req.pathname === `/sandboxes/${SANDBOX_ID}`) {
+          return { status: 200, json: { ...SANDBOX_DATA, state: "running" } };
+        }
+        return { status };
+      });
+      await expect(sb.isRunning()).resolves.toBe(false);
+      sb.close();
+    }
+  });
+
+  it("isRunning throws on data-plane 403 (auth)", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.pathname === `/sandboxes/${SANDBOX_ID}`) {
+        return { status: 200, json: { ...SANDBOX_DATA, state: "running" } };
+      }
+      return { status: 403 };
+    });
+    await expect(sb.isRunning()).rejects.toBeInstanceOf(ApiError);
+    sb.close();
+  });
+
+  it("isRunning throws on data-plane 500", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      if (req.pathname === `/sandboxes/${SANDBOX_ID}`) {
+        return { status: 200, json: { ...SANDBOX_DATA, state: "running" } };
+      }
+      return { status: 500 };
+    });
+    await expect(sb.isRunning()).rejects.toBeInstanceOf(ApiError);
+    sb.close();
+  });
+
+  it("resolves an exposed-port endpoint via GET /sandboxes/:id/exposed-ports/:port", async () => {
+    const sb = await createSandbox();
+    setHandler((req) => {
+      expect(req.pathname).toBe(`/sandboxes/${SANDBOX_ID}/exposed-ports/8080`);
+      expect(req.method).toBe("GET");
+      // No caller-IP parameter is ever sent.
+      expect(req.url.searchParams.get("callerHostIP")).toBeNull();
+      return {
+        status: 200,
+        json: {
+          sandboxID: SANDBOX_ID,
+          containerPort: 8080,
+          mode: "host_port",
+          endpoint: "9.135.152.214:20006",
+          hostIP: "9.135.152.214",
+          hostPort: 20006,
+          sandboxIP: "192.168.0.20",
+        },
+      };
+    });
+    const endpoint = await sb.getExposedPortEndpoint(8080);
+    expect(endpoint).toBe("9.135.152.214:20006");
     sb.close();
   });
 

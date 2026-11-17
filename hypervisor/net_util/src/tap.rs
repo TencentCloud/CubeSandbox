@@ -72,6 +72,17 @@ pub struct Tap {
     donated: bool,
 }
 
+#[cfg(test)]
+impl Tap {
+    pub(crate) fn from_file_for_test(tap_file: File) -> Self {
+        Self {
+            tap_file,
+            if_name: Vec::new(),
+            donated: true,
+        }
+    }
+}
+
 impl PartialEq for Tap {
     fn eq(&self, other: &Tap) -> bool {
         self.if_name == other.if_name

@@ -48,6 +48,10 @@ func (e *Engine) GetVolumeInfo(string) (*Volume, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
 }
 
+func (e *Engine) GetObjectInfo(string) (*Volume, error) {
+	return nil, fmt.Errorf(nativeBuildHint)
+}
+
 func (e *Engine) GetVolumeBlockInfo(string) (*VolumeBlockInfo, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
 }

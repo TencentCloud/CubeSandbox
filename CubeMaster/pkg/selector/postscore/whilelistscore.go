@@ -13,6 +13,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// whilelistWeightedScore adjusts node scores by active/negative whitelists:
+// nodes on the active whitelist get a boost (raising their selection chance),
+// nodes on the negative whitelist are scaled down proportionally.
 type whilelistWeightedScore struct {
 }
 

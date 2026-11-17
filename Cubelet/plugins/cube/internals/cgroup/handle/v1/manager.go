@@ -11,11 +11,11 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/containerd/cgroups/v3/cgroup1"
-	cgroup1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	"github.com/hashicorp/go-multierror"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -31,6 +31,12 @@ type handler struct {
 	root      string
 	baseGroup string
 	usePoolV2 bool
+
+	// subsystems resolved once; the mount topology does not change at
+	// runtime.
+	subsysOnce sync.Once
+	subsys     []cgroup1.Subsystem
+	subsysErr  error
 }
 
 var _ handle.Interface = &handler{}
@@ -318,15 +324,48 @@ func (h *handler) GetAllocatedMem(group string) int64 {
 	return int64(mem)
 }
 
+// UsageSnapshot reads only the files the snapshot consumes; cpuacct is
+// optional and reads as zero when absent.
 func (h *handler) UsageSnapshot(ctx context.Context, group string) (handle.UsageSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return handle.UsageSnapshot{}, err
 	}
-	m, err := cgroup1.Load(cgroup1.StaticPath(group), cgroup1.WithHiearchy(h.hierarchy))
+	cpuPath, err := h.subsystemPath(cgroup1.Cpu, group)
 	if err != nil {
-		return handle.UsageSnapshot{}, fmt.Errorf("load cgroup v1 %q: %w", group, err)
+		return handle.UsageSnapshot{}, err
 	}
-	metrics, err := m.Stat(cgroup1.IgnoreNotExist)
+	memPath, err := h.subsystemPath(cgroup1.Memory, group)
+	if err != nil {
+		return handle.UsageSnapshot{}, err
+	}
+
+	var usageTotal, usageUser, usageSystem uint64
+	if cpuacctPath, acctErr := h.subsystemPath(cgroup1.Cpuacct, group); acctErr == nil {
+		statKV, err := handle.ReadKVFile(cpuacctPath, "cpuacct.stat")
+		if err != nil {
+			return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v1 usage for %q: %w", group, err)
+		}
+		usageUser = handle.CpuacctTicksToNanoseconds(statKV["user"])
+		usageSystem = handle.CpuacctTicksToNanoseconds(statKV["system"])
+		usageTotal, err = handle.ReadUintFile(cpuacctPath, "cpuacct.usage")
+		if err != nil {
+			return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v1 usage for %q: %w", group, err)
+		}
+	}
+
+	throttleKV, err := handle.ReadKVFile(cpuPath, "cpu.stat")
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v1 usage for %q: %w", group, err)
+	}
+	memUsage, err := handle.ReadUintFile(memPath, "memory.usage_in_bytes")
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v1 usage for %q: %w", group, err)
+	}
+	memLimit, err := handle.ReadUintFile(memPath, "memory.limit_in_bytes")
+	if err != nil {
+		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v1 usage for %q: %w", group, err)
+	}
+	memFailcnt, err := handle.ReadUintFile(memPath, "memory.failcnt")
 	if err != nil {
 		return handle.UsageSnapshot{}, fmt.Errorf("read cgroup v1 usage for %q: %w", group, err)
 	}
@@ -337,7 +376,7 @@ func (h *handler) UsageSnapshot(ctx context.Context, group string) (handle.Usage
 	if err := ctx.Err(); err != nil {
 		return handle.UsageSnapshot{}, err
 	}
-	return usageSnapshotFromMetrics(metrics, cpuLimit)
+	return usageSnapshotFromRaw(usageTotal, usageUser, usageSystem, throttleKV, memUsage, memLimit, memFailcnt, cpuLimit), nil
 }
 
 func (h *handler) readCPULimit(group string) (handle.CPULimit, error) {
@@ -368,8 +407,15 @@ func (h *handler) readCPULimit(group string) (handle.CPULimit, error) {
 	return handle.CPULimit{QuotaUS: quota, PeriodUS: period}, nil
 }
 
+func (h *handler) resolveSubsystems() ([]cgroup1.Subsystem, error) {
+	h.subsysOnce.Do(func() {
+		h.subsys, h.subsysErr = h.hierarchy()
+	})
+	return h.subsys, h.subsysErr
+}
+
 func (h *handler) subsystemPath(name cgroup1.Name, group string) (string, error) {
-	subsystems, err := h.hierarchy()
+	subsystems, err := h.resolveSubsystems()
 	if err != nil {
 		return "", fmt.Errorf("load cgroup v1 hierarchy: %w", err)
 	}
@@ -386,33 +432,22 @@ func (h *handler) subsystemPath(name cgroup1.Name, group string) (string, error)
 	return "", fmt.Errorf("cgroup v1 subsystem %q is unavailable", name)
 }
 
-func usageSnapshotFromMetrics(metrics *cgroup1stats.Metrics, cpuLimit handle.CPULimit) (handle.UsageSnapshot, error) {
-	if metrics == nil || metrics.GetCPU() == nil || metrics.GetCPU().GetUsage() == nil || metrics.GetCPU().GetThrottling() == nil {
-		return handle.UsageSnapshot{}, fmt.Errorf("cgroup v1 CPU usage is incomplete")
-	}
-	if metrics.GetMemory() == nil || metrics.GetMemory().GetUsage() == nil {
-		return handle.UsageSnapshot{}, fmt.Errorf("cgroup v1 memory usage is incomplete")
-	}
-	cpu := metrics.GetCPU()
-	usage := cpu.GetUsage()
-	throttling := cpu.GetThrottling()
-	memory := metrics.GetMemory().GetUsage()
-	limit := handle.ResourceLimit{Value: memory.GetLimit()}
+func usageSnapshotFromRaw(usageTotal, usageUser, usageSystem uint64, throttleKV map[string]uint64, memUsage, memLimit, memFailcnt uint64, cpuLimit handle.CPULimit) handle.UsageSnapshot {
+	limit := handle.ResourceLimit{Value: memLimit}
 	if handle.IsCgroupV1UnlimitedMemoryLimit(limit.Value) {
 		limit.Value = 0
 		limit.Unlimited = true
 	}
-
 	return handle.UsageSnapshot{
-		CPUUsageTotalNS:          usage.GetTotal(),
-		CPUUserTotalNS:           usage.GetUser(),
-		CPUSystemTotalNS:         usage.GetKernel(),
-		CPUThrottledTotalNS:      throttling.GetThrottledTime(),
-		CPUPeriodsTotal:          throttling.GetPeriods(),
-		CPUThrottledPeriodsTotal: throttling.GetThrottledPeriods(),
+		CPUUsageTotalNS:          usageTotal,
+		CPUUserTotalNS:           usageUser,
+		CPUSystemTotalNS:         usageSystem,
+		CPUThrottledTotalNS:      throttleKV["throttled_time"],
+		CPUPeriodsTotal:          throttleKV["nr_periods"],
+		CPUThrottledPeriodsTotal: throttleKV["nr_throttled"],
 		CPULimit:                 cpuLimit,
-		MemoryCurrentBytes:       memory.GetUsage(),
+		MemoryCurrentBytes:       memUsage,
 		MemoryLimit:              limit,
-		MemoryFailuresTotal:      memory.GetFailcnt(),
-	}, nil
+		MemoryFailuresTotal:      memFailcnt,
+	}
 }

@@ -30,6 +30,7 @@ s3lvol-<version>/
 │   ├── rcow_start.sh rcow_stop.sh rcow_recovery.sh rcow_common.sh
 │   ├── rcow_cpumask.sh               # default SPDK -m (last two allowed CPUs)
 │   ├── rcow_upgrade.sh  rcow_purge.sh  s3lvol_rpc.py  s3_prefix_rm.py
+│   ├── prune_restart_logs.py       # optional restart archive retention
 │   ├── rpc.py         # this repo's launcher (3.8 argparse shim)
 │   ├── rpc_compat.py  # BooleanOptionalAction backfill for Python 3.8
 │   ├── spdk_rpc.py    # SPDK's rpc.py, unmodified
@@ -124,12 +125,17 @@ lvstore online, pins the initiator timeouts the pause depends on, then kills the
 target so the host keeps its namespaces and only pauses I/O, leaving the state
 for a replacement to pick up.
 
-The pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`): what it could
-not push is already durable in the WAL and the replacement attach replays it, so
-the drain only added time to the pause. Setting `RCOW_HOT_FLUSH_MS` to a positive
-value restores it as a drain deadline, which shortens the replay at the cost of
-waiting out in-flight GET+PUT (under a write load the overlay never goes clean,
-so the drain runs to its deadline and returns `-ETIMEDOUT`).
+The pre-kill flush is skipped by default (`RCOW_HOT_FLUSH_MS=0`): acknowledged
+writes that have not reached S3 sit in the shared-memory write-back ring, and
+the replacement attach on the same node replays that ring. The ring is not the
+disk WAL. A node reboot loses records that have not reached S3. Once the new
+process is serving, or has attached the lvstore, `cube-s3lvol-hot-upgrade.sh`
+refuses to roll back: those writes exist only in the new process's ring, and
+the previous binary cannot replay them. Setting `RCOW_HOT_FLUSH_MS` to a
+positive value restores the pre-kill flush as a drain deadline, which shortens
+the replay at the cost of waiting out in-flight GET+PUT (under a write load the
+overlay never goes clean, so the drain runs to its deadline and returns
+`-ETIMEDOUT`).
 
 `--candidate <binary>` is required on a real run: it is the binary the upgrade
 will start, and the version gate refuses if the two builds cannot share the
@@ -177,7 +183,9 @@ used ones:
 | `RCOW_CAPACITY_GB` | `16384` | used only at first create; thin, unused space costs nothing |
 | `RCOW_CACHE_MB` | `490496` | chunk cache on the WAL image; only matters before the first start |
 | `RCOW_CACHE_HOT_BUFS` | `1024` | whole-object RAM-cache slots per lvstore; 1 GiB at the default 1 MiB chunk size, `0` disables the RAM tier |
-| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports promote this default to 4096, `0` disables tuning |
+| `RCOW_WRITEBACK_MB` | `4096` | `/dev/shm` payload-ring capacity per lvstore; 64–4096 MiB |
+| `S3LVOL_WRITEBACK_TOTAL_MB` | `8192` | process-wide cap for all write-back rings; must be at least `RCOW_WRITEBACK_MB` |
+| `RCOW_READ_AHEAD_KB` | `1024` | host block-device readahead; dense imports (at least 20% of chunks present) promote this default to 4096, `0` disables tuning |
 | `RCOW_LISTEN_ADDR` / `RCOW_LISTEN_PORT` | `127.0.0.1` / `4420` | |
 | `RCOW_TGT_CPUMASK` | last two allowed CPUs | SPDK `-m`; override with an explicit hex mask |
 | `RCOW_NO_HUGE` | `1` | no hugepages by default, a deliberate choice |
@@ -388,10 +396,56 @@ cache operation. `rcow_get_lvstores` exposes native RAM/disk hit, miss,
 populate, eviction, residency and byte counters, plus separate imported-object
 cache and CopyObject-alias counters under each lvstore's `write_path`.
 
+The write-back payload ring is different from the cache: its complete configured
+size is reserved in `/dev/shm` during create/attach so running out later cannot
+SIGBUS the target. `rcow_start.sh` checks the available tmpfs capacity before
+starting the target and passes `RCOW_WRITEBACK_MB` to both RPC paths. Reduce the
+value on smaller nodes; acknowledged records that have not reached S3 are lost
+on a node reboot because `/dev/shm` is not persistent.
+
 Logs default to `/data/log/rcow/s3lvol_tgt.log` (overridable with `RCOW_LOG`, or
 `RCOW_LOG_DIR`). The CRT log level is set with
 `S3LVOL_CRT_LOG_LEVEL=trace|debug|info|warn|error|none`; `trace` prints every
 request header and the canonical string of the SigV4 signature.
+
+When `ONE_CLICK_ENABLE_S3LVOL=1`, one-click installs an S3lvol policy into
+`/etc/cube-sandbox/logrotate.d/s3lvol`. The existing host-level
+`cube-sandbox-logrotate.timer` checks all policies every minute; CubeShim and
+VMM keep their hourly rotation policy. Storage logs rotate at 256 MiB and keep
+eight archives, with compression delayed until the next rotation. This is a
+periodic check, not a strict instantaneous byte ceiling. Role shutdown and
+upgrades do not disable the host timer; uninstall removes it.
+
+Rotation uses `copytruncate` to preserve the storage process's open descriptor.
+There is a small concurrent-tail log-loss window; WAL and volume data are not
+modified. Archives go into a per-source directory under `rotated/` beside the
+log, or under `RCOW_LOG_ARCHIVE_DIR`. The `firstaction` hook checks for a singly
+linked regular file and enough free space for the complete active-log copy,
+the previous archive's delayed compression, and an additional reserve. The
+`prerotate` hook repeats the check before copying the active log. The
+reserve is at least 1 GiB on the source filesystem and 512 MiB on a separate
+archive filesystem; `RCOW_LOG_RESERVE_BYTES` can raise it. A failed check skips
+rotation without truncating the active log. This check does not reserve blocks
+against concurrent disk writers, so operators still need disk-space monitoring.
+
+`RCOW_LOG`, `RCOW_LOG_DIR`, archive and reserve settings are resolved at install
+time; re-run the installer after changing them. Archive directory names must
+not contain whitespace or logrotate metacharacters. `ONE_CLICK_LOGROTATE_BIN`
+selects the executable; a stale override warns and falls back to system
+lookup for both host policies in the same install.
+
+Timestamped restart archives are separate from periodic rotation. They are kept
+by default. Set `RCOW_LOG_RESTART_RETAIN=8` in the storage service environment to
+keep the newest eight matching archives when `rcow_start.sh` moves the previous
+run's log. Cleanup skips symlinks, hard links and unrelated files, and rechecks
+the inode before removal. It also covers existing matching restart archives.
+
+For an oversized legacy log, use the one-time procedure in
+[service management](../docs/guide/service-management.md#rotating-s3lvol-logs)
+to run `logrotate --force` under the same space guard and private state file.
+There is no separate bootstrap state or fixed copy timeout. The standalone
+policy and guard can also be used by a host-managed Kubernetes deployment;
+one-click does not install them on Kubernetes hosts automatically.
 
 `[ERROR] ... response status=404` is **normal**: s3lvol uses a GET's 404 to
 determine whether an object exists.

@@ -46,6 +46,32 @@ assert_decision ack-ok "false" true true
 assert_decision ack-ok "true" false true
 assert_decision ack-ok "" true TRUE
 
+assert_jfs_decision() {
+  expected="$1"
+  shift
+  got="$(juicefs_change_decision "$@")"
+  if [ "$got" != "$expected" ]; then
+    fail "juicefs_change_decision '$*' = '$got', expected '$expected'"
+  fi
+}
+
+# juicefs_change_decision args: live_state live_hash desired desired_hash ack fresh_install
+# Existing releases must acknowledge enable, disable, and configuration changes.
+assert_jfs_decision keep absent "" false desired false false
+assert_jfs_decision block absent "" true desired false false
+assert_jfs_decision ack-ok absent "" true desired true false
+assert_jfs_decision keep present same true same false false
+assert_jfs_decision block present old true new false false
+assert_jfs_decision ack-ok present old true new true false
+assert_jfs_decision block present old false disabled false false
+assert_jfs_decision ack-ok present old false disabled true false
+# A fresh install creates the DaemonSet from nothing, so enabling is free;
+# a leftover mount DaemonSet still needs the acknowledgement.
+assert_jfs_decision keep absent "" true desired false true
+assert_jfs_decision block present old true new false true
+assert_jfs_decision ack-ok present old true new true true
+assert_jfs_decision block present old false disabled false true
+
 # The refusal has to name both ways out, or operators invent their own.
 message="$(block_message false true cube-system cube-node)"
 case "$message" in
@@ -132,6 +158,61 @@ assert_main_passes "unchanged host network" true false
 write_fake_kubectl 'Error from server (NotFound): daemonsets.apps "cube-node" not found' false
 assert_main_passes "fresh install" true false
 
+# A missing cube-node DaemonSet must not disable the JuiceFS lifecycle guard:
+# manual deletion or a half-finished install can remove cube-node while the
+# JuiceFS mount DaemonSet still backs live sandboxes.
+cat > "$FAKE_BIN/kubectl" <<'EOF'
+#!/bin/bash
+for a in "$@"; do
+  if [ "$a" = "cube-juicefs" ]; then
+    printf '%s' 'old-hash'
+    exit 0
+  fi
+done
+printf '%s' 'Error from server (NotFound): daemonsets.apps "cube-node" not found' >&2
+exit 1
+EOF
+chmod +x "$FAKE_BIN/kubectl"
+
+run_main_jfs() {
+  desired="$1"
+  ack="$2"
+  jfs_desired="$3"
+  jfs_ack="$4"
+  env -i PATH="$FAKE_BIN:$PATH" \
+    RELEASE_NAMESPACE=cube-system \
+    CUBE_NODE_DS_NAME=cube-node \
+    CUBE_NODE_HOSTNETWORK_DESIRED="$desired" \
+    CUBE_NODE_HOSTNETWORK_CHANGE_ACK="$ack" \
+    CUBE_JUICEFS_DS_NAME=cube-juicefs \
+    CUBE_JUICEFS_DESIRED_ENABLED="$jfs_desired" \
+    CUBE_JUICEFS_DESIRED_HASH=new-hash \
+    CUBE_JUICEFS_LIFECYCLE_CHANGE_ACK="$jfs_ack" \
+    bash "$PREFLIGHT"
+}
+
+if output="$(run_main_jfs true false false false 2>&1)"; then
+  fail "disabling JuiceFS must be blocked even when cube-node is absent: ${output}"
+fi
+case "$output" in
+  *"cubeJuiceFS.lifecycleChangeAck: true"*) ;;
+  *) fail "the JuiceFS refusal must offer the acknowledgement: ${output}" ;;
+esac
+if ! output="$(run_main_jfs true false false true 2>&1)"; then
+  fail "acknowledged JuiceFS disable must pass with cube-node absent: ${output}"
+fi
+case "$output" in
+  *WARNING*) ;;
+  *) fail "an acknowledged JuiceFS change must still warn: ${output}" ;;
+esac
+
+# A genuine fresh install: neither DaemonSet exists yet, so enabling JuiceFS
+# creates the mount from nothing and must pass without the acknowledgement.
+write_fake_kubectl 'Error from server (NotFound): daemonsets.apps "not found' false
+if ! output="$(run_main_jfs true false true false 2>&1)"; then
+  fail "enabling JuiceFS on a fresh install must not need the ack: ${output}"
+fi
+
 # A stale acknowledgement left in values must not silently arm the next change.
 write_fake_kubectl 'true' true
 if output="$(run_main true true 2>&1)"; then
@@ -203,6 +284,10 @@ for expected in (
     'helm.sh/hook-weight: "-109"',             # after the cubevs CIDR preflight (-110)
     'CUBE_NODE_HOSTNETWORK_DESIRED',
     'CUBE_NODE_HOSTNETWORK_CHANGE_ACK',
+    'CUBE_JUICEFS_DS_NAME',
+    'CUBE_JUICEFS_DESIRED_ENABLED',
+    'CUBE_JUICEFS_DESIRED_HASH',
+    'CUBE_JUICEFS_LIFECYCLE_CHANGE_ACK',
     'RELEASE_NAMESPACE',
     'CUBE_NODE_DS_NAME',
     'hostnet-preflight-cube-node',             # the DaemonSet it inspects

@@ -21,6 +21,11 @@ export interface ConfigOptions {
   apiKey?: string | null;
   /** Template ID for sandbox creation. Env: ``CUBE_TEMPLATE_ID``. */
   templateId?: string | null;
+  /**
+   * Template ID or alias used when ``Sandbox.create({ mcp })`` has no explicit
+   * template. Env: ``CUBE_MCP_TEMPLATE_ID`` (default ``mcp-gateway``).
+   */
+  mcpTemplateId?: string;
   /** CubeProxy node IP; bypasses DNS for ``*.cube.app``. Env: ``CUBE_PROXY_NODE_IP``. */
   proxyNodeIp?: string | null;
   /** CubeProxy HTTP port. Env: ``CUBE_PROXY_PORT_HTTP`` (default 80). */
@@ -75,6 +80,7 @@ export class Config {
   apiUrl: string;
   apiKey: string | null;
   templateId: string | null;
+  mcpTemplateId: string;
   proxyNodeIp: string | null;
   proxyPort: number;
   proxyScheme: string;
@@ -91,6 +97,7 @@ export class Config {
     const rawKey = options.apiKey ?? env.CUBE_API_KEY ?? env.E2B_API_KEY ?? null;
     this.apiKey = rawKey && rawKey.trim() ? rawKey.trim() : null;
     this.templateId = options.templateId ?? env.CUBE_TEMPLATE_ID ?? null;
+    this.mcpTemplateId = options.mcpTemplateId ?? env.CUBE_MCP_TEMPLATE_ID ?? "mcp-gateway";
     this.proxyNodeIp = options.proxyNodeIp ?? env.CUBE_PROXY_NODE_IP ?? null;
     this.proxyPort = options.proxyPort ?? parsePort(env.CUBE_PROXY_PORT_HTTP, 80);
     this.proxyScheme = normalizeProxyScheme(

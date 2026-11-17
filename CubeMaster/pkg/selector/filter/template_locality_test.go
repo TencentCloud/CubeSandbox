@@ -157,3 +157,27 @@ func TestTemplateLocalityFilterHonorsTemplateNodeScopeAndStorageState(t *testing
 		t.Fatalf("expected only node-a to remain, got %v", got)
 	}
 }
+
+func TestTemplateLocalityFilterUsesFrozenSnapshotFacts(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetImageStateByNode, func(string, string) *fwk.ImageStateSummary {
+		t.Fatal("filter must not reread image state after the snapshot is frozen")
+		return nil
+	})
+	ctx := selctx.New("random")
+	ctx.Ctx = context.Background()
+	ctx.ReqRes = &selctx.RequestResource{TemplateID: "tpl-1"}
+	ctx.SetNodes(node.NodeList{&node.Node{InsID: "node-a"}})
+	ctx.SetSnapshotFacts(map[string]selctx.SnapshotNodeFacts{
+		"node-a": {TemplateLocal: true, TemplateLocalKnown: true},
+	})
+	ctx.FreezeSnapshot()
+	got, err := NewTemplateLocalityFilter().Select(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID() != "node-a" {
+		t.Fatalf("frozen snapshot result = %v", got)
+	}
+}

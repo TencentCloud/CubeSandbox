@@ -119,6 +119,14 @@ spec:
               value: {{ ternary "true" "false" .Values.cubeNode.hostNetwork | quote }}
             - name: CUBE_NODE_HOSTNETWORK_CHANGE_ACK
               value: {{ ternary "true" "false" .Values.cubeNode.hostNetworkChangeAck | quote }}
+            - name: CUBE_JUICEFS_DS_NAME
+              value: {{ include "cube.juicefsName" . | quote }}
+            - name: CUBE_JUICEFS_DESIRED_ENABLED
+              value: {{ ternary "true" "false" .Values.cubeJuiceFS.enabled | quote }}
+            - name: CUBE_JUICEFS_DESIRED_HASH
+              value: {{ include "cube.juicefsConfigHash" . | quote }}
+            - name: CUBE_JUICEFS_LIFECYCLE_CHANGE_ACK
+              value: {{ ternary "true" "false" .Values.cubeJuiceFS.lifecycleChangeAck | quote }}
           volumeMounts:
             - name: scripts
               mountPath: /scripts

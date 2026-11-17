@@ -8,12 +8,17 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	snapshotv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -91,6 +96,46 @@ func TestReconcileOncePromotesInProgressOnly(t *testing.T) {
 	assertRemote(t, db, constants.SnapshotTableName, "snap-ready", constants.RemoteStatusReady)
 	assertRemote(t, db, constants.PauseSnapshotTableName, "pause-up", constants.RemoteStatusReady)
 	assertRemote(t, db, constants.PauseSnapshotTableName, "pause-pending", constants.RemoteStatusPending)
+}
+
+func TestReconcileOnceTracksJFSAndSkipsXFS(t *testing.T) {
+	db := setupReconcilerDB(t)
+	requireNoErr(t, db.Create(&models.PauseSnapshotRecord{
+		SnapshotID:   "pause-jfs",
+		SandboxID:    "sb-1",
+		NodeIP:       "10.0.0.2",
+		Backend:      constants.SnapshotBackendJFS,
+		RemoteStatus: constants.RemoteStatusInProgress,
+		Status:       "READY",
+	}).Error)
+	requireNoErr(t, db.Create(&models.SnapshotRecord{
+		SnapshotID:   "snap-xfs",
+		OriginNodeIP: "10.0.0.1",
+		Backend:      constants.SnapshotBackendXFS,
+		RemoteStatus: constants.RemoteStatusInProgress,
+	}).Error)
+	backends := map[string]string{}
+	prevQuery := queryStatus
+	prevAddr := cubeletAddr
+	queryStatus = func(_ context.Context, _ string, req *snapshotv1.StatusRequest) (*snapshotv1.StatusResponse, error) {
+		backends[req.GetSnapshotId()] = req.GetBackend()
+		return &snapshotv1.StatusResponse{State: constants.RemoteStatusReady, RemoteReady: true}, nil
+	}
+	cubeletAddr = func(hostIP string) string { return hostIP }
+	t.Cleanup(func() {
+		queryStatus = prevQuery
+		cubeletAddr = prevAddr
+	})
+
+	ReconcileOnce(context.Background(), db)
+
+	if backends["pause-jfs"] != constants.SnapshotBackendJFS {
+		t.Fatalf("jfs pause must be queried with backend jfs, got %v", backends)
+	}
+	if _, ok := backends["snap-xfs"]; ok {
+		t.Fatalf("xfs rows must not be polled, got %v", backends)
+	}
+	assertRemote(t, db, constants.PauseSnapshotTableName, "pause-jfs", constants.RemoteStatusReady)
 }
 
 func TestReconcileOnceLeavesInProgressWhenCubeletNotReady(t *testing.T) {
@@ -200,5 +245,157 @@ func requireNoErr(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func stubWatch(t *testing.T, db *gorm.DB, query func(*snapshotv1.StatusRequest) *snapshotv1.StatusResponse) {
+	t.Helper()
+	prevQuery, prevAddr, prevDB := queryStatus, cubeletAddr, watchDB.Load()
+	queryStatus = func(_ context.Context, _ string, req *snapshotv1.StatusRequest) (*snapshotv1.StatusResponse, error) {
+		return query(req), nil
+	}
+	cubeletAddr = func(hostIP string) string { return hostIP }
+	watchDB.Store(db)
+	t.Cleanup(func() {
+		queryStatus, cubeletAddr = prevQuery, prevAddr
+		watchDB.Store(prevDB)
+	})
+}
+
+func waitRemoteStatus(t *testing.T, db *gorm.DB, table, snapshotID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var got string
+		requireNoErr(t, db.Table(table).Select("remote_status").Where("snapshot_id = ?", snapshotID).Scan(&got).Error)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s remote_status=%q, want %q", snapshotID, got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWatchPauseSettlesWithoutWaitingForTheLoop(t *testing.T) {
+	db := setupReconcilerDB(t)
+	requireNoErr(t, db.Create(&models.PauseSnapshotRecord{
+		SnapshotID:   "pause-jfs",
+		SandboxID:    "sb-1",
+		NodeIP:       "10.0.0.2",
+		Backend:      constants.SnapshotBackendJFS,
+		RemoteStatus: constants.RemoteStatusInProgress,
+		Status:       "READY",
+	}).Error)
+	var mu sync.Mutex
+	var reqs []*snapshotv1.StatusRequest
+	stubWatch(t, db, func(req *snapshotv1.StatusRequest) *snapshotv1.StatusResponse {
+		mu.Lock()
+		defer mu.Unlock()
+		reqs = append(reqs, req)
+		if len(reqs) < 2 {
+			return &snapshotv1.StatusResponse{State: constants.RemoteStatusRunning}
+		}
+		return &snapshotv1.StatusResponse{State: constants.RemoteStatusReady, RemoteReady: true}
+	})
+
+	WatchPause(context.Background(), "pause-jfs", "10.0.0.2", constants.SnapshotBackendJFS)
+	waitRemoteStatus(t, db, constants.PauseSnapshotTableName, "pause-jfs", constants.RemoteStatusReady)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reqs) != 2 {
+		t.Fatalf("queries=%d", len(reqs))
+	}
+	for _, req := range reqs {
+		if req.GetWaitReadyMs() != int32(watchWaitReady/time.Millisecond) || req.GetBackend() != constants.SnapshotBackendJFS {
+			t.Fatalf("request=%v", req)
+		}
+	}
+}
+
+func TestWatchSnapshotStopsOnceSettledElsewhere(t *testing.T) {
+	db := setupReconcilerDB(t)
+	requireNoErr(t, db.Create(&models.SnapshotRecord{
+		SnapshotID:   "snap-s3",
+		OriginNodeIP: "10.0.0.1",
+		Backend:      constants.SnapshotBackendS3,
+		RemoteStatus: constants.RemoteStatusReady,
+		Status:       "READY",
+	}).Error)
+	var calls atomic.Int32
+	stubWatch(t, db, func(*snapshotv1.StatusRequest) *snapshotv1.StatusResponse {
+		calls.Add(1)
+		return &snapshotv1.StatusResponse{State: constants.RemoteStatusFailed}
+	})
+
+	WatchSnapshot(context.Background(), "snap-s3", "10.0.0.1", constants.SnapshotBackendS3, `{"rootfs":"r1","memory":"m1"}`, snapshotmode.Full)
+	time.Sleep(3 * watchRetryGap)
+	if calls.Load() != 1 {
+		t.Fatalf("queries=%d", calls.Load())
+	}
+	waitRemoteStatus(t, db, constants.SnapshotTableName, "snap-s3", constants.RemoteStatusReady)
+}
+
+// The mode guard must work on the first settle pass, not only for rows the
+// periodic reconciler picks up later: a full package that exported no memory
+// must be reported failed the moment Cubelet answers.
+func TestRemotePackageDefect(t *testing.T) {
+	cases := []struct {
+		name   string
+		item   workItem
+		defect string
+	}{
+		{
+			name:   "full package with memory export",
+			item:   workItem{kind: kindSnapshot, mode: snapshotmode.Full, exportUUIDs: `{"rootfs":"r1","memory":"m1","metadata":"c1"}`},
+			defect: "",
+		},
+		{
+			name:   "full package without memory export",
+			item:   workItem{kind: kindSnapshot, mode: snapshotmode.Full, exportUUIDs: `{"rootfs":"r1","metadata":"c1"}`},
+			defect: "full package exported no guest memory",
+		},
+		{
+			name:   "filesystem-only package has no memory by design",
+			item:   workItem{kind: kindSnapshot, mode: snapshotmode.FsOnly, exportUUIDs: `{"rootfs":"r1","metadata":"c1"}`},
+			defect: "",
+		},
+		{
+			name:   "filesystem-only package that exported memory",
+			item:   workItem{kind: kindSnapshot, mode: snapshotmode.FsOnly, exportUUIDs: `{"rootfs":"r1","memory":"m1","metadata":"c1"}`},
+			defect: "filesystem-only package exported guest memory",
+		},
+		{
+			name:   "snapshot package without metadata",
+			item:   workItem{kind: kindSnapshot, mode: snapshotmode.Full, exportUUIDs: `{"rootfs":"r1","memory":"m1"}`},
+			defect: "package exported no metadata, so it cannot be cold booted",
+		},
+		{
+			name:   "unreadable export list",
+			item:   workItem{kind: kindSnapshot, mode: snapshotmode.Full, exportUUIDs: `not-json`},
+			defect: "exported uuids are unreadable",
+		},
+		{
+			name: "pause packages always carry memory",
+			item: workItem{kind: kindPause, exportUUIDs: `{"rootfs":"r1","metadata":"c1"}`},
+		},
+		{
+			name: "row without a recorded export list is not audited",
+			item: workItem{kind: kindSnapshot, mode: snapshotmode.Full},
+		},
+	}
+	for _, tc := range cases {
+		got := remotePackageDefect(tc.item)
+		if tc.defect == "" {
+			if got != "" {
+				t.Fatalf("%s: remotePackageDefect = %q, want no defect", tc.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, tc.defect) {
+			t.Fatalf("%s: remotePackageDefect = %q, want it to mention %q", tc.name, got, tc.defect)
+		}
 	}
 }

@@ -347,7 +347,12 @@ type CreateRequest struct {
 	// volume_id is the stable identifier assigned by CubeMaster.
 	VolumeId string `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
 	// name is the human-readable label.
-	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// private_data is opaque caller input forwarded unchanged to Create.
+	// Only the plugin's returned private_data is persisted and used by Attach
+	// and Destroy. Max length: 1024 bytes. May be empty.
+	// Carry credential references, never plaintext credentials.
+	PrivateData   string `protobuf:"bytes,4,opt,name=private_data,json=privateData,proto3" json:"private_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -396,13 +401,21 @@ func (x *CreateRequest) GetName() string {
 	return ""
 }
 
+func (x *CreateRequest) GetPrivateData() string {
+	if x != nil {
+		return x.PrivateData
+	}
+	return ""
+}
+
 type CreateResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// token is an optional credential for volume-content access.
 	// volume_id and name come from the CreateRequest; plugins must not echo them.
 	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
 	// private_data is opaque plugin state persisted in t_cube_volume and
-	// forwarded to Attach on sandbox create. Not returned to API/SDK clients.
+	// forwarded to Attach and Destroy. An empty value is stored as empty; the
+	// caller's input is never used as a fallback. Not returned to API/SDK clients.
 	// Max length: 1024 bytes. May be empty.
 	PrivateData   string `protobuf:"bytes,2,opt,name=private_data,json=privateData,proto3" json:"private_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -454,8 +467,12 @@ func (x *CreateResponse) GetPrivateData() string {
 }
 
 type DestroyRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	// private_data is the plugin state returned by Create and persisted in
+	// t_cube_volume. Create rollback uses the returned state even if persistence
+	// or length validation failed. May be empty.
+	PrivateData   string `protobuf:"bytes,3,opt,name=private_data,json=privateData,proto3" json:"private_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -493,6 +510,13 @@ func (*DestroyRequest) Descriptor() ([]byte, []int) {
 func (x *DestroyRequest) GetVolumeId() string {
 	if x != nil {
 		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *DestroyRequest) GetPrivateData() string {
+	if x != nil {
+		return x.PrivateData
 	}
 	return ""
 }
@@ -564,15 +588,17 @@ const file_services_volumeplugin_v1_volumeplugin_proto_rawDesc = "" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x04\x10\x05J\x04\b\a\x10\b\"\x10\n" +
-	"\x0eDetachResponse\"F\n" +
+	"\x0eDetachResponse\"i\n" +
 	"\rCreateRequest\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04nameJ\x04\b\x03\x10\x04\"I\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12!\n" +
+	"\fprivate_data\x18\x04 \x01(\tR\vprivateDataJ\x04\b\x03\x10\x04\"I\n" +
 	"\x0eCreateResponse\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12!\n" +
-	"\fprivate_data\x18\x02 \x01(\tR\vprivateData\"3\n" +
+	"\fprivate_data\x18\x02 \x01(\tR\vprivateData\"V\n" +
 	"\x0eDestroyRequest\x12\x1b\n" +
-	"\tvolume_id\x18\x01 \x01(\tR\bvolumeIdJ\x04\b\x02\x10\x03\"\x11\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12!\n" +
+	"\fprivate_data\x18\x03 \x01(\tR\vprivateDataJ\x04\b\x02\x10\x03\"\x11\n" +
 	"\x0fDestroyResponse2\xef\x01\n" +
 	"\x13VolumePluginService\x12k\n" +
 	"\x06Attach\x12/.cubelet.services.volumeplugin.v1.AttachRequest\x1a0.cubelet.services.volumeplugin.v1.AttachResponse\x12k\n" +

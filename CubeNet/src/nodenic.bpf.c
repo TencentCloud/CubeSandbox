@@ -11,6 +11,7 @@
 #include "jhash.h"
 #include "l2l3.h"
 #include "map.h"
+#include "metrics.h"
 #include "skb.h"
 #include "tcp.h"
 #include "tcp_reset.h"
@@ -21,8 +22,11 @@
 /* create_port_mapping_session installs an egress_sessions entry for a
  * port_mapping connection. Called on the inbound path (SYN for a new
  * connection, or a non-SYN packet whose session was reaped and is being
- * rebuilt). */
-static __always_inline void create_port_mapping_session(__be32 peer_ip, __be16 peer_port,
+ * rebuilt). vm_ip and gen are the sandbox identity read from mvm_meta by the
+ * caller; both belong in this entry so the key and the value name the same
+ * sandbox. */
+static __always_inline void create_port_mapping_session(__be32 vm_ip, __u32 gen,
+							__be32 peer_ip, __be16 peer_port,
 							struct mvm_port *mvm_port,
 							__be32 node_ip, __be16 host_port,
 							__u32 node_ifindex, __u64 now_ns,
@@ -31,23 +35,18 @@ static __always_inline void create_port_mapping_session(__be32 peer_ip, __be16 p
 	struct nat_session sess = {};
 	struct session_key pkey = {};
 
-	port_mapping_key(&pkey, peer_ip, peer_port, mvm_port->listen_port);
+	port_mapping_key(&pkey, vm_ip, peer_ip, peer_port, mvm_port->listen_port);
 
 	sess.access_time = now_ns;
 	sess.node_ifindex = node_ifindex;
 	sess.node_ip = node_ip;
 	sess.node_port = host_port;
 	sess.vm_ifindex = mvm_port->ifindex;
-	sess.vm_ip = mvm_inner_ip;
+	sess.vm_ip = vm_ip;
 	sess.vm_port = mvm_port->listen_port;
 	sess.state = initial_state;
 	sess.packet_class = PORT_MAPPING_PACKET;
-	{
-		struct mvm_meta *meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
-
-		if (meta)
-			sess.gen = meta->version;
-	}
+	sess.gen = gen;
 	bpf_map_update_elem(&egress_sessions, &pkey, &sess, BPF_ANY);
 }
 
@@ -55,38 +54,65 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 			 struct mvm_port *mvm_port)
 {
 	__u32 old_daddr, new_daddr, tcp_csum_off;
+	struct mvm_meta *meta;
 	struct nat_session *sess;
 	struct session_key pkey = {};
+	__be32 vm_ip;
+	__u32 gen;
 	__u16 old_dport, new_dport;
 	__u16 ip_hlen;
 	__u64 now;
 	__u64 flags;
 	long err;
 
-	/* Track the port_mapping connection's generation so a rollback can reset
-	 * it while an aged (reaped) one is rebuilt. */
+	/* The inbound packet is addressed to the node, so the sandbox identity
+	 * has to come from metadata. Do not fall back to the shared mvm_inner_ip:
+	 * that key aliases every sandbox. */
+	meta = bpf_map_lookup_elem(&ifindex_to_mvmmeta, &mvm_port->ifindex);
+	if (!meta)
+		return TC_ACT_SHOT;
+	vm_ip = meta->ip;
+	gen = meta->version;
+
+	/* Track the port_mapping connection's generation. A rollback leaves a
+	 * stale entry: a new-connection SYN replaces it, any other packet is
+	 * reset, and an aged (reaped) session is rebuilt below. */
 	now = bpf_ktime_get_ns();
-	port_mapping_key(&pkey, l3->saddr, l4->source, mvm_port->listen_port);
+	port_mapping_key(&pkey, vm_ip, l3->saddr, l4->source, mvm_port->listen_port);
 	sess = bpf_map_lookup_elem(&egress_sessions, &pkey);
-	if (sess && sess->gen != current_gen(sess->vm_ifindex)) {
-		/* Stale: the sandbox was rolled back. Reset the peer and drop the
-		 * entry so a reconnect starts clean. port_mapping sessions have no
-		 * ingress entry. */
-		bpf_map_delete_elem(&egress_sessions, &pkey);
-		return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
+	if (sess && session_is_stale(sess)) {
+		/* Stale: the sandbox was rolled back. A new-connection SYN
+		 * replaces the entry with the current generation and is
+		 * forwarded. Any other packet resets the peer and drops the
+		 * entry. port_mapping sessions have no ingress entry. */
+		if (!(l4->syn && !l4->ack)) {
+				update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+					      SANDBOX_METRIC_DROP);
+			bpf_map_delete_elem(&egress_sessions, &pkey);
+			return tcp_send_reset(skb, skb->ingress_ifindex, l3->saddr);
+		}
+		sess = NULL;
 	}
 	if (!sess) {
-		/* New connection (SYN) or a rebuilt aged one (non-SYN). */
+		/* New connection (SYN), a SYN replacing a rolled-back session,
+		 * or a rebuilt aged one (non-SYN). */
 		if (l4->syn && !l4->ack)
-			create_port_mapping_session(l3->saddr, l4->source, mvm_port,
+			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
-						    now, TCP_CONNTRACK_SYN_RECV);
+						    now, TCP_CONNTRACK_SYN_SENT);
 		else
-			create_port_mapping_session(l3->saddr, l4->source, mvm_port,
+			create_port_mapping_session(vm_ip, gen, l3->saddr, l4->source, mvm_port,
 						    l3->daddr, l4->dest, skb->ingress_ifindex,
 						    now, TCP_CONNTRACK_ESTABLISHED);
 	} else {
-		sess->access_time = now;
+		/* Port mapping conntrack orientation: the outside client is
+		 * IP_CT_DIR_ORIGINAL, while the guest VM server is IP_CT_DIR_REPLY. */
+		bool syn = l4->syn;
+		bool ack = l4->ack;
+		bool fin = l4->fin;
+		bool rst = l4->rst;
+
+		update_session(IP_CT_DIR_ORIGINAL, sess, now, syn, ack, fin, rst);
 	}
 
 	old_daddr = l3->daddr;
@@ -105,29 +131,46 @@ static int tcp_nat_proxy(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr 
 	/* update TCP csum: IP daddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
-	if (err)
+	if (err) {
+		update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update TCP csum for port change (not part of pseudo-header) */
 	flags = sizeof(old_dport);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport, flags);
-	if (err)
+	if (err) {
+		update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* write new TCP destination port */
 	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
-	if (err)
+	if (err) {
+		update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	update_metrics(vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(mvm_port->ifindex, 0);
 }
 
@@ -205,43 +248,67 @@ static int tcp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	/* update TCP csum: IP daddr is part of pseudo-header, so BPF_F_PSEUDO_HDR */
 	flags = BPF_F_PSEUDO_HDR | sizeof(old_daddr);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_daddr, new_daddr, flags);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update TCP csum for port change (not part of pseudo-header) */
 	flags = sizeof(old_dport);
 	err = bpf_l4_csum_replace(skb, tcp_csum_off, old_dport, new_dport, flags);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* write new TCP destination port */
 	err = bpf_skb_store_bytes(skb, TCP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
-/* Rewrite an ingress UDP packet into the sandbox's reverse-NAT form.
+/* Rewrite an ingress UDP packet into the sandbox's reverse-NAT form: daddr to
+ * mvm_inner_ip, dport to the guest's port, the MAC pair to cubegw0 -> mvm, with
+ * the L3/L4 checksums fixed incrementally. Returns false if a helper failed, in
+ * which case the caller must not deliver the packet.
  *
- * Marked __always_inline because both the from_world UDP path and the DNS
- * response tail-called program share this exact rewrite. The non-inline
- * variant would create deep verifier paths in two SEC programs at once.
+ * Delivery is the caller's decision, not ours. The plain UDP path redirects to
+ * the TAP; the DNS response path uploads the finished frame to user space
+ * instead, so that a reply which teaches a new address is only handed to the
+ * sandbox once the rule permitting it exists.
+ *
+ * Marked __always_inline because both callers live in different SEC programs.
+ * The non-inline variant would create deep verifier paths in two at once.
  */
-static __always_inline int udp_nat_rewrite(struct __sk_buff *skb,
-					   struct ethhdr *l2,
-					   struct iphdr *l3,
-					   struct udphdr *l4,
-					   const struct nat_session *sess)
+static __always_inline bool udp_nat_rewrite(struct __sk_buff *skb,
+					    struct ethhdr *l2,
+					    struct iphdr *l3,
+					    struct udphdr *l4,
+					    const struct nat_session *sess)
 {
 	__u32 old_daddr, new_daddr, udp_csum_off;
 	__u16 old_dport, new_dport, old_csum;
@@ -271,31 +338,46 @@ static __always_inline int udp_nat_rewrite(struct __sk_buff *skb,
 	if (old_csum) {
 		flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(old_daddr);
 		err = bpf_l4_csum_replace(skb, udp_csum_off, old_daddr, new_daddr, flags);
-		if (err)
-			return TC_ACT_OK;
+		if (err) {
+			update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
+			return false;
+		}
 
 		/* port is not part of pseudo-header */
 		flags = BPF_F_MARK_MANGLED_0 | sizeof(old_dport);
 		err = bpf_l4_csum_replace(skb, udp_csum_off, old_dport, new_dport, flags);
-		if (err)
-			return TC_ACT_OK;
+		if (err) {
+			update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
+			return false;
+		}
 	}
 
 	/* write new UDP destination port */
 	err = bpf_skb_store_bytes(skb, UDP_DST_OFF(ip_hlen), &new_dport, sizeof(new_dport), 0);
-	if (err)
-		return TC_ACT_OK;
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
+		return false;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
-		return TC_ACT_OK;
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
+		return false;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
-		return TC_ACT_OK;
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
+		return false;
+	}
 
-	return bpf_redirect(sess->vm_ifindex, 0);
+	return true;
 }
 
 static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct udphdr *l4)
@@ -304,6 +386,7 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	struct session_key key = {};
 	struct nat_session *sess;
 	__u32 scratch_key = 0;
+	__u32 vm_ifindex;
 	__u32 dns_off;
 	__u64 now;
 
@@ -317,10 +400,11 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	if (!sess)
 		return TC_ACT_OK;
 
-	/* DNS replies need IP-learning before reverse NAT. The handler walks
-	 * up to DNS_MAX_RESPONSE_ANSWERS RRs and inlining it here pushes the
-	 * from_world verifier graph past the 1M insn budget, so we hand the
-	 * packet off to a tail-called program that finishes UDP NAT itself.
+	/* DNS replies are handed to a tail-called program that recognises a
+	 * tracked query, finishes UDP NAT itself, and then either redirects the
+	 * frame or uploads it to user space for learning. The QNAME hash walks up
+	 * to DNS_MAX_NAME_LEN bytes and inlining it here pushes the from_world
+	 * verifier graph past the 1M insn budget.
 	 *
 	 * bpf_tail_call invalidates packet pointers, so we MUST NOT touch
 	 * l2/l3/l4 after attempting the tail call. If the tail call succeeds
@@ -336,13 +420,15 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 			rstate->ifindex = sess->vm_ifindex;
 			rstate->server_ip = l3->saddr;
 			rstate->source_port = sess->vm_port;
-			rstate->reserved = 0;
+			rstate->upload = 0;
 			bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_RESPONSE);
 			/* Tail call failed (slot unpopulated): drop the packet.
 			 * Packet pointers are considered invalidated by the
 			 * verifier after bpf_tail_call, so we cannot continue
 			 * the reverse-NAT path here.
 			 */
+			update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+				      SANDBOX_METRIC_DROP);
 			return TC_ACT_OK;
 		}
 	}
@@ -351,7 +437,15 @@ static int udp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphd
 	now = bpf_ktime_get_ns();
 	update_udp_session(IP_CT_DIR_REPLY, sess, now);
 
-	return udp_nat_rewrite(skb, l2, l3, l4, sess);
+	/* Read before the rewrite: its store/csum helpers invalidate packet
+	 * pointers, so nothing below should reach back into the packet.
+	 */
+	vm_ifindex = sess->vm_ifindex;
+	if (!udp_nat_rewrite(skb, l2, l3, l4, sess))
+		return TC_ACT_OK;
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
+	return bpf_redirect(vm_ifindex, 0);
 }
 
 static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iphdr *l3, struct icmphdr *l4)
@@ -403,23 +497,37 @@ static int icmp_nat_session(struct __sk_buff *skb, struct ethhdr *l2, struct iph
 	 */
 	flags = sizeof(old_id);
 	err = bpf_l4_csum_replace(skb, icmp_csum_off, old_id, new_id, flags);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* write the restored ICMP echo identifier */
 	err = bpf_skb_store_bytes(skb, ICMP_ECHO_ID_OFF(ip_hlen), &new_id, sizeof(new_id), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	/* update IP csum and write new daddr */
 	err = bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, new_daddr, sizeof(old_daddr));
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
 	err = bpf_skb_store_bytes(skb, IP_DADDR_OFF, &new_daddr, sizeof(new_daddr), 0);
-	if (err)
+	if (err) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
 		return TC_ACT_OK;
+	}
 
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
 	return bpf_redirect(sess->vm_ifindex, 0);
 }
 
@@ -504,12 +612,17 @@ int from_world(struct __sk_buff *skb)
 
 /* Tail-called from udp_nat_session when an ingress UDP packet is a DNS reply.
  *
- * Owns just the heavy DNS answer-RR walk. All DNS helpers it calls are
- * __always_inline so this program contains no bpf-to-bpf calls, which is a
- * hard requirement on kernel 5.4: programs that mix bpf-to-bpf calls with
- * tail calls are rejected. After learning A records we tail-call the UDP
- * NAT finish program; splitting the work this way keeps each program's
- * verifier graph well under the 1M instruction budget.
+ * Owns just the QNAME hash and the dns_query_track lookup, and records the
+ * verdict in dns_response_state for the finish program. All DNS helpers it
+ * calls are __always_inline so this program contains no bpf-to-bpf calls,
+ * which is a hard requirement on kernel 5.4: programs that mix bpf-to-bpf
+ * calls with tail calls are rejected.
+ *
+ * The split remains even though the answer-RR walk is gone, because the QNAME
+ * hash still walks up to DNS_MAX_NAME_LEN bytes and from_world already carries
+ * the TCP and ICMP paths; folding it back in has not been shown to fit the 1M
+ * instruction budget. Merging the two programs is a veristat exercise, not an
+ * assumption.
  */
 SEC("tc")
 int dns_handle_response_prog(struct __sk_buff *skb)
@@ -521,29 +634,44 @@ int dns_handle_response_prog(struct __sk_buff *skb)
 	if (!rstate)
 		return TC_ACT_OK;
 
-	/* Learn A records into allow_out_v3 before reverse NAT. */
-	dns_handle_response(skb, rstate->dns_off, rstate->ifindex,
-			    rstate->server_ip, rstate->source_port);
+	rstate->upload = dns_response_parse_and_track(skb, rstate->dns_off, rstate->ifindex,
+						   rstate->server_ip, rstate->source_port);
 
 	bpf_tail_call(skb, &dns_tail_calls, DNS_TAIL_CALL_RESPONSE_FINISH);
 	/* Tail call failed (slot unpopulated): drop, the sandbox will retry. */
 	return TC_ACT_OK;
 }
 
-/* Tail-called from dns_handle_response_prog to finish ingress UDP NAT.
+/* Tail-called from dns_handle_response_prog to finish ingress UDP NAT, and to
+ * hand the finished frame to user space when the reply is one we learn from.
  *
  * Pointers and map element references from the previous tail call did not
  * survive, so we re-pull headers and re-look-up the session here.
+ *
+ * The reverse NAT runs *before* the upload so the frame user space receives is
+ * byte-for-byte what bpf_redirect() would have delivered to the sandbox: the
+ * destination is already mvm_inner_ip, the port is the guest's, and the MACs
+ * are cubegw0 -> mvm. User space can therefore inject it verbatim onto the TAP
+ * without touching the packet or recomputing a checksum. TC_ACT_SHOT then
+ * keeps the sandbox from seeing the reply until the allow_out_v3 write is done.
  */
 SEC("tc")
 int dns_response_finish_prog(struct __sk_buff *skb)
 {
+	struct dns_response_state *rstate;
 	struct session_key key = {};
 	struct nat_session *sess;
 	struct ethhdr *l2;
 	struct iphdr *l3;
 	struct udphdr *l4;
+	__u32 scratch_key = 0;
+	__u32 vm_ifindex;
+	__u16 upload = 0;
 	__u64 now;
+
+	rstate = bpf_map_lookup_elem(&dns_response_state, &scratch_key);
+	if (rstate)
+		upload = rstate->upload;
 
 	if (!__pull_headers_udp(skb, &l2, &l3, &l4))
 		return TC_ACT_OK;
@@ -561,7 +689,28 @@ int dns_response_finish_prog(struct __sk_buff *skb)
 	now = bpf_ktime_get_ns();
 	update_udp_session(IP_CT_DIR_REPLY, sess, now);
 
-	return udp_nat_rewrite(skb, l2, l3, l4, sess);
+	/* Copy before the rewrite: the store/csum helpers invalidate packet
+	 * pointers, and we still need the target after them.
+	 */
+	vm_ifindex = sess->vm_ifindex;
+	if (!udp_nat_rewrite(skb, l2, l3, l4, sess))
+		return TC_ACT_OK;
+
+	if (upload == DNS_RESP_UPLOAD) {
+		/* SHOT withholds the original. Forward or drop is counted from
+		 * the perf output inside the upload.
+		 */
+		dns_forward_response_to_user(skb, vm_ifindex, sess->vm_ip);
+		return TC_ACT_SHOT;
+	}
+	if (upload == DNS_RESP_DROP) {
+		update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+			      SANDBOX_METRIC_DROP);
+		return TC_ACT_SHOT;
+	}
+	update_metrics(sess->vm_ip, skb->len, SANDBOX_METRIC_INGRESS,
+		      SANDBOX_METRIC_FORWARDED);
+	return bpf_redirect(vm_ifindex, 0);
 }
 
 char __license[] SEC("license") = "Dual BSD/GPL";

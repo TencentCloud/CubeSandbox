@@ -122,8 +122,34 @@ func finishTemplateImageJobAfterArtifact(
 		}
 		return failErr
 	}
+	jobRecord, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+			"status":        JobStatusFailed,
+			"phase":         JobPhaseCreatingTemplate,
+			"progress":      100,
+			"error_message": fmt.Sprintf("load template image job before replica creation: %v", err),
+		})
+		return err
+	}
+	if jobRecord.Operation == JobOperationRedo {
+		existingReplicas, listErr := ListReplicas(ctx, req.TemplateID)
+		if listErr == nil {
+			listErr = prepareRedoTemplateReplicas(ctx, req.TemplateID, generatedReq.InstanceType, existingReplicas, readyTargets, storageBackendFromCreate(generatedReq))
+		}
+		if listErr != nil {
+			_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+				"status":          JobStatusFailed,
+				"phase":           JobPhaseCreatingTemplate,
+				"progress":        100,
+				"template_status": StatusFailed,
+				"error_message":   listErr.Error(),
+			})
+			return listErr
+		}
+	}
 	var info *TemplateInfo
-	storedReq, err := normalizeStoredTemplateRequest(generatedReq)
+	storedReq, err := normalizeStoredTemplateRequest(generatedReq, true)
 	if err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
@@ -151,9 +177,6 @@ func finishTemplateImageJobAfterArtifact(
 		ArtifactID: artifact.ArtifactID,
 		JobID:      jobID,
 	})
-	// claimWarning is populated by finalizeTemplateReplicas, which claims the
-	// alias *before* publishing the READY status so a client that sees READY
-	// can always resolve the alias.
 	claimWarning := ""
 	if persistErr != nil {
 		err = persistErr
@@ -175,12 +198,7 @@ func finishTemplateImageJobAfterArtifact(
 		})
 		return err
 	}
-	// Alias was already claimed by finalizeTemplateReplicas (before the READY
-	// status was published) to avoid the create/claim publish-ordering race.
 	resultPayload, _ := json.Marshal(info)
-	// Keep TC's BUILT report if this job was built remotely: writing the
-	// template payload straight over result_json used to erase the only durable
-	// proof of where the ext4 came from, on failed jobs too.
 	resultPayload = preserveRemoteBuildReport(ctx, jobID, resultPayload)
 	jobStatus := JobStatusReady
 	jobPhase := JobPhaseReady

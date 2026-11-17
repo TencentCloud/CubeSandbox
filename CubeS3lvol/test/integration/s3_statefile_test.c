@@ -154,7 +154,8 @@ main(void)
 	 * written tmp sits next to it. A read must return the old content, never
 	 * the tmp's prefix. */
 	printf("\n[3] a leftover half-written tmp does not leak into reads\n");
-	rc = raw_write(tmppath, "{\"x\":\"completely diff", 23);   /* torn prefix */
+	rc = raw_write(tmppath, "{\"x\":\"completely diff",
+		       strlen("{\"x\":\"completely diff"));   /* torn prefix */
 	check_int("plant a torn tmp file", rc, 0);
 	got = s3lvol_statefile_read(path);
 	check_str("a read still returns the intact target content", got, content_b);
@@ -206,8 +207,25 @@ main(void)
 	check_true("read after remove returns NULL", got == NULL, NULL);
 	free(got);
 
-	/* ---------- [6] write to a directory that does not exist ---------- */
-	printf("\n[6] a failed write leaves nothing behind\n");
+	/* ---------- [6] directory fsync failures are reported ---------- */
+	printf("\n[6] directory fsync failures are reported and retryable\n");
+	setenv("S3LVOL_TEST_STATEFILE_DIR_FSYNC_ERRNO", "5", 1);
+	rc = s3lvol_statefile_write(path, content_a);
+	check_int("write reports an injected directory fsync failure", rc, -EIO);
+	got = s3lvol_statefile_read(path);
+	check_str("the atomically renamed file remains readable", got, content_a);
+	free(got);
+	rc = s3lvol_statefile_write(path, content_a);
+	check_int("retrying the same write succeeds", rc, 0);
+
+	setenv("S3LVOL_TEST_STATEFILE_DIR_FSYNC_ERRNO", "5", 1);
+	rc = s3lvol_statefile_remove(path);
+	check_int("remove reports an injected directory fsync failure", rc, -EIO);
+	rc = s3lvol_statefile_remove(path);
+	check_int("retrying the same remove succeeds", rc, 0);
+
+	/* ---------- [7] write to a directory that does not exist ---------- */
+	printf("\n[7] a failed write leaves nothing behind\n");
 	{
 		char badpath[600];
 
@@ -218,8 +236,8 @@ main(void)
 		check_true("and leaves no target file", !file_exists(badpath), NULL);
 	}
 
-	/* ---------- [7] path resolution ---------- */
-	printf("\n[7] path resolution (env override, rejection, caching)\n");
+	/* ---------- [8] path resolution ---------- */
+	printf("\n[8] path resolution (env override, rejection, caching)\n");
 	{
 		/* Each call below passes a distinct string literal, because the cache
 		 * keys on the literal's address. Four distinct names, four slots. */

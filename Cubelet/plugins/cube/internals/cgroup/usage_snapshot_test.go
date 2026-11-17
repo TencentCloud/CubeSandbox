@@ -28,27 +28,44 @@ func (h *usageSnapshotHandle) UsageSnapshot(_ context.Context, group string) (ha
 	return h.result, h.err
 }
 
-func TestHostMetricsBaselineAtAssignmentReturnsReadFailure(t *testing.T) {
-	h := &usageSnapshotHandle{err: errors.New("cgroup stats unavailable")}
-	plugin := &CgPlugin{poolV1Handle: h, poolV2Handle: &usageSnapshotHandle{}}
-
-	baseline, err := plugin.hostMetricsBaselineAtAssignment(context.Background(), "/cube_sandbox/sandbox/7")
-	require.Nil(t, baseline)
-	require.ErrorContains(t, err, "cgroup stats unavailable")
+func newUsageSnapshotPluginForTest(t *testing.T, h handle.Interface) *CgPlugin {
+	t.Helper()
+	return &CgPlugin{pool: newBaselineTestPool(t, 4, h)}
 }
 
-func TestHostMetricsBaselineAtAssignmentRetriesTransientReadFailure(t *testing.T) {
+func TestBaselineForAssignmentReturnsReadFailure(t *testing.T) {
+	h := &usageSnapshotHandle{err: errors.New("cgroup stats unavailable")}
+	plugin := newUsageSnapshotPluginForTest(t, h)
+
+	baseline := plugin.baselineForAssignment(context.Background(), 7, "/cube_sandbox/sandbox/7")
+	require.Nil(t, baseline)
+}
+
+func TestBaselineForAssignmentRetriesTransientReadFailure(t *testing.T) {
 	const group = "/cube_sandbox/sandbox/7"
 	h := &usageSnapshotHandle{
 		result: handle.UsageSnapshot{CPUUsageTotalNS: 101},
 		errs:   []error{errors.New("cgroup stats temporarily unavailable"), nil},
 	}
-	plugin := &CgPlugin{poolV1Handle: h, poolV2Handle: &usageSnapshotHandle{}}
+	plugin := newUsageSnapshotPluginForTest(t, h)
 
-	baseline, err := plugin.hostMetricsBaselineAtAssignment(context.Background(), group)
-	require.NoError(t, err)
+	baseline := plugin.baselineForAssignment(context.Background(), 7, group)
+	require.NotNil(t, baseline)
 	require.Equal(t, uint64(101), baseline.CPUUsageTotalNS)
 	require.Equal(t, []string{group, group}, h.groups)
+}
+
+func TestBaselineForAssignmentUsesCachedBaselineWithoutReads(t *testing.T) {
+	const group = "/cube_sandbox/sandbox/7"
+	h := &usageSnapshotHandle{result: handle.UsageSnapshot{CPUUsageTotalNS: 101}}
+	plugin := newUsageSnapshotPluginForTest(t, h)
+	plugin.pool.baselineCache[7] = handle.UsageSnapshot{CPUUsageTotalNS: 55}
+
+	baseline := plugin.baselineForAssignment(context.Background(), 7, group)
+	require.NotNil(t, baseline)
+	require.Equal(t, uint64(55), baseline.CPUUsageTotalNS)
+	require.Empty(t, h.groups, "cache hit must not read cgroupfs")
+	require.NotContains(t, plugin.pool.baselineCache, uint32(7), "assignment pops the cache entry")
 }
 
 func TestUsageSnapshotSelectsHandleFromPersistedGroupPath(t *testing.T) {
@@ -74,7 +91,7 @@ func TestUsageSnapshotRejectsUnknownGroupPath(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestHostMetricsBaselineAtAssignmentCapturesRawCounters(t *testing.T) {
+func TestBaselineForAssignmentCapturesRawCounters(t *testing.T) {
 	const group = "/cube_sandbox/sandbox/7"
 	usage := handle.UsageSnapshot{
 		CPUUsageTotalNS:          101,
@@ -86,10 +103,10 @@ func TestHostMetricsBaselineAtAssignmentCapturesRawCounters(t *testing.T) {
 		MemoryFailuresTotal:      5,
 	}
 	h := &usageSnapshotHandle{result: usage}
-	plugin := &CgPlugin{poolV1Handle: h, poolV2Handle: &usageSnapshotHandle{}}
+	plugin := newUsageSnapshotPluginForTest(t, h)
 
-	baseline, err := plugin.hostMetricsBaselineAtAssignment(context.Background(), group)
-	require.NoError(t, err)
+	baseline := plugin.baselineForAssignment(context.Background(), 7, group)
+	require.NotNil(t, baseline)
 	require.Equal(t, []string{group}, h.groups)
 	require.Equal(t, group, baseline.CGroupPath)
 	require.Equal(t, usage.CPUUsageTotalNS, baseline.CPUUsageTotalNS)

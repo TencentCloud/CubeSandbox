@@ -14,6 +14,7 @@ from typing import Any
 from adapters.base import SandboxAdapter, cleanup_raw_sandbox
 from framework.capabilities import E2B_CAPABILITIES
 from framework.config import SdkE2EConfig
+from framework.exceptions import UnsupportedCapability
 from framework.models import (
     CodeResult,
     CommandResult,
@@ -23,6 +24,9 @@ from framework.models import (
 )
 
 MAX_LIST_PAGES = 100
+NON_RUNNING_CONTROL_PLANE_STATES = frozenset(
+    {"paused", "pausing", "killing", "killed", "terminated", "stopped"}
+)
 
 
 def _import_e2b_sandbox():
@@ -45,11 +49,23 @@ def _import_e2b_sandbox():
 
 def _import_e2b_command_exit_exception():
     try:
-        from e2b.sandbox.commands.command_handle import CommandExitException  # type: ignore
+        from e2b.sandbox.commands.command_handle import (
+            CommandExitException,  # type: ignore
+        )
 
         return CommandExitException
     except ImportError:
         return None
+
+
+def _is_e2b_not_found(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) == 404:
+        return True
+    try:
+        from e2b.exceptions import SandboxNotFoundException  # type: ignore
+    except ImportError:
+        return False
+    return isinstance(exc, SandboxNotFoundException)
 
 
 def _get_sandbox_id(sandbox: Any) -> str:
@@ -264,6 +280,26 @@ class E2BAdapter(SandboxAdapter):
             raw=raw,
         )
 
+    def is_running(self) -> bool:
+        method = getattr(self._sandbox, "is_running", None)
+        if not callable(method):
+            raise UnsupportedCapability(self.backend, "is_running")
+
+        # E2B's is_running() probes envd directly. That can auto-resume a paused
+        # CubeSandbox and reports stale proxy routes as errors after deletion, so
+        # answer known non-running control-plane states before touching the data
+        # plane. Unknown deliberately falls through, matching the SDK contract.
+        try:
+            info = self.info()
+        except Exception as exc:
+            if _is_e2b_not_found(exc):
+                return False
+            raise
+        if (info.state or "").strip().lower() in NON_RUNNING_CONTROL_PLANE_STATES:
+            return False
+
+        return bool(method())
+
     def run_command(self, command: str, *, user: str = "root", timeout: int = 30) -> CommandResult:
         commands = getattr(self._sandbox, "commands", None)
         if commands is None:
@@ -298,13 +334,33 @@ class E2BAdapter(SandboxAdapter):
         writer(path, content)
 
     def read_file(self, path: str, *, user: str = "root") -> str:
+        return str(self._read_with_format(path, "text"))
+
+    def write_bytes(self, path: str, content: bytes, *, user: str = "root") -> None:
+        files = getattr(self._sandbox, "files", None)
+        if files is None:
+            raise RuntimeError("E2B sandbox object does not expose files")
+        writer = getattr(files, "write", None) or getattr(files, "write_file", None)
+        if not callable(writer):
+            raise RuntimeError("E2B files object does not expose write/write_file")
+        writer(path, content)
+
+    def read_bytes(self, path: str, *, user: str = "root") -> bytes:
+        return bytes(self._read_with_format(path, "bytes"))
+
+    def read_stream(self, path: str, *, user: str = "root") -> bytes:
+        return b"".join(self._read_with_format(path, "stream"))
+
+    def _read_with_format(self, path: str, format: str):
         files = getattr(self._sandbox, "files", None)
         if files is None:
             raise RuntimeError("E2B sandbox object does not expose files")
         reader = getattr(files, "read", None) or getattr(files, "read_file", None)
         if not callable(reader):
             raise RuntimeError("E2B files object does not expose read/read_file")
-        return str(reader(path))
+        if format == "text":
+            return reader(path)
+        return reader(path, format=format)
 
     def _files_call(self, names: tuple[str, ...], *args):
         files = getattr(self._sandbox, "files", None)
@@ -445,6 +501,19 @@ class E2BAdapter(SandboxAdapter):
         token = first_present(raw, "traffic_access_token", "trafficAccessToken")
         return str(token) if token else None
 
+    def mcp_url(self) -> str:
+        get_mcp_url = getattr(self._sandbox, "get_mcp_url", None)
+        if not callable(get_mcp_url):
+            raise RuntimeError("E2B sandbox object does not expose get_mcp_url()")
+        return str(get_mcp_url())
+
+    def mcp_token(self) -> str | None:
+        get_mcp_token = getattr(self._sandbox, "get_mcp_token", None)
+        if not callable(get_mcp_token):
+            raise RuntimeError("E2B sandbox object does not expose get_mcp_token()")
+        token = get_mcp_token()
+        return str(token) if token else None
+
     def pause(self, *, timeout: int = 60) -> None:
         pause = getattr(self._sandbox, "pause", None)
         if not callable(pause):
@@ -505,6 +574,33 @@ class E2BAdapter(SandboxAdapter):
             # the E2B SDK model parser cannot deserialize. Use CubeAPI directly
             # for diagnostics and cleanup assertions.
             return _list_sandboxes_via_cubeapi(config)
+
+
+def list_sandboxes_by_state(
+    config: SdkE2EConfig,
+    states: list[str] | None = None,
+    *,
+    metadata: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """E2B ``Sandbox.list`` with a ``SandboxQuery``, without the REST fallback.
+
+    A response the SDK cannot parse must fail the caller, not be papered over.
+    """
+    from e2b import SandboxQuery, SandboxState  # type: ignore
+
+    query = SandboxQuery(
+        metadata=metadata,
+        state=[SandboxState(state) for state in states] if states else None,
+    )
+    listing = _import_e2b_sandbox().list(query=query, **_e2b_api_params(config))
+    if not hasattr(listing, "next_items"):
+        return [_sandbox_entry_to_dict(entry) for entry in listing or []]
+    entries: list[Any] = []
+    for _ in range(MAX_LIST_PAGES):
+        if not listing.has_next:
+            return [_sandbox_entry_to_dict(entry) for entry in entries]
+        entries.extend(listing.next_items())
+    raise RuntimeError(f"E2B sandbox listing exceeded {MAX_LIST_PAGES} pages")
 
 
 def _e2b_api_params(config: SdkE2EConfig) -> dict[str, Any]:

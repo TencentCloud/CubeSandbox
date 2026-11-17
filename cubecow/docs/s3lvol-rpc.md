@@ -49,7 +49,7 @@ s3lvol exposes only three kinds of objects:
 
 - `rcow_export_snapshot` publishes a snapshot to shared COS and returns an opaque `export_uuid`. The upload is **asynchronous** and may still be in flight when the RPC returns.
 - `rcow_get_snapshot_status` queries upload progress and whether the snapshot is "safe to delete" (i.e. whether any importer on another node still references it).
-- `rcow_import_lvol` materializes a new writable lvol on this node from an `export_uuid`. The client always passes `"decouple": true`, which requires the server to complete decoupling within this RPC — the returned lvol must be immediately usable, and the client will not issue any follow-up decouple RPC.
+- `rcow_import_lvol` creates a new writable lvol on this node from an `export_uuid`. The client passes `"decouple": false`. The lvol is usable immediately and reads the export; the client does not issue a follow-up decouple RPC.
 
 ---
 
@@ -298,14 +298,14 @@ Materialize a new writable lvol on this node from an `export_uuid`.
 **Request**
 
 ```json
-{ "lvol_name": "restore-A", "export_uuid": "a60fc264-d69a-4b59-b8c4-32e37cf6647f", "decouple": true }
+{ "lvol_name": "restore-A", "export_uuid": "a60fc264-d69a-4b59-b8c4-32e37cf6647f", "decouple": false }
 ```
 
 | Field | Type | Required | Constraint |
 |---|---|---|---|
 | `lvol_name` | string | ✅ | Name of the new local lvol; globally unique in the namespace |
 | `export_uuid` | string | ✅ | Produced by `rcow_export_snapshot` |
-| `decouple` | bool | ✅ | The client always sends `true`; the server is required to complete decoupling within this RPC and return an lvol that is fully self-contained |
+| `decouple` | bool | | Optional, default `false`. Omitted, the lvol keeps reading the export and this RPC does not copy it. `true` materialises that lvol alone |
 
 **Success**
 
@@ -315,7 +315,7 @@ Materialize a new writable lvol on this node from an `export_uuid`.
 
 **Requirements:**
 
-- The returned lvol **must be self-contained**: the client will **not** call `rcow_decouple_lvol` after import. The server must either synchronously finish decoupling within this RPC, or support transparent on-demand fetching from COS.
+- The returned lvol is usable immediately and reads the export. The client will **not** call `rcow_decouple_lvol` after import. Deleting the source snapshot while this lvol still exists stays deferred until the reader is gone.
 - `lvol_name` shares the same namespace with the other create-family RPCs; collision returns `"already exists"`.
 - Idempotent: a repeated import with the same `(lvol_name, export_uuid)` returns `"already exists"`.
 

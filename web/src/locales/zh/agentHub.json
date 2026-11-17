@@ -7,6 +7,10 @@
     "description": "当前功能主要用于演示和早期试用，API、部署配置和交互细节后续可能调整。",
     "close": "关闭预览版提示"
   },
+  "env": {
+    "linux": "Linux",
+    "mac": "个人 Mac 设备"
+  },
   "settings": {
     "openAction": "模型服务设置",
     "title": "数字助手设置",

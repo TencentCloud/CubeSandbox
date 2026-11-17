@@ -17,6 +17,7 @@
   "fields": {
     "templateID": "Template ID",
     "alias": "Alias",
+    "backend": "Storage Backend",
     "status": "Status",
     "instanceType": "Instance Type",
     "version": "Version",
@@ -67,6 +68,7 @@
   },
   "building": "Template is being built. Please refresh in a moment.",
   "buildFailed": "Template build failed.",
+  "buildFailedDeleteHint": "This template failed to build and cannot be viewed, but you can delete it.",
   "network": {
     "allowed": "Allowed",
     "blocked": "Blocked"
@@ -100,5 +102,10 @@
   "createdAt": "Created at",
   "imageCopied": "Image URL copied",
   "exposedPorts": "Exposed Ports",
-  "probePath": "Probe Path & Port"
+  "probePath": "Probe Path & Port",
+  "errors": {
+    "templateInUse": "This template has sandbox instances in use. Destroy all related sandboxes before deleting it.",
+    "buildInProgress": "This template is still building. Wait for the build to finish before deleting it.",
+    "cleanupMissing": "Cleanup information for this template is incomplete, so it cannot be deleted automatically. Contact an administrator."
+  }
 }

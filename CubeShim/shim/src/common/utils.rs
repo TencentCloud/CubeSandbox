@@ -526,7 +526,25 @@ impl Utils {
 impl AsyncUtils {
     pub const PASSFD_LISTENER_PORT: u32 = 1027;
 
+    /// Bound for the vsock CONNECT/OK handshake; bounds the handshake only,
+    /// not how long a guest takes to boot.
+    pub const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
     pub async fn connect_agent(sandbox_id: &String) -> CResult<Client> {
+        tokio::time::timeout(
+            Self::AGENT_CONNECT_TIMEOUT,
+            Self::connect_agent_inner(sandbox_id),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "connect agent timed out after {}s",
+                Self::AGENT_CONNECT_TIMEOUT.as_secs()
+            )
+        })?
+    }
+
+    async fn connect_agent_inner(sandbox_id: &String) -> CResult<Client> {
         let addr = Utils::vsock_path(sandbox_id);
 
         let mut stream = UnixStream::connect(&addr)

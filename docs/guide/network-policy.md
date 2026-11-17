@@ -35,8 +35,8 @@ Each component has a distinct responsibility:
 | --- | --- |
 | CubeAPI | Receives SDK/API requests, maps the network configuration, and forwards a CubeMaster request. |
 | CubeMaster | Merges template network configuration with the current create request and schedules the sandbox through Cubelet embedded network runtime. |
-| Cubelet embedded network runtime | Converts `CubeNetworkConfig` into CubeVS `MVMOptions`, extracts network reachability targets from L7 `rules`, and registers or updates the TAP eBPF maps. |
-| CubeVS | Runs in the host eBPF data plane. It enforces per-sandbox L3/L4 allow/deny policy, DNS A-record learning for configured domains, session/NAT, TCP RST rejection, and L7 proxy routing decisions. |
+| Cubelet embedded network runtime | Converts `CubeNetworkConfig` into CubeVS `MVMOptions`, extracts network reachability targets from L7 `rules`, and registers or updates the TAP eBPF maps. It is also on the DNS delivery path for controlled domains: it learns the A records and injects the reply back onto the TAP. While Cubelet is stopped, DNS for those domains is blocked. |
+| CubeVS | Runs in the host eBPF data plane. It enforces per-sandbox L3/L4 allow/deny policy, tracks DNS queries for configured domains, session/NAT, TCP RST rejection, and L7 proxy routing decisions. A learnable reply for a controlled domain is not forwarded here; Cubelet delivers it. |
 | CubeEgress | Transparent HTTP/HTTPS proxy. It only receives TCP/80 and TCP/443 traffic that CubeVS marked as requiring L7 checks, then evaluates the complete `rules` list. |
 
 A key point: **active outbound policy decisions happen in the `from_cube` direction**, after sandbox traffic enters the TAP device. The host-NIC `from_world` direction mainly handles reverse NAT for existing sessions, port-mapped inbound traffic, and DNS response learning. It is not the primary allow/deny decision point for outbound policy.
@@ -138,8 +138,8 @@ In strict mode with `allow_internet_access=false`, `0.0.0.0/0` is already instal
 
 - `name`: human-readable rule name, used for audit and template merging.
 - `match.scheme`: `http` or `https`.
-- `match.sni`: TLS SNI. Supports exact domains and leading `*.` wildcard domains.
-- `match.host`: HTTP Host. Supports domains, `host:port`, IPv4, IPv4 CIDR, and leading `*.` wildcard domains.
+- `match.sni`: TLS SNI. Supports exact domains, leading `*.` wildcard domains, and standalone `*`.
+- `match.host`: HTTP Host. Supports domains, `host:port`, IPv4, IPv4 CIDR, leading `*.` wildcard domains, and standalone `*`.
 - `match.method`: list of HTTP methods; methods are ORed.
 - `match.path`: exact by default; one trailing `*` means prefix match, such as `/v1/*`.
 - `action.allow`: `true` allows, `false` rejects.
@@ -153,6 +153,14 @@ CubeVS only extracts network reachability from `rules[].match.sni` and `rules[].
 
 Therefore, when `allow_internet_access=false`, each L7 rule that should actually reach an external HTTP/HTTPS service should include `host` or `sni`. A rule with only `method` and `path` may never reach CubeEgress, because the network layer has no destination target to allow.
 :::
+
+### Catch-all `*`
+
+`host="*"` or `sni="*"` matches every DNS name. It is not the same as `*.example.com`, which still matches subdomains only.
+
+Use it with `allow_internet_access=false`. Every name the sandbox resolves with a DNS A query is learned, and the ports on those addresses follow the same rules as any other L7 target. A rule that sets `port` opens that port. A rule that omits `port` opens the default for its scheme (`http` → 80, `https` → 443). Omitting both `port` and `scheme` opens TCP/80 and TCP/443. A connection that never sends a DNS query — a cached address or a literal public IP — is not allowed.
+
+`*` can carry credential injection, under the same gates as a named host. Exact names and `*.example.com` rules still take priority over `*`.
 
 ## Control-plane merge and programming flow
 
@@ -291,7 +299,8 @@ Re-evaluation is driven by traffic, not pushed: an idle established connection i
 
 Two consequences worth planning for:
 
-- **Existing DNS-learned IPs outlive the domain rule that created them.** Removing a domain from `allow_out` stops new IPs from being learned immediately, but IPs already learned for it remain allowed until their DNS TTL expires. Revoking access to a domain promptly requires an `allow_internet_access=false` policy plus a short resolver TTL.
+- **Removing a domain revokes the addresses that name taught.** Those IPs leave the allow map when the update is applied, unless another live name still holds the same address. The removal blocks traffic only together with a deny-all or another deny; under default-allow, deleting the learned row does not reject the IP.
+- **Rows recovered after a lost snapshot are the exception.** They were copied from the live map and have no QName, so a later domain revocation does not drop them. They stay until their expiry. Recovery caps that expiry at 24 hours, because a row written by the previous in-kernel learner can carry a much longer TTL.
 - **The update is not transactional across planes.** CubeEgress is updated before CubeVS, and the durable state is written last, so a failure leaves the sandbox on a state no more permissive than the old and new policies combined. Replaying the same request converges; a Cubelet restart re-applies the last policy that was successfully persisted.
 
 ## How `from_cube` decides and forwards
@@ -429,14 +438,21 @@ DNS responses from the external network enter the host-NIC `from_world` program:
 1. `from_world` finds the matching UDP session through `ingress_sessions`.
 2. If this is a response from DNS server port `53`, it invokes DNS response learning before reverse NAT.
 3. Learning runs only when `ifindex_to_mvmmeta[].dns_policy_flags` has the learning flag and requires the response to match an existing pending query in `dns_query_track`.
-4. Only IPv4 A records are learned; AAAA / IPv6 answers are not inserted into `allow_out_v2`.
-5. At most the first `8` answers in the response are processed.
-6. Learned IPs are inserted as `/32` entries into `allow_out_v2[ifindex]`, with `expires_at_ns` derived from the DNS TTL.
-7. If the original DNS allow rule had `L7_REQUIRED`, the learned IP inherits that flag.
-8. The pending query is deleted after learning succeeds or fails.
-9. The response packet continues through reverse NAT back to the sandbox.
+4. Only a positive IPv4 A answer is eligible to be learned. AAAA / IPv6 answers are not inserted into `allow_out_v2`.
+5. The datapath classifies the reply after reverse NAT:
+   - No matching tracked query: forward it to the sandbox.
+   - Tracked, but nothing to cache (NXDOMAIN, NODATA, any other non-success rcode, or TC=1): forward it. The guest must see the negative result, and the truncation bit, so its resolver can fall back to TCP.
+   - Tracked and learnable: do not forward it. Hand the frame to Cubelet.
+6. Cubelet parses the reply, inserts the learned IPs as `/32` entries into `allow_out_v2[ifindex]` with `expires_at_ns` taken from the DNS TTL, and inherits `L7_REQUIRED` when the domain rule had it. It then injects the frame onto the sandbox TAP. The sandbox does not see the reply before that inject.
+7. The pending query is deleted when the reply is classified.
 
 If an IP is already a static `allow_out` entry, DNS learning does not turn it into an expiring temporary entry. The static entry remains non-expiring and flags are merged.
+
+::: warning Cubelet is a hard dependency of DNS for controlled domains
+A controlled domain is any name that matches a `dns_allow` rule: an `allow_out` domain, an L7 `host` or `sni`, a `*.suffix` wildcard, or the `*` catch-all. The learnable positive reply for that name is removed from the kernel path. Only Cubelet writes the allow entry and injects the frame back onto the TAP.
+
+While Cubelet is stopped, those replies are dropped and DNS for controlled domains fails. A `*` catch-all makes that every name. Names that match no rule are not tracked, and their DNS still follows ordinary UDP forwarding. NXDOMAIN, NODATA, other non-success replies, and truncated replies are still forwarded by the datapath. Static IP/CIDR rules and addresses already learned stay in the kernel maps, so traffic to those addresses continues until the learned TTL expires. New resolutions of controlled domains do not succeed again until Cubelet is running.
+:::
 
 ### DNS reaping
 

@@ -21,8 +21,7 @@ import (
 func newTestLocal() *local {
 	return &local{
 		cache:                 cache.New(0, 0),
-		imageCache:            cache.New(0, 0),
-		templateNodeCache:     cache.New(0, 0),
+		locality:              newTemplateLocality(),
 		sortedNodesByClusters: make(map[string]node.NodeList),
 	}
 }
@@ -67,9 +66,8 @@ func TestSyncAllFromDB_EmptyStreakEvictsAfterThreshold(t *testing.T) {
 	l.cache.SetDefault("node-2", &node.Node{InsID: "node-2"})
 	assert.Equal(t, 2, len(l.cache.Items()), "precondition: cache seeded")
 
-	// Stub delNodeCache side-effects so eviction runs without external deps.
+	// CloseWorkerConn is the only external side effect of node eviction.
 	patches := gomonkey.NewPatches()
-	patches.ApplyFunc(SyncNodeTemplates, func(context.Context, string, []string) {})
 	patches.ApplyFunc(grpcconn.CloseWorkerConn, func(string) {})
 	defer patches.Reset()
 
@@ -151,4 +149,43 @@ func TestSyncAllFromDB_LoadErrorResetsStreak(t *testing.T) {
 		t.Fatal("expected error from loader")
 	}
 	assert.Zero(t, l.emptySyncStreak.Load(), "load error must reset streak to 0")
+}
+
+func TestDelNodeCacheRemovesTemplateLocality(t *testing.T) {
+	loc := newTestLocal()
+	loc.cache.SetDefault("node-1", &node.Node{InsID: "node-1", IP: "10.0.0.1", Healthy: true})
+	loc.cache.SetDefault("node-2", &node.Node{InsID: "node-2", IP: "10.0.0.2", Healthy: true})
+	loc.locality.register("tpl-reg", "node-1", 1)
+	loc.locality.replaceReported("node-1", normalizeTemplateIDSet([]string{"tpl-hb"}))
+	loc.locality.register("tpl-keep", "node-2", 1)
+
+	patches := gomonkey.NewPatches()
+	patches.ApplyFunc(grpcconn.CloseWorkerConn, func(string) {})
+	defer patches.Reset()
+
+	withExternalNodeLoader(t, func(context.Context) ([]*node.Node, error) {
+		return []*node.Node{{InsID: "node-2", IP: "10.0.0.2", Healthy: true}}, nil
+	})
+	if err := loc.syncAllFromDB(context.Background(), true); err != nil {
+		t.Fatalf("syncAllFromDB: %v", err)
+	}
+
+	if state := loc.locality.image("tpl-reg"); state != nil && state.HasNode("node-1") {
+		t.Fatal("registered locality of a departed node must be removed")
+	}
+	if state := loc.locality.image("tpl-hb"); state != nil && state.HasNode("node-1") {
+		t.Fatal("heartbeat locality of a departed node must be removed")
+	}
+	if _, ok := loc.locality.registered["tpl-reg"]; ok {
+		t.Fatal("departed node must not remain in registered assertions")
+	}
+	if _, ok := loc.locality.reported["node-1"]; ok {
+		t.Fatal("departed node must not remain in heartbeat assertions")
+	}
+	if state := loc.locality.image("tpl-keep"); state == nil || !state.HasNode("node-2") {
+		t.Fatal("other nodes must keep their registered locality")
+	}
+	if _, ok := loc.cache.Get("node-1"); ok {
+		t.Fatal("departed node must leave the node cache")
+	}
 }

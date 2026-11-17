@@ -183,6 +183,15 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 			return err
 		}
 
+		// Validate target nodes before creating a new build job. While distribution
+		// re-checks node availability after the build, failing fast here avoids
+		// minutes of image pulling and ext4 creation for an unreachable scope.
+		// Kept after active-job lookup so idempotent retries reuse an in-flight job
+		// even during transient node cache blips.
+		if _, err := resolveTemplateNodes(normalized.InstanceType, normalized.DistributionScope); err != nil {
+			return err
+		}
+
 		var latestJob *models.TemplateImageJob
 		if job, err := getLatestTemplateImageJobByTemplateID(ctx, normalized.TemplateID); err == nil {
 			latestJob = job
@@ -249,11 +258,19 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	if err != nil {
 		return nil, err
 	}
+	definition, err := GetDefinition(ctx, normalized.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureRedoTemplateNotInUse(ctx, normalized.TemplateID, definition.InstanceType); err != nil {
+		return nil, err
+	}
 	jobID := uuid.NewString()
 	var redoJob *models.TemplateImageJob
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if _, err := lockTemplateDefinitionTx(tx, normalized.TemplateID); err != nil {
+			definition, err := lockTemplateDefinitionTx(tx, normalized.TemplateID)
+			if err != nil {
 				return err
 			}
 			if _, err := getActiveTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID); err == nil {
@@ -285,6 +302,9 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 				return fmt.Errorf("decode latest template image request fail: %w", err)
 			}
 			sourceReq.TemplateID = normalized.TemplateID
+			if strings.TrimSpace(sourceReq.Backend) == "" {
+				sourceReq.Backend = definition.StorageBackend
+			}
 			if !isCreateRedoJobOperation(sourceJob.Operation) {
 				sourceReq.Alias = ""
 			}
@@ -297,6 +317,7 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 				return err
 			}
 			targetScope := distributionScopeFromTargets(targetNodes)
+			sourceReq.DistributionScope = append([]string(nil), targetScope...)
 			attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
 			requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
 			if err != nil {

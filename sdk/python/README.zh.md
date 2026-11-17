@@ -6,7 +6,7 @@
   <a href="https://github.com/TencentCloud/CubeSandbox"><img src="https://img.shields.io/badge/CubeSandbox-GitHub-blue" alt="CubeSandbox" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/version-0.6.0-orange" alt="v0.6.0" />
+  <img src="https://img.shields.io/badge/version-0.8.0-orange" alt="v0.8.0" />
 </p>
 
 ---
@@ -104,6 +104,25 @@ sb.pause(timeout=60, interval=0.5) # 自定义轮询参数
 # 通过连接恢复 —— 自动恢复已暂停的沙箱
 sb2 = Sandbox.connect(sb.sandbox_id)
 ```
+
+### 分叉（Fork）
+
+```python
+sb = Sandbox.create()
+
+# 一次服务端调用：后端对 sb 只打一次快照，派生 N 个副本。
+forks = sb.fork(count=3)              # list[Sandbox | Exception]，每个 fork 一项
+forks = sb.fork(count=3, timeout=60)  # timeout：新副本空闲存活时长，单位秒
+
+for f in forks:
+    if isinstance(f, Sandbox):
+        f.run_code("print('alive')")  # 运行中的副本
+    else:
+        print(f)                      # 该 fork 的异常
+```
+
+部分成功会保留副本且不抛异常；只有整体失败才抛异常（如源沙箱不存在）。
+`count` 为 1..100（默认 1）。与 `clone` 不同，临时快照由服务端管理。
 
 ### 指定计算节点
 
@@ -283,7 +302,7 @@ Volume.destroy(vol.volume_id)           # -> bool；先杀掉所有挂载它的�
 ```python
 from cubesandbox import Sandbox
 
-print(Sandbox.health())     # {"status": "ok", "sandboxes": 4}
+print(Sandbox.health())     # {"status": "ok"}
 print(Sandbox.list())       # 运行中沙箱列表
 print(Sandbox.list_v2())    # v2 API（支持过滤）
 ```
@@ -321,7 +340,7 @@ with Sandbox.create(config=cfg) as sb:
 | `Sandbox.create(template, *, timeout, env_vars, metadata, distribution_scope, volume_mounts, config)` | `POST /sandboxes` — 创建新沙箱（可限定计算节点或挂载卷） |
 | `Sandbox.connect(sandbox_id, timeout=None, *, config)` | `POST /sandboxes/:id/connect` — 连接（暂停状态下自动恢复），并可选地重置空闲超时 |
 | `Sandbox.list(config)` | `GET /sandboxes` — 列出运行中沙箱（v1） |
-| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出沙箱（v2） |
+| `Sandbox.list_v2(config)` | `GET /v2/sandboxes` — 列出运行中与已暂停的沙箱（v2 E2B 视图） |
 | `Sandbox.health(config)` | `GET /health` — 服务健康检查 |
 
 ### `Sandbox` — 实例方法
@@ -330,6 +349,7 @@ with Sandbox.create(config=cfg) as sb:
 |---|---|
 | `sb.run_code(code, *, on_stdout, on_stderr, on_result, on_error, envs, timeout)` | `POST /execute` — 执行代码，返回 `Execution` |
 | `sb.get_info()` | `GET /sandboxes/:id` — 获取沙箱状态和元数据 |
+| `sb.is_running(request_timeout=None)` | 判断沙箱是否运行中 — 先查控制面状态，仅 running/unknown 时才探测 envd `/health`，返回 `bool`（不可达/传输错误返回 `False`） |
 | `sb.pause(*, wait, timeout, interval)` | `POST /sandboxes/:id/pause` — 暂停沙箱 |
 | `sb.resume(timeout)` | `POST /sandboxes/:id/resume` — 恢复（已弃用，请用 `connect`） |
 | `sb.kill()` | `DELETE /sandboxes/:id` — 销毁沙箱 |

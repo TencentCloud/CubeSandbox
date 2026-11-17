@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
-import { api, ops, setTokens, clearTokens } from '@/lib/api';
+import { api, apiWithHeaders, ops, setTokens, clearTokens } from '@/lib/api';
 import type { components } from './generated/schema';
 
 export type ClusterOverviewDto = components['schemas']['ClusterOverview'];
@@ -41,6 +41,8 @@ export interface TemplateDetail extends TemplateSummary {
   createRequest?: unknown;
   networkType?: string | null;
   allowInternetAccess?: boolean | null;
+  /** CoW backend (xfs|s3). CubeMaster returns `backend`, falling back to `storage_backend`. Empty/absent means the historical xfs path. */
+  backend?: string | null;
 }
 
 export interface TemplateCompatSummary {
@@ -165,6 +167,10 @@ function mapTemplateDetail(dto: TemplateDetailDto): TemplateDetail {
     networkType: (dto as unknown as { networkType?: string }).networkType ?? null,
     allowInternetAccess:
       (dto as unknown as { allowInternetAccess?: boolean }).allowInternetAccess ?? null,
+    backend:
+      (dto as unknown as { backend?: string }).backend?.trim() ||
+      (dto as unknown as { storageBackend?: string }).storageBackend?.trim() ||
+      null,
     displayName:
       dto.aliases?.[0]?.trim() ||
       (dto as unknown as { displayName?: string }).displayName?.trim() ||
@@ -213,13 +219,34 @@ const DEFAULT_RESUME_BODY: SandboxResumeRequest = {
   autoPause: false,
 };
 
+// Ask for every state so exited (`unknown`) sandboxes stay cleanable and a pausing one keeps its label.
+const ALL_SANDBOX_STATES = 'running,paused,pausing,unknown';
+
 export const sandboxApi = {
-  list: (params?: {
+  list: async (params?: {
     metadata?: string;
-    state?: RunningSandbox['state'];
+    /** Comma-separated states; defaults to every state so exited sandboxes stay visible. */
+    state?: string;
     nextToken?: string;
     limit?: number;
-  }) => api<ListedSandboxDto[]>('/v2/sandboxes', { params }).then((items) => items.map(mapSandbox)),
+  }) => {
+    // `GET /v2/sandboxes` paginates through the `x-next-token` response
+    // header rather than the body. Follow the cursor until the backend stops
+    // advertising another page so callers that want the full list (the
+    // dashboard does) are not silently truncated to the first page.
+    const items: ListedSandboxDto[] = [];
+    let nextToken = params?.nextToken;
+    for (;;) {
+      const { data, headers } = await apiWithHeaders<ListedSandboxDto[]>('/v2/sandboxes', {
+        params: { state: ALL_SANDBOX_STATES, ...params, nextToken },
+      });
+      items.push(...data);
+      const token = headers.get('x-next-token');
+      if (!token) break;
+      nextToken = token;
+    }
+    return items.map(mapSandbox);
+  },
   get: (id: string) => api<SandboxDetailDto>(`/sandboxes/${id}`).then(mapSandboxDetail),
   kill: (id: string) => api<void>(`/sandboxes/${id}`, { method: 'DELETE' }),
   pause: (id: string) => api<void>(`/sandboxes/${id}/pause`, { method: 'POST' }),
@@ -249,6 +276,8 @@ export const templateApi = {
   create: (body: {
     templateID?: string;
     image: string;
+    alias?: string;
+    backend?: string;
     instanceType?: string;
     writableLayerSize?: string;
     exposedPorts?: number[];
@@ -285,6 +314,70 @@ export const templateApi = {
   compat: () => api<TemplateCompatMatrix>('/templates/compat'),
   adoptCompatBaseline: (id: string) =>
     api<{ updated: number }>(`/templates/compat/${id}/adopt-baseline`, { method: 'POST' }),
+};
+
+export interface SnapshotReplica {
+  nodeID?: string | null;
+  nodeIP?: string | null;
+  phase?: string | null;
+  status?: string | null;
+  spec?: string | null;
+  lastJobID?: string | null;
+  lastErrorPhase?: string | null;
+  errorMessage?: string | null;
+  compatStatus?: string | null;
+  compatPolicy?: string | null;
+  shimVersion?: string | null;
+  agentVersion?: string | null;
+  guestImageVersion?: string | null;
+  kernelVersion?: string | null;
+}
+
+export interface SnapshotSummary {
+  // SDK camelCase converter maps snake_case `_id` suffixes to capital `ID`.
+  snapshotID: string;
+  displayName?: string | null;
+  // CubeMaster omits an empty status, so callers must handle undefined.
+  status?: string;
+  originSandboxID?: string | null;
+  originNodeID?: string | null;
+  originNodeIP?: string | null;
+  instanceType?: string | null;
+  version?: string | null;
+  createdAt?: string | null;
+  rootfsSizeBytesAtSnapshot?: number | null;
+  runtimeRefCount?: number | null;
+  runtimeRefSandboxes?: string[] | null;
+  storageBackend?: string | null;
+  replicas?: SnapshotReplica[] | null;
+  remoteStatus?: string | null;
+  lastError?: string | null;
+}
+
+export interface SnapshotListResult {
+  items: SnapshotSummary[];
+  nextToken: string | null;
+}
+
+export const snapshotApi = {
+  // next_token is an offset (page N → offset (N-1)*limit); cursor arrives via X-Next-Token.
+  list: async (params?: { limit?: number; nextToken?: string }): Promise<SnapshotListResult> => {
+    const res = await apiWithHeaders<unknown>('/snapshots', {
+      params: {
+        limit: params?.limit ?? 100,
+        ...(params?.nextToken ? { next_token: params.nextToken } : {}),
+      },
+    });
+    const items = Array.isArray(res.data) ? (res.data as SnapshotSummary[]) : [];
+    const nextToken = res.headers.get('x-next-token');
+    return { items, nextToken };
+  },
+  // Detail response wraps the payload: {requestID, snapshot: {...}} (no `data` field).
+  get: async (id: string): Promise<SnapshotSummary> => {
+    const res = await api<{ snapshot?: SnapshotSummary }>(`/snapshots/${encodeURIComponent(id)}`);
+    return res?.snapshot ?? (res as unknown as SnapshotSummary);
+  },
+  remove: (id: string) => api<void>(`/snapshots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
 export const versionApi = {
@@ -385,6 +478,46 @@ export const warehouseApi = {
   },
 };
 
+export interface QuotaSpecDto {
+  // Patch semantics: omit a field to leave it unchanged; an explicit 0/"" resets
+  // it to the cubelet default. The API merges absent fields onto the stored spec.
+  mcpu_limit?: number;
+  mem_limit?: string;
+  mvm_limit?: number;
+  creation_concurrent_num?: number;
+  paused_resource_release_ratio?: number | null;
+  expected_revision?: number;
+  // Read-only in responses: true = all fields authoritative, false = ratio only.
+  node_managed?: boolean;
+  revision: number;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface QuotaViewDto {
+  node_id: string;
+  spec?: QuotaSpecDto;
+  actual: {
+    milli_cpu: number;
+    mem_mb: number;
+    max_mvm_num: number;
+    create_concurrent_num: number;
+  };
+  drift: 'none' | 'detected' | 'no_spec' | 'ratio_only';
+  // Stored management mode, independent of drift: false = ratio only
+  // (adopting requires all four overcommit fields). Absent on older backends.
+  node_managed?: boolean;
+  effective_paused_ratio?: number;
+  paused_ratio_inherited?: boolean;
+  message?: string;
+}
+
+export interface QuotaHistoryEntryDto {
+  operator: string;
+  detail: string;
+  created_at: string;
+}
+
 export const clusterApi = {
   overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
@@ -400,6 +533,14 @@ export const clusterApi = {
       body: detail ? JSON.stringify({ detail }) : undefined,
     }),
   nodeOperations: (id: string) => ops<NodeOperationDto[]>(`/nodes/${id}/operations`),
+  nodeQuota: (id: string) => ops<QuotaViewDto>(`/nodes/${id}/config/quota`),
+  setNodeQuota: (id: string, spec: QuotaSpecDto) =>
+    ops<{ view: QuotaViewDto; push: { applied: boolean; skip_reason?: string } }>(
+      `/nodes/${id}/config/quota`,
+      { method: 'PUT', body: JSON.stringify(spec) },
+    ),
+  nodeQuotaHistory: (id: string) =>
+    ops<QuotaHistoryEntryDto[]>(`/nodes/${id}/config/quota/history`),
   config: () =>
     ops<{
       apiEndpoint: string;

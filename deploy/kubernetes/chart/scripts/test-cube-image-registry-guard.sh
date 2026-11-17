@@ -198,6 +198,22 @@ expect(
     f"{MIRROR}/cube-sandbox/cube-master:{tag}",
 )
 
+# 6. JuiceFS client image follows the same official-host contract. It used to
+#    be a Docker Hub third-party image; it now lives in the Cube TCR namespace
+#    and must never fall back to juicedata/mount.
+jfs = render("--set", "cubeJuiceFS.enabled=true")
+if "juicedata/mount" in jfs:
+    raise SystemExit("default render must not pull JuiceFS from Docker Hub")
+if f"{INT}/cube-sandbox/juicefs:ce-v1.4.1" not in jfs:
+    raise SystemExit("default render must pull JuiceFS from TCR int")
+
+jfs_cn = render("-f", cn_file, "--set", "cubeJuiceFS.enabled=true")
+if "juicedata/mount" in jfs_cn:
+    raise SystemExit("values-cn render must not pull JuiceFS from Docker Hub")
+if f"{CN}/cube-sandbox/juicefs:ce-v1.4.1" not in jfs_cn:
+    raise SystemExit("values-cn must rewrite JuiceFS to TCR cn")
+print("ok: JuiceFS client image is served from the official Cube TCR hosts")
+
 print("ok: cube.cubeImage rewrites only official Cube TCR hosts")
 PY
 

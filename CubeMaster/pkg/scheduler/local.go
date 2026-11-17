@@ -21,15 +21,22 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
+// local holds scheduler-local state: per-instance-type task buffer queues and
+// the global destroy concurrency limit.
 type local struct {
+	// bufferTaskMap organizes buffer queues by instance type (product).
 	bufferTaskMap              map[string]*buffertask
 	stop                       chan struct{}
 	ctx                        context.Context
-	lastDestroyconcurrentLimit int64
+	lastDestroyconcurrentLimit int64 // 上一次计算出的全局销毁并发上限，用于检测变化
 }
 
 var l *local
 
+// initTask initializes the local scheduler: it creates buffer queues for the
+// default instance type and every configured instance type, then starts three
+// background goroutines (metric collection, metric reporting, concurrency-limit
+// monitoring).
 func initTask(ctx context.Context) error {
 	l = &local{
 		ctx:                        ctx,
@@ -48,6 +55,8 @@ func initTask(ctx context.Context) error {
 	return nil
 }
 
+// Stop shuts the scheduler down: closes the stop signal and gracefully stops
+// every buffer queue.
 func Stop(ctx context.Context) {
 	close(l.stop)
 	for _, v := range l.bufferTaskMap {
@@ -55,14 +64,18 @@ func Stop(ctx context.Context) {
 	}
 }
 
+// buffertask is one instance type's buffer queue with concurrency limits and
+// metric bookkeeping.
 type buffertask struct {
 	bufferQ                         bufferqueue.BufferQueue
-	lastCreateConcurrentLimit       int64
-	bufferTaskLenMax                int64
-	bufferWorkingsMax               int64
+	lastCreateConcurrentLimit       int64 // 上一次设置的创建并发上限
+	bufferTaskLenMax                int64 // 观测到的队列最大长度（用于上报峰值）
+	bufferWorkingsMax               int64 // 观测到的最大在途任务数（用于上报峰值）
 	localCreateConcurrentNumMetrics *sync.Map
 }
 
+// newTask creates a buffer queue whose capacity comes from the configured
+// BufferQueueMinJob.
 func newTask() *buffertask {
 	return &buffertask{
 		bufferQ: bufferqueue.New(
@@ -87,6 +100,7 @@ func (t *buffertask) Len() int {
 	}
 	return t.bufferQ.Len()
 }
+
 func (t *buffertask) Workings() int {
 	if t == nil || t.bufferQ == nil {
 		return 0
@@ -100,6 +114,7 @@ func (t *buffertask) setBufferTaskConcurrent(n int64) {
 	}
 	t.bufferQ.SetLimit(n)
 }
+
 func (t *buffertask) setLastCreateConcurrentLimit(n int64) {
 	if t == nil {
 		return
@@ -107,6 +122,9 @@ func (t *buffertask) setLastCreateConcurrentLimit(n int64) {
 	t.lastCreateConcurrentLimit = n
 }
 
+// AddBufferTask pushes a task into the buffer queue of the given product
+// (instance type); when no queue is configured for that type, it falls back to
+// the default instance type's queue.
 func AddBufferTask(x interface{}, product string) {
 	bufferQ, ok := l.bufferTaskMap[product]
 	if !ok || bufferQ == nil {
@@ -116,6 +134,9 @@ func AddBufferTask(x interface{}, product string) {
 	bufferQ.Push(x)
 }
 
+// collectMetric periodically samples buffer-queue metrics: it records the peak
+// queue length and peak in-flight task count, and tracks per-node create
+// concurrency (peaks above 5, for later reporting).
 func (l *local) collectMetric() {
 	ticker := time.NewTicker(config.GetConfig().Common.CollectMetricInterval)
 	defer ticker.Stop()
@@ -160,6 +181,9 @@ func (l *local) collectMetric() {
 	}
 }
 
+// reportMetric periodically reports the collected peaks (queue length,
+// in-flight tasks, per-node create concurrency) via log Trace, then resets
+// them.
 func (l *local) reportMetric() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -214,6 +238,8 @@ func (l *local) reportMetric() {
 	}
 }
 
+// reportStdevTrace reports the cluster's node resource-distribution balance as
+// standard deviations of CPU quota usage, memory quota usage and MVM counts.
 func reportStdevTrace() {
 	metricTrace := &CubeLog.RequestTrace{
 		Caller: constants.CubeMasterServiceID,
@@ -256,6 +282,11 @@ func limitDestroyOfEveryNode() int64 {
 	return config.GetConfig().CubeletConf.DestroyConcurentLimit
 }
 
+// monitorLimit periodically monitors and adjusts concurrency limits:
+//  1. recomputes each instance type's create concurrency limit from the healthy
+//     node count and the master node count, and pushes it to the buffer queues;
+//  2. computes the global destroy concurrency limit and updates the destroy
+//     task worker concurrency when it changes.
 func (l *local) monitorLimit() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -280,9 +311,11 @@ func (l *local) monitorLimit() {
 				}
 				newMasterNodes := localcache.HealthyMasterNodes()
 
+				// Per-node create limit: max(cluster average, configured floor).
 				newCreateLimitOfEveryNode := max(int64(math.Ceil(float64(totalLimitCreate*1.0/newHealthyNodes))),
 					config.GetConfig().CubeletConf.CreateConcurrentLimit)
 
+				// Global create limit amortized across master nodes.
 				limitCreate := int64(math.Ceil(float64(newHealthyNodes * newCreateLimitOfEveryNode * 1.0 / newMasterNodes)))
 				if bufferQ.lastCreateConcurrentLimit != limitCreate {
 					bufferQ.setLastCreateConcurrentLimit(limitCreate)

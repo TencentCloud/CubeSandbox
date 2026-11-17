@@ -2,26 +2,20 @@
 # Copyright (c) 2026 Tencent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-#  A reference chain must be able to stop depending on its source export.
+#  A shared import template can be decoupled while a clone of its snapshot is
+#  being read.
 #
-#  Snapshotting an imported volume moves the external snapshot onto the snapshot
-#  (measured, docs/import-reference-snapshot-design.md 9.2). That left nothing to
-#  decouple: the volume no longer reads the export, and a read-only snapshot could
-#  not be materialised -- so the chain referenced its source until it was deleted,
-#  which ties the data's survival to the importer's uptime, since a lease going
-#  stale is what licenses an unattended delete on the source.
-#
-#  Decoupling a snapshot is what closes that. This asserts it end to end, and the
-#  assertion that matters is the last one: the source's objects are deleted from S3
-#  and the lvstore is unloaded and re-attached before the final read, so a pass
-#  cannot come from a cache.
+#  decouple:true materialises __rcow_tpl_<uuid>. Snapshotting the user volume
+#  does not cancel that copy and does not move the esnap. The clone's own write
+#  must stay intact while the template is copied. Reads are checked both in this
+#  process and after unload/reload, once the source objects have been reclaimed.
 #
 #  Scenario:
 #    src: a volume written full -> snapshot -> export
-#    dst: import it, snapshot it (which cancels the import's decouple), clone the
-#         snapshot, write to the clone
-#    dst: decouple the snapshot, while a reader loops on the clone
-#    then: erase the source prefix, reload, and read everything back
+#    dst: import it with decouple:true, snapshot it without cancelling the copy,
+#         clone the snapshot, write to the clone
+#    dst: the template decouple runs, with a reader looping on the clone
+#    src: attach it again and delete the snapshot without rcow_release_export
 #
 #  Usage:
 #    sudo -E ./test/dataplane/run_snapshot_converge_test.sh -e <endpoint> -b <bucket> [-r <region>]
@@ -42,14 +36,15 @@ RPC_SOCK="/var/run/s3lvol_cv.sock"
 
 S3_EXPORTS_DIR="exports"
 
-SRC_LVS="cvsrc"
-DST_LVS="cvdst"
+SRC_LVS="${S3LVOL_TEST_SRC_LVS:-cvsrc}"
+DST_LVS="${S3LVOL_TEST_DST_LVS:-cvdst}"
 
 BIG_VOL="big0"
 BIG_SNAP="big0-snap"
 BIG_IMP="big0-imp"
 BIG_IMP_SNAP="big0-imp-snap"
 BIG_IMP_CLONE="big0-imp-clone"
+BIG_REEXPORT_UUID=""
 
 CAPACITY_GIB=8
 BIG_GIB=1          # written end to end, so its decouple is slow enough to catch
@@ -58,14 +53,14 @@ JOURNAL_MB=64
 WAL_MB=128
 WAL_FILE_MB=$((JOURNAL_MB + WAL_MB + 128))
 
-SRC_WAL_FILE="/data/cv_src.img"
-DST_WAL_FILE="/data/cv_dst.img"
+SRC_WAL_FILE="${S3LVOL_SRC_WAL_FILE:-/data/cv_src.img}"
+DST_WAL_FILE="${S3LVOL_DST_WAL_FILE:-/data/cv_dst.img}"
 SRC_WAL_BDEV="cv_src_wal0"
 DST_WAL_BDEV="cv_dst_wal0"
 
 NQN="nqn.2026-08.io.spdk:cv"
 LISTEN_ADDR="127.0.0.1"
-LISTEN_PORT="4422"
+LISTEN_PORT="${S3LVOL_TEST_PORT:-4422}"
 
 ENDPOINT=""
 BUCKET=""
@@ -178,7 +173,13 @@ nvme_settle()
 remove_prefix()
 {
 	python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
-		-r "${REGION}" -p "$1"
+		-r "${REGION}" -p "$1" ${S3LVOL_TEST_S3FLAGS:-}
+}
+
+count_objects()
+{
+	python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
+		-r "${REGION}" -p "$1" --list ${S3LVOL_TEST_S3FLAGS:-} 2>/dev/null | wc -l
 }
 
 # Decouple is considered done when the decouple list is empty.
@@ -475,17 +476,15 @@ if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","l
 	exit 1
 fi
 
-# It must be *running*, not queued -- that is the branch this test exists for.
-# decouple_start() is called before the import replies, so this should already
-# hold; asserted rather than assumed, because a queued one would quietly turn this
-# into a duplicate of run_decouple_queue_test.sh.
-if ! grep -qE "Decoupling lvol '${BIG_IMP}'" "${TGT_LOG}"; then
-	fail "${BIG_IMP} is not materialising -- this test needs a running decouple"
+# The copy is on the hidden template. decouple_start() runs before the import
+# replies.
+TPL="__rcow_tpl_${BIG_EXP_UUID}"
+if ! grep -qF "Decoupling lvol '${TPL}'" "${TGT_LOG}"; then
+	fail "${TPL} is not materialising -- this test needs a running decouple"
 	exit 1
 fi
-pass "${BIG_IMP} imported, decouple running"
+pass "imported ${BIG_IMP}; decouple is running on ${TPL}"
 
-# Let it get somewhere, so the cancellation has clusters to keep.
 sleep 5
 
 # ==========================================================================
@@ -493,7 +492,11 @@ echo "[5] snapshot it, clone the snapshot, write to the clone"
 raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
 	"${BIG_IMP}" "${BIG_IMP_SNAP}")" >/dev/null 2>"${WORKDIR}/snap.err" \
 	|| { fail "snapshot ${BIG_IMP}"; sed 's/^/    /' "${WORKDIR}/snap.err"; exit 1; }
-pass "snapshot ${BIG_IMP_SNAP} taken (its decouple was cancelled)"
+if grep -qE "Cancelling the decouple of lvol '${TPL}'" "${TGT_LOG}"; then
+	fail "snapshot cancelled the template decouple"
+	exit 1
+fi
+pass "snapshot ${BIG_IMP_SNAP} taken; the template decouple kept running"
 
 raw_rpc rcow_create_clone "$(printf '{"snapshot_name":"%s","clone_name":"%s"}' \
 	"${BIG_IMP_SNAP}" "${BIG_IMP_CLONE}")" >/dev/null 2>"${WORKDIR}/clone.err" \
@@ -559,12 +562,23 @@ rm -f "${WORKDIR}/reader_stop"
 ) &
 READER_PID=$!
 
+# The import already started the template copy. Naming the snapshot redirects
+# there. The RPC only puts strerror on stderr ("Invalid argument" / "Device or
+# resource busy"); the reason is in the target log.
+CONV_MARK="$(wc -l < "${TGT_LOG}")"
 if raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${BIG_IMP_SNAP}")" \
 	>/dev/null 2>"${WORKDIR}/dec.err"; then
-	pass "decouple of the read-only snapshot was accepted"
+	pass "decouple of ${BIG_IMP_SNAP} redirected onto the template"
 else
-	fail "decouple of ${BIG_IMP_SNAP} refused"
-	sed 's/^/    /' "${WORKDIR}/dec.err" 2>/dev/null | tail -3
+	CONV_TAIL="$(tail -n +"${CONV_MARK}" "${TGT_LOG}")"
+	if echo "${CONV_TAIL}" | grep -q 'already being decoupled'; then
+		pass "template decouple was already running when ${BIG_IMP_SNAP} was named"
+	elif echo "${CONV_TAIL}" | grep -q 'nothing to decouple'; then
+		pass "template decouple had already finished when ${BIG_IMP_SNAP} was named"
+	else
+		fail "could not decouple the chain behind ${BIG_IMP_SNAP}"
+		sed 's/^/    /' "${WORKDIR}/dec.err" 2>/dev/null | tail -5
+	fi
 fi
 
 if wait_for_decouple; then
@@ -589,10 +603,10 @@ else
 	grep '^BAD ' "${WORKDIR}/clone_reads.txt" 2>/dev/null | head -3 | sed 's/^/    /'
 fi
 
-if grep -qE "'${BIG_IMP_SNAP}' no longer reads export" "${TGT_LOG}"; then
-	pass "snapshot reports it no longer reads the export"
+if grep -qF "'${TPL}' no longer reads export" "${TGT_LOG}"; then
+	pass "the template reports it no longer reads the export"
 else
-	fail "no 'no longer reads export' line for ${BIG_IMP_SNAP}"
+	fail "no 'no longer reads export' line for ${TPL}"
 fi
 
 # ==========================================================================
@@ -603,65 +617,143 @@ if raw_rpc rcow_decouple_lvol "$(printf '{"lvol_name":"%s"}' "${BIG_IMP_SNAP}")"
 	>/dev/null 2>&1; then
 	fail "a second decouple was accepted -- the external parent was not cleared"
 else
-	pass "second decouple refused: the snapshot is no longer an esnap clone"
+	pass "second decouple refused: the template is no longer an esnap"
 fi
 
-raw_rpc rcow_get_lvstores "" >"${WORKDIR}/lvs.json" 2>/dev/null || true
-SNAP_ALLOC="$(python3 -c "
-import json, sys
-try:
-    rows = json.load(open(sys.argv[1]))
-except Exception:
-    print(-1); raise SystemExit
-for lvs in (rows if isinstance(rows, list) else rows.get('lvstores', [])):
-    for l in lvs.get('lvols', []):
-        if l.get('name') == sys.argv[2]:
-            print(l.get('allocated_clusters', -1)); raise SystemExit
-print(-1)
-" "${WORKDIR}/lvs.json" "${BIG_IMP_SNAP}" 2>/dev/null || echo -1)"
-if [ "${SNAP_ALLOC}" -gt 0 ] 2>/dev/null; then
-	pass "snapshot now owns ${SNAP_ALLOC} cluster(s) of its own"
+if raw_rpc rcow_get_lvol "$(printf '{"lvol_name":"%s"}' "${TPL}")" \
+	>/dev/null 2>"${WORKDIR}/get_tpl.err"; then
+	fail "hidden template ${TPL} was listed"
 else
-	fail "snapshot owns no clusters after being decoupled (reported '${SNAP_ALLOC}')"
+	pass "hidden template stays hidden after it is decoupled"
+fi
+
+BIG_REEXPORT_UUID="$(raw_rpc rcow_export_snapshot \
+	"$(printf '{"snapshot_name":"%s"}' "${BIG_IMP_SNAP}")" \
+	2>"${WORKDIR}/reexport.err" | tr -d ' \t\r\n')"
+if [ -n "${BIG_REEXPORT_UUID}" ] &&
+   wait_export_done "${BIG_REEXPORT_UUID}" "re-export of imported snapshot"; then
+	pass "a snapshot of the imported lvol can be exported again"
+else
+	fail "could not re-export the imported lvol's snapshot"
+	sed 's/^/    /' "${WORKDIR}/reexport.err" 2>/dev/null
 fi
 
 # ==========================================================================
-echo "[8] erase the source and reload: the bytes must be local now"
-# The whole point. release_export cannot be used -- it runs on the source
-# lvstore, which was unloaded so this one could exist -- and deleting the prefix
-# is the stronger statement anyway: if the objects are gone from S3 and the reads
-# still work, the data is really here. Unload and re-attach so that nothing can
-# be answered out of memory.
-nvme_settle
-remove_ns "${CLONE_NSID}"
-CLONE_NSID=""
+echo "[7b] delete the source snapshot without release_export"
+# The destination stopped reading the export when its snapshot was decoupled.
+# The source was unloaded only so this lvstore could be created; attach it
+# again and let the snapshot delete release the export itself. A lease written
+# while the import was still reading stays for the grace period, so the delete
+# may be deferred until the poller notices it has gone stale.
+if ! raw_rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${SRC_LVS}" "${BUCKET}" "${SRC_WAL_BDEV}")" \
+	>/dev/null 2>"${WORKDIR}/attach_src_del.err"; then
+	fail "re-attach ${SRC_LVS} to delete its snapshot"
+	sed 's/^/    /' "${WORKDIR}/attach_src_del.err"
+	exit 1
+fi
+SRC_CREATED=1
+pass "source re-attached for the snapshot delete"
 
-python3 "${TOOLS_DIR}/s3_prefix_rm.py" -e "${ENDPOINT}" -b "${BUCKET}" \
-	-r "${REGION}" -p "${SRC_LVS}/" >"${WORKDIR}/prefix_rm.log" 2>&1
-info "$(tail -1 "${WORKDIR}/prefix_rm.log")"
-if grep -qE '[1-9][0-9]* deleted' "${WORKDIR}/prefix_rm.log"; then
-	pass "source prefix erased from S3"
-else
-	fail "source prefix was not erased -- the check below would prove nothing"
+SRC_DATA_BEFORE="$(count_objects "${SRC_LVS}/data/")"
+if [ "${SRC_DATA_BEFORE}" -eq 0 ]; then
+	fail "the source had no data objects left to reclaim"
+	exit 1
 fi
 
-raw_rpc rcow_flush_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" >/dev/null 2>&1
-raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
-	>/dev/null 2>"${WORKDIR}/unload_dst.err" \
-	|| { fail "unload ${DST_LVS}"; sed 's/^/    /' "${WORKDIR}/unload_dst.err"; exit 1; }
-DST_CREATED=0
-sleep 2
-raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
-	"${DST_LVS}" "${BUCKET}" "${DST_WAL_BDEV}")" \
-	>/dev/null 2>"${WORKDIR}/attach_dst.err" \
-	|| { fail "re-attach ${DST_LVS}"; sed 's/^/    /' "${WORKDIR}/attach_dst.err"; exit 1; }
-DST_CREATED=1
-sleep 2
-pass "${DST_LVS} unloaded and re-attached with the source gone"
+SRC_VOL_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${BIG_VOL}" "${SRC_LVS}")" 2>&1)"
+if echo "${SRC_VOL_DEL}" | grep -q '"deferred": *true'; then
+	fail "deleting ${BIG_VOL} was deferred: ${SRC_VOL_DEL}"
+	exit 1
+elif echo "${SRC_VOL_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source volume was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${BIG_VOL}): ${SRC_VOL_DEL}"
+	exit 1
+fi
+SRC_DATA_AFTER_VOL="$(count_objects "${SRC_LVS}/data/")"
+if [ "${SRC_DATA_AFTER_VOL}" = "${SRC_DATA_BEFORE}" ]; then
+	pass "source data objects survived deleting the writable volume"
+else
+	fail "source data object count changed when the writable volume was deleted (${SRC_DATA_BEFORE} -> ${SRC_DATA_AFTER_VOL})"
+fi
 
+SRC_SNAP_DEL="$(python3 "${TOOLS_DIR}/s3lvol_rpc.py" --sock "${RPC_SOCK}" --raw \
+	rcow_delete_lvol "$(printf '{"lvol_name":"%s","lvs_name":"%s"}' \
+		"${BIG_SNAP}" "${SRC_LVS}")" 2>&1)"
+if echo "${SRC_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	info "source snapshot delete deferred; waiting for the lease to go stale"
+elif echo "${SRC_SNAP_DEL}" | grep -q '"bool_value": *true'; then
+	pass "the source snapshot was deleted without release_export"
+else
+	fail "rcow_delete_lvol (${BIG_SNAP}): ${SRC_SNAP_DEL}"
+	exit 1
+fi
+if echo "${SRC_SNAP_DEL}" | grep -q '"deferred": *true'; then
+	SRC_SNAP_GONE=0
+	for _ in $(seq 180); do
+		if ! raw_rpc rcow_get_snapshot_status \
+			"$(printf '{"snapshot_name":"%s"}' "${BIG_SNAP}")" \
+			>/dev/null 2>&1; then
+			SRC_SNAP_GONE=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${SRC_SNAP_GONE}" = "1" ]; then
+		pass "the poller deleted the source snapshot once its lease was stale"
+	else
+		fail "the source snapshot was still there 180s after its delete"
+		exit 1
+	fi
+fi
+
+SRC_MANIFEST_GONE=0
+for _ in $(seq 30); do
+	if [ "$(count_objects "${S3_EXPORTS_DIR}/${BIG_EXP_UUID}.json")" -eq 0 ]; then
+		SRC_MANIFEST_GONE=1
+		break
+	fi
+	sleep 1
+done
+if [ "${SRC_MANIFEST_GONE}" = "1" ]; then
+	pass "the snapshot delete removed the export manifest"
+else
+	fail "the export manifest was still in the bucket after the snapshot delete"
+fi
+
+SRC_DATA_RECLAIMED=0
+SRC_DATA_AFTER="${SRC_DATA_BEFORE}"
+for _ in $(seq 60); do
+	SRC_DATA_AFTER="$(count_objects "${SRC_LVS}/data/")"
+	if [ "${SRC_DATA_AFTER}" -lt "${SRC_DATA_BEFORE}" ]; then
+		SRC_DATA_RECLAIMED=1
+		break
+	fi
+	sleep 1
+done
+if [ "${SRC_DATA_RECLAIMED}" = "1" ]; then
+	pass "source data objects were reclaimed after the snapshot delete (${SRC_DATA_BEFORE} -> ${SRC_DATA_AFTER})"
+else
+	fail "source data objects were not reclaimed after the snapshot delete (still ${SRC_DATA_AFTER})"
+fi
+
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${SRC_LVS}")" \
+	>/dev/null 2>&1 || { fail "unload ${SRC_LVS} after the snapshot delete"; exit 1; }
+SRC_CREATED=0
+check_target "step 7b" || exit 1
+
+# ==========================================================================
+echo "[8] in-process reads after the source objects are gone"
+# The template decouple has cleared the esnap, and step 7b reclaimed the source
+# objects. This process must answer from the copy it just made.
 SNAP_MD5="$(read_vol_md5 "${BIG_IMP_SNAP}")" || SNAP_MD5="unreadable"
 VOL_MD5="$(read_vol_md5 "${BIG_IMP}")" || VOL_MD5="unreadable"
-CLONE_NOW="$(read_vol_md5 "${BIG_IMP_CLONE}")" || CLONE_NOW="unreadable"
+CLONE_NOW="$(dd if="${CLONE_DEV}" bs=1M count=$((BIG_GIB * 1024)) iflag=direct \
+	status=none | md5sum | cut -d' ' -f1)"
 info "source was      ${SRC_MD5}"
 info "snapshot        ${SNAP_MD5}"
 info "volume          ${VOL_MD5}"
@@ -669,21 +761,54 @@ info "clone (expects ${CLONE_MD5})"
 info "clone           ${CLONE_NOW}"
 
 if [ "${SNAP_MD5}" = "${SRC_MD5}" ]; then
-	pass "snapshot still reads correctly with its source erased"
+	pass "snapshot still reads the source bytes in this process"
 else
-	fail "snapshot content wrong after the source was erased"
+	fail "snapshot content wrong after the source objects were reclaimed"
 fi
 if [ "${VOL_MD5}" = "${SRC_MD5}" ]; then
-	pass "volume still reads correctly with its source erased"
+	pass "volume still reads the source bytes in this process"
 else
-	fail "volume content wrong after the source was erased"
+	fail "volume content wrong after the source objects were reclaimed"
 fi
 if [ "${CLONE_NOW}" = "${CLONE_MD5}" ]; then
-	pass "clone still reads its own write with its source erased"
+	pass "clone still reads its own write in this process"
 else
-	fail "clone content wrong after the source was erased"
+	fail "clone content wrong after the source objects were reclaimed"
 fi
 
 check_target "step 8" || exit 1
+
+# ==========================================================================
+echo "[9] the decoupled chain survives unload/reload without its source"
+remove_ns "${CLONE_NSID}"
+CLONE_NSID=""
+raw_rpc rcow_unload_lvstore "$(printf '{"lvs_name":"%s"}' "${DST_LVS}")" \
+	>/dev/null 2>&1 || { fail "unload ${DST_LVS} after decouple"; exit 1; }
+DST_CREATED=0
+raw_rpc rcow_attach_lvstore \
+	"$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s"}' \
+		"${DST_LVS}" "${BUCKET}" "${DST_WAL_BDEV}")" \
+	>/dev/null 2>"${WORKDIR}/reload_dst.err" || {
+	fail "re-attach ${DST_LVS} after decouple"
+	sed 's/^/    /' "${WORKDIR}/reload_dst.err"
+	exit 1
+}
+DST_CREATED=1
+
+SNAP_MD5="$(read_vol_md5 "${BIG_IMP_SNAP}")" || SNAP_MD5="unreadable"
+VOL_MD5="$(read_vol_md5 "${BIG_IMP}")" || VOL_MD5="unreadable"
+CLONE_NOW="$(read_vol_md5 "${BIG_IMP_CLONE}")" || CLONE_NOW="unreadable"
+if [ "${SNAP_MD5}" = "${SRC_MD5}" ] && [ "${VOL_MD5}" = "${SRC_MD5}" ]; then
+	pass "snapshot and volume retain the materialised source bytes after reload"
+else
+	fail "decoupled source bytes were not durable across reload"
+fi
+if [ "${CLONE_NOW}" = "${CLONE_MD5}" ]; then
+	pass "clone retains its own write after reload"
+else
+	fail "clone content was not durable across reload"
+fi
+
+check_target "step 9" || exit 1
 
 echo "--- log kept at: ${TGT_LOG}"

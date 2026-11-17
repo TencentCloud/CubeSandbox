@@ -7,6 +7,7 @@ package cubebox
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -46,6 +47,7 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 
 	sandBoxID := opts.SandboxID
 	keepPausedTombstone := shouldKeepPausedTombstone(opts)
+	keepCubebox := workflow.RetainFor(opts).CubeboxMeta
 	defer func() {
 		if err != nil {
 			return
@@ -54,6 +56,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 			if ferr := l.finalizePausedTombstone(ctx, sandBoxID); ferr != nil {
 				log.G(ctx).Warnf("finalize paused tombstone %s: %v", sandBoxID, ferr)
 			}
+			return
+		}
+		if keepCubebox {
 			return
 		}
 		err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
@@ -72,7 +77,7 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	sb.Lock()
 	defer sb.Unlock()
 
-	if opts.BaseWorkflowInfo.IsRollBack {
+	if opts.BaseWorkflowInfo.IsRollBack && !keepCubebox {
 		if sb.UserMarkDeletedTime == nil {
 			now := time.Now()
 			sb.UserMarkDeletedTime = &now
@@ -195,10 +200,113 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	if er := waitSandboxRuntimeGone(ctx, sandBoxID, runtimeEvidence); er != nil {
 		result = multierror.Append(result, fmt.Errorf("wait sandbox runtime exit [%s] fail: %w", sandBoxID, er))
 	}
+	// Shim Wait often burns the whole deadline, so Delete runs on an already
+	// canceled context and fails even after the runtime pid is gone. Retry
+	// that delete with a live context; otherwise the cold start finds the
+	// old container still registered.
+	if opts.IsRestartDestroy && onlyDeadlineErrors(result.ErrorOrNil()) {
+		if er := l.releaseRestartRuntime(ctx, containers); er != nil {
+			result = multierror.Append(result, er)
+		} else {
+			result = nil
+		}
+	}
 	if er := result.ErrorOrNil(); er != nil {
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
 	return nil
+}
+
+// statusWithCause keeps a ret status message and the original error.
+// ret.Err stores only the text, so errors.Is would miss a deadline.
+type statusWithCause struct {
+	status error
+	cause  error
+}
+
+func (e *statusWithCause) Error() string {
+	if e == nil || e.status == nil {
+		if e != nil && e.cause != nil {
+			return e.cause.Error()
+		}
+		return ""
+	}
+	return e.status.Error()
+}
+
+func (e *statusWithCause) Unwrap() error { return e.cause }
+
+func statusErr(code errorcode.ErrorCode, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &statusWithCause{status: ret.Err(code, cause.Error()), cause: cause}
+}
+
+// onlyDeadlineErrors reports that every failure came from a canceled destroy
+// context. A real remove error must still fail the restart. The aggregate is
+// walked child by child: errors.Is on a multierror is true when any child matches.
+func onlyDeadlineErrors(err error) bool {
+	if err == nil {
+		return false
+	}
+	var multi *multierror.Error
+	if stderrors.As(err, &multi) && multi != nil {
+		if len(multi.Errors) == 0 {
+			return false
+		}
+		for _, child := range multi.Errors {
+			if !isDeadlineError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return isDeadlineError(err)
+}
+
+func isDeadlineError(err error) bool {
+	return err != nil && (stderrors.Is(err, context.DeadlineExceeded) || stderrors.Is(err, context.Canceled))
+}
+
+// releaseRestartRuntime deletes the task and containerd container after the
+// shim has been reaped. The caller's context is already done.
+func (l *local) releaseRestartRuntime(parent context.Context, containers []*cubeboxstore.Container) error {
+	if l == nil || l.localTask == nil {
+		return fmt.Errorf("restart runtime release has no task service")
+	}
+	ns := namespaces.Default
+	if got, ok := namespaces.Namespace(parent); ok && got != "" {
+		ns = got
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeReapWait+3*time.Second)
+	defer cancel()
+	ctx = namespaces.WithNamespace(ctx, ns)
+	var result *multierror.Error
+	seen := map[string]struct{}{}
+	for _, c := range containers {
+		if c == nil || c.ID == "" {
+			continue
+		}
+		if _, ok := seen[c.ID]; ok {
+			continue
+		}
+		seen[c.ID] = struct{}{}
+		_, err := l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: c.ID})
+		if err != nil {
+			err = errgrpc.ToNative(err)
+			if !cubes.IsNotFoundContainerError(err) && !isTtrpcError(err) {
+				result = multierror.Append(result, fmt.Errorf("delete task %s: %w", c.ID, err))
+			}
+		}
+		if c.Container == nil {
+			continue
+		}
+		if err := deleteContainer(ctx, c.Container); err != nil && !cubes.IsNotFoundContainerError(err) && !isTtrpcError(err) {
+			result = multierror.Append(result, fmt.Errorf("delete container %s: %w", c.ID, err))
+		}
+	}
+	return result.ErrorOrNil()
 }
 
 // shouldKeepPausedTombstone is true for Pause post-cleanup Destroy: wipe leftover
@@ -319,8 +427,12 @@ func (l *local) destroyContainer(ctx context.Context, c *cubeboxstore.Container)
 
 	err := l.cleanContainerdContainer(ctx, c.Container)
 
-	if er := rootfs.CleanRootfs(ctx, c.ID); er != nil {
-		log.G(ctx).Warnf("clean rootfs failed.%s", er)
+	// The writable rootfs stays with the sandbox ID across a restart.
+	dc, _ := ctx.Value(workflow.KDestroyContext).(*workflow.DestroyContext)
+	if !workflow.RetainFor(dc).Storage {
+		if er := rootfs.CleanRootfs(ctx, c.ID); er != nil {
+			log.G(ctx).Warnf("clean rootfs failed.%s", er)
+		}
 	}
 	if er := taskio.Clean(ctx, c.ID); er != nil {
 		log.G(ctx).Warnf("clean fifo failed.%s", er)
@@ -341,7 +453,7 @@ func (l *local) cleanContainerdContainer(ctx context.Context, container containe
 	} else if err != nil {
 
 		log.G(ctx).Warnf("stopTask %s error: %s", id, err)
-		return ret.Err(errorcode.ErrorCode_DeleteTaskFailed, err.Error())
+		return statusErr(errorcode.ErrorCode_DeleteTaskFailed, err)
 	}
 
 	err = deleteContainer(ctx, container)
@@ -349,7 +461,7 @@ func (l *local) cleanContainerdContainer(ctx context.Context, container containe
 		log.G(ctx).Warnf("ignore delete container [%s] fail: %v", container.ID(), err)
 	} else if err != nil {
 		log.G(ctx).Errorf("deleteContainer %s error: %s", id, err)
-		return ret.Err(errorcode.ErrorCode_DeleteContainerFromMetaDataFailed, err.Error())
+		return statusErr(errorcode.ErrorCode_DeleteContainerFromMetaDataFailed, err)
 	}
 	return nil
 }
@@ -379,59 +491,55 @@ func (l *local) stopTask(ctx context.Context, container containerd.Container) (e
 		}
 	}
 	if !constants.IsTerminatingPod(ctx) {
-
-		_, err = container.Task(ctx, nil)
-		if err != nil {
-
-			log.G(ctx).Warnf("Get and State task %s ret: %v", id, err)
-			if cubes.IsNotFoundContainerError(err) {
-				_, err = l.localTask.Kill(ctx, &tasks.KillRequest{ContainerID: id,
-					Signal: uint32(syscall.SIGKILL), All: true})
-				if err == nil {
-					_, err = l.localTask.Wait(ctx, &tasks.WaitRequest{ContainerID: id})
-				}
-
-				_, err = l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: id})
-				if err != nil {
-					err = errgrpc.ToNative(err)
-					if cubes.IsNotFoundContainerError(err) || isTtrpcError(err) {
-						return nil
-					}
-					log.G(ctx).Warnf("forcibly delete task %s fail: %v", id, err)
-				}
-				return err
-			}
-
-			_, err = l.localTask.Kill(ctx, &tasks.KillRequest{ContainerID: id,
-				Signal: uint32(syscall.SIGKILL), All: true})
-			if err == nil {
-				_, err = l.localTask.Wait(ctx, &tasks.WaitRequest{ContainerID: id})
-			} else {
-				log.G(ctx).Warn(errors.Wrapf(err, "failed to send SIGKILL for container[%s]", id))
-			}
-			return err
+		// Task and Kill go to the shim. A crashed guest leaves that
+		// connection open and unread, so those RPCs wait until the caller
+		// context ends. That used up the whole destroy deadline, and Delete
+		// then ran with an expired context: the disconnect wait returned
+		// immediately and the bundle was still being removed during cold start.
+		reapCtx, reapCancel := shimWaitContext(ctx)
+		if _, taskErr := container.Task(reapCtx, nil); taskErr != nil {
+			log.G(ctx).Warnf("Get and State task %s ret: %v", id, taskErr)
 		}
-
-		_, err = l.localTask.Kill(ctx, &tasks.KillRequest{
+		_, killErr := l.localTask.Kill(reapCtx, &tasks.KillRequest{
 			ContainerID: id,
 			Signal:      uint32(syscall.SIGKILL),
 			All:         true,
 		})
-		if err == nil {
-			_, err = l.localTask.Wait(ctx, &tasks.WaitRequest{ContainerID: id})
+		reapCancel()
+		if killErr == nil {
+			// A Wait that hits its short bound must still reach Delete.
+			// Returning here leaves the shim up and the next restart blocks
+			// in Wait again. The bound is not the caller's destroy deadline.
+			_ = l.waitTask(ctx, id)
 		} else {
-			log.G(ctx).Warn(errors.Wrapf(err, "failed to send SIGKILL for container[%s]", id))
+			killErr = errgrpc.ToNative(killErr)
+			if !cubes.IsNotFoundContainerError(killErr) && !isTtrpcError(killErr) {
+				log.G(ctx).Warn(errors.Wrapf(killErr, "failed to send SIGKILL for container[%s]", id))
+			}
+			// The shim did not take the signal. Reap its host process so
+			// the disconnect callback starts, then Delete joins that callback.
+			l.reapShimProcess(ctx, id)
 		}
 	}
 
+	// tasks.Delete runs shim.Delete, which waits for the disconnect callback.
+	// That callback's bundle removal has to finish before this returns, or
+	// the next create's bundle is the directory it deletes.
 	_, err = l.localTask.Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: id})
 	if err != nil {
 		err = errgrpc.ToNative(err)
-		if cubes.IsNotFoundContainerError(err) {
+		if cubes.IsNotFoundContainerError(err) || isTtrpcError(err) {
 			return nil
 		}
 		log.G(ctx).Warnf("forcibly delete task %s fail: %v", id, err)
 	}
+	return err
+}
+
+func (l *local) waitTask(ctx context.Context, id string) error {
+	waitCtx, cancel := shimWaitContext(ctx)
+	defer cancel()
+	_, err := l.localTask.Wait(waitCtx, &tasks.WaitRequest{ContainerID: id})
 	return err
 }
 

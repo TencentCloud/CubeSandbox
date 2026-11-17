@@ -209,6 +209,16 @@ impl AgentServiceClient {
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "GetVolumeStats", cres);
     }
 
+    pub async fn freeze_rootfs(&self, ctx: ttrpc::context::Context, req: &super::agent::FreezeRootfsRequest) -> ::ttrpc::Result<super::agent::FreezeRootfsResponse> {
+        let mut cres = super::agent::FreezeRootfsResponse::new();
+        ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "FreezeRootfs", cres);
+    }
+
+    pub async fn thaw_rootfs(&self, ctx: ttrpc::context::Context, req: &super::agent::ThawRootfsRequest) -> ::ttrpc::Result<super::empty::Empty> {
+        let mut cres = super::empty::Empty::new();
+        ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "ThawRootfs", cres);
+    }
+
     pub async fn resize_volume(&self, ctx: ttrpc::context::Context, req: &super::agent::ResizeVolumeRequest) -> ::ttrpc::Result<super::empty::Empty> {
         let mut cres = super::empty::Empty::new();
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "ResizeVolume", cres);
@@ -600,6 +610,28 @@ impl ::ttrpc::r#async::MethodHandler for GetVolumeStatsMethod {
     }
 }
 
+struct FreezeRootfsMethod {
+    service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
+}
+
+#[async_trait]
+impl ::ttrpc::r#async::MethodHandler for FreezeRootfsMethod {
+    async fn handler(&self, ctx: ::ttrpc::r#async::TtrpcContext, req: ::ttrpc::Request) -> ::ttrpc::Result<(u32, Vec<u8>)> {
+        ::ttrpc::async_request_handler!(self, ctx, req, agent, FreezeRootfsRequest, freeze_rootfs);
+    }
+}
+
+struct ThawRootfsMethod {
+    service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
+}
+
+#[async_trait]
+impl ::ttrpc::r#async::MethodHandler for ThawRootfsMethod {
+    async fn handler(&self, ctx: ::ttrpc::r#async::TtrpcContext, req: ::ttrpc::Request) -> ::ttrpc::Result<(u32, Vec<u8>)> {
+        ::ttrpc::async_request_handler!(self, ctx, req, agent, ThawRootfsRequest, thaw_rootfs);
+    }
+}
+
 struct ResizeVolumeMethod {
     service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
 }
@@ -718,6 +750,12 @@ pub trait AgentService: Sync {
     async fn get_volume_stats(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::VolumeStatsRequest) -> ::ttrpc::Result<super::csi::VolumeStatsResponse> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/GetVolumeStats is not supported".to_string())))
     }
+    async fn freeze_rootfs(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::FreezeRootfsRequest) -> ::ttrpc::Result<super::agent::FreezeRootfsResponse> {
+        Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/FreezeRootfs is not supported".to_string())))
+    }
+    async fn thaw_rootfs(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::ThawRootfsRequest) -> ::ttrpc::Result<super::empty::Empty> {
+        Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/ThawRootfs is not supported".to_string())))
+    }
     async fn resize_volume(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::ResizeVolumeRequest) -> ::ttrpc::Result<super::empty::Empty> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/ResizeVolume is not supported".to_string())))
     }
@@ -830,6 +868,12 @@ pub fn create_agent_service(service: Arc<std::boxed::Box<dyn AgentService + Send
 
     methods.insert("/grpc.AgentService/GetVolumeStats".to_string(),
                     std::boxed::Box::new(GetVolumeStatsMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
+
+    methods.insert("/grpc.AgentService/FreezeRootfs".to_string(),
+                    std::boxed::Box::new(FreezeRootfsMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
+
+    methods.insert("/grpc.AgentService/ThawRootfs".to_string(),
+                    std::boxed::Box::new(ThawRootfsMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
 
     methods.insert("/grpc.AgentService/ResizeVolume".to_string(),
                     std::boxed::Box::new(ResizeVolumeMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);

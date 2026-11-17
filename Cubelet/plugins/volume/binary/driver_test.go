@@ -100,3 +100,25 @@ func TestAttachPassesEmptyPrivateDataFlag(t *testing.T) {
 		t.Fatalf("empty private_data must omit --private-data flag; got %q", raw)
 	}
 }
+
+func TestAttachRejectsNULStateBeforeStartingPlugin(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	wrapper := writeAttachStub(t, dir, argsFile)
+	p := New("nul-fixture")
+	if err := p.Init(context.Background(), volume.PluginConfig{BinaryPath: wrapper}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.Attach(context.Background(), &volume.AttachRequest{
+		VolumeID: "vol-nul", PrivateData: "state-before\x00state-after", VolumeBaseDir: dir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "NUL") || !strings.Contains(err.Error(), "vol-nul") || !strings.Contains(err.Error(), "nul-fixture") {
+		t.Fatalf("expected contextual NUL error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "state-before") {
+		t.Fatalf("error must not echo state: %v", err)
+	}
+	if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+		t.Fatalf("plugin must not start: argv file stat = %v", err)
+	}
+}

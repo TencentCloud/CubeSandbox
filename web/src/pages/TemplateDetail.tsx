@@ -15,48 +15,12 @@ import { ApiError } from '@/lib/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import {
-  ArrowLeft,
-  RefreshCw,
-  Trash2,
-  ChevronDown,
-  ChevronUp,
-  Copy,
-  Check,
-  AlertTriangle,
-} from 'lucide-react';
+import { ArrowLeft, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import { cn, formatDeleteError, copyToClipboard } from '@/lib/utils';
 import { extractTemplateRuntimeConfig, extractTemplateNetworkPolicy } from '@/lib/templateConfig';
 import { BoolBadge } from '@/components/ui/typography';
-
-// ── status helpers ────────────────────────────────────────────────────────────
-
-function statusDotClass(status: string) {
-  switch (status.toUpperCase()) {
-    case 'READY':
-      return 'bg-cube-ok';
-    case 'BUILDING':
-    case 'RUNNING':
-      return 'bg-cube-warn animate-pulse';
-    case 'FAILED':
-      return 'bg-cube-err';
-    default:
-      return 'bg-muted-foreground';
-  }
-}
-function statusTextClass(status: string) {
-  switch (status.toUpperCase()) {
-    case 'READY':
-      return 'text-cube-ok';
-    case 'BUILDING':
-    case 'RUNNING':
-      return 'text-cube-warn';
-    case 'FAILED':
-      return 'text-cube-err';
-    default:
-      return 'text-muted-foreground';
-  }
-}
+import { CopyButton, CopyableText } from '@/components/ui/copy';
+import { statusDotClass, statusTextClass } from '@/lib/status';
 function StatusBadge({ status }: { status: string }) {
   const { t } = useTranslation('templateDetail');
   const tone = (() => {
@@ -130,29 +94,6 @@ function CompatBadge({ status }: { status: string }) {
   );
 }
 
-// ── copy button ───────────────────────────────────────────────────────────────
-
-function CopyButton({ text, className }: { text: string; className?: string }) {
-  const { t } = useTranslation('templateDetail');
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={() => {
-        copyToClipboard(text, t('copied'));
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-      className={cn(
-        'text-muted-foreground/50 hover:text-muted-foreground transition-colors',
-        className,
-      )}
-      title={t('copy')}
-    >
-      {copied ? <Check className="h-3 w-3 text-cube-ok" /> : <Copy className="h-3 w-3" />}
-    </button>
-  );
-}
-
 // ── field ─────────────────────────────────────────────────────────────────────
 
 function Field({
@@ -168,6 +109,7 @@ function Field({
   copyable?: boolean;
   dim?: boolean;
 }) {
+  const { t } = useTranslation('templateDetail');
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-xs uppercase tracking-wider text-muted-foreground/70 font-medium">
@@ -181,45 +123,11 @@ function Field({
         )}
       >
         <span>{value ?? '—'}</span>
-        {copyable && value && <CopyButton text={value} />}
-      </span>
-    </div>
-  );
-}
-
-// ── copy tooltip wrapper ─────────────────────────────────────────────────────
-
-function CopyableText({
-  text,
-  display,
-  className,
-}: {
-  text: string;
-  display?: string;
-  className?: string;
-}) {
-  const { t } = useTranslation('templateDetail');
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    copyToClipboard(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <span
-      className={cn('inline-flex items-center gap-1.5 cursor-pointer group', className)}
-      onClick={handleCopy}
-      title={copied ? t('copied') : t('clickToCopy', { text })}
-    >
-      <span>{display ?? text}</span>
-      <span className="opacity-0 group-hover:opacity-100 transition-opacity">
-        {copied ? (
-          <Check className="h-3 w-3 text-cube-ok" />
-        ) : (
-          <Copy className="h-3 w-3 text-muted-foreground/50" />
+        {copyable && value && (
+          <CopyButton text={value} copiedLabel={t('copied')} copyLabel={t('copy')} />
         )}
       </span>
-    </span>
+    </div>
   );
 }
 
@@ -262,6 +170,7 @@ function Section({
 // reserves a clear column for the icon).
 
 function Monoblock({ label, value }: { label: string; value?: string | null }) {
+  const { t } = useTranslation('templateDetail');
   if (!value) return null;
   return (
     <div className="flex flex-col gap-1.5">
@@ -272,7 +181,12 @@ function Monoblock({ label, value }: { label: string; value?: string | null }) {
         <pre className="rounded-md border border-border/50 bg-muted/30 pl-3 pr-10 py-2 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed text-foreground/90">
           {value}
         </pre>
-        <CopyButton text={value} className="absolute top-1/2 -translate-y-1/2 right-2 p-1.5" />
+        <CopyButton
+          text={value}
+          copiedLabel={t('copied')}
+          copyLabel={t('copy')}
+          className="absolute top-1/2 -translate-y-1/2 right-2 p-1.5"
+        />
       </div>
     </div>
   );
@@ -505,6 +419,8 @@ function ReplicaTable({
                       text={r.artifact_id}
                       display={r.artifact_id.slice(0, 28) + '…'}
                       className="font-mono text-sm text-muted-foreground"
+                      copiedLabel={t('copied')}
+                      clickToCopyLabel={t('clickToCopy', { text: r.artifact_id })}
                     />
                   ) : (
                     '—'
@@ -516,6 +432,8 @@ function ReplicaTable({
                       text={r.last_job_id}
                       display={r.last_job_id.slice(0, 28) + '…'}
                       className="font-mono text-sm text-muted-foreground"
+                      copiedLabel={t('copied')}
+                      clickToCopyLabel={t('clickToCopy', { text: r.last_job_id })}
                     />
                   ) : (
                     '—'
@@ -740,11 +658,7 @@ export default function TemplateDetailPage() {
         ) : isFailed404 ? (
           <div className="space-y-3">
             <p className="text-sm text-destructive">{t('buildFailed')}</p>
-            <p className="text-xs text-muted-foreground">
-              {t('buildFailedDeleteHint', {
-                defaultValue: '该模板构建失败，无法查看详情，但你可以将其删除。',
-              })}
-            </p>
+            <p className="text-xs text-muted-foreground">{t('buildFailedDeleteHint')}</p>
             {showDeleteConfirm ? (
               <div className="space-y-3">
                 <p className="text-sm text-muted-foreground">{t('delete.confirmDesc')}</p>
@@ -763,7 +677,7 @@ export default function TemplateDetailPage() {
                 </div>
                 {deleteMutation.isError && (
                   <p className="text-xs text-destructive">
-                    {formatDeleteError(deleteMutation.error)}
+                    {formatDeleteError(deleteMutation.error, t)}
                   </p>
                 )}
               </div>
@@ -819,7 +733,7 @@ export default function TemplateDetailPage() {
             <h1 className="text-lg font-semibold font-mono tracking-tight truncate">
               {data.templateID}
             </h1>
-            <CopyButton text={data.templateID} />
+            <CopyButton text={data.templateID} copiedLabel={t('copied')} copyLabel={t('copy')} />
           </div>
           {imgShort && (
             <div className="flex items-center gap-1.5 group">
@@ -830,7 +744,12 @@ export default function TemplateDetailPage() {
               >
                 {imgShort}
               </p>
-              <CopyButton text={imgShort} className="opacity-0 group-hover:opacity-100" />
+              <CopyButton
+                text={imgShort}
+                copiedLabel={t('copied')}
+                copyLabel={t('copy')}
+                className="opacity-0 group-hover:opacity-100"
+              />
             </div>
           )}
           {createdAt && (
@@ -954,6 +873,7 @@ export default function TemplateDetailPage() {
           <Field label={t('fields.templateID')} value={data.templateID} mono copyable />
           <Field label={t('fields.alias')} value={data.displayName || null} />
           <Field label={t('fields.instanceType')} value={data.instanceType ?? '—'} />
+          <Field label={t('fields.backend')} value={data.backend || 'xfs'} />
           {cfg?.exposedPorts && <Field label={t('exposedPorts')} value={cfg.exposedPorts} mono />}
           {cfg?.probePath && (
             <Field label={t('probePath')} value={`${cfg.probePath} :${cfg.probePort}`} mono dim />
@@ -1085,7 +1005,9 @@ export default function TemplateDetailPage() {
               </Button>
             </div>
             {deleteMutation.isError && (
-              <p className="text-xs text-destructive">{formatDeleteError(deleteMutation.error)}</p>
+              <p className="text-xs text-destructive">
+                {formatDeleteError(deleteMutation.error, t)}
+              </p>
             )}
           </div>
         ) : (

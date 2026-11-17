@@ -7,12 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"time"
 
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 // runSnapshotWithRootfs captures memory and rootfs in one frozen window.
@@ -61,7 +59,7 @@ func captureLegacyCommitMemory(cb *cubeboxstore.CubeBox, snapshotID string, inva
 	}
 	// cube-runtime has cleared soft-dirty state, so every subsequent commit
 	// must resolve this snapshot or safely degrade to a full capture.
-	setRuntimeSnapshotBindingLabels(cb, snapshotID, time.Now().UTC())
+	setRuntimeSnapshotBinding(cb, snapshotID)
 	return nil
 }
 
@@ -85,48 +83,35 @@ func correctLegacySnapshotMetadataVersions(cb *cubeboxstore.CubeBox, snapshotPat
 		)
 	}
 
-	metadataPath := filepath.Join(snapshotPath, "metadata.json")
-	body, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return fmt.Errorf("read legacy snapshot metadata: %w", err)
-	}
-
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(body, &metadata); err != nil {
-		return fmt.Errorf("parse legacy snapshot metadata: %w", err)
-	}
-	if metadata == nil {
-		return fmt.Errorf("parse legacy snapshot metadata: expected JSON object")
-	}
-	if versions.GuestImage != "" {
-		metadata["image_version"], err = json.Marshal(versions.GuestImage)
-		if err != nil {
-			return fmt.Errorf("marshal legacy snapshot image version: %w", err)
-		}
-	}
-	if versions.Agent != "" {
-		metadata["agent_version"], err = json.Marshal(versions.Agent)
-		if err != nil {
-			return fmt.Errorf("marshal legacy snapshot agent version: %w", err)
-		}
-	}
-
-	body, err = json.Marshal(metadata)
-	if err != nil {
-		return fmt.Errorf("marshal legacy snapshot metadata: %w", err)
-	}
-	tmpPath := metadataPath + ".tmp"
-	if err := os.WriteFile(tmpPath, body, 0o644); err != nil {
-		return fmt.Errorf("write legacy snapshot metadata: %w", err)
-	}
-	if err := os.Rename(tmpPath, metadataPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("publish legacy snapshot metadata: %w", err)
-	}
-	return nil
+	return mutateSnapshotPackageMetadata(snapshotPath, "legacy snapshot metadata",
+		func(metadata map[string]json.RawMessage) error {
+			if versions.GuestImage != "" {
+				encoded, err := json.Marshal(versions.GuestImage)
+				if err != nil {
+					return fmt.Errorf("marshal legacy snapshot image version: %w", err)
+				}
+				metadata["image_version"] = encoded
+			}
+			if versions.Agent != "" {
+				encoded, err := json.Marshal(versions.Agent)
+				if err != nil {
+					return fmt.Errorf("marshal legacy snapshot agent version: %w", err)
+				}
+				metadata["agent_version"] = encoded
+			}
+			return nil
+		})
 }
 
 func checkCommitSnapshotDestination(ctx context.Context, backend, snapshotID string, inspect func(context.Context, string, []storage.CowObjectRef) ([]storage.CowObjectStatus, error)) error {
+	// Reflink create operations use create_new/FICLONE destination checks and
+	// roll back only artefacts created by that call. A separate preflight is
+	// redundant for XFS and turns every new JFS name into a full directory
+	// discovery. S3 retains the preflight because some create paths resolve and
+	// reuse existing writable lvols.
+	if cow.IsReflinkBackend(backend) {
+		return nil
+	}
 	// Include work and sealed objects: S3 may resolve an existing writable
 	// memory volume instead of rejecting it, so none may be reused here.
 	refs := storage.DefaultTemplateObjectRefs(snapshotID)

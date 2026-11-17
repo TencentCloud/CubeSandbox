@@ -1,9 +1,11 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from "node:crypto";
+
 import { fetch, type Dispatcher } from "undici";
 
-import { Commands } from "./commands.js";
+import { Commands, ENVD_PORT } from "./commands.js";
 import { Config, NEVER_TIMEOUT, resolveConfig, type ConfigOptions } from "./config.js";
 import {
   ApiError,
@@ -26,6 +28,35 @@ import { buildDataDispatcher, controlFetch, dataScheme } from "./transport.js";
 import { serializeVolumeMounts, type VolumeMountsArg } from "./volume.js";
 
 export const JUPYTER_PORT = 49999;
+/** Port the in-sandbox ``mcp-gateway`` listens on (E2B-compatible). */
+export const MCP_PORT = 50005;
+export const MCP_TOKEN_PATH = "/etc/mcp-gateway/.token";
+/**
+ * How long `mcp-gateway --config` may take, in seconds, matching the E2B
+ * SDK's default command timeout. Pre-install servers in the template.
+ */
+export const MCP_STARTUP_TIMEOUT_S = 60;
+
+/**
+ * E2B-compatible MCP server configuration keyed by server name, e.g.
+ * ``{ duckduckgo: {}, arxiv: { storagePath: "/" } }``. Keys of the form
+ * ``github/<owner>/<repo>`` take a {@link GitHubMcpServerConfig}.
+ */
+export type McpServer = Record<string, Record<string, unknown> | GitHubMcpServerConfig>;
+
+/** Configuration for a server cloned from GitHub (``github/<owner>/<repo>``). */
+export interface GitHubMcpServerConfig {
+  /** Command that starts a stdio MCP server, run in the repository root. */
+  runCmd: string;
+  /** Command that installs dependencies, run once in the repository root. */
+  installCmd?: string;
+  /** Environment variables for the MCP server process. */
+  envs?: Record<string, string>;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 /** Egress network policy passed to {@link Sandbox.create}. */
 export interface NetworkOptions {
@@ -81,6 +112,13 @@ export interface CreateOptions {
    * ```
    */
   volumeMounts?: VolumeMountsArg;
+  /**
+   * MCP servers to start inside the sandbox through ``mcp-gateway``. When set
+   * without ``template``, ``config.mcpTemplateId`` (``mcp-gateway``) is tried
+   * first and ``config.templateId`` is used only if that template does not exist.
+   * Connect with {@link Sandbox.getMcpUrl} and {@link Sandbox.getMcpToken}.
+   */
+  mcp?: McpServer;
   config?: Config | ConfigOptions;
   /** Extra fields forwarded verbatim into the create request body. */
   extra?: Record<string, unknown>;
@@ -134,10 +172,14 @@ export interface ListSnapshotsOptions {
   sandboxId?: string;
   limit?: number;
   nextToken?: string;
+  name?: string;
   config?: Config | ConfigOptions;
 }
 
 const VALID_ON_TIMEOUT = ["kill", "pause"] as const;
+
+/** Fork request budget: CubeAPI's FORK_ROUTE_TIMEOUT (1560 s) plus headroom. */
+const FORK_REQUEST_TIMEOUT_MS = 1_600_000;
 
 function serializeLifecycle(lifecycle: LifecycleOptions): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -207,6 +249,12 @@ async function checkControlResponse(resp: {
   throw new ApiError(msg, code);
 }
 
+function isTemplateNotFound(status: number, body: string): boolean {
+  // Older CubeAPI builds relay CubeMaster's 130404 without mapping it to 404.
+  const text = body.toLowerCase();
+  return (status === 404 && text.includes("template")) || text.includes("130404");
+}
+
 /**
  * Translate NetworkOptions into the API's camelCase network object, running the
  * same client-side validation the server applies. Shared by sandbox creation
@@ -229,7 +277,7 @@ function buildNetworkPayload(
   if (net.rules) {
     const normalized = normalizeRulesArg(net.rules);
     if (normalized.length > 0) {
-      wire.rules = normalized.map(serializeRule);
+      wire.rules = normalized.map((rule, index) => serializeRule(rule, index));
     }
   }
   return wire;
@@ -279,6 +327,7 @@ function resolveCreateConfig(options: CreateOptions): Config {
       ? {
           apiUrl: options.config.apiUrl,
           templateId: options.config.templateId,
+          mcpTemplateId: options.config.mcpTemplateId,
           proxyNodeIp: options.config.proxyNodeIp,
           proxyPort: options.config.proxyPort,
           proxyScheme: options.config.proxyScheme,
@@ -321,6 +370,7 @@ export class Sandbox {
   private readonly _files: Filesystem;
   private readonly _pty: Pty;
   private _cloneCleanup: CloneCleanup | undefined;
+  private _mcpToken: string | undefined;
 
   constructor(data: Record<string, any>, config: Config) {
     this._data = data;
@@ -401,14 +451,21 @@ export class Sandbox {
   /** POST /sandboxes — create a new sandbox. */
   static async create(options: CreateOptions = {}): Promise<Sandbox> {
     const cfg = resolveCreateConfig(options);
-    const tpl = options.template || options.templateId || cfg.templateId;
-    if (!tpl) {
+    const explicit = options.template || options.templateId;
+    // A templateID in `extra` is an explicit choice: it is sent verbatim,
+    // without the MCP template fallback.
+    const extraTemplate = options.extra !== undefined && "templateID" in options.extra;
+    const fallback = !explicit && !extraTemplate && options.mcp !== undefined;
+    const templates = explicit
+      ? [explicit]
+      : [...new Set((fallback ? [cfg.mcpTemplateId, cfg.templateId] : [cfg.templateId]).filter(Boolean))];
+    if (templates.length === 0) {
       throw new Error(
         "template is required. Set CUBE_TEMPLATE_ID or pass template/templateId",
       );
     }
 
-    const payload: Record<string, unknown> = { templateID: tpl };
+    const payload: Record<string, unknown> = { templateID: templates[0] };
     if (options.timeout !== undefined) {
       payload.timeout = options.timeout;
     }
@@ -433,17 +490,84 @@ export class Sandbox {
     if (options.volumeMounts && Object.keys(options.volumeMounts).length > 0) {
       payload.volumeMounts = serializeVolumeMounts(options.volumeMounts);
     }
-    if (options.extra) {
-      Object.assign(payload, options.extra);
+    if (options.mcp !== undefined) {
+      payload.mcp = options.mcp;
     }
-
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/sandboxes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let resp: Response | undefined;
+    for (const tpl of templates) {
+      const attempt = await controlFetch(cfg, `${cfg.apiUrl}/sandboxes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, templateID: tpl, ...options.extra }),
+      });
+      if (attempt.ok || !fallback) {
+        resp = attempt;
+        break;
+      }
+      const body = await attempt.text();
+      if (!isTemplateNotFound(attempt.status, body)) {
+        await checkControlResponse({ ok: false, status: attempt.status, text: async () => body });
+      }
+    }
+    if (!resp) {
+      throw new TemplateNotFoundError(
+        `no template for mcp: tried ${templates.map((t) => `"${t}"`).join(", ")}. ` +
+          "Build a template that provides mcp-gateway (see docs/guide/mcp-gateway.md), " +
+          "then pass template or set CUBE_MCP_TEMPLATE_ID",
+        404,
+      );
+    }
     await checkControlResponse(resp);
-    return new Sandbox((await resp.json()) as Record<string, any>, cfg);
+    const sandbox = new Sandbox((await resp.json()) as Record<string, any>, cfg);
+    if (options.mcp !== undefined) {
+      try {
+        await sandbox.startMcpGateway(options.mcp);
+      } catch (err) {
+        await sandbox.kill().catch(() => undefined);
+        throw err;
+      }
+    }
+    return sandbox;
+  }
+
+  private async startMcpGateway(mcp: McpServer): Promise<void> {
+    const token = randomUUID();
+    const result = await this.commands.run(
+      `mcp-gateway --config ${shellQuote(JSON.stringify(mcp))}`,
+      {
+        user: "root",
+        envs: { GATEWAY_ACCESS_TOKEN: token },
+        timeoutMs: MCP_STARTUP_TIMEOUT_S * 1000,
+      },
+    );
+    if (result.exitCode !== 0) {
+      let detail = (result.stderr || result.stdout).trim();
+      if (result.exitCode === 127) {
+        detail = `template "${this.templateId}" does not provide mcp-gateway (see docs/guide/mcp-gateway.md): ${detail}`;
+      }
+      throw new CubeSandboxError(`Failed to start MCP gateway: ${detail}`);
+    }
+    this._mcpToken = token;
+  }
+
+  /**
+   * Streamable-HTTP URL of the sandbox MCP gateway. Send
+   * ``Authorization: Bearer <getMcpToken()>`` with every request.
+   */
+  getMcpUrl(): string {
+    return this.dataUrl(MCP_PORT, "/mcp");
+  }
+
+  /**
+   * MCP gateway bearer token, or ``undefined`` if MCP is not enabled. Cached on
+   * the instance that started the gateway; other instances read it from the
+   * sandbox.
+   */
+  async getMcpToken(): Promise<string | undefined> {
+    if (this._mcpToken === undefined && (await this.files.exists(MCP_TOKEN_PATH))) {
+      this._mcpToken = (await this.files.read(MCP_TOKEN_PATH, { user: "root" })).trim();
+    }
+    return this._mcpToken;
   }
 
   /** POST /sandboxes/:id/connect — connect (auto-resumes if paused). */
@@ -469,12 +593,34 @@ export class Sandbox {
     return (await resp.json()) as Record<string, any>[];
   }
 
-  /** GET /v2/sandboxes — list all running sandboxes (v2). */
+  /**
+   * GET /v2/sandboxes — list sandboxes in the E2B view (v2).
+   *
+   * Returns running and paused sandboxes; `unknown` (exited, still creating)
+   * is omitted unless the server is asked for it, which this method does not
+   * do. Use `list()` for the Cube-native view that includes `unknown`.
+   *
+   * The endpoint answers one page at a time (`limit`, 100 by default) and
+   * reports the next page's position in the `x-next-token` response header.
+   * This follows that cursor until it is absent, so the result is every
+   * matching sandbox rather than only the first page.
+   */
   static async listV2(config?: Config | ConfigOptions): Promise<Record<string, any>[]> {
     const cfg = resolveConfig(config);
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/v2/sandboxes`);
-    await checkControlResponse(resp);
-    return (await resp.json()) as Record<string, any>[];
+    const collected: Record<string, any>[] = [];
+    // `nextToken` is the query parameter the endpoint declares; the first
+    // request carries none, which is what fetches page one.
+    let nextToken: string | null = null;
+    do {
+      const url = new URL(`${cfg.apiUrl}/v2/sandboxes`);
+      if (nextToken) url.searchParams.set("nextToken", nextToken);
+      const resp = await controlFetch(cfg, url.toString());
+      await checkControlResponse(resp);
+      collected.push(...((await resp.json()) as Record<string, any>[]));
+      // Absent (or blank) header means the last page has been returned.
+      nextToken = resp.headers.get("x-next-token") || null;
+    } while (nextToken);
+    return collected;
   }
 
   /** GET /health — check the health of the CubeAPI service. */
@@ -494,6 +640,7 @@ export class Sandbox {
     if (options.sandboxId !== undefined) params.set("sandboxID", options.sandboxId);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.nextToken !== undefined) params.set("nextToken", options.nextToken);
+    if (options.name !== undefined) params.set("name", options.name);
     const query = params.toString();
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/snapshots${query ? `?${query}` : ""}`);
     await checkControlResponse(resp);
@@ -503,16 +650,20 @@ export class Sandbox {
     return { snapshots, nextToken };
   }
 
-  /** DELETE /templates/:id — delete a snapshot (stored as a template). */
+  /** DELETE /templates/:id?snapshot_only=true — delete a snapshot by ID or name; false when absent. */
   static async deleteSnapshot(
     snapshotId: string,
     options: { config?: Config | ConfigOptions } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     const cfg = resolveConfig(options.config);
-    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${snapshotId}`, {
+    const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates/${encodeURIComponent(snapshotId)}?snapshot_only=true`, {
       method: "DELETE",
     });
+    if (resp.status === 404) {
+      return false;
+    }
     await checkControlResponse(resp);
+    return true;
   }
 
   // ── Instance methods ────────────────────────────────────────────────────────
@@ -575,6 +726,67 @@ export class Sandbox {
     const resp = await controlFetch(this.config, `${this.config.apiUrl}/sandboxes/${this.sandboxId}`);
     await checkControlResponse(resp);
     return (await resp.json()) as Record<string, any>;
+  }
+
+  /**
+   * Report whether the sandbox is currently running (matches E2B's API).
+   * Checks control-plane state first so a paused sandbox is answered without
+   * a data-plane probe (which would trigger CLM auto-resume). The envd /health
+   * probe runs only for running/unknown states.
+   */
+  async isRunning(options: { requestTimeoutMs?: number } = {}): Promise<boolean> {
+    let state: unknown;
+    try {
+      state = (await this.getInfo()).state;
+    } catch (err) {
+      if (err instanceof SandboxNotFoundError) {
+        return false;
+      }
+      throw err;
+    }
+    if (state === "paused" || state === "pausing") {
+      return false;
+    }
+
+    const url = this.dataUrl(ENVD_PORT, "/health");
+    const signal = AbortSignal.timeout(options.requestTimeoutMs ?? this.config.requestTimeoutMs);
+    let resp: Awaited<ReturnType<typeof fetch>>;
+    try {
+      // envd /health is unauthenticated, so no X-Access-Token is sent.
+      resp = await fetch(url, {
+        headers: this.trafficTokenHeaders(),
+        dispatcher: this.dataDispatcher,
+        signal,
+      });
+    } catch {
+      // Unreachable proxy / stale socket — sandbox not reachable.
+      return false;
+    }
+    // Only the status matters; cancel the body so the connection returns to
+    // the pool instead of leaking across a polling loop.
+    void resp.body?.cancel().catch(() => undefined);
+    if (resp.status === 404 || resp.status === 502 || resp.status === 503 || resp.status === 410) {
+      return false;
+    }
+    if (resp.status >= 400) {
+      throw new ApiError(`isRunning failed: HTTP ${resp.status}`, resp.status);
+    }
+    return true;
+  }
+
+  /**
+   * GET /sandboxes/:id/exposed-ports/:port — return the hostIP:hostPort
+   * endpoint of a template-declared exposed port. The endpoint works
+   * identically for off-node, host-side, and in-sandbox callers (same-node
+   * sandbox callers are served by CubeVS hairpin).
+   */
+  async getExposedPortEndpoint(port: number): Promise<string> {
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/exposed-ports/${port}`,
+    );
+    await checkControlResponse(resp);
+    return ((await resp.json()) as { endpoint: string }).endpoint;
   }
 
   /** POST /sandboxes/:id/pause — pause a sandbox (preserves memory snapshot). */
@@ -681,7 +893,7 @@ export class Sandbox {
     await this._cloneCleanup?.release(this.sandboxId);
   }
 
-  /** POST /sandboxes/:id/snapshots — create a snapshot. */
+  /** POST /sandboxes/:id/snapshots — create a snapshot; name must not start with tpl-/snap-. */
   async createSnapshot(name?: string): Promise<SnapshotInfo> {
     const payload: Record<string, unknown> = {};
     if (name !== undefined) {
@@ -741,28 +953,28 @@ export class Sandbox {
         }
       }
     } else {
-        // Bounded fan-out: at most min(n, concurrency) create calls are in
-        // flight at once (workers pull from a shared cursor), matching the
-        // Python (ThreadPoolExecutor) and Go (semaphore) SDKs. Every task is
-        // drained so a mid-fan-out failure never leaks a created sibling.
-        const limit = Math.min(n, concurrency);
-        let next = 0;
-        const worker = async (): Promise<void> => {
-          for (;;) {
-            const index = next++;
-            if (index >= n) {
-              return;
-            }
-            try {
-              sandboxes.push(await createOne());
-            } catch (err) {
-              if (firstError === null) {
-                firstError = err;
-              }
+      // Bounded fan-out: at most min(n, concurrency) create calls are in
+      // flight at once (workers pull from a shared cursor), matching the
+      // Python (ThreadPoolExecutor) and Go (semaphore) SDKs. Every task is
+      // drained so a mid-fan-out failure never leaks a created sibling.
+      const limit = Math.min(n, concurrency);
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const index = next++;
+          if (index >= n) {
+            return;
+          }
+          try {
+            sandboxes.push(await createOne());
+          } catch (err) {
+            if (firstError === null) {
+              firstError = err;
             }
           }
-        };
-        await Promise.all(Array.from({ length: limit }, () => worker()));
+        }
+      };
+      await Promise.all(Array.from({ length: limit }, () => worker()));
     }
 
     const cleanup = new CloneCleanup(snapId, sandboxes.length, cfg);
@@ -785,6 +997,74 @@ export class Sandbox {
       }
     }
     return sandboxes;
+  }
+
+  /**
+   * Fork this sandbox ``count`` times, mirroring E2B's ``Sandbox.fork``.
+   *
+   * Delegates the fork to the backend: ``POST /sandboxes/{id}/fork`` asks
+   * CubeMaster to snapshot this sandbox once and derive ``count`` copies in a
+   * single round-trip. Each requested fork succeeds or fails independently: the
+   * outcome is reported in the returned array at that fork's position — a
+   * {@link Sandbox} instance or the {@link Error} that prevented it from
+   * starting. Unlike {@link clone} (all-or-nothing), successful forks are kept
+   * even when siblings fail. The temporary snapshot is managed by the server,
+   * so no client-side cleanup is needed. Fork concurrency is bounded server-side.
+   *
+   * @param options ``count`` 1..100; ``timeoutMs`` optional idle TTL in
+   *   milliseconds (E2B-compatible), converted to whole seconds on the wire
+   *   (``NEVER_TIMEOUT`` sends ``-1``, disabling the idle timeout);
+   *   ``requestTimeoutMs`` overrides the client-side request budget
+   *   (default 26 min 40 s, sized to the server's fork budget).
+   * @returns Exactly ``count`` entries, in request order — each a {@link Sandbox}
+   *   instance (when that fork started) or an {@link Error}.
+   */
+  async fork(
+    options: { count?: number; timeoutMs?: number; requestTimeoutMs?: number } = {},
+  ): Promise<Array<Sandbox | Error>> {
+    const count = options.count ?? 1;
+    if (count < 1 || count > 100) {
+      throw new RangeError("count must be between 1 and 100");
+    }
+
+    const payload: Record<string, unknown> = { count };
+    if (options.timeoutMs !== undefined) {
+      const ms = options.timeoutMs;
+      if (!Number.isFinite(ms) || (ms < 0 && ms !== NEVER_TIMEOUT)) {
+        throw new RangeError(`timeoutMs must be >= 0 or NEVER_TIMEOUT (-1), got ${ms}`);
+      }
+      // Wire timeout is integer seconds; ceil so sub-second values don't collapse to 0.
+      payload.timeout = ms === NEVER_TIMEOUT ? NEVER_TIMEOUT : Math.ceil(ms / 1000);
+    }
+
+    const resp = await controlFetch(
+      this.config,
+      `${this.config.apiUrl}/sandboxes/${this.sandboxId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        // Fork can legally take minutes; bypass the 30 s control default.
+        signal: AbortSignal.timeout(options.requestTimeoutMs ?? FORK_REQUEST_TIMEOUT_MS),
+      },
+    );
+    await checkControlResponse(resp);
+
+    // Body is an array with one entry per fork: {sandbox}|{error}.
+    const entries = (await resp.json()) as Array<Record<string, any>>;
+    if (!Array.isArray(entries) || entries.length !== count) {
+      throw new ApiError(
+        `fork expected ${count} results, got ${Array.isArray(entries) ? entries.length : "none"}`,
+        500,
+      );
+    }
+    return entries.map((entry): Sandbox | Error => {
+      if (entry?.sandbox) {
+        return new Sandbox(entry.sandbox, this.config);
+      }
+      const err = entry?.error ?? {};
+      return new ApiError(err?.message ?? "fork failed", undefined, err?.code);
+    });
   }
 
   /** Close pooled HTTP connections without destroying the sandbox. */

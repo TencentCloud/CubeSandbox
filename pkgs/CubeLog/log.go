@@ -60,6 +60,14 @@ func Init(cfg Config) {
 	}
 }
 
+// SetAsyncFlush enables the non-blocking log queue. When the queue is full,
+// new lines are dropped. CubeMaster calls this from its own config loader;
+// CubeLog.Init is not on that path, so the AsyncFlush field of Init alone
+// never reaches a running master.
+func SetAsyncFlush(enabled bool) {
+	config.asyncFlush = enabled
+}
+
 type RemoteConfig struct {
 	EnableLocal string
 	enablelocal bool

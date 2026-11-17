@@ -210,6 +210,35 @@ func (e *Engine) GetVolumeInfo(name string) (*Volume, error) {
 	return &vol, nil
 }
 
+func (e *Engine) GetObjectInfo(name string) (*Volume, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ptr, err := e.openHandle()
+	if err != nil {
+		return nil, err
+	}
+	defer e.mu.RUnlock()
+
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	var cJSON *C.char
+	rc := C.cubecow_get_object_info(C.CubecowEngineHandle(ptr), cName, &cJSON)
+	if rc != 0 {
+		return nil, makeError(rc)
+	}
+	raw := takeCString(cJSON)
+	var vol Volume
+	if err := json.Unmarshal([]byte(raw), &vol); err != nil {
+		return nil, fmt.Errorf("unmarshal cubecow_get_object_info: %w", err)
+	}
+	if strings.TrimSpace(vol.Name) == "" {
+		vol.Name = name
+	}
+	return &vol, nil
+}
+
 func (e *Engine) GetVolumeBlockInfo(name string) (*VolumeBlockInfo, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

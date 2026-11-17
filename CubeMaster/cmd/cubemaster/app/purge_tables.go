@@ -17,11 +17,12 @@ import "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 // When disable_hard_delete is false (the default), t_cube_instance_info is
 // hard-deleted on the delete path (no tombstone accumulates; included only
 // defensively) and t_cube_instance_userdata is always soft-deleted and so is
-// purged. t_cube_sandbox_spec and t_cube_template_replica are always purged
+// purged. t_cube_sandbox_spec, t_cube_sandbox_status and t_cube_template_replica are always purged
 // (they are not instance records).
 func cubeMasterPurgeTables(disableHardDelete bool) []string {
 	tables := []string{
 		constants.SandboxSpecTableName,
+		constants.SandboxStatusTableName,
 		constants.TemplateReplicaTableName,
 	}
 	if !disableHardDelete {

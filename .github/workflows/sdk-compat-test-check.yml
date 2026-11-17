@@ -13,6 +13,23 @@ on:
       - 'tests/e2e/sdk_compat/**'
       - '.github/workflows/sdk-compat-test-check.yml'
   workflow_dispatch:
+    inputs:
+      live_e2e:
+        description: 'Run the live filesystem-only E2E suite against a real cluster'
+        type: boolean
+        default: false
+      runner_label:
+        description: 'Self-hosted runner label that can reach the cluster'
+        default: 'cube-sandbox-e2e'
+      cube_api_url:
+        description: 'CubeAPI base URL reachable from the runner (e.g. http://10.0.0.1:3000)'
+        required: false
+      cube_template_id:
+        description: 'Template id to create sandboxes from (use a small-CPU one)'
+        required: false
+      cube_proxy_node_ip:
+        description: 'Node IP used for cube proxy traffic (optional)'
+        required: false
 
 concurrency:
   group: sdk-compat-test-${{ github.event.pull_request.number || github.ref }}
@@ -50,3 +67,35 @@ jobs:
       - name: Run SDK compatibility test suite
         working-directory: tests/e2e/sdk_compat
         run: python -m pytest cases -q
+
+
+  # The contract job above cannot run the live cases: they need a cluster.
+  # This job is opt-in so it never blocks a pull request, but it keeps the
+  # filesystem-only scenarios executable by CI instead of only by hand.
+  live-e2e:
+    name: Live filesystem-only E2E
+    if: github.event_name == 'workflow_dispatch' && inputs.live_e2e
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: tests/e2e/sdk_compat/requirements.txt
+
+      - name: Install SDK compatibility test dependencies
+        run: python -m pip install -r tests/e2e/sdk_compat/requirements.txt
+
+      # The case list lives in the Makefile target, so a local run and this job
+      # cannot drift apart.
+      - name: Run live filesystem-only E2E
+        env:
+          CUBE_API_URL: ${{ inputs.cube_api_url }}
+          CUBE_TEMPLATE_ID: ${{ inputs.cube_template_id }}
+          CUBE_PROXY_NODE_IP: ${{ inputs.cube_proxy_node_ip }}
+        run: make e2e-fs-only

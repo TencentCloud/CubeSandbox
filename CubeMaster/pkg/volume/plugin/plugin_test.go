@@ -12,10 +12,10 @@ import (
 type stubPlugin struct{ name string }
 
 func (s stubPlugin) Name() string { return s.name }
-func (s stubPlugin) Create(context.Context, string, string) (*VolumeInfo, error) {
+func (s stubPlugin) Create(context.Context, string, string, string) (*VolumeInfo, error) {
 	return &VolumeInfo{}, nil
 }
-func (s stubPlugin) Destroy(context.Context, string) error { return nil }
+func (s stubPlugin) Destroy(context.Context, string, string) error { return nil }
 
 func TestUnregisterForTest(t *testing.T) {
 	const name = "fake-unregister-test"

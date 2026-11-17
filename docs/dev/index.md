@@ -11,6 +11,7 @@ If you are *using* CubeSandbox (deploying it, building templates, calling the AP
 ## Service designs
 
 - [CubeTemplateCenter Design](./templatecenter-design) — the standalone template build service: control/data plane split, routing rules, callback authentication, artifact lifecycle, deployment wiring, and known limitations.
+- [CubeObservability and OTel Collector Design](./sandbox-otel-recommendation) — Collector pipelines, data contracts, deployment mapping, and security boundaries. Installation instructions are in the [observability guide](../guide/observability).
 
 ## What belongs here
 

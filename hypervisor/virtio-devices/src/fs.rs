@@ -254,6 +254,11 @@ struct FsEpollHandler {
     counters: FsCounters,
     rate_limited: std::sync::Once,
     id: String,
+    /// Whether this worker needs per-thread CWD isolation.
+    /// True when xattr, security_label, or xattrmap is enabled — those paths
+    /// call fchdir through the proc-fd route, so each worker must have its own
+    /// filesystem context via unshare(CLONE_FS).
+    needs_cwd_isolation: bool,
 }
 
 // New descriptors are pending on the virtio queue.
@@ -272,6 +277,21 @@ impl FsEpollHandler {
         paused: Arc<AtomicBool>,
         paused_sync: Arc<Barrier>,
     ) -> result::Result<(), EpollHelperError> {
+        // Passthrough xattr operations temporarily change CWD through procfs.
+        // Give each worker its own filesystem state, as standalone virtiofsd does.
+        // Safe because unshare does not access userspace memory.
+        // Only required when xattr, security_label, or xattrmap is enabled —
+        // those paths call fchdir through the proc-fd route.
+        if self.needs_cwd_isolation && unsafe { libc::unshare(libc::CLONE_FS) } < 0 {
+            let os_err = std::io::Error::last_os_error();
+            error!(
+                "{} unshare(CLONE_FS) failed; the host container must allow \
+                 this syscall for xattr support: {}",
+                self.id, os_err
+            );
+            return Err(EpollHelperError::IoError(os_err));
+        }
+
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
 
         helper.add_event(self.queue_evt.as_raw_fd(), QUEUE_AVAIL_EVENT)?;
@@ -1097,6 +1117,9 @@ impl VirtioDevice for Fs {
                 counters: self.counters.clone(),
                 rate_limited: std::sync::Once::new(),
                 id: self.id.clone(),
+                needs_cwd_isolation: self.backendfs_config.xattr
+                    || self.backendfs_config.security_label
+                    || self.backendfs_config.xattrmap.is_some(),
             };
 
             let paused = self.common.paused.clone();

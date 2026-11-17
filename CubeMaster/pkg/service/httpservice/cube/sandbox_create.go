@@ -45,6 +45,12 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
 		return rsp
 	}
+	if err := rejectCallerSuppliedQos(req); err != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = err.Error()
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return rsp
+	}
 	rsp.RequestID = req.RequestID
 	rt.RequestID = req.RequestID
 	rt.InstanceType = req.InstanceType
@@ -88,6 +94,13 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 				ret.ExtInfo = make(map[string]string)
 			}
 			ret.ExtInfo[constants.CubeAnnotationComponentEnvdVersion] = v
+		}
+		// Echo the template alias so CubeAPI can report it without a round-trip.
+		if v := strings.TrimSpace(req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]); v != "" {
+			if ret.ExtInfo == nil {
+				ret.ExtInfo = make(map[string]string)
+			}
+			ret.ExtInfo[constants.CubeAnnotationAppSnapshotTemplateAlias] = v
 		}
 	}
 	rt.RetCode = int64(ret.Ret.RetCode)
@@ -146,6 +159,12 @@ func constructCreateReq(r *http.Request) (*types.CreateCubeSandboxReq, error) {
 	if req.Annotations == nil {
 		req.Annotations = map[string]string{}
 	}
+	// Snapshot mode is a property of the snapshot record, never client input.
+	// Master's internal builders set it after this function returns.
+	req.SnapshotMode = ""
+	// The alias is server-derived from the template/snapshot display_name; drop
+	// any client-supplied value so metadata cannot spoof create/get_info/list.
+	delete(req.Labels, constants.CubeAnnotationAppSnapshotTemplateAlias)
 	constants.NormalizeAppSnapshotAnnotations(req.Annotations)
 	if req.InstanceType == "" {
 		if req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "" {

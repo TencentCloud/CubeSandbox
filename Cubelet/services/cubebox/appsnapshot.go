@@ -28,9 +28,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 const (
@@ -87,9 +89,9 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	templateID := createReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]
-	rsp.TemplateID = templateID
-	if err := pathutil.ValidateSafeID(templateID); err != nil {
+	logicalTemplateID := createReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]
+	rsp.TemplateID = logicalTemplateID
+	if err := pathutil.ValidateSafeID(logicalTemplateID); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid templateID: %v", err)
 		return rsp, nil
@@ -110,6 +112,26 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	templateID := logicalTemplateID
+	if backend == cow.BackendJFS &&
+		createReq.GetAnnotations()[constants.MasterAnnotationJFSTemplateVariantPolicy] == constants.MasterJFSTemplateVariantPolicyV1 {
+		templateID = strings.TrimSpace(createReq.GetAnnotations()[constants.MasterAnnotationJFSTemplateVariantID])
+		if templateID == "" {
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			rsp.Ret.RetMsg = fmt.Sprintf("annotation %s is required for a variant JFS template",
+				constants.MasterAnnotationJFSTemplateVariantID)
+			return rsp, nil
+		}
+		if err := pathutil.ValidateSafeID(templateID); err != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+			rsp.Ret.RetMsg = fmt.Sprintf("invalid JFS template variant ID: %v", err)
+			return rsp, nil
+		}
+		// Storage workflow plugins still read the established template-id
+		// annotation. AppSnapshot is an internal one-shot request, so point its
+		// temporary sandbox at the selected JFS template variant.
+		createReq.Annotations[constants.MasterAnnotationAppSnapshotTemplateID] = templateID
+	}
 
 	rt := &CubeLog.RequestTrace{
 		Action:       "AppSnapshot",
@@ -123,8 +145,9 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
-		"step":       "appSnapshot",
-		"templateID": templateID,
+		"step":              "appSnapshot",
+		"templateID":        logicalTemplateID,
+		"templateVariantID": templateID,
 	})
 
 	stepLog.Infof("AppSnapshotRequest: templateID=%s", templateID)
@@ -304,10 +327,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	// collectEnvdVersion uses containerd Exec, which must run before
-	// the shim marks the guest as app-snapshotting and disables exec.
-	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
-
 	stepLog.Info("Step 4: Capturing sandbox snapshot through shim...")
 	// AppSnapshot builds a brand-new template from a fresh sandbox: there is
 	// no base memory blob to overlay onto, so we always ask for a full memory
@@ -325,6 +344,17 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 	var snapshotErr, rootfsErr, resumeErr error
 	shimCapability := resolveShimSnapshotCapability(cb)
+
+	// Run the template's declared readiness probe immediately before the
+	// snapshot transaction. Templates without a probe preserve the existing
+	// AppSnapshot behavior.
+	if err := s.verifyAppSnapshotReadiness(frozenCtx, sandboxID); err != nil {
+		stepLog.Errorf("Snapshot readiness probe failed before capture: %v", err)
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fmt.Sprintf("snapshot readiness precondition failed: %v", err)
+		return rsp, nil
+	}
 
 	// The legacy sequence: capture memory with the cube-runtime CLI, then commit
 	// rootfs. Used both as the ordinary path for a shim below the coordinated
@@ -346,7 +376,10 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
 			captureStarted = true
-			captureErr := s.captureSnapshotWithShim(frozenCtx, cb, templateID, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull)
+			captureErr := s.captureSnapshotWithShim(
+				frozenCtx, cb, templateID, layout.MetaWork,
+				memoryObject.DevPath, snapshotTypeFull, "", snapshotmode.Full,
+			)
 			if shimSnapshotUnsupported(captureErr) {
 				captureStarted = false
 			}
@@ -380,7 +413,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		// never frozen and no artifact was committed -- the whole transaction can
 		// safely be redone on the legacy path. The legacy path never re-enters
 		// the coordinated one, so this retries at most once.
-		if shouldRetryWithLegacy(snapshotErr, rootfsErr) {
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr, snapshotmode.Full) {
 			logShimDegradedToLegacy(stepLog, shimCapability.Version)
 			snapshotErr, rootfsErr = runLegacy()
 		}
@@ -416,6 +449,12 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resume sandbox after snapshot: %v", resumeErr)
 		return rsp, nil
 	}
+
+	// Collect the envd version after the snapshot rather than before. The
+	// probe exec carries the shim's internal probe exec-ID, which bypasses
+	// the app-snapshot exec gate, and both capture paths resume the guest
+	// before returning here, so the probe can still run.
+	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
 	stepLog.Infof("Step 5: Destroying temporary cubebox (templateID=%s)...", templateID)
 	destroyCtx, destroyCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -484,7 +523,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	snapshotSuccess = true
 	rsp.RootfsVol = rootfsObject.Name
 	rsp.MemoryVol = memoryObject.Name
 	rsp.RootfsKind = rootfsObject.Kind
@@ -524,6 +562,11 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		ComponentVersions: frozenVersions,
 		Kind:              storage.CatalogKindTemplate,
 	}); err != nil {
+		if backend == cow.BackendJFS {
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", err)
+			return rsp, nil
+		}
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and the
 		// deterministic-name cleanup fallback keeps working. Log loudly so
@@ -534,8 +577,14 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
 	}
 
-	// Template disks stay node-local. Pause / CommitSandbox export the
-	// sandbox snapshot package, not the template.
+	// JFS templates become eligible for cross-node use when this call succeeds.
+	// The builder must drain its writeback cache before Master publishes READY.
+	if err := waitJFSTemplateUpload(ctx, backend, templateID); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("jfs template is not shared-ready: %v", err)
+		return rsp, nil
+	}
+	snapshotSuccess = true
 
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"
@@ -881,6 +930,12 @@ func deactivateCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperL
 }
 
 func deactivateCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) error {
+	// Reflink objects are ordinary files and have no activation lifecycle.
+	// They were just created successfully, so calling Deactivate would only
+	// revalidate each file. S3 must still flush and release its active lvols.
+	if cow.IsReflinkBackend(backend) {
+		return nil
+	}
 	if err := deactivateCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject); err != nil {
 		return err
 	}

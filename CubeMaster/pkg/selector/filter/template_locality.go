@@ -14,6 +14,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// templateLocalityFilter keeps template-bound requests on nodes that have
+// cached the template image and are within the allowed scheduling scope.
 type templateLocalityFilter struct{}
 
 func NewTemplateLocalityFilter() *templateLocalityFilter {
@@ -28,6 +30,8 @@ func (l *templateLocalityFilter) String() string {
 	return l.ID()
 }
 
+// Select only takes effect when the request carries a TemplateID (or a
+// template scheduling scope is configured).
 func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 	inList := selCtx.Nodes()
 	reqRes := selCtx.GetReqRes()
@@ -39,31 +43,48 @@ func (l *templateLocalityFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeLi
 	}
 
 	nodes := make(node.NodeList, 0, inList.Len())
+	rejects := newRejectLog(selCtx)
 	for i := range inList {
 		if !templateNodeAllowed(reqRes, inList[i]) {
-			log.G(selCtx.Ctx).Warnf("%v select:%v template=%s not in template scope", l.ID(), inList[i].ID(), reqRes.TemplateID)
+			rejects.warnf("%v select:%v template=%s not in template scope", l.ID(), inList[i].ID(), reqRes.TemplateID)
 			continue
 		}
 		if reqRes.TemplateID != "" && !reqRes.AllowNonLocalTemplate {
-			if localcache.GetImageStateByNode(reqRes.TemplateID, inList[i].ID()) == nil {
-				log.G(selCtx.Ctx).Warnf("%v select:%v template=%s not local", l.ID(), inList[i].ID(), reqRes.TemplateID)
+			facts, frozen := selCtx.SnapshotFacts(inList[i].ID())
+			templateLocal := false
+			if frozen && facts.TemplateLocalKnown {
+				templateLocal = facts.TemplateLocal
+			} else {
+				templateLocal = localcache.GetImageStateByNode(reqRes.TemplateID, inList[i].ID()) != nil
+			}
+			if !templateLocal {
+				rejects.warnf("%v select:%v template=%s not local", l.ID(), inList[i].ID(), reqRes.TemplateID)
 				continue
 			}
-			if reqRes.EnforceSnapshotStorage && !snapshotStorageNodeAllowed(inList[i]) {
-				log.G(selCtx.Ctx).Warnf("%v select:%v template=%s snapshot storage unavailable", l.ID(), inList[i].ID(), reqRes.TemplateID)
-				continue
+			if reqRes.EnforceSnapshotStorage {
+				storageAllowed := false
+				if frozen && facts.SnapshotStorageKnown {
+					storageAllowed = facts.SnapshotStorageAllowed
+				} else {
+					storageAllowed = snapshotStorageNodeAllowed(inList[i])
+				}
+				if !storageAllowed {
+					rejects.warnf("%v select:%v template=%s snapshot storage unavailable", l.ID(), inList[i].ID(), reqRes.TemplateID)
+					continue
+				}
 			}
 		}
 		nodes.Append(inList[i])
 	}
+	rejects.flush(l.ID())
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
 	}
 	return nodes, nil
 }
 
+// templateNodeAllowed reports whether the node is within the template's
+// scheduling scope; all nodes are allowed when no scope is configured.
 func templateNodeAllowed(reqRes *selctx.RequestResource, n *node.Node) bool {
 	if reqRes == nil || len(reqRes.TemplateNodeScope) == 0 || n == nil {
 		return true

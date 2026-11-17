@@ -103,9 +103,10 @@ impl VmConfig {
         #[cfg(target_arch = "x86_64")]
         params.extend(["no_timer_check".to_string(), "noreplace-smp".to_string()]);
         params.extend(["printk.devkmsg=on".to_string()]);
-        #[cfg(target_arch = "aarch64")]
-        params.push("console=ttyAMA0,115200".to_string());
-        #[cfg(not(target_arch = "aarch64"))]
+        // virtio-console on every architecture: output is batched through a
+        // virtqueue and drained off the vCPU thread, while a UART console traps
+        // every byte. On aarch64 the VMM still appends a PL011 earlycon for
+        // boot messages printed before hvc0 registers.
         params.push("console=hvc0".to_string());
         params.extend([
             "net.ifnames=0".to_string(),
@@ -520,9 +521,6 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         params.extend(["no_timer_check".to_string(), "noreplace-smp".to_string()]);
         params.extend(["printk.devkmsg=on".to_string()]);
-        #[cfg(target_arch = "aarch64")]
-        params.push("console=ttyAMA0,115200".to_string());
-        #[cfg(not(target_arch = "aarch64"))]
         params.push("console=hvc0".to_string());
         params.extend([
             "net.ifnames=0".to_string(),
@@ -535,6 +533,19 @@ mod tests {
             "mitigations=off".to_string(),
         ]);
         assert_eq!(config.cmdlines, params);
+    }
+
+    #[test]
+    fn guest_console_is_virtio_console() {
+        let config = VmConfig::default();
+        let consoles: Vec<&String> = config
+            .cmdlines
+            .iter()
+            .filter(|p| p.starts_with("console="))
+            .collect();
+        // A trailing UART console= would become /dev/console and route the
+        // agent's stdout through a byte-per-exit device again.
+        assert_eq!(consoles, vec!["console=hvc0"]);
     }
 
     #[test]

@@ -130,3 +130,38 @@ func TestParseCPUMilli(t *testing.T) {
 		})
 	}
 }
+
+// alias must pass through to the top-level snake_case key when set, and be
+// absent when empty/missing.
+func TestTransformCreateTemplateRequest_Alias(t *testing.T) {
+	cmReq := TransformCreateTemplateRequest(map[string]interface{}{
+		"image": "reg/foo:1",
+		"alias": "my-app",
+	})
+	if cmReq["alias"] != "my-app" {
+		t.Errorf("alias = %v, want \"my-app\"", cmReq["alias"])
+	}
+
+	// Empty/missing → absent (not an empty string).
+	bare := TransformCreateTemplateRequest(map[string]interface{}{"image": "reg/foo:1"})
+	if _, ok := bare["alias"]; ok {
+		t.Errorf("alias should be absent when empty, got %#v", bare["alias"])
+	}
+}
+
+// backend must pass through to the top-level snake_case key when set, and be
+// absent when empty/missing (empty = historical xfs default on CubeMaster).
+func TestTransformCreateTemplateRequest_Backend(t *testing.T) {
+	cmReq := TransformCreateTemplateRequest(map[string]interface{}{
+		"image":   "reg/foo:1",
+		"backend": "s3",
+	})
+	if cmReq["backend"] != "s3" {
+		t.Errorf("backend = %v, want \"s3\"", cmReq["backend"])
+	}
+
+	bare := TransformCreateTemplateRequest(map[string]interface{}{"image": "reg/foo:1"})
+	if _, ok := bare["backend"]; ok {
+		t.Errorf("backend should be absent when empty, got %#v", bare["backend"])
+	}
+}

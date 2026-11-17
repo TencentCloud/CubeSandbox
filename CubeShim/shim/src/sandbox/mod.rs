@@ -8,3 +8,4 @@ pub mod disk;
 pub mod net;
 pub mod pmem;
 pub mod sb;
+pub mod snapshot_mode;

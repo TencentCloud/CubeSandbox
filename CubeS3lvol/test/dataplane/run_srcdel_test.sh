@@ -42,8 +42,8 @@
 #  anything the snapshot references, the read would differ (or 404, see the TTL
 #  hazard documented in vbdev_s3lvol_lvstore.c).
 #
-#  decouple is explicit true (the RPC's default, stated explicitly): the import
-#  materialises the export's data in the background and the test waits for it.
+#  decouple is explicit true. The RPC defaults to false, which would leave the
+#  import reading the export; this test needs the data materialised first.
 #  That is the configuration a caller actually uses when it wants the volume to
 #  outlive the source, and the deletion that happened on the source in step 2 is
 #  what it has to survive.
@@ -702,8 +702,8 @@ DST_CREATED=1
 DST_WAS_CREATED=1
 pass "destination lvstore created"
 
-# decouple=true (the RPC's default, stated explicitly): the destination
-# materialises the export's data in the background and the test waits for it.
+# decouple=true, stated explicitly. The RPC defaults to false; this import has
+# to materialise the export's data in the background, and the test waits for it.
 # This is the configuration a caller uses when it wants the volume to outlive
 # the source -- and the source volume is already gone at this point.
 if ! raw_rpc rcow_import_lvol "$(printf '{"lvol_name":"%s","export_uuid":"%s","decouple":true}' \

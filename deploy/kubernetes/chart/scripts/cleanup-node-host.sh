@@ -12,6 +12,7 @@ set -euo pipefail
 
 TOOLBOX_ROOT="${TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 DATA_CUBELET="${DATA_CUBELET:-/data/cubelet}"
+DEV_SHM="${DEV_SHM:-/dev/shm}"
 DATA_CUBE_SHIM="${DATA_CUBE_SHIM:-/data/cube-shim}"
 DATA_CUBE_SHARED="${DATA_CUBE_SHARED:-/data/cube-shared}"
 TMP_CUBE="${TMP_CUBE:-/tmp/cube}"
@@ -38,6 +39,11 @@ run "rm -rf '${BOOTSTRAP_STATE}'"
 
 log "removing data dirs ${DATA_CUBELET} ${DATA_CUBE_SHIM} ${DATA_CUBE_SHARED} ${TMP_CUBE}"
 run "rm -rf '${DATA_CUBELET}' '${DATA_CUBE_SHIM}' '${DATA_CUBE_SHARED}' '${TMP_CUBE}'"
+
+# Cube paths under the host tmpfs. Keep the /dev/shm mount.
+log "removing Cube runtime state under ${DEV_SHM}"
+run "rm -rf '${DEV_SHM}/cubelet' '${DEV_SHM}/cubevs' '${DEV_SHM}/cube-s3lvol'"
+run "rm -rf ${DEV_SHM}/ivshmem-*"
 run "rm -rf /data/cubelet-xfs.img /data/log/Cubelet /data/log/CubeShim /data/log/CubeVmm /data/snapshot_pack || true"
 
 # Best-effort residual dataplane cleanup (safe if devices/rules absent).

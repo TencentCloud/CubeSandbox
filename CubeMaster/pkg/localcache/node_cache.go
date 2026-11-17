@@ -27,14 +27,13 @@ import (
 )
 
 type local struct {
-	cache             *cache.Cache
-	imageCache        *cache.Cache
-	templateNodeCache *cache.Cache
-	event             chan *Event
-	db                *gorm.DB
-	dbAddr            string
-	lockMetaData      sync.Mutex
-	lockSortedNodes   sync.RWMutex
+	cache           *cache.Cache
+	locality        *templateLocality
+	event           chan *Event
+	db              *gorm.DB
+	dbAddr          string
+	lockMetaData    sync.Mutex
+	lockSortedNodes sync.RWMutex
 
 	sortedNodesByClusters map[string]node.NodeList
 	totalSelfNodes        int64
@@ -43,13 +42,12 @@ type local struct {
 	emptySyncStreak atomic.Int32
 }
 
-// The node/image stores exist from package load so nodemeta query APIs
-// (GetNodeHostFacts / GetPersistedNodeHostFacts) are fail-closed before
-// localcache.Init, matching the pre-migration global.nodes empty map.
+// The node and template-locality stores exist from package load so nodemeta
+// query APIs (GetNodeHostFacts / GetPersistedNodeHostFacts) are fail-closed
+// before localcache.Init, matching the pre-migration global.nodes empty map.
 var l = &local{
 	cache:                 cache.New(0, 0),
-	imageCache:            cache.New(0, 0),
-	templateNodeCache:     cache.New(0, 0),
+	locality:              newTemplateLocality(),
 	sortedNodesByClusters: make(map[string]node.NodeList),
 }
 
@@ -237,11 +235,10 @@ func (l *local) delNodeCache(ctx context.Context, n *node.Node) {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
 	}
-	// Clean template locality: empty list deregisters all replicas.
-	SyncNodeTemplates(ctx, n.ID(), nil)
-	if l.templateNodeCache != nil {
-		l.templateNodeCache.Delete(n.ID())
-	}
+	// Drop both heartbeat-reported and template-center assertions for this node.
+	// An empty heartbeat must not be reused here: it would leave registrations
+	// that the template center still considers local.
+	l.locality.removeNode(n.ID())
 	l.cache.Delete(n.ID())
 	l.delSortedNodes(n)
 

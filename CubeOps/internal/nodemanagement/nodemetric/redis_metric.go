@@ -16,6 +16,7 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/logging"
+	"github.com/tencentcloud/CubeSandbox/pkgs/redisx"
 )
 
 const (
@@ -26,8 +27,9 @@ const (
 )
 
 var (
-	pool     *redis.Pool
-	poolOnce sync.Once
+	clusterClient *redisx.Cluster
+	pool          *redis.Pool
+	poolOnce      sync.Once
 
 	// writeNodeMetricHook is set by tests to intercept Redis writes.
 	writeNodeMetricHook func(*NodeMetric) error
@@ -46,6 +48,35 @@ func SetWriteNodeMetricHook(hook func(*NodeMetric) error) func() {
 func Init(cfg *config.Config) error {
 	if cfg == nil {
 		return errors.New("nodemetric: config is nil; redis is required")
+	}
+	if cfg.RedisClusterNodes != "" {
+		if cfg.RedisURL != "" || cfg.RedisDB != 0 || cfg.RedisMasterName != "" || cfg.RedisSentinelNodes != "" {
+			return errors.New("Redis Cluster requires DB 0 and cannot use REDIS_URL or Sentinel")
+		}
+		cluster, err := redisx.NewCluster(cfg.RedisClusterNodes, cfg.RedisPassword, 5, 20)
+		if err != nil {
+			return err
+		}
+		conn := cluster.Conn()
+		defer conn.Close()
+		if _, err := conn.Do("PING"); err != nil {
+			cluster.Close()
+			return fmt.Errorf("Redis Cluster ping: %w", err)
+		}
+		poolOnce.Do(func() {
+			clusterClient = cluster
+			pool = &redis.Pool{MaxIdle: 5, MaxActive: 20, Wait: true, Dial: func() (redis.Conn, error) { return cluster.Conn(), nil }}
+		})
+		if clusterClient != cluster {
+			cluster.Close()
+			if clusterClient == nil {
+				return errors.New("Redis mode changed after initialization; restart CubeOps")
+			}
+		}
+		return nil
+	}
+	if clusterClient != nil {
+		return errors.New("Redis mode changed after initialization; restart CubeOps")
 	}
 	url, sentinel, err := resolveRedisConnection(cfg)
 	if err != nil {

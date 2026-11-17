@@ -16,6 +16,14 @@ enum packet_class {
 	 * aged (reaped) connection misses and is rebuilt while a stale (rolled-back)
 	 * one is found and reset. */
 	PORT_MAPPING_PACKET,
+	/* HAIRPIN_PACKET marks sessions for same-host port-mapping access
+	 * (sandbox -> its own node's nodeIP:hostPort). The flow takes the
+	 * ordinary SNAT path, but from_cube loops every packet back into the
+	 * primary NIC ingress (TCP_HAIRPIN_OK) so from_world can apply the
+	 * port-mapping DNAT. Flagged once at session creation: the destination
+	 * port's remote_port_mapping entry may churn mid-connection, but the
+	 * flow's treatment must not flip with it. */
+	HAIRPIN_PACKET,
 };
 
 /* Lazy refresh threshold: 1 second in nanoseconds */
@@ -104,13 +112,18 @@ static __always_inline bool session_is_stale(const struct nat_session *sess)
 }
 
 /* port_mapping_key builds the egress_sessions key for a port_mapping
- * connection. The guest is the server, so the key is the guest-side tuple
- * (mvm_inner_ip:listen_port -> peer:peer_port) with a fixed key version of 0;
- * the rollback generation is carried in the session value's gen field. */
-static __always_inline void port_mapping_key(struct session_key *key, __be32 peer_ip,
-					     __be16 peer_port, __be16 listen_port)
+ * connection. The guest is the server. src_ip is the sandbox-assigned address
+ * (mvm_meta->ip), not the shared link-local mvm_inner_ip: every sandbox uses
+ * that same inner address, so keying on it would alias distinct sandboxes that
+ * listen on the same port and share a peer tuple. Callers must pass the
+ * address looked up from ifindex_to_mvmmeta; the packet headers never carry it
+ * on the inbound path. Key version stays 0; the rollback generation is carried
+ * in the session value's gen field. */
+static __always_inline void port_mapping_key(struct session_key *key, __be32 vm_ip,
+					     __be32 peer_ip, __be16 peer_port,
+					     __be16 listen_port)
 {
-	key->src_ip = mvm_inner_ip;
+	key->src_ip = vm_ip;
 	key->src_port = listen_port;
 	key->dst_ip = peer_ip;
 	key->dst_port = peer_port;

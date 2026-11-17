@@ -425,6 +425,15 @@ read_sync(struct s3_cache *cache, uint64_t chunk_index,
 	return ctx.status;
 }
 
+/* Whole-object residency, which is what these checks mean. One block at
+ * offset 0 is a hit while the rest of the object is still missing. */
+static bool
+cache_resident(struct s3_cache *cache, uint64_t chunk_index,
+	       const struct spdk_uuid *uuid, void *buf)
+{
+	return read_sync(cache, chunk_index, uuid, 0, TEST_CHUNK_SIZE, buf) == 0;
+}
+
 static void
 object_populate_sync(struct s3_cache *cache,
 		     const struct s3_cache_object_id *id,
@@ -597,11 +606,11 @@ main(int argc, char **argv)
 		fill_pattern(src, 7, TEST_CHUNK_SIZE, 0);
 
 		check_true("nothing is cached before the populate",
-			   !s3_cache_lookup(cache, 7, &uuid_a), NULL);
+			   !cache_resident(cache, 7, &uuid_a, dst), NULL);
 
 		populate_sync(cache, 7, &uuid_a, src, TEST_CHUNK_SIZE);
 		check_true("lookup finds it afterwards",
-			   s3_cache_lookup(cache, 7, &uuid_a), NULL);
+			   cache_resident(cache, 7, &uuid_a, dst), NULL);
 
 		s3_cache_get_stats(cache, &stats);
 		check_u64("one populate landed", stats.populates, 1);
@@ -634,13 +643,13 @@ main(int argc, char **argv)
 		 * and named by its uuid, so serving a stale tag would hand out
 		 * data from a superseded version of the chunk. */
 		check_true("lookup with the other uuid says no",
-			   !s3_cache_lookup(cache, 7, &uuid_b), NULL);
+			   !cache_resident(cache, 7, &uuid_b, dst), NULL);
 		check_u64("read with the other uuid is -ENOENT",
 			  (uint64_t) - read_sync(cache, 7, &uuid_b, 0,
 						 AIO_BLOCK_SIZE, dst),
 			  ENOENT);
 		check_true("the original version is still readable",
-			   s3_cache_lookup(cache, 7, &uuid_a), NULL);
+			   cache_resident(cache, 7, &uuid_a, dst), NULL);
 	}
 
 	printf("\n[5] the tail past valid_bytes reads as zeroes\n");
@@ -685,9 +694,9 @@ main(int argc, char **argv)
 		check_u64("resident count did not grow", stats.slots_resident,
 			  before);
 		check_true("the new version is the one cached",
-			   s3_cache_lookup(cache, 7, &uuid_b), NULL);
+			   cache_resident(cache, 7, &uuid_b, dst), NULL);
 		check_true("the old version is gone",
-			   !s3_cache_lookup(cache, 7, &uuid_a), NULL);
+			   !cache_resident(cache, 7, &uuid_a, dst), NULL);
 
 		memset(dst, 0, TEST_CHUNK_SIZE);
 		rc = read_sync(cache, 7, &uuid_b, 0, AIO_BLOCK_SIZE, dst);
@@ -733,7 +742,7 @@ main(int argc, char **argv)
 		check_u64("it evicted exactly one slot", stats.evictions,
 			  evictions_before + 1);
 		check_true("but not the one being read",
-			   s3_cache_lookup(cache, pinned, &uuid_a), NULL);
+			   cache_resident(cache, pinned, &uuid_a, dst), NULL);
 
 		if (!poll_until(&rctx.done)) {
 			goto out_cache;
@@ -758,7 +767,7 @@ main(int argc, char **argv)
 
 		spdk_uuid_generate(&uuid_c);
 
-		if (!s3_cache_lookup(cache, chunk, &uuid_a)) {
+		if (!cache_resident(cache, chunk, &uuid_a, dst)) {
 			/* It may have been evicted in [7]; put it back. */
 			fill_pattern(src, chunk, TEST_CHUNK_SIZE, 0);
 			populate_sync(cache, chunk, &uuid_a, src,
@@ -780,7 +789,7 @@ main(int argc, char **argv)
 		check_true("the populate was dropped, not applied",
 			   stats.populates_dropped == dropped_before + 1, NULL);
 		check_true("the version being read is still the cached one",
-			   s3_cache_lookup(cache, chunk, &uuid_a), NULL);
+			   cache_resident(cache, chunk, &uuid_a, dst), NULL);
 
 		if (!poll_until(&rctx.done)) {
 			goto out_cache;
@@ -795,7 +804,7 @@ main(int argc, char **argv)
 	{
 		uint64_t before;
 
-		if (!s3_cache_lookup(cache, 9, &uuid_a)) {
+		if (!cache_resident(cache, 9, &uuid_a, dst)) {
 			fill_pattern(src, 9, TEST_CHUNK_SIZE, 3);
 			populate_sync(cache, 9, &uuid_a, src, TEST_CHUNK_SIZE);
 		}
@@ -809,7 +818,7 @@ main(int argc, char **argv)
 		check_u64("residency dropped by one", stats.slots_resident,
 			  before - 1);
 		check_true("and it is no longer cached",
-			   !s3_cache_lookup(cache, 9, &uuid_a), NULL);
+			   !cache_resident(cache, 9, &uuid_a, dst), NULL);
 
 		/* Out of range and never-cached chunks are no-ops, not crashes. */
 		s3_cache_drop_chunk(cache, TEST_NUM_CHUNKS + 100);
@@ -820,7 +829,7 @@ main(int argc, char **argv)
 	printf("\n[10] out-of-range and degenerate arguments\n");
 	{
 		check_true("lookup past num_chunks is false",
-			   !s3_cache_lookup(cache, TEST_NUM_CHUNKS, &uuid_a),
+			   !cache_resident(cache, TEST_NUM_CHUNKS, &uuid_a, dst),
 			   NULL);
 		check_u64("read past num_chunks is -ENOENT",
 			  (uint64_t) - read_sync(cache, TEST_NUM_CHUNKS,
@@ -842,8 +851,8 @@ main(int argc, char **argv)
 				  AIO_BLOCK_SIZE, TEST_CHUNK_SIZE);
 		poll_for_ms(50);
 		check_true("rejected populates leave the cache usable",
-			   !s3_cache_lookup(cache, TEST_NUM_CHUNKS, &uuid_a) &&
-			   !s3_cache_lookup(cache, 1, &uuid_a), NULL);
+			   !cache_resident(cache, TEST_NUM_CHUNKS, &uuid_a, dst) &&
+			   !cache_resident(cache, 1, &uuid_a, dst), NULL);
 	}
 
 	printf("\n[11] partial residency\n");
@@ -914,7 +923,7 @@ main(int argc, char **argv)
 					   AIO_BLOCK_SIZE, 0), NULL);
 
 		check_true("a partly resident object is not reported as cached",
-			   !s3_cache_lookup(cache, chunk, &uuid_a), NULL);
+			   !cache_resident(cache, chunk, &uuid_a, dst), NULL);
 
 		/* Filling the rest, in two more pieces, completes the object. The
 		 * pattern is generated per range with the offset folded in, so
@@ -930,7 +939,7 @@ main(int argc, char **argv)
 				    TEST_CHUNK_SIZE - rest_off, TEST_CHUNK_SIZE);
 
 		check_true("once every block is in, the object is cached",
-			   s3_cache_lookup(cache, chunk, &uuid_a), NULL);
+			   cache_resident(cache, chunk, &uuid_a, dst), NULL);
 
 		s3_cache_get_stats(cache, &stats);
 		hits_before = stats.hits;
@@ -1139,12 +1148,14 @@ main(int argc, char **argv)
 		fill_pattern(src, 50, TEST_CHUNK_SIZE, 11);
 		s3_cache_populate(cache, 50, &uuid_a, 0, src,
 				  TEST_CHUNK_SIZE, TEST_CHUNK_SIZE);
+		check_true("lookup sees RAM before disk fill completion",
+			   cache_resident(cache, 50, &uuid_a, dst), NULL);
+		/* The presence check is itself a read, so the counters under
+		 * test start after it. */
 		s3_cache_get_stats(cache, &stats);
 		ram_hits_before = stats.ram_hits;
 		disk_hits_before = stats.disk_hits;
 		ram_bytes_before = stats.ram_bytes_served;
-		check_true("lookup sees RAM before disk fill completion",
-			   s3_cache_lookup(cache, 50, &uuid_a), NULL);
 		memset(src, 0xcc, TEST_CHUNK_SIZE);
 
 		/* No poll: the aio write is still outstanding. RAM publication is
@@ -1215,7 +1226,7 @@ main(int argc, char **argv)
 		check_u64("partial fills did not consume hot entries",
 			  stats.hot_slots_resident, 2);
 		check_true("disk eviction leaves the independently indexed hot object",
-			   s3_cache_lookup(cache, 51, &uuid_a), NULL);
+			   cache_resident(cache, 51, &uuid_a, dst), NULL);
 		{
 			struct async_ctx ram_read = {0};
 
@@ -1232,7 +1243,7 @@ main(int argc, char **argv)
 
 		s3_cache_drop_chunk(cache, 51);
 		check_true("drop_chunk removes an independently resident hot object",
-			   !s3_cache_lookup(cache, 51, &uuid_a), NULL);
+			   !cache_resident(cache, 51, &uuid_a, dst), NULL);
 	}
 
 	printf("\n[16] off-owner populate publishes RAM without the owner thread\n");
@@ -1262,7 +1273,7 @@ main(int argc, char **argv)
 			check_true("off-owner populate returns after RAM publish",
 				   msg.done, NULL);
 			check_true("lookup sees the object before owner disk fill",
-				   s3_cache_lookup(cache, 40, &uuid_a), NULL);
+				   cache_resident(cache, 40, &uuid_a, dst), NULL);
 			memset(src, 0xdd, TEST_CHUNK_SIZE);
 			memset(dst, 0xee, TEST_CHUNK_SIZE);
 			{
@@ -1331,7 +1342,7 @@ main(int argc, char **argv)
 			pthread_join(t2, NULL);
 			poll_until_populate_settled(cache);
 			check_true("lookup sees the concurrently populated object",
-				   s3_cache_lookup(cache, 41, &uuid_a), NULL);
+				   cache_resident(cache, 41, &uuid_a, dst), NULL);
 			memset(dst, 0xee, TEST_CHUNK_SIZE);
 			{
 				struct async_ctx ram_read = {0};
@@ -1489,12 +1500,12 @@ main(int argc, char **argv)
 						   NULL);
 
 					check_true("stale dest uuid is still in cache until replaced",
-						   s3_cache_lookup(cache, ch0,
-								   &uuid_a),
+						   cache_resident(cache, ch0,
+								   &uuid_a, dst),
 						   NULL);
 					check_true("new dest uuid is a miss until populate",
-						   !s3_cache_lookup(cache, ch0,
-								    &uuid_b),
+						   !cache_resident(cache, ch0,
+								    &uuid_b, dst),
 						   NULL);
 					check_u64("read of the new dest uuid is -ENOENT",
 						  (uint64_t) - read_sync(
@@ -1583,6 +1594,12 @@ main(int argc, char **argv)
 		uint32_t short_valid = 2 * AIO_BLOCK_SIZE + 100;
 		uint32_t partial_off = 4 * AIO_BLOCK_SIZE;
 		uint64_t declined_before;
+		struct s3_cache_object_reservation *reservations[5] = {0};
+		struct async_ctx reserved_done = {0};
+		const struct s3_cache_object_id *reserve_ids[5] = {
+			&object_a, &other_key, &other_bucket, &other_endpoint,
+			&collision_a,
+		};
 
 		poll_until_populate_settled(cache);
 		s3_cache_destroy(cache);
@@ -1593,8 +1610,99 @@ main(int argc, char **argv)
 			goto out_cache;
 		}
 
+		for (uint32_t i = 0; i < 4; i++) {
+			rc = s3_cache_object_reserve(cache, reserve_ids[i],
+						     TEST_CHUNK_SIZE,
+						     &reservations[i]);
+			check_u64("each free slot can take a preheat reservation",
+				  (uint64_t)-rc, 0);
+		}
+		rc = s3_cache_object_reserve(cache, reserve_ids[4],
+					     TEST_CHUNK_SIZE, &reservations[4]);
+		check_u64("slot count stops preheat before the 32-wide window",
+			  (uint64_t)-rc, ENOSPC);
+		{
+			struct s3_cache_object_reservation *duplicate = NULL;
+
+			rc = s3_cache_object_reserve(cache, &object_a,
+						     TEST_CHUNK_SIZE, &duplicate);
+			check_u64("the same object cannot be reserved twice",
+				  (uint64_t)-rc, EALREADY);
+		}
+		s3_cache_object_reservation_cancel(reservations[0]);
+		reservations[0] = NULL;
+		rc = s3_cache_object_reserve(cache, reserve_ids[4],
+					     TEST_CHUNK_SIZE, &reservations[4]);
+		check_u64("releasing one ticket admits the next export",
+			  (uint64_t)-rc, 0);
+		for (uint32_t i = 1; i < 5; i++) {
+			s3_cache_object_reservation_cancel(reservations[i]);
+		}
+
+		{
+			struct s3_cache_opts wide_opts = opts;
+			struct s3_cache *wide = NULL;
+			struct s3_cache_object_reservation *ticket[6] = {0};
+			struct async_ctx done[6] = {0};
+			struct s3_cache_object_id ids[6];
+			char keys[6][32];
+
+			wide_opts.region_offset = TEST_REGION_OFF + TEST_REGION_SIZE;
+			wide_opts.region_size = 8 * TEST_CHUNK_SIZE;
+			rc = s3_cache_create(&wide_opts, &wide);
+			check_u64("wider cache for the preheat window",
+				  (uint64_t)-rc, 0);
+			check_true("preheat admission is 32 across the lvstore",
+				   S3_CACHE_PREHEAT_MAX == 32, NULL);
+			if (rc == 0) {
+				fill_pattern(src, 61, TEST_CHUNK_SIZE, 7);
+				for (uint32_t i = 0; i < 6; i++) {
+					snprintf(keys[i], sizeof(keys[i]),
+						 "preheat/object-%u", i);
+					ids[i].endpoint = "cos.example.test";
+					ids[i].bucket = "bucket-a";
+					ids[i].key = keys[i];
+					rc = s3_cache_object_reserve(
+						wide, &ids[i], TEST_CHUNK_SIZE,
+						&ticket[i]);
+					check_u64("six preheats share one window above 4",
+						  (uint64_t)-rc, 0);
+				}
+				for (uint32_t i = 0; i < 6; i++) {
+					if (!ticket[i]) {
+						continue;
+					}
+					rc = s3_cache_object_populate_reserved_notify(
+						ticket[i], src, TEST_CHUNK_SIZE,
+						read_cb, &done[i]);
+					ticket[i] = NULL;
+					check_u64("a finished GET waits for disk instead of failing",
+						  (uint64_t)-rc, 0);
+				}
+				for (uint32_t i = 0; i < 6; i++) {
+					check_true("queued preheat reaches disk",
+						   poll_until(&done[i].done) &&
+						   done[i].status == 0, NULL);
+				}
+				s3_cache_destroy(wide);
+			}
+		}
+
 		fill_pattern(src, 60, TEST_CHUNK_SIZE, 41);
-		object_populate_sync(cache, &object_a, src, TEST_CHUNK_SIZE);
+		rc = s3_cache_object_reserve(cache, &object_a, TEST_CHUNK_SIZE,
+					     &reservations[0]);
+		check_u64("a preheat ticket can be reacquired", (uint64_t)-rc, 0);
+		if (rc == 0) {
+			rc = s3_cache_object_populate_reserved_notify(
+				reservations[0], src, TEST_CHUNK_SIZE,
+				read_cb, &reserved_done);
+			reservations[0] = NULL;
+			check_u64("reserved populate submits without retry",
+				  (uint64_t)-rc, 0);
+			check_true("reserved populate reaches durable completion",
+				   rc == 0 && poll_until(&reserved_done.done) &&
+				   reserved_done.status == 0, NULL);
+		}
 		memset(dst, 0, TEST_CHUNK_SIZE);
 		rc = object_read_sync(cache, ch, &object_a, TEST_CHUNK_SIZE, 0,
 				      TEST_CHUNK_SIZE, dst);
@@ -1771,7 +1879,7 @@ main(int argc, char **argv)
 		}
 		for (uint64_t chunk = 20; chunk < 20 + TEST_N_SLOTS; chunk++) {
 			check_true("native entry remains resident after reclaim",
-				   s3_cache_lookup(cache, chunk, &uuid_a), NULL);
+				   cache_resident(cache, chunk, &uuid_a, dst), NULL);
 		}
 		check_u64("object entry no longer occupies native capacity",
 			  (uint64_t)-object_read_sync(cache, ch, &object_a,
@@ -1804,7 +1912,7 @@ main(int argc, char **argv)
 			for (uint64_t chunk = 20;
 			     chunk < 20 + TEST_N_SLOTS; chunk++) {
 				check_true("native entry survives refused object populate",
-					   s3_cache_lookup(cache, chunk, &uuid_a),
+					   cache_resident(cache, chunk, &uuid_a, dst),
 					   NULL);
 			}
 		}
@@ -1836,6 +1944,76 @@ main(int argc, char **argv)
 			  (uint64_t)-read_sync(cache, 20, &uuid_a, 0,
 					       AIO_BLOCK_SIZE, dst),
 			  0);
+	}
+
+	printf("\n[23] teardown waits for a preheat GET to release its slot\n");
+	{
+		struct s3_cache_opts hold_opts = {
+			.desc = desc,
+			.ch = ch,
+			.region_offset = TEST_REGION_OFF + TEST_REGION_SIZE +
+					 8 * TEST_CHUNK_SIZE,
+			.region_size = TEST_CHUNK_SIZE,
+			.chunk_size = TEST_CHUNK_SIZE,
+			.block_size = AIO_BLOCK_SIZE,
+			.num_chunks = TEST_NUM_CHUNKS,
+		};
+		struct s3_cache *hold = NULL;
+		struct s3_cache_object_reservation *ticket = NULL;
+		struct s3_cache_object_id object = {
+			.endpoint = "cos.example.test",
+			.bucket = "bucket-a",
+			.key = "source/data/still-downloading",
+		};
+		struct async_ctx done = {0};
+
+		rc = s3_cache_create(&hold_opts, &hold);
+		check_u64("cache for an in-flight preheat reservation",
+			  (uint64_t)-rc, 0);
+		if (rc == 0) {
+			check_true("an idle cache is quiesced",
+				   s3_cache_is_quiesced(hold), NULL);
+			rc = s3_cache_object_reserve(hold, &object, TEST_CHUNK_SIZE,
+						     &ticket);
+			check_u64("the GET holds a slot before any disk fill",
+				  (uint64_t)-rc, 0);
+			check_true("the reservation keeps teardown waiting",
+				   rc == 0 && !s3_cache_is_quiesced(hold), NULL);
+			s3_cache_stop_object_io(hold);
+			check_true("stop does not drop a GET that has not landed",
+				   ticket != NULL && !s3_cache_is_quiesced(hold),
+				   NULL);
+			s3_cache_object_reservation_cancel(ticket);
+			ticket = NULL;
+			check_true("cancelling the GET lets teardown continue",
+				   s3_cache_is_quiesced(hold), NULL);
+			s3_cache_destroy(hold);
+			hold = NULL;
+		}
+
+		rc = s3_cache_create(&hold_opts, &hold);
+		check_u64("cache for a GET that lands after stop",
+			  (uint64_t)-rc, 0);
+		if (rc == 0) {
+			fill_pattern(src, 70, TEST_CHUNK_SIZE, 47);
+			rc = s3_cache_object_reserve(hold, &object, TEST_CHUNK_SIZE,
+						     &ticket);
+			check_u64("second GET holds the slot", (uint64_t)-rc, 0);
+			if (rc == 0) {
+				s3_cache_stop_object_io(hold);
+				rc = s3_cache_object_populate_reserved_notify(
+					ticket, src, TEST_CHUNK_SIZE, read_cb,
+					&done);
+				ticket = NULL;
+				check_u64("a late GET releases its reservation",
+					  (uint64_t)-rc, ESHUTDOWN);
+				check_true("the late GET does not complete as a fill",
+					   !done.done, NULL);
+			}
+			check_true("the slot is gone once the late GET returns",
+				   s3_cache_is_quiesced(hold), NULL);
+			s3_cache_destroy(hold);
+		}
 	}
 
 	printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);

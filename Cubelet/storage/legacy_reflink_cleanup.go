@@ -28,8 +28,7 @@ func isXFSCleanupBackend(backend string) bool {
 
 // removeLegacyXfsCowObjectIfGone deletes a cubecow volume directory or
 // snapshot file from the pre-refactor <work>/cubecow-reflink pool when the
-// same name is already gone from <work>/xfs/objects. Template / snapshot
-// cleanup used to miss those leftovers because cubecow's reflink root_dir
+// same name is already gone from <work>/xfs/objects: the reflink root_dir
 // now points at xfs/objects and treats old objects as NotFound.
 func removeLegacyXfsCowObjectIfGone(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)

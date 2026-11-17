@@ -234,6 +234,8 @@ func TestResolvePromotionState(t *testing.T) {
 		{"skip resuming", lifecycle.StateRunning, "resuming", ""},
 		{"skip killing", lifecycle.StatePaused, "killing", ""},
 		{"skip killed", lifecycle.StateRunning, lifecycle.StateKilled, ""},
+		{"restarting wins over running", lifecycle.StateRestarting, lifecycle.StateRunning, lifecycle.StateRestarting},
+		{"backoff wins over empty", lifecycle.StateBackOff, "", lifecycle.StateBackOff},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

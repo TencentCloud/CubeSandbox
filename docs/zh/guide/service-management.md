@@ -94,7 +94,7 @@ network-online.target
 最常见的两种配置入口：
 
 - 顶层环境：`/usr/local/services/cubetoolbox/.one-click.env`
-- 组件原生配置：`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`cubeproxy/global.conf`、`coredns/Corefile`
+- 组件原生配置：`Cubelet/config/config.toml`、`Cubelet/dynamicconf/conf.yaml`、`CubeMaster/conf.yaml`、`cubeproxy/global.conf`、`coredns/Corefile.template`
 
 改完之后，重启**直接读这份配置的那个服务**：
 
@@ -111,9 +111,13 @@ sudo systemctl restart cube-sandbox-cube-api.service
 # 改了 cubeproxy/global.conf
 sudo systemctl restart cube-sandbox-cube-proxy.service
 
-# 改了 coredns/Corefile
+# 改了 coredns/Corefile.template
 sudo systemctl restart cube-sandbox-coredns.service
 ```
+
+::: warning CoreDNS：改模板，而不是渲染产物 Corefile
+`coredns/Corefile` 是渲染产物：`cube-sandbox-coredns.service` 每次启动都会从 `coredns/Corefile.template` 重新渲染（`coredns-prepare.sh` → `coredns-start.sh` → `render_template_atomic`），直接改渲染文件会在下次重启时被静默覆盖。请修改模板文件，再重启服务。
+:::
 
 ::: warning 改 systemd unit 文件本身的情况
 如果你直接动了 `/etc/systemd/system/cube-sandbox-*.service` 文件本身，需要先 reload，systemd 才会读到新内容：
@@ -286,11 +290,13 @@ sudo tail -200 /data/log/CubeVmm/vmm.log
 
 CubeShim 和 VMM 运行期间会保持日志文件打开。CubeShim 通过内部每 30 分钟轮转事件 reopen。VMM 控制线程自己持有 monotonic `timerfd`，每小时发出已有的 `LOG_CTRL_REOPEN` 控制记录。reopen 由固定周期驱动：宿主机执行“`rename` + `create`”后，会在下一次计划中的 reopen 时切换到新文件，而不是在任意一次写入时立即检测。该定时器由 VMM 控制线程持有，不依赖延迟 logger 初始化，也不会由 vCPU/API 线程创建。因此宿主机侧仍应按小时执行轮转，并使用“`rename` + `create`”方式，不要使用 `copytruncate`。
 
-例如，将下面内容保存为 `/etc/logrotate.d/cubesandbox`，并确保宿主机每小时执行一次 `logrotate`：
+一键部署会安装 `/etc/cube-sandbox/logrotate.d/cubesandbox`，并启用每小时的 `cube-sandbox-logrotate.timer`。安装器会先校验新策略，再替换线上文件；校验失败时保留线上策略，并且不启用新的 timer。该文件由安装器管理，每次安装或升级都会覆盖。已有的 `/etc/logrotate.d/cubesandbox` 会被移到 `/etc/cube-sandbox/legacy-cubesandbox.bak.<epoch>`。
+
+Kubernetes / Helm 仍需手工安装：把下面的示例保存为 `/etc/logrotate.d/cubesandbox`，并确保宿主机每小时执行一次 `logrotate`；发行版默认的每日任务只能按天轮转。
 
 ```text
-/data/log/CubeVmm/vmm.log
-/data/log/CubeShim/*.log {
+/data/log/CubeVmm/vmm.log /data/log/CubeShim/*.log {
+    su root root
     hourly
     rotate 24
     missingok
@@ -301,9 +307,9 @@ CubeShim 和 VMM 运行期间会保持日志文件打开。CubeShim 通过内部
 }
 ```
 
-`rotate 24` 表示保留 24 个小时文件，可按实际保留周期调整。`delaycompress` 会将最新的轮转文件延迟一个周期压缩，因为 writer 在下一次计划中的 reopen 之前可能仍使用旧 fd。CubeShim 每 30 分钟触发一次内部事件，VMM 控制线程每小时发送一次 reopen 控制事件。不需要 `postrotate` 信号或重启服务；该策略保证宿主机侧 retention 有界，但不承诺对任意手工轮转立即响应，也不支持 `copytruncate`。
+按每小时执行一次计算，`rotate 24` 约保留 24 小时日志，可按实际保留周期调整。`delaycompress` 会将最新的轮转文件延迟一个周期压缩，因为 writer 在下一次计划中的 reopen 之前可能仍使用旧 fd。CubeShim 每 30 分钟触发一次内部事件，VMM 控制线程每小时发送一次 reopen 控制事件。不需要 `postrotate` 信号或重启服务；该策略保证宿主机侧 retention 有界，但不承诺对任意手工轮转立即响应，也不支持 `copytruncate`。
 
-示例使用 `root root`，因为随附的一键部署 systemd 服务以 root 运行。如果 CubeShim 或 VMM 使用其他账号运行，请把 `create` 的 owner 和 group 改成对应账号；否则新建文件可能无法被 reopen。
+示例使用 `root root`，因为随附的一键部署 systemd 服务以 root 运行。如果 CubeShim 或 VMM 使用其他账号运行，请把 `su` 的 user/group 和 `create` 的 owner/group 都改成对应账号；否则 logrotate 无法切换身份，新建文件也可能无法被 reopen。
 示例中的 `0640` 只适用于 `logrotate` 创建的文件；CubeShim 和 VMM writer 本身仍遵循进程的 umask。
 
 ### `journalctl` 启动期日志

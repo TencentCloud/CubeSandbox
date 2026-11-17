@@ -187,8 +187,9 @@ func identityFromSpec(spec *types.CreateCubeSandboxReq) *specIdentity {
 	return id
 }
 
-// sandboxDataFromSpec renders a sandbox the node did not report. CreateAt
-// stays zero: the spec does not record when the sandbox started.
+// sandboxDataFromSpec renders a sandbox the node did not report. CreateAt is
+// left zero here; the caller fills it from the durable spec, the only place
+// the creation time survives a pause.
 func sandboxDataFromSpec(sandboxID string, spec *types.CreateCubeSandboxReq) *types.SandboxData {
 	one := &types.SandboxData{SandboxID: sandboxID}
 	id := identityFromSpec(spec)
@@ -218,8 +219,7 @@ func sandboxDataFromSpec(sandboxID string, spec *types.CreateCubeSandboxReq) *ty
 }
 
 // pauseBindingRow renders a binding the node did not report. CreateAt stays
-// empty: the binding only knows when the pause happened, not when the sandbox
-// was created.
+// zero here; callers that can reach the durable spec fill it afterwards.
 func pauseBindingRow(rec *pausesnap.Record) *types.SandboxBriefData {
 	if rec == nil {
 		return nil

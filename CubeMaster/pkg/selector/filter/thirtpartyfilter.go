@@ -14,6 +14,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// thirtpartyFilter is a placeholder third-party filter: it applies only to
+// specific instance types on the non-slow path and currently filters nothing,
+// returning the node list unchanged.
 type thirtpartyFilter struct {
 }
 
@@ -51,8 +54,6 @@ func (l *thirtpartyFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, er
 	nodes := selCtx.Nodes()
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
 	}
 	return nodes, nil
 }

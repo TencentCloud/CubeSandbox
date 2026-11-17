@@ -1,6 +1,20 @@
 export const DEFAULT_QUALITY_STATUS_JSON_URL =
   'https://cubesandbox-1253970226.cos.ap-singapore.myqcloud.com/page-data/quality-status.json'
 
+export function historyUrlFromLatest(url) {
+  const value = String(url || '')
+  if (!value.includes('quality-status.json')) return ''
+  return value.replace(/quality-status\.json(?=($|\?))/, 'quality-status-history.json')
+}
+
+export function sortNightsByDate(nights) {
+  if (!Array.isArray(nights)) return []
+  return nights
+    .filter((night) => night && night.date)
+    .slice()
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+}
+
 export function safeHttpUrl(value) {
   if (!value) return ''
   try {
@@ -112,6 +126,9 @@ export function normalizeQualityStatus(payload) {
   const baseline = performance.baseline || comparison.baseline || {}
   const modules = e2e.modules || e2e.module_distribution || payload.modules || []
   const metrics = comparison.metrics || performance.metrics || []
+  const sectionRows = Array.isArray(comparison.sections)
+    ? comparison.sections
+    : (Array.isArray(performance.sections) ? performance.sections : [])
   return {
     generatedAt: payload.generatedAt || payload.generated_at || null,
     date: payload.date || payload.lastRun || payload.last_run || '',
@@ -131,6 +148,8 @@ export function normalizeQualityStatus(payload) {
         url_en: safeHttpUrl(baseline.url_en || baseline.urlEn || baseline.urls?.en)
       },
       counts: comparison.counts || performance.counts || {},
+      thresholds: comparison.thresholds || performance.thresholds || {},
+      sections: sectionRows.filter((row) => row && typeof row === 'object'),
       note: comparison.note || performance.note || '',
       metrics: Array.isArray(metrics) ? metrics.filter((row) => row && typeof row === 'object') : []
     }

@@ -80,6 +80,9 @@ func (p *Plugin) Init(_ context.Context, cfg volume.PluginConfig) error {
 
 // Attach forks the binary with --op attach and the request fields as flags.
 func (p *Plugin) Attach(ctx context.Context, req *volume.AttachRequest) (*volume.AttachResult, error) {
+	if strings.ContainsRune(req.PrivateData, '\x00') {
+		return nil, fmt.Errorf("binary volume plugin %q attach: volume %q private_data must not contain NUL", p.name, req.VolumeID)
+	}
 	args := []string{
 		"--op", "attach",
 		"--sandbox-id", req.SandboxID,

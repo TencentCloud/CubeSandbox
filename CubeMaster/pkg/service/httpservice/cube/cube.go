@@ -28,6 +28,7 @@ const (
 	SandboxCommitAction                    = "/sandbox/commit"
 	SandboxRollbackAction                  = "/sandbox/rollback"
 	SnapshotAction                         = "/snapshot"
+	CapabilitiesAction                     = "/capabilities"
 	SnapshotStorageAction                  = "/snapshot/storage"
 	SnapshotCompatibleNodesByFactorsAction = "/snapshot/compatible-nodes-by-factors"
 	OperationAction                        = "/operation"

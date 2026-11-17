@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
@@ -284,4 +285,298 @@ func TestTCPUpdateSessionBidirectionalFINCompletionTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTCPUpdateSessionIgnoredTransitions(t *testing.T) {
+	prog := loadTCPStateTestProgram(t)
+	synack := func(dir uint8) tcpUpdateStep { return tcpUpdateStep{dir: dir, syn: 1, ack: 1} }
+	syn := func(dir uint8) tcpUpdateStep { return tcpUpdateStep{dir: dir, syn: 1} }
+
+	// A: Retransmitted SYN-ACK on ESTABLISHED or SYN_RECV should not poison state to IGNORED(11)
+	curr := tcpUpdateCase{
+		accessTime: 1,
+		nowNS:      1e9,
+		state:      uint8(tcpCTEstablished),
+		steps:      []tcpUpdateStep{synack(tcpDirReply)},
+	}
+	curr = runTCPUpdateCase(t, prog, curr)
+	if curr.state != uint8(tcpCTEstablished) {
+		t.Fatalf("after retransmitted SYN-ACK on ESTABLISHED, state=%s, want established (must not become IGNORED)",
+			tcpConntrackState(curr.state))
+	}
+
+	curr = tcpUpdateCase{
+		accessTime: 1,
+		nowNS:      1e9,
+		state:      uint8(tcpCTSynRecv),
+		steps:      []tcpUpdateStep{synack(tcpDirReply)},
+	}
+	curr = runTCPUpdateCase(t, prog, curr)
+	if curr.state != uint8(tcpCTSynRecv) {
+		t.Fatalf("after retransmitted SYN-ACK on SYN_RECV, state=%s, want syn_recv (must not become IGNORED)",
+			tcpConntrackState(curr.state))
+	}
+
+	// B: Retransmitted SYN on ESTABLISHED from ORIGINAL should not poison state to IGNORED(11)
+	curr = tcpUpdateCase{
+		accessTime: 1,
+		nowNS:      1e9,
+		state:      uint8(tcpCTEstablished),
+		steps:      []tcpUpdateStep{syn(tcpDirOriginal)},
+	}
+	curr = runTCPUpdateCase(t, prog, curr)
+	if curr.state != uint8(tcpCTEstablished) {
+		t.Fatalf("after retransmitted SYN on ESTABLISHED, state=%s, want established (must not become IGNORED)",
+			tcpConntrackState(curr.state))
+	}
+	// C: Reopening a connection in TIME_WAIT resets active_close
+	curr = tcpUpdateCase{
+		accessTime:  1,
+		nowNS:       1e9,
+		state:       uint8(tcpCTTimeWait),
+		activeClose: 1,
+		steps:       []tcpUpdateStep{syn(tcpDirOriginal)},
+	}
+	curr = runTCPUpdateCase(t, prog, curr)
+	if curr.state != uint8(tcpCTSynSent) {
+		t.Fatalf("after reopen SYN on TIME_WAIT, state=%s, want syn_sent", tcpConntrackState(curr.state))
+	}
+	if curr.activeClose != 0 {
+		t.Fatalf("after reopen SYN on TIME_WAIT, active_close=%d, want 0", curr.activeClose)
+	}
+}
+
+func TestPortMappingTCPTimeout(t *testing.T) {
+	// Independent Go unit tests exercising tcpTimeout() rules without requiring BPF environment.
+	t.Run("port mapping client active close gets TIME_WAIT timeout", func(t *testing.T) {
+		sess := natSession{
+			State:       uint8(tcpCTTimeWait),
+			ActiveClose: 1, // External client closed first
+			PacketClass: packetClassPortMapping,
+		}
+		if got, want := sess.tcpTimeout(), uint64(tcpTimeouts[tcpCTTimeWait].Nanoseconds()); got != want {
+			t.Fatalf("timeout=%v, want %v", time.Duration(got), time.Duration(want))
+		}
+	})
+
+	t.Run("port mapping guest active close gets CLOSE timeout", func(t *testing.T) {
+		sess := natSession{
+			State:       uint8(tcpCTTimeWait),
+			ActiveClose: 0, // Sandbox guest closed first
+			PacketClass: packetClassPortMapping,
+		}
+		if got, want := sess.tcpTimeout(), uint64(tcpTimeouts[tcpCTClose].Nanoseconds()); got != want {
+			t.Fatalf("timeout=%v, want %v", time.Duration(got), time.Duration(want))
+		}
+	})
+
+	t.Run("snat guest active close gets CLOSE timeout", func(t *testing.T) {
+		sess := natSession{
+			State:       uint8(tcpCTTimeWait),
+			ActiveClose: 1, // For SNAT, guest is ORIGINAL, so ActiveClose == 1 means guest closed
+			PacketClass: packetClassSNAT,
+		}
+		if got, want := sess.tcpTimeout(), uint64(tcpTimeouts[tcpCTClose].Nanoseconds()); got != want {
+			t.Fatalf("timeout=%v, want %v", time.Duration(got), time.Duration(want))
+		}
+	})
+
+	t.Run("port mapping established gets 3 hours", func(t *testing.T) {
+		sess := natSession{
+			State:       uint8(tcpCTEstablished),
+			PacketClass: packetClassPortMapping,
+		}
+		if got, want := sess.tcpTimeout(), uint64(tcpTimeouts[tcpCTEstablished].Nanoseconds()); got != want {
+			t.Fatalf("timeout=%v, want %v", time.Duration(got), time.Duration(want))
+		}
+	})
+}
+
+func TestPortMappingTCPStateProgression(t *testing.T) {
+	prog := loadTCPStateTestProgram(t)
+	synack := func(dir uint8) tcpUpdateStep { return tcpUpdateStep{dir: dir, syn: 1, ack: 1} }
+	ack := func(dir uint8) tcpUpdateStep { return tcpUpdateStep{dir: dir, ack: 1} }
+	fin := func(dir uint8) tcpUpdateStep { return tcpUpdateStep{dir: dir, ack: 1, fin: 1} }
+	rst := func(dir uint8) tcpUpdateStep { return tcpUpdateStep{dir: dir, rst: 1} }
+
+	t.Run("port mapping handshake to established then client close", func(t *testing.T) {
+		// 1. Simulate inbound SYN with session initialized to SYN_SENT state
+		curr := tcpUpdateCase{
+			accessTime: 1,
+			nowNS:      1e9,
+			state:      uint8(tcpCTSynSent),
+		}
+
+		// 2. VM replies with SYN-ACK (REPLY direction) -> SYN_RECV
+		curr.steps = []tcpUpdateStep{synack(tcpDirReply)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTSynRecv) {
+			t.Fatalf("after SYN-ACK state=%s, want %s", tcpConntrackState(curr.state), tcpCTSynRecv)
+		}
+
+		// 3. Client sends ACK (ORIGINAL direction) -> ESTABLISHED
+		curr.steps = []tcpUpdateStep{ack(tcpDirOriginal)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTEstablished) {
+			t.Fatalf("after ACK state=%s, want %s", tcpConntrackState(curr.state), tcpCTEstablished)
+		}
+
+		// Verify that ESTABLISHED session enjoys 3-hour timeout
+		sessEst := natSession{State: curr.state}
+		if sessEst.tcpTimeout() != uint64(tcpTimeouts[tcpCTEstablished].Nanoseconds()) {
+			t.Fatalf("established timeout=%v, want %v",
+				time.Duration(sessEst.tcpTimeout()), tcpTimeouts[tcpCTEstablished])
+		}
+
+		// 4. Data transfer in both directions keeps connection ESTABLISHED
+		curr.steps = []tcpUpdateStep{ack(tcpDirOriginal), ack(tcpDirReply)}
+		curr.nowNS += 1e9
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTEstablished) {
+			t.Fatalf("after data state=%s, want %s", tcpConntrackState(curr.state), tcpCTEstablished)
+		}
+
+		// 5. Client active close: FIN -> ACK -> FIN -> ACK
+		// Client sends FIN -> FIN_WAIT
+		curr.steps = []tcpUpdateStep{fin(tcpDirOriginal)}
+		curr.nowNS += 1e9
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTFinWait) {
+			t.Fatalf("after client FIN state=%s, want %s", tcpConntrackState(curr.state), tcpCTFinWait)
+		}
+		if curr.activeClose != 1 {
+			t.Fatalf("active_close=%d, want 1", curr.activeClose)
+		}
+
+		// VM sends ACK -> CLOSE_WAIT
+		curr.steps = []tcpUpdateStep{ack(tcpDirReply)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTCloseWait) {
+			t.Fatalf("after server ACK state=%s, want %s", tcpConntrackState(curr.state), tcpCTCloseWait)
+		}
+
+		// VM sends FIN -> LAST_ACK
+		curr.steps = []tcpUpdateStep{fin(tcpDirReply)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTLastAck) {
+			t.Fatalf("after server FIN state=%s, want %s", tcpConntrackState(curr.state), tcpCTLastAck)
+		}
+
+		// Client sends ACK -> TIME_WAIT
+		curr.steps = []tcpUpdateStep{ack(tcpDirOriginal)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTTimeWait) {
+			t.Fatalf("after client ACK state=%s, want %s", tcpConntrackState(curr.state), tcpCTTimeWait)
+		}
+
+		// 6. Verify reaper recognizes session closed normally
+		dummyKey := sessionKey{Protocol: unix.IPPROTO_TCP}
+		finalSess := natSession{State: curr.state, ActiveClose: curr.activeClose}
+		finalSess.PacketClass = packetClassPortMapping
+		if !sessionClosedNormally(&dummyKey, &finalSess) {
+			t.Fatal("sessionClosedNormally returned false for TIME_WAIT session, expected true (no reaper false alarm)")
+		}
+		if got, want := finalSess.tcpTimeout(), uint64(tcpTimeouts[tcpCTTimeWait].Nanoseconds()); got != want {
+			t.Fatalf("client-close timeout=%v, want %v", time.Duration(got), time.Duration(want))
+		}
+	})
+
+	t.Run("port mapping handshake to established then server close", func(t *testing.T) {
+		curr := tcpUpdateCase{
+			accessTime: 1,
+			nowNS:      1e9,
+			state:      uint8(tcpCTSynSent),
+		}
+		// Handshake
+		curr.steps = []tcpUpdateStep{synack(tcpDirReply), ack(tcpDirOriginal)}
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTEstablished) {
+			t.Fatalf("handshake failed, state=%s, want %s", tcpConntrackState(curr.state), tcpCTEstablished)
+		}
+
+		// Server active close: VM sends FIN -> FIN_WAIT
+		curr.steps = []tcpUpdateStep{fin(tcpDirReply)}
+		curr.nowNS += 1e9
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTFinWait) {
+			t.Fatalf("after server FIN state=%s, want %s", tcpConntrackState(curr.state), tcpCTFinWait)
+		}
+		if curr.activeClose != 0 {
+			t.Fatalf("active_close=%d, want 0", curr.activeClose)
+		}
+
+		// Client sends ACK -> CLOSE_WAIT
+		curr.steps = []tcpUpdateStep{ack(tcpDirOriginal)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTCloseWait) {
+			t.Fatalf("after client ACK state=%s, want %s", tcpConntrackState(curr.state), tcpCTCloseWait)
+		}
+
+		// Client sends FIN -> LAST_ACK
+		curr.steps = []tcpUpdateStep{fin(tcpDirOriginal)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTLastAck) {
+			t.Fatalf("after client FIN state=%s, want %s", tcpConntrackState(curr.state), tcpCTLastAck)
+		}
+
+		// VM sends ACK -> TIME_WAIT
+		curr.steps = []tcpUpdateStep{ack(tcpDirReply)}
+		curr.nowNS += 1e7
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTTimeWait) {
+			t.Fatalf("after server ACK state=%s, want %s", tcpConntrackState(curr.state), tcpCTTimeWait)
+		}
+
+		dummyKey := sessionKey{Protocol: unix.IPPROTO_TCP}
+		finalSess := natSession{State: curr.state, ActiveClose: curr.activeClose}
+		finalSess.PacketClass = packetClassPortMapping
+		if !sessionClosedNormally(&dummyKey, &finalSess) {
+			t.Fatal("sessionClosedNormally returned false for TIME_WAIT session, expected true")
+		}
+		if got, want := finalSess.tcpTimeout(), uint64(tcpTimeouts[tcpCTClose].Nanoseconds()); got != want {
+			t.Fatalf("server-close timeout=%v, want %v", time.Duration(got), time.Duration(want))
+		}
+	})
+
+	t.Run("port mapping reset transitions to CLOSE", func(t *testing.T) {
+		// Test RST from client
+		curr := tcpUpdateCase{
+			accessTime: 1,
+			nowNS:      1e9,
+			state:      uint8(tcpCTEstablished),
+			steps:      []tcpUpdateStep{rst(tcpDirOriginal)},
+		}
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTClose) {
+			t.Fatalf("after client RST state=%s, want %s", tcpConntrackState(curr.state), tcpCTClose)
+		}
+		dummyKey := sessionKey{Protocol: unix.IPPROTO_TCP}
+		finalSess := natSession{State: curr.state}
+		if !sessionClosedNormally(&dummyKey, &finalSess) {
+			t.Fatal("sessionClosedNormally returned false for CLOSE session, expected true")
+		}
+
+		// Test RST from VM
+		curr = tcpUpdateCase{
+			accessTime: 1,
+			nowNS:      1e9,
+			state:      uint8(tcpCTEstablished),
+			steps:      []tcpUpdateStep{rst(tcpDirReply)},
+		}
+		curr = runTCPUpdateCase(t, prog, curr)
+		if curr.state != uint8(tcpCTClose) {
+			t.Fatalf("after VM RST state=%s, want %s", tcpConntrackState(curr.state), tcpCTClose)
+		}
+		finalSess = natSession{State: curr.state}
+		if !sessionClosedNormally(&dummyKey, &finalSess) {
+			t.Fatal("sessionClosedNormally returned false for CLOSE session, expected true")
+		}
+	})
 }

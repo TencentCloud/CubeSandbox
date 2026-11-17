@@ -56,5 +56,6 @@
 /pkgs/CubeLog/ @fslongjin
 /pkgs/cubedb/ @fslongjin
 /pkgs/blobstore/ @fslongjin
+/pkgs/redisx/ @fslongjin
 # Shared proto module (wire contracts for CubeMaster / Cubelet / examples)
 /pkgs/proto/ @fslongjin @ls-ggg @chenhengqi

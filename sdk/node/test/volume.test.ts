@@ -98,6 +98,56 @@ afterEach(() => {
 });
 
 describe("Volume CRUD", () => {
+  it("versioned create preserves opaque input including empty strings and UTF-8 limits", async () => {
+    setHandler(() => ({ status: 201, json: { volumeID: "vol-pd", name: "vol-pd", token: "tok" } }));
+    const inputs = [
+      "", "  opaque 桶 '\" \\ $()\n ", "a".repeat(1024), "界".repeat(341) + "a",
+      "é中\u2028\uFFFF\uFFFD", "literal \\ud83d\\ude00",
+    ];
+    for (const [index, privateData] of inputs.entries()) {
+      const cfg = new Config({ apiUrl: `http://127.0.0.1:${port}`, apiKey: "test-key" });
+      const volume = await Volume.createWithPrivateData({ name: "vol-pd", driver: "s3", privateData, config: cfg });
+      expect(volume).toBeInstanceOf(Volume);
+      expect(volume.volumeId).toBe("vol-pd");
+      expect(volume.token).toBe("tok");
+      expect(requests[index].pathname).toBe("/v2/volumes");
+      expect(requests[index].headers.authorization).toBe("Bearer test-key");
+      expect(JSON.parse(requests[index].body.toString())).toEqual({ name: "vol-pd", driver: "s3", private_data: privateData });
+      expect(volume).not.toHaveProperty("privateData");
+    }
+    expect(requests).toHaveLength(inputs.length);
+  });
+
+  it("versioned create rejects invalid input before sending a request", async () => {
+    for (const privateData of ["a".repeat(1025), "界".repeat(342), "😀", "𠀀", "private-data-sentinel\0tail"]) {
+      const error = await Volume.createWithPrivateData({ privateData, config: makeConfig() }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).toContain("private_data");
+      expect(String(error)).not.toContain(privateData);
+      expect(String(error)).not.toContain("private-data-sentinel");
+    }
+    for (const privateData of ["\ud800", "before\udfffafter"]) {
+      const error = await Volume.createWithPrivateData({ privateData, config: makeConfig() }).catch((e: unknown) => e);
+      expect(String(error)).toBe("Error: private_data must be valid UTF-8");
+    }
+    await expect(Volume.createWithPrivateData({ name: "bad/name", privateData: "", config: makeConfig() })).rejects.toThrow(/volume name/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("versioned create requires a string", async () => {
+    for (const value of [undefined, null, {}, [], 123]) {
+      await expect(Volume.createWithPrivateData({ privateData: value as unknown as string, config: makeConfig() })).rejects.toThrow("private_data must be a string");
+    }
+    expect(requests).toHaveLength(0);
+  });
+
+  it("versioned create does not fall back when the server lacks the new API", async () => {
+    setHandler(() => ({ status: 404, json: { message: "route not found" } }));
+    await expect(Volume.createWithPrivateData({ privateData: "input-A", config: makeConfig() })).rejects.toBeInstanceOf(VolumeNotFoundError);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].pathname).toBe("/v2/volumes");
+  });
+
   it("create sends the payload and parses the response", async () => {
     setHandler(() => ({
       status: 201,

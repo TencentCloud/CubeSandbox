@@ -1,0 +1,1417 @@
+{{- if .Values.observability.enabled }}
+{{- $fullname := include "cube.fullname" . -}}
+{{- $obs := .Values.observability -}}
+{{- $backendEnabled := $obs.backend.enabled -}}
+{{- $logsBackend := lower ($obs.logs.backend | default "loki") -}}
+{{- if not (has $logsBackend (list "loki" "elasticsearch")) -}}
+{{- fail "observability.logs.backend must be loki or elasticsearch" -}}
+{{- end -}}
+{{- $useLoki := eq $logsBackend "loki" -}}
+{{- $useElasticsearch := eq $logsBackend "elasticsearch" -}}
+{{- $promPort := int ($obs.backend.prometheus.port | default 9092) -}}
+{{- $lokiPort := int ($obs.backend.loki.port | default 3100) -}}
+{{- $esPort := int ($obs.backend.elasticsearch.port | default 9200) -}}
+{{- $grafPort := int ($obs.backend.grafana.port | default 3001) -}}
+{{- $cubeletMetricsTarget := $obs.otelCollector.cubeletMetricsTarget | default "127.0.0.1:9998" -}}
+{{- if and (eq $cubeletMetricsTarget "127.0.0.1:9998") (not .Values.cubeNode.hostNetwork) -}}
+{{- fail "observability.otelCollector.cubeletMetricsTarget=127.0.0.1:9998 requires cubeNode.hostNetwork=true" -}}
+{{- end -}}
+{{- $otelStateHostPath := $obs.otelCollector.stateHostPath | default "/var/lib/cube-sandbox/otelcol-k8s" -}}
+{{- if not (hasPrefix "/" $otelStateHostPath) -}}
+{{- fail "observability.otelCollector.stateHostPath must be an absolute host path" -}}
+{{- end -}}
+{{- $promSvcUrl := printf "http://%s-prometheus:%d" $fullname $promPort -}}
+{{- $lokiSvcUrl := printf "http://%s-loki:%d" $fullname $lokiPort -}}
+{{- $esSvcUrl := printf "http://%s-elasticsearch:%d" $fullname $esPort -}}
+{{- $metricsRw := $obs.metrics.remoteWriteUrl | default "" -}}
+{{- $metricsOtlp := $obs.metrics.otlpEndpoint | default (ternary (printf "%s/api/v1/otlp" $promSvcUrl) "" (and $backendEnabled (eq $metricsRw ""))) -}}
+{{- $metricsAuth := $obs.metrics.auth | default dict -}}
+{{- $metricsAuthSecret := $metricsAuth.existingSecret | default "" -}}
+{{- $metricsAuthorizationKey := $metricsAuth.authorizationKey | default "" -}}
+{{- $metricsTenantKey := $metricsAuth.tenantIdKey | default "" -}}
+{{- $metricsTenantSlot := ternary 2 1 (ne $metricsAuthorizationKey "") -}}
+{{- $deployLogsBackend := and $backendEnabled $obs.logs.enabled -}}
+{{- $configuredLogsEs := $obs.logs.esEndpoint | default "" -}}
+{{- $configuredLogsOtlp := $obs.logs.otlpEndpoint | default "" -}}
+{{- $deployLoki := and $deployLogsBackend $useLoki (eq $configuredLogsOtlp "") -}}
+{{- $deployElasticsearch := and $deployLogsBackend $useElasticsearch (eq $configuredLogsEs "") -}}
+{{- $logsEs := $configuredLogsEs | default (ternary $esSvcUrl "" $deployElasticsearch) -}}
+{{- $logsOtlp := $configuredLogsOtlp | default (ternary (printf "%s/otlp" $lokiSvcUrl) "" $deployLoki) -}}
+{{- $lokiQueryUrl := trimSuffix "/otlp" (trimSuffix "/" $logsOtlp) -}}
+{{- $logsEnabled := and $obs.logs.enabled (or (ne $logsEs "") (ne $logsOtlp "")) -}}
+{{- $componentLogs := $obs.logs.components | default dict -}}
+{{- $componentLogsEnabled := $componentLogs.enabled | default false -}}
+{{- $componentLogPath := clean ($componentLogs.hostPath | default "/var/log/pods") -}}
+{{- $componentLogContainers := $componentLogs.containers | default (list "cube-master" "cube-api" "cube-ops" "cube-templatecenter" "cubelet" "cube-proxy" "cube-lifecycle-manager") -}}
+{{- if and $componentLogsEnabled (not $obs.logs.enabled) -}}
+{{- fail "observability.logs.components.enabled requires observability.logs.enabled=true" -}}
+{{- end -}}
+{{- if and $componentLogsEnabled (not (hasPrefix "/" $componentLogPath)) -}}
+{{- fail "observability.logs.components.hostPath must be an absolute path" -}}
+{{- end -}}
+{{- if and $componentLogsEnabled (or (eq $componentLogPath "/") (contains ".." $componentLogPath)) -}}
+{{- fail "observability.logs.components.hostPath must not be the host root or contain '..'" -}}
+{{- end -}}
+{{- if and $componentLogsEnabled (eq (len $componentLogContainers) 0) -}}
+{{- fail "observability.logs.components.containers must include at least one container name" -}}
+{{- end -}}
+{{- range $container := $componentLogContainers -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $container) -}}
+{{- fail (printf "invalid observability.logs.components.containers entry %q" $container) -}}
+{{- end -}}
+{{- end -}}
+{{- $logsAuth := $obs.logs.auth | default dict -}}
+{{- $logsAuthSecret := $logsAuth.existingSecret | default "" -}}
+{{- $logsAuthorizationKey := $logsAuth.authorizationKey | default "" -}}
+{{- $logsTenantKey := $logsAuth.tenantIdKey | default "" -}}
+{{- $logsTenantSlot := ternary 2 1 (ne $logsAuthorizationKey "") -}}
+{{- $grafanaSecret := $obs.backend.grafana.existingSecret | default "" -}}
+{{- $grafanaGeneratedSecretName := printf "%s-grafana-admin" $fullname | trunc 63 | trimSuffix "-" -}}
+{{- $componentOtelName := printf "%s-component-otelcol" $fullname | trunc 63 | trimSuffix "-" -}}
+{{- $componentOtelConfigName := printf "%s-component-otelcol-config" $fullname | trunc 63 | trimSuffix "-" -}}
+{{- $grafanaAdminUser := $obs.backend.grafana.adminUser | default "admin" -}}
+{{- $grafanaAdminPassword := $obs.backend.grafana.adminPassword | default "" -}}
+{{- $promPersistence := $obs.backend.prometheus.persistence | default dict -}}
+{{- $lokiPersistence := $obs.backend.loki.persistence | default dict -}}
+{{- $esPersistence := $obs.backend.elasticsearch.persistence | default dict -}}
+{{- $grafanaPersistence := $obs.backend.grafana.persistence | default dict -}}
+{{- $promClaim := $promPersistence.existingClaim | default (printf "%s-prometheus-data" $fullname) -}}
+{{- $lokiClaim := $lokiPersistence.existingClaim | default (printf "%s-loki-data" $fullname) -}}
+{{- $esClaim := $esPersistence.existingClaim | default (printf "%s-elasticsearch-data" $fullname) -}}
+{{- $grafanaClaim := $grafanaPersistence.existingClaim | default (printf "%s-grafana-data" $fullname) -}}
+{{- $metricsAuthSecretData := dict -}}
+{{- $logsAuthSecretData := dict -}}
+{{- $grafanaSecretData := dict -}}
+{{- if ne $metricsAuthSecret "" -}}
+  {{- $secret := lookup "v1" "Secret" .Release.Namespace $metricsAuthSecret -}}
+  {{- if $secret -}}{{- $metricsAuthSecretData = ($secret.data | default dict) -}}{{- end -}}
+{{- end -}}
+{{- if ne $logsAuthSecret "" -}}
+  {{- $secret := lookup "v1" "Secret" .Release.Namespace $logsAuthSecret -}}
+  {{- if $secret -}}{{- $logsAuthSecretData = ($secret.data | default dict) -}}{{- end -}}
+{{- end -}}
+{{- if ne $grafanaSecret "" -}}
+  {{- $secret := lookup "v1" "Secret" .Release.Namespace $grafanaSecret -}}
+  {{- if $secret -}}{{- $grafanaSecretData = ($secret.data | default dict) -}}{{- end -}}
+{{- else if $backendEnabled -}}
+  {{- $passwordProvided := ne $grafanaAdminPassword "" -}}
+  {{- if and $passwordProvided (lt (len $grafanaAdminPassword) 16) -}}
+    {{- fail "observability.backend.grafana.adminPassword must contain at least 16 characters; use existingSecret for externally managed credentials" -}}
+  {{- end -}}
+  {{- $secret := lookup "v1" "Secret" .Release.Namespace $grafanaGeneratedSecretName -}}
+  {{- if and (not $passwordProvided) $secret $secret.data (index $secret.data "admin-password") -}}
+    {{- $grafanaAdminPassword = index $secret.data "admin-password" | b64dec -}}
+  {{- else if not $passwordProvided -}}
+    {{- $grafanaAdminPassword = randAlphaNum 32 -}}
+  {{- end -}}
+  {{- $grafanaSecretData = dict "admin-user" (b64enc $grafanaAdminUser) "admin-password" (b64enc $grafanaAdminPassword) -}}
+{{- end -}}
+{{- if and (ne $metricsOtlp "") (ne $metricsRw "") -}}
+{{- fail "observability.metrics.otlpEndpoint and observability.metrics.remoteWriteUrl are mutually exclusive" -}}
+{{- end -}}
+{{- if and (eq $metricsOtlp "") (eq $metricsRw "") -}}
+{{- fail "observability requires observability.metrics.otlpEndpoint or observability.metrics.remoteWriteUrl when the in-cluster backend is disabled" -}}
+{{- end -}}
+{{- if and $obs.logs.enabled (ne $logsEs "") (ne $logsOtlp "") -}}
+{{- fail "observability.logs.esEndpoint and observability.logs.otlpEndpoint are mutually exclusive" -}}
+{{- end -}}
+{{- if and $obs.logs.enabled $useLoki (ne $logsEs "") -}}
+{{- fail "observability.logs.backend=loki cannot be combined with observability.logs.esEndpoint" -}}
+{{- end -}}
+{{- if and $obs.logs.enabled $useElasticsearch (ne $logsOtlp "") -}}
+{{- fail "observability.logs.backend=elasticsearch cannot be combined with observability.logs.otlpEndpoint" -}}
+{{- end -}}
+{{- if and $obs.logs.enabled (eq $logsEs "") (eq $logsOtlp "") -}}
+{{- fail "observability.logs.enabled=true requires observability.logs.esEndpoint or observability.logs.otlpEndpoint when the in-cluster backend is disabled" -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-node-otelcol-config
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-otelcol
+data:
+  otelcol.yaml: |
+    receivers:
+      prometheus/cubelet_resource_metrics:
+        config:
+          scrape_configs:
+            - job_name: cubesandbox-resource
+              scrape_interval: {{ $obs.otelCollector.scrapeInterval | default "15s" | quote }}
+              scrape_timeout: "10s"
+              metrics_path: /v1/metrics/resource
+              static_configs:
+                - targets: [{{ $cubeletMetricsTarget | quote }}]
+                  labels:
+                    cluster: {{ $obs.clusterId | default "cubesandbox" | quote }}
+                    node: "${env:CUBE_NODE_NAME}"
+{{- if $logsEnabled }}
+      filelog/sandbox_stdio:
+        include:
+          - {{ .Values.hostPaths.dataCubelet }}/log/*/stdout
+          - {{ .Values.hostPaths.dataCubelet }}/log/*/stderr
+        start_at: beginning
+        storage: file_storage
+        include_file_path: true
+        operators:
+          - type: regex_parser
+            parse_from: attributes["log.file.path"]
+            regex: '^{{ .Values.hostPaths.dataCubelet }}/log/(?P<cubesandbox_sandbox_id>[^/]+)/(?P<log_iostream>stdout|stderr)$'
+          - type: add
+            field: attributes["cubesandbox.log.source"]
+            value: "sandbox-init"
+          - type: add
+            field: resource["service.name"]
+            value: "cubesandbox-sandbox"
+          - type: add
+            field: resource["host.name"]
+            value: "${env:CUBE_NODE_NAME}"
+          - type: add
+            field: resource["cubesandbox.cluster.id"]
+            value: {{ $obs.clusterId | default "cubesandbox" | quote }}
+          - type: copy
+            from: attributes.cubesandbox_sandbox_id
+            to: resource["cubesandbox.sandbox.id"]
+          - type: copy
+            from: attributes.log_iostream
+            to: attributes["log.iostream"]
+{{- end }}
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+        spike_limit_mib: 64
+      resource/common:
+        attributes:
+          - key: cluster
+            value: {{ $obs.clusterId | default "cubesandbox" | quote }}
+            action: upsert
+          - key: node
+            value: "${env:CUBE_NODE_NAME}"
+            action: upsert
+          - key: host.name
+            value: "${env:CUBE_NODE_NAME}"
+            action: upsert
+{{- if and $logsEnabled (ne $logsEs "") }}
+      transform/es_flat:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil
+              - set(attributes["host_name"], resource.attributes["host.name"]) where resource.attributes["host.name"] != nil
+              - set(attributes["cubesandbox_cluster_id"], resource.attributes["cubesandbox.cluster.id"]) where resource.attributes["cubesandbox.cluster.id"] != nil
+              - set(attributes["cubesandbox_log_source"], attributes["cubesandbox.log.source"]) where attributes["cubesandbox.log.source"] != nil
+              - set(attributes["log_file_path"], attributes["log.file.path"]) where attributes["log.file.path"] != nil
+{{- end }}
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+
+    exporters:
+{{- if ne $metricsRw "" }}
+      prometheus_remote_write:
+        http:
+          endpoint: {{ $metricsRw | quote }}
+{{- if and (ne $metricsAuthSecret "") (or (ne $metricsAuthorizationKey "") (ne $metricsTenantKey "")) }}
+          headers:
+{{- if ne $metricsAuthorizationKey "" }}
+            Authorization: "${env:CUBE_METRICS_AUTHORIZATION}"
+{{- end }}
+{{- if ne $metricsTenantKey "" }}
+            X-Scope-OrgID: "${env:CUBE_METRICS_TENANT_ID}"
+{{- end }}
+{{- end }}
+        wal:
+          directory: /var/lib/otelcol/prom_rw
+        resource_to_telemetry_conversion:
+          enabled: true
+{{- else }}
+      otlp_http/metrics:
+        endpoint: {{ $metricsOtlp | quote }}
+        compression: gzip
+{{- if and (ne $metricsAuthSecret "") (or (ne $metricsAuthorizationKey "") (ne $metricsTenantKey "")) }}
+        headers:
+{{- if ne $metricsAuthorizationKey "" }}
+          Authorization: "${env:CUBE_METRICS_AUTHORIZATION}"
+{{- end }}
+{{- if ne $metricsTenantKey "" }}
+          X-Scope-OrgID: "${env:CUBE_METRICS_TENANT_ID}"
+{{- end }}
+{{- end }}
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          queue_size: 1000
+          block_on_overflow: true
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 0
+{{- end }}
+{{- if $logsEnabled }}
+{{- if ne $logsEs "" }}
+      elasticsearch/logs:
+        endpoints: [{{ $logsEs | quote }}]
+        logs_index: {{ $obs.logs.esIndex | default "cubesandbox-logs" | quote }}
+        mapping:
+          allowed_modes: [raw]
+{{- if and (ne $logsAuthSecret "") (or (ne $logsAuthorizationKey "") (ne $logsTenantKey "")) }}
+        headers:
+{{- if ne $logsAuthorizationKey "" }}
+          Authorization: "${env:CUBE_LOGS_AUTHORIZATION}"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          X-Scope-OrgID: "${env:CUBE_LOGS_TENANT_ID}"
+{{- end }}
+{{- end }}
+        sending_queue:
+          enabled: true
+          num_consumers: 10
+          queue_size: 1000
+          block_on_overflow: true
+          batch:
+            flush_timeout: 2s
+            min_size: 0
+            max_size: 5000000
+            sizer: bytes
+        retry:
+          enabled: true
+          max_retries: 5
+          initial_interval: 100ms
+          max_interval: 1m
+{{- else if ne $logsOtlp "" }}
+      otlp_http/logs:
+        endpoint: {{ $logsOtlp | quote }}
+        compression: gzip
+{{- if and (ne $logsAuthSecret "") (or (ne $logsAuthorizationKey "") (ne $logsTenantKey "")) }}
+        headers:
+{{- if ne $logsAuthorizationKey "" }}
+          Authorization: "${env:CUBE_LOGS_AUTHORIZATION}"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          X-Scope-OrgID: "${env:CUBE_LOGS_TENANT_ID}"
+{{- end }}
+{{- end }}
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          queue_size: 1000
+          block_on_overflow: true
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 0
+{{- end }}
+{{- end }}
+
+    extensions:
+      health_check:
+        endpoint: 127.0.0.1:13133
+      file_storage:
+        directory: /var/lib/otelcol/storage
+        create_directory: true
+
+    service:
+      extensions: [health_check, file_storage]
+      pipelines:
+        metrics:
+          receivers: [prometheus/cubelet_resource_metrics]
+          processors: [memory_limiter, resource/common, batch]
+          exporters: [{{ if ne $metricsRw "" }}prometheus_remote_write{{ else }}otlp_http/metrics{{ end }}]
+{{- if $logsEnabled }}
+        logs:
+          receivers: [filelog/sandbox_stdio]
+          processors: [memory_limiter, resource/common{{ if ne $logsEs "" }}, transform/es_flat{{ end }}, batch]
+          exporters: [{{ if ne $logsEs "" }}elasticsearch/logs{{ else }}otlp_http/logs{{ end }}]
+{{- end }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $fullname }}-node-otelcol
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-otelcol
+spec:
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: node-otelcol
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: node-otelcol
+      annotations:
+        checksum/config: {{ printf "%s-%s-%s" (toJson $obs) .Values.hostPaths.dataCubelet .Chart.Version | sha256sum }}
+{{- if ne $metricsAuthSecret "" }}
+        checksum/metrics-auth-secret: {{ $metricsAuthSecretData | toJson | sha256sum | quote }}
+{{- end }}
+{{- if ne $logsAuthSecret "" }}
+        checksum/logs-auth-secret: {{ $logsAuthSecretData | toJson | sha256sum | quote }}
+{{- end }}
+    spec:
+      serviceAccountName: {{ include "cube.nodeServiceAccountName" . }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.computePlacement" . | nindent 6 }}
+      containers:
+        - name: otelcol
+          image: {{ $obs.otelCollector.image | quote }}
+          imagePullPolicy: {{ $obs.otelCollector.pullPolicy | default "IfNotPresent" }}
+          args: ["--config=/etc/otelcol/otelcol.yaml"]
+          securityContext:
+            runAsUser: 0
+          # hostNetwork: kubelet probes run on the host, so the loopback-only
+          # health_check endpoint is reachable via 127.0.0.1.
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /
+              port: 13133
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          env:
+            - name: CUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+{{- if and (ne $metricsAuthSecret "") (ne $metricsAuthorizationKey "") }}
+            - name: CUBE_METRICS_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $metricsAuthSecret | quote }}
+                  key: {{ $metricsAuthorizationKey | quote }}
+{{- end }}
+{{- if and (ne $metricsAuthSecret "") (ne $metricsTenantKey "") }}
+            - name: CUBE_METRICS_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $metricsAuthSecret | quote }}
+                  key: {{ $metricsTenantKey | quote }}
+{{- end }}
+{{- if and $logsEnabled (ne $logsAuthSecret "") (ne $logsAuthorizationKey "") }}
+            - name: CUBE_LOGS_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $logsAuthSecret | quote }}
+                  key: {{ $logsAuthorizationKey | quote }}
+{{- end }}
+{{- if and $logsEnabled (ne $logsAuthSecret "") (ne $logsTenantKey "") }}
+            - name: CUBE_LOGS_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $logsAuthSecret | quote }}
+                  key: {{ $logsTenantKey | quote }}
+{{- end }}
+          {{- with $obs.otelCollector.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/otelcol
+            {{- if $logsEnabled }}
+            - name: cubelet-logs
+              mountPath: {{ .Values.hostPaths.dataCubelet }}/log
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-node-otelcol-config
+        - name: state
+          hostPath:
+            path: {{ $otelStateHostPath | quote }}
+            type: DirectoryOrCreate
+        {{- if $logsEnabled }}
+        - name: cubelet-logs
+          hostPath:
+            path: {{ .Values.hostPaths.dataCubelet }}/log
+            type: DirectoryOrCreate
+        {{- end }}
+{{- if $componentLogsEnabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $componentOtelConfigName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: component-otelcol
+data:
+  otelcol.yaml: |
+    receivers:
+{{- range $container := $componentLogContainers }}
+      filelog/component_{{ replace "-" "_" $container }}:
+        include:
+          - {{ printf "%s/%s_*_*/%s/*.log" (trimSuffix "/" $componentLogPath) $.Release.Namespace $container | quote }}
+        start_at: end
+        storage: file_storage
+        include_file_path: true
+        operators:
+          - type: container
+            format: containerd
+          - type: add
+            field: resource["service.name"]
+            value: {{ printf "cubesandbox-%s" $container | quote }}
+          - type: add
+            field: resource["cubesandbox.log.source"]
+            value: "component"
+          - type: add
+            field: resource["cubesandbox.component.name"]
+            value: {{ $container | quote }}
+{{- end }}
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+        spike_limit_mib: 64
+      resource/common:
+        attributes:
+          - key: cluster
+            value: {{ $obs.clusterId | default "cubesandbox" | quote }}
+            action: upsert
+          - key: node
+            value: "${env:CUBE_NODE_NAME}"
+            action: upsert
+          - key: host.name
+            value: "${env:CUBE_NODE_NAME}"
+            action: upsert
+          - key: cubesandbox.cluster.id
+            value: {{ $obs.clusterId | default "cubesandbox" | quote }}
+            action: upsert
+{{- if ne $logsEs "" }}
+      transform/es_flat:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil
+              - set(attributes["host_name"], resource.attributes["host.name"]) where resource.attributes["host.name"] != nil
+              - set(attributes["cubesandbox_cluster_id"], resource.attributes["cubesandbox.cluster.id"]) where resource.attributes["cubesandbox.cluster.id"] != nil
+              - set(attributes["cubesandbox_log_source"], resource.attributes["cubesandbox.log.source"]) where resource.attributes["cubesandbox.log.source"] != nil
+              - set(attributes["cubesandbox_component_name"], resource.attributes["cubesandbox.component.name"]) where resource.attributes["cubesandbox.component.name"] != nil
+              - set(attributes["log_file_path"], attributes["log.file.path"]) where attributes["log.file.path"] != nil
+{{- end }}
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+    exporters:
+{{- if ne $logsEs "" }}
+      elasticsearch/logs:
+        endpoints: [{{ $logsEs | quote }}]
+        logs_index: {{ $obs.logs.esIndex | default "cubesandbox-logs" | quote }}
+        mapping:
+          allowed_modes: [raw]
+{{- if and (ne $logsAuthSecret "") (or (ne $logsAuthorizationKey "") (ne $logsTenantKey "")) }}
+        headers:
+{{- if ne $logsAuthorizationKey "" }}
+          Authorization: "${env:CUBE_LOGS_AUTHORIZATION}"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          X-Scope-OrgID: "${env:CUBE_LOGS_TENANT_ID}"
+{{- end }}
+{{- end }}
+        sending_queue:
+          enabled: true
+          num_consumers: 10
+          queue_size: 1000
+          block_on_overflow: true
+          batch:
+            flush_timeout: 2s
+            min_size: 0
+            max_size: 5000000
+            sizer: bytes
+        retry:
+          enabled: true
+          max_retries: 5
+          initial_interval: 100ms
+          max_interval: 1m
+{{- else }}
+      otlp_http/logs:
+        endpoint: {{ $logsOtlp | quote }}
+        compression: gzip
+{{- if and (ne $logsAuthSecret "") (or (ne $logsAuthorizationKey "") (ne $logsTenantKey "")) }}
+        headers:
+{{- if ne $logsAuthorizationKey "" }}
+          Authorization: "${env:CUBE_LOGS_AUTHORIZATION}"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          X-Scope-OrgID: "${env:CUBE_LOGS_TENANT_ID}"
+{{- end }}
+{{- end }}
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          queue_size: 1000
+          block_on_overflow: true
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 0
+{{- end }}
+    extensions:
+      health_check:
+        # Pod network: kubelet probes the Pod IP, not the Pod's loopback.
+        endpoint: ${env:POD_IP}:13133
+      file_storage:
+        directory: /var/lib/otelcol/storage
+        create_directory: true
+    service:
+      extensions: [health_check, file_storage]
+      pipelines:
+{{- range $container := $componentLogContainers }}
+        logs/component_{{ replace "-" "_" $container }}:
+          receivers: [filelog/component_{{ replace "-" "_" $container }}]
+          processors: [memory_limiter, resource/common{{ if ne $logsEs "" }}, transform/es_flat{{ end }}, batch]
+          exporters: [{{ if ne $logsEs "" }}elasticsearch/logs{{ else }}otlp_http/logs{{ end }}]
+{{- end }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $componentOtelName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: component-otelcol
+spec:
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: component-otelcol
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: component-otelcol
+      annotations:
+        checksum/config: {{ printf "%s-%s" (toJson $componentLogs) .Chart.Version | sha256sum | quote }}
+{{- if ne $logsAuthSecret "" }}
+        checksum/logs-auth-secret: {{ $logsAuthSecretData | toJson | sha256sum | quote }}
+{{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $componentLogs.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $componentLogs.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $componentLogs.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: otelcol-components
+          image: {{ $obs.otelCollector.image | quote }}
+          imagePullPolicy: {{ $obs.otelCollector.pullPolicy | default "IfNotPresent" }}
+          args: ["--config=/etc/otelcol/otelcol.yaml"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+{{- if and (ne $logsAuthSecret "") (ne $logsAuthorizationKey "") }}
+            - name: CUBE_LOGS_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $logsAuthSecret | quote }}
+                  key: {{ $logsAuthorizationKey | quote }}
+{{- end }}
+{{- if and (ne $logsAuthSecret "") (ne $logsTenantKey "") }}
+            - name: CUBE_LOGS_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $logsAuthSecret | quote }}
+                  key: {{ $logsTenantKey | quote }}
+{{- end }}
+          {{- with $obs.otelCollector.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/otelcol
+            - name: component-logs
+              mountPath: {{ $componentLogPath | quote }}
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $componentOtelConfigName }}
+        - name: state
+          hostPath:
+            path: {{ printf "%s-components" $otelStateHostPath | quote }}
+            type: DirectoryOrCreate
+        - name: component-logs
+          hostPath:
+            path: {{ $componentLogPath | quote }}
+            type: Directory
+{{- end }}
+{{- if $backendEnabled }}
+{{- if and $promPersistence.enabled (not ($promPersistence.existingClaim | default "")) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $promClaim }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  accessModes:
+    {{- toYaml ($promPersistence.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $promPersistence.size | default "40Gi" | quote }}
+  {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" $promPersistence) -}}
+  {{- if $sc }}
+  storageClassName: {{ $sc | quote }}
+  {{- end }}
+{{- end }}
+{{- if and $deployLoki $lokiPersistence.enabled (not ($lokiPersistence.existingClaim | default "")) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $lokiClaim }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  accessModes:
+    {{- toYaml ($lokiPersistence.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $lokiPersistence.size | default "20Gi" | quote }}
+  {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" $lokiPersistence) -}}
+  {{- if $sc }}
+  storageClassName: {{ $sc | quote }}
+  {{- end }}
+{{- end }}
+{{- if and $deployElasticsearch $esPersistence.enabled (not ($esPersistence.existingClaim | default "")) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $esClaim }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: elasticsearch
+spec:
+  accessModes:
+    {{- toYaml ($esPersistence.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $esPersistence.size | default "40Gi" | quote }}
+  {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" $esPersistence) -}}
+  {{- if $sc }}
+  storageClassName: {{ $sc | quote }}
+  {{- end }}
+{{- end }}
+{{- if and $grafanaPersistence.enabled (not ($grafanaPersistence.existingClaim | default "")) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $grafanaClaim }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  accessModes:
+    {{- toYaml ($grafanaPersistence.accessModes | default (list "ReadWriteOnce")) | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $grafanaPersistence.size | default "5Gi" | quote }}
+  {{- $sc := include "cube.persistenceStorageClassName" (dict "root" . "component" $grafanaPersistence) -}}
+  {{- if $sc }}
+  storageClassName: {{ $sc | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-prometheus-config
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    otlp:
+      translation_strategy: UnderscoreEscapingWithSuffixes
+      promote_resource_attributes:
+        - cluster
+        - node
+        - cubesandbox.cluster.id
+        - host.name
+        - service.name
+        - service.instance.id
+    scrape_configs: []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-prometheus
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: prometheus
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: prometheus
+    spec:
+      securityContext:
+        fsGroup: 65534
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: prometheus
+          image: {{ $obs.backend.prometheus.image | quote }}
+          imagePullPolicy: {{ $obs.backend.prometheus.pullPolicy | default "IfNotPresent" }}
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - {{ printf "--storage.tsdb.retention.time=%s" ($obs.backend.prometheus.retention | default "15d") | quote }}
+            - {{ printf "--web.listen-address=0.0.0.0:%d" $promPort | quote }}
+            - "--web.enable-lifecycle"
+            - "--web.enable-remote-write-receiver"
+            - "--web.enable-otlp-receiver"
+          ports:
+            - name: http
+              containerPort: {{ $promPort }}
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-prometheus-config
+        - name: data
+{{- if $promPersistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $promClaim }}
+{{- else }}
+          emptyDir: {}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-prometheus
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+  ports:
+    - name: http
+      port: {{ $promPort }}
+      targetPort: {{ $promPort }}
+{{- if $deployLoki }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-loki-config
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_address: 0.0.0.0
+      http_listen_port: {{ $lokiPort }}
+      grpc_listen_address: 127.0.0.1
+      grpc_listen_port: 9096
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /var/lib/loki
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: cubesandbox_
+            period: 24h
+    storage_config:
+      filesystem:
+        directory: /var/lib/loki/chunks
+    compactor:
+      working_directory: /var/lib/loki/compactor
+      retention_enabled: true
+      delete_request_store: filesystem
+    limits_config:
+      allow_structured_metadata: true
+      retention_period: {{ $obs.backend.loki.retention | default "15d" }}
+      otlp_config:
+        resource_attributes:
+          ignore_defaults: true
+          attributes_config:
+            - action: index_label
+              attributes:
+                - service.name
+                - cubesandbox.cluster.id
+                - host.name
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-loki
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: loki
+  template:
+    metadata:
+      annotations:
+        checksum/loki-config: {{ printf "%s-%s" (toJson $obs.backend.loki) .Chart.Version | sha256sum | quote }}
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: loki
+    spec:
+      securityContext:
+        fsGroup: 10001
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: loki
+          image: {{ $obs.backend.loki.image | quote }}
+          imagePullPolicy: {{ $obs.backend.loki.pullPolicy | default "IfNotPresent" }}
+          args:
+            - "-config.file=/etc/loki/loki.yaml"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          ports:
+            - name: http
+              containerPort: {{ $lokiPort }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/loki
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-loki-config
+        - name: data
+{{- if $lokiPersistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $lokiClaim }}
+{{- else }}
+          emptyDir: {}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-loki
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+  ports:
+    - name: http
+      port: {{ $lokiPort }}
+      targetPort: {{ $lokiPort }}
+{{- else if $deployElasticsearch }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-elasticsearch
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: elasticsearch
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: elasticsearch
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: elasticsearch
+    spec:
+      securityContext:
+        fsGroup: 1000
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: elasticsearch
+          image: {{ $obs.backend.elasticsearch.image | quote }}
+          imagePullPolicy: {{ $obs.backend.elasticsearch.pullPolicy | default "IfNotPresent" }}
+          # Avoid a privileged node-level vm.max_map_count mutation. This is
+          # suitable for the bundled single-node backend; use a managed ES
+          # cluster for production-scale workloads.
+          args: ["-Enode.store.allow_mmap=false"]
+          env:
+            - name: discovery.type
+              value: "single-node"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: http.port
+              value: {{ $esPort | quote }}
+            - name: ES_JAVA_OPTS
+              value: {{ $obs.backend.elasticsearch.javaOpts | default "-Xms1g -Xmx1g" | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $esPort }}
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?wait_for_status=yellow&timeout=1s
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: data
+{{- if $esPersistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $esClaim }}
+{{- else }}
+          emptyDir: {}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-elasticsearch
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: elasticsearch
+spec:
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: elasticsearch
+  ports:
+    - name: http
+      port: {{ $esPort }}
+      targetPort: {{ $esPort }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-grafana-provisioning
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: cubesandbox-prometheus
+        type: prometheus
+        access: proxy
+        url: {{ $promSvcUrl | quote }}
+        isDefault: true
+        editable: true
+{{- if and (ne $metricsAuthSecret "") (or (ne $metricsAuthorizationKey "") (ne $metricsTenantKey "")) }}
+        jsonData:
+{{- if ne $metricsAuthorizationKey "" }}
+          httpHeaderName1: "Authorization"
+{{- end }}
+{{- if ne $metricsTenantKey "" }}
+          {{ printf "httpHeaderName%d" $metricsTenantSlot }}: "X-Scope-OrgID"
+{{- end }}
+        secureJsonData:
+{{- if ne $metricsAuthorizationKey "" }}
+          httpHeaderValue1: "$CUBE_METRICS_AUTHORIZATION"
+{{- end }}
+{{- if ne $metricsTenantKey "" }}
+          {{ printf "httpHeaderValue%d" $metricsTenantSlot }}: "$CUBE_METRICS_TENANT_ID"
+{{- end }}
+{{- end }}
+{{- if $obs.logs.enabled }}
+{{- if $useLoki }}
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: {{ $lokiQueryUrl | quote }}
+        isDefault: false
+        editable: true
+        jsonData:
+          derivedFields: []
+{{- if and (ne $logsAuthSecret "") (or (ne $logsAuthorizationKey "") (ne $logsTenantKey "")) }}
+{{- if ne $logsAuthorizationKey "" }}
+          httpHeaderName1: "Authorization"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          {{ printf "httpHeaderName%d" $logsTenantSlot }}: "X-Scope-OrgID"
+{{- end }}
+        secureJsonData:
+{{- if ne $logsAuthorizationKey "" }}
+          httpHeaderValue1: "$CUBE_LOGS_AUTHORIZATION"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          {{ printf "httpHeaderValue%d" $logsTenantSlot }}: "$CUBE_LOGS_TENANT_ID"
+{{- end }}
+{{- end }}
+{{- else }}
+      - name: Elasticsearch
+        uid: elasticsearch
+        type: elasticsearch
+        access: proxy
+        url: {{ $logsEs | quote }}
+        database: {{ printf "%s*" ($obs.logs.esIndex | default "cubesandbox-logs") | quote }}
+        isDefault: false
+        editable: true
+        jsonData:
+          timeField: "@timestamp"
+          esVersion: "8.0.0"
+          logMessageField: "Body"
+          logLevelField: "SeverityText"
+{{- if and (ne $logsAuthSecret "") (or (ne $logsAuthorizationKey "") (ne $logsTenantKey "")) }}
+{{- if ne $logsAuthorizationKey "" }}
+          httpHeaderName1: "Authorization"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          {{ printf "httpHeaderName%d" $logsTenantSlot }}: "X-Scope-OrgID"
+{{- end }}
+        secureJsonData:
+{{- if ne $logsAuthorizationKey "" }}
+          httpHeaderValue1: "$CUBE_LOGS_AUTHORIZATION"
+{{- end }}
+{{- if ne $logsTenantKey "" }}
+          {{ printf "httpHeaderValue%d" $logsTenantSlot }}: "$CUBE_LOGS_TENANT_ID"
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: CubeSandbox
+        orgId: 1
+        folder: CubeSandbox
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-grafana-dashboards
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+{{- range $dashboard := list "cubesandbox-cluster" "cubesandbox-node" "cubesandbox-sandbox" }}
+  {{ $dashboard }}.json: |-
+{{ $.Files.Get (printf "files/cube-observability/grafana/dashboards/%s.json" $dashboard) | indent 4 }}
+{{- end }}
+{{- if $obs.logs.enabled }}
+  cubesandbox-logs.json: |-
+{{- if $useLoki }}
+{{ .Files.Get "files/cube-observability/grafana/dashboards/cubesandbox-logs.json" | indent 4 }}
+{{- else }}
+{{ .Files.Get "files/cube-observability/grafana/dashboards/cubesandbox-logs-elasticsearch.json" | indent 4 }}
+{{- end }}
+{{- end }}
+{{- if eq $grafanaSecret "" }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $grafanaGeneratedSecretName }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana-admin
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  {{- toYaml $grafanaSecretData | nindent 2 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-grafana
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: grafana
+  template:
+    metadata:
+      annotations:
+        checksum/observability-grafana-config: {{ printf "%s\n%s" (toJson $obs) ((.Files.Glob "files/cube-observability/grafana/dashboards/*.json").AsConfig) | sha256sum | quote }}
+{{- if ne $metricsAuthSecret "" }}
+        checksum/metrics-auth-secret: {{ $metricsAuthSecretData | toJson | sha256sum | quote }}
+{{- end }}
+{{- if ne $logsAuthSecret "" }}
+        checksum/logs-auth-secret: {{ $logsAuthSecretData | toJson | sha256sum | quote }}
+{{- end }}
+        checksum/grafana-admin-secret: {{ $grafanaSecretData | toJson | sha256sum | quote }}
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: grafana
+    spec:
+      securityContext:
+        fsGroup: 472
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: grafana
+          image: {{ $obs.backend.grafana.image | quote }}
+          imagePullPolicy: {{ $obs.backend.grafana.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: GF_SERVER_HTTP_PORT
+              value: {{ $grafPort | quote }}
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ ternary $grafanaSecret $grafanaGeneratedSecretName (ne $grafanaSecret "") | quote }}
+                  key: {{ ternary ($obs.backend.grafana.adminUserKey | default "admin-user") "admin-user" (ne $grafanaSecret "") | quote }}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ ternary $grafanaSecret $grafanaGeneratedSecretName (ne $grafanaSecret "") | quote }}
+                  key: {{ ternary ($obs.backend.grafana.adminPasswordKey | default "admin-password") "admin-password" (ne $grafanaSecret "") | quote }}
+{{- if and (ne $metricsAuthSecret "") (ne $metricsAuthorizationKey "") }}
+            - name: CUBE_METRICS_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $metricsAuthSecret | quote }}
+                  key: {{ $metricsAuthorizationKey | quote }}
+{{- end }}
+{{- if and (ne $metricsAuthSecret "") (ne $metricsTenantKey "") }}
+            - name: CUBE_METRICS_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $metricsAuthSecret | quote }}
+                  key: {{ $metricsTenantKey | quote }}
+{{- end }}
+{{- if and $obs.logs.enabled (ne $logsAuthSecret "") (ne $logsAuthorizationKey "") }}
+            - name: CUBE_LOGS_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $logsAuthSecret | quote }}
+                  key: {{ $logsAuthorizationKey | quote }}
+{{- end }}
+{{- if and $obs.logs.enabled (ne $logsAuthSecret "") (ne $logsTenantKey "") }}
+            - name: CUBE_LOGS_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $logsAuthSecret | quote }}
+                  key: {{ $logsTenantKey | quote }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $grafPort }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        - name: datasources
+          configMap:
+            name: {{ $fullname }}-grafana-provisioning
+        - name: dashboard-provider
+          configMap:
+            name: {{ $fullname }}-grafana-provisioning
+        - name: data
+{{- if $grafanaPersistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $grafanaClaim }}
+{{- else }}
+          emptyDir: {}
+{{- end }}
+        - name: dashboards
+          configMap:
+            name: {{ $fullname }}-grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-grafana
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  type: {{ $obs.backend.grafana.serviceType | default "ClusterIP" }}
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+  ports:
+    - name: http
+      port: {{ $grafPort }}
+      targetPort: {{ $grafPort }}
+{{- end }}
+{{- end }}

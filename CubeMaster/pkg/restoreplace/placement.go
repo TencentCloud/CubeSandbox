@@ -26,6 +26,21 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// Kind selects the restore semantics. It changes which candidates are
+// eligible, never whether a snapshot may leave its origin: both kinds obey the
+// same backend / remote_status rule.
+type Kind int
+
+const (
+	// MemoryRestore restores guest memory. Cross-node candidates must match
+	// the origin CPU and host kernel.
+	MemoryRestore Kind = iota
+	// FilesystemColdBoot boots a new guest from the snapshot rootfs. There is
+	// no memory ABI to match, so any healthy node in scope with the package may
+	// be chosen.
+	FilesystemColdBoot
+)
+
 // Input is the snapshot／pause-snap identity needed to run §3.1.
 type Input struct {
 	SnapshotID          string
@@ -40,6 +55,9 @@ type Input struct {
 	// PinToOrigin forbids cross-node restore even when the snapshot is S3
 	// remote_ready (e.g. host-mount is bound to the origin host path).
 	PinToOrigin bool
+	// Kind is MemoryRestore for pause/rollback/from-full-snapshot and
+	// FilesystemColdBoot for a create from a filesystem-only snapshot.
+	Kind Kind
 }
 
 // Placement is the chosen host. CrossNode is true only after origin failed
@@ -58,7 +76,9 @@ type compatibleCandidate struct {
 var (
 	lookupNodeFn              = defaultLookupNode
 	selectNodeFn              = defaultSelectNode
+	selectPinnedFn            = scheduler.SelectPinned
 	listCompatibleFn          = defaultListCompatible
+	listColdBootFn            = defaultListColdBootCandidates
 	queryHostFactCandidatesFn = nodemeta.QueryHostFactCandidates
 )
 
@@ -73,10 +93,10 @@ func crossNodeBlockedReason(in Input) string {
 	return ""
 }
 
-// CanCrossNode is §3.1 steps 1–3: only S3 snapshots whose sync finished
-// (remote_status=ready) may leave the origin.
+// CanCrossNode is §3.1 steps 1–3: only s3 / jfs snapshots whose sync
+// finished (remote_status=ready) may leave the origin.
 func CanCrossNode(backend, remoteStatus string) bool {
-	if !constants.IsS3Backend(backend) {
+	if !constants.IsRemoteTrackedBackend(backend) {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(remoteStatus), constants.RemoteStatusReady)
@@ -108,15 +128,24 @@ func Decide(ctx context.Context, in Input) (*Placement, error) {
 			originDesc, strings.TrimSpace(in.SnapshotID), reason)
 	}
 
-	facts := parseOriginHostFacts(in.OriginHostFactsJSON)
-	if facts == nil || strings.TrimSpace(facts.CPUIDHash) == "" || strings.TrimSpace(facts.HostKernelRelease) == "" {
-		return nil, fmt.Errorf("cannot cross-node restore %s: origin cpuid_hash/host_kernel_release unknown",
-			strings.TrimSpace(in.SnapshotID))
-	}
-
-	candidates, err := listCompatibleFn(ctx, facts)
-	if err != nil {
-		return nil, fmt.Errorf("list compatible nodes for %s: %w", strings.TrimSpace(in.SnapshotID), err)
+	var candidates []compatibleCandidate
+	var err error
+	if in.Kind == FilesystemColdBoot {
+		// No guest memory to match; the target needs the package only.
+		candidates, err = listColdBootFn(ctx, in.InstanceType)
+		if err != nil {
+			return nil, fmt.Errorf("list cold-boot nodes for %s: %w", strings.TrimSpace(in.SnapshotID), err)
+		}
+	} else {
+		facts := parseOriginHostFacts(in.OriginHostFactsJSON)
+		if facts == nil || strings.TrimSpace(facts.CPUIDHash) == "" || strings.TrimSpace(facts.HostKernelRelease) == "" {
+			return nil, fmt.Errorf("cannot cross-node restore %s: origin cpuid_hash/host_kernel_release unknown",
+				strings.TrimSpace(in.SnapshotID))
+		}
+		candidates, err = listCompatibleFn(ctx, facts)
+		if err != nil {
+			return nil, fmt.Errorf("list compatible nodes for %s: %w", strings.TrimSpace(in.SnapshotID), err)
+		}
 	}
 
 	excludeID := ""
@@ -154,6 +183,10 @@ func Decide(ctx context.Context, in Input) (*Placement, error) {
 		}
 	}
 	if len(scope) == 0 {
+		if in.Kind == FilesystemColdBoot {
+			return nil, fmt.Errorf("no healthy node for cross-node cold boot of %s",
+				strings.TrimSpace(in.SnapshotID))
+		}
 		return nil, fmt.Errorf("no compatible node for cross-node restore of %s (cpuid_hash/kernel match)",
 			strings.TrimSpace(in.SnapshotID))
 	}
@@ -185,7 +218,8 @@ func originSchedulable(ctx context.Context, origin *node.Node, in Input) bool {
 	if ip := strings.TrimSpace(origin.HostIP()); ip != "" {
 		scope = append(scope, ip)
 	}
-	selected, err := selectNodeFn(ctx, in.InstanceType, cloneReqResForOrigin(in.ReqRes, scope), scope)
+	sel := newSelector(ctx, in.InstanceType, cloneReqResForOrigin(in.ReqRes, scope))
+	selected, err := selectPinnedFn(sel, node.NodeList{origin})
 	if err != nil || selected == nil {
 		return false
 	}
@@ -246,7 +280,7 @@ func defaultLookupNode(nodeID, nodeIP string) *node.Node {
 	return nil
 }
 
-func defaultSelectNode(ctx context.Context, instanceType string, reqRes *selctx.RequestResource, _ []string) (*node.Node, error) {
+func newSelector(ctx context.Context, instanceType string, reqRes *selctx.RequestResource) *selctx.SelectorCtx {
 	name := "random"
 	if cfg := config.GetConfig(); cfg != nil && cfg.Scheduler != nil {
 		name = cfg.Scheduler.LeastSelectName
@@ -268,7 +302,11 @@ func defaultSelectNode(ctx context.Context, instanceType string, reqRes *selctx.
 			sel.Affinity.NodePrefererd = np
 		}
 	}
-	return scheduler.Select(sel)
+	return sel
+}
+
+func defaultSelectNode(ctx context.Context, instanceType string, reqRes *selctx.RequestResource, _ []string) (*node.Node, error) {
+	return scheduler.Select(newSelector(ctx, instanceType, reqRes))
 }
 
 func defaultListCompatible(ctx context.Context, origin *nodemeta.HostFacts) ([]compatibleCandidate, error) {
@@ -285,6 +323,18 @@ func defaultListCompatible(ctx context.Context, origin *nodemeta.HostFacts) ([]c
 			continue
 		}
 		out = append(out, compatibleCandidate{NodeID: row.NodeID, NodeIP: row.HostIP})
+	}
+	return out, nil
+}
+
+func defaultListColdBootCandidates(_ context.Context, instanceType string) ([]compatibleCandidate, error) {
+	nodes := localcache.GetHealthyNodesByInstanceType(-1, instanceType)
+	out := make([]compatibleCandidate, 0, nodes.Len())
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		out = append(out, compatibleCandidate{NodeID: n.ID(), NodeIP: n.HostIP()})
 	}
 	return out, nil
 }

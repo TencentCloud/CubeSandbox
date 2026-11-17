@@ -50,6 +50,9 @@ type HostFacts struct {
 	KVMModuleFingerprint  string `json:"kvm_module_fingerprint,omitempty"`
 	KVMModuleTaint        string `json:"kvm_module_taint,omitempty"`
 	KVMModuleScanned      bool   `json:"kvm_module_scanned,omitempty"`
+	// Physical machine capacity, distinct from the quota-carrying Capacity.
+	CPUCount   int64 `json:"cpu_count,omitempty"`
+	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
 }
 
 type RegisterNodeRequest struct {
@@ -66,9 +69,20 @@ type RegisterNodeRequest struct {
 	QuotaMemMB          int64              `json:"quota_mem_mb,omitempty"`
 	CreateConcurrentNum int64              `json:"create_concurrent_num,omitempty"`
 	MaxMvmNum           int64              `json:"max_mvm_num,omitempty"`
+	PausedReleaseRatio  *float64           `json:"paused_release_ratio,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`
 	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
+}
+
+// QuotaReport is the node's effective quota, reported on register and heartbeat.
+type QuotaReport struct {
+	MilliCPU            int64 `json:"milli_cpu"`
+	MemMB               int64 `json:"mem_mb"`
+	MaxMvmNum           int64 `json:"max_mvm_num"`
+	CreateConcurrentNum int64 `json:"create_concurrent_num"`
+	// PausedReleaseRatio mirrors the dynamicconf value (nil = wire compat only).
+	PausedReleaseRatio *float64 `json:"paused_release_ratio,omitempty"`
 }
 
 type UpdateNodeStatusRequest struct {
@@ -81,6 +95,9 @@ type UpdateNodeStatusRequest struct {
 	Allocated  *AllocatedResources `json:"allocated,omitempty"`
 	DiskUsage  *DiskUsage          `json:"disk_usage,omitempty"`
 	MetricTime time.Time           `json:"metric_time,omitempty"`
+
+	// Quota is the current effective quota; nil = not reported.
+	Quota *QuotaReport `json:"quota,omitempty"`
 
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	InventoryIncomplete bool               `json:"inventory_incomplete,omitempty"`

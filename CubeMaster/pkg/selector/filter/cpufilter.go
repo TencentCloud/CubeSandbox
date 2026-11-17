@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
 )
 
+// cpuFilter rejects nodes with insufficient CPU quota or excessive CPU utilization.
 type cpuFilter struct {
 }
 
@@ -38,27 +39,27 @@ func (l *cpuFilter) Select(selCtx *selctx.SelectorCtx) (node.NodeList, error) {
 
 	inList := selCtx.Nodes()
 	nodes := make(node.NodeList, 0, inList.Len())
+	rejects := newRejectLog(selCtx)
 	for i := range inList {
 
 		quotaCpuFree := inList[i].QuotaCpu -
 			sconf.EffectiveAllocated(inList[i].QuotaCpuUsage)
 		if quotaCpuFree <= cpuq.MilliValue() {
-			log.G(selCtx.Ctx).Warnf("%v select:%v, quotaCpuFree:%v, cpuq:%v",
+			rejects.warnf("%v select:%v, quotaCpuFree:%v, cpuq:%v",
 				l.ID(), inList[i].ID(), quotaCpuFree, cpuq.MilliValue())
 			continue
 		}
 
 		if inList[i].CpuUtil >= sconf.NodeMaxCpuUtil {
-			log.G(selCtx.Ctx).Warnf("%v select:%v, CpuUtil:%v, NodeMaxCpuUsage:%v",
+			rejects.warnf("%v select:%v, CpuUtil:%v, NodeMaxCpuUsage:%v",
 				l.ID(), inList[i].ID(), inList[i].CpuUtil, sconf.NodeMaxCpuUtil)
 			continue
 		}
 		nodes.Append(inList[i])
 	}
+	rejects.flush(l.ID())
 	if log.IsDebug() {
 		log.G(selCtx.Ctx).Debugf("%v select:%v", l.ID(), nodes.String())
-	} else {
-		log.G(selCtx.Ctx).Infof("%v select_size:%v", l.ID(), nodes.Len())
 	}
 	return nodes, nil
 }

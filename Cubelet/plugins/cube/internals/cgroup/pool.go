@@ -45,6 +45,20 @@ type cgPool struct {
 	poolV2 cgPoolV2
 
 	individualGroups map[string]struct{}
+
+	// Return-time baseline state: pendingSet holds cleaned slots awaiting
+	// their baseline read (invisible to the allocator until then);
+	// baselineCache holds idle-slot counters, popped at assignment.
+	pendingSet      map[uint32]struct{}
+	baselineCache   map[uint32]handle.UsageSnapshot
+	queue           *idQueue
+	stopCh          chan struct{}
+	stopOnce        sync.Once
+	workers         int
+	triggerInterval time.Duration
+	// Injected closure; the dynamic config watcher can flip the value at
+	// runtime.
+	reparentFileEnabled func() bool
 }
 
 func (p *cgPool) addIndividualCgroup(group ...string) {
@@ -77,7 +91,9 @@ func (p *cgPool) createCgroup(ctx context.Context, fullCgID uint32) error {
 		return fmt.Errorf("create cgroup %s error: %w", group, err)
 	}
 
-	l.setupMemoryReparentFile(ctx, fullCgID, l.config.ShouldSetMemoryReparentFile())
+	// Best effort: a disabled config still writes 0 to any existing
+	// reparent file; failures do not fail creation.
+	_ = setupMemoryReparentFile(ctx, fullCgID, p.reparentFileEnabled())
 
 	return nil
 }
@@ -88,10 +104,21 @@ func (p *cgPool) init() error {
 	if err != nil {
 		return fmt.Errorf("recover cg data from db: %w", err)
 	}
+	inUse := make(map[uint32]struct{}, len(allUse))
 
 	p.mutex.Lock()
 	p.dirtySet = make(map[uint32]struct{})
 	p.individualGroups = make(map[string]struct{})
+	p.pendingSet = make(map[uint32]struct{})
+	p.baselineCache = make(map[uint32]handle.UsageSnapshot)
+	p.queue = newIDQueue()
+	p.stopCh = make(chan struct{})
+	if p.workers < 1 {
+		p.workers = 1
+	}
+	if p.triggerInterval <= 0 {
+		p.triggerInterval = time.Duration(defaultPoolTriggerIntervalInMs) * time.Millisecond
+	}
 	err = p.initPoolV1()
 	if err != nil {
 		p.mutex.Unlock()
@@ -108,6 +135,7 @@ func (p *cgPool) init() error {
 		if err != nil {
 			continue
 		}
+		inUse[uint32(inuseCgIdInt)] = struct{}{}
 		if inuseCgIdInt < CgPoolV1IdLimit {
 			p.poolV1.initialAssign(uint32(inuseCgIdInt))
 		} else {
@@ -126,6 +154,9 @@ func (p *cgPool) init() error {
 	if err != nil {
 		return fmt.Errorf("init pool v2 late failed: %w", err)
 	}
+
+	p.sweepBaselines(inUse)
+	p.start()
 	return nil
 }
 
@@ -149,7 +180,7 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 		if err := p.createCgroup(ctx, uint32(cgId)); err != nil {
 			log.G(ctx).Errorf("cgroup pool v1 init: %v", err)
 		} else {
-			l.setupMemoryReparentFile(ctx, uint32(cgId), l.config.ShouldSetMemoryReparentFile())
+			_ = setupMemoryReparentFile(ctx, uint32(cgId), p.reparentFileEnabled())
 		}
 	}
 
@@ -201,7 +232,7 @@ func (p *cgPool) initPoolV2Late() error {
 			if err := p.createCgroup(ctx, fullCgID); err != nil {
 				log.G(ctx).Errorf("cgroup pool v2 init: create fullCgID: %d failed: %v", fullCgID, err)
 			} else {
-				l.setupMemoryReparentFile(ctx, fullCgID, l.config.ShouldSetMemoryReparentFile())
+				_ = setupMemoryReparentFile(ctx, fullCgID, p.reparentFileEnabled())
 			}
 
 		}
@@ -240,6 +271,8 @@ func IsPoolV2ID(fullCgID uint32) bool {
 	return fullCgID >= CgPoolV1IdLimit
 }
 
+// Put cleans a returned cgroup synchronously, then defers its release until
+// the background baseline read completes.
 func (p *cgPool) Put(ctx context.Context, fullCgID uint32) {
 	group := MakeCgroupPathByID(fullCgID)
 	var err error
@@ -248,16 +281,19 @@ func (p *cgPool) Put(ctx context.Context, fullCgID uint32) {
 	} else {
 		err = p.poolV1Handle.CleanForReuse(ctx, group)
 	}
+
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
 	if err == nil {
-		p.allocatorReleaseCgroup(fullCgID)
 		delete(p.dirtySet, fullCgID)
+		p.pendingSet[fullCgID] = struct{}{}
 	} else {
-
 		p.dirtySet[fullCgID] = struct{}{}
 		log.G(ctx).Errorf("failed to clean cgroup %v for reuse: %w", MakeCgroupPathByID(fullCgID), err)
+	}
+	p.mutex.Unlock()
+
+	if err == nil {
+		p.queue.push(fullCgID)
 	}
 }
 
@@ -451,7 +487,7 @@ func setupAllCgroupsMemoryReparentFile(ctx context.Context, set bool) error {
 	errcnt := 0
 	succCnt := 0
 	for _, fullCgID := range allCgIds {
-		err := l.setupMemoryReparentFile(ctx, fullCgID, set)
+		err := setupMemoryReparentFile(ctx, fullCgID, set)
 		if err != nil {
 			errcnt++
 			log.G(ctx).Errorf("failed to setup memory.reparent_file for cgroup %d: %v", fullCgID, err)

@@ -1,0 +1,15 @@
+{{/* Chart-managed ConfigMap for trustedCACerts.certs (inline path only:
+     an operator-managed existingConfigMap is referenced, not rendered). */}}
+{{- if and .Values.trustedCACerts.enabled .Values.controlPlane.enabled .Values.trustedCACerts.certs (not .Values.trustedCACerts.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cube.trustedCaConfigMapName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+data:
+  {{- range $i, $pem := .Values.trustedCACerts.certs }}
+  ca-{{ $i }}.crt: |
+    {{- $pem | nindent 4 }}
+  {{- end }}
+{{- end }}

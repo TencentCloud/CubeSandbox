@@ -37,7 +37,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-> Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot.md). Omit the flag to keep the historical `xfs` path.
+> Pass `--backend s3` to store the template (and every sandbox / snapshot derived from it) on the cluster-shared S3 CoW backend. That is required for [cross-node Pause / Resume / FromSnap](../cross-node-snapshot/requirements.md). Omit the flag to keep the historical `xfs` path.
 
 Template creation can expose multiple ports, use a custom probe path, and pass environment variables:
 
@@ -51,6 +51,17 @@ cubemastercli tpl create-from-image \
   --probe-path /health \
   --env        MY_ENV=production
 ```
+
+`--user` sets the container user for the template build and for sandboxes created from that template. The value is `uid`, `uid:gid`, `username`, or `username:gid`. The group must be a number. Omit `--user` to keep the default root user.
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --user      1000:1000
+```
+
+The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
 
 ## Step 3 — Monitor Progress
 
@@ -194,9 +205,14 @@ cubemastercli tpl delete tpl-748094d2f2374b0a8a37e6ec
 
 # Delete multiple templates in one command
 cubemastercli tpl delete tpl-first tpl-second tpl-third
+
+# Clear stuck build work before deleting
+cubemastercli tpl delete --force tpl-748094d2f2374b0a8a37e6ec
 ```
 
 When multiple template IDs are provided, the CLI attempts every deletion even if one fails, then returns a combined error for the failed templates.
+
+`--force` clears a stuck build job or definition build so deletion can proceed. It does **not** override the in-use check: the backend rejects deletion, even with `--force`, while a live sandbox still depends on the template.
 
 On success:
 
@@ -205,8 +221,7 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 ```
 
 > ⚠️ Deletion removes both the template metadata and all node-local artifact
-> replicas.  Any sandboxes already running from this template are **not**
-> affected, but new sandboxes can no longer be created from it.
+> replicas. Once deleted, new sandboxes can no longer be created from it.
 
 
 ## Troubleshooting

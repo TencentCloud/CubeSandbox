@@ -5,11 +5,13 @@
 package cubebox
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -178,4 +180,91 @@ func TestMergeThinNetworkFieldsOntoPackedPauseSpec(t *testing.T) {
 	assert.Equal(t, "tap", packed.NetworkType)
 	assert.Equal(t, "cube", packed.RuntimeHandler)
 	assert.Equal(t, []int64{8080}, packed.ExposedPorts)
+}
+
+// Resume rebuilds a sandbox from the packed spec alone, so a restart policy
+// missing from the package silently disarms the restart manager. The CubeBox
+// row keeps the policy only in OriginalRequest; the package must copy it.
+func TestBuildPauseSandboxSpecPacksRestartPolicy(t *testing.T) {
+	sb := &cubeboxstore.CubeBox{
+		Metadata: cubeboxstore.Metadata{
+			ID:        "sb-1",
+			SandboxID: "sb-1",
+		},
+	}
+	require.NoError(t, sb.SetOriginalRequest(&cubebox.RunCubeSandboxRequest{
+		RequestID:     "req-original",
+		RestartPolicy: restartpolicy.OnFailure,
+		RestartBackoff: &cubebox.RestartBackoffConfig{
+			InitialIntervalSecond: 1,
+			Multiplier:            1,
+			MaxRestarts:           2,
+		},
+	}))
+
+	got := buildPauseSandboxSpec(sb, "req-pause")
+	require.NotNil(t, got)
+	assert.Equal(t, restartpolicy.OnFailure, got.GetRestartPolicy())
+	require.NotNil(t, got.GetRestartBackoff())
+	assert.Equal(t, int32(1), got.GetRestartBackoff().GetInitialIntervalSecond())
+	assert.Equal(t, int32(2), got.GetRestartBackoff().GetMaxRestarts())
+
+	// The package is serialized to sandbox_spec.json; both fields must survive
+	// that round trip, not just the in-memory struct.
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	var decoded cubebox.RunCubeSandboxRequest
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, restartpolicy.OnFailure, decoded.GetRestartPolicy())
+	require.NotNil(t, decoded.GetRestartBackoff())
+	assert.Equal(t, int32(2), decoded.GetRestartBackoff().GetMaxRestarts())
+}
+
+func TestBuildPauseSandboxSpecWithoutRestartPolicy(t *testing.T) {
+	sb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb-2"}}
+	got := buildPauseSandboxSpec(sb, "req-pause")
+	require.NotNil(t, got)
+	assert.Empty(t, got.GetRestartPolicy())
+	assert.Nil(t, got.GetRestartBackoff())
+}
+
+// The pause package is assembled from the saved ContainerConfig, so a probe
+// that makeContainerConfigToSave keeps must reach sandbox_spec.json unchanged.
+func TestBuildPauseSandboxSpecKeepsContainerLivenessProbe(t *testing.T) {
+	probe := &cubebox.LivenessProbe{
+		ProbeHandler: &cubebox.ProbeHandler{
+			HttpGet: &cubebox.HTTPGetAction{Port: 8080},
+		},
+		InitialDelaySecond: 30,
+		PeriodSecond:       10,
+		ProbeTimeoutSecond: 1,
+		FailureThreshold:   3,
+	}
+	sb := &cubeboxstore.CubeBox{
+		Metadata:           cubeboxstore.Metadata{ID: "sb-1", SandboxID: "sb-1"},
+		FirstContainerName: "c1",
+		ContainersMap: &cubeboxstore.ContainersMap{
+			ContainerMap: map[string]*cubeboxstore.Container{
+				"c1": {
+					Metadata: cubeboxstore.Metadata{
+						ID:   "c1",
+						Name: "main",
+						Config: &cubebox.ContainerConfig{
+							Id:            "c1",
+							Name:          "main",
+							LivenessProbe: probe,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got := buildPauseSandboxSpec(sb, "req-pause")
+	require.Len(t, got.GetContainers(), 1)
+	saved := got.GetContainers()[0].GetLivenessProbe()
+	require.NotNil(t, saved)
+	assert.Equal(t, int32(8080), saved.GetProbeHandler().GetHttpGet().GetPort())
+	assert.Equal(t, int32(30), saved.GetInitialDelaySecond())
+	assert.Equal(t, int32(3), saved.GetFailureThreshold())
 }

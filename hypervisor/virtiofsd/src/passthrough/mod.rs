@@ -12,6 +12,9 @@ pub mod stat;
 pub mod util;
 pub mod xattrmap;
 
+#[cfg(test)]
+mod tests;
+
 use super::fs_cache_req_handler::FsCacheReqHandler;
 use crate::filesystem::{
     Context, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
@@ -2443,26 +2446,13 @@ impl FileSystem for PassthroughFs {
 
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
 
-        let res = if is_safe_inode(data.mode) {
-            // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
-            // need to get a new fd.
-            let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        // fgetxattr cannot use O_PATH descriptors. Read through procfs instead of
+        // reopening the inode: an extra open/close can undo O_TRUNC on s3fs.
+        let file = data.get_file()?;
+        let procname = CString::new(format!("{}", file.as_raw_fd()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            // Safe because this will only modify the contents of `buf`.
-            unsafe {
-                libc::fgetxattr(
-                    file.as_raw_fd(),
-                    name.as_ptr(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    size as libc::size_t,
-                )
-            }
-        } else {
-            let file = data.get_file()?;
-
-            let procname = CString::new(format!("{}", file.as_raw_fd()))
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
+        let res = {
             let _working_dir_guard =
                 set_working_directory(self.proc_self_fd.as_raw_fd(), self.root_fd.as_raw_fd());
 

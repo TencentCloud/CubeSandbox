@@ -92,22 +92,18 @@ spec:
             periodSeconds: {{ .Values.controlPlane.api.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.controlPlane.api.probes.liveness.failureThreshold }}
           {{- end }}
-          {{- if .Values.cubeEgress.enabled }}
           volumeMounts:
             - name: cube-egress-ca
               mountPath: /etc/cube/ca
               readOnly: true
-          {{- end }}
           {{- with .Values.controlPlane.api.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if .Values.cubeEgress.enabled }}
       volumes:
         - name: cube-egress-ca
           secret:
             secretName: {{ include "cube.egressCASecretName" . }}
-      {{- end }}
 ---
 apiVersion: v1
 kind: Service

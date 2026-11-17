@@ -122,6 +122,48 @@ pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
     }
 }
 
+pub fn performance_vsock_echo_throughput(_control: &PerformanceTestControl) -> f64 {
+    const ECHO_BYTES: usize = 256 << 20;
+
+    let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+    let guest = performance_test_new_guest(Box::new(focal));
+    let socket = String::from(guest.tmp_dir.as_path().join("vsock").to_str().unwrap());
+
+    let mut child = GuestCommand::new(&guest)
+        .args(["--cpus", "boot=2"])
+        .args(["--memory", "size=1G"])
+        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+        .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .default_disks()
+        .default_net()
+        .args(["--vsock", format!("cid=3,socket={}", socket).as_str()])
+        .capture_output()
+        .verbosity(VerbosityLevel::Warn)
+        .set_print_cmd(false)
+        .spawn()
+        .unwrap();
+
+    let r = std::panic::catch_unwind(|| {
+        guest.wait_vm_boot(None).unwrap();
+        guest.start_vsock_echo_listener();
+        // Warm up the connection path before the measured run.
+        guest.vsock_echo(socket.as_str(), 1 << 20);
+        let elapsed = guest.vsock_echo(socket.as_str(), ECHO_BYTES);
+        ECHO_BYTES as f64 / elapsed.as_secs_f64()
+    });
+
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+
+    match r {
+        Ok(r) => r,
+        Err(e) => {
+            handle_child_output(Err(e), &output);
+            panic!("test failed!");
+        }
+    }
+}
+
 pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = performance_test_new_guest(Box::new(focal));

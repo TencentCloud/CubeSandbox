@@ -11,7 +11,7 @@ local utils = require "utils"
 
 local _M = { _VERSION = "0.01" }
 
-local ENVD_PORT = 49983
+_M.ENVD_PORT = 49983
 local PORT_PLACEHOLDER_PATTERN = "%$%{PORT%}"
 
 function _M.render(mask, container_port, original_host)
@@ -22,7 +22,7 @@ function _M.render(mask, container_port, original_host)
     -- Routing already parsed digits; tonumber normalizes leading zeros for
     -- ${PORT} expansion and for the envd exemption check.
     local port = tonumber(container_port)
-    if port == ENVD_PORT then
+    if port == _M.ENVD_PORT then
         return original_host, false, nil
     end
 
