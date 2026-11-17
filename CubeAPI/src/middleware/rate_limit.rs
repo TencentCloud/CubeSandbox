@@ -94,14 +94,23 @@ mod tests {
         ServerConfig::default()
     }
 
-    async fn request(server: &TestServer, method: Method, path: &str) -> axum_test::TestResponse {
+    async fn request_with_key(
+        server: &TestServer,
+        method: Method,
+        path: &str,
+        key: &'static str,
+    ) -> axum_test::TestResponse {
         server
             .method(method, path)
             .add_header(
                 HeaderName::from_static(API_KEY_HEADER),
-                HeaderValue::from_static(KEY),
+                HeaderValue::from_static(key),
             )
             .await
+    }
+
+    async fn request(server: &TestServer, method: Method, path: &str) -> axum_test::TestResponse {
+        request_with_key(server, method, path, KEY).await
     }
 
     /// Backwards compatibility: with neither new setting configured, every
@@ -142,6 +151,43 @@ mod tests {
         // read bucket nor the shared bucket.
         let write = request(&server, Method::POST, "/ping").await;
         write.assert_status_ok();
+    }
+
+    /// The split is symmetric: exhausting lifecycle writes must not throttle
+    /// status polling. Using DELETE and POST also verifies that both methods
+    /// consume the write bucket.
+    #[tokio::test]
+    async fn write_exhaustion_does_not_throttle_reads() {
+        let mut config = test_config();
+        config.rate_limit_read_per_sec = Some(100);
+        config.rate_limit_write_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        let first = request(&server, Method::DELETE, "/ping").await;
+        first.assert_status_ok();
+        let second = request(&server, Method::POST, "/ping").await;
+        second.assert_status(StatusCode::TOO_MANY_REQUESTS);
+
+        let read = request(&server, Method::GET, "/ping").await;
+        read.assert_status_ok();
+    }
+
+    /// Quotas are keyed independently rather than acting as one global bucket.
+    #[tokio::test]
+    async fn rate_limit_is_independent_per_api_key() {
+        let mut config = test_config();
+        config.rate_limit_read_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        request_with_key(&server, Method::GET, "/ping", "key-a")
+            .await
+            .assert_status_ok();
+        request_with_key(&server, Method::GET, "/ping", "key-a")
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+        request_with_key(&server, Method::GET, "/ping", "key-b")
+            .await
+            .assert_status_ok();
     }
 
     /// Fallback documented for a single setting: when only the read limit is
