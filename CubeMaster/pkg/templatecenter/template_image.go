@@ -262,8 +262,18 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	var redoJob *models.TemplateImageJob
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if _, err := lockTemplateDefinitionTx(tx, normalized.TemplateID); err != nil {
+			def, err := lockTemplateDefinitionTx(tx, normalized.TemplateID)
+			if err != nil {
 				return err
+			}
+			// A full or node-scoped redo cleans up and recreates replicas on
+			// every target node. If replica persistence then fails, the
+			// definition is published FAILED, which would turn a working READY
+			// template into FAILED (and FAILED skips the in-use check on
+			// delete). Only failed-node redos are allowed on a READY template.
+			if strings.EqualFold(def.Status, StatusReady) && !normalized.FailedOnly {
+				return fmt.Errorf("%w: template %s is READY; use --failed-only or build a new template id",
+					ErrTemplateNotReady, normalized.TemplateID)
 			}
 			if _, err := getActiveTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID); err == nil {
 				return fmt.Errorf("%w: template %s is currently running", ErrTemplateAttemptInProgress, normalized.TemplateID)

@@ -93,7 +93,10 @@ any state ──→ (row removed)     delete hard-deletes the definition and its
 ```
 
 READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
-a fresh aggregate status from the same summary rules.
+a fresh aggregate status from the same summary rules. A redo on a READY
+template is only accepted with `--failed-only`; a full or node-scoped redo is
+rejected with `ErrTemplateNotReady`, because a replica persistence failure
+during it would publish FAILED over a working template.
 
 Invariants:
 

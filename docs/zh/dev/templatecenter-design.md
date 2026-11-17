@@ -84,7 +84,7 @@ CREATING ─┬─→ READY             快照提交成功
                                 模板定义没有 DELETED 状态
 ```
 
-`redo` 会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。
+`redo` 会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。对 READY 模板只接受带 `--failed-only` 的 redo；全量或按节点（`--node`）的 redo 会以 `ErrTemplateNotReady` 拒绝，因为其间一旦副本落库失败，就会把一个可用模板发布成 FAILED。
 
 不变式：
 
