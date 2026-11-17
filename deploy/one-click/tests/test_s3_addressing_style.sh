@@ -145,13 +145,20 @@ sed -n '/^apply_one_click_toggles$/,/^apply_one_click_database_intent$/p' \
 [[ -s "${TMP_DIR}/snapshot.sh" && -s "${TMP_DIR}/replay.sh" ]] \
   || fail "installer intent call sites missing"
 
-check_runtime_consumers() {
-  local runtime_env="$1" shared="$2" ops="$3" script got expected
-  # Keep all filesystem effects in the fixture, regardless of template defaults.
+# The real runtime loader takes precedence over launcher environment variables.
+# Override template paths in the runtime file itself so fixtures work without
+# root privileges and cannot create directories under /data on the host.
+write_runtime_fixture_paths() {
+  local runtime_env="$1"
   printf '%s=%q\n' CUBE_OPS_LOG_DIR "${TMP_DIR}/log" \
     CUBE_OPS_WAREHOUSE_WORK_DIR "${TMP_DIR}/warehouse" \
     CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR "${TMP_DIR}/artifacts" \
     CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR "${TMP_DIR}/artifacts" >> "${runtime_env}"
+}
+
+check_runtime_consumers() {
+  local runtime_env="$1" shared="$2" ops="$3" script got expected
+  write_runtime_fixture_paths "${runtime_env}"
   for script in cubeops cubemaster cubetemplatecenter; do
     expected="${shared}"
     if [[ "${script}" == cubeops ]]; then
@@ -263,8 +270,7 @@ PY
 
 check_runtime_setting() {
   local runtime_env="$1" label="$2" service="$3" key="$4" expected="$5" got
-  printf '%s=%q\n' CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR "${TMP_DIR}/artifacts" \
-    CUBE_TEMPLATE_CENTER_ARTIFACT_STORE_DIR "${TMP_DIR}/artifacts" >> "${runtime_env}"
+  write_runtime_fixture_paths "${runtime_env}"
   got="$(env -i PATH="${TMP_DIR}/bin:${PATH}" TEST_ONE_CLICK_DIR="${ONE_CLICK_DIR}" \
     TEST_TOOLBOX_ROOT="${TMP_DIR}/toolbox" TEST_PRINT_COMPANION="${key}" \
     ONE_CLICK_RUNTIME_ENV_FILE="${runtime_env}" \
@@ -276,6 +282,7 @@ check_runtime_setting() {
 
 check_node_endpoint() {
   local runtime_env="$1" label="$2" got
+  write_runtime_fixture_paths "${runtime_env}"
   got="$(env -i PATH="${PATH}" TEST_ONE_CLICK_DIR="${ONE_CLICK_DIR}" \
     TEST_TOOLBOX_ROOT="${TMP_DIR}/toolbox" TEST_PRINT_NODE_ENDPOINT=1 \
     ONE_CLICK_RUNTIME_ENV_FILE="${runtime_env}" \
