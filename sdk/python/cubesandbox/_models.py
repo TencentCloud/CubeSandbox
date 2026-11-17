@@ -201,6 +201,7 @@ class SnapshotInfo:
     #: Servers that predate filesystem-only snapshots omit it; the default
     #: keeps their responses truthful (everything they can produce is full).
     mode: str = "full"
+    expires_at: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "SnapshotInfo":
@@ -208,6 +209,7 @@ class SnapshotInfo:
             snapshot_id=data.get("snapshotID", ""),
             names=data.get("names") or [],
             mode=data.get("mode") or "full",
+            expires_at=data.get("expiresAt"),
         )
 
 

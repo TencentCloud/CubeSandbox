@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -34,6 +35,7 @@ const (
 	snapshotSandboxLockPrefix  = "snapshot-sandbox:"
 	snapshotResourceLockPrefix = "snapshot-resource:"
 	snapshotIDPrefix           = "snap-"
+	maxSnapshotTTLSeconds      = int64((1<<63 - 1) / int64(time.Second))
 )
 
 func snapshotRequestLockKey(requestID string) string {
@@ -76,6 +78,7 @@ type snapshotCreateJobRequest struct {
 	Backend         string `json:"backend,omitempty"`
 	Mode            string `json:"mode,omitempty"`
 	SpecFingerprint string `json:"spec_fingerprint,omitempty"`
+	TTLSeconds      int64  `json:"ttl_seconds,omitempty"`
 }
 
 type snapshotRollbackJobRequest struct {
@@ -111,8 +114,15 @@ type snapshotRollbackResult struct {
 // original CreateCubeSandboxReq, which was the original motivation for this
 // refactor.
 func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode) (*sandboxtypes.TemplateImageJobInfo, error) {
+	return SubmitSandboxSnapshotWithTTL(ctx, requestID, sandboxID, hostID, hostIP, displayName, backend, mode, 0)
+}
+
+func SubmitSandboxSnapshotWithTTL(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode, ttlSeconds int64) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
+	}
+	if ttlSeconds < 0 || ttlSeconds > maxSnapshotTTLSeconds {
+		return nil, errors.New("ttl_seconds is out of range")
 	}
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
@@ -128,6 +138,16 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
 	mode = snapshotmode.Normalize(mode.String())
+	// Division of labor: this submit-time expires_at only backstops FAILED
+	// snapshots (reconcileExpiredSnapshots covers READY and FAILED, and a
+	// FAILED snapshot never reaches the READY transition); the CREATING→READY
+	// transition in runSnapshotCreateJob re-anchors expires_at to "usable for
+	// N seconds" from the moment the snapshot becomes READY.
+	var expiresAt *time.Time
+	if ttlSeconds > 0 {
+		expiry := time.Now().Add(time.Duration(ttlSeconds) * time.Second)
+		expiresAt = &expiry
+	}
 
 	originReq, err := loadSandboxCreateRequestFn(ctx, sandboxID)
 	if err != nil {
@@ -175,7 +195,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			}
 			storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
 			storedReq.Backend = normalizedBackend
-			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, mode, storedReq) {
+			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, mode, ttlSeconds, storedReq) {
 				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
 			}
 			jobID = existing.JobID
@@ -215,6 +235,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			Backend:         normalizedBackend,
 			Mode:            mode.String(),
 			SpecFingerprint: fingerprint,
+			TTLSeconds:      ttlSeconds,
 		})
 		if err != nil {
 			return err
@@ -251,6 +272,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			RemoteStatus:              constants.SnapshotRemoteStatus(normalizedBackend),
 			RootfsSizeBytesAtSnapshot: parseSystemDiskSizeBytes(storedReq),
 			Status:                    StatusCreating,
+			ExpiresAt:                 expiresAt,
 		}
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := createSnapshotTx(ctx, tx, snapshotID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), snapRec); err != nil {
@@ -350,6 +372,19 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	if backend := strings.TrimSpace(rec.Backend); backend != "" {
 		commitBackend = backend
 	}
+	// Read persisted TTL before any node-side work. Failure must never turn a
+	// provisional submit-time deadline into the deadline of a READY snapshot.
+	var ttl int64
+	if rec.ExpiresAt != nil {
+		var err error
+		ttl, err = snapshotCreateTTLSeconds(ctx, jobID)
+		if err != nil || ttl == 0 {
+			if err == nil {
+				err = errors.New("expiring snapshot has no positive TTL in its job")
+			}
+			return failSnapshotCreateJob(ctx, jobID, snapshotID, "", "", nil, err, commitBackend)
+		}
+	}
 	mode := snapshotmode.Normalize(rec.Mode)
 	commitRsp, err := cubelet.CommitSandbox(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
 		RequestID:    uuid.NewString(),
@@ -419,6 +454,12 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"status":                        StatusReady,
 		"last_error":                    "",
 		"rootfs_size_bytes_at_snapshot": commitRsp.GetRootfsSizeBytes(),
+	}
+	// TTL means "usable for N seconds": anchor expiry to the CREATING→READY
+	// transition, not to the request submission (commit can take up to
+	// snapshotOperationTimeout, longer than a short TTL).
+	if ttl > 0 {
+		snapUpdates["expires_at"] = time.Now().Add(time.Duration(ttl) * time.Second)
 	}
 	exportUUIDs := ""
 	if constants.IsRemoteTrackedBackend(commitBackend) {
@@ -526,11 +567,8 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 			}
 			return err
 		}
-		if snapshotRejectsNewUse(rec.Status) {
-			return wrapSnapshotNotFound(snapshotID)
-		}
-		if !strings.EqualFold(rec.Status, StatusReady) {
-			return fmt.Errorf("%w: snapshot %s is in status %s", ErrTemplateAttemptInProgress, snapshotID, rec.Status)
+		if err := validateSnapshotNewUse(rec, time.Now()); err != nil {
+			return err
 		}
 		// Rollback is a memory restore. A filesystem-only artifact has no
 		// memory to load, and its disk alone would reset the guest silently.
@@ -613,7 +651,19 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 			Progress:     0,
 			RequestJSON:  payload,
 		}
-		return store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			current, err := lockSnapshotRecordTx(tx, snapshotID)
+			if err != nil {
+				return err
+			}
+			if err := validateSnapshotNewUse(current, time.Now()); err != nil {
+				return err
+			}
+			if err := rejectActiveSnapshotJobTx(tx, snapshotID); err != nil {
+				return err
+			}
+			return tx.Table(constants.TemplateImageJobTableName).Create(record).Error
+		})
 	}); err != nil {
 		return nil, err
 	}
@@ -1557,12 +1607,34 @@ func snapshotJobFailedError(info *sandboxtypes.TemplateImageJobInfo) error {
 	return errors.New(message)
 }
 
+// snapshotCreateTTLSeconds reads the TTL the create job was submitted with,
+// from the persisted job payload (the same snapshotCreateJobRequest parse
+// path snapshotCreateRequestMatches uses). Missing or malformed data is an
+// error, distinct from the explicit no-expiration value.
+func snapshotCreateTTLSeconds(ctx context.Context, jobID string) (int64, error) {
+	record, err := getTemplateImageJobRecordByID(ctx, jobID)
+	if err != nil {
+		return 0, fmt.Errorf("read snapshot TTL for job %s: %w", jobID, err)
+	}
+	if record == nil {
+		return 0, fmt.Errorf("snapshot job %s is missing", jobID)
+	}
+	var req snapshotCreateJobRequest
+	if err := json.Unmarshal([]byte(record.RequestJSON), &req); err != nil {
+		return 0, fmt.Errorf("decode snapshot TTL for job %s: %w", jobID, err)
+	}
+	if req.TTLSeconds < 0 || req.TTLSeconds > maxSnapshotTTLSeconds {
+		return 0, errors.New("persisted snapshot TTL is out of range")
+	}
+	return req.TTLSeconds, nil
+}
+
 // snapshotCreateRequestMatches verifies idempotency: a re-arrival of the same
 // request_id must target the same sandbox/host/displayName and the same
 // canonical spec fingerprint. Because the spec is now fetched from sandboxspec
 // on every call instead of being carried in the payload, we compare via
 // fingerprint rather than deep-equal.
-func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, mode snapshotmode.Mode, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
+func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, mode snapshotmode.Mode, ttlSeconds int64, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
 	if strings.TrimSpace(raw) == "" {
 		return true
 	}
@@ -1577,6 +1649,9 @@ func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, dis
 		return false
 	}
 	if snapshotmode.Normalize(existing.Mode) != mode {
+		return false
+	}
+	if existing.TTLSeconds != ttlSeconds {
 		return false
 	}
 	if existing.SpecFingerprint == "" {

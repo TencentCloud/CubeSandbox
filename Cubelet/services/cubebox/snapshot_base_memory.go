@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -350,12 +352,14 @@ func prepareCommitMemoryArtifact(
 	baseMemoryObject, baseErr := resolveBaseMemoryObjectFn(ctx, cb, backend)
 	if baseErr == nil {
 		memoryObject, err := commitMemoryFromBaseFor(ctx, backend, baseMemoryObject, templateID, memorySizeBytes)
-		if err != nil {
+		if err == nil {
+			stepLog.Infof("memory artifact: cloned previous snapshot %s -> %s", baseMemoryObject.Name, memoryObject.Name)
+			return memoryObject, snapshotTypeSoftDirty, nil
+		}
+		if !snapshotBaseDisappeared(err) {
 			return nil, "", err
 		}
-		stepLog.Infof("memory artifact: reflink-cloned base memory %s/%s -> %s, snapshot type=%s",
-			baseMemoryObject.Name, baseMemoryObject.Kind, memoryObject.Name, snapshotTypeSoftDirty)
-		return memoryObject, snapshotTypeSoftDirty, nil
+		baseErr = fmt.Errorf("%w: base disappeared before clone: %v", ErrNoBaseMemoryForIncremental, err)
 	}
 	if !errors.Is(baseErr, ErrNoBaseMemoryForIncremental) {
 		return nil, "", baseErr
@@ -371,13 +375,14 @@ func prepareCommitMemoryArtifact(
 	restoreBase, restoreErr := resolveRestoreBaseMemoryObjectFn(ctx, cb, backend)
 	if restoreErr == nil {
 		memoryObject, err := commitMemoryFromBaseFor(ctx, backend, restoreBase, templateID, memorySizeBytes)
-		if err != nil {
+		if err == nil {
+			stepLog.Warnf("memory artifact: using last-restore base %s -> %s", restoreBase.Name, memoryObject.Name)
+			return memoryObject, snapshotTypeIncremental, nil
+		}
+		if !snapshotBaseDisappeared(err) {
 			return nil, "", err
 		}
-		stepLog.Warnf("memory artifact: previous-snapshot base unavailable (%v); "+
-			"falling back to incremental(pagemap_anon) over last-restore base %s/%s -> %s",
-			baseErr, restoreBase.Name, restoreBase.Kind, memoryObject.Name)
-		return memoryObject, snapshotTypeIncremental, nil
+		restoreErr = fmt.Errorf("%w: restore base disappeared before clone: %v", ErrNoBaseMemoryForIncremental, err)
 	}
 	if !errors.Is(restoreErr, ErrNoBaseMemoryForIncremental) {
 		return nil, "", restoreErr
@@ -412,6 +417,11 @@ func prepareCommitMemoryArtifact(
 	stepLog.Infof("memory artifact: created empty memory volume %s/%s, snapshot type=%s",
 		memoryObject.Name, memoryObject.Kind, snapshotTypeFull)
 	return memoryObject, snapshotTypeFull, nil
+}
+
+func snapshotBaseDisappeared(err error) bool {
+	var cowErr *cubecow.CowError
+	return errors.Is(err, os.ErrNotExist) || (errors.As(err, &cowErr) && cowErr.Code == cubecow.SemNotFound)
 }
 
 func importedSandboxMemoryForCommit(

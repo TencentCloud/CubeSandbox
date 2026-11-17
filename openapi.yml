@@ -1574,6 +1574,12 @@ components:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
       properties:
+        ttlSeconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Lifetime from READY in seconds; omitted or zero means no expiration.
         backend:
           type:
           - string
@@ -2742,6 +2748,11 @@ components:
       - names
       - mode
       properties:
+        expiresAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
         backend:
           type:
           - string
@@ -2770,6 +2781,11 @@ components:
       - status
       - mode
       properties:
+        expiresAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
         backend:
           type:
           - string

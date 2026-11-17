@@ -144,6 +144,7 @@ func snapshotInfoFromRecord(rec *models.SnapshotRecord, replicas []ReplicaStatus
 		RootfsSizeBytesAtSnapshot: rec.RootfsSizeBytesAtSnapshot,
 		LastError:                 rec.LastError,
 		CreatedAt:                 formatUTCRFC3339(rec.CreatedAt),
+		ExpiresAt:                 formatUTCRFC3339Ptr(rec.ExpiresAt),
 		Replicas:                  replicas,
 		CreateRequest:             createReq,
 	}

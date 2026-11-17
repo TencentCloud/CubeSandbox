@@ -914,6 +914,9 @@ pub struct ConnectSandbox {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateSnapshotRequest {
     pub name: Option<String>,
+    /// Lifetime from READY in seconds; omitted or zero means no expiration.
+    #[serde(default, rename = "ttlSeconds", alias = "ttl_seconds")]
+    pub ttl_seconds: Option<i64>,
     /// CoW backend (xfs | s3). Empty means xfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
@@ -938,6 +941,8 @@ pub struct SnapshotInfo {
     #[serde(rename = "snapshotID")]
     pub snapshot_id: String,
     pub names: Vec<String>,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     /// CoW backend that produced this snapshot (xfs | s3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
@@ -972,6 +977,8 @@ pub struct SnapshotListItem {
     #[serde(rename = "snapshotID")]
     pub snapshot_id: String,
     pub names: Vec<String>,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     pub status: String,
     #[serde(rename = "originSandboxID", skip_serializing_if = "Option::is_none")]
     pub origin_sandbox_id: Option<String>,

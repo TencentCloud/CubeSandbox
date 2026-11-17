@@ -62,6 +62,48 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
 
 A snapshot's lifecycle is independent of the sandbox: the snapshot remains usable even after the source sandbox is `kill()`ed. Call `Sandbox.delete_snapshot(snapshot_id_or_name)` to clean up when it is no longer needed. It accepts either a snapshot ID or the name you passed to `create_snapshot`, and returns `True` when the snapshot was deleted or `False` when it did not exist. The SDK only matches snapshots, never templates: a name that matches no snapshot returns `False` even if a template alias has that name, and the template is left untouched. If a name matches several snapshots the call fails with HTTP 409 and nothing is deleted; use the `snap-` ID instead. This requires a CubeAPI that supports `snapshot_only`; older servers ignore it and still route a name that matches no snapshot to the template of that name.
 
+### Snapshot expiration
+
+Set a TTL for temporary checkpoints, experiment snapshots or short-lived restore
+backups so they can be cleaned up automatically when no longer needed. Omit it
+or pass zero for snapshots you want to keep until explicitly deleted.
+
+```python
+snap = sb.create_snapshot(name="checkpoint", ttl_seconds=3600)
+print(snap.expires_at)
+
+# Each restore creates a new sandbox while the snapshot is still valid.
+restored = Sandbox.create(template=snap.snapshot_id)
+```
+
+The TTL starts when the snapshot becomes ready. `expires_at` is its UTC expiration
+time, or `None` without a TTL. Use SDK, CubeAPI and CubeMaster versions that
+support snapshot expiration. Node accepts
+`sb.createSnapshot("checkpoint", { ttlSeconds: 3600 })`; Go accepts
+`sb.CreateSnapshot(ctx, "checkpoint", cubesandbox.CreateSnapshotOptions{TTLSeconds: 3600})`.
+
+After expiration, the snapshot cannot be used for new restores or rollbacks.
+Sandboxes already running from it continue to work. Cleanup runs periodically;
+storage is released only after running sandboxes and other dependencies have
+released their references, so expiration does not free disk space immediately.
+
+If a permanently lost node leaves a pending restore that prevents cleanup, an
+administrator can use `cubemastercli snapshot recover-create`. First fence the
+node so its VMs and queued requests cannot resume, retire the snapshot, and wait
+at least 24 hours for the pending reservation:
+
+```bash
+cubemastercli snapshot recover-create \
+  --snapshot-id snap-example --sandbox-id reserved-example \
+  --node-id retired-node --node-ip 192.0.2.10 \
+  --confirm-node-fenced --reason "Host powered off and prevented from restarting"
+```
+
+Use the node identity recorded for that pending restore. Recovery releases only
+the matching stale reservation; it refuses healthy nodes, known sandboxes and
+active snapshot operations. Physical cleanup continues on a later reconciliation
+pass. Normal expiration does not require this command.
+
 ### Filesystem-only snapshots
 
 Pass `mode="fs-only"` to capture the filesystem without guest memory. The guest
