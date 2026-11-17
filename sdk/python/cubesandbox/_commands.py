@@ -135,8 +135,8 @@ class Commands:
 
 
 def _parse_process_start_stream(chunks) -> CommandResult:
-    stdout: list[str] = []
-    stderr: list[str] = []
+    stdout = bytearray()
+    stderr = bytearray()
     exit_code: int | None = None
     buffer = bytearray()
 
@@ -164,9 +164,9 @@ def _parse_process_start_stream(chunks) -> CommandResult:
             event = json.loads(raw.decode("utf-8")).get("event") or {}
             data = event.get("data") or {}
             if data.get("stdout"):
-                stdout.append(_decode_process_bytes(data["stdout"]))
+                stdout.extend(base64.b64decode(data["stdout"]))
             if data.get("stderr"):
-                stderr.append(_decode_process_bytes(data["stderr"]))
+                stderr.extend(base64.b64decode(data["stderr"]))
             end = event.get("end")
             if end is not None:
                 if "exitCode" in end:
@@ -185,7 +185,11 @@ def _parse_process_start_stream(chunks) -> CommandResult:
     if exit_code is None:
         raise RuntimeError("process stream ended without EndEvent")
 
-    return CommandResult(stdout="".join(stdout), stderr="".join(stderr), exit_code=exit_code)
+    return CommandResult(
+        stdout=stdout.decode("utf-8", "replace"),
+        stderr=stderr.decode("utf-8", "replace"),
+        exit_code=exit_code,
+    )
 
 
 def _encode_connect_envelope(data: bytes, flags: int = 0) -> bytes:
@@ -227,10 +231,6 @@ def _http_error_detail(resp) -> str:
             if isinstance(message, str) and message.strip():
                 return message.strip()
     return text
-
-
-def _decode_process_bytes(value: str) -> str:
-    return base64.b64decode(value).decode("utf-8", "replace")
 
 
 def _exit_code_from_status(status: object) -> int | None:

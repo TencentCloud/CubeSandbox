@@ -207,6 +207,35 @@ describe("Commands.run", () => {
     sb.close();
   });
 
+  it("preserves UTF-8 output split across data events", async () => {
+    const sb = await createSandbox();
+    const output = Buffer.concat([Buffer.alloc(32767, "a"), Buffer.from("\u4e2d", "utf-8")]);
+    const stdout = [
+      output.subarray(0, 32768).toString("base64"),
+      output.subarray(32768).toString("base64"),
+    ];
+    const stderr = stdout.map((chunk) => chunk);
+    handler = () => ({
+      status: 200,
+      buffer: Buffer.concat([
+        connectFrame(0, JSON.stringify({ event: { data: { stdout: stdout[0] } } })),
+        connectFrame(0, JSON.stringify({ event: { data: { stderr: stderr[0] } } })),
+        connectFrame(0, JSON.stringify({ event: { data: { stdout: stdout[1] } } })),
+        connectFrame(0, JSON.stringify({ event: { data: { stderr: stderr[1] } } })),
+        connectFrame(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+        connectFrame(0x02, "{}"),
+      ]),
+    });
+
+    const result = await sb.commands.run("printf data");
+    const expected = "a".repeat(32767) + "\u4e2d";
+    expect(result.stdout).toBe(expected);
+    expect(result.stderr).toBe(expected);
+    expect(result.stdout).not.toContain("\ufffd");
+    expect(result.stderr).not.toContain("\ufffd");
+    sb.close();
+  });
+
   it("reports a non-zero exit code", async () => {
     const sb = await createSandbox();
     handler = () => ({
