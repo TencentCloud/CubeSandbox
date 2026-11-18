@@ -107,6 +107,7 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 type sandboxInfoLookupDeps struct {
 	getPauseBinding    func(context.Context, string) (*pausesnap.Record, error)
 	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)
+	getNode            func(string) (*node.Node, bool)
 	getNodesByIP       func(string) (*node.Node, bool)
 	getCubeletAddr     func(string) string
 }
@@ -122,6 +123,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 	return checkValidAndGetReqWithDeps(ctx, req, cubeletReq, rsp, sandboxInfoLookupDeps{
 		getPauseBinding:    pausesnap.GetBySandbox,
 		getSandboxProxyMap: localcache.GetSandboxProxyMap,
+		getNode:            localcache.GetNode,
 		getNodesByIP:       localcache.GetNodesByIp,
 		getCubeletAddr:     cubelet.GetCubeletAddr,
 	})
@@ -144,8 +146,8 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 		exist bool
 	)
 	if req.HostID != "" {
-		n, exist = localcache.GetNode(req.HostID)
-		if !exist {
+		n, exist = deps.getNode(req.HostID)
+		if !exist || n == nil {
 			setError(errorcode.ErrorCode_NotFound, rsp)
 			return "", "", nil, false
 		}
@@ -162,7 +164,7 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 		n, exist = deps.getNodesByIP(locatedHost)
 	}
 
-	if !exist || !n.Healthy {
+	if !exist || n == nil || !n.Healthy {
 		// A caller-pinned host keeps the old error. An unpinned Info of a
 		// shimless pause is answered from Master only when the located host is
 		// the binding's own node. A cache entry that names some other node
