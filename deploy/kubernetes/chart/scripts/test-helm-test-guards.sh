@@ -368,6 +368,29 @@ for f in "$TMP_DIR/admin-token-a.yaml" "$TMP_DIR/admin-token-b.yaml"; do
     exit 1
   fi
 done
+# The count and the shared value above would still pass if one workload carried
+# two annotations and another none, so check where each annotation landed.
+for f in "$TMP_DIR/admin-token-a.yaml" "$TMP_DIR/admin-token-b.yaml"; do
+  python3 - "$f" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+carriers = []
+for doc in text.split("\n---\n"):
+    if "checksum/admin-token:" not in doc:
+        continue
+    if re.search(r"^kind: Deployment$", doc, re.M) is None:
+        sys.exit(f"checksum/admin-token sits outside a Deployment: {sys.argv[1]}")
+    if doc.count("checksum/admin-token:") != 1:
+        sys.exit(f"checksum/admin-token appears more than once on one workload: {sys.argv[1]}")
+    name = re.search(r"^  name: (.+)$", doc, re.M)
+    carriers.append(name.group(1).strip() if name else "<unnamed>")
+if len(carriers) != 3 or len(set(carriers)) != 3:
+    sys.exit(f"checksum/admin-token must be on master, proxy and lifecycle-manager, got {carriers}")
+PY
+done
 sum_a="$(grep -m1 'checksum/admin-token:' "$TMP_DIR/admin-token-a.yaml" | awk '{print $2}')"
 sum_b="$(grep -m1 'checksum/admin-token:' "$TMP_DIR/admin-token-b.yaml" | awk '{print $2}')"
 if [ "$sum_a" = "$sum_b" ]; then

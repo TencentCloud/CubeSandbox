@@ -177,7 +177,7 @@ See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentclou
 
 ### CubeProxy cache after Resume
 
-Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then best-effort purges CubeProxy `local_cache` via `POST /admin/backend_cache/delete` so traffic does not keep routing to the pre-pause IP (same-node 504).
+Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then purges CubeProxy `local_cache` via `POST /admin/backend_cache/delete` so traffic does not keep routing to the pre-pause IP (same-node 504); a refused purge is returned as an error rather than ignored.
 
 For that purge to succeed, **CubeMaster and CubeProxy must share the same admin token**:
 

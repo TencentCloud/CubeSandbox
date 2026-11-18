@@ -177,7 +177,7 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 
 ### Resume 后的 CubeProxy 缓存
 
-Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由。CubeMaster 随后 best-effort 调用 CubeProxy `POST /admin/backend_cache/delete` 清理 `local_cache`，避免流量仍打到 pause 前的旧 IP（同机 504）。
+Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由。CubeMaster 随后调用 CubeProxy `POST /admin/backend_cache/delete` 清理 `local_cache`，避免流量仍打到 pause 前的旧 IP（同机 504）；清理被拒绝时会作为错误返回，而不是被忽略。
 
 要使该清理成功，**CubeMaster 与 CubeProxy 必须配置相同的 admin token**：
 

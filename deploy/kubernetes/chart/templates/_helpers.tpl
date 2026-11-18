@@ -482,7 +482,11 @@ CUBE_PROXY_ADMIN_TOKEN, the lifecycle manager as CUBE_LCM_ADMIN_TOKEN, and
 CubeMaster as CUBE_PROXY_ADMIN_TOKEN (injected by master.yaml), so all three
 consume one value. Do not render it into conf.yaml: Helm evaluates randAlphaNum
 independently per template, so a second render would diverge from the Secret on
-a fresh install.
+a fresh install. The same per-caller behaviour applies to the checksum/admin-token
+call sites: on a fresh install each caller draws its own random value, so the
+three annotations disagree with the Secret until the first upgrade resolves the
+persisted key through lookup, and that upgrade rolls all three Pods once even
+when nothing else changed.
 Priority: explicit lifecycleManager.adminToken → persisted cube-admin-token key
 in the release Secret → freshly generated random.
 */}}
