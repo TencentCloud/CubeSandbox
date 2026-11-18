@@ -161,7 +161,9 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 
 When connecting or resuming a paused sandbox while another lifecycle operation on it is still settling, CubeAPI returns HTTP 503 with `Retry-After: 2` if the sandbox is not running yet; wait at least that long and retry. If a concurrent request has already resumed it, connect succeeds and returns the connection info, while `POST /sandboxes/<id>/resume` returns 409 (already running). A connect 409 can also mean the sandbox's container has already exited: that state is permanent, so retrying will not help — see [State Model](#state-model).
 
-A retry during rollback of a failed resume also returns HTTP 503 with `Retry-After: 2`. If rollback times out, Cubelet retries resource cleanup in the background and keeps the original pause snapshot available for a later resume.
+A retry or delete during rollback of a failed resume on the same Cubelet returns HTTP 503 with `Retry-After: 2` through CubeAPI and the CubeOps SDK endpoints. If rollback times out, Cubelet retries resource cleanup in the background and keeps the original pause snapshot available for a later resume. After 60 failed cleanup attempts, it emits an error log requesting operator investigation and reduces cleanup retries to once every 10 minutes. Resume and delete remain blocked until cleanup succeeds, so a retry cannot reuse resources still owned by the failed runtime. Operators should investigate the Cubelet rollback errors and runtime/storage health; clearing the gate alone does not make resource reuse safe.
+
+The rollback gate and remembered runtime process identities are held in Cubelet memory and are lost when Cubelet restarts. This gate only coordinates requests reaching the same Cubelet; it does not provide cluster-wide coordination when an S3-backed resume retry is placed on another node. Cross-node rollback coordination and recovery of pending rollback state after restart remain outside this mechanism's scope.
 
 The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 
