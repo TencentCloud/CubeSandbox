@@ -208,6 +208,36 @@ func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
 	require.Equal(t, attempt, stampedPauseSnapshotID(sb), "fall-through keeps the in-flight stamp")
 }
 
+func TestGetCubeboxSnapshotSpecRejectsUninitializedDependencies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		svc  *service
+		want string
+	}{
+		{name: "nil service", want: "cubebox manager is not initialized"},
+		{name: "nil local manager", svc: &service{}, want: "cubebox manager is not initialized"},
+		{
+			name: "nil cubebox store",
+			svc:  &service{cubeboxMgr: &local{}},
+			want: "cubebox manager is not initialized",
+		},
+		{
+			name: "nil containerd client",
+			svc:  &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{}}},
+			want: "containerd client is not initialized",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := tc.svc.getCubeboxSnapshotSpec(context.Background(), "sandbox")
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
 func TestClearLocalPauseAttemptRestoresRunning(t *testing.T) {
 	t.Parallel()
 	require.NotPanics(t, func() { clearLocalPauseAttempt(nil) })
