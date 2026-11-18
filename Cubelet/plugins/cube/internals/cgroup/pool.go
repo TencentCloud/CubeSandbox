@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -215,15 +216,64 @@ func (p *cgPool) initPoolV2() error {
 	return nil
 }
 
+// ensureNumaSlotCpuset (re)applies a node's cpulist / node id to one per-NUMA
+// slot. The slot outlives a cubelet restart, and creating an existing cgroup is
+// a no-op or an error depending on the driver, so the values are re-asserted on
+// every startup; this also repairs a slot whose mask drifted (CPU hot-add,
+// manual change).
+//
+// cpuset.memory_migrate is deliberately left at the kernel default of 0:
+// cpuset.mems already confines every new allocation to the node, while
+// memory_migrate=1 would also migrate the pages a sandbox has already faulted
+// in, on attach, serialised by cpuset_mutex. That cost is proportional to the
+// resident set: with it enabled, 50 concurrent 2 vCPU / 2 GB creates measured
+// P99 = 26 s against 166 ms with the default, so it is not a knob we turn on.
+func ensureNumaSlotCpuset(slot string, cpulist string, nodeID int) error {
+	base := fmt.Sprintf("%s/cpuset%s", handle.RootMountPoint, slot)
+	// On a cgroup v2 (unified) host there is no per-controller cpuset mount:
+	// the v2 handle has already written cpuset.cpus / cpuset.mems through
+	// cgroup2, so there is nothing to repair here. Returning nil keeps cubelet
+	// bootstrap alive instead of failing on a path that cannot exist.
+	if _, err := os.Stat(base); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	want := []struct{ name, val string }{
+		{"cpuset.cpus", cpulist},
+		{"cpuset.mems", fmt.Sprintf("%d", nodeID)},
+	}
+	for _, w := range want {
+		file := path.Join(base, w.name)
+		cur, err := os.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(cur)) == w.val {
+			continue
+		}
+		if err := os.WriteFile(file, []byte(w.val), 0644); err != nil {
+			return fmt.Errorf("write %s=%s: %w", w.name, w.val, err)
+		}
+	}
+	return nil
+}
+
 func (p *cgPool) initPoolV2Late() error {
 	ctx := context.Background()
 	for i := 0; i < len(p.poolV2.numaPools); i++ {
 		numaPool := &p.poolV2.numaPools[i]
 		numaNode := numaPool.numaNode
 		log.G(ctx).Errorf("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
-		err := p.poolV2.handle.CreateWithCpuSet(ctx, fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId), numaNode.Cpulist, numaNode.NodeId)
-		if err != nil {
-			log.G(ctx).Errorf("cgroup pool v2 init, failed to create cgroup for numa%d: %v", numaNode.NodeId, err)
+		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
+		if err := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId); err != nil {
+			// Re-creating the slot of a previous run is expected to fail; the
+			// cpuset values are re-asserted below either way.
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, err)
+		}
+		if err := ensureNumaSlotCpuset(slot, numaNode.Cpulist, numaNode.NodeId); err != nil {
+			log.G(ctx).Errorf("cgroup pool v2 init, failed to set cpuset for numa%d: %v", numaNode.NodeId, err)
 			return err
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
