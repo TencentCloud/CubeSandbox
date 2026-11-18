@@ -299,6 +299,10 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		annotations[constants.AnnotationAppSnapshotRestore] = "true"
 
 		annotations[constants.AnnotationAppSnapshotContainerID] = snapshotRestoreContainerID(templateID, snapSpecPath)
+		// Keep the layer the restored guest is already using.
+		if layer := snapshotRestoreWritableLayer(templateID, snapSpecPath, flowOpts.PriorWritableLayer, realReq); layer != "" {
+			flowOpts.SnapshotWritableLayer = layer
+		}
 
 		// Pause / FromSnap: guest virtiofs + container binds are already live
 		// in restored memory. Stamp pause.snapshot.id on the sandbox OCI spec

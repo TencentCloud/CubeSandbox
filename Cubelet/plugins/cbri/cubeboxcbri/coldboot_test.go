@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
@@ -269,4 +271,54 @@ func TestColdBootContainerIDRejectsAnUnrecordedLayout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSnapshotRestoreWritableLayerPrefersTheRecordedDirectory(t *testing.T) {
+	specDir := writeSnapshotMetadata(t, `{
+		"rootfs_writable_layer":"disk/tpl-recorded_0",
+		"app_snapshot_container_id":"guest-id"
+	}`)
+	got := snapshotRestoreWritableLayer("tpl-fallback", specDir, "disk/prior_0", nil)
+	if got != "disk/tpl-recorded_0" {
+		t.Fatalf("layer = %q", got)
+	}
+}
+
+func TestSnapshotRestoreWritableLayerUsesThePausedRowBeforeTheGuestID(t *testing.T) {
+	specDir := writeSnapshotMetadata(t, `{"app_snapshot_container_id":"tpl-guest_0"}`)
+	got := snapshotRestoreWritableLayer("tpl-fallback", specDir, "disk/prior_0", nil)
+	if got != "disk/prior_0" {
+		t.Fatalf("layer = %q, want the paused row", got)
+	}
+}
+
+func TestSnapshotRestoreWritableLayerFallsBackToTheGuestID(t *testing.T) {
+	specDir := writeSnapshotMetadata(t, `{
+		"rootfs_writable_layer":"disk/../../etc",
+		"app_snapshot_container_id":"tpl-guest_0"
+	}`)
+	got := snapshotRestoreWritableLayer("tpl-fallback", specDir, "not-a-layer", nil)
+	if got != "disk/tpl-guest_0" {
+		t.Fatalf("layer = %q", got)
+	}
+}
+
+func TestSnapshotRestoreWritableLayerUsesTheVariantBeforeTheTemplate(t *testing.T) {
+	req := &cubeboxv1.RunCubeSandboxRequest{Annotations: map[string]string{
+		constants.MasterAnnotationJFSTemplateVariantID:  "variant-1",
+		constants.MasterAnnotationAppSnapshotTemplateID: "tpl-plain",
+	}}
+	got := snapshotRestoreWritableLayer("tpl-plain", t.TempDir(), "", req)
+	if got != "disk/variant-1_0" {
+		t.Fatalf("layer = %q", got)
+	}
+}
+
+func writeSnapshotMetadata(t *testing.T, body string) string {
+	t.Helper()
+	specDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(specDir, "metadata.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return specDir
 }

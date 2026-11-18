@@ -688,6 +688,9 @@ func (s *service) updateWithPauseCow(
 	}()
 	specWriteStarted := time.Now()
 	specErr := writePauseSandboxSpec(layout.MetaWork, pauseSpec)
+	if specErr == nil {
+		specErr = recordWritableLayer(layout.MetaWork, effectiveSandboxWritableLayer(sb))
+	}
 	stageTimings.SpecWriteMS = durationMS(time.Since(specWriteStarted))
 	rootfsResult := <-rootfsReady
 	stageTimings.RootfsCloneMS = durationMS(rootfsResult.duration)

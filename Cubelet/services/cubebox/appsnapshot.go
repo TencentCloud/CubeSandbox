@@ -397,6 +397,9 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 				frozenCtx, cb, templateID, layout.MetaWork,
 				memoryObject.DevPath, snapshotTypeFull, "", snapshotmode.Full,
 			)
+			if captureErr == nil {
+				captureErr = recordWritableLayer(layout.MetaWork, effectiveSandboxWritableLayer(cb))
+			}
 			if shimSnapshotUnsupported(captureErr) {
 				captureStarted = false
 			}

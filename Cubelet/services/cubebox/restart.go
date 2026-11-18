@@ -174,8 +174,7 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 		SavedContainerIDs: ids,
 		RestartPrior:      prior,
 		LocalRunTemplate:  template,
-		// Reuse the layer captured by the snapshot this sandbox cold-booted from.
-		SnapshotWritableLayer: old.RootfsWritableLayer,
+		SnapshotWritableLayer: effectiveSandboxWritableLayer(old),
 		BaseWorkflowInfo:      workflow.BaseWorkflowInfo{SandboxID: sandboxID},
 	}
 	createCtx, createCancel := context.WithTimeout(base, deadline)
