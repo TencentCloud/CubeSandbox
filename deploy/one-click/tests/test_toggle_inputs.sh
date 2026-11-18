@@ -6,7 +6,8 @@
 # snapshot_one_click_toggles, apply_one_click_toggles) in lib/common.sh.
 # These on/off switches and selectors must preserve this-run intent (process
 # environment or bundle .env, except copied template defaults for protected
-# keys) across the upgrade env merge.
+# keys) across the upgrade env merge. The storage log keys
+# (ONE_CLICK_RCOW_LOG_KEYS) follow the same rule.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -301,6 +302,86 @@ EOF
   [[ "${CUBE_SANDBOX_MINIO_ENABLED}" == "0" && "${CUBE_LOGS_BACKEND}" == "elasticsearch" ]] || fail "non-default dotenv must override process environment"
 }
 
+reset_rcow_log_vars() {
+  unset RCOW_LOG_DIR RCOW_LOG RCOW_LOG_ARCHIVE_DIR RCOW_LOG_RESERVE_BYTES \
+    RCOW_LOG_RESTART_RETAIN
+}
+
+# Same order as install.sh: snapshot, source .env, capture, optionally source
+# the upgrade merge output, then apply.
+run_rcow_log_roundtrip() {
+  local dotenv="$1" old="${2:-}"
+  local out="${TMP_DIR}/rcow-merged.env" diff="${TMP_DIR}/rcow-merged.diff"
+  snapshot_one_click_rcow_log_intent "${dotenv}"
+  load_env_file "${dotenv}" >/dev/null 2>&1
+  capture_one_click_rcow_log_dotenv_values
+  if [[ -n "${old}" ]]; then
+    merge_env_three_way "${ONE_CLICK_DIR}/env.example" "${old}" "" "${dotenv}" \
+      "${out}" "${diff}" 2>/dev/null
+    load_env_file "${out}" >/dev/null 2>&1
+  fi
+  apply_one_click_rcow_log_intent
+}
+
+test_rcow_log_keys_registry() {
+  [[ "${ONE_CLICK_RCOW_LOG_KEYS[*]}" == "RCOW_LOG_DIR RCOW_LOG RCOW_LOG_ARCHIVE_DIR RCOW_LOG_RESERVE_BYTES RCOW_LOG_RESTART_RETAIN" ]] \
+    || fail "unexpected ONE_CLICK_RCOW_LOG_KEYS='${ONE_CLICK_RCOW_LOG_KEYS[*]}'"
+}
+
+# `cp env.example .env; RCOW_LOG=/x ./install.sh`: the copied empty or default
+# values must not clobber the command-line values, including an explicit empty
+# RCOW_LOG_RESTART_RETAIN (keep every restart archive).
+test_rcow_log_copied_template_keeps_process_env() {
+  local dotenv="${TMP_DIR}/rcow-copied.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  reset_rcow_log_vars
+  export RCOW_LOG=/x/override.log RCOW_LOG_RESTART_RETAIN=
+  run_rcow_log_roundtrip "${dotenv}"
+  [[ "${RCOW_LOG}" == "/x/override.log" ]] \
+    || fail "copied template cleared process-env RCOW_LOG (got '${RCOW_LOG}')"
+  [[ -n "${RCOW_LOG_RESTART_RETAIN+x}" && -z "${RCOW_LOG_RESTART_RETAIN}" ]] \
+    || fail "copied template replaced explicit empty RCOW_LOG_RESTART_RETAIN with '${RCOW_LOG_RESTART_RETAIN-unset}'"
+  [[ -z "${RCOW_LOG_DIR}" ]] || fail "untouched RCOW_LOG_DIR changed"
+  [[ "$(bash -c 'printf %s "${RCOW_LOG-unset}"')" == "/x/override.log" ]] \
+    || fail "RCOW_LOG must stay exported for install-logrotate.sh"
+}
+
+# Upgrade with a copied .env: the previous runtime value survives, and a
+# process-env value still wins over it.
+test_rcow_log_upgrade_keeps_runtime_and_process_env() {
+  local dotenv="${TMP_DIR}/rcow-upgrade.env" old="${TMP_DIR}/rcow-old.env"
+  cp "${ONE_CLICK_DIR}/env.example" "${dotenv}"
+  printf 'RCOW_LOG=/old/s3lvol_tgt.log\nRCOW_LOG_RESTART_RETAIN=3\n' > "${old}"
+
+  reset_rcow_log_vars
+  run_rcow_log_roundtrip "${dotenv}" "${old}"
+  [[ "${RCOW_LOG}" == "/old/s3lvol_tgt.log" && "${RCOW_LOG_RESTART_RETAIN}" == "3" ]] \
+    || fail "upgrade with a copied .env lost runtime values (RCOW_LOG='${RCOW_LOG}', RETAIN='${RCOW_LOG_RESTART_RETAIN}')"
+
+  reset_rcow_log_vars
+  export RCOW_LOG=/x/override.log
+  run_rcow_log_roundtrip "${dotenv}" "${old}"
+  [[ "${RCOW_LOG}" == "/x/override.log" ]] \
+    || fail "upgrade merge clobbered process-env RCOW_LOG (got '${RCOW_LOG}')"
+  [[ "${RCOW_LOG_RESTART_RETAIN}" == "3" ]] \
+    || fail "upgrade lost runtime RCOW_LOG_RESTART_RETAIN (got '${RCOW_LOG_RESTART_RETAIN}')"
+}
+
+# A non-default .env value is intent and beats the process environment; a
+# .env value equal to the template default is not.
+test_rcow_log_non_default_dotenv_beats_process_env() {
+  local dotenv="${TMP_DIR}/rcow-explicit.env"
+  printf 'RCOW_LOG="/dotenv/s3lvol_tgt.log"\nRCOW_LOG_RESTART_RETAIN=8\n' > "${dotenv}"
+  reset_rcow_log_vars
+  export RCOW_LOG=/x/override.log RCOW_LOG_RESTART_RETAIN=2
+  run_rcow_log_roundtrip "${dotenv}"
+  [[ "${RCOW_LOG}" == "/dotenv/s3lvol_tgt.log" ]] \
+    || fail "non-default .env RCOW_LOG must win (got '${RCOW_LOG}')"
+  [[ "${RCOW_LOG_RESTART_RETAIN}" == "2" ]] \
+    || fail "template-default .env RETAIN must not beat process env (got '${RCOW_LOG_RESTART_RETAIN}')"
+  reset_rcow_log_vars
+}
+
 test_toggle_keys_registry
 test_dotenv_default_value_is_explicit
 test_process_env_is_explicit
@@ -311,5 +392,9 @@ test_logs_backend_can_switch_back_to_default
 test_legacy_es_endpoint_beats_new_template_default
 test_observability_intent_rotates_and_clears_values
 test_copied_template_preserves_external_backends
+test_rcow_log_keys_registry
+test_rcow_log_copied_template_keeps_process_env
+test_rcow_log_upgrade_keeps_runtime_and_process_env
+test_rcow_log_non_default_dotenv_beats_process_env
 
 echo "test_toggle_inputs: all tests passed"
