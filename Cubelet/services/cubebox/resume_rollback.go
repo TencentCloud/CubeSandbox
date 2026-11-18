@@ -8,6 +8,7 @@ import (
 	"context"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -19,10 +20,17 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
+const (
+	resumeRollbackFastAttempts = 60
+	resumeRollbackSlowInterval = 10 * time.Minute
+)
+
 type resumeRollback struct {
 	namespace string
 	requestID string
 	busy      atomic.Bool
+	failures  atomic.Int32
+	nextRetry atomic.Int64
 	// The shim may remove its bundle before the VMM exits. Keep verified
 	// identities across cleanup attempts under the lifecycle lock.
 	runtimeIdentities []utils.ProcessIdentity
@@ -72,11 +80,15 @@ func (s *service) startResumeRollback(id string, attempt *resumeRollback) {
 	if !attempt.busy.CompareAndSwap(false, true) {
 		return
 	}
+	if time.Now().UnixNano() < attempt.nextRetry.Load() {
+		attempt.busy.Store(false)
+		return
+	}
 	go func() {
 		defer attempt.busy.Store(false)
 		defer func() {
 			if failure := recover(); failure != nil {
-				log.G(context.Background()).Errorf("resume rollback for %s panicked: %v", id, failure)
+				attempt.recordFailure(context.Background(), id, failure)
 			}
 		}()
 
@@ -84,6 +96,7 @@ func (s *service) startResumeRollback(id string, attempt *resumeRollback) {
 		defer cancelLock()
 		unlock, err := s.sandboxLifecycleLocks.LockContext(lockCtx, id)
 		if err != nil {
+			attempt.recordFailure(context.Background(), id, err)
 			return
 		}
 		defer unlock()
@@ -110,9 +123,19 @@ func (s *service) startResumeRollback(id string, attempt *resumeRollback) {
 		// Use the workflow directly. The public Destroy path can garbage
 		// collect the original pause snapshot, which the next resume needs.
 		if err := s.engine.Destroy(ctx, opts); err != nil {
-			log.G(ctx).Warnf("resume rollback for %s will be retried: %v", id, err)
+			attempt.recordFailure(ctx, id, err)
 			return
 		}
 		s.resumeRollbacks.Delete(id)
 	}()
+}
+
+func (a *resumeRollback) recordFailure(ctx context.Context, id string, failure any) {
+	count := a.failures.Add(1)
+	if count >= resumeRollbackFastAttempts {
+		a.nextRetry.Store(time.Now().Add(resumeRollbackSlowInterval).UnixNano())
+		log.G(ctx).Errorf("resume rollback for %s failed after %d attempts; operator investigation required; cleanup will retry every %s and resume/delete remain blocked until cleanup succeeds: %v", id, count, resumeRollbackSlowInterval, failure)
+		return
+	}
+	log.G(ctx).Warnf("resume rollback for %s will be retried (attempt %d/%d): %v", id, count, resumeRollbackFastAttempts, failure)
 }

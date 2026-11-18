@@ -22,6 +22,12 @@ import (
 )
 
 func TestResumeRetryWaitsForFailedAttemptCleanup(t *testing.T) {
+	t.Run("fast retry", func(t *testing.T) { testResumeRetryWaitsForFailedAttemptCleanup(t, false) })
+	t.Run("slow retry after exhaustion", func(t *testing.T) { testResumeRetryWaitsForFailedAttemptCleanup(t, true) })
+}
+
+func testResumeRetryWaitsForFailedAttemptCleanup(t *testing.T, exhausted bool) {
+	t.Helper()
 	id := "sandbox-resume"
 	failed := errors.New("guest agent connection timed out")
 	flow := &resumeRollbackTestFlow{
@@ -47,6 +53,12 @@ func TestResumeRetryWaitsForFailedAttemptCleanup(t *testing.T) {
 	unlock := s.sandboxLifecycleLocks.Lock(id)
 	err := s.engine.Create(ctx, create)
 	pending := s.resumeRollbackPending(id)
+	attemptValue, _ := s.resumeRollbacks.Load(id)
+	attempt := attemptValue.(*resumeRollback)
+	if exhausted {
+		// Exercise escalation without waiting for sixty real cleanup deadlines.
+		attempt.failures.Store(resumeRollbackFastAttempts - 1)
+	}
 	unlock()
 	require.ErrorIs(t, err, failed)
 	require.True(t, pending, "the retry gate must be visible before the first attempt unlocks")
@@ -67,14 +79,23 @@ func TestResumeRetryWaitsForFailedAttemptCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, list.GetItems())
 
-	attempt, _ := s.resumeRollbacks.Load(id)
-	require.NotNil(t, attempt)
 	require.Eventually(t, func() bool {
-		return !attempt.(*resumeRollback).busy.Load()
+		return !attempt.busy.Load()
 	}, time.Second, time.Millisecond)
 	require.True(t, s.resumeRollbackPending(id), "a timed-out rollback must remain retryable")
+	if exhausted {
+		require.Equal(t, int32(resumeRollbackFastAttempts), attempt.failures.Load())
+		require.Greater(t, attempt.nextRetry.Load(), time.Now().Add(9*time.Minute).UnixNano())
+		s.retryResumeRollbacks()
+		require.False(t, attempt.busy.Load(), "exhausted rollbacks must skip the normal ten-second retry loop")
+		require.Empty(t, flow.started)
+	} else {
+		require.Equal(t, int32(1), attempt.failures.Load())
+		require.Zero(t, attempt.nextRetry.Load())
+	}
 
 	flow.allowDestroy = true
+	attempt.nextRetry.Store(0) // Advance past the slow retry interval.
 	s.retryResumeRollbacks()
 	require.Eventually(t, func() bool {
 		return !s.resumeRollbackPending(id)
