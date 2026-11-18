@@ -12,7 +12,9 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -163,6 +165,9 @@ func checkDestroyRet(destroyRsp *cubebox.DestroyCubeSandboxResponse, sandboxID, 
 		return nil
 	}
 	msg := destroyRsp.GetRet().GetRetMsg()
+	if code == cubeleterrorcode.ErrorCode_ResumeRollbackPending {
+		return ret.Err(errorcode.MasterCode(code), msg)
+	}
 	if strings.Contains(strings.ToLower(msg), "not found") {
 		return nil
 	}
