@@ -23,9 +23,8 @@ can prove:
   determinism; source PR #946 / issue #944). Provisions host dirs via a
   throwaway sandbox; a missing hostPath source on multi-node local-disk
   clusters is treated as pass-with-warning;
-- the symlink TOCTOU escape: CubeMaster validates the path lexically while
-  Cubelet resolves symlinks before mounting, so a symlink planted under the
-  allowed prefix can redirect the mount to an arbitrary host path.
+- the symlink escape: a symlink planted under the allowed prefix must not
+  redirect a host mount to an arbitrary host path.
 """
 
 from __future__ import annotations
@@ -524,16 +523,11 @@ def test_nested_ro_parent_rw_child_writable_when_child_listed_first(
         raise
 
 
-# --- Symlink TOCTOU escape ---------------------------------------------------
+# --- Symlink escape ----------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="known-open host-mount symlink TOCTOU (see docstring); strict=True "
-    "turns the fix into a loud XPASS and catches later regressions.",
-)
 def test_symlink_escapes_allowed_prefix(sdk_backend, sdk_e2e_config):
-    """Reproduce the symlink TOCTOU escape of the host-mount whitelist.
+    """A symlink under the allowed prefix must not escape the host-mount whitelist.
 
     1. Sandbox A mounts the allowed prefix and plants a symlink
        `escape-<id> -> /bin` inside it (materialized on the host as
@@ -553,11 +547,8 @@ def test_symlink_escapes_allowed_prefix(sdk_backend, sdk_e2e_config):
 
     Two secure outcomes make this test pass: the escaper create is rejected
     (path re-validated after symlink resolution), or the create succeeds but the
-    mount does not expose the symlink target. The current code allows the
-    escape, so the test xfails. Once the resolved path is validated it will
-    XPASS, and because the marker is ``strict=True`` that XPASS fails the suite,
-    forcing removal of the marker; a later regression re-introducing the escape
-    then fails loudly instead of being silently tolerated.
+    mount does not expose the symlink target. If the escape is reintroduced,
+    this test fails the suite instead of being silently tolerated.
     """
     token = uuid.uuid4().hex[:12]
     link_name = f"escape-{token}"
