@@ -188,7 +188,7 @@ The Helm chart wires both sides from one source: it generates a token (or takes 
 
 Rotating `lifecycleManager.adminToken` on a Helm install therefore rolls the master, proxy and lifecycle-manager Pods in the same upgrade: the chart hashes the token into a `checksum/admin-token` Pod annotation. The three Deployments still restart in sequence rather than atomically, so a resume that lands mid-rollout can fail while a not-yet-restarted proxy replica still validates the old token. The purge only retries a few times (two 500ms backoffs, each request capped at 3s), so the resume returns an error instead of recovering when the rollout finishes — retry the pause/resume cycle (or purge that route manually) after the rotation completes. If you change the Secret outside Helm, restart those three workloads yourself — an env `secretKeyRef` is only read when a container starts, so a running Pod keeps the old value.
 
-If the token is set on only one side, or the values differ, cache purge returns **403**, Redis is still correct, but CubeProxy may serve a stale cached backend until the entry expires. Align the token in deploy / Helm values whenever Resume is used.
+If the token is set on only one side, or the values differ, cache purge returns **403**: Redis is still correct, but CubeProxy keeps routing to the cached backend for every later request. A cache hit renews the entry's TTL, so that mapping never expires on its own — the sandbox stays unreachable until the route is actually purged. Align the token in deploy / Helm values whenever Resume is used.
 
 ## Platform-managed Auto-pause / Auto-resume
 

@@ -188,7 +188,7 @@ Helm Chart 会从同一个来源把两端接好：生成一个 token（或采用
 
 也正因如此，在 Helm 安装中轮换 `lifecycleManager.adminToken` 会在同一次升级里滚动 master、proxy、lifecycle-manager 三个 Pod：Chart 会把该 token 哈希进 `checksum/admin-token` 的 Pod 注解。三个 Deployment 仍按顺序滚动、并非原子切换，因此滚动过程中发起的 Resume 可能因尚未重启的 proxy 副本仍在校验旧 token 而失败；清理只重试几次（两次 500ms 退避，单次请求最长 3 秒），Resume 会直接返回错误，而不是等滚动结束后自愈——请在滚动完成后重试一次 pause/resume（或手动清理该路由）。若绕过 Helm 直接改 Secret，请自行重启这三个工作负载——环境变量 `secretKeyRef` 只在容器启动时读取，运行中的 Pod 仍持有旧值。
 
-若只配一侧或两端不一致，清理会返回 **403**：Redis 路由已正确，但 CubeProxy 可能继续使用过期缓存直至条目过期。使用 Resume 时请在部署／Helm 中对齐该 token。
+若只配一侧或两端不一致，清理会返回 **403**：Redis 路由已正确，但 CubeProxy 会对后续请求一直路由到旧的缓存后端。缓存命中会刷新条目 TTL，这条映射不会自行过期，沙箱会持续不可达，直到该路由被真正清理。使用 Resume 时请在部署／Helm 中对齐该 token。
 
 ## 平台自动暂停 / 自动恢复
 
