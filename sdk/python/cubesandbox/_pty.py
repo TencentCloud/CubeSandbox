@@ -27,8 +27,10 @@ from ._commands import (
     DEFAULT_ENVD_USER,
     ENVD_PORT,
     MAX_CONNECT_ENVELOPE_SIZE,
+    _connect_header_error,
     _encode_connect_envelope,
     _exit_code_from_status,
+    _html_response_error,
     _http_error_detail,
     _raise_connect_end_stream,
     _user_headers,
@@ -430,6 +432,9 @@ class Pty:
                     f"{method} failed: HTTP {resp.status_code}{suffix}",
                     resp.status_code,
                 )
+            html_error = _html_response_error(resp)
+            if html_error:
+                raise CubeSandboxError(f"{method} failed: {html_error}")
 
             event_iter = _iter_connect_events(resp.iter_raw(), resp_ctx)
             try:
@@ -478,6 +483,9 @@ def _iter_connect_events(
                 continue
             buffer.extend(chunk)
             while len(buffer) >= 5:
+                header_error = _connect_header_error(buffer)
+                if header_error:
+                    raise CubeSandboxError(header_error)
                 flags = buffer[0]
                 size = struct.unpack(">I", buffer[1:5])[0]
                 if size > MAX_CONNECT_ENVELOPE_SIZE:

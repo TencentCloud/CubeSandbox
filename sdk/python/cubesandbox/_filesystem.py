@@ -10,7 +10,14 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal, Union, overload
 
 logger = logging.getLogger(__name__)
 
-from ._commands import DEFAULT_ENVD_USER, ENVD_PORT, MAX_CONNECT_ENVELOPE_SIZE, _user_headers
+from ._commands import (
+    DEFAULT_ENVD_USER,
+    ENVD_PORT,
+    MAX_CONNECT_ENVELOPE_SIZE,
+    _connect_header_error,
+    _html_response_error,
+    _user_headers,
+)
 from ._exceptions import FilesystemNotFoundError, PartialWriteError
 
 if TYPE_CHECKING:
@@ -269,6 +276,10 @@ class Filesystem:
         if resp.status_code >= 400:
             resp.close()
             raise IOError(f"WatchDir failed: HTTP {resp.status_code}")
+        html_error = _html_response_error(resp)
+        if html_error:
+            resp.close()
+            raise IOError(f"WatchDir failed: {html_error}")
         return Watcher(resp)
 
 
@@ -332,6 +343,9 @@ class Watcher:
             if not self._fill(5):
                 return None
 
+            header_error = _connect_header_error(self._buf)
+            if header_error:
+                raise IOError(header_error)
             flags = self._buf[0]
             size = struct.unpack(">I", self._buf[1:5])[0]
 

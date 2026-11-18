@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import httpx
+
     from .sandbox import Sandbox
 
 
@@ -21,6 +23,46 @@ CONNECT_END_STREAM_FLAG = 0x02
 CONNECT_COMPRESSED_FLAG = 0x01
 MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024
 DEFAULT_ENVD_USER = "root"
+_CONNECT_KNOWN_FLAGS = CONNECT_COMPRESSED_FLAG | CONNECT_END_STREAM_FLAG
+_ROUTING_HINT = (
+    "check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint "
+    "points to a web service"
+)
+
+
+def _connect_header_error(header: bytes | bytearray) -> str | None:
+    """Return a diagnostic when ``header`` cannot start a Connect envelope.
+
+    A misrouted request can get an HTML page, JSON or a gzip body back with
+    HTTP 200. Read as an envelope, ``<!DOCTYPE`` becomes flags ``0x3c`` and a
+    length of 558124867, which was reported as an oversized message. Reject
+    unknown flag bits before the length is interpreted, as the Go SDK does.
+    """
+    if header[0] & ~_CONNECT_KNOWN_FLAGS:
+        return (
+            f"response is not a Connect envelope (first 5 bytes: {bytes(header[:5]).hex()}); "
+            "check whether CUBE_PROXY_NODE_IP is configured, the data-plane endpoint "
+            "points to a web service, or the response was compressed"
+        )
+    return None
+
+
+def _html_response_error(resp: httpx.Response) -> str | None:
+    """Return a diagnostic for an HTTP 200 ``text/html`` response.
+
+    A Connect stream is never labelled ``text/html``; such a response means
+    the request reached a Web UI or portal page instead of CubeProxy. The
+    body is not read.
+    """
+    if resp.status_code != 200:
+        return None
+    content_type = resp.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "text/html":
+        return None
+    return (
+        f'received HTML instead of a Connect response (content-type "{content_type}"); '
+        f"{_ROUTING_HINT}"
+    )
 
 
 @dataclass
@@ -131,6 +173,9 @@ class Commands:
                 detail = _http_error_detail(resp)
                 suffix = f": {detail}" if detail else ""
                 raise RuntimeError(f"command failed: HTTP {resp.status_code}{suffix}")
+            html_error = _html_response_error(resp)
+            if html_error:
+                raise RuntimeError(html_error)
             return _parse_process_start_stream(resp.iter_raw())
 
 
@@ -145,6 +190,9 @@ def _parse_process_start_stream(chunks) -> CommandResult:
             continue
         buffer.extend(chunk)
         while len(buffer) >= 5:
+            header_error = _connect_header_error(buffer)
+            if header_error:
+                raise RuntimeError(header_error)
             flags = buffer[0]
             size = struct.unpack(">I", buffer[1:5])[0]
             if size > MAX_CONNECT_ENVELOPE_SIZE:
