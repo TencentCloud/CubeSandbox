@@ -329,7 +329,7 @@ sudo chmod 0700 /data/shared/tenant-a
 sudo chmod 0700 /data/shared/tenant-b
 ```
 
-Even if a sandbox attempts to access another tenant's path (e.g. via traversal), it is blocked by both CubeMaster's path validation and OS-level permissions.
+Even if a sandbox attempts to access another tenant's path (e.g. via traversal), it is blocked by CubeMaster's path validation, Cubelet's final symlink check, and OS-level permissions.
 
 ### Isolation Layers Summary
 
@@ -337,6 +337,7 @@ Even if a sandbox attempts to access another tenant's path (e.g. via traversal),
 |-------|-----------|---------|
 | Directory layout | Isolated subdirectory per tenant; each sandbox only mounts its own path | Structural data isolation; tenants cannot see each other |
 | Application | Platform code constructs paths; user input is not trusted | Tenant isolation under normal operation |
+| Path resolution | Cubelet resolves `hostPath` before mounting and rejects targets outside the configured prefixes | Prevents symlinks under an allowed prefix from exposing unrelated host data |
 | OS | Directory owner/mode permissions | Last-resort protection against any bypass |
 
 ## Nested Mounts: Shared Read, Writer-Scoped
