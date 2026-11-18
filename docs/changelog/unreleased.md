@@ -4,6 +4,10 @@ title: Unreleased Changes
 
 # Unreleased Changes
 
+## Pause / lifecycle
+
+- Open exec sessions no longer leave sandboxes stuck as `unknown(failed)` after a rejected Pause. Cubelet returns `TaskPauseFailed` (130588) while the sandbox stays running, and CubeMaster aborts the CREATING pause binding so auto-pause can retry. Cubelet checks for open execs before cloning the memory volume via CubeShim `CheckPauseAllowed`. **Ship Cubelet, CubeMaster, and CubeShim together** for this busy-reject path. Refs [#2270](https://github.com/TencentCloud/CubeSandbox/pull/2270).
+
 ## Go SDK
 
 - Connect streaming calls now report a routing diagnostic for HTML pages, 404 text pages, and invalid Connect frames such as JSON or whole-response gzip payloads. HTTP 200 responses labeled `text/html` are rejected before reading the stream body; other non-200 text errors retain the server's message. Non-200 HTML and 404 text error messages are truncated to 200 characters before appending the diagnostic hint.

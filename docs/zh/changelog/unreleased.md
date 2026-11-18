@@ -4,6 +4,10 @@ title: 未发布变更
 
 # 未发布变更
 
+## Pause / 生命周期
+
+- 未关闭的 exec 会话导致 Pause 被拒绝时，沙箱不再卡在 `unknown(failed)`。Cubelet 返回 `TaskPauseFailed`（130588）且沙箱保持 running；CubeMaster 中止 CREATING pause 绑定，便于 auto-pause 重试。Cubelet 通过 CubeShim `CheckPauseAllowed` 在克隆内存卷前做 exec 预检。**Cubelet、CubeMaster 与 CubeShim 需一起升级**。关联 [#2270](https://github.com/TencentCloud/CubeSandbox/pull/2270)。
+
 ## Go SDK
 
 - Connect 流式调用收到 HTML 页面、404 文本页或 JSON、整段 gzip 等无效 Connect 帧时，现在会报告路由诊断信息。标记为 `text/html` 的 HTTP 200 响应会在读取流内容前被拒绝；其他非 200 文本错误保留服务器原始消息。非 200 的 HTML 及 404 文本错误消息在追加诊断提示前会被截断至 200 字符。

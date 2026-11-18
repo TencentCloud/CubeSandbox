@@ -381,7 +381,7 @@ impl SandBox {
         Ok(())
     }
 
-    async fn pause_vm_forbidding(&self) -> bool {
+    pub(crate) async fn pause_vm_forbidding(&self) -> bool {
         let containers = self.containers.lock().await;
         for (_, c) in containers.iter() {
             if c.pause_vm_forbidding().await {

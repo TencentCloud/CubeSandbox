@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// Identifies the update action to perform.
 ///
 /// Supported values: `"RollbackSnapshot"`, `"PauseToSnapshot"`,
-/// `"SnapshotCapture"`, `"SnapshotResume"`.
+/// `"CheckPauseAllowed"`, `"SnapshotCapture"`, `"SnapshotResume"`.
 const ANNO_UPDATE_EXT_ACTION: &str = "cube.shimapi.update.action";
 const ANNO_SNAPSHOT_CAPTURE_CONFIG: &str = "cube.shimapi.update.snapshot.capture_config";
 const ANNO_SNAPSHOT_ID: &str = "cube.shimapi.update.snapshot.id";
@@ -344,10 +344,22 @@ pub async fn update_route(
     match action {
         "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log, trace).await,
         "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log, trace).await,
+        "CheckPauseAllowed" => do_check_pause_allowed(sb, log).await,
         "SnapshotCapture" => do_snapshot_capture(sb, annos, trace).await,
         "SnapshotResume" => do_snapshot_resume(sb, annos, trace).await,
         unknown => Err(format!("unknown update ext action: {}", unknown).into()),
     }
+}
+
+/// Cheap Pause preflight: only the open-exec check. Same busy wording as
+/// PauseToSnapshot so Cubelet can refuse before cloning the memory volume.
+async fn do_check_pause_allowed(sb: &SandBox, log: &Log) -> CResult<UpdateOutcome> {
+    if sb.pause_vm_forbidding().await {
+        let msg = "sandbox pause forbidding, terminate exec tasks first";
+        errf!(log, "check pause allowed: {}", msg);
+        return Err(msg.into());
+    }
+    Ok(UpdateOutcome { exit_shim: false })
 }
 
 #[cfg(test)]

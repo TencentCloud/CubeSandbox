@@ -892,8 +892,12 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	// GC leftover / half-finished pause snaps on user Destroy. Never GC while
 	// Pause keep-tombstone / tombstone delete still owns the pause snap.
 	pauseSnapToGC := ""
+	abortedPauseSnapToGC := ""
 	if getErr == nil {
 		pauseSnapToGC = pauseSnapIDToGCOnDestroy(req, sb)
+		if sb != nil && !isPauseKeepTombstone(req) && !isPauseDeleteTombstone(req) {
+			abortedPauseSnapToGC = abortedPauseSnapshotID(sb)
+		}
 	}
 
 	// Final delete of a paused sandbox: only drop the PAUSED CubeBox store row.
@@ -934,14 +938,22 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
 		}
 	}
-	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && (pauseSnapToGC != "" || abortedPauseSnapToGC != "") {
 		backend, _ := storageBackendFromAnnotations(req.GetAnnotations())
 		if sb != nil {
 			if b := pauseCatalogBackend(sb); b != "" {
 				backend = b
 			}
 		}
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
+		if pauseSnapToGC != "" {
+			s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
+		}
+		if abortedPauseSnapToGC != "" && abortedPauseSnapToGC != pauseSnapToGC {
+			if s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, abortedPauseSnapToGC, cleanupBackendForPauseSnap(backend, abortedPauseSnapToGC)) {
+				clearAbortedPauseSnapshotStamp(sb)
+				_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+			}
+		}
 	}
 	return rsp, nil
 }

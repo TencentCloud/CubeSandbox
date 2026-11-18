@@ -142,6 +142,79 @@ func stampedPauseSnapshotID(sb *cubeboxstore.CubeBox) string {
 	return strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseSnapshotID])
 }
 
+// restorePauseSnapshotStamp rolls the pause.snapshot.id stamp back after a
+// pre-freeze busy reject so the CubeBox still names the live restore base
+// (prevLiveSnap). An empty prevLiveSnap clears the stamp entirely.
+func restorePauseSnapshotStamp(sb *cubeboxstore.CubeBox, prevLiveSnap string) {
+	if sb == nil {
+		return
+	}
+	prevLiveSnap = strings.TrimSpace(prevLiveSnap)
+	if prevLiveSnap != "" {
+		stampPauseSnapshotID(sb, prevLiveSnap)
+		return
+	}
+	clearPauseSnapshotStamp(sb)
+}
+
+func clearPauseSnapshotStamp(sb *cubeboxstore.CubeBox) {
+	clearCubeBoxMetaKey(sb, constants.MasterAnnotationPauseSnapshotID)
+}
+
+// stampAbortedPauseSnapshotID records a busy-reject pause attempt whose CoW
+// cleanup failed, so Destroy can still GC tpl-<snapID>-memory after the live
+// pause.snapshot.id stamp is rolled back to the restore base.
+func stampAbortedPauseSnapshotID(sb *cubeboxstore.CubeBox, snapID string) {
+	snapID = strings.TrimSpace(snapID)
+	if sb == nil || snapID == "" {
+		return
+	}
+	sb.AddLabels(map[string]string{constants.MasterAnnotationPauseAbortedSnapshotID: snapID})
+	sb.AddAnnotations(map[string]string{constants.MasterAnnotationPauseAbortedSnapshotID: snapID})
+}
+
+func clearAbortedPauseSnapshotStamp(sb *cubeboxstore.CubeBox) {
+	clearCubeBoxMetaKey(sb, constants.MasterAnnotationPauseAbortedSnapshotID)
+}
+
+func abortedPauseSnapshotID(sb *cubeboxstore.CubeBox) string {
+	if sb == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(sb.Labels[constants.MasterAnnotationPauseAbortedSnapshotID]); id != "" {
+		return id
+	}
+	return strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseAbortedSnapshotID])
+}
+
+func clearCubeBoxMetaKey(sb *cubeboxstore.CubeBox, key string) {
+	if sb == nil || key == "" {
+		return
+	}
+	sb.MetaLock.Lock()
+	defer sb.MetaLock.Unlock()
+	if sb.Labels != nil {
+		next := make(map[string]string, len(sb.Labels))
+		for k, v := range sb.Labels {
+			if k == key {
+				continue
+			}
+			next[k] = v
+		}
+		sb.Labels = next
+	}
+	if sb.Annotations != nil {
+		next := make(map[string]string, len(sb.Annotations))
+		for k, v := range sb.Annotations {
+			if k == key {
+				continue
+			}
+			next[k] = v
+		}
+		sb.Annotations = next
+	}
+}
+
 func (s *service) listCubeboxes() []*cubeboxstore.CubeBox {
 	if listCubeboxesForTest != nil {
 		return listCubeboxesForTest()
@@ -162,6 +235,7 @@ var listCubeboxesForTest func() []*cubeboxstore.CubeBox
 func rejectUserCubeMasterLabel(key string) bool {
 	switch strings.TrimSpace(key) {
 	case constants.MasterAnnotationPauseSnapshotID,
+		constants.MasterAnnotationPauseAbortedSnapshotID,
 		constants.MasterAnnotationLaunchMemorySnapshotID,
 		constants.MasterAnnotationRuntimeRestoreSnapshotID,
 		constants.MasterAnnotationRuntimeRestoreSnapshotAttachedAt:
@@ -372,6 +446,23 @@ func (s *service) updateWithPauseCow(
 		}()
 	}
 
+	// Cheap exec preflight before layout / memory clone / preStop. Open exec
+	// sessions make PauseToSnapshot fail with the same busy wording; CLM
+	// retries about every 5s and must not redo JuiceFS clone work each cycle.
+	// Only early-return on the busy string: an older shim that rejects
+	// CheckPauseAllowed as an unknown action must fall through so Pause still
+	// works until CubeShim rolls out.
+	if busyErr := s.preflightPauseNotBusy(ctx, sb); busyErr != nil {
+		if isPauseBusyReject(busyErr.Error()) {
+			restorePauseSnapshotStamp(sb, prevLiveSnap)
+			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
+			rsp.Ret.RetMsg = busyErr.Error()
+			return rsp, nil
+		}
+		stepLog.Warnf("CheckPauseAllowed preflight unavailable; continuing to PauseToSnapshot: %v", busyErr)
+	}
+
 	spec, err := s.getCubeboxSnapshotSpec(ctx, req.SandboxID)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
@@ -464,11 +555,12 @@ func (s *service) updateWithPauseCow(
 	}
 
 	var rootfsObject *storage.CowSnapshotObject
-	cleanupArtifacts := func(base context.Context) {
+	cleanupArtifacts := func(base context.Context) bool {
 		c := telemetry.DetachTrace(base, stageCtx)
 		cleanupPreparedLayout(c)
-		cleanupCowSnapshotObjectsOn(c, stepLog, backend, memoryObject, rootfsObject)
-		s.bestEffortCleanupPauseSnapshot(c, req.RequestID, snapID, backend)
+		objectsOK := cleanupCowSnapshotObjectsOn(c, stepLog, backend, memoryObject, rootfsObject)
+		catalogOK := s.bestEffortCleanupPauseSnapshot(c, req.RequestID, snapID, backend)
+		return objectsOK && catalogOK
 	}
 
 	if layoutErr != nil {
@@ -561,8 +653,16 @@ func (s *service) updateWithPauseCow(
 		shimUpdateActionAnnotation:        shimUpdatePauseToSnapshotAction,
 		shimUpdatePauseSnapshotAnnotation: string(cfgJSON),
 	})); err != nil {
-		cleanupArtifacts(ctx)
-		markLocalPauseFailed(sb, err)
+		cleanupOK := cleanupArtifacts(ctx)
+		// Shim rejects Pause while exec sessions are open *before* freezing
+		// the VM. That is retryable: clear the in-flight PausingAt markers,
+		// restore the previous pause.snapshot.id stamp (so lineage/GC still
+		// name the live restore base), and leave the sandbox RUNNING.
+		if isPauseBusyReject(err.Error()) {
+			applyPauseBusyRejectLocalState(sb, prevLiveSnap, snapID, cleanupOK)
+		} else {
+			markLocalPauseFailed(sb, err)
+		}
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
 		rsp.Ret.RetMsg = err.Error()
@@ -799,6 +899,94 @@ func markPauseDestroyPending(sb *cubeboxstore.CubeBox, requestID string) bool {
 	return true
 }
 
+// pauseBusyRejectMessage is the Shim wording for an open-exec Pause reject.
+// CheckPauseAllowed and PauseToSnapshot both return this string; keep the
+// Cubelet/Master matchers in sync with it.
+const pauseBusyRejectMessage = "sandbox pause forbidding, terminate exec tasks first"
+
+// pauseFailedReason is stamped by markLocalPauseFailed and cleared by
+// clearLocalPauseAttempt on a retryable busy reject.
+const pauseFailedReason = "PauseFailed"
+
+// preflightPauseNotBusy asks the shim whether open exec sessions would block
+// Pause, before Cubelet clones the memory volume or runs preStop.
+func (s *service) preflightPauseNotBusy(ctx context.Context, sb *cubeboxstore.CubeBox) error {
+	if preflightPauseNotBusyForTest != nil {
+		return preflightPauseNotBusyForTest(ctx, sb)
+	}
+	if sb == nil {
+		return nil
+	}
+	first := sb.FirstContainer()
+	if first == nil || first.Container == nil {
+		return nil
+	}
+	ns := sb.Namespace
+	if ns == "" {
+		ns = namespaces.Default
+	}
+	ctx = namespaces.WithNamespace(ctx, ns)
+	task, err := first.Container.Task(ctx, nil)
+	if err != nil {
+		// Let the later Pause path surface the missing-task error.
+		return nil
+	}
+	return task.Update(ctx, containerd.WithAnnotations(map[string]string{
+		shimUpdateActionAnnotation: shimUpdateCheckPauseAllowedAction,
+	}))
+}
+
+// preflightPauseNotBusyForTest, when set, replaces the shim Update preflight
+// so busy-path unit tests do not need a live containerd task.
+var preflightPauseNotBusyForTest func(ctx context.Context, sb *cubeboxstore.CubeBox) error
+
+// isPauseBusyReject reports a Shim preflight reject: open exec sessions
+// forbid Pause, and the MicroVM is still running. Matching the Shim wording
+// keeps Cubelet/Master aligned without a new wire error code.
+func isPauseBusyReject(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "pause forbidding") ||
+		strings.Contains(lower, "terminate exec tasks first")
+}
+
+// applyPauseBusyRejectLocalState rolls local pause bookkeeping back after a
+// pre-freeze busy reject. cleanupOK false means CoW/catalog delete failed, so
+// the aborted snap id is retained for Destroy GC while the live stamp returns
+// to prevLiveSnap for lineage.
+func applyPauseBusyRejectLocalState(sb *cubeboxstore.CubeBox, prevLiveSnap, snapID string, cleanupOK bool) {
+	clearLocalPauseAttempt(sb)
+	restorePauseSnapshotStamp(sb, prevLiveSnap)
+	if !cleanupOK {
+		stampAbortedPauseSnapshotID(sb, snapID)
+		return
+	}
+	clearAbortedPauseSnapshotStamp(sb)
+}
+
+// clearLocalPauseAttempt rolls back in-flight pause bookkeeping when Pause
+// never left the sandbox running (busy reject). Unlike markLocalPauseFailed,
+// this does not stamp Unknown / PauseFailed.
+func clearLocalPauseAttempt(sb *cubeboxstore.CubeBox) {
+	if sb == nil {
+		return
+	}
+	for _, c := range sb.AllContainers() {
+		if c == nil || c.Status == nil {
+			continue
+		}
+		_ = c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.PausingAt = 0
+			status.PausedAt = 0
+			status.Unknown = false
+			if status.Reason == pauseFailedReason {
+				status.Reason = ""
+				status.Message = ""
+			}
+			return status, nil
+		})
+	}
+}
+
 // markLocalPauseFailed records a terminal Pause failure without EXITED.
 // Master keeps the sandbox proxy + FAILED pausesnap for user visibility.
 func markLocalPauseFailed(sb *cubeboxstore.CubeBox, cause error) {
@@ -818,7 +1006,7 @@ func markLocalPauseFailed(sb *cubeboxstore.CubeBox, cause error) {
 			status.PausedAt = 0
 			status.FinishedAt = 0
 			status.Unknown = true
-			status.Reason = "PauseFailed"
+			status.Reason = pauseFailedReason
 			status.Message = msg
 			return status, nil
 		})
@@ -931,10 +1119,11 @@ func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubebo
 // bestEffortCleanupPauseSnapshot removes a pause catalog. After Pause
 // succeeds Cubelet GCs the previous live pause snap here; Destroy is the
 // leftover / failed-pause fallback. Master is not in this path.
-func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID, backend string) {
+// Returns false when cleanup was attempted and failed.
+func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID, backend string) bool {
 	snapID = strings.TrimSpace(snapID)
 	if snapID == "" {
-		return
+		return true
 	}
 	cleanupRsp, err := s.cleanupTemplate(ctx, &cubebox.CleanupTemplateRequest{
 		RequestID:  requestID,
@@ -943,11 +1132,13 @@ func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID,
 	}, false)
 	if err != nil {
 		log.G(ctx).Warnf("pause-snap GC after destroy failed snap=%s: %v", snapID, err)
-		return
+		return false
 	}
 	if cleanupRsp != nil && cleanupRsp.GetRet() != nil &&
 		cleanupRsp.GetRet().GetRetCode() != errorcode.ErrorCode_Success {
 		log.G(ctx).Warnf("pause-snap GC after destroy snap=%s ret=%v msg=%s",
 			snapID, cleanupRsp.GetRet().GetRetCode(), cleanupRsp.GetRet().GetRetMsg())
+		return false
 	}
+	return true
 }
