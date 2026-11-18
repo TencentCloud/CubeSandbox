@@ -134,10 +134,16 @@ func looksLikeJSONErrorDocument(body []byte) bool {
 // or HTML-looking body, or a 404 with a non-empty text body that is not a
 // JSON API error document (e.g. Go's "404 page not found"). A genuine JSON API
 // error document keeps the server's classification even when the Content-Type
-// header says text/* (including text/html); empty bodies and bodies that look
-// like truncated JSON are not positive evidence of a routing page either.
+// header says text/* (including text/html). A potentially truncated JSON object
+// is left to the API error parser. Empty text bodies need the text/html media
+// type to be classified as a routing page.
 func isRoutingPage(statusCode int, mediaType string, body []byte) bool {
 	trimmed := bytes.TrimSpace(body)
+	// The bounded peek may end inside a genuine JSON error document. A
+	// mislabeled HTML content type must not override that incomplete evidence.
+	if len(trimmed) > 0 && trimmed[0] == '{' && !json.Valid(trimmed) {
+		return false
+	}
 	prefix := bytes.ToLower(trimmed[:min(len(trimmed), len("<!doctype"))])
 	bodyLooksHTML := bytes.HasPrefix(prefix, []byte("<!doctype")) || bytes.HasPrefix(prefix, []byte("<html"))
 	if mediaType == "text/html" || bodyLooksHTML {

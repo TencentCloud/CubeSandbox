@@ -53,6 +53,34 @@ type routingBodySpy struct {
 	bytes  atomic.Int64
 }
 
+func TestPtyHTMLDiagnosticIdentifiesMethod(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html>portal</html>")
+	}))
+	defer server.Close()
+	host, port := serverHostPort(t, server.URL)
+	client := NewClient(Config{ProxyNodeIP: host, ProxyPortHTTP: port, SandboxDomain: "cube.test", RequestTimeout: time.Second})
+	defer client.Close()
+	sb := &Sandbox{client: client, SandboxID: "sb-pty"}
+	for _, tc := range []struct {
+		method string
+		run    func() error
+	}{
+		{"SendSignal", func() error { _, err := sb.Pty().Kill(context.Background(), 1); return err }},
+		{"SendInput", func() error { return sb.Pty().SendStdin(context.Background(), 1, []byte("x")) }},
+		{"Update", func() error { return sb.Pty().Resize(context.Background(), 1, PtySize{Rows: 24, Cols: 80}) }},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			err := tc.run()
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || !strings.HasPrefix(err.Error(), tc.method+" failed: ") {
+				t.Fatalf("expected method attribution and wrapped APIError, got %v", err)
+			}
+		})
+	}
+}
+
 func (b *routingBodySpy) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	b.bytes.Add(int64(n))

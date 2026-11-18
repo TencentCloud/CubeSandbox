@@ -6,6 +6,7 @@ package cubesandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1043,18 +1044,36 @@ func TestValidateConnectResponseTruncatedJSONDoc(t *testing.T) {
 	// A JSON error document larger than the routing peek cannot be fully
 	// parsed from the prefix; the SDK must not misclassify it as a routing
 	// page just because the prefix was cut off.
-	big := `{"message":"` + strings.Repeat("x", maxRoutingPagePeekBytes) + `"}`
-	resp := &http.Response{
-		StatusCode: http.StatusNotFound,
-		Header:     http.Header{"Content-Type": []string{"text/plain"}},
-		Body:       io.NopCloser(strings.NewReader(big)),
-	}
-	err := validateConnectResponse(resp)
-	if !errors.Is(err, ErrSandboxNotFound) {
-		t.Fatalf("validateConnectResponse(404 oversized JSON-as-text)=%v, want ErrSandboxNotFound", err)
-	}
-	if strings.Contains(err.Error(), "CUBE_PROXY_NODE_IP") {
-		t.Fatalf("validateConnectResponse(404 oversized JSON-as-text)=%v, should not suggest proxy routing", err)
+	for _, contentType := range []string{"text/plain", "text/html"} {
+		for _, tc := range []struct {
+			name string
+			want error
+		}{
+			{"sandbox", ErrSandboxNotFound},
+			{"template", ErrTemplateNotFound},
+			{"volume", ErrVolumeNotFound},
+		} {
+			t.Run(contentType+"/"+tc.name, func(t *testing.T) {
+				message := tc.name + " not found: " + strings.Repeat("x", maxRoutingPagePeekBytes)
+				raw, err := json.Marshal(map[string]string{"message": message})
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp := &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     http.Header{"Content-Type": []string{contentType}},
+					Body:       io.NopCloser(strings.NewReader(" \n" + string(raw))),
+				}
+				err = validateConnectResponse(resp)
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("lost %s not-found classification after the JSON prefix was truncated", tc.name)
+				}
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) || apiErr.Message != message {
+					t.Fatal("genuine JSON error message was replaced or truncated")
+				}
+			})
+		}
 	}
 }
 

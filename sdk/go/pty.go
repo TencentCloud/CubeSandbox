@@ -466,7 +466,7 @@ func (p *Pty) unary(ctx context.Context, method string, payload any, allowNotFou
 	// page instead of CubeProxy; surface the routing diagnostic instead of
 	// reporting success on a misrouted page.
 	if diag := misroutedHTMLDiagnostic(resp); diag != nil {
-		return false, diag
+		return false, fmt.Errorf("%s failed: %w", method, diag)
 	}
 	return true, nil
 }
