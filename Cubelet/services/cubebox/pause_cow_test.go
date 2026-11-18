@@ -203,7 +203,8 @@ func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
 	require.NoError(t, err)
 	// Fall-through continues into getCubeboxSnapshotSpec, which fails without a
 	// real runtime — that proves we did not early-return the preflight error.
-	require.NotEqual(t, errorcode.ErrorCode_TaskPauseFailed, rsp.Ret.RetCode)
+	require.Equal(t, errorcode.ErrorCode_Unknown, rsp.Ret.RetCode)
+	require.Contains(t, rsp.Ret.RetMsg, "failed to get cubebox spec")
 	require.NotContains(t, rsp.Ret.RetMsg, "CheckPauseAllowed")
 	require.Equal(t, attempt, stampedPauseSnapshotID(sb), "fall-through keeps the in-flight stamp")
 }

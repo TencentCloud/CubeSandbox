@@ -638,6 +638,11 @@ func validateAppSnapshotAnnotations(req *cubebox.RunCubeSandboxRequest) error {
 }
 
 func (s *service) getCubeboxSnapshotSpec(ctx context.Context, sandboxID string) (*CubeboxSnapshotSpec, error) {
+	if s.cubeboxMgr == nil || s.cubeboxMgr.client == nil {
+		// Unit tests and early-boot paths may call Pause without a live
+		// containerd client; return an error instead of nil-pointer panic.
+		return nil, fmt.Errorf("containerd client is not initialized")
+	}
 
 	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
 	if err != nil {
