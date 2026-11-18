@@ -57,7 +57,7 @@ type HourWriter struct {
 type DateType uint8
 
 func reOpenFile(path string, currFile **os.File, openTime *int64) {
-	*openTime = currUnixTime
+	*openTime = currUnixTime()
 	if *currFile != nil {
 		(*currFile).Close()
 	}
@@ -74,7 +74,7 @@ func (w *ConsoleWriter) Write(v []byte) (int, error) {
 }
 
 func (w *RollFileWriter) Write(v []byte) (int, error) {
-	if w.currFile == nil || w.openTime+10 < currUnixTime {
+	if w.currFile == nil || w.openTime+10 < currUnixTime() {
 		fullPath := filepath.Join(w.logpath, fmt.Sprintf("%s.log", w.name))
 		reOpenFile(fullPath, &w.currFile, &w.openTime)
 	}
@@ -172,7 +172,7 @@ func NewRollFileWriter(logpath, name string, num, sizeMB int) *RollFileWriter {
 }
 
 func (w *DateWriter) Write(v []byte) (int, error) {
-	if w.currFile == nil || w.openTime+10 < currUnixTime {
+	if w.currFile == nil || w.openTime+10 < currUnixTime() {
 		fullPath := filepath.Join(w.logpath, fmt.Sprintf("%s.log.%s", w.name, w.currDate))
 		reOpenFile(fullPath, &w.currFile, &w.openTime)
 	}
@@ -227,7 +227,7 @@ func (w *DateWriter) cleanOldLogs() {
 
 func (w *DateWriter) getCurrDate() string {
 	if w.dateType == HOUR {
-		return currDateHour
+		return currDateHour()
 	}
-	return currDateDay
+	return currDateDay()
 }

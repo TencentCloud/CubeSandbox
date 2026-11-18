@@ -4,21 +4,39 @@
 
 package CubeLog
 
-import "time"
-
-var (
-	currUnixTime int64
-	currDateTime string
-	currDateHour string
-	currDateDay  string
+import (
+	"sync/atomic"
+	"time"
 )
 
+// logClock is the time snapshot shared by every log writer. A background
+// goroutine refreshes it once per second while writers read it on every
+// call, so it is published atomically: a reader sees one complete snapshot
+// and never a torn string or a time from a different tick.
+type logClock struct {
+	unixTime int64
+	dateHour string
+	dateDay  string
+}
+
+var currClock atomic.Pointer[logClock]
+
+func newLogClock(now time.Time) *logClock {
+	return &logClock{
+		unixTime: now.Unix(),
+		dateHour: now.Format("2006010215"),
+		dateDay:  now.Format("20060102"),
+	}
+}
+
+func currUnixTime() int64 { return currClock.Load().unixTime }
+
+func currDateHour() string { return currClock.Load().dateHour }
+
+func currDateDay() string { return currClock.Load().dateDay }
+
 func init() {
-	now := time.Now()
-	currUnixTime = now.Unix()
-	currDateTime = now.Format("2006-01-02 15:04:05")
-	currDateHour = now.Format("2006010215")
-	currDateDay = now.Format("20060102")
+	currClock.Store(newLogClock(time.Now()))
 	go func() {
 		tm := time.NewTimer(time.Second)
 		for {
@@ -26,11 +44,7 @@ func init() {
 			d := time.Second - time.Duration(now.Nanosecond())
 			tm.Reset(d)
 			<-tm.C
-			now = time.Now()
-			currUnixTime = now.Unix()
-			currDateTime = now.Format("2006-01-02 15:04:05")
-			currDateHour = now.Format("2006010215")
-			currDateDay = now.Format("20060102")
+			currClock.Store(newLogClock(time.Now()))
 		}
 	}()
 }
