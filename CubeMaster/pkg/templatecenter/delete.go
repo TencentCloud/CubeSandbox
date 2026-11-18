@@ -420,7 +420,20 @@ func (t *templateCleanupTargets) shouldCheckInUse() bool {
 	if t.Definition == nil {
 		return false
 	}
-	return !strings.EqualFold(t.Definition.Status, StatusFailed)
+	if !strings.EqualFold(t.Definition.Status, StatusFailed) {
+		return true
+	}
+	// FAILED normally means no replica is usable, so the in-use check is
+	// skipped. A partial replica persistence failure on create can leave
+	// READY rows behind a FAILED definition (e.g. an adopted artifact is not
+	// cleaned up), and sandbox scheduling only needs a READY replica, so keep
+	// the check while any READY row remains.
+	for _, replica := range t.Replicas {
+		if replica.Status == ReplicaStatusReady {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanupTemplateMetadata(ctx context.Context, templateID string) error {

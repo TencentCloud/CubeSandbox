@@ -102,12 +102,12 @@ and other operations are not changed by this: on persistErr they still fail
 only the job (follow-up).
 
 Caveat: persistErr can be partial, because rows are upserted per node. If the
-create adopted an existing artifact (`builtFreshArtifact == false`), no
-cleanup runs, so READY rows of the nodes that did persist can remain next to
-the FAILED definition. A FAILED definition therefore does not guarantee that
-no usable replica exists, and `shouldCheckInUse` (which skips the in-use
-check for FAILED) must not be relied on for this state. Tracked in the same
-follow-up.
+create adopted an existing artifact (`builtFreshArtifact == false`), or the
+cleanup fails, READY rows of the nodes that did persist can remain next to the
+FAILED definition. A FAILED definition therefore does not guarantee that no
+usable replica exists. To keep deletes safe, `shouldCheckInUse` still runs
+the in-use check for a FAILED definition while any READY replica row remains;
+a FAILED definition with no READY row skips it, as before.
 
 Invariants:
 

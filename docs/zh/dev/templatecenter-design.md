@@ -88,7 +88,7 @@ CREATING ─┬─→ READY             快照提交成功
 
 **create** 时副本落库失败（persistErr），定义会以脱敏信息发布为 FAILED。如果该 job 新构建了 artifact，随后会清理该 artifact 及其副本行。redo 等其他操作不受影响：persistErr 时仍只把 job 标为失败（后续处理）。
 
-注意：副本行是逐节点写入的，persistErr 可能只是部分失败。如果 create 复用了已有 artifact（`builtFreshArtifact == false`），不会执行清理，写入成功的节点的 READY 副本行可能与 FAILED 的定义并存。因此 FAILED 的定义并不保证没有可用副本，对这种状态不能依赖 `shouldCheckInUse`（它对 FAILED 会跳过使用中检查）。这一点同样列入后续处理。
+注意：副本行是逐节点写入的，persistErr 可能只是部分失败。如果 create 复用了已有 artifact（`builtFreshArtifact == false`），或者清理失败，写入成功的节点的 READY 副本行可能与 FAILED 的定义并存。因此 FAILED 的定义并不保证没有可用副本。为保证删除安全，只要还有 READY 副本行，`shouldCheckInUse` 对 FAILED 的定义仍会执行使用中检查；没有 READY 副本行的 FAILED 定义则与以前一样跳过该检查。
 
 不变式：
 

@@ -307,6 +307,41 @@ func TestDeleteTemplateWithTargetsForceOnFailedDefinitionSkipsInUse(t *testing.T
 	}
 }
 
+// A partial replica persistence failure on create can leave READY rows
+// behind a FAILED definition. Such a template is still schedulable, so a
+// normal delete must keep the in-use check.
+func TestDeleteTemplateWithTargetsFailedDefinitionWithReadyReplicaChecksInUse(t *testing.T) {
+	rec := stubDeleteFlow(t, true)
+
+	err := deleteTemplateWithTargets(context.Background(), "tpl-failed-ready", &templateCleanupTargets{
+		Definition:   &models.TemplateDefinition{TemplateID: "tpl-failed-ready", Status: StatusFailed},
+		Replicas:     []models.TemplateReplica{{TemplateID: "tpl-failed-ready", NodeID: "node-a", Status: ReplicaStatusReady}},
+		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
+	}, DeleteTemplateOptions{})
+
+	if !errors.Is(err, ErrTemplateInUse) {
+		t.Fatalf("a FAILED definition with a READY replica must honour the in-use check, got %v", err)
+	}
+	if !rec.inUseCalled {
+		t.Fatal("the in-use check must run while a READY replica remains")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("an in-use template must not be cleaned up, got %v", rec.stages)
+	}
+}
+
+// A FAILED definition whose replicas are all non-READY keeps skipping the
+// in-use check, as before.
+func TestShouldCheckInUseFailedDefinitionWithoutReadyReplica(t *testing.T) {
+	targets := &templateCleanupTargets{
+		Definition: &models.TemplateDefinition{TemplateID: "tpl-failed", Status: StatusFailed},
+		Replicas:   []models.TemplateReplica{{TemplateID: "tpl-failed", NodeID: "node-a", Status: ReplicaStatusFailed}},
+	}
+	if targets.shouldCheckInUse() {
+		t.Fatal("a FAILED definition without READY replicas must skip the in-use check")
+	}
+}
+
 // Force also clears the "no node locator" dead end, which is otherwise
 // permanently undeletable.
 func TestDeleteTemplateWithTargetsForceClearsMissingLocator(t *testing.T) {
