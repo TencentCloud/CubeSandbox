@@ -115,8 +115,13 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	// Snapshot pids before Kill/DeleteTask. TaskExit and ttrpc close return
 	// while the shim process may still hold the guest disks; storage Destroy
 	// is the next workflow step and must not delete those volumes yet.
-	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, sb)
-	if attempt, ok := ctx.Value(resumeRollbackContextKey{}).(*resumeRollback); ok {
+	attempt, _ := ctx.Value(resumeRollbackContextKey{}).(*resumeRollback)
+	var remembered []runtimePIDCandidate
+	if attempt != nil {
+		remembered = attempt.unresolvedPIDs
+	}
+	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, sb, remembered...)
+	if attempt != nil {
 		runtimeEvidence = attempt.rememberRuntime(runtimeEvidence)
 	}
 	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)

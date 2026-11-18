@@ -837,10 +837,18 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	ctx = log.WithLogger(ctx, stepLog)
 
 	if (getErr == nil && constants.IsCubeRuntime(ctx)) || s.resumeRollbackPending(req.SandboxID) {
+		if s.resumeRollbackPending(req.SandboxID) {
+			setResumeRollbackPending(rsp.Ret)
+			return rsp, nil
+		}
 		// Serialize Destroy with Pause/Resume. CoW Pause already exited the shim;
 		// Destroy never wakes a paused sandbox (no resume-before-delete).
 		lockDeadline, ok := deleteLifecycleLockDeadline(ctx, time.Now())
 		if !ok {
+			if s.resumeRollbackPending(req.SandboxID) {
+				setResumeRollbackPending(rsp.Ret)
+				return rsp, nil
+			}
 			rsp.Ret.RetMsg = "cannot start delete: insufficient time remains for the Cubelet RPC response; retry DELETE after 5 seconds"
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 			return rsp, nil
@@ -849,6 +857,10 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		defer lockCancel()
 		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, req.SandboxID)
 		if lockErr != nil {
+			if s.resumeRollbackPending(req.SandboxID) {
+				setResumeRollbackPending(rsp.Ret)
+				return rsp, nil
+			}
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry DELETE after 2 seconds"
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 			return rsp, nil

@@ -114,6 +114,38 @@ func destroySandboxWithContextForTest(t *testing.T, s *service, ctx context.Cont
 	return rsp
 }
 
+func TestDestroyReturnsRollbackPendingWhileLifecycleLockIsHeld(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		name := "stored sandbox"
+		if missing {
+			name = "missing sandbox row"
+		}
+		t.Run(name, func(t *testing.T) {
+			const id = "rollback-held-lock"
+			sb := newCubeboxWithStatusForTest(id, cubeboxstore.Status{})
+			if missing {
+				sb = nil
+			}
+			s, manager, flow := newDestroyLifecycleServiceForTest(sb)
+			if missing {
+				manager.getErr = utils.ErrorKeyNotFound
+			}
+			unlock := s.sandboxLifecycleLocks.Lock(id)
+			defer unlock()
+			s.resumeRollbacks.Store(id, &resumeRollback{})
+			// Keep the lock held for the entire public Destroy call, as the
+			// background rollback does while waiting for the VMM to exit.
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			rsp := destroySandboxWithContextForTest(t, s, ctx, id)
+			require.Equal(t, errorcode.ErrorCode_ResumeRollbackPending, rsp.GetRet().GetRetCode())
+			require.Zero(t, flow.destroyCalls)
+			require.Zero(t, flow.cleanupCalls)
+			require.True(t, s.resumeRollbackPending(id))
+		})
+	}
+}
+
 func TestDestroyRunningSandboxDoesNotResume(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("running-delete", cubeboxstore.Status{
 		StartedAt: time.Now().Add(-time.Minute).UnixNano(),

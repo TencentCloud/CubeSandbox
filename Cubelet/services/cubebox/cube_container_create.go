@@ -477,17 +477,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
-		if flowOpts.ScheduleResumeRollback != nil {
-			return err
-		}
-		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
-		if cleanupErr == nil {
-			// The sandbox has already been torn down synchronously, so the outer
-			// workflow failover does not need to repeat the same destroy path.
-			flowOpts.Failover = false
-		} else {
-			sanboxlog.Errorf("cleanup sandbox after envd init failure failed: %v", cleanupErr)
-		}
+		l.handleEnvdInitFailure(ctx, flowOpts, realReq, sandBox)
 		return err
 	}
 
@@ -519,6 +509,19 @@ func applyCgroupInfoToCubeBox(sandBox *cubeboxstore.CubeBox, info *cgroupp.Info)
 	sandBox.CGroupPath = info.CgroupID
 	sandBox.RestoreHostMetricsBaseline(info.HostMetricsBaseline)
 	sandBox.HostMetricsBaselineMissingAtAssignment = info.HostMetricsBaselineMissingAtAssignment
+}
+
+func (l *local) handleEnvdInitFailure(ctx context.Context, flowOpts *workflow.CreateContext,
+	realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) {
+	if flowOpts.Failover && flowOpts.ScheduleResumeRollback != nil {
+		return
+	}
+	if err := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox); err != nil {
+		log.G(ctx).Errorf("cleanup sandbox after envd init failure failed: %v", err)
+	} else {
+		// Synchronous teardown succeeded; the workflow need not repeat it.
+		flowOpts.Failover = false
+	}
 }
 
 func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,

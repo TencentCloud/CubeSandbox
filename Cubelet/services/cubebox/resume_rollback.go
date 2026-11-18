@@ -32,8 +32,9 @@ type resumeRollback struct {
 	failures  atomic.Int32
 	nextRetry atomic.Int64
 	// The shim may remove its bundle before the VMM exits. Keep verified
-	// identities across cleanup attempts under the lifecycle lock.
+	// identities and unresolved PID candidates under the lifecycle lock.
 	runtimeIdentities []utils.ProcessIdentity
+	unresolvedPIDs    []runtimePIDCandidate
 }
 
 type resumeRollbackContextKey struct{}
@@ -45,6 +46,9 @@ func (a *resumeRollback) rememberRuntime(ev sandboxRuntimeEvidence) sandboxRunti
 		}
 	}
 	ev.identities = a.runtimeIdentities
+	// These candidates have just been rechecked by the collector. Drop only
+	// those now proven gone or converted into a verified identity.
+	a.unresolvedPIDs = ev.unresolvedPIDs
 	return ev
 }
 
