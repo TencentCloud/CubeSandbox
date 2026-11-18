@@ -84,17 +84,17 @@ CREATING ─┬─→ READY             快照提交成功
                                 模板定义没有 DELETED 状态
 ```
 
-`redo` 会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。任何定义状态下都接受 redo，包括 READY（例如扩容后执行 `tpl redo --node <新节点>`）。
+`redo` 成功时会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。
 
-副本落库失败（persistErr）时，job 一律以脱敏信息标为失败，但定义状态按路径不同：
+副本落库失败（persistErr）时，job 一律以脱敏信息标为失败。定义状态按路径不同：
 
-- **create**：发布 FAILED；新构建的 artifact 及其副本行会被清理。
-- **redo**（本地或转发到 TC 的）：在清理新 artifact 之后，按已落库的副本行汇总得出。没有 READY 副本时发布 FAILED，这也会解除停留在 PENDING 的定义；否则发布 READY / PARTIALLY_READY，仍在服务的模板绝不会被报告为 FAILED。如果读不到副本行，则保持原状态，不做降级。
+- **create**：发布 FAILED。新构建的 artifact 及其副本行会被清理。
+- **redo**（本地或转发到 TC 的）：保持不变。redo 的目标模板可能仍在服务，而写库失败的节点上的副本行已经过期，不能据此推导状态。这种情况留待后续处理。
 
 不变式：
 
 - PENDING 和 CREATING 会被 `hasActiveDefinitionBuild` 视为构建进行中，普通（非强制）删除会以 `ErrTemplateAttemptInProgress` 拒绝。强制删除会先把定义标为 FAILED（`UpdateDefinitionStatus`），再删除该行。
-- 每个构建终态都必须通过 `publishTemplateStatusWithAlias` 发布状态；只写 job 行的 `template_status` 不会更新定义，会导致定义一直停留在 PENDING。
+- 只写 job 行的 `template_status` 不会更新定义。create 的 persistErr 路径会通过 `publishTemplateStatusWithAlias` 发布 FAILED。仍然只写 job 行的失败可能让 PENDING 的定义一直停留在 PENDING，包括：redo 的 persistErr，以及定义行存在之后 `prepareRedoTemplateReplicas`、`refreshTemplateReplicaSummary`、`GetTemplateInfo` 出错。这些目前尚未覆盖。
 - 定义行已处于 DELETING 时，发布路径会被抑制（`publishTemplateStatusWithAlias` 返回 `ErrTemplateNotFound`），因此并发删除不会被演变成第二次失败。
 - 发布时的别名认领条件是 `status != FAILED`：READY 和 PARTIALLY_READY 会认领请求的别名，FAILED 跳过认领。跳过认领不会释放模板已经持有的别名。手动设置别名（`SetTemplateAlias`）更严格，要求 READY。
 - 创建沙箱不检查定义状态，只要求某个健康节点上有 READY 副本（`EnsureTemplateLocalityReady`）。因此定义状态是面向用户的汇总信息，而不是调度闸门。

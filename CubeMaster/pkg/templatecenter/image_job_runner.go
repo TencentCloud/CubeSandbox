@@ -186,13 +186,14 @@ func finishTemplateImageJobAfterArtifact(
 	// jobErrMsg overrides err.Error() in the job row when the raw error must
 	// not be exposed through the build-status API.
 	jobErrMsg := ""
-	// A TC-forwarded REDO reuses this path but may target a template that is
-	// already serving from READY replicas. Its status is published from the
-	// persisted replica rows, after the fresh-artifact cleanup below has
-	// removed the rows that point at the artifact being discarded.
-	redoPersistErr := persistErr != nil && jobRecord.Operation == JobOperationRedo
 	if persistErr != nil {
-		if redoPersistErr {
+		if jobRecord.Operation == JobOperationRedo {
+			// A TC-forwarded REDO reuses this path, but its target may be a
+			// template that is still serving. Redo keeps the definition
+			// status untouched on persistErr (only the job fails); deriving a
+			// correct status for a partially redone template is out of scope
+			// here.
+			jobErrMsg = logRedoPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
 			err = persistErr
 		} else {
 			jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
@@ -208,9 +209,6 @@ func finishTemplateImageJobAfterArtifact(
 			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
 				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
 			}
-		}
-		if redoPersistErr {
-			jobErrMsg, err = publishRedoStatusAfterPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
 		}
 		if jobErrMsg == "" {
 			jobErrMsg = err.Error()
@@ -298,56 +296,15 @@ func persistErrUserMessage(readyTargetCount int, jobID string) string {
 	)
 }
 
-// publishRedoStatusAfterPersistErr is the redo counterpart of
-// markDefinitionFailedOnPersistErr. A redo runs against a template that may
-// already be serving from READY replicas on nodes the redo did not touch (or
-// touched successfully), so a persistence failure on some targets must not
-// publish FAILED over them: FAILED misreports a usable template and makes a
-// later delete skip the in-use check (shouldCheckInUse).
-//
-// The status is therefore derived from the persisted replica rows:
-//   - no READY replica left: published FAILED with the sanitized message
-//     (this also fixes a definition left in PENDING);
-//   - at least one READY replica: the aggregate READY / PARTIALLY_READY is
-//     published via refreshTemplateReplicaSummary, as on the success path;
-//   - replica rows cannot be read: the definition is left unchanged rather
-//     than downgraded on missing information.
-//
-// The job row always fails with the sanitized userMsg; err carries the raw
-// cause for logs only.
-func publishRedoStatusAfterPersistErr(
-	ctx context.Context,
-	templateID, jobID string,
-	readyTargetCount int,
-	persistErr error,
-) (userMsg string, err error) {
-	replicas, listErr := ListReplicas(ctx, templateID)
-	if listErr != nil {
-		log.G(ctx).Errorf("replica persist error during redo and replica rows unreadable, template status left unchanged, template=%s job=%s persist_err=%v list_err=%v",
-			templateID, jobID, persistErr, listErr)
-		return persistErrUserMessage(readyTargetCount, jobID) + "; template status could not be updated",
-			errors.Join(persistErr, fmt.Errorf("list template replicas: %w", listErr))
-	}
-	current := make([]ReplicaStatus, 0, len(replicas))
-	for _, replica := range replicas {
-		current = append(current, replicaModelToStatus(replica))
-	}
-	if status, _ := summarizeStatus(current); status == StatusFailed {
-		return markDefinitionFailedOnPersistErr(ctx, templateID, jobID, readyTargetCount, persistErr)
-	}
-	log.G(ctx).Errorf("replica persist error during redo, READY replicas remain so status is derived from replica rows, template=%s job=%s err=%v",
-		templateID, jobID, persistErr)
-	userMsg = persistErrUserMessage(readyTargetCount, jobID)
-	err = persistErr
-	if _, refreshErr := refreshTemplateReplicaSummary(ctx, templateID, jobID); refreshErr != nil {
-		log.G(ctx).Errorf("refresh template status after redo persist error, template=%s job=%s err=%v", templateID, jobID, refreshErr)
-		if !errors.Is(refreshErr, ErrTemplateNotFound) {
-			err = errors.Join(err, fmt.Errorf("refresh template status: %w", refreshErr))
-			userMsg += "; template status could not be updated"
-		}
-		invalidateTemplateCaches(templateID)
-	}
-	return userMsg, err
+// logRedoPersistErr handles replica persistence failures on the redo paths.
+// Unlike create, it does not touch the definition status: a redo may target a
+// template that is still serving from replicas outside (or unaffected by) the
+// redo, and the persisted rows of the nodes whose write failed are stale. It
+// logs the raw error and returns the sanitized message for the job row, which
+// the build-status API exposes.
+func logRedoPersistErr(ctx context.Context, templateID, jobID string, readyTargetCount int, persistErr error) string {
+	log.G(ctx).Errorf("replica persist error during redo, definition status left unchanged, template=%s job=%s err=%v", templateID, jobID, persistErr)
+	return persistErrUserMessage(readyTargetCount, jobID)
 }
 
 func errorString(err error) string {

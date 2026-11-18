@@ -93,21 +93,17 @@ any state ──→ (row removed)     delete hard-deletes the definition and its
 ```
 
 READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
-a fresh aggregate status from the same summary rules. Redo is accepted in any
-definition status, including READY (e.g. `tpl redo --node <new-node>` after
-scale-out).
+a fresh aggregate status from the same summary rules on success.
 
 On a replica persistence failure (persistErr) the job always fails with a
-sanitized message, but the definition status depends on the path:
+sanitized message. The definition status depends on the path:
 
-- **create**: published FAILED; the fresh artifact and its replica rows are
+- **create**: published FAILED. The fresh artifact and its replica rows are
   cleaned up.
-- **redo** (local or TC-forwarded): derived from the persisted replica rows,
-  after any fresh-artifact cleanup. If no READY replica remains it is
-  published FAILED, which also releases a definition left in PENDING.
-  Otherwise READY / PARTIALLY_READY is published, so a template that is still
-  serving is never reported FAILED. If the replica rows cannot be read, the
-  status is left unchanged rather than downgraded.
+- **redo** (local or TC-forwarded): left unchanged. A redo may target a
+  template that is still serving, and the rows of the nodes whose write
+  failed are stale, so no status is derived from them. Handling this case is
+  a follow-up.
 
 Invariants:
 
@@ -115,10 +111,13 @@ Invariants:
   `hasActiveDefinitionBuild`; a normal (non-force) delete is rejected with
   `ErrTemplateAttemptInProgress`. A force delete first marks the definition FAILED
   (`UpdateDefinitionStatus`) and then removes the row.
-- Every terminal build outcome must publish a status through
-  `publishTemplateStatusWithAlias`; writing only the job row's
-  `template_status` does not update the definition and leaves it stuck in
-  PENDING.
+- Writing only the job row's `template_status` does not update the
+  definition. The create persistErr path publishes FAILED through
+  `publishTemplateStatusWithAlias`. Failures that still write only the job
+  row can leave a PENDING definition stuck in PENDING: redo persistErr, and
+  `prepareRedoTemplateReplicas`, `refreshTemplateReplicaSummary` or
+  `GetTemplateInfo` errors after the definition row exists. These are not
+  covered yet.
 - A definition row already marked DELETING suppresses the publish path
   (`publishTemplateStatusWithAlias` returns `ErrTemplateNotFound`), so a
   concurrent delete is never turned into a second failure.

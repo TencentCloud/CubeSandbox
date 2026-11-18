@@ -190,6 +190,7 @@ type persistErrCallChainRecorder struct {
 	publishedStatuses []string
 	publishedErrors   []string
 	jobUpdates        []map[string]any
+	refreshed         bool
 }
 
 // lastJobErrorMessage returns the error_message of the last job-row update
@@ -324,11 +325,9 @@ func TestFinishTemplateImageJobAfterArtifact_PersistErrMarksDefinitionFailed(t *
 }
 
 // patchRedoPersistErrChain stubs the redo call chain (SNAPSHOTTING resume
-// with a reusable artifact) up to createTemplateReplicasOnNodes. replicaRows
-// is what ListReplicas returns, both at redo start and when the persistErr
-// branch derives the template status. The returned pointer reports whether
-// refreshTemplateReplicaSummary ran.
-func patchRedoPersistErrChain(patches *gomonkey.Patches, rec *persistErrCallChainRecorder, persistErr error, replicaRows []models.TemplateReplica) *bool {
+// with a reusable artifact) up to createTemplateReplicasOnNodes, which fails
+// with persistErr.
+func patchRedoPersistErrChain(patches *gomonkey.Patches, rec *persistErrCallChainRecorder, persistErr error) {
 	patchPersistErrCommon(patches, rec, persistErr)
 
 	const artifactID = "artifact-redo"
@@ -351,7 +350,7 @@ func patchRedoPersistErrChain(patches *gomonkey.Patches, rec *persistErrCallChai
 		}, nil
 	})
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
-		return replicaRows, nil
+		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
 	})
 	patches.ApplyFunc(resolveRedoTargets, func(instanceType string, req *types.RedoTemplateFromImageReq, replicas []models.TemplateReplica) ([]*node.Node, error) {
 		return targets, nil
@@ -373,12 +372,10 @@ func patchRedoPersistErrChain(patches *gomonkey.Patches, rec *persistErrCallChai
 	patches.ApplyFunc(prepareRedoTemplateReplicas, func(ctx context.Context, templateID, instanceType string, existingReplicas []models.TemplateReplica, targets []*node.Node, backend string) error {
 		return nil
 	})
-	refreshed := false
 	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, jobID string) (string, error) {
-		refreshed = true
+		rec.refreshed = true
 		return "", nil
 	})
-	return &refreshed
 }
 
 func runRedoForPersistErrTest() {
@@ -388,17 +385,16 @@ func runRedoForPersistErrTest() {
 	}, "http://master.example")
 }
 
-// assertRedoStatusKeptOutcome checks the outcome when READY replicas remain
-// after a redo persistErr: FAILED is never published (the status comes from
-// refreshTemplateReplicaSummary instead), and the job row still fails with
-// the sanitized message.
-func assertRedoStatusKeptOutcome(t *testing.T, rec *persistErrCallChainRecorder, refreshed bool) {
+// assertRedoPersistErrOutcome checks the redo outcome on persistErr: the
+// definition status is left untouched (no publish, no refresh), and the job
+// row fails with the sanitized message only.
+func assertRedoPersistErrOutcome(t *testing.T, rec *persistErrCallChainRecorder) {
 	t.Helper()
 	if len(rec.publishedStatuses) != 0 {
-		t.Fatalf("published definition statuses = %v, want none: READY replicas remain", rec.publishedStatuses)
+		t.Fatalf("published definition statuses = %v, want none: redo must not change the definition status on persistErr", rec.publishedStatuses)
 	}
-	if !refreshed {
-		t.Fatal("status must be derived from replica rows via refreshTemplateReplicaSummary")
+	if rec.refreshed {
+		t.Fatal("refreshTemplateReplicaSummary must not run after persistErr")
 	}
 	if got := rec.lastJobStatus(); got != JobStatusFailed {
 		t.Fatalf("job status = %q, want %q", got, JobStatusFailed)
@@ -414,50 +410,26 @@ func assertRedoStatusKeptOutcome(t *testing.T, rec *persistErrCallChainRecorder,
 	}
 }
 
-// TestRunRedoTemplateImageJob_PersistErrWithoutReadyReplicasMarksFailed
-// covers the original stuck-PENDING bug on the redo path: no READY replica
-// row remains, so the definition is published FAILED.
-func TestRunRedoTemplateImageJob_PersistErrWithoutReadyReplicasMarksFailed(t *testing.T) {
+// TestRunRedoTemplateImageJob_PersistErrLeavesDefinitionAndSanitizesJob
+// drives the real local redo chain into the persistErr branch. A redo may
+// target a template that is still serving, so the definition status must
+// not be changed; only the job fails, with a sanitized message.
+func TestRunRedoTemplateImageJob_PersistErrLeavesDefinitionAndSanitizesJob(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
 	rec := &persistErrCallChainRecorder{}
-	refreshed := patchRedoPersistErrChain(patches, rec, errors.New(rawDBErrText),
-		[]models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusFailed}})
+	patchRedoPersistErrChain(patches, rec, errors.New(rawDBErrText))
 
 	runRedoForPersistErrTest()
 
-	if *refreshed {
-		t.Fatal("refreshTemplateReplicaSummary must not run when no READY replica remains")
-	}
-	assertPersistErrOutcome(t, rec)
+	assertRedoPersistErrOutcome(t, rec)
 }
 
-// TestRunRedoTemplateImageJob_PersistErrKeepsStatusWhenReadyReplicasRemain
-// covers the review finding: a redo on a template that still has READY
-// replicas (READY, or PARTIALLY_READY) must not publish FAILED over it.
-func TestRunRedoTemplateImageJob_PersistErrKeepsStatusWhenReadyReplicasRemain(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	rec := &persistErrCallChainRecorder{}
-	refreshed := patchRedoPersistErrChain(patches, rec, errors.New(rawDBErrText),
-		[]models.TemplateReplica{
-			{NodeID: "node-a", Status: ReplicaStatusFailed},
-			{NodeID: "node-b", Status: ReplicaStatusReady},
-		})
-
-	runRedoForPersistErrTest()
-
-	assertRedoStatusKeptOutcome(t, rec, *refreshed)
-}
-
-// TestFinishTemplateImageJobAfterArtifact_RedoPersistErrDerivesStatusAfterCleanup
-// covers a TC-forwarded REDO, which goes through the create finish path. The
-// status must be derived only after the fresh artifact cleanup has removed the
-// replica rows that point at the discarded artifact, and FAILED must not be
-// published while READY replicas remain.
-func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrDerivesStatusAfterCleanup(t *testing.T) {
+// TestFinishTemplateImageJobAfterArtifact_RedoPersistErrLeavesDefinition
+// covers a TC-forwarded REDO, which goes through the create finish path: it
+// must behave like the local redo path, not like create.
+func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrLeavesDefinition(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
@@ -473,20 +445,16 @@ func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrDerivesStatusAfterCle
 		return &models.TemplateImageJob{JobID: jobID, TemplateID: "tpl-1", Operation: JobOperationRedo}, nil
 	})
 	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
-		return []models.TemplateReplica{{NodeID: "node-b", Status: ReplicaStatusReady}}, nil
+		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
 	})
 	patches.ApplyFunc(prepareRedoTemplateReplicas, func(ctx context.Context, templateID, instanceType string, existingReplicas []models.TemplateReplica, targets []*node.Node, backend string) error {
 		return nil
 	})
-	var order []string
 	patches.ApplyFunc(cleanupFailedRootfsArtifact, func(ctx context.Context, artifact *models.RootfsArtifact, instanceType, templateID string) error {
-		order = append(order, "cleanup")
 		return nil
 	})
-	refreshed := false
 	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, jobID string) (string, error) {
-		refreshed = true
-		order = append(order, "refresh")
+		rec.refreshed = true
 		return "", nil
 	})
 
@@ -501,84 +469,5 @@ func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrDerivesStatusAfterCle
 	if !errors.Is(err, persistErr) {
 		t.Fatalf("returned error %v does not wrap persistErr", err)
 	}
-	if strings.Join(order, ",") != "cleanup,refresh" {
-		t.Fatalf("call order = %v, want cleanup before status refresh", order)
-	}
-	assertRedoStatusKeptOutcome(t, rec, refreshed)
-}
-
-// TestPublishRedoStatusAfterPersistErr_UnreadableReplicasLeavesStatus verifies
-// the helper does not downgrade the definition when it cannot tell whether
-// READY replicas remain.
-func TestPublishRedoStatusAfterPersistErr_UnreadableReplicasLeavesStatus(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	persistErr := errors.New(rawDBErrText)
-	listErr := errors.New("list replicas: invalid connection")
-	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
-		return nil, listErr
-	})
-	published := false
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-		published = true
-		return "", "", nil
-	})
-	refreshed := false
-	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, jobID string) (string, error) {
-		refreshed = true
-		return "", nil
-	})
-
-	userMsg, err := publishRedoStatusAfterPersistErr(context.Background(), "tpl-1", "job-1", 2, persistErr)
-
-	if published || refreshed {
-		t.Fatalf("definition must be left unchanged when replica rows are unreadable (published=%v refreshed=%v)", published, refreshed)
-	}
-	if !errors.Is(err, persistErr) || !errors.Is(err, listErr) {
-		t.Fatalf("returned error %v must wrap both persistErr and listErr", err)
-	}
-	if !strings.Contains(userMsg, "template status could not be updated") {
-		t.Fatalf("userMsg missing status-update note: %q", userMsg)
-	}
-	for _, leak := range append(rawDBErrLeaks, "invalid connection") {
-		if strings.Contains(userMsg, leak) {
-			t.Fatalf("userMsg leaks %q: %q", leak, userMsg)
-		}
-	}
-}
-
-// TestPublishRedoStatusAfterPersistErr_RefreshErrorReported verifies a failed
-// status refresh is joined into the error and noted in the sanitized message,
-// without falling back to publishing FAILED.
-func TestPublishRedoStatusAfterPersistErr_RefreshErrorReported(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	persistErr := errors.New(rawDBErrText)
-	refreshErr := errors.New("refresh: deadlock")
-	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
-		return []models.TemplateReplica{{NodeID: "node-b", Status: ReplicaStatusReady}}, nil
-	})
-	published := false
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-		published = true
-		return "", "", nil
-	})
-	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, jobID string) (string, error) {
-		return "", refreshErr
-	})
-	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
-
-	userMsg, err := publishRedoStatusAfterPersistErr(context.Background(), "tpl-1", "job-1", 1, persistErr)
-
-	if published {
-		t.Fatal("FAILED must not be published as a fallback while READY replicas remain")
-	}
-	if !errors.Is(err, persistErr) || !errors.Is(err, refreshErr) {
-		t.Fatalf("returned error %v must wrap both persistErr and refreshErr", err)
-	}
-	if !strings.Contains(userMsg, "template status could not be updated") || strings.Contains(userMsg, "deadlock") {
-		t.Fatalf("userMsg = %q, want sanitized status-update note", userMsg)
-	}
+	assertRedoPersistErrOutcome(t, rec)
 }
