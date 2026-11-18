@@ -11,6 +11,26 @@
 {{- fail (printf "%s must be empty, auto, path, or virtual" $setting) }}
 {{- end }}
 {{- end }}
+{{- if eq (include "cube.minioBuiltinEnabled" .) "true" }}
+{{- $minio := include "cube.minioEndpoint" . }}
+{{- if and .Values.controlPlane.enabled $s3Backed }}
+{{- $style := include "cube.effectiveEnvValue" (dict "env" .Values.global.env "name" "CUBE_S3_ADDRESSING_STYLE" "default" .Values.controlPlane.artifactStore.s3AddressingStyle) }}
+{{- $endpoint := include "cube.effectiveEnvValue" (dict "env" .Values.global.env "name" "CUBE_S3_ENDPOINT" "default" (include "cube.volumeS3EffectiveEndpoint" .)) }}
+{{- if and (eq ($style | trim | lower) "virtual") (eq ($endpoint | trimSuffix "/") $minio) }}
+{{- fail "controlPlane.artifactStore.s3AddressingStyle: virtual addressing requires an external S3 endpoint; bundled MinIO uses path style" }}
+{{- end }}
+{{- end }}
+{{- if eq (include "cube.opsEnabled" .) "true" }}
+{{- $env := .Values.cubeOps.env }}
+{{- $backend := include "cube.effectiveEnvValue" (dict "env" $env "name" "CUBE_OPS_STORE_BACKEND" "default" (include "cube.opsStoreBackend" .)) }}
+{{- $style := include "cube.effectiveEnvValue" (dict "env" $env "name" "CUBE_OPS_S3_ADDRESSING_STYLE" "default" (.Values.cubeOps.s3).addressingStyle) }}
+{{- $endpoint := include "cube.effectiveEnvValue" (dict "env" $env "name" "CUBE_OPS_S3_ENDPOINT" "default" (include "cube.opsS3Endpoint" .)) }}
+{{- $node := include "cube.effectiveEnvValue" (dict "env" $env "name" "CUBE_OPS_S3_NODE_ENDPOINT" "default" (include "cube.opsS3NodeEndpoint" .)) }}
+{{- if and (eq $backend "s3") (eq ($style | trim | lower) "virtual") (or (eq ($endpoint | trimSuffix "/") $minio) (eq ($node | trimSuffix "/") $minio)) }}
+{{- fail "cubeOps.s3.addressingStyle: virtual addressing requires external S3 data and download endpoints; bundled MinIO uses path style" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if and $s3Backed (eq $artifactBackend "fs") }}
 {{- fail "controlPlane.artifactStore.backend=fs cannot be combined with controlPlane.artifactStore.s3Backed=true" }}
 {{- end }}

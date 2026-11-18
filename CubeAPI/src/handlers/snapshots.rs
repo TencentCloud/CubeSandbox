@@ -49,7 +49,7 @@ pub async fn create_snapshot(
     let info: SnapshotInfo = state
         .services
         .snapshots
-        .create(&sandbox_id, body.name, body.backend, mode)
+        .create(&sandbox_id, body.name, body.backend, mode, body.ttl_seconds)
         .await?;
 
     tracing::info!(

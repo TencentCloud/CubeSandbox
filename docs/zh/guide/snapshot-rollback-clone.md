@@ -62,6 +62,41 @@ with Sandbox.create(template=TEMPLATE_ID) as sb:
 
 快照的生命周期独立于沙箱：源沙箱被 `kill()` 之后，快照仍然可用。不再需要时，调用 `Sandbox.delete_snapshot(snapshot_id_or_name)` 手动清理。它既接受快照 ID，也接受创建快照时指定的名称，删除成功返回 `True`、快照不存在返回 `False`。SDK 只匹配快照、不会匹配模板：名称没有对应快照时返回 `False`，即使存在同名模板别名，模板也不会被删除；名称匹配多个快照时返回 HTTP 409 且不删除任何对象，请改用 `snap-` ID。该行为要求 CubeAPI 支持 `snapshot_only`，旧版服务端会忽略该参数，名称没有对应快照时仍会路由到同名模板。
 
+### 快照有效期
+
+临时检查点、实验快照和短期恢复备份建议设置有效期，让系统在不再需要时自动清理。
+需要长期保留的快照不传有效期，或传 0，之后再手动删除。
+
+```python
+snap = sb.create_snapshot(name="checkpoint", ttl_seconds=3600)
+print(snap.expires_at)
+
+# 快照有效期内，每次恢复都会创建一个新的沙箱。
+restored = Sandbox.create(template=snap.snapshot_id)
+```
+
+有效期从快照就绪时开始计算。`expires_at` 是 UTC 过期时间，未设置有效期时为 `None`。
+SDK、CubeAPI 和 CubeMaster 都需要使用支持快照有效期的版本。Node SDK 使用
+`sb.createSnapshot("checkpoint", { ttlSeconds: 3600 })`；Go SDK 使用
+`sb.CreateSnapshot(ctx, "checkpoint", cubesandbox.CreateSnapshotOptions{TTLSeconds: 3600})`。
+
+过期后不能再用该快照创建沙箱或回滚；已经从它启动的沙箱仍能正常运行。
+系统会定期清理，等待运行中的沙箱和其他依赖释放引用后才回收存储，因此过期不代表立即释放磁盘空间。
+
+如果节点永久丢失，遗留的待完成恢复阻止了清理，管理员可以使用
+`cubemastercli snapshot recover-create`。先隔离节点，确保旧 VM 和排队请求不能恢复运行，
+删除快照，并等待待完成预约至少满 24 小时，再执行：
+
+```bash
+cubemastercli snapshot recover-create \
+  --snapshot-id snap-example --sandbox-id reserved-example \
+  --node-id retired-node --node-ip 192.0.2.10 \
+  --confirm-node-fenced --reason "Host powered off and prevented from restarting"
+```
+
+节点信息必须与该次待完成恢复记录一致。命令只释放匹配的过期预约；节点仍健康、
+实例仍存在或快照操作尚在进行时会拒绝执行。后续对账会继续物理清理，正常过期不需要手动运行此命令。
+
 ### 仅文件系统快照（fs-only）
 
 给 `create_snapshot()` 传 `mode="fs-only"`，只捕获文件系统、不捕获 guest 内存。调用期间 guest 不会暂停，返回时即可继续读写。代价是：用它创建的沙箱会**冷启动**——文件都在，但所有进程都是新的。

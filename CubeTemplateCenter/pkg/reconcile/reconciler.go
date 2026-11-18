@@ -73,6 +73,10 @@ const (
 	// maxRowsPerSweep bounds a single sweep so a large backlog cannot hold the
 	// session lock for an unbounded time.
 	maxRowsPerSweep = 200
+
+	// deferredArtifactPlacementCountFilter skips rows CubeMaster deferred (node
+	// never returned); they are Master's trail and must not block the delete.
+	deferredArtifactPlacementCountFilter = " AND deferred_at = 0"
 )
 
 // ArtifactDeleter is the subset of build.ArtifactDeleter the reconciler needs
@@ -178,7 +182,9 @@ func (r *Reconciler) SweepOnce(ctx context.Context) error {
 // address); deleting the S3/local object and the row in that state leaks the
 // node copies and destroys the recovery trail — Master GC can no longer
 // enumerate them once the row is gone. Rows with remaining placements are
-// skipped, not failed.
+// skipped, not failed. Rows deferred by CubeMaster (deferred_at > 0) do not
+// block: the node is unreachable for good and Master keeps them as its own
+// cleanup trail.
 //
 // Runs under the same session lock as failStaleJobs so exactly one replica
 // sweeps, and is skipped entirely when no deleter is installed.
@@ -204,12 +210,14 @@ func (r *Reconciler) cleanupPendingArtifacts(ctx context.Context) error {
 	}
 	log.G(ctx).Warnf("reconciler: found %d cleanup-pending/stale-deleting artifact(s) to delete (backstop)", len(rows))
 	for _, row := range rows {
-		// Placements remaining means node cleanup has not drained — the row
-		// stays until CubeMaster finishes (or its GC retries) the node side.
+		// Deferred rows are excluded: their node is gone for good, so waiting
+		// on them would keep the S3 object and the row alive forever.
+		// deferred_at comes from migration 20261112071208; unknown-column errors
+		// mean the migration has not been applied yet.
 		var placements int64
 		if err := r.db.WithContext(ctx).
 			Table(constants.ArtifactNodePlacementTableName).
-			Where("artifact_id = ?", row.ArtifactID).
+			Where("artifact_id = ?"+deferredArtifactPlacementCountFilter, row.ArtifactID).
 			Count(&placements).Error; err != nil {
 			return fmt.Errorf("count placements for artifact %s: %w", row.ArtifactID, err)
 		}

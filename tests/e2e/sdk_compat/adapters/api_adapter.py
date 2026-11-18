@@ -185,15 +185,35 @@ class ApiClient:
         )
         return resp.status_code, _json_body(resp)
 
-    def create_volume(self, name: str = "", *, driver: str | None = None) -> dict:
+    def create_volume_raw(
+        self,
+        name: str = "",
+        *,
+        driver: str | None = None,
+        private_data: str | None = None,
+    ) -> requests.Response:
+        """Return one create response, preserving invalid input for API tests."""
         payload: dict = {"name": name}
         if driver:
             payload["driver"] = driver
-        resp = self._session.post(
-            f"{self._config.cube_api_url}/volumes",
+        path = "/volumes"
+        if private_data is not None:
+            path = "/v2/volumes"
+            payload["private_data"] = private_data
+        return self._session.post(
+            f"{self._config.cube_api_url}{path}",
             json=payload,
             timeout=self._config.api_timeout,
         )
+
+    def create_volume(
+        self,
+        name: str = "",
+        *,
+        driver: str | None = None,
+        private_data: str | None = None,
+    ) -> dict:
+        resp = self.create_volume_raw(name, driver=driver, private_data=private_data)
         if resp.status_code != 201:
             raise RuntimeError(
                 f"failed to create volume name={name!r}: "

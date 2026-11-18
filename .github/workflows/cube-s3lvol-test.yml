@@ -54,6 +54,21 @@ jobs:
       - name: Pull builder image
         run: docker pull "${BUILDER_IMAGE}"
 
+      # The real-logrotate rotation tests skip without logrotate. Until the
+      # published builder carries it (Dockerfile.builder installs it), add a
+      # thin local layer from the Ubuntu archive. FROM keeps the s3lvol stamp
+      # labels, so `make builder-image` still reuses the image. Fail rather
+      # than let those tests skip silently.
+      - name: Ensure logrotate in builder image
+        run: |
+          if docker run --rm --entrypoint /bin/sh "${BUILDER_IMAGE}" -c 'command -v logrotate' >/dev/null; then
+            echo "builder image already provides logrotate"
+          else
+            printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends logrotate && rm -rf /var/lib/apt/lists/*\n' \
+              "${BUILDER_IMAGE}" | docker build -t "${BUILDER_IMAGE}" -
+            docker run --rm --entrypoint /bin/sh "${BUILDER_IMAGE}" -c 'command -v logrotate && logrotate --version 2>&1 | head -1'
+          fi
+
       # setup_dep.sh reuses /opt/s3lvol-* from the published builder when stamps
       # match; a pin/patch change on this PR falls back to deps/ once, and the
       # next published builder after merge carries the new prebuilt.

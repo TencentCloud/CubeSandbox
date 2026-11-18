@@ -126,14 +126,18 @@ func singleForkDerive(
 	}
 
 	if err := forkDealCubeboxCreateReqWithTemplateFn(subCtx, req); err != nil {
-		return nil, forkRet(errorcode.ErrorCode_MasterParamsError, err.Error())
+		return nil, forkRet(errorcode.ErrorCode(snapshotErrorCode(err)), err.Error())
 	}
 	// Mirror create: seed node affinity into the per-derivation ctx.
 	subCtx, err = runInsReq2Affinity(subCtx, req)
 	if err != nil {
 		return nil, forkRet(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
+	if err := reserveCreatedSandboxRuntimeRef(subCtx, req); err != nil {
+		return nil, forkRet(errorcode.ErrorCode(snapshotErrorCode(err)), err.Error())
+	}
 	ret := forkCreateSandboxRunFn(subCtx, req)
+	releaseUndispatchedSnapshotCreate(subCtx, req, ret)
 	if ret == nil {
 		return nil, forkRet(errorcode.ErrorCode_MasterInternalError, "create returned nil")
 	}
@@ -322,7 +326,7 @@ func forkSandboxFromSource(
 		return err
 	}
 	alias := resolveSourceAliasFn(ctx, sandboxID)
-	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "", mode)
+	jobInfo, err := createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, "", "", mode, 0)
 	if err != nil {
 		return err
 	}

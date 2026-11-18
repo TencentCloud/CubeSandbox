@@ -48,6 +48,8 @@ class SdkE2EConfig:
     cube_proxy_admin_port: int
     volume_plugin_enabled: bool
     volume_driver: str
+    volume_cred_ref: str | None
+    volume_prefix: str
     volume_refcount_wait: int
     restart_policy_wait: int
     create_capacity_retries: int
@@ -101,6 +103,11 @@ class SdkE2EConfig:
             cube_proxy_admin_port=int(os.environ.get("CUBE_PROXY_ADMIN_PORT", "8082")),
             volume_plugin_enabled=volume_plugin_enabled_from_env(),
             volume_driver=os.environ.get("SDK_E2E_VOLUME_DRIVER", "s3").strip() or "s3",
+            volume_cred_ref=os.environ.get("SDK_E2E_VOLUME_CRED_REF", "").strip() or None,
+            volume_prefix=(
+                os.environ.get("SDK_E2E_VOLUME_PREFIX", "sdk-e2e/").strip()
+                or "sdk-e2e/"
+            ),
             volume_refcount_wait=int(os.environ.get("SDK_E2E_VOLUME_REFCOUNT_WAIT", "60")),
             restart_policy_wait=int(os.environ.get("SDK_E2E_RESTART_POLICY_WAIT", "300")),
             create_capacity_retries=int(

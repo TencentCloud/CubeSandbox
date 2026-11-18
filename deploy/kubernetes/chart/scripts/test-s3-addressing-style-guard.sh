@@ -3,7 +3,7 @@
 # addressing style while leaving legacy booleans and volume clients alone.
 set -eu
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 CHART_DIR="$(dirname "$SCRIPT_DIR")"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -32,6 +32,7 @@ expect_fail() {
 }
 
 render default
+render null-ops-s3 --set cubeOps.s3=null
 render legacy --set controlPlane.artifactStore.s3Backed=true
 render legacy-false --set controlPlane.artifactStore.s3Backed=true \
   --set cubeOps.s3.pathStyle=false --set minio.enabled=false \
@@ -40,8 +41,18 @@ render legacy-false --set controlPlane.artifactStore.s3Backed=true \
   --set-string volumeS3.bucket=artifacts \
   --set volumeS3.pathStyle=false
 
+# Use the same external endpoint for all three style renders.
+external_s3() {
+  name="$1"
+  shift
+  render "$name" --set minio.enabled=false --set volumeS3.pathStyle=true \
+    --set-string volumeS3.endpoint=https://storage.example.test \
+    --set-string volumeS3.accessKeyId=test-ak --set-string volumeS3.secretAccessKey=test-sk \
+    --set-string volumeS3.bucket=artifacts "$@"
+}
+
 for style in auto path virtual; do
-  render "$style" --set controlPlane.artifactStore.s3Backed=true \
+  external_s3 "$style" --set controlPlane.artifactStore.s3Backed=true \
     --set-string "cubeOps.s3.addressingStyle=$style" \
     --set-string "controlPlane.artifactStore.s3AddressingStyle=$style"
 done
@@ -73,10 +84,15 @@ render override -f "$TMP_DIR/manual-values.yaml" \
   --set-string cubeOps.s3.addressingStyle=virtual \
   --set-string 'cubeOps.env[0].name=CUBE_OPS_S3_ADDRESSING_STYLE' \
   --set-string 'cubeOps.env[0].value=path'
+render style-from-secret -f "$TMP_DIR/manual-values.yaml" \
+  --set-string 'global.env[4].name=CUBE_S3_ADDRESSING_STYLE' \
+  --set-string 'global.env[4].valueFrom.secretKeyRef.name=settings' --set-string 'global.env[4].valueFrom.secretKeyRef.key=style' \
+  --set-string cubeOps.s3.addressingStyle=virtual --set-string 'cubeOps.env[0].name=CUBE_OPS_S3_ADDRESSING_STYLE' \
+  --set-string 'cubeOps.env[0].valueFrom.secretKeyRef.name=settings' --set-string 'cubeOps.env[0].valueFrom.secretKeyRef.key=style'
 render disabled --set-string controlPlane.artifactStore.s3AddressingStyle=virtual
 
-render volume-default --set cubeS3lvol.enabled=true
-render volume-virtual --set cubeS3lvol.enabled=true \
+external_s3 volume-default --set cubeS3lvol.enabled=true
+external_s3 volume-virtual --set cubeS3lvol.enabled=true \
   --set controlPlane.artifactStore.s3Backed=true \
   --set-string controlPlane.artifactStore.s3AddressingStyle=virtual \
   --set-string cubeOps.s3.addressingStyle=virtual
@@ -109,7 +125,7 @@ def want(name, label, key, expected):
     if actual != expected:
         raise SystemExit(f"{name}/{label}: {key}={actual!r}, want {expected!r}")
 
-for name in ("default", "legacy", "legacy-false"):
+for name in ("default", "null-ops-s3", "legacy", "legacy-false"):
     want(name, "ops", "CUBE_OPS_S3_ADDRESSING_STYLE", [])
     for label in ("master", "templatecenter"):
         want(name, label, "CUBE_S3_ADDRESSING_STYLE", [])
@@ -132,10 +148,15 @@ for label in ("master", "templatecenter"):
     want("manual", label, "CUBE_S3_ADDRESSING_STYLE", ["virtual"])
     want("manual", label, "CUBE_S3_ENDPOINT", ["https://storage.example.test"])
     want("manual", label, "CUBE_S3_USE_PATH_STYLE", [])
-    want("override", label, "CUBE_S3_ADDRESSING_STYLE", ["virtual", "path"])
+    want("override", label, "CUBE_S3_ADDRESSING_STYLE", ["path"])
     want("disabled", label, "CUBE_S3_ADDRESSING_STYLE", [])
-want("override", "ops", "CUBE_OPS_S3_ADDRESSING_STYLE", ["virtual", "path"])
-print("ok: manual credentials retain chart style; later operator env overrides it")
+want("override", "ops", "CUBE_OPS_S3_ADDRESSING_STYLE", ["path"])
+for label, key in (("master", "CUBE_S3_ADDRESSING_STYLE"), ("templatecenter", "CUBE_S3_ADDRESSING_STYLE"),
+                   ("ops", "CUBE_OPS_S3_ADDRESSING_STYLE")):
+    doc = component("style-from-secret", label)
+    if doc.count("name: " + key + "\n") != 1 or not re.search(r"name: " + key + r"\n\s+valueFrom:", doc):
+        raise SystemExit(f"{label}: expected exactly one {key} from the operator Secret")
+print("ok: manual credentials retain chart style; operator env overrides it without duplicates")
 
 for label in ("volume-s3", "cube-s3lvol"):
     before = component("volume-default", label, "Secret").split("stringData:", 1)[1]
@@ -149,4 +170,17 @@ expect_fail cubeOps.s3.addressingStyle --set-string cubeOps.s3.addressingStyle=v
 expect_fail controlPlane.artifactStore.s3AddressingStyle --set-string controlPlane.artifactStore.s3AddressingStyle=virtual-host
 expect_fail cubeOps.s3.addressingStyle --set cubeOps.s3.addressingStyle=false
 expect_fail controlPlane.artifactStore.s3AddressingStyle --set controlPlane.artifactStore.s3AddressingStyle=false
+for setting in controlPlane.artifactStore.s3AddressingStyle cubeOps.s3.addressingStyle; do
+  if helm template s3-addressing "$CHART_DIR" $COMMON_SETS --set minio.enabled=true \
+      --set controlPlane.artifactStore.s3Backed=true --set-string "$setting=virtual" \
+      >/dev/null 2>"$TMP_DIR/minio.err"; then
+    echo "bundled MinIO unexpectedly accepted $setting=virtual" >&2
+    exit 1
+  fi
+  grep -F "$setting: virtual addressing requires" "$TMP_DIR/minio.err" >/dev/null
+done
+render builtin-override --set minio.enabled=true --set controlPlane.artifactStore.s3Backed=true \
+  --set-string controlPlane.artifactStore.s3AddressingStyle=virtual \
+  --set-string 'global.env[0].name=CUBE_S3_ADDRESSING_STYLE' --set-string 'global.env[0].value=path' \
+  --set-string cubeOps.s3.addressingStyle=virtual --set-string cubeOps.s3.endpoint=https://warehouse.example.test
 echo "All S3 addressing-style guard tests passed"

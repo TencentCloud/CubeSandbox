@@ -269,10 +269,16 @@ impl Container {
 
     pub async fn pause_vm_forbidding(&self) -> bool {
         let execs = self.execs.lock().await;
-        if execs.is_empty() {
-            return false;
+        // Keep exited execs until DeleteProcess; only unfinished execs block pause.
+        // Lock order matches get_container_info: execs, then ContainerState.
+        for exec in execs.values() {
+            if let Some(state) = &exec.state {
+                if state.state().await != TaskState::STOPPED {
+                    return true;
+                }
+            }
         }
-        true
+        false
     }
 
     pub async fn set_client(

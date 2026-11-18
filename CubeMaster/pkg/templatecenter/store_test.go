@@ -46,6 +46,7 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 		Timeout:      sandboxtypes.TimeoutPtr(1),
 		Annotations: map[string]string{
 			constants.CubeAnnotationsAppSnapshotCreate:        "true",
+			constants.CubeAnnotationDesiredSandboxID:          "source-sandbox",
 			constants.CubeAnnotationRuntimeSnapshotID:         "snap-stale",
 			constants.CubeAnnotationRuntimeSnapshotAttachedAt: "2026-05-01T00:00:00Z",
 			"unrelated": "keep-me",
@@ -57,6 +58,7 @@ func TestNormalizeStoredTemplateRequestStripsPhysicalAnnotations(t *testing.T) {
 
 	for _, k := range []string{
 		constants.CubeAnnotationsAppSnapshotCreate,
+		constants.CubeAnnotationDesiredSandboxID,
 		constants.CubeAnnotationRuntimeSnapshotID,
 		constants.CubeAnnotationRuntimeSnapshotAttachedAt,
 	} {
@@ -507,7 +509,9 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 	invalidateTemplateCaches(templateID)
 	defer invalidateTemplateCaches(templateID)
 
-	if err := setTemplateRequestCache(templateID, &sandboxtypes.CreateCubeSandboxReq{}); err != nil {
+	if err := setTemplateRequestCache(templateID, &sandboxtypes.CreateCubeSandboxReq{
+		Annotations: map[string]string{constants.CubeAnnotationDesiredSandboxID: "old-sandbox"},
+	}); err != nil {
 		t.Fatalf("setTemplateRequestCache returned error: %v", err)
 	}
 
@@ -515,6 +519,7 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplateRequest returned error: %v", err)
 	}
+	require.NotContains(t, first.Annotations, constants.CubeAnnotationDesiredSandboxID)
 	if first.Request == nil {
 		t.Fatal("expected runtime request to be hydrated")
 	}
@@ -526,6 +531,7 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplateRequest second call returned error: %v", err)
 	}
+	require.NotContains(t, second.Annotations, constants.CubeAnnotationDesiredSandboxID)
 	if second.Request == nil || strings.TrimSpace(second.RequestID) == "" {
 		t.Fatal("expected runtime requestID on subsequent fetch")
 	}
@@ -566,6 +572,7 @@ func TestGetTemplateRequestStampsSnapshotDisplayNameAsAlias(t *testing.T) {
 	stored := &sandboxtypes.CreateCubeSandboxReq{
 		Request: &sandboxtypes.Request{RequestID: "req-1"},
 		Annotations: map[string]string{
+			constants.CubeAnnotationDesiredSandboxID:         "old-sandbox",
 			constants.CubeAnnotationAppSnapshotTemplateAlias: "source-template-alias",
 		},
 		Labels: map[string]string{
@@ -592,6 +599,7 @@ func TestGetTemplateRequestStampsSnapshotDisplayNameAsAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplateRequest returned error: %v", err)
 	}
+	require.NotContains(t, req.Annotations, constants.CubeAnnotationDesiredSandboxID)
 	if got := req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias]; got != "my-snap" {
 		t.Fatalf("expected snapshot name my-snap as alias, got %q", got)
 	}

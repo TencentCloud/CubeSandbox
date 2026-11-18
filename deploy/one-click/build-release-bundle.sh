@@ -1068,6 +1068,7 @@ copy_file "${SCRIPT_DIR}/smoke.sh" "${DIST_ROOT}/smoke.sh"
 copy_file "${SCRIPT_DIR}/online-install.sh" "${DIST_ROOT}/online-install.sh"
 copy_file "${SCRIPT_DIR}/env.example" "${DIST_ROOT}/env.example"
 copy_file "${SCRIPT_DIR}/lib/common.sh" "${DIST_ROOT}/lib/common.sh"
+copy_file "${SCRIPT_DIR}/lib/s3_addressing_env.py" "${DIST_ROOT}/lib/s3_addressing_env.py"
 # lib/common.sh `source`s ${ONE_CLICK_DIR}/scripts/common/validation.sh, so the
 # shared helpers must ship at the bundle top level too (install.sh /
 # install-compute.sh source lib/common.sh from here).

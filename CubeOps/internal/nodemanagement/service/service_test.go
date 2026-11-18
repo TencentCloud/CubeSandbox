@@ -899,6 +899,12 @@ func TestHostFacts_IsZero(t *testing.T) {
 	if (&model.HostFacts{MemTotalMB: 65536}).IsZero() {
 		t.Error("mem_total_mb set should not be zero")
 	}
+	if (&model.HostFacts{CpuOvercommitFactor: 1.0}).IsZero() {
+		t.Error("cpu_overcommit_factor set should not be zero")
+	}
+	if (&model.HostFacts{MemOvercommitFactor: 1.25}).IsZero() {
+		t.Error("mem_overcommit_factor set should not be zero")
+	}
 }
 
 // --- T1: DeleteNodeLabel ---

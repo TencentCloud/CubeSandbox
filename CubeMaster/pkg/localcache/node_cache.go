@@ -40,6 +40,10 @@ type local struct {
 
 	// emptySyncStreak counts consecutive empty CubeOps responses before eviction.
 	emptySyncStreak atomic.Int32
+
+	// synced is set once any node-view sync succeeded (an empty view is valid).
+	synced  atomic.Bool
+	absence absenceTracker
 }
 
 // The node and template-locality stores exist from package load so nodemeta
@@ -226,7 +230,12 @@ func (l *local) addNodeCache(n *node.Node) {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
 	}
-	l.cache.SetDefault(n.ID(), n)
+	// Same lock as AbsentSince, so no concurrent reader sees "not present"
+	// mid-transition and records a bogus absence start for a present node.
+	l.absence.withLock(func() {
+		l.cache.SetDefault(n.ID(), n)
+		l.absence.clearLocked(n.ID())
+	})
 	l.appendSortedNodes(n)
 }
 
@@ -239,7 +248,11 @@ func (l *local) delNodeCache(ctx context.Context, n *node.Node) {
 	// An empty heartbeat must not be reused here: it would leave registrations
 	// that the template center still considers local.
 	l.locality.removeNode(n.ID())
-	l.cache.Delete(n.ID())
+	// Same atomicity requirement as addNodeCache: see the comment there.
+	l.absence.withLock(func() {
+		l.cache.Delete(n.ID())
+		l.absence.noteAbsentLocked(n.ID(), time.Now())
+	})
 	l.delSortedNodes(n)
 
 	grpcconn.CloseWorkerConn(cubelet.GetCubeletAddr(n.HostIP()))

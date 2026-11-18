@@ -283,6 +283,101 @@ export function listWarehouseComponents(nodeIds: string[]): {
   return { components };
 }
 
+// compareVersionDesc mirrors CubeOps/internal/warehouse/catalog.go compareVersionDesc:
+// numeric-led versions rank above non-numeric keys (kernel sha256-), newest-first.
+function compareVersionDesc(a: string, b: string): number {
+  return -compareVersionAsc(a, b);
+}
+
+function compareVersionAsc(a: string, b: string): number {
+  const [aNum, aRest] = splitNumericRun(a);
+  const [bNum, bRest] = splitNumericRun(b);
+  const aNumeric = aNum !== '';
+  const bNumeric = bNum !== '';
+  if (aNumeric !== bNumeric) return aNumeric ? 1 : -1;
+  if (!aNumeric) return cmp(a, b);
+  const runCmp = compareNumericRun(aNum, bNum);
+  if (runCmp !== 0) return runCmp;
+  // A release outranks its prerelease: "1.0.0" > "1.0.0-rc1".
+  if (aRest === '' && bRest !== '') return 1;
+  if (bRest === '' && aRest !== '') return -1;
+  const preCmp = comparePrerelease(aRest, bRest);
+  if (preCmp !== 0) return preCmp;
+  // Semantically equal (e.g. "v1.0" vs "v1.0.0"): stable lexical tie-break.
+  return cmp(a, b);
+}
+
+function splitNumericRun(v: string): [string, string] {
+  if (v[0] === 'v' || v[0] === 'V') v = v.slice(1);
+  let i = 0;
+  while (i < v.length && ((v[i] >= '0' && v[i] <= '9') || v[i] === '.')) i++;
+  return [v.slice(0, i), v.slice(i)];
+}
+
+// compareNumericRun compares dot-separated numeric runs by value; a missing
+// trailing segment equals 0, so "1.0" and "1.0.0" are equal.
+function compareNumericRun(a: string, b: string): number {
+  const an = a.split('.');
+  const bn = b.split('.');
+  const n = Math.max(an.length, bn.length);
+  for (let i = 0; i < n; i++) {
+    const c = compareNumericSegment(an[i] ?? '0', bn[i] ?? '0');
+    if (c !== 0) return c;
+  }
+  return 0;
+}
+
+function comparePrerelease(a: string, b: string): number {
+  const ai = a.replace(/^-/, '').split('.');
+  const bi = b.replace(/^-/, '').split('.');
+  for (let i = 0; i < ai.length && i < bi.length; i++) {
+    const c = comparePrereleaseIdent(ai[i], bi[i]);
+    if (c !== 0) return c;
+  }
+  // More identifiers wins: "alpha" < "alpha.1".
+  return ai.length - bi.length;
+}
+
+function comparePrereleaseIdent(a: string, b: string): number {
+  const aNum = isAllDigits(a);
+  const bNum = isAllDigits(b);
+  if (aNum && bNum) return compareNumericSegment(a, b);
+  if (aNum) return -1;
+  if (bNum) return 1;
+  // Identifiers sharing a letter prefix compare trailing digits numerically (rc10 > rc2).
+  const [aPre, aDig] = splitLetterPrefix(a);
+  const [bPre, bDig] = splitLetterPrefix(b);
+  if (aPre !== '' && aPre === bPre && aDig !== '' && bDig !== '') {
+    return compareNumericSegment(aDig, bDig);
+  }
+  return cmp(a, b);
+}
+
+function splitLetterPrefix(s: string): [string, string] {
+  let i = 0;
+  while (i < s.length && (s[i] < '0' || s[i] > '9')) i++;
+  return [s.slice(0, i), s.slice(i)];
+}
+
+function isAllDigits(s: string): boolean {
+  return s.length > 0 && /^[0-9]+$/.test(s);
+}
+
+// compareNumericSegment compares decimal segments by value, ignoring leading
+// zeros, via length-then-lexical so arbitrarily long segments never overflow.
+function compareNumericSegment(a: string, b: string): number {
+  const sa = a.replace(/^0+/, '');
+  const sb = b.replace(/^0+/, '');
+  if (sa.length !== sb.length) return sa.length - sb.length;
+  return cmp(sa, sb);
+}
+
+// cmp is an ASCII lexical compare; version keys are restricted to ASCII so this
+// matches Go's strings.Compare (never use localeCompare, which is locale-aware).
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export function getWarehouseComponent(
   name: string,
   nodeIds: string[],
@@ -302,6 +397,8 @@ export function getWarehouseComponent(
     }
     seen.get(item.version)!.push(item);
   }
+  // Mirror CubeOps/internal/warehouse/catalog.go compareVersionDesc (newest-first).
+  order.sort(compareVersionDesc);
   const versions: WarehouseVersionGroup[] = order.map((version) => {
     const arts = [...(seen.get(version) ?? [])].sort((a, b) => a.arch.localeCompare(b.arch));
     return {

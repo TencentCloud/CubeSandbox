@@ -120,3 +120,80 @@ func TestGroupComponent(t *testing.T) {
 		t.Fatalf("empty agent=%+v", empty)
 	}
 }
+
+func TestGroupComponent_VersionOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"numeric beats lexical", []string{"v0.5.0", "v0.6.0"}, []string{"v0.6.0", "v0.5.0"}},
+		{"two-digit segment", []string{"v0.9.0", "v0.10.0"}, []string{"v0.10.0", "v0.9.0"}},
+		{"padded segment", []string{"v0.09.0", "v0.10.0"}, []string{"v0.10.0", "v0.09.0"}},
+		{"prerelease after release", []string{"v1.0.0-rc1", "v1.0.0"}, []string{"v1.0.0", "v1.0.0-rc1"}},
+		{"prerelease numeric identifiers", []string{"v1.0.0-rc2", "v1.0.0-rc10"}, []string{"v1.0.0-rc10", "v1.0.0-rc2"}},
+		{"prerelease numeric below alpha", []string{"v1.0.0-1", "v1.0.0-alpha"}, []string{"v1.0.0-alpha", "v1.0.0-1"}},
+		{"prerelease more identifiers newer", []string{"v1.0.0-alpha", "v1.0.0-alpha.1"}, []string{"v1.0.0-alpha.1", "v1.0.0-alpha"}},
+		{"short equals long release", []string{"v1.0", "v1.0.0"}, []string{"v1.0.0", "v1.0"}},
+		{"release outranks longer prerelease", []string{"v1.0", "v1.0.0-rc1"}, []string{"v1.0", "v1.0.0-rc1"}},
+		{"kernel hash stays lexical", []string{"sha256-aaa", "sha256-bbb"}, []string{"sha256-bbb", "sha256-aaa"}},
+		{"mixed forms do not panic", []string{"sha256-aaa", "v1.0.0"}, []string{"v1.0.0", "sha256-aaa"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items := make([]store.WarehouseItem, 0, len(tc.in))
+			for _, v := range tc.in {
+				items = append(items, store.WarehouseItem{Arch: ArchAMD64, Component: ComponentShim, Version: v})
+			}
+			got := GroupComponent(ComponentShim, items, nil, nil, false)
+			versions := make([]string, 0, len(got.Versions))
+			for _, g := range got.Versions {
+				versions = append(versions, g.Version)
+			}
+			if !reflect.DeepEqual(versions, tc.want) {
+				t.Errorf("versions=%v want %v", versions, tc.want)
+			}
+		})
+	}
+}
+
+func TestGroupComponent_VersionOrderTransitive(t *testing.T) {
+	// The comparator must be a transitive total order or sort.SliceStable output
+	// depends on input permutation. Assert transitivity and permutation invariance.
+	in := []string{
+		"v0.10.0", "v0.9.0", "v1.0.0", "v1.0.0-rc1", "v1.0.0-rc2", "v1.0.0-rc10",
+		"10", "v9", "sabc", "sha256-aaa", "sha256-bbb",
+	}
+	for _, a := range in {
+		for _, b := range in {
+			if compareVersionDesc(a, b) != -compareVersionDesc(b, a) {
+				t.Errorf("asymmetric compare: %q vs %q", a, b)
+			}
+			for _, c := range in {
+				if compareVersionDesc(a, b) <= 0 && compareVersionDesc(b, c) <= 0 && compareVersionDesc(a, c) > 0 {
+					t.Errorf("intransitive: %q <= %q <= %q but %q > %q", a, b, c, a, c)
+				}
+			}
+		}
+	}
+	reversed := make([]string, len(in))
+	for i, v := range in {
+		reversed[len(in)-1-i] = v
+	}
+	if a, b := orderedVersions(in), orderedVersions(reversed); !reflect.DeepEqual(a, b) {
+		t.Errorf("input-order dependent: %v vs %v", a, b)
+	}
+}
+
+func orderedVersions(in []string) []string {
+	items := make([]store.WarehouseItem, 0, len(in))
+	for _, v := range in {
+		items = append(items, store.WarehouseItem{Arch: ArchAMD64, Component: ComponentShim, Version: v})
+	}
+	got := GroupComponent(ComponentShim, items, nil, nil, false)
+	out := make([]string, 0, len(got.Versions))
+	for _, g := range got.Versions {
+		out = append(out, g.Version)
+	}
+	return out
+}

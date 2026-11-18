@@ -59,4 +59,5 @@ lang: en-US
 | [Host Mounts Fail with Permission Denied](./host-mount-permissions.md) | barry166 | 2026-06-14 | runtime, host-mount, permissions |
 | [How to Find CubeSandbox Component Logs (cubecli logs and the Guest Kernel Log)](./component-log-locations.md) | ls-ggg | 2026-07-15 | logging, cubelet, cubeshim, operations |
 | [Compute Nodes Report HeartbeatExpired While Still Online (Clock Skew)](./node-heartbeat-expired-clock-skew.md) | Cold-E | 2026-10-22 | heartbeat, clock, chrony, cube-ops |
+| [Go SDK Connect Stream Returns an HTML or Text Response](./sdk-connect-stream-routing.md) | tokove | 2026-09-24 | sdk, networking, cube-proxy |
 | _Add your article here_ | - | - | - |

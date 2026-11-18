@@ -29,6 +29,7 @@ func TestCanonicalizeRequestStripsTransientSnapshotAnnotations(t *testing.T) {
 	req := &sandboxtypes.CreateCubeSandboxReq{
 		InstanceType: "cubebox",
 		Annotations: map[string]string{
+			constants.CubeAnnotationDesiredSandboxID:          "source-sandbox",
 			constants.CubeAnnotationRuntimeSnapshotID:         "snap-1",
 			constants.CubeAnnotationRuntimeSnapshotAttachedAt: "2026-05-01T00:00:00Z",
 			constants.CubeAnnotationAppSnapshotTemplateID:     "tpl-keep",
@@ -40,8 +41,11 @@ func TestCanonicalizeRequestStripsTransientSnapshotAnnotations(t *testing.T) {
 
 	out, err := CanonicalizeRequest(req)
 	require.NoError(t, err)
+	assert.Equal(t, "source-sandbox", req.Annotations[constants.CubeAnnotationDesiredSandboxID],
+		"canonicalization must not mutate the active create reservation")
 
 	for _, k := range []string{
+		constants.CubeAnnotationDesiredSandboxID,
 		constants.CubeAnnotationRuntimeSnapshotID,
 		constants.CubeAnnotationRuntimeSnapshotAttachedAt,
 	} {

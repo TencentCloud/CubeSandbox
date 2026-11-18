@@ -305,8 +305,8 @@ export class Commands {
     body: ReadableStream<Uint8Array>,
     onActivity?: () => void,
   ): Promise<CommandResult> {
-    const stdout: string[] = [];
-    const stderr: string[] = [];
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
     let exitCode: number | null = null;
 
     for await (const { flags, payload } of readConnectFrames(body)) {
@@ -326,10 +326,10 @@ export class Commands {
       const event = JSON.parse(payload.toString("utf-8")).event ?? {};
       const data = event.data ?? {};
       if (data.stdout) {
-        stdout.push(Buffer.from(data.stdout, "base64").toString("utf-8"));
+        stdout.push(Buffer.from(data.stdout, "base64"));
       }
       if (data.stderr) {
-        stderr.push(Buffer.from(data.stderr, "base64").toString("utf-8"));
+        stderr.push(Buffer.from(data.stderr, "base64"));
       }
       const end = event.end;
       if (end !== undefined && end !== null) {
@@ -352,6 +352,10 @@ export class Commands {
     if (exitCode === null) {
       throw new Error("process stream ended without EndEvent");
     }
-    return { stdout: stdout.join(""), stderr: stderr.join(""), exitCode };
+    return {
+      stdout: Buffer.concat(stdout).toString("utf-8"),
+      stderr: Buffer.concat(stderr).toString("utf-8"),
+      exitCode,
+    };
   }
 }

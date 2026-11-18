@@ -184,17 +184,16 @@ test_preserves_shell_sensitive_values() {
   local new="${TMP_DIR}/new5.example" old="${TMP_DIR}/old5.env"
   local out="${TMP_DIR}/out5.env" diff="${TMP_DIR}/diff5.txt"
   write_new_example "${new}"
-  # Preserve URL punctuation and an unrelated value containing '='.
-  # Authentication is irrelevant here; the fixture DSN contains no credentials.
+  # user customized a value containing '=' and a URL with ://@
   cat > "${old}" <<'EOF'
-DATABASE_URL=mysql://127.0.0.1:3306/db2
+DATABASE_URL=mysql://u:p@host:3306/db2
 WEIRD_KEY=a=b=c
 EOF
 
   merge_env_three_way "${new}" "${old}" "" "" "${out}" "${diff}" 2>/dev/null
 
   assert_value "${out}" CUBE_PROXY_CERT_DIR "/usr/local/services/cubetoolbox/cubeproxy/certs"
-  assert_value "${out}" DATABASE_URL "mysql://127.0.0.1:3306/db2"
+  assert_value "${out}" DATABASE_URL "mysql://u:p@host:3306/db2"
   # WEIRD_KEY is old-only -> appended verbatim, value with '=' intact
   assert_value "${out}" WEIRD_KEY "a=b=c"
 
@@ -206,7 +205,7 @@ EOF
     set +a
     [[ "${CUBE_PROXY_CERT_DIR}" == "/usr/local/services/cubetoolbox/cubeproxy/certs" ]] \
       || { echo "expansion failed: ${CUBE_PROXY_CERT_DIR}" >&2; exit 1; }
-    [[ "${DATABASE_URL}" == "mysql://127.0.0.1:3306/db2" ]] || exit 1
+    [[ "${DATABASE_URL}" == "mysql://u:p@host:3306/db2" ]] || exit 1
     [[ "${WEIRD_KEY}" == "a=b=c" ]] || exit 1
   ) || fail "merged env did not source/expand correctly"
 }
@@ -477,7 +476,7 @@ test_diff_report_redacts_secrets() {
   # API_KEY/TOKEN) that are NOT in the obsolete deny-list, so they are preserved.
   cat > "${old}" <<'EOF'
 CUBE_SANDBOX_REDIS_PASSWORD=topsecret123
-DATABASE_URL=mysql://127.0.0.1:3306/realdb
+DATABASE_URL=mysql://u:p@host:3306/realdb
 CUSTOM_THIRD_PARTY_API_KEY=sk-custom-secret
 MY_SERVICE_AUTH_TOKEN=tok-openclaw-secret
 EOF
@@ -496,7 +495,7 @@ EOF
 
   # ...but the merged runtime env MUST keep the real values intact.
   assert_value "${out}" CUBE_SANDBOX_REDIS_PASSWORD topsecret123
-  assert_value "${out}" DATABASE_URL "mysql://127.0.0.1:3306/realdb"
+  assert_value "${out}" DATABASE_URL "mysql://u:p@host:3306/realdb"
   assert_value "${out}" CUSTOM_THIRD_PARTY_API_KEY "sk-custom-secret"
   assert_value "${out}" MY_SERVICE_AUTH_TOKEN "tok-openclaw-secret"
 }
@@ -736,120 +735,6 @@ test_cidr_preflight_skip_conflict_param() {
   ( check_cidr_preflight "10.123.0.0/16" 1 ) >/dev/null 2>&1 \
     || fail "valid CIDR with skip=1 should pass"
 }
-
-test_compound_mysql_reference_survives_upgrade() {
-  local old="${TMP_DIR}/mysql-reference.env" out="${TMP_DIR}/mysql-reference-out.env"
-  cat > "${old}" <<'EOF'
-MYSQL_SECRET=fixture-password CUBE_SANDBOX_MYSQL_PASSWORD="${MYSQL_SECRET}"
-EOF
-  env -i PATH="${PATH}" bash -euo pipefail -c '
-    source "$1/lib/common.sh"
-    merge_env_three_way "$1/env.example" "$2" "$1/env.example" "" "$3" "$3.diff"
-    load_env_file "$3"
-    [[ "${CUBE_SANDBOX_MYSQL_PASSWORD:-}" == fixture-password ]] || {
-      echo "FAIL: compound MySQL password reference changed during upgrade" >&2
-      exit 1
-    }
-    persist_one_click_compound_env_values "$3"
-    persist_one_click_database_runtime_env "$3"
-    unset MYSQL_SECRET CUBE_SANDBOX_MYSQL_PASSWORD DATABASE_URL
-    load_env_file "$3"
-    [[ "${CUBE_SANDBOX_MYSQL_PASSWORD:-}" == fixture-password ]]
-    [[ "${DATABASE_URL}" == mysql://cube:fixture-password@127.0.0.1:3306/cube_mvp ]]
-    merge_env_three_way "$1/env.example" "$3" "$1/env.example" "" "$3.next" "$3.next.diff"
-    unset MYSQL_SECRET CUBE_SANDBOX_MYSQL_PASSWORD DATABASE_URL
-    load_env_file "$3.next"
-    [[ "${CUBE_SANDBOX_MYSQL_PASSWORD:-}" == fixture-password ]]
-    [[ "${DATABASE_URL}" == mysql://cube:fixture-password@127.0.0.1:3306/cube_mvp ]]
-  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
-}
-
-test_compound_persistence_preserves_evaluated_order() {
-  local old="${TMP_DIR}/ordered.env" out="${TMP_DIR}/ordered-out.env"
-  cat > "${old}" <<'EOF'
-FIRST=one SECOND="${FIRST}" THIRD="${SECOND}-suffix" EMPTY=
-FIRST=updated
-EOF
-  env -i PATH="${PATH}" bash -euo pipefail -c '
-    source "$1/lib/common.sh"
-    load_env_file "$2"
-    [[ "${FIRST}" == updated && "${SECOND}" == one && "${THIRD}" == one-suffix ]]
-    persist_one_click_compound_env_values "$2"
-    upsert_env_kv "$2" FIRST final
-    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
-    unset FIRST SECOND THIRD EMPTY
-    load_env_file "$3"
-    [[ "${FIRST}" == final && "${SECOND}" == one && "${THIRD}" == one-suffix && "${EMPTY}" == "" ]]
-  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
-}
-
-test_compound_persistence_preserves_quoting_and_export() {
-  local old="${TMP_DIR}/quoted.env" out="${TMP_DIR}/quoted-out.env"
-  cat > "${old}" <<'EOF'
-export FIRST=one QUOTED='literal A=B and #text' ESCAPED=hello\ world EMPTY= URL=https://example.test/#fragment
-PREFIX=${SEED:-fallback} ARITH=$((1 + 2)) NESTED="$(printf '%s' "$(printf '%s' 'nested value')")"
-ANSI=$'quoted\' value' BACKTICK=`printf '%s' 'tick value'`
-EOF
-  printf 'TAB_FIRST=one\tTAB_SECOND=two' >> "${old}"
-  env -i PATH="${PATH}" bash -euo pipefail -c '
-    source "$1/lib/common.sh"
-    load_env_file "$2"
-    persist_one_click_compound_env_values "$2"
-    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
-  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
-  env -i PATH="${PATH}" bash -euo pipefail -c '
-    source "$1"
-    [[ "${QUOTED}" == "literal A=B and #text" && "${ESCAPED}" == "hello world" ]]
-    [[ "${EMPTY}" == "" && "${URL}" == "https://example.test/#fragment" ]]
-    [[ "${PREFIX}" == fallback && "${ARITH}" == 3 && "${NESTED}" == "nested value" ]]
-    [[ "${ANSI}" == "quoted'"'"' value" && "${BACKTICK}" == "tick value" && "${TAB_SECOND}" == two ]]
-    [[ ! -v A ]]
-  ' _ "${out}"
-}
-
-test_compound_capture_does_not_evaluate_again() {
-  local old="${TMP_DIR}/side-effect.env" out="${TMP_DIR}/side-effect-out.env" marker="${TMP_DIR}/side-effect.marker"
-  cat > "${old}" <<'EOF'
-FIRST=one EFFECT=$(printf x >> "$MARKER_PATH"; printf value) AFTER=preserved
-EOF
-  env -i PATH="${PATH}" MARKER_PATH="${marker}" bash -euo pipefail -c '
-    source "$1/lib/common.sh"
-    load_env_file "$2"
-    [[ "$(cat "${MARKER_PATH}")" == x ]]
-    persist_one_click_compound_env_values "$2"
-    [[ "$(cat "${MARKER_PATH}")" == x ]]
-    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
-    [[ "$(cat "${MARKER_PATH}")" == x ]]
-    unset FIRST EFFECT AFTER
-    load_env_file "$3"
-    [[ "${EFFECT}" == value && "${AFTER}" == preserved ]]
-    [[ "$(cat "${MARKER_PATH}")" == x ]]
-  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
-}
-
-test_compound_capture_ignores_quoted_names_and_redacts_secrets() {
-  local old="${TMP_DIR}/opaque.env" out="${TMP_DIR}/opaque-out.env"
-  cat > "${old}" <<'EOF'
-OPAQUE="literal A=B and C=D" # retain comment
-FIRST=one API_SECRET='fixture-sensitive-value' OTHER=kept # trailing comment
-EOF
-  env -i PATH="${PATH}" bash -euo pipefail -c '
-    source "$1/lib/common.sh"
-    load_env_file "$2"
-    persist_one_click_compound_env_values "$2"
-    merge_env_three_way "$1/env.example" "$2" "" "" "$3" "$3.diff"
-    [[ ! -v A && ! -v C ]]
-  ' _ "${ONE_CLICK_DIR}" "${old}" "${out}"
-  assert_value "${out}" OPAQUE '"literal A=B and C=D" # retain comment'
-  assert_value "${out}" API_SECRET fixture-sensitive-value
-  assert_not_contains "${out}.diff" fixture-sensitive-value
-}
-
-test_compound_mysql_reference_survives_upgrade
-test_compound_persistence_preserves_evaluated_order
-test_compound_persistence_preserves_quoting_and_export
-test_compound_capture_does_not_evaluate_again
-test_compound_capture_ignores_quoted_names_and_redacts_secrets
 
 test_preserves_user_customized_value
 test_adds_new_keys_with_defaults

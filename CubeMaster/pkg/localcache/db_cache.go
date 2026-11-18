@@ -77,6 +77,9 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 			}
 			allFromDb[n.InsID] = struct{}{}
 		}
+		// Set only after addNodeCache has filled the cache: AbsentSince gates on
+		// synced, else a node about to be (re-)added is briefly seen as absent.
+		l.synced.Store(true)
 		if update {
 			if len(allFromDb) == 0 {
 				cur := l.emptySyncStreak.Add(1)
@@ -162,6 +165,7 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 		}
 		allFromDb[n.InsID] = struct{}{}
 	}
+	l.synced.Store(true)
 
 	if update {
 		l.checkDirty(ctx, allFromDb, false)
