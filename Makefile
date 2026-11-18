@@ -150,6 +150,8 @@ help:
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
+	@printf "  cube-volume-nfs Build the NFS Volume plugin in Docker\n"
+	@printf "  cube-volume-nfs-test Run NFS Volume plugin unit tests in Docker\n"
 	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
@@ -419,6 +421,11 @@ cube-volume-s3: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/examples/volume/s3 && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/cube-volume-s3 ./cmd/cube-volume-s3"
 
+.PHONY: cube-volume-nfs
+cube-volume-nfs: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/examples/volume/nfs && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/cube-volume-nfs ./cmd/cube-volume-nfs"
+
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -487,6 +494,10 @@ ops-agent-test: builder-image
 .PHONY: cube-volume-s3-test
 cube-volume-s3-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
+
+.PHONY: cube-volume-nfs-test
+cube-volume-nfs-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/nfs && go vet ./... && go test ./...'
 
 # COS RPC Volume plugin (examples/volume/cos/rpc): the reference gRPC volume
 # plugin and the only example consuming pkgs/proto. Standalone Go module (its
@@ -716,6 +727,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C examples/cube-bench fmt
 	@printf '  %-8s %s\n' "FMT" "examples/volume/s3"
 	@$(MAKE) -C examples/volume/s3 fmt
+	@printf '  %-8s %s\n' "FMT" "examples/volume/nfs"
+	@cd examples/volume/nfs && go fmt ./...
 else
 	@$(MAKE) builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'
