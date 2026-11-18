@@ -248,18 +248,18 @@ if mode == "default.yaml":
     admin_token = re.search(r'^\s+admin_token: "(.*)"$', master_conf, re.M)
     if admin_token is None or admin_token.group(1) != "":
         raise SystemExit("master config must not render its own admin token")
-    master = doc_named("Deployment", "helm-guard-cube-master")
-    if not re.search(
+    admin_env = (
         r"(?ms)^            - name: CUBE_PROXY_ADMIN_TOKEN\n"
         r"              valueFrom:\n"
         r"                secretKeyRef:\n"
         r"                  name: helm-guard-cube-secret\n"
-        r"                  key: cube-admin-token$",
-        master,
-    ):
-        raise SystemExit(
-            "master Deployment does not read the admin token from the release Secret"
-        )
+        r"                  key: cube-admin-token$"
+    )
+    for deployment in ("helm-guard-cube-master", "helm-guard-cube-proxy"):
+        if not re.search(admin_env, doc_named("Deployment", deployment)):
+            raise SystemExit(
+                f"{deployment} does not read the admin token from the release Secret"
+            )
     print("master and proxy share one admin token source")
 
     d = pod_doc("helm-guard-cube-dns-test")

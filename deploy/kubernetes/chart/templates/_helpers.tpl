@@ -508,8 +508,9 @@ cube.templateCallbackToken resolves the shared secret gating CubeTemplateCenter'
 build-status callbacks to CubeMaster (POST /internal/template/jobs/:job_id/status;
 both sides read it as CUBE_TEMPLATE_CALLBACK_TOKEN). Persisted as the
 cube-template-callback-token key in the release Secret, looked up first so
-upgrades keep the value stable. Unlike cube.adminToken every consumer reads it
-via secretKeyRef at runtime, so there is no fresh-install double generation.
+upgrades keep the value stable. Like cube.adminToken, every consumer reads it
+via secretKeyRef at runtime rather than from a rendered conf, so there is no
+fresh-install double generation.
 */}}
 {{- define "cube.templateCallbackToken" -}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace (include "cube.secretName" .) -}}

@@ -227,6 +227,8 @@ v0.7.0 Chart 的 helper 注释已经解释原因：当 lifecycleManager.adminTok
 
 还要注意：Secret 内容更新不代表使用 subPath 的进程已经读取新文件。没有触发 Pod Template checksum 时，应显式滚动 CubeMaster。
 
+> **更新（2026-11-18）：** Chart 已不再把 admin token 渲染进 CubeMaster 的 `conf.yaml`，CubeMaster 改为通过 `CUBE_PROXY_ADMIN_TOKEN` 读取 release Secret，因此全新安装只有一个生成值，轮换 token 也会滚动 master、proxy 与 lifecycle-manager。该修复之前的版本仍需按上文办法处理。
+
 ### 6.2 connect() 后不能丢失 traffic token
 
 开启 network.allow_public_traffic=false 后，v0.7.0 Python SDK 只在 create() 响应中返回 traffic token。Sandbox.connect() 返回的新对象不包含它；如果 Adapter 只保存 sandbox_id，恢复后的文件与命令调用会被 CubeProxy 以 403 拒绝。

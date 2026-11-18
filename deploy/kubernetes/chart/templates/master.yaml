@@ -19,8 +19,10 @@ spec:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master
       annotations:
+        # cube.masterConf is the rendered files/cube-master/conf.yaml, so this
+        # alone covers every config edit; a second hash of the same template
+        # would only duplicate it.
         checksum/config: {{ include "cube.masterConf" . | sha256sum | quote }}
-        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-master/conf.yaml") . | sha256sum }}
         # The admin token arrives as an env secretKeyRef, which a running
         # container reads only at start. Without this the token could rotate in
         # the Secret with no pod pick it up, or be picked up by only the pod
