@@ -335,18 +335,22 @@ func TestCheckDestroyRet(t *testing.T) {
 	}, "sb", "destroy"))
 }
 
-func TestCheckDestroyRetPreservesResumeRollbackPending(t *testing.T) {
-	message := "previous resume rollback is in progress; retry after 2 seconds"
-	err := checkDestroyRet(&cubebox.DestroyCubeSandboxResponse{
-		Ret: &cubeleterrorcode.Ret{
-			RetCode: cubeleterrorcode.ErrorCode_ResumeRollbackPending,
-			RetMsg:  message,
-		},
-	}, "sb", "delete paused tombstone")
-	status, ok := ret.FromError(err)
-	require.True(t, ok)
-	require.Equal(t, errorcode.MasterCode(cubeleterrorcode.ErrorCode_ResumeRollbackPending), status.Code())
-	require.Equal(t, message, status.Message())
+func TestCheckDestroyRetPreservesRetryableLifecycleErrors(t *testing.T) {
+	for _, code := range []cubeleterrorcode.ErrorCode{
+		cubeleterrorcode.ErrorCode_ResumeRollbackPending,
+		cubeleterrorcode.ErrorCode_TaskStateInvalid,
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			message := "sandbox lifecycle operation is in progress; retry DELETE after 2 seconds"
+			err := checkDestroyRet(&cubebox.DestroyCubeSandboxResponse{
+				Ret: &cubeleterrorcode.Ret{RetCode: code, RetMsg: message},
+			}, "sb", "delete paused tombstone")
+			status, ok := ret.FromError(err)
+			require.True(t, ok)
+			require.Equal(t, errorcode.MasterCode(code), status.Code())
+			require.Equal(t, message, status.Message())
+		})
+	}
 }
 
 func TestTryDeletePausedKeepsBindingDuringResumeRollback(t *testing.T) {

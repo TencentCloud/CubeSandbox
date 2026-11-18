@@ -165,7 +165,8 @@ func checkDestroyRet(destroyRsp *cubebox.DestroyCubeSandboxResponse, sandboxID, 
 		return nil
 	}
 	msg := destroyRsp.GetRet().GetRetMsg()
-	if code == cubeleterrorcode.ErrorCode_ResumeRollbackPending {
+	switch code {
+	case cubeleterrorcode.ErrorCode_ResumeRollbackPending, cubeleterrorcode.ErrorCode_TaskStateInvalid:
 		return ret.Err(errorcode.MasterCode(code), msg)
 	}
 	if strings.Contains(strings.ToLower(msg), "not found") {
