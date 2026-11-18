@@ -37,6 +37,21 @@ struct {
  * forwarded normally, and TC_ACT_SHOT+1 if the harness failed to stage a case.
  */
 SEC("tc")
+int test_skb_perf_output(struct __sk_buff *skb)
+{
+	struct dns_event_prefix prefix = {};
+	__u32 frame_len = skb->len;
+	__u64 flags;
+
+	if (frame_len > DNS_EVENT_MAX_FRAME)
+		frame_len = DNS_EVENT_MAX_FRAME;
+	prefix.frame_len = (__u16)frame_len;
+	flags = BPF_F_CURRENT_CPU | ((__u64)frame_len << 32);
+	return bpf_perf_event_output(skb, &dns_events, flags, &prefix,
+				     sizeof(prefix)) == 0 ? 0 : 1;
+}
+
+SEC("tc")
 int test_dns_upload(struct __sk_buff *skb)
 {
 	struct dns_upload_case *tc;
