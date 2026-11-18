@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -147,6 +148,34 @@ func TestOpenHostDirSourceRejectsSymlinkPath(t *testing.T) {
 
 	_, err := openHostDirSource(link)
 	require.Error(t, err)
+}
+
+// Exercise the real mount path: the descriptor is pinned, mount receives
+// /proc/<pid>/fd/<n> with --no-canonicalize, and the mounted view must match
+// the pinned directory. Also proves the read-only remount.
+func TestBindHostDirMountsPinnedDescriptor(t *testing.T) {
+	requireRoot(t)
+
+	source := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(source, "marker"), []byte("pinned"), 0644))
+	dest := t.TempDir()
+
+	sourceFile, err := openHostDirSource(source)
+	require.NoError(t, err)
+	defer sourceFile.Close()
+
+	sourcePath := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), sourceFile.Fd())
+	require.NoError(t, bindHostDir(context.Background(), sourcePath, dest, true))
+	t.Cleanup(func() {
+		require.NoError(t, unix.Unmount(dest, unix.MNT_DETACH))
+	})
+
+	data, err := os.ReadFile(filepath.Join(dest, "marker"))
+	require.NoError(t, err)
+	require.Equal(t, "pinned", string(data))
+
+	err = os.WriteFile(filepath.Join(dest, "new-file"), []byte("x"), 0644)
+	require.Error(t, err, "read-only remount must reject writes")
 }
 
 func TestResolveHostMountAllowedPrefixesRejectsRootSymlink(t *testing.T) {
