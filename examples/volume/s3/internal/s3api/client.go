@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -235,16 +236,36 @@ func (c *Client) EnsureBucket(ctx context.Context) error {
 	return nil
 }
 
+// directoryMarkerOptions returns the headers s3fs mkdir writes on a directory
+// object. Without compat_dir, s3fs 1.96+ mounts bucket:/<prefix> only if this
+// object carries Content-Type and all of x-amz-meta-{uid,gid,mode,atime,ctime,
+// mtime}; a bare PUT fails with "Remote mountpath ... not found" at mount time.
+func directoryMarkerOptions(now time.Time) minio.PutObjectOptions {
+	ts := strconv.FormatInt(now.Unix(), 10)
+	return minio.PutObjectOptions{
+		ContentType: "application/x-directory",
+		UserMetadata: map[string]string{
+			"mode":  "16877", // S_IFDIR | 0755
+			"uid":   "0",
+			"gid":   "0",
+			"atime": ts,
+			"ctime": ts,
+			"mtime": ts,
+		},
+	}
+}
+
 // CreatePrefix PUTs the trailing-slash directory object s3fs uses for mkdir.
 //
 // Object storage has no real directories; s3fs 1.91+ stats this key when
 // mounting bucket:/<prefix>. A sibling ".keep" file is a different key and does
-// not satisfy that stat.
+// not satisfy that stat. Rewriting an existing marker is how a volume created
+// by an older plugin version is repaired.
 func (c *Client) CreatePrefix(ctx context.Context, prefix string) error {
 	if err := checkPrefix(prefix); err != nil {
 		return err
 	}
-	if _, err := c.inner.PutObject(ctx, c.bucket, prefix, bytes.NewReader(nil), 0, minio.PutObjectOptions{}); err != nil {
+	if _, err := c.inner.PutObject(ctx, c.bucket, prefix, bytes.NewReader(nil), 0, directoryMarkerOptions(time.Now())); err != nil {
 		return fmt.Errorf("put object %q: %w", prefix, err)
 	}
 	return nil

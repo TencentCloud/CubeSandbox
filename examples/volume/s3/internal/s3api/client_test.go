@@ -52,6 +52,36 @@ func TestPrefixHasDataDistinguishesEmptyDirectoryMarker(t *testing.T) {
 	}
 }
 
+func TestCreatePrefixWritesS3fsDirectoryMarker(t *testing.T) {
+	var got http.Header
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			got, gotPath = r.Header.Clone(), r.URL.Path
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := testClient(t, srv.URL).CreatePrefix(context.Background(), "volumes/mydata/"); err != nil {
+		t.Fatalf("CreatePrefix: %v", err)
+	}
+	if gotPath != "/test-bucket/volumes/mydata/" {
+		t.Fatalf("PUT path = %q", gotPath)
+	}
+	if ct := got.Get("Content-Type"); ct != "application/x-directory" {
+		t.Errorf("Content-Type = %q, want application/x-directory", ct)
+	}
+	if mode := got.Get("X-Amz-Meta-Mode"); mode != "16877" {
+		t.Errorf("x-amz-meta-mode = %q, want 16877 (S_IFDIR|0755)", mode)
+	}
+	for _, h := range []string{"Uid", "Gid", "Atime", "Ctime", "Mtime"} {
+		if got.Get("X-Amz-Meta-"+h) == "" {
+			t.Errorf("x-amz-meta-%s missing: s3fs rejects a mount-point marker without it", strings.ToLower(h))
+		}
+	}
+}
+
 func TestParseEndpoint(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
