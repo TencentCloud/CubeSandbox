@@ -75,7 +75,7 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
 PENDING  ─┬─→ READY             所有副本均 READY
 (template)├─→ PARTIALLY_READY   至少一个副本 READY，且至少一个不是
           └─→ FAILED            没有 READY 副本、创建时副本落库失败
-                                （persistErr），或构建被强制删除中断
+                                （persistErr，见下方说明），或构建被强制删除中断
 
 CREATING ─┬─→ READY             快照提交成功
 (snapshot)└─→ FAILED            快照提交失败
@@ -86,7 +86,9 @@ CREATING ─┬─→ READY             快照提交成功
 
 `redo` 成功时会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。
 
-**create** 时副本落库失败（persistErr），定义会以脱敏信息发布为 FAILED，随后清理新构建的 artifact 及其副本行。redo 等其他操作不受影响：persistErr 时仍只把 job 标为失败（后续处理）。
+**create** 时副本落库失败（persistErr），定义会以脱敏信息发布为 FAILED。如果该 job 新构建了 artifact，随后会清理该 artifact 及其副本行。redo 等其他操作不受影响：persistErr 时仍只把 job 标为失败（后续处理）。
+
+注意：副本行是逐节点写入的，persistErr 可能只是部分失败。如果 create 复用了已有 artifact（`builtFreshArtifact == false`），不会执行清理，写入成功的节点的 READY 副本行可能与 FAILED 的定义并存。因此 FAILED 的定义并不保证没有可用副本，对这种状态不能依赖 `shouldCheckInUse`（它对 FAILED 会跳过使用中检查）。这一点同样列入后续处理。
 
 不变式：
 

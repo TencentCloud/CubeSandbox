@@ -81,8 +81,8 @@ Initial state depends on the definition kind
 PENDING  ─┬─→ READY             every replica READY
 (template)├─→ PARTIALLY_READY   at least one replica READY, at least one not
           └─→ FAILED            no replica READY, replica persistence failed
-                                on create (persistErr), or a force delete
-                                interrupted the build
+                                on create (persistErr, see caveat below), or
+                                a force delete interrupted the build
 
 CREATING ─┬─→ READY             snapshot committed
 (snapshot)└─→ FAILED            snapshot commit failed
@@ -96,9 +96,18 @@ READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
 a fresh aggregate status from the same summary rules on success.
 
 On a replica persistence failure (persistErr) during **create**, the
-definition is published FAILED with a sanitized message. The fresh artifact
-and its replica rows are then cleaned up. Redo and other operations are not
-changed by this: on persistErr they still fail only the job (follow-up).
+definition is published FAILED with a sanitized message. If the job built a
+fresh artifact, that artifact and its replica rows are then cleaned up. Redo
+and other operations are not changed by this: on persistErr they still fail
+only the job (follow-up).
+
+Caveat: persistErr can be partial, because rows are upserted per node. If the
+create adopted an existing artifact (`builtFreshArtifact == false`), no
+cleanup runs, so READY rows of the nodes that did persist can remain next to
+the FAILED definition. A FAILED definition therefore does not guarantee that
+no usable replica exists, and `shouldCheckInUse` (which skips the in-use
+check for FAILED) must not be relied on for this state. Tracked in the same
+follow-up.
 
 Invariants:
 
