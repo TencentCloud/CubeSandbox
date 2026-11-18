@@ -1845,6 +1845,65 @@ class TestCommands:
         assert result.stderr == "warn\nerror\n"
         assert result.exit_code == 0
 
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_run_preserves_utf8_split_across_data_events(self, stream):
+        sb = make_sandbox()
+        output = b"a" * 32767 + "\u4e2d".encode("utf-8")
+        chunks = (output[:32768], output[32768:])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = b"".join(
+                [
+                    connect_envelope(
+                        0,
+                        json.dumps({"event": {"data": {
+                            stream: base64.b64encode(chunk).decode(),
+                        }}}),
+                    )
+                    for chunk in chunks
+                ]
+                + [
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            result = sb.commands.run("printf data")
+
+        assert getattr(result, stream) == "a" * 32767 + "\u4e2d"
+        assert "\ufffd" not in getattr(result, stream)
+
+    def test_run_replaces_invalid_utf8(self):
+        sb = make_sandbox()
+        stdout = base64.b64encode(b"ok\xff\xfe").decode()
+        stderr = base64.b64encode(b"\xe4\xb8").decode()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = b"".join(
+                [
+                    connect_envelope(
+                        0,
+                        json.dumps({"event": {"data": {
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        }}}),
+                    ),
+                    connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+                    connect_envelope(0x02, "{}"),
+                ]
+            )
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch.object(sb, "_build_data_client", return_value=client):
+            result = sb.commands.run("printf data")
+
+        assert result.stdout == "ok\ufffd\ufffd"
+        assert result.stderr == "\ufffd"
+
     def test_run_exit_code_nonzero(self):
         sb = make_sandbox()
 
