@@ -89,6 +89,26 @@ func TestBuildPauseSandboxSpecIncludesNetworkRecreateFields(t *testing.T) {
 	assert.Equal(t, "10.0.0.0/8", sb.CubeNetworkConfig.AllowOut[0])
 }
 
+func TestPauseRestoreBindingPreservesCurrentHostMountAllowlist(t *testing.T) {
+	const allowlist = `["/srv/cubelet/shared/"]`
+	thin := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			cubebox.AnnotationHostMountAllowedPrefixes: allowlist,
+		},
+	}
+	binding := pauseRestoreBindingFrom(thin, "snap-1", "local")
+
+	packed := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{
+			"kept": "yes",
+		},
+	}
+	binding.applyTo(packed)
+
+	assert.Equal(t, "yes", packed.Annotations["kept"])
+	assert.Equal(t, allowlist, packed.Annotations[cubebox.AnnotationHostMountAllowedPrefixes])
+}
+
 // Expanding a Resume replaces the whole request with the packed spec, which
 // knows nothing about where this restore reads its storage from. Losing
 // remote_uuids sends the rootfs path down the clone branch, and cross-node
