@@ -83,7 +83,7 @@ mod tests {
     use std::task::{Context, Poll, Poll::Ready};
     use tokio::pin;
     use tokio::select;
-    use tokio::sync::watch::channel;
+    use tokio::sync::{watch::channel, Notify};
     use tokio::task::JoinError;
     use tokio::time::Duration;
 
@@ -293,6 +293,40 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_interruptable_io_copier_shutdown() {
+        #[derive(Clone)]
+        struct NotifyingWriter {
+            writer: BufWriter,
+            wrote: Arc<Notify>,
+        }
+
+        impl tokio::io::AsyncWrite for NotifyingWriter {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<Result<usize, io::Error>> {
+                let result = Pin::new(&mut self.writer).poll_write(cx, buf);
+                if matches!(result, Ready(Ok(_))) {
+                    self.wrote.notify_one();
+                }
+                result
+            }
+
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<(), io::Error>> {
+                Pin::new(&mut self.writer).poll_flush(cx)
+            }
+
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<(), io::Error>> {
+                Pin::new(&mut self.writer).poll_shutdown(cx)
+            }
+        }
+
         // Create an async reader that creates an infinite stream of bytes
         // (which allows us to interrupt it, since we know it is always busy ;)
         const REPEAT_CHAR: u8 = b'r';
@@ -301,11 +335,17 @@ mod tests {
 
         let (tx, rx) = channel(true);
         let writer = BufWriter::new();
+        let wrote = Arc::new(Notify::new());
+        let notifying_writer = NotifyingWriter {
+            writer: writer.clone(),
+            wrote: wrote.clone(),
+        };
 
-        let handle = tokio::spawn(interruptable_io_copier(reader, writer.clone(), rx));
+        let handle = tokio::spawn(interruptable_io_copier(reader, notifying_writer, rx));
 
-        // Allow time for the thread to be spawned.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Wait until the copier has actually run rather than relying on a
+        // timing-dependent warm-up that also builds an unnecessary backlog.
+        wrote.notified().await;
 
         let timeout = tokio::time::sleep(Duration::from_secs(1));
         pin!(timeout);
