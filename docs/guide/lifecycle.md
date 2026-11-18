@@ -102,11 +102,11 @@ print(info)
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed whenever the sandbox receives a request or you call `set_timeout`. Pausing does not cancel a finite idle deadline, so the detail and list APIs keep returning the same `endAt` while a sandbox is paused. The E2B SDK requires the field on every response, so it is always present; read the sibling `endAtStatus` to know what it means:
+`endAt` is when the sandbox is due to time out. It is calculated from the last time the timeout was set (create, `set_timeout`, `resume`) plus the timeout. A sandbox that keeps receiving traffic stays alive, so the real pause can happen later than `endAt`: treat it as the earliest the sandbox could pause, not an exact time. Pausing does not cancel a finite timeout, so the detail and list APIs keep returning the same `endAt` while a sandbox is paused. The E2B SDK requires the field on every response, so it is always present; read the sibling `endAtStatus` to know what it means:
 
 | `endAtStatus` | `endAt` | Meaning |
 |---|---|---|
-| `deadline` | the projected instant | A real idle deadline. |
+| `deadline` | the projected instant | A finite timeout is set. The time is a best guess; traffic can push the actual pause later. |
 | `never` | `9999-12-31T23:59:59Z` | The sandbox has no timeout. The sentinel is not a real instant. |
 | `unknown` | `9999-12-31T23:59:59Z` | The deadline lookup failed. Treat the deadline as unknown and do not reclaim the sandbox from this value. |
 
