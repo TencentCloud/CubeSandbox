@@ -29,6 +29,7 @@ import (
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -109,6 +110,8 @@ func (l *CgPlugin) init() error {
 	}
 
 	l.config.parseAndSetDynamicConfig(dynamConf.GetConfig())
+	log.L.Infof("cgroup numa affinity: enabled=%v (enable_numa_affinity=%v, numa_nodes=%d)",
+		l.config.NumaAffinityEnabled(), l.config.EnableNumaAffinity, numa.GetNumaNodeCount())
 
 	err = l.initPool()
 	if err != nil {
@@ -324,7 +327,10 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 		}
 	}
 	var fullCgID *uint32
-	usePoolV2 := false
+	// Per-NUMA pool: the sandbox cgroup is created under numa<N> and inherits
+	// that node's cpuset.cpus / cpuset.mems, which is what makes the placement
+	// picked in resource.go bind CPU cores and memory instead of being a label.
+	usePoolV2 := l.config.NumaAffinityEnabled()
 	numa := opts.GetNumaNode()
 
 	defer func() {

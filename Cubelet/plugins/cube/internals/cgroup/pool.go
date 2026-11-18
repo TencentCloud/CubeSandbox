@@ -188,6 +188,21 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 	return nil
 }
 
+// NumaAffinityEnabled reports whether the per-NUMA cgroup pool should be used.
+// The v2 pool keeps one subtree per NUMA node (numa<N>) whose cpuset.cpus and
+// cpuset.mems carry that node's cpulist / node id; a sandbox cgroup created
+// under it inherits the binding, which is what turns the NUMA node picked for
+// the sandbox into a real CPU + memory affinity constraint.
+//
+// Opt-in via enable_numa_affinity. A single-NUMA host gains nothing from the
+// v2 pool, so the setting is ignored there and the v1 pool stays in use.
+func (c *Config) NumaAffinityEnabled() bool {
+	if c == nil || !c.EnableNumaAffinity {
+		return false
+	}
+	return numa.GetNumaNodeCount() > 1
+}
+
 func (p *cgPool) initPoolV2() error {
 	numaNodes := numa.GetAllNumaNodes()
 	maxNumaNodeID := 0
