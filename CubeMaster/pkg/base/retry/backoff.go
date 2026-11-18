@@ -10,13 +10,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
-func DoWithBackoff(do func() error, bf *wait.Backoff) error {
-	var defaultRetry = wait.Backoff{
+func defaultBackoff() wait.Backoff {
+	return wait.Backoff{
 		Steps:    20,
 		Duration: 500 * time.Millisecond,
 		Factor:   1.0,
 		Jitter:   0.5,
 	}
+}
+
+func DoWithBackoff(do func() error, bf *wait.Backoff) error {
+	defaultRetry := defaultBackoff()
 	if bf != nil {
 		defaultRetry = *bf
 	}
