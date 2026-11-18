@@ -256,3 +256,13 @@ func transformError(err error) error {
 	}
 	return ret.Err(errorcode.ErrorCode_NewTaskFailed, err.Error())
 }
+
+// stripReservedAnnotations removes internal keys that only Cubelet's spec
+// builders may write: the dirty-log switch is host policy, and resume requests
+// carry the packed annotations of the host that took the pause snapshot.
+func stripReservedAnnotations(req *cubebox.RunCubeSandboxRequest) {
+	delete(req.Annotations, constants.AnnotationMemoryDirtyLog)
+	for _, c := range req.GetContainers() {
+		delete(c.GetAnnotations(), constants.AnnotationMemoryDirtyLog)
+	}
+}
