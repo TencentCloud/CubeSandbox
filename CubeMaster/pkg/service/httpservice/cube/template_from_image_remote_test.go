@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // These tests verify markForwardBuildJobFailed's core invariant: it must mark
@@ -140,7 +141,7 @@ func TestForwardBuildJobToTemplateCenterMissingEndpointMessageIsNotStale(t *test
 	t.Setenv(config.EnvTemplateCenterAddr, "")
 	captured := captureUpdateJob(t)
 
-	forwardBuildJobToTemplateCenter("job-missing-endpoint", nil, "", nil)
+	forwardBuildJobToTemplateCenter("job-missing-endpoint", nil, "", nil, trace.SpanContext{})
 
 	if !captured.called {
 		t.Fatal("expected the DB write to be invoked")

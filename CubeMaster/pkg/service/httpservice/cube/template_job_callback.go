@@ -18,7 +18,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // templateJobStatusUpdatableColumns is the whitelist of image_jobs columns
@@ -56,6 +59,7 @@ var templateJobIntColumns = map[string]bool{
 
 var applyTemplateImageJobBuiltReport = templatecenter.ApplyTemplateImageJobBuiltReport
 var prepareTemplateImageJobAfterRemoteBuildCallback = templatecenter.PrepareTemplateImageJobAfterRemoteBuildCallback
+var continueTemplateImageJobAfterRemoteBuild = templatecenter.ContinueTemplateImageJobAfterRemoteBuild
 
 // callbackTokenWarnOnce rate-limits the "unauthenticated endpoint" warning.
 var callbackTokenWarnOnce sync.Once
@@ -151,7 +155,9 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	// image config) that have no image_jobs column. Keep the raw payload in
 	// result_json so the state is inspectable and the resume step can be
 	// replayed from the row if needed.
+	builtReport := false
 	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
+		builtReport = true
 		if raw, err := json.Marshal(payload); err == nil {
 			values["result_json"] = string(raw)
 		}
@@ -164,6 +170,16 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	var callbackErr error
+	var callbackSpan trace.Span
+	if builtReport {
+		ctx = telemetry.ExtractHTTP(ctx, c.Request.Header)
+		ctx, callbackSpan = telemetry.Start(ctx, telemetry.SpanTemplateImageCallback,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(attribute.String(telemetry.AttrJobID, jobID)))
+	}
+	defer func() { telemetry.End(callbackSpan, callbackErr) }()
+
 	// Conditional update: guards live in the UPDATE's WHERE (not a preceding
 	// SELECT). Terminal jobs cannot be rewritten, and a retried BUILT report
 	// cannot move an already claimed distribution back to BUILT.
@@ -171,6 +187,7 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 		if strings.EqualFold(newStatus, templatecenter.JobStatusBuilt) {
 			applied, err := applyTemplateImageJobBuiltReport(ctx, jobID, values)
 			if err != nil {
+				callbackErr = err
 				log.G(ctx).Errorf("template job BUILT callback: update fail: job_id=%s err=%v", jobID, err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
@@ -212,7 +229,7 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	// The resume context is detached from the request (the pipeline performs
 	// cross-node RPCs and must not be canceled when this handler returns) but
 	// still carries a RequestTrace, like every other detached template job.
-	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
+	if builtReport {
 		result := remoteBuildResultFromPayload(payload)
 		resumeCtx := templatecenter.DetachRemoteBuildResumeContext(ctx, jobID, result.ArtifactID)
 		continuation, err := prepareTemplateImageJobAfterRemoteBuildCallback(ctx, jobID, result)
@@ -220,6 +237,7 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 			// Return 5xx while the job remains BUILT. TC's terminal-report retry
 			// loop will call us again while it still owns the build lock; if it
 			// eventually gives up, the BUILT reconciler can replay registration.
+			callbackErr = err
 			log.G(ctx).Errorf("template job BUILT callback: register artifact fail: job_id=%s err=%v", jobID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -234,7 +252,7 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 						jobID, r, string(debug.Stack()))
 				}
 			}()
-			if err := templatecenter.ContinueTemplateImageJobAfterRemoteBuild(resumeCtx, continuation); err != nil {
+			if err := continueTemplateImageJobAfterRemoteBuild(resumeCtx, continuation); err != nil {
 				log.G(resumeCtx).Errorf("resume remote-built template job fail: job_id=%s err=%v", jobID, err)
 			}
 		}()
