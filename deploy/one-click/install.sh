@@ -344,6 +344,22 @@ apply_one_click_rcow_log_intent
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
 
+# Check the effective values before stopping services or replacing files.
+validate_s3_addressing_styles() {
+  local key style
+  local LC_ALL=C
+  for key in CUBE_S3_ADDRESSING_STYLE CUBE_OPS_S3_ADDRESSING_STYLE; do
+    style="${!key-}"
+    style="${style#"${style%%[![:space:]]*}"}"
+    style="${style%"${style##*[![:space:]]}"}"
+    case "${style,,}" in
+      ""|auto|path|virtual) ;;
+      *) die "invalid ${key}. Use auto, path, virtual, or an empty value." ;;
+    esac
+  done
+}
+validate_s3_addressing_styles
+
 # Old packages had no unified knob. Preserve a previous non-zero Master /
 # per-component DB instead of silently resetting all consumers to DB 0.
 if [[ "${INSTALL_MODE}" == "upgrade" ]]; then

@@ -55,6 +55,8 @@ sed -n '/^RUNTIME_ENV_FILE=/,/^# Install version files/{ /^# Install version fil
 sed -n '/^S3_OVERRIDES=/,/^MERGED_ENV=/p' "${src}/install.sh" > capture.sh
 sed -n '/^  python3 .*s3_addressing_env.py.* stored /,/^  apply_cli_overrides$/p' \
   "${src}/install.sh" > merge.sh
+sed -n '/^validate_s3_addressing_styles() {$/,/^validate_s3_addressing_styles$/p' \
+  "${src}/install.sh" > validate.sh
 grep -q 'merge_env_three_way' merge.sh
 grep -q 'chmod 600' copy.sh
 
@@ -78,6 +80,7 @@ install_env() {
       log() { :; }
       source ./merge.sh
     fi
+    source ./validate.sh
     source ./copy.sh
     persist_one_click_database_runtime_env "${RUNTIME_ENV_FILE}"
     [[ "$(stat -c %a "${RUNTIME_ENV_FILE}")" == 600 ]]
@@ -150,4 +153,23 @@ rm new.env
 install_env upgrade
 check_services virtual virtual
 [[ "$(grep -c '^CUBE_S3_ADDRESSING_STYLE=' install/.one-click.env)" == 1 ]]
+
+check_invalid_style() {
+  local mode="$1" key="$2"
+  shift 2
+  cp install/.one-click.env before.env
+  if install_env "${mode}" "$@" > validation.log 2>&1; then
+    printf 'Expected %s to reject invalid %s\n' "${mode}" "${key}" >&2
+    return 1
+  fi
+  grep -Fq "invalid ${key}." validation.log || { cat validation.log >&2; return 1; }
+  cmp before.env install/.one-click.env
+}
+
+check_invalid_style install CUBE_S3_ADDRESSING_STYLE CUBE_S3_ADDRESSING_STYLE=vitual
+printf 'CUBE_OPS_S3_ADDRESSING_STYLE=vitual\n' >> install/.one-click.env
+check_invalid_style upgrade CUBE_OPS_S3_ADDRESSING_STYLE
+printf '%s\n' 'CUBE_OPS_S3_ADDRESSING_STYLE=" ViRtUaL "' > new.env
+install_env upgrade CUBE_OPS_S3_ADDRESSING_STYLE=vitual
+check_services virtual ' ViRtUaL '
 echo "S3 addressing survives install, upgrades and service startup"
