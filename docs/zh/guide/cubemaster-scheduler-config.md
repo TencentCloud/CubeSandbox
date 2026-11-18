@@ -30,6 +30,7 @@ host:
     # 可选。仅在未设置 mcpu_limit / mem_limit 时生效。
     # 默认：cpu_overcommit_factor=2.0，mem_overcommit_factor=1.25。
     # 都设为 1.0 即可不超卖，同时仍自动识别宿主机规格。
+    # 范围：cpu 0–20，mem 0–3；0 表示用默认。
     # cpu_overcommit_factor: 2.0
     # mem_overcommit_factor: 1.25
 ```

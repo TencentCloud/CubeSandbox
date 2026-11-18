@@ -12,6 +12,8 @@ host:
     # by these factors. Omit or set 0 to keep historical defaults (CPU 2.0, mem
     # 1.25). Set both to 1.0 for no overcommit while still auto-detecting size.
     # Explicit mcpu_limit / mem_limit ignore these factors.
+    # Range: cpu_overcommit_factor [0, 20], mem_overcommit_factor [0, 3]; 0 = use
+    # default. Non-finite or out-of-range values are rejected on load.
     # cpu_overcommit_factor: 2.0
     # mem_overcommit_factor: 1.25
     # Fraction of a paused sandbox's CPU/memory quota to release back to the

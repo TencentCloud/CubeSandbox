@@ -30,6 +30,7 @@ host:
     # Optional. Only used when mcpu_limit / mem_limit are unset.
     # Defaults: cpu_overcommit_factor=2.0, mem_overcommit_factor=1.25.
     # Set both to 1.0 for no overcommit while still auto-detecting host size.
+    # Range: cpu 0-20, mem 0-3; 0 = use default.
     # cpu_overcommit_factor: 2.0
     # mem_overcommit_factor: 1.25
 ```
