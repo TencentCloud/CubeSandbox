@@ -64,8 +64,8 @@ func TestNodesWithoutReadyReplicaIPOnlyRow(t *testing.T) {
 // (listArtifactNodePlacements); the helper only matches node identity.
 func TestNodesWithoutArtifactPlacement(t *testing.T) {
 	placements := []models.ArtifactNodePlacement{
-		{ArtifactID: "rfs-1", NodeID: "node-a", NodeIP: "10.0.0.1"},
-		{ArtifactID: "rfs-1", NodeID: "", NodeIP: "10.0.0.2"},
+		{ArtifactID: "rfs-1", NodeID: "node-a", NodeIP: "10.0.0.1", InstanceType: "test"},
+		{ArtifactID: "rfs-1", NodeID: "", NodeIP: "10.0.0.2", InstanceType: "test"},
 	}
 	targets := []*node.Node{
 		testNode("node-a", "10.0.0.1"), // covered by id+ip
@@ -145,8 +145,8 @@ func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 		testNode("node-new", "10.0.0.4"),
 	}
 	placements := []models.ArtifactNodePlacement{
-		{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1"},
-		{ArtifactID: "rfs-jfs", NodeID: "node-b", NodeIP: "10.0.0.2"},
+		{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1", InstanceType: "test"},
+		{ArtifactID: "rfs-jfs", NodeID: "node-b", NodeIP: "10.0.0.2", InstanceType: "test"},
 	}
 	recorder := stubBackfillSeams(t, job, artifact, nodes, placements)
 
@@ -192,7 +192,7 @@ func TestBackfillTemplateReplicasJFSSkipsFullyPlaced(t *testing.T) {
 		MasterNodeIP:  "http://cube-master:8089",
 	}
 	nodes := []*node.Node{testNode("node-a", "10.0.0.1")}
-	placements := []models.ArtifactNodePlacement{{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1"}}
+	placements := []models.ArtifactNodePlacement{{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1", InstanceType: "test"}}
 	recorder := stubBackfillSeams(t, job, artifact, nodes, placements)
 
 	def := backfillDefinition{TemplateID: "tpl-1", InstanceType: "cubebox", RootfsArtifactID: "rfs-jfs"}
