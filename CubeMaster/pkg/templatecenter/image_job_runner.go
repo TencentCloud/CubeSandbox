@@ -187,15 +187,11 @@ func finishTemplateImageJobAfterArtifact(
 	// not be exposed through the build-status API.
 	jobErrMsg := ""
 	if persistErr != nil {
-		if jobRecord.Operation == JobOperationRedo {
-			// A TC-forwarded REDO reuses this path, but its target may be a
-			// template that is still serving. Redo keeps the definition
-			// status untouched on persistErr (only the job fails); deriving a
-			// correct status for a partially redone template is out of scope
-			// here.
-			jobErrMsg = logRedoPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
-			err = persistErr
-		} else {
+		err = persistErr
+		// Only a CREATE owns the definition it just wrote. Other operations
+		// (e.g. a TC-forwarded REDO) also reach this path and keep the
+		// previous behaviour: only the job fails.
+		if jobRecord.Operation == JobOperationCreate {
 			jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
 		}
 	} else {
@@ -274,7 +270,10 @@ func markDefinitionFailedOnPersistErr(
 	persistErr error,
 ) (userMsg string, err error) {
 	log.G(ctx).Errorf("replica persist error, template=%s job=%s err=%v", templateID, jobID, persistErr)
-	userMsg = persistErrUserMessage(readyTargetCount, jobID)
+	userMsg = fmt.Sprintf(
+		"failed to persist replica records on up to %d target node(s); see CubeMaster logs for job %s",
+		readyTargetCount, jobID,
+	)
 	err = persistErr
 	if _, _, updErr := publishTemplateStatusWithAlias(ctx, templateID, jobID, StatusFailed, userMsg); updErr != nil {
 		log.G(ctx).Errorf("mark template definition FAILED after replica persist error, template=%s job=%s err=%v", templateID, jobID, updErr)
@@ -285,26 +284,6 @@ func markDefinitionFailedOnPersistErr(
 		invalidateTemplateCaches(templateID)
 	}
 	return userMsg, err
-}
-
-// persistErrUserMessage is the sanitized text written to last_error and to the
-// job row after a replica persistence failure.
-func persistErrUserMessage(readyTargetCount int, jobID string) string {
-	return fmt.Sprintf(
-		"failed to persist replica records (%d target node(s)); see CubeMaster logs for job %s",
-		readyTargetCount, jobID,
-	)
-}
-
-// logRedoPersistErr handles replica persistence failures on the redo paths.
-// Unlike create, it does not touch the definition status: a redo may target a
-// template that is still serving from replicas outside (or unaffected by) the
-// redo, and the persisted rows of the nodes whose write failed are stale. It
-// logs the raw error and returns the sanitized message for the job row, which
-// the build-status API exposes.
-func logRedoPersistErr(ctx context.Context, templateID, jobID string, readyTargetCount int, persistErr error) string {
-	log.G(ctx).Errorf("replica persist error during redo, definition status left unchanged, template=%s job=%s err=%v", templateID, jobID, persistErr)
-	return persistErrUserMessage(readyTargetCount, jobID)
 }
 
 func errorString(err error) string {

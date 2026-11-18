@@ -95,15 +95,10 @@ any state ──→ (row removed)     delete hard-deletes the definition and its
 READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
 a fresh aggregate status from the same summary rules on success.
 
-On a replica persistence failure (persistErr) the job always fails with a
-sanitized message. The definition status depends on the path:
-
-- **create**: published FAILED. The fresh artifact and its replica rows are
-  cleaned up.
-- **redo** (local or TC-forwarded): left unchanged. A redo may target a
-  template that is still serving, and the rows of the nodes whose write
-  failed are stale, so no status is derived from them. Handling this case is
-  a follow-up.
+On a replica persistence failure (persistErr) during **create**, the
+definition is published FAILED with a sanitized message. The fresh artifact
+and its replica rows are then cleaned up. Redo and other operations are not
+changed by this: on persistErr they still fail only the job (follow-up).
 
 Invariants:
 
@@ -129,8 +124,10 @@ Invariants:
   READY replica on a healthy node (`EnsureTemplateLocalityReady`), so the
   definition status is a user-visible summary and not a scheduling gate.
 - `last_error` (definition) and `error_message` (job row) are both returned
-  by the API and must hold sanitized, user-readable text. Raw driver or DB
-  errors go to CubeMaster logs only.
+  by the API. The create persistErr path writes sanitized, user-readable text
+  to both, and the raw driver or DB error goes to CubeMaster logs only. Other
+  failure paths (including redo persistErr) still write the raw error to the
+  job row (follow-up).
 
 ### 3.3 Error mapping
 

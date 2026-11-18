@@ -86,10 +86,7 @@ CREATING ─┬─→ READY             快照提交成功
 
 `redo` 成功时会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。
 
-副本落库失败（persistErr）时，job 一律以脱敏信息标为失败。定义状态按路径不同：
-
-- **create**：发布 FAILED。新构建的 artifact 及其副本行会被清理。
-- **redo**（本地或转发到 TC 的）：保持不变。redo 的目标模板可能仍在服务，而写库失败的节点上的副本行已经过期，不能据此推导状态。这种情况留待后续处理。
+**create** 时副本落库失败（persistErr），定义会以脱敏信息发布为 FAILED，随后清理新构建的 artifact 及其副本行。redo 等其他操作不受影响：persistErr 时仍只把 job 标为失败（后续处理）。
 
 不变式：
 
@@ -98,7 +95,7 @@ CREATING ─┬─→ READY             快照提交成功
 - 定义行已处于 DELETING 时，发布路径会被抑制（`publishTemplateStatusWithAlias` 返回 `ErrTemplateNotFound`），因此并发删除不会被演变成第二次失败。
 - 发布时的别名认领条件是 `status != FAILED`：READY 和 PARTIALLY_READY 会认领请求的别名，FAILED 跳过认领。跳过认领不会释放模板已经持有的别名。手动设置别名（`SetTemplateAlias`）更严格，要求 READY。
 - 创建沙箱不检查定义状态，只要求某个健康节点上有 READY 副本（`EnsureTemplateLocalityReady`）。因此定义状态是面向用户的汇总信息，而不是调度闸门。
-- 定义的 `last_error` 和 job 行的 `error_message` 都会通过 API 返回，只能写脱敏后、用户可读的文本；原始驱动 / 数据库错误只进 CubeMaster 日志。
+- 定义的 `last_error` 和 job 行的 `error_message` 都会通过 API 返回。create 的 persistErr 路径向两者都写入脱敏后、用户可读的文本，原始驱动 / 数据库错误只进 CubeMaster 日志。其他失败路径（包括 redo 的 persistErr）仍会把原始错误写进 job 行（后续处理）。
 
 ### 3.3 `tpl merge` / migrate job
 

@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -49,7 +48,7 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 	if strings.Contains(publishedLastError, "invalid connection") {
 		t.Fatalf("last_error leaks raw DB error: %q", publishedLastError)
 	}
-	if !strings.Contains(publishedLastError, "2 target node(s)") {
+	if !strings.Contains(publishedLastError, "up to 2 target node(s)") {
 		t.Fatalf("last_error missing node count: %q", publishedLastError)
 	}
 	if !strings.Contains(publishedLastError, "job-1") {
@@ -185,12 +184,11 @@ const rawDBErrText = "upsert template replica fail, template=tpl-1 node=node-a: 
 var rawDBErrLeaks = []string{"Error 1045", "Access denied", "template_replicas", "col=node_id", "10.0.0.5"}
 
 // persistErrCallChainRecorder captures the side effects of the persistErr
-// branch through the real create/redo call chains.
+// branch through the real finish call chain.
 type persistErrCallChainRecorder struct {
 	publishedStatuses []string
 	publishedErrors   []string
 	jobUpdates        []map[string]any
-	refreshed         bool
 }
 
 // lastJobErrorMessage returns the error_message of the last job-row update
@@ -215,9 +213,8 @@ func (r *persistErrCallChainRecorder) lastJobStatus() string {
 	return ""
 }
 
-// patchPersistErrCommon stubs the steps shared by the create and redo paths
-// from "definition written" onwards, with createTemplateReplicasOnNodes
-// returning a raw DB error.
+// patchPersistErrCommon stubs the finish-path steps from "definition written"
+// onwards, with createTemplateReplicasOnNodes returning a raw DB error.
 func patchPersistErrCommon(patches *gomonkey.Patches, rec *persistErrCallChainRecorder, persistErr error) {
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
 		rec.jobUpdates = append(rec.jobUpdates, values)
@@ -324,112 +321,11 @@ func TestFinishTemplateImageJobAfterArtifact_PersistErrMarksDefinitionFailed(t *
 	assertPersistErrOutcome(t, rec)
 }
 
-// patchRedoPersistErrChain stubs the redo call chain (SNAPSHOTTING resume
-// with a reusable artifact) up to createTemplateReplicasOnNodes, which fails
-// with persistErr.
-func patchRedoPersistErrChain(patches *gomonkey.Patches, rec *persistErrCallChainRecorder, persistErr error) {
-	patchPersistErrCommon(patches, rec, persistErr)
-
-	const artifactID = "artifact-redo"
-	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
-
-	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
-		return &models.TemplateImageJob{
-			JobID:       jobID,
-			TemplateID:  "tpl-1",
-			ResumePhase: JobPhaseSnapshotting,
-			ArtifactID:  artifactID,
-		}, nil
-	})
-	patches.ApplyFunc(unmarshalTemplateImageJobRequest, func(payload string) (*types.CreateTemplateFromImageReq, error) {
-		return &types.CreateTemplateFromImageReq{
-			Request:        &types.Request{RequestID: "req-1"},
-			TemplateID:     "tpl-1",
-			InstanceType:   cubeboxv1.InstanceType_cubebox.String(),
-			SourceImageRef: "docker.io/library/nginx:latest",
-		}, nil
-	})
-	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
-		return []models.TemplateReplica{{NodeID: "node-a", Status: ReplicaStatusReady}}, nil
-	})
-	patches.ApplyFunc(resolveRedoTargets, func(instanceType string, req *types.RedoTemplateFromImageReq, replicas []models.TemplateReplica) ([]*node.Node, error) {
-		return targets, nil
-	})
-	patches.ApplyFunc(rootfsArtifactReusableForRedo, func(ctx context.Context, gotArtifactID string) bool {
-		return true
-	})
-	patches.ApplyFunc(getRootfsArtifactByID, func(ctx context.Context, gotArtifactID string) (*models.RootfsArtifact, error) {
-		return &models.RootfsArtifact{ArtifactID: gotArtifactID, Status: ArtifactStatusReady}, nil
-	})
-	patches.ApplyFunc(generateTemplateCreateRequest, func(ctx context.Context, req *types.CreateTemplateFromImageReq, artifact *models.RootfsArtifact, imageCfg DockerImageConfig, downloadBaseURL string) (*types.CreateCubeSandboxReq, error) {
-		return &types.CreateCubeSandboxReq{
-			InstanceType: req.InstanceType,
-			Annotations: map[string]string{
-				constants.CubeAnnotationAppSnapshotTemplateID: req.TemplateID,
-			},
-		}, nil
-	})
-	patches.ApplyFunc(prepareRedoTemplateReplicas, func(ctx context.Context, templateID, instanceType string, existingReplicas []models.TemplateReplica, targets []*node.Node, backend string) error {
-		return nil
-	})
-	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, jobID string) (string, error) {
-		rec.refreshed = true
-		return "", nil
-	})
-}
-
-func runRedoForPersistErrTest() {
-	runRedoTemplateImageJob(context.Background(), "job-redo", &types.RedoTemplateFromImageReq{
-		Request:    &types.Request{RequestID: "req-redo"},
-		TemplateID: "tpl-1",
-	}, "http://master.example")
-}
-
-// assertRedoPersistErrOutcome checks the redo outcome on persistErr: the
-// definition status is left untouched (no publish, no refresh), and the job
-// row fails with the sanitized message only.
-func assertRedoPersistErrOutcome(t *testing.T, rec *persistErrCallChainRecorder) {
-	t.Helper()
-	if len(rec.publishedStatuses) != 0 {
-		t.Fatalf("published definition statuses = %v, want none: redo must not change the definition status on persistErr", rec.publishedStatuses)
-	}
-	if rec.refreshed {
-		t.Fatal("refreshTemplateReplicaSummary must not run after persistErr")
-	}
-	if got := rec.lastJobStatus(); got != JobStatusFailed {
-		t.Fatalf("job status = %q, want %q", got, JobStatusFailed)
-	}
-	jobMsg, ok := rec.lastJobErrorMessage()
-	if !ok || !strings.Contains(jobMsg, "failed to persist replica records") {
-		t.Fatalf("job error_message = %q, want the sanitized persist message", jobMsg)
-	}
-	for _, leak := range rawDBErrLeaks {
-		if strings.Contains(jobMsg, leak) {
-			t.Fatalf("job error_message leaks %q: %q", leak, jobMsg)
-		}
-	}
-}
-
-// TestRunRedoTemplateImageJob_PersistErrLeavesDefinitionAndSanitizesJob
-// drives the real local redo chain into the persistErr branch. A redo may
-// target a template that is still serving, so the definition status must
-// not be changed; only the job fails, with a sanitized message.
-func TestRunRedoTemplateImageJob_PersistErrLeavesDefinitionAndSanitizesJob(t *testing.T) {
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-
-	rec := &persistErrCallChainRecorder{}
-	patchRedoPersistErrChain(patches, rec, errors.New(rawDBErrText))
-
-	runRedoForPersistErrTest()
-
-	assertRedoPersistErrOutcome(t, rec)
-}
-
-// TestFinishTemplateImageJobAfterArtifact_RedoPersistErrLeavesDefinition
-// covers a TC-forwarded REDO, which goes through the create finish path: it
-// must behave like the local redo path, not like create.
-func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrLeavesDefinition(t *testing.T) {
+// TestFinishTemplateImageJobAfterArtifact_NonCreatePersistErrLeavesDefinition
+// covers a TC-forwarded REDO, which shares this finish path with create. The
+// fix is scoped to CREATE, so a REDO keeps the previous behaviour: the job
+// fails and the definition status is not published.
+func TestFinishTemplateImageJobAfterArtifact_NonCreatePersistErrLeavesDefinition(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
@@ -453,10 +349,6 @@ func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrLeavesDefinition(t *t
 	patches.ApplyFunc(cleanupFailedRootfsArtifact, func(ctx context.Context, artifact *models.RootfsArtifact, instanceType, templateID string) error {
 		return nil
 	})
-	patches.ApplyFunc(refreshTemplateReplicaSummary, func(ctx context.Context, templateID, jobID string) (string, error) {
-		rec.refreshed = true
-		return "", nil
-	})
 
 	req := &types.CreateTemplateFromImageReq{
 		Request:      &types.Request{RequestID: "req-1"},
@@ -469,5 +361,10 @@ func TestFinishTemplateImageJobAfterArtifact_RedoPersistErrLeavesDefinition(t *t
 	if !errors.Is(err, persistErr) {
 		t.Fatalf("returned error %v does not wrap persistErr", err)
 	}
-	assertRedoPersistErrOutcome(t, rec)
+	if len(rec.publishedStatuses) != 0 {
+		t.Fatalf("published definition statuses = %v, want none for a non-CREATE job", rec.publishedStatuses)
+	}
+	if got := rec.lastJobStatus(); got != JobStatusFailed {
+		t.Fatalf("job status = %q, want %q", got, JobStatusFailed)
+	}
 }
