@@ -653,9 +653,11 @@ lifecycleManager:
   eventBusEnabled: true
   # Shared with CubeProxy admin endpoints (X-Cube-Admin-Token). Empty means
   # the chart auto-generates and persists one in the release Secret. Changing
-  # it on `helm upgrade` rolls master, proxy and lifecycle-manager together
-  # (checksum/admin-token Pod annotation); editing the Secret outside Helm
-  # instead requires restarting those three workloads yourself.
+  # it on `helm upgrade` rolls master, proxy and lifecycle-manager in the same
+  # upgrade (checksum/admin-token Pod annotation); the three still roll in
+  # sequence, so let the rollout finish before relying on resume. Editing the
+  # Secret outside Helm instead requires restarting those three workloads
+  # yourself.
   adminToken: ""
   probes:
     readiness:
