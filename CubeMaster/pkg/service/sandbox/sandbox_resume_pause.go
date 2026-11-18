@@ -241,7 +241,14 @@ func cubeletReportsState(ctx context.Context, hostIP, sandboxID string, want cub
 // recoverTimedOutPauseForResume heals a Master FAILED pause binding only when
 // the failure was an RPC timeout and Cubelet already reports PAUSED. Completes
 // READY with empty plugin-volume list (no ext_info → do not adjust refcount).
+var timedOutPauseProbe = cubeletReportsPaused
+
 func recoverTimedOutPauseForResume(ctx context.Context, req *types.UpdateRequest, rec *pausesnap.Record, hostIP string) (*pausesnap.Record, error) {
+	return recoverTimedOutPauseForResumeWithProbe(ctx, req, rec, hostIP, timedOutPauseProbe)
+}
+
+func recoverTimedOutPauseForResumeWithProbe(ctx context.Context, req *types.UpdateRequest, rec *pausesnap.Record, hostIP string,
+	reportsPaused func(context.Context, string, string) bool) (*pausesnap.Record, error) {
 	if req == nil || rec == nil {
 		return nil, errors.New("cannot resume: pause snapshot status=FAILED")
 	}
@@ -259,7 +266,7 @@ func recoverTimedOutPauseForResume(ctx context.Context, req *types.UpdateRequest
 	if probeIP == "" {
 		return nil, fmt.Errorf("cannot resume: pause rpc timed out (no host to probe)")
 	}
-	if !cubeletReportsPaused(ctx, probeIP, req.SandboxID) {
+	if !reportsPaused(ctx, probeIP, req.SandboxID) {
 		return nil, fmt.Errorf("cannot resume: pause rpc timed out and cubelet is not PAUSED")
 	}
 	nodeID := strings.TrimSpace(rec.NodeID)

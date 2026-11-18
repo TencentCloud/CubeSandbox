@@ -406,6 +406,29 @@ func TestPauseDuplicateAndUploadResult(t *testing.T) {
 	}
 }
 
+func TestRecoverTimedOutPauseForResumeUsesProductionWrapper(t *testing.T) {
+	oldProbe := timedOutPauseProbe
+	timedOutPauseProbe = func(_ context.Context, hostIP, sandboxID string) bool {
+		require.Equal(t, "127.0.0.1", hostIP)
+		require.Equal(t, "sb", sandboxID)
+		return false
+	}
+	t.Cleanup(func() { timedOutPauseProbe = oldProbe })
+
+	_, err := recoverTimedOutPauseForResume(
+		context.Background(),
+		&types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"},
+		&pausesnap.Record{
+			SandboxID: "sb",
+			NodeIP:    "127.0.0.1",
+			Status:    pausesnap.StatusFailed,
+			LastError: "rpc error: code = DeadlineExceeded desc = context deadline exceeded",
+		},
+		"fallback.invalid",
+	)
+	require.EqualError(t, err, "cannot resume: pause rpc timed out and cubelet is not PAUSED")
+}
+
 func TestPauseTimeoutHealingDoesNotPublish(t *testing.T) {
 	db := webhooktest.SnapshotDB(t)
 	pausesnap.Init(db)
@@ -413,12 +436,10 @@ func TestPauseTimeoutHealingDoesNotPublish(t *testing.T) {
 	p := lifecycleBuffer(t)
 	row := &models.PauseSnapshotRecord{SnapshotID: "snap-timeout", SandboxID: "sb", NodeID: "node", NodeIP: "127.0.0.1", InstanceType: "cubebox", Backend: "s3", Status: "FAILED", LastError: "rpc error: code = DeadlineExceeded desc = context deadline exceeded"}
 	require.NoError(t, db.Create(row).Error)
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(cubeletReportsPaused, func(context.Context, string, string) bool { return true })
 	rec, err := pausesnap.GetBySandbox(context.Background(), "sb")
 	require.NoError(t, err)
-	healed, err := recoverTimedOutPauseForResume(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, rec, "127.0.0.1")
+	healed, err := recoverTimedOutPauseForResumeWithProbe(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, rec, "127.0.0.1",
+		func(context.Context, string, string) bool { return true })
 	require.NoError(t, err)
 	require.Equal(t, "READY", healed.Status)
 	require.Empty(t, p.Events(), "healing a timed-out pause is not a new successful pause")

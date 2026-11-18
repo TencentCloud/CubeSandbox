@@ -92,13 +92,10 @@ cd "$REPO_ROOT" || exit 2
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
 	"ops-agent|Go|0|make ops-agent-test"
-	# -gcflags=all=-l disables inlining, which is REQUIRED by the gomonkey-based
-	# tests in ./pkg/templatecenter: gomonkey rewrites a function's machine code
-	# to redirect it, but an inlined call site bypasses that patch, so a stub
-	# intermittently fails to take effect and the real function runs (e.g. the
-	# flaky "template store is not initialized" failures). The repo already uses
-	# this flag for the integration tests (CubeMaster/Makefile testlocal/testtt).
-	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./cmd/... ./pkg/...'"
+	# CubeMaster's Makefile runs packages one at a time with the no-inline flag
+	# required by its remaining gomonkey tests. Keeping that flag scoped to each
+	# test binary also avoids cross-package runtime corruption on arm64.
+	"cubemaster|Go|0|make cubemaster-test"
 	# CubeTemplateCenter shares CubeMaster's pkg/templatecenter image code
 	# (Linux-only syscall constants), so its unit tests go through the builder
 	# like every other Go component. Docker-backed cases are excluded here and
