@@ -348,6 +348,77 @@ remove_data() {
     /usr/local/bin/cubemastercli /usr/local/bin/cubeopscli \
     /usr/local/bin/cube-jfs-setup.sh /usr/local/bin/cube-jfs-init.sh \
     /usr/local/bin/cube-jfs-mount.sh /usr/local/bin/cube-jfs-check.sh
+
+  remove_s3lvol_writeback_rings
+}
+
+# S3lvol's write-back rings live in /dev/shm, a tmpfs, so they survive the
+# target, this uninstall and everything short of a reboot. That is their job
+# after a crash or a hot upgrade -- they hold acknowledged writes not yet in S3,
+# and the next attach replays them. After an uninstall they belong to nothing:
+# remove_data() has just emptied /data/cubelet, taking bstore.json and the WAL
+# with it, so the next install creates the lvstore instead of attaching it, and
+# create refuses a same-name ring that still holds records. The target then
+# exits at every start, systemd restarts it forever, and the install times out
+# waiting for the RPC socket.
+#
+# Each ring is removed only under the flock s3_writeback_open() takes, so one
+# that a still-running target has open is left alone and reported by check, and
+# only once bstore.json is confirmed gone -- a ring whose lvstore is still
+# attachable is what the next start replays. S3LVOL_SHM_DIR and
+# S3LVOL_STATE_DIR are for the tests only.
+remove_s3lvol_writeback_rings() {
+  local shm="${S3LVOL_SHM_DIR:-/dev/shm}" path fd
+  local -a rings=()
+  local state="${S3LVOL_STATE_DIR:-/data/cubelet/rcow}"
+
+  # The rationale only holds if the wipe actually happened, and
+  # clear_path_preserving_mountpoint() does not report whether it did: the
+  # rm -rf branch discards its status, the mounted branch only warns. A
+  # bstore.json that survived a partial wipe (read-only /data, ENOSPC, an I/O
+  # error, a busy file) means the next start attaches rather than creates, and
+  # replays this ring -- so removing it would drop the one thing the uninstall
+  # could not reconstruct from S3. Checked rather than assumed.
+  if [[ -e "${state}/bstore.json" ]]; then
+    warn "${state}/bstore.json still exists, so the s3lvol write-back rings were left in place"
+    warn "the next start will attach and replay them; remove ${state} first if that is not wanted"
+    return 0
+  fi
+
+  shopt -s nullglob
+  rings=("${shm}"/s3lvol-wb-*/s3lvol-wb-* "${shm}"/s3lvol-wb-*)
+  shopt -u nullglob
+
+  # No flock, no removal. The lock is the only thing that can tell a ring whose
+  # target is gone from one a hand-started target still has open, and deleting
+  # the latter would take the acknowledged writes with it -- the one thing an
+  # uninstall cannot reconstruct from S3. flock(1) is present on any systemd
+  # host, so this is a refusal rather than a fallback.
+  if ! command -v flock >/dev/null 2>&1; then
+    if [[ "${#rings[@]}" -gt 0 ]]; then
+      warn "flock is not available, so the s3lvol write-back rings were left in place"
+      warn "a ring a running target still holds cannot be told apart without it; remove them by hand once no target is running"
+    fi
+    return 0
+  fi
+
+  for path in "${rings[@]}"; do
+    [[ -f "${path}" && ! -L "${path}" ]] || continue
+    exec {fd}<>"${path}" || continue
+    if ! flock -n "${fd}"; then
+      warn "s3lvol write-back ring ${path} is held by a running process; leaving it"
+      exec {fd}>&-
+      continue
+    fi
+    rm -f -- "${path}" || warn "could not remove ${path}"
+    exec {fd}>&-
+  done
+
+  shopt -s nullglob
+  for path in "${shm}"/s3lvol-wb-*/; do
+    rmdir -- "${path}" 2>/dev/null || true
+  done
+  shopt -u nullglob
 }
 
 check_failed=0
@@ -430,6 +501,7 @@ check_installation() {
     /run/cube-sandbox-systemd /run/cube-containers /run/cube-pause-timings \
     /run/cubelock.db /run/cube-let.pid
   check_path_glob runtime '/run/vc/vm/*/cube.sock'
+  check_path_glob runtime "${S3LVOL_SHM_DIR:-/dev/shm}/s3lvol-wb-*"
   if [[ -e /data/cubelet ]]; then
     if ! mountpoint -q /data/cubelet 2>/dev/null; then
       report_leftover data /data/cubelet
