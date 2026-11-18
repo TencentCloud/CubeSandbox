@@ -9,11 +9,13 @@ import (
 	"fmt"
 
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"gopkg.in/yaml.v3"
@@ -51,6 +53,67 @@ func TestInit(t *testing.T) {
 	gotCpu, err := resource.ParseQuantity(cubeboxConf.CpuLowerWaterMark)
 	assert.NoError(t, err)
 	assert.True(t, expectCpu.Equal(gotCpu))
+}
+
+func TestConfigLogsRedactCredentials(t *testing.T) {
+	const configBody = `common: {http_port: 8089}
+log: {level: info}
+instance_db_config:
+  addr: "127.0.0.1:3306"
+  user: "cube"
+  pwd: "db-secret-sentinel"
+redis:
+  nodes: "127.0.0.1:6379"
+  password: "redis-secret-sentinel"
+  sentinel_password: "sentinel-secret-sentinel"
+auth:
+  enable: true
+  secret_key_map:
+    alice:
+      key: "signing-secret-sentinel"
+cube_proxy_conf:
+  admin_token: "proxy-secret-sentinel"
+`
+	secrets := []string{
+		"db-secret-sentinel",
+		"redis-secret-sentinel",
+		"sentinel-secret-sentinel",
+		"signing-secret-sentinel",
+		"proxy-secret-sentinel",
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(configBody), 0o600))
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestConfigRedactionProcessHelper$")
+	cmd.Env = append(os.Environ(),
+		"CONFIG_REDACTION_HELPER=startup",
+		"CUBE_MASTER_CONFIG_PATH="+configPath,
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	for _, secret := range secrets {
+		require.NotContains(t, string(out), secret,
+			"startup log exposed a configured credential: %s", out)
+	}
+	require.Contains(t, string(out), "[REDACTED]")
+	require.Contains(t, string(out), "127.0.0.1:3306")
+	require.Contains(t, string(out), "127.0.0.1:6379")
+}
+
+func TestConfigRedactionProcessHelper(t *testing.T) {
+	mode := os.Getenv("CONFIG_REDACTION_HELPER")
+	if mode == "" {
+		return
+	}
+
+	conf, err := Init()
+	require.NoError(t, err)
+	require.Equal(t, "db-secret-sentinel", conf.InstanceDBConfig.Pwd)
+	require.Equal(t, "redis-secret-sentinel", conf.RedisConf.Password)
+	require.Equal(t, "sentinel-secret-sentinel", conf.RedisConf.SentinelPassword)
+	require.Equal(t, "signing-secret-sentinel", conf.AuthConf.SecretKeyMap["alice"]["key"])
+	require.Equal(t, "proxy-secret-sentinel", conf.CubeProxyConf.AdminToken)
 }
 
 func TestPreComHandleConfDistributionWorkersDefault(t *testing.T) {
