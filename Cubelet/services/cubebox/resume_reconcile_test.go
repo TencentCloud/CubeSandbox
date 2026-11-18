@@ -26,6 +26,7 @@ type fakeCubeboxAPI struct {
 	getHook       func(call int)
 	syncIDs       []string
 	syncSnapshots []fakeCubeboxSyncSnapshot
+	getErr        error
 	syncErr       error
 	saveErr       error
 }
