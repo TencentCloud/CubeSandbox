@@ -8,6 +8,7 @@ BUILDER_CONTAINER_HOME ?= /home/builder
 TMP_GIT_CREDENTIALS ?= /tmp/.cube-sandbox-builder-tmp-git-credentials
 BUILDER_CMD ?= bash
 BUILDER_RUN_EXTRA_MOUNTS ?=
+BUILDER_RUN_LABELS ?=
 # User the builder container runs as. Defaults to the host user so bind-mounted
 # outputs stay host-writable; privileged test targets (e.g. cubevs-test, which
 # loads eBPF / mounts bpffs) override this to 0:0 along with --privileged.
@@ -167,7 +168,8 @@ help:
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
 	@printf "  cubetemplatecenter-docker-test Run CubeTemplateCenter Docker-backed tests on the host\n"
-	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cubelet-test  Run Cubelet unit tests with coverage in Docker\n"
+	@printf "  cubelet-test-fast Run Cubelet unit tests without coverage in Docker\n"
 	@printf "  cubelet-mount-test Run Cubelet mount tests in privileged Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
@@ -283,6 +285,7 @@ endif
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(BUILDER_RUN_EXTRA_MOUNTS) \
+		$(BUILDER_RUN_LABELS) \
 		$(DOCKER_GIT_CRED) \
 		-w /workspace \
 		$(BUILDER_IMAGE) \
@@ -520,6 +523,10 @@ cubetemplatecenter-docker-test:
 .PHONY: cubelet-test
 cubelet-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test'
+
+.PHONY: cubelet-test-fast
+cubelet-test-fast: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test-fast'
 
 # Keep the ordinary Cubelet gate unprivileged while still exercising tests that
 # call mount(2) in CI. Run every storage test protected by requireRoot; the full

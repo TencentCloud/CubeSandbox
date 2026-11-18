@@ -14,12 +14,24 @@
 # skips "gated" components that need a live database or a full VM. Naming a
 # gated component explicitly (e.g. `run.sh hypervisor-kvm`) forces it to run.
 #
+# Components run concurrently (each in its own builder container or host
+# process); every component's output goes to <log-dir>/<name>.log and a
+# PASS/FAIL line (plus the log tail on failure) is printed as each finishes.
+# `-j 1` restores the sequential mode that streams output live.
+#
 # Usage:
 #   tests/unittest/run.sh                 # run the default (self-contained) gate
 #   tests/unittest/run.sh cubemaster agent   # run only the named components
+#   tests/unittest/run.sh -j 1            # one component at a time, live output
 #   tests/unittest/run.sh --list          # list components and exit
 #   tests/unittest/run.sh --no-kvm        # skip components needing /dev/kvm
 #   tests/unittest/run.sh -h | --help
+#
+# Options:
+#   -j N, --jobs N   max components running at once (default: $UNITTEST_JOBS,
+#                    else nproc/4 clamped to 2..8)
+#   --log-dir DIR    per-component logs for parallel runs
+#                    (default: $UNITTEST_LOG_DIR, else _output/unittest)
 #
 # Component names are the keys shown by `--list` (lower-case, e.g. cubemaster,
 # cubelet, agent, hypervisor). Exit status is non-zero if any run failed.
@@ -51,6 +63,7 @@ find_repo_root() {
 	return 1
 }
 
+INVOKE_DIR="$PWD"
 REPO_ROOT="$(find_repo_root)" || {
 	printf 'error: could not locate repo root (no Makefile defining builder-run found above %s)\n' \
 		"$(dirname "${BASH_SOURCE[0]}")" >&2
@@ -112,8 +125,11 @@ WITH_TESTS=(
 	"sandboxrestart|Go|0|cd pkgs/sandboxrestart && go test ./..."
 	"redisx|Go|0|make redisx-test"
 	"cubebench|Shell|0|make cubebench-test"
-	# Same entry point as CI (unit-test-check).
-	"cubelet|Go|0|make cubelet-test"
+	# Same prerequisites and package set as CI's `make cubelet-test`, but via
+	# Cubelet's `make test-fast`: one `go test` over every package instead of a
+	# per-package loop with -coverprofile, which serialises ~166 compile+link
+	# steps. Use `make cubelet-test` directly for per-package coverage files.
+	"cubelet|Go|0|make cubelet-test-fast"
 	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
 	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest).
 	# The root package command does not execute workspace member tests, so run
@@ -160,6 +176,21 @@ NO_TESTS=(
 	"cube-s3lvol|no unit tests; integration tests in test/ run via make check / check-offline (need SPDK build + root, covered by CI workflow)"
 )
 
+# SERIAL_GROUPS: "name|group[,group...]" — two components sharing a group never
+#   run at the same time, because one rewrites in-tree files the other compiles:
+#   cubevs-gen   `make gen` (bpf2go) rewrites CubeNet/cubevs/*_bpfel.{go,o},
+#                which Cubelet compiles through its replace directive.
+#   cubecow-sdk  `make cubecow-sdk` reinstalls Cubelet/third_party/cubecow
+#                (libcubecow.a + header) that Cubelet's CGO packages link. It
+#                also keeps cubelet, whose `make proto` rewrites
+#                Cubelet/api/*.pb.go, apart from cubelet-mount.
+SERIAL_GROUPS=(
+	"cubevs|cubevs-gen"
+	"cubecow|cubecow-sdk"
+	"cubelet|cubevs-gen,cubecow-sdk"
+	"cubelet-mount|cubevs-gen,cubecow-sdk"
+)
+
 # --- output helpers ----------------------------------------------------------
 
 if [[ -t 1 ]]; then
@@ -184,7 +215,7 @@ fail() { printf '%sFAIL%s %s\n' "$C_RED" "$C_RESET" "$*"; }
 skip() { printf '%sSKIP%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; }
 
 usage() {
-	sed -n '5,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	awk 'NR < 5 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
 }
 
 list_components() {
@@ -212,10 +243,28 @@ list_components() {
 
 # --- arg parsing -------------------------------------------------------------
 
+default_jobs() {
+	local n
+	n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
+	n=$((n / 4))
+	((n < 2)) && n=2
+	((n > 8)) && n=8
+	printf '%s' "$n"
+}
+
+need_value() {
+	if [[ $2 -lt 2 || -z "$3" || "$3" == -* ]]; then
+		fail "$1 needs a value"
+		exit 2
+	fi
+}
+
 NO_KVM=0
+JOBS="${UNITTEST_JOBS:-}"
+LOG_DIR="${UNITTEST_LOG_DIR:-$REPO_ROOT/_output/unittest}"
 SELECTED=()
-for arg in "$@"; do
-	case "$arg" in
+while [[ $# -gt 0 ]]; do
+	case "$1" in
 	-h | --help)
 		usage
 		exit 0
@@ -225,14 +274,41 @@ for arg in "$@"; do
 		exit 0
 		;;
 	--no-kvm) NO_KVM=1 ;;
+	-j | --jobs)
+		need_value "$1" $# "${2:-}"
+		JOBS="$2"
+		shift
+		;;
+	-j*) JOBS="${1#-j}" ;;
+	--jobs=*) JOBS="${1#--jobs=}" ;;
+	--log-dir)
+		need_value "$1" $# "${2:-}"
+		LOG_DIR="$2"
+		shift
+		;;
+	--log-dir=*) LOG_DIR="${1#--log-dir=}" ;;
 	-*)
-		fail "unknown option: $arg"
+		fail "unknown option: $1"
 		usage
 		exit 2
 		;;
-	*) SELECTED+=("$arg") ;;
+	*) SELECTED+=("$1") ;;
 	esac
+	shift
 done
+
+[[ -n "$JOBS" ]] || JOBS="$(default_jobs)"
+if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+	fail "invalid job count: $JOBS (want a positive integer)"
+	exit 2
+fi
+if [[ -z "$LOG_DIR" ]]; then
+	fail "log dir must not be empty"
+	exit 2
+fi
+# Relative --log-dir / UNITTEST_LOG_DIR are relative to where the script was
+# invoked, not to REPO_ROOT (the script has already cd'ed there).
+[[ "$LOG_DIR" == /* ]] || LOG_DIR="$INVOKE_DIR/$LOG_DIR"
 
 # Validate any explicitly requested names against all tables.
 known_component() {
@@ -258,12 +334,34 @@ requested() {
 	return 1
 }
 
-# --- run ---------------------------------------------------------------------
+serial_groups_of() {
+	local q="$1" entry name groups
+	for entry in "${SERIAL_GROUPS[@]}"; do
+		IFS='|' read -r name groups <<<"$entry"
+		if [[ "$name" == "$q" ]]; then
+			printf '%s' "${groups//,/ }"
+			return 0
+		fi
+	done
+}
+
+# --- plan --------------------------------------------------------------------
 
 PASSED=()
 FAILED=()
 SKIPPED=()
-START_TS=$(date +%s)
+# Queue of components to run, as parallel arrays indexed together.
+Q_NAME=()
+Q_LANG=()
+Q_CMD=()
+Q_GROUPS=()
+
+enqueue() {
+	Q_NAME+=("$1")
+	Q_LANG+=("$2")
+	Q_CMD+=("$3")
+	Q_GROUPS+=("$(serial_groups_of "$1")")
+}
 
 for entry in "${WITH_TESTS[@]}"; do
 	IFS='|' read -r name lang kvm cmd <<<"$entry"
@@ -274,19 +372,7 @@ for entry in "${WITH_TESTS[@]}"; do
 		SKIPPED+=("$name")
 		continue
 	fi
-
-	info "$name ($lang): $cmd"
-	comp_start=$(date +%s)
-	if bash -c "$cmd"; then
-		comp_dur=$(($(date +%s) - comp_start))
-		pass "$name (${comp_dur}s)"
-		PASSED+=("$name")
-	else
-		rc=$?
-		comp_dur=$(($(date +%s) - comp_start))
-		fail "$name (${comp_dur}s, exit $rc)"
-		FAILED+=("$name")
-	fi
+	enqueue "$name" "$lang" "$cmd"
 done
 
 # Gated components: run only when named explicitly; otherwise announced as
@@ -307,19 +393,7 @@ for entry in "${GATED_TESTS[@]}"; do
 		SKIPPED+=("$name")
 		continue
 	fi
-
-	info "$name ($lang, gated): $cmd"
-	comp_start=$(date +%s)
-	if bash -c "$cmd"; then
-		comp_dur=$(($(date +%s) - comp_start))
-		pass "$name (${comp_dur}s)"
-		PASSED+=("$name")
-	else
-		rc=$?
-		comp_dur=$(($(date +%s) - comp_start))
-		fail "$name (${comp_dur}s, exit $rc)"
-		FAILED+=("$name")
-	fi
+	enqueue "$name" "$lang, gated" "$cmd"
 done
 
 # Components with no unit tests: always announced when in scope.
@@ -330,6 +404,237 @@ for entry in "${NO_TESTS[@]}"; do
 	SKIPPED+=("$name")
 done
 
+# --- run ---------------------------------------------------------------------
+
+FAIL_TAIL_LINES=40
+# "name seconds" from earlier passing runs; parallel runs start the slowest
+# components first so the longest one does not end up queued behind short ones.
+HISTORY_FILE="$LOG_DIR/.durations"
+DURATIONS=()
+
+last_duration() {
+	[[ -f "$HISTORY_FILE" ]] || return 0
+	awk -v n="$1" '$1 == n { d = $2 } END { if (d != "") print d }' "$HISTORY_FILE"
+}
+
+save_durations() {
+	[[ ${#DURATIONS[@]} -gt 0 ]] || return 0
+	mkdir -p "$LOG_DIR" 2>/dev/null || return 0
+	{
+		[[ -f "$HISTORY_FILE" ]] && cat "$HISTORY_FILE"
+		printf '%s\n' "${DURATIONS[@]}"
+	} | awk 'NF == 2 { d[$1] = $2 } END { for (n in d) print n, d[n] }' | sort >"$HISTORY_FILE.tmp" &&
+		mv -f "$HISTORY_FILE.tmp" "$HISTORY_FILE"
+}
+
+# finish <queue-index> <exit-code> <seconds> [log]
+finish() {
+	local i="$1" rc="$2" dur="$3" log="${4:-}"
+	local name="${Q_NAME[i]}" where=""
+	[[ -n "$log" ]] && where="  log: ${log#"$REPO_ROOT"/}"
+	if [[ "$rc" -eq 0 ]]; then
+		pass "$name (${dur}s)$where"
+		PASSED+=("$name")
+		DURATIONS+=("$name $dur")
+	else
+		fail "$name (${dur}s, exit $rc)$where"
+		FAILED+=("$name")
+		if [[ -n "$log" ]]; then
+			tail -n "$FAIL_TAIL_LINES" "$log" | sed 's/^/    | /'
+		fi
+	fi
+}
+
+run_foreground() {
+	local i="$1" start rc
+	info "${Q_NAME[i]} (${Q_LANG[i]}): ${Q_CMD[i]}"
+	start=$(date +%s)
+	bash -c "${Q_CMD[i]}"
+	rc=$?
+	finish "$i" "$rc" "$(($(date +%s) - start))"
+}
+
+# Whether a component's command uses the builder container: a direct
+# `make builder-run`, or a root `make <target>` whose rule needs builder-image.
+needs_builder() {
+	local cmd="$1"
+	[[ "$cmd" == *builder-run* ]] && return 0
+	[[ "$cmd" =~ ^make\ ([A-Za-z0-9_.-]+)$ ]] || return 1
+	grep -qE "^${BASH_REMATCH[1]}:.*builder-image" Makefile
+}
+
+# Every builder target depends on `make builder-image`, which builds the image
+# when it is missing or stale. Resolve that once up front so parallel
+# components do not each start the same `docker build`.
+prepare_builder_image() {
+	local i log="$LOG_DIR/builder-image.log"
+	command -v docker >/dev/null 2>&1 || return 0
+	for i in "${!Q_NAME[@]}"; do
+		needs_builder "${Q_CMD[i]}" || continue
+		info "builder-image: make builder-image"
+		if ! make --no-print-directory builder-image >"$log" 2>&1; then
+			fail "make builder-image failed (log: ${log#"$REPO_ROOT"/})"
+			tail -n "$FAIL_TAIL_LINES" "$log" | sed 's/^/    | /'
+			return 1
+		fi
+		return 0
+	done
+}
+
+ORDER=()
+plan_order() {
+	local i d
+	ORDER=()
+	while IFS=$'\t' read -r _ i; do
+		ORDER+=("$i")
+	done < <(
+		for i in "${!Q_NAME[@]}"; do
+			d="$(last_duration "${Q_NAME[i]}")"
+			# Never-timed components go first: they may well be the slow ones.
+			printf '%s\t%s\n' "${d:-999999}" "$i"
+		done | sort -t $'\t' -k1,1nr -k2,2n
+	)
+}
+
+TMP_ROOT=""
+RUN_ID=""
+BUSY_GROUPS=" "
+# Running components, as parallel arrays indexed together.
+RUN_PIDS=()
+RUN_IDX=()
+RUN_START=()
+
+groups_free() {
+	local g
+	for g in $1; do
+		[[ "$BUSY_GROUPS" == *" $g "* ]] && return 1
+	done
+	return 0
+}
+
+launch() {
+	local i="$1" g
+	local name="${Q_NAME[i]}"
+	local log="$LOG_DIR/$name.log" rcfile="$TMP_ROOT/$name.rc"
+	for g in ${Q_GROUPS[i]}; do BUSY_GROUPS+="$g "; done
+	info "start $name (${Q_LANG[i]})"
+	# A per-component TMP_GIT_CREDENTIALS: builder-run deletes and re-creates
+	# that file before bind-mounting it, which races between parallel runs.
+	(
+		printf '==> %s (%s): %s\n' "$name" "${Q_LANG[i]}" "${Q_CMD[i]}"
+		TMP_GIT_CREDENTIALS="$TMP_ROOT/git-credentials.$name" \
+			BUILDER_RUN_LABELS="--label cube-unittest-run=$RUN_ID" bash -c "${Q_CMD[i]}"
+		rc=$?
+		echo "$rc" >"$rcfile"
+		exit "$rc"
+	) >"$log" 2>&1 </dev/null &
+	RUN_PIDS+=("$!")
+	RUN_IDX+=("$i")
+	RUN_START+=("$(date +%s)")
+}
+
+reap() {
+	local k i g pid rc
+	local -a pids=() idx=() starts=()
+	for k in "${!RUN_PIDS[@]}"; do
+		pid="${RUN_PIDS[k]}"
+		i="${RUN_IDX[k]}"
+		if [[ ! -f "$TMP_ROOT/${Q_NAME[i]}.rc" ]] && kill -0 "$pid" 2>/dev/null; then
+			pids+=("$pid")
+			idx+=("$i")
+			starts+=("${RUN_START[k]}")
+			continue
+		fi
+		wait "$pid"
+		rc=$?
+		for g in ${Q_GROUPS[i]}; do BUSY_GROUPS="${BUSY_GROUPS/ $g / }"; done
+		finish "$i" "$rc" "$(($(date +%s) - RUN_START[k]))" "$LOG_DIR/${Q_NAME[i]}.log"
+	done
+	RUN_PIDS=("${pids[@]}")
+	RUN_IDX=("${idx[@]}")
+	RUN_START=("${starts[@]}")
+}
+
+kill_tree() {
+	local pid="$1" sig="$2" child
+	for child in $(pgrep -P "$pid" 2>/dev/null); do
+		kill_tree "$child" "$sig"
+	done
+	kill "-$sig" "$pid" 2>/dev/null
+}
+
+# Signalling `docker run` does not stop the container: its PID 1 (bash) ignores
+# SIGTERM/SIGINT, so it would keep running tests against the workspace. Builder
+# containers launched above carry this run's unique label, allowing cleanup to
+# avoid touching containers from another concurrent invocation.
+stop_run_containers() {
+	local id
+	command -v docker >/dev/null 2>&1 || return 0
+	for id in $(docker ps -q --filter "label=cube-unittest-run=$RUN_ID" 2>/dev/null); do
+		docker kill "$id" >/dev/null 2>&1 &
+	done
+	wait
+}
+
+on_interrupt() {
+	trap - INT TERM
+	local pid
+	printf '\n'
+	fail "interrupted; stopping ${#RUN_PIDS[@]} running component(s)"
+	for pid in "${RUN_PIDS[@]}"; do kill_tree "$pid" TERM; done
+	stop_run_containers
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		pgrep -P $$ >/dev/null 2>&1 || break
+		sleep 0.5
+	done
+	for pid in "${RUN_PIDS[@]}"; do kill_tree "$pid" KILL; done
+	exit 130
+}
+
+run_parallel() {
+	local i
+	local -a pending waiting
+	mkdir -p "$LOG_DIR" || {
+		fail "cannot create log dir: $LOG_DIR"
+		exit 2
+	}
+	TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cube-unittest.XXXXXX")" || exit 2
+	RUN_ID="${TMP_ROOT##*/}"
+	trap 'rm -rf "$TMP_ROOT"' EXIT
+	trap on_interrupt INT TERM
+
+	info "running ${#Q_NAME[@]} components, up to $JOBS at a time; logs in ${LOG_DIR#"$REPO_ROOT"/}/"
+	if ! prepare_builder_image; then
+		FAILED+=("builder-image")
+		return 0
+	fi
+	plan_order
+	pending=("${ORDER[@]}")
+	while [[ ${#pending[@]} -gt 0 || ${#RUN_PIDS[@]} -gt 0 ]]; do
+		waiting=()
+		for i in "${pending[@]}"; do
+			if [[ ${#RUN_PIDS[@]} -lt $JOBS ]] && groups_free "${Q_GROUPS[i]}"; then
+				launch "$i"
+			else
+				waiting+=("$i")
+			fi
+		done
+		pending=("${waiting[@]}")
+		sleep 0.5
+		reap
+	done
+}
+
+START_TS=$(date +%s)
+PARALLEL=0
+if [[ ${#Q_NAME[@]} -gt 1 && "$JOBS" -gt 1 ]]; then
+	PARALLEL=1
+	run_parallel
+else
+	for i in "${!Q_NAME[@]}"; do run_foreground "$i"; done
+fi
+save_durations
+
 # --- summary -----------------------------------------------------------------
 
 TOTAL_DUR=$(($(date +%s) - START_TS))
@@ -337,5 +642,8 @@ printf '\n%s===== unit test summary (%ss) =====%s\n' "$C_BOLD" "$TOTAL_DUR" "$C_
 printf '  passed:  %d  %s\n' "${#PASSED[@]}" "${PASSED[*]:-}"
 printf '  failed:  %d  %s\n' "${#FAILED[@]}" "${FAILED[*]:-}"
 printf '  skipped: %d  %s\n' "${#SKIPPED[@]}" "${SKIPPED[*]:-}"
+if [[ "$PARALLEL" == "1" ]]; then
+	printf '  logs:    %s/\n' "${LOG_DIR#"$REPO_ROOT"/}"
+fi
 
 [[ ${#FAILED[@]} -eq 0 ]]
