@@ -476,20 +476,15 @@ Rendered CubeMaster conf. The master Deployment checksums it so config edits rol
 {{- end -}}
 
 {{/*
-cube.adminToken resolves the shared CubeProxy admin token. CubeProxy reads it at
-runtime as CUBE_PROXY_ADMIN_TOKEN and the lifecycle manager as CUBE_LCM_ADMIN_TOKEN
-from the release Secret key cube-admin-token; CubeMaster needs the same value
-rendered into its conf.yaml as cube_proxy_conf.admin_token (sent as
-X-Cube-Admin-Token when invalidating a proxy routing cache on sandbox resume).
+cube.adminToken resolves the shared CubeProxy admin token stored in the release
+Secret as cube-admin-token. CubeProxy reads it at runtime as
+CUBE_PROXY_ADMIN_TOKEN, the lifecycle manager as CUBE_LCM_ADMIN_TOKEN, and
+CubeMaster as CUBE_PROXY_ADMIN_TOKEN (injected by master.yaml), so all three
+consume one value. Do not render it into conf.yaml: Helm evaluates randAlphaNum
+independently per template, so a second render would diverge from the Secret on
+a fresh install.
 Priority: explicit lifecycleManager.adminToken → persisted cube-admin-token key
 in the release Secret → freshly generated random.
-
-Fresh-install note: Helm renders every manifest in a single pass, so the
-randAlphaNum fallback below is evaluated separately per caller. On a brand-new
-install the value rendered into the master config Secret can therefore differ
-from the one persisted in the release Secret until the next `helm upgrade`
-aligns both via lookup. Set lifecycleManager.adminToken explicitly (>=16 chars,
-see validate.yaml) to avoid the double generation entirely.
 */}}
 {{- define "cube.adminToken" -}}
 {{- if .Values.lifecycleManager.adminToken -}}

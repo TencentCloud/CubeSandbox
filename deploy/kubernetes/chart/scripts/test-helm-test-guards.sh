@@ -231,6 +231,37 @@ if mode == "default.yaml":
     if 'test "$status" = "200"' not in d:
         raise SystemExit("proxy-control-test must assert HTTP 200")
 
+    def doc_named(kind, name):
+        for candidate in docs:
+            if re.search(rf"^kind: {kind}$", candidate, re.M) and re.search(
+                rf"^  name: {re.escape(name)}$", candidate, re.M
+            ):
+                return candidate
+        raise SystemExit(f"{kind} {name} not found")
+
+    # A second randAlphaNum render would diverge from the release Secret on a
+    # fresh install, so every resume purge would receive 403 from CubeProxy.
+    secret_doc = doc_named("Secret", "helm-guard-cube-secret")
+    if not re.search(r'^  cube-admin-token: ".+"$', secret_doc, re.M):
+        raise SystemExit("release Secret has no cube-admin-token")
+    master_conf = doc_named("Secret", "helm-guard-cube-master-config")
+    admin_token = re.search(r'^\s+admin_token: "(.*)"$', master_conf, re.M)
+    if admin_token is None or admin_token.group(1) != "":
+        raise SystemExit("master config must not render its own admin token")
+    master = doc_named("Deployment", "helm-guard-cube-master")
+    if not re.search(
+        r"(?ms)^            - name: CUBE_PROXY_ADMIN_TOKEN\n"
+        r"              valueFrom:\n"
+        r"                secretKeyRef:\n"
+        r"                  name: helm-guard-cube-secret\n"
+        r"                  key: cube-admin-token$",
+        master,
+    ):
+        raise SystemExit(
+            "master Deployment does not read the admin token from the release Secret"
+        )
+    print("master and proxy share one admin token source")
+
     d = pod_doc("helm-guard-cube-dns-test")
     if "getent ahostsv4" not in d:
         raise SystemExit("dns-test does not use getent ahostsv4")
@@ -318,3 +349,29 @@ python_check "$TMP_DIR/custom-taint.yaml"
 
 render "$TMP_DIR/disabled.yaml" --set helmTest.enabled=false
 python_check "$TMP_DIR/disabled.yaml"
+
+# The admin token reaches every consumer as an env secretKeyRef, which a running
+# container resolves only at start. Rotating it must therefore move all three
+# pod templates: otherwise the new value is silently unused, or the one pod that
+# restarts first validates a token its peers no longer accept.
+render "$TMP_DIR/admin-token-a.yaml" --set-string lifecycleManager.adminToken=guard-rotation-token-aaa
+render "$TMP_DIR/admin-token-b.yaml" --set-string lifecycleManager.adminToken=guard-rotation-token-bbb
+for f in "$TMP_DIR/admin-token-a.yaml" "$TMP_DIR/admin-token-b.yaml"; do
+  count="$(grep -c 'checksum/admin-token:' "$f" || true)"
+  if [ "$count" -ne 3 ]; then
+    echo "checksum/admin-token must be on master, proxy and lifecycle-manager (got $count)" >&2
+    exit 1
+  fi
+  distinct="$(grep 'checksum/admin-token:' "$f" | awk '{print $2}' | sort -u | wc -l | tr -d ' ')"
+  if [ "$distinct" -ne 1 ]; then
+    echo "checksum/admin-token differs across the three workloads" >&2
+    exit 1
+  fi
+done
+sum_a="$(grep -m1 'checksum/admin-token:' "$TMP_DIR/admin-token-a.yaml" | awk '{print $2}')"
+sum_b="$(grep -m1 'checksum/admin-token:' "$TMP_DIR/admin-token-b.yaml" | awk '{print $2}')"
+if [ "$sum_a" = "$sum_b" ]; then
+  echo "checksum/admin-token did not change with lifecycleManager.adminToken" >&2
+  exit 1
+fi
+echo "admin token rotation rolls master, proxy and lifecycle-manager"

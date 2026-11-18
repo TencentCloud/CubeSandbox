@@ -181,8 +181,12 @@ Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy
 
 For that purge to succeed, **CubeMaster and CubeProxy must share the same admin token**:
 
-- CubeMaster: `cubeproxy.admin_token` (sent as `X-Cube-Admin-Token`)
-- CubeProxy: `$cube_admin_token` in `nginx.conf` (see `CubeProxy/lua/admin_phase.lua`)
+- CubeProxy: `$cube_admin_token` in `nginx.conf` (see `CubeProxy/lua/admin_phase.lua`), filled from `CUBE_PROXY_ADMIN_TOKEN`
+- CubeMaster: `CUBE_PROXY_ADMIN_TOKEN` when set, otherwise `cubeproxy.admin_token` in `conf.yaml`; either way it is sent as `X-Cube-Admin-Token` (see `CubeMaster/pkg/cubeproxy/admin.go`)
+
+The Helm chart wires both sides from one source: it generates a token (or takes `lifecycleManager.adminToken`) and persists it in the release Secret as `cube-admin-token`. CubeProxy, CubeMaster and the lifecycle manager each read that key through their own environment variable, and the chart renders `cubeproxy.admin_token` empty on purpose — Helm evaluates each template separately, so a second generated value would diverge from the Secret on a fresh install.
+
+Rotating `lifecycleManager.adminToken` on a Helm install therefore rolls the master, proxy and lifecycle-manager Pods together: the chart hashes the token into a `checksum/admin-token` Pod annotation. If you change the Secret outside Helm, restart those three workloads yourself — an env `secretKeyRef` is only read when a container starts, so a running Pod keeps the old value.
 
 If the token is set on only one side, or the values differ, cache purge returns **403**, Redis is still correct, but CubeProxy may serve a stale cached backend until the entry expires. Align the token in deploy / Helm values whenever Resume is used.
 

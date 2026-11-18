@@ -181,8 +181,12 @@ Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由�
 
 要使该清理成功，**CubeMaster 与 CubeProxy 必须配置相同的 admin token**：
 
-- CubeMaster：`cubeproxy.admin_token`（请求头 `X-Cube-Admin-Token`）
-- CubeProxy：`nginx.conf` 中的 `$cube_admin_token`（见 `CubeProxy/lua/admin_phase.lua`）
+- CubeProxy：`nginx.conf` 中的 `$cube_admin_token`（见 `CubeProxy/lua/admin_phase.lua`），取自环境变量 `CUBE_PROXY_ADMIN_TOKEN`
+- CubeMaster：优先读环境变量 `CUBE_PROXY_ADMIN_TOKEN`，未设置时回退到 `conf.yaml` 的 `cubeproxy.admin_token`；两种来源都以 `X-Cube-Admin-Token` 发送（见 `CubeMaster/pkg/cubeproxy/admin.go`）
+
+Helm Chart 会从同一个来源把两端接好：生成一个 token（或采用 `lifecycleManager.adminToken`）并写入 release Secret 的 `cube-admin-token`。CubeProxy、CubeMaster 与 lifecycle manager 各自通过环境变量读取该 key，Chart 故意把 `cubeproxy.admin_token` 渲染为空——Helm 逐模板独立渲染，再生成一次值会在全新安装时与 Secret 中的值不一致。
+
+也正因如此，在 Helm 安装中轮换 `lifecycleManager.adminToken` 会把 master、proxy、lifecycle-manager 三个 Pod 一起滚动：Chart 会把该 token 哈希进 `checksum/admin-token` 的 Pod 注解。若绕过 Helm 直接改 Secret，请自行重启这三个工作负载——环境变量 `secretKeyRef` 只在容器启动时读取，运行中的 Pod 仍持有旧值。
 
 若只配一侧或两端不一致，清理会返回 **403**：Redis 路由已正确，但 CubeProxy 可能继续使用过期缓存直至条目过期。使用 Resume 时请在部署／Helm 中对齐该 token。
 
