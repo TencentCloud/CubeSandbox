@@ -118,6 +118,28 @@ func (p *storeTimeoutProvider) LookupEndAts(ctx context.Context, sandboxIDs []st
 	return endAts, nil
 }
 
+// LookupDeadlines returns the live deadline plus the timeout mode for each
+// sandbox, so callers can distinguish a true never-timeout from a missing or
+// unreadable metadata row.
+func (p *storeTimeoutProvider) LookupDeadlines(ctx context.Context, sandboxIDs []string) (map[string]sandbox.DeadlineInfo, error) {
+	if p == nil || p.store == nil || len(sandboxIDs) == 0 {
+		return nil, nil
+	}
+	metas, err := p.store.LoadMetas(ctx, sandboxIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]sandbox.DeadlineInfo, len(metas))
+	for sandboxID, meta := range metas {
+		out[sandboxID] = sandbox.DeadlineInfo{
+			EndAtMs:        lifecycleMetaEndAt(meta),
+			TimeoutSeconds: meta.TimeoutSeconds,
+			Found:          true,
+		}
+	}
+	return out, nil
+}
+
 func lifecycleMetaEndAt(meta *SandboxLifecycleMeta) int64 {
 	if meta == nil {
 		return 0

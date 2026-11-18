@@ -313,28 +313,33 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 func decorateSandboxConfig(ctx context.Context, items []*types.SandboxData,
 	preloaded map[string]*types.CreateCubeSandboxReq) map[string]*types.CreateCubeSandboxReq {
 	specs := preloaded
-	if specs == nil {
-		ids := make([]string, 0, len(items))
-		for _, item := range items {
-			if item != nil {
-				ids = append(ids, item.SandboxID)
-			}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.SandboxID)
 		}
+	}
+	if specs == nil {
 		var err error
 		specs, err = sandboxspec.GetMany(ctx, ids)
 		if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
 			log.G(ctx).Warnf("GetSandboxInfo: batch read sandbox specs: %v", err)
 		}
 	}
-	applySandboxConfig(items, specs)
+	applySandboxConfig(items, specs, LookupSandboxDeadlines(ctx, ids))
 	return specs
 }
 
-func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.CreateCubeSandboxReq) {
+func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.CreateCubeSandboxReq, deadlines map[string]DeadlineInfo) {
 	for _, item := range items {
 		if item == nil {
 			continue
 		}
+		d := deadlines[item.SandboxID]
+		if d.Found {
+			item.EndAt = d.EndAtMs
+		}
+		item.EndAtStatus = endAtStatusFor(item.EndAt, d)
 		spec, ok := specs[item.SandboxID]
 		if !ok {
 			continue
@@ -342,16 +347,28 @@ func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.Crea
 		item.AutoPause = &spec.AutoPause
 		item.AutoResume = &spec.AutoResume
 		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
-		item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
 	}
 }
 
-func endAtStatusFor(endAt int64, timeout *int) string {
-	if endAt > 0 {
-		return types.EndAtStatusDeadline
+// endAtStatusFor derives the status from the live lifecycle metadata, never
+// from the create-time spec: a later set-timeout rewrites only the metadata,
+// so the spec can claim -1 long after the sandbox gained a deadline. itemEndAt
+// is the deadline already known to the caller; it covers the case where the
+// metadata batch could not be read but the item still carries a deadline.
+func endAtStatusFor(itemEndAt int64, d DeadlineInfo) string {
+	if d.Found {
+		if d.EndAtMs > 0 {
+			return types.EndAtStatusDeadline
+		}
+		if d.TimeoutSeconds != nil && *d.TimeoutSeconds == types.NeverTimeout {
+			return types.EndAtStatusNever
+		}
+		return types.EndAtStatusUnknown
 	}
-	if timeout != nil && *timeout == types.NeverTimeout {
-		return types.EndAtStatusNever
+	// Metadata unreadable: the item's own deadline, when present, still
+	// proves a deadline. Nothing proves "never", so it is unknown.
+	if itemEndAt > 0 {
+		return types.EndAtStatusDeadline
 	}
 	return types.EndAtStatusUnknown
 }

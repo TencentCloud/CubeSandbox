@@ -240,7 +240,6 @@ func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, re
 			item.AutoPause = &spec.AutoPause
 			item.AutoResume = &spec.AutoResume
 			item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
-			item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
 		}
 		if spec == nil {
 			recordPauseViewWithoutSpec("list")
@@ -312,23 +311,18 @@ func enrichSandboxListEndAts(ctx context.Context, items []*types.SandboxBriefDat
 			ids = append(ids, item.SandboxID)
 		}
 	}
-	endAts := lookupSandboxEndAts(ctx, ids)
+	deadlines := LookupSandboxDeadlines(ctx, ids)
 	for _, item := range items {
 		if item == nil {
 			continue
 		}
-		if endAt, ok := endAts[item.SandboxID]; ok {
-			item.EndAt = endAt
-			// EndAtStatus was derived while EndAt was still 0 (enrich runs
-			// before this fill); upgrade a real deadline, leave the
-			// provisional never/unknown rows alone.
-			// Only rows whose spec was read carry a provisional status;
-			// leave synthesized/unknown rows untouched so a spec-store
-			// failure reads the same on list as it does on detail.
-			if endAt > 0 && item.EndAtStatus != "" {
-				item.EndAtStatus = types.EndAtStatusDeadline
-			}
+		// A missing row is "unknown", not an absent field: list and detail
+		// must agree on the tri-state.
+		d := deadlines[item.SandboxID]
+		if d.Found {
+			item.EndAt = d.EndAtMs
 		}
+		item.EndAtStatus = endAtStatusFor(item.EndAt, d)
 	}
 }
 
@@ -371,7 +365,6 @@ func enrichSandboxList(ctx context.Context, items []*types.SandboxBriefData) {
 		item.AutoPause = &spec.AutoPause
 		item.AutoResume = &spec.AutoResume
 		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
-		item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
 	}
 }
 

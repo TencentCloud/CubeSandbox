@@ -29,7 +29,7 @@ func TestApplySandboxConfigEchoesPersistedSpec(t *testing.T) {
 		nil,
 	}
 
-	applySandboxConfig(items, specs)
+	applySandboxConfig(items, specs, nil)
 
 	full := items[0]
 	if full.AutoPause == nil || !*full.AutoPause || full.AutoResume == nil || !*full.AutoResume {
@@ -67,16 +67,20 @@ func TestEndAtStatusFor(t *testing.T) {
 	never := types.NeverTimeout
 	finite := 600
 	for name, tc := range map[string]struct {
-		endAt   int64
-		timeout *int
-		want    string
+		itemEndAt int64
+		d         DeadlineInfo
+		want      string
 	}{
-		"real deadline":        {endAt: 1_700_000_000_000, timeout: &finite, want: types.EndAtStatusDeadline},
-		"true never-timeout":   {timeout: &never, want: types.EndAtStatusNever},
-		"finite but no meta":   {timeout: &finite, want: types.EndAtStatusUnknown},
-		"no timeout persisted": {want: types.EndAtStatusUnknown},
+		"real deadline":      {d: DeadlineInfo{EndAtMs: 1_700_000_000_000, TimeoutSeconds: &finite, Found: true}, want: types.EndAtStatusDeadline},
+		"true never-timeout": {d: DeadlineInfo{TimeoutSeconds: &never, Found: true}, want: types.EndAtStatusNever},
+		"no meta row":        {d: DeadlineInfo{}, want: types.EndAtStatusUnknown},
+		"meta without mode":  {d: DeadlineInfo{Found: true}, want: types.EndAtStatusUnknown},
+		// The create-time spec said -1, but a later set-timeout changed the
+		// live mode to a finite value: the live value wins.
+		"live wins over stale spec":                {d: DeadlineInfo{TimeoutSeconds: &finite, Found: true}, want: types.EndAtStatusUnknown},
+		"metadata read failed, item carries endAt": {itemEndAt: 1_700_000_000_000, want: types.EndAtStatusDeadline},
 	} {
-		if got := endAtStatusFor(tc.endAt, tc.timeout); got != tc.want {
+		if got := endAtStatusFor(tc.itemEndAt, tc.d); got != tc.want {
 			t.Fatalf("%s: got %q, want %q", name, got, tc.want)
 		}
 	}
@@ -90,11 +94,15 @@ func TestApplySandboxConfigSetsEndAtStatus(t *testing.T) {
 		{SandboxID: "sb-missing-meta", EndAt: 0},
 	}
 	specs := map[string]*types.CreateCubeSandboxReq{
-		"sb-deadline":     {Timeout: nil},
-		"sb-never":        {Timeout: &never},
-		"sb-missing-meta": {Timeout: func() *int { v := 600; return &v }()},
+		"sb-deadline":     {},
+		"sb-never":        {},
+		"sb-missing-meta": {},
 	}
-	applySandboxConfig(items, specs)
+	applySandboxConfig(items, specs, map[string]DeadlineInfo{
+		"sb-deadline":     {EndAtMs: 1_700_000_000_000, Found: true},
+		"sb-never":        {TimeoutSeconds: &never, Found: true},
+		"sb-missing-meta": {},
+	})
 	if items[0].EndAtStatus != types.EndAtStatusDeadline {
 		t.Fatalf("deadline: got %q", items[0].EndAtStatus)
 	}
@@ -159,7 +167,7 @@ func TestEchoNetworkConfigMarksRulesPresence(t *testing.T) {
 		},
 	}
 	items := []*types.SandboxData{{SandboxID: "sb-1"}}
-	applySandboxConfig(items, map[string]*types.CreateCubeSandboxReq{"sb-1": spec})
+	applySandboxConfig(items, map[string]*types.CreateCubeSandboxReq{"sb-1": spec}, nil)
 
 	raw, err := types.FastestJsoniter.Marshal(items[0])
 	if err != nil {

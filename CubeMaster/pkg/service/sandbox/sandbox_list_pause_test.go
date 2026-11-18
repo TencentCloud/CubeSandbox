@@ -495,8 +495,12 @@ func TestListEndAtStatusFollowsTheEndAtFill(t *testing.T) {
 	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
 		return specs, nil
 	})
-	patches.ApplyFunc(lookupSandboxEndAts, func(context.Context, []string) map[string]int64 {
-		return map[string]int64{"sb-finite": 1_800_000_000_000}
+	patches.ApplyFunc(LookupSandboxDeadlines, func(context.Context, []string) map[string]DeadlineInfo {
+		return map[string]DeadlineInfo{
+			"sb-finite":       {EndAtMs: 1_800_000_000_000, TimeoutSeconds: &finite, Found: true},
+			"sb-never":        {TimeoutSeconds: &never, Found: true},
+			"sb-missing-meta": {},
+		}
 	})
 
 	enrichSandboxList(t.Context(), items)
@@ -569,25 +573,30 @@ func TestListSynthesizedPauseRowCarriesEndAtStatus(t *testing.T) {
 	rsp := &types.ListCubeSandboxRes{}
 	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
 	require.Len(t, rsp.Data, 1)
+	// Production order: the deadline fill runs after the pause merge, so the
+	// synthesized row gets its status there.
+	patches.ApplyFunc(LookupSandboxDeadlines, func(context.Context, []string) map[string]DeadlineInfo {
+		return map[string]DeadlineInfo{"sb-paused": {TimeoutSeconds: &never, Found: true}}
+	})
+	enrichSandboxListEndAts(t.Context(), rsp.Data)
 	require.Equal(t, types.EndAtStatusNever, rsp.Data[0].EndAtStatus)
 }
 
-func TestListEndAtUpgradeRequiresSpecRead(t *testing.T) {
-	items := []*types.SandboxBriefData{{SandboxID: "sb-scan"}}
+func TestListStatusIsAlwaysTriState(t *testing.T) {
+	// A missing metadata row is "unknown", not an absent field: list and
+	// detail must agree on the tri-state, and the status must not depend on
+	// whether the spec row was readable.
+	items := []*types.SandboxBriefData{{SandboxID: "sb-missing"}}
 
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
-		return map[string]*types.CreateCubeSandboxReq{}, nil
-	})
-	patches.ApplyFunc(lookupSandboxEndAts, func(context.Context, []string) map[string]int64 {
-		return map[string]int64{"sb-scan": 1_800_000_000_000}
+	patches.ApplyFunc(LookupSandboxDeadlines, func(context.Context, []string) map[string]DeadlineInfo {
+		return map[string]DeadlineInfo{}
 	})
 
-	enrichSandboxList(t.Context(), items)
 	enrichSandboxListEndAts(t.Context(), items)
 
-	if items[0].EndAtStatus != "" {
-		t.Fatalf("spec unread but status set: %q", items[0].EndAtStatus)
+	if got := items[0].EndAtStatus; got != types.EndAtStatusUnknown {
+		t.Fatalf("status: got %q, want unknown", got)
 	}
 }
