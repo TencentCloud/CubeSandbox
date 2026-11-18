@@ -8,6 +8,15 @@ import (
 	gocontext "context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
 	"github.com/containerd/console"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/cmd/ctr/commands"
@@ -18,13 +27,9 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"io"
-	"os"
-	"regexp"
-	"strings"
-	"sync"
 
 	cubecommands "github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/commands"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/cmd/cubecli/internal/execidle"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -55,6 +60,12 @@ var ExecCommand = &cli.Command{
 			Name:    "detach",
 			Aliases: []string{"d"},
 			Usage:   "Detached mode: run command in the background",
+		},
+		&cli.DurationFlag{
+			Name:  "idle-timeout",
+			Value: execidle.DefaultTTYTimeout,
+			Usage: "For -t/--tty: exit after this long with no stdin/stdout activity " +
+				"(0 disables). Keeps abandoned interactive sessions from blocking Pause.",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -131,6 +142,7 @@ var ExecCommand = &cli.Command{
 			ioCreator cio.Creator
 			stdinC    = newStdinCloser(os.Stdin)
 			con       console.Console
+			activity  *execidle.Activity
 		)
 
 		cioOpts := []cio.Opt{cio.WithFIFODir("/data/cubelet/fifo")}
@@ -140,7 +152,15 @@ var ExecCommand = &cli.Command{
 			if err := con.SetRaw(); err != nil {
 				return err
 			}
-			cioOpts = append(cioOpts, cio.WithStreams(con, con, nil), cio.WithTerminal, cio.WithFIFODir("/data/cubelet/fifo"))
+			stdinStream := io.Reader(con)
+			stdoutStream := io.Writer(con)
+			idleTimeout := context.Duration("idle-timeout")
+			if idleTimeout > 0 {
+				activity = execidle.NewActivity()
+				stdinStream = execidle.NewActivityReader(con, activity)
+				stdoutStream = execidle.NewActivityWriter(con, activity)
+			}
+			cioOpts = append(cioOpts, cio.WithStreams(stdinStream, stdoutStream, nil), cio.WithTerminal, cio.WithFIFODir("/data/cubelet/fifo"))
 		} else {
 			cioOpts = append(cioOpts, cio.WithStreams(stdinC, os.Stdout, os.Stderr))
 		}
@@ -181,8 +201,75 @@ var ExecCommand = &cli.Command{
 		if flagD {
 			return nil
 		}
-		status := waitForProcessIO(statusC, process.IO().Wait)
-		code, _, err := status.Result()
+
+		idleCtx, idleCancel := gocontext.WithCancel(cntCtx)
+		defer idleCancel()
+		// winner: 0=unset, 1=process exited first, 2=idle watchdog claimed the kill.
+		// CAS + killRequestedAt close the race where a late tick SIGKILLs an
+		// already-exited (but not yet deleted) exec and CubeShim still returns Ok.
+		var (
+			winner          atomic.Uint32
+			killRequestedAt atomic.Int64
+			killOK          atomic.Bool
+			idleDone        <-chan struct{}
+		)
+		const (
+			exitWinner uint32 = 1
+			idleWinner uint32 = 2
+			// Bound Kill + join so a stuck shim RPC cannot leave the TTY in raw mode.
+			idleKillTimeout = 5 * time.Second
+			idleJoinTimeout = 10 * time.Second
+		)
+		if flagT && activity != nil {
+			idleTimeout := context.Duration("idle-timeout")
+			idleDone = execidle.Watch(idleCtx, idleTimeout, activity.LastActive, func() bool {
+				if winner.Load() == exitWinner {
+					return true
+				}
+				// Claim idle once; failed Kill returns false so Watch retries.
+				winner.CompareAndSwap(0, idleWinner)
+				if winner.Load() != idleWinner {
+					return true
+				}
+				if killOK.Load() {
+					return true
+				}
+				killRequestedAt.Store(time.Now().UnixNano())
+				logrus.Warnf("exec idle timeout after %s with no I/O; killing session so Pause is not blocked", idleTimeout)
+				killCtx, killCancel := gocontext.WithTimeout(cntCtx, idleKillTimeout)
+				defer killCancel()
+				if killErr := process.Kill(killCtx, syscall.SIGKILL); killErr != nil {
+					logrus.WithError(killErr).Error("failed to kill idle exec process; will retry")
+					return false
+				}
+				killOK.Store(true)
+				return true
+			})
+		}
+
+		status := <-statusC
+		// Claim natural/process exit before cancelling the watchdog so a concurrent
+		// tick cannot treat a successful Kill-on-exited-exec as an idle timeout.
+		winner.CompareAndSwap(0, exitWinner)
+		idleCancel()
+		if idleDone != nil {
+			select {
+			case <-idleDone:
+			case <-time.After(idleJoinTimeout):
+				logrus.Warn("idle watchdog join timed out; continuing so console.Reset can run")
+			}
+		}
+		process.IO().Wait()
+		code, exitedAt, err := status.Result()
+		if winner.Load() == idleWinner {
+			req := killRequestedAt.Load()
+			// CubeShim floors exited_at to whole seconds (nanos always 0), so allow
+			// a 1s skew vs local killRequestedAt nanoseconds.
+			if killOK.Load() && req != 0 && !exitedAt.Add(time.Second).Before(time.Unix(0, req)) {
+				return fmt.Errorf("exec idle timeout after %s with no stdin/stdout activity (open sessions block Pause); use --idle-timeout=0 to disable",
+					context.Duration("idle-timeout"))
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("failed to get exit code: %w", err)
 		}
@@ -194,7 +281,10 @@ var ExecCommand = &cli.Command{
 }
 
 // waitForProcessIO prevents process deletion from racing the final stdout and
-// stderr copy loops after the process has exited.
+// stderr copy loops after the process has exited. The idle-timeout path above
+// inlines the same order (status then Wait) so it can CAS the exit winner
+// between those two steps; keep this helper for the package tests of that
+// ordering invariant.
 func waitForProcessIO(statusC <-chan containerd.ExitStatus, wait func()) containerd.ExitStatus {
 	status := <-statusC
 	wait()

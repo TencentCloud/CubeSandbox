@@ -150,6 +150,8 @@ cubecli exec -it <sandbox-id> bash
 
 这个命令通过本地容器运行时创建 exec 进程，适合检查用户进程、文件系统、环境变量、命令执行行为和容器级日志。它不是登录 guest MVM。
 
+交互式（`-t`）会话默认 **15 分钟无 stdin/stdout 活动超时**，避免长时间挂着的 TTY exec 一直阻止 Pause。可用 `--idle-timeout=30m` 覆盖，或 `--idle-timeout=0` 关闭。仅有输出的会话（例如 `tail -f`）会通过 stdout 刷新计时器。
+
 `unsafe` 命令只应在明确理解本地节点影响范围时使用：
 
 ```bash

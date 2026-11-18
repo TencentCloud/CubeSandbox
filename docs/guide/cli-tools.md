@@ -138,6 +138,8 @@ cubecli exec -it <sandbox-id> bash
 
 This creates an exec process through the local container runtime. It is useful for checking user processes, files, environment variables, command behavior, and container-level logs. It is not the same as logging into the guest MVM.
 
+Interactive (`-t`) sessions default to a **15-minute stdin/stdout idle timeout** so an abandoned TTY `exec` cannot keep forbidding Pause. Override with `--idle-timeout=30m`, or disable with `--idle-timeout=0`. Output-only sessions (for example `tail -f`) keep the timer alive via stdout.
+
 Use unsafe commands only when you understand the local-node blast radius:
 
 ```bash
