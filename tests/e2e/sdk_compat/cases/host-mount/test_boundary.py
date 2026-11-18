@@ -533,10 +533,10 @@ def test_symlink_escapes_allowed_prefix(sdk_backend, sdk_e2e_config):
        `escape-<id> -> /bin` inside it (materialized on the host as
        `<prefix>/escape-<id> -> /bin`).
     2. Sandbox B requests host-mount of `<prefix>/escape-<id>`. CubeMaster's
-       lexical check sees a path under the allowed prefix and admits it;
-       Cubelet resolves the symlink and bind-mounts the host `/bin`.
-    3. If B can read host `/bin` through the mount, the whitelist is bypassed:
-       `/bin` is the node root filesystem, which cannot appear under the prefix.
+       lexical check admits the path because it is under the allowed prefix.
+    3. Cubelet must resolve the path to `/bin`, see that it is outside every
+       allowed prefix, and reject the create before bind-mounting. If B can
+       read host `/bin` through the mount, the whitelist is bypassed.
 
     The escape target is `/bin` rather than a secret directory such as `/etc`
     on purpose: it proves the same lexical-vs-resolved bypass (a directory
@@ -545,10 +545,10 @@ def test_symlink_escapes_allowed_prefix(sdk_backend, sdk_e2e_config):
     harness is killed mid-test is far less dangerous than `-> /etc`. `/bin` also
     exists on every Cubelet node, so the probe is deterministic.
 
-    Two secure outcomes make this test pass: the escaper create is rejected
-    (path re-validated after symlink resolution), or the create succeeds but the
-    mount does not expose the symlink target. If the escape is reintroduced,
-    this test fails the suite instead of being silently tolerated.
+    Secure outcomes are a rejected create (path re-validated after symlink
+    resolution) or a mount that does not expose the symlink target. The
+    rejection must name the host-mount prefix check so an unrelated mount
+    failure does not count as a pass.
     """
     token = uuid.uuid4().hex[:12]
     link_name = f"escape-{token}"
@@ -608,12 +608,14 @@ def test_symlink_escapes_allowed_prefix(sdk_backend, sdk_e2e_config):
                 # mistaken for a create failure below.
                 raise
             except Exception as exc:  # noqa: BLE001 - a rejected create is the secure outcome
-                # A backend that re-validates the resolved path rejects the
-                # escaper create outright; that is a pass, not an error. The
-                # rejection may come from the control-plane prefix/absolute check
-                # or, if the fix lives in Cubelet, from a bind-mount/symlink
-                # failure at mount time -- accept any of these secure signals.
-                secure_tokens = ("prefix", "absolute", "bind mount", "symlink")
+                # Cubelet rejects the resolved target because it is outside the
+                # allowed prefixes, or because a symlink component sits below
+                # one. Require one of those specific diagnostics so an
+                # unrelated mount failure cannot masquerade as the fix.
+                secure_tokens = (
+                    "outside allowed host mount prefixes",
+                    "symlink below allowed host mount prefix",
+                )
                 assert any(t in str(exc).lower() for t in secure_tokens), (
                     f"escaper create failed for an unexpected reason: {exc!r}"
                 )

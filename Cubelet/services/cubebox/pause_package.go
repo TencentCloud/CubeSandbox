@@ -238,8 +238,15 @@ func (b pauseRestoreBinding) applyTo(req *cubebox.RunCubeSandboxRequest) {
 	if b.crossNode {
 		req.Annotations[constants.MasterAnnotationSnapshotCrossNode] = "true"
 	}
+	// The packed spec was written by whichever Cubelet paused this sandbox and
+	// may predate the trusted allowlist, so a value there is never authoritative.
+	// A thin Create without the annotation (old CubeMaster) must drop the packed
+	// value instead of inheriting it: otherwise a prefix chosen before the fix
+	// would be honoured on resume and reopen the symlink escape.
 	if b.hostMountAllowedPrefixes != "" {
 		req.Annotations[cubebox.AnnotationHostMountAllowedPrefixes] = b.hostMountAllowedPrefixes
+	} else {
+		delete(req.Annotations, cubebox.AnnotationHostMountAllowedPrefixes)
 	}
 	delete(req.Annotations, constants.MasterAnnotationsAppSnapshotCreate)
 	// Keep appsnapshot.template.id=tpl-* so Resume can EnsureCubeRunTemplate

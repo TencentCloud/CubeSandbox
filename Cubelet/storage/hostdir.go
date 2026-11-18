@@ -192,7 +192,17 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 	return nil
 }
 
-func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]string, error) {
+// hostMountAllowedPrefix keeps both spellings of a configured prefix. The raw
+// form marks where the operator drew the boundary, so the symlink walk below
+// starts there and still permits symlinked ancestors of the prefix itself
+// (for example /data -> /mnt/ssd/data). The resolved form is used to compare
+// against the fully resolved host path.
+type hostMountAllowedPrefix struct {
+	raw      string
+	resolved string
+}
+
+func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]hostMountAllowedPrefix, error) {
 	rawPrefixes, ok, err := cubebox.HostMountAllowedPrefixes(annotations)
 	if err != nil {
 		return nil, err
@@ -204,7 +214,7 @@ func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]string, e
 		return nil, fmt.Errorf("%s annotation is empty", cubebox.AnnotationHostMountAllowedPrefixes)
 	}
 
-	prefixes := make([]string, 0, len(rawPrefixes))
+	prefixes := make([]hostMountAllowedPrefix, 0, len(rawPrefixes))
 	for _, raw := range rawPrefixes {
 		cleaned := filepath.Clean(raw)
 		if !filepath.IsAbs(cleaned) || cleaned == "/" {
@@ -227,7 +237,10 @@ func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]string, e
 		if !info.IsDir() {
 			return nil, fmt.Errorf("allowed host mount prefix %q is not a directory", raw)
 		}
-		prefixes = append(prefixes, filepath.Clean(resolved))
+		prefixes = append(prefixes, hostMountAllowedPrefix{
+			raw:      cleaned,
+			resolved: filepath.Clean(resolved),
+		})
 	}
 	if len(prefixes) == 0 {
 		return nil, errors.New("no allowed host mount prefix exists on this node")
@@ -235,7 +248,7 @@ func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]string, e
 	return prefixes, nil
 }
 
-func resolveHostDirSource(hostPath string, allowedPrefixes []string) (string, error) {
+func resolveHostDirSource(hostPath string, allowedPrefixes []hostMountAllowedPrefix) (string, error) {
 	cleaned := filepath.Clean(hostPath)
 	if !filepath.IsAbs(cleaned) {
 		return "", fmt.Errorf("host path %q is not absolute", hostPath)
@@ -246,11 +259,69 @@ func resolveHostDirSource(hostPath string, allowedPrefixes []string) (string, er
 	}
 	resolved = filepath.Clean(resolved)
 	for _, prefix := range allowedPrefixes {
-		if hostDirPathWithin(prefix, resolved) {
-			return resolved, nil
+		if !hostDirPathWithin(prefix.resolved, resolved) {
+			continue
 		}
+		// A symlink anywhere below the prefix is rejected even when its final
+		// target stays inside the prefix. Otherwise, with the default
+		// /data/shared/ allowlist, a link such as tenant-a/x -> tenant-b would
+		// mount another tenant's data. The prefix itself is exempt because the
+		// operator configured that path (including any symlinked ancestors).
+		//
+		// Walk the spelling the caller supplied below whichever form of the
+		// prefix it matched. Using the resolved path here would hide a link:
+		// tenant-a -> tenant-b resolves to tenant-b, which has no link left to
+		// inspect.
+		var base, rel string
+		switch {
+		case hostDirPathWithin(prefix.raw, cleaned):
+			base = prefix.raw
+			rel, err = filepath.Rel(prefix.raw, cleaned)
+		case hostDirPathWithin(prefix.resolved, cleaned):
+			base = prefix.resolved
+			rel, err = filepath.Rel(prefix.resolved, cleaned)
+		default:
+			// The path only reaches the prefix through a spelling that is not
+			// configured and does not match the resolved form. Refuse to map
+			// it rather than guess which components are links.
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("make host path %q relative to allowed prefix %q: %w", hostPath, base, err)
+		}
+		if err := rejectSymlinksBelowPrefix(base, rel); err != nil {
+			return "", fmt.Errorf("host path %q: %w", hostPath, err)
+		}
+		return resolved, nil
 	}
 	return "", fmt.Errorf("host path %q resolves to %q, outside allowed host mount prefixes", hostPath, resolved)
+}
+
+// rejectSymlinksBelowPrefix lstats each component of rel under base and fails
+// on the first symlink. base itself is not inspected: ancestors of a
+// configured prefix are allowed to be symlinks.
+func rejectSymlinksBelowPrefix(base, rel string) error {
+	if rel == "" || rel == "." {
+		return nil
+	}
+	current := base
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return fmt.Errorf("host path escapes allowed host mount prefix %q", base)
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect host path component %q: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("host path component %q is a symlink below allowed host mount prefix %q", current, base)
+		}
+	}
+	return nil
 }
 
 func hostDirPathWithin(prefix, path string) bool {

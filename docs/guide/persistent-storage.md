@@ -296,7 +296,7 @@ with Sandbox.create(
     sandbox.commands.run("ls /datasets /output")
 ```
 
-Tenant A's sandbox can only see `/data/shared/tenant-a/` — it cannot access `tenant-b` or `tenant-c` directories.
+With server-side path construction, Tenant A's sandbox only receives `/data/shared/tenant-a/`. The allowlist is a single shared boundary, not a per-tenant one: a caller that can supply an arbitrary `hostPath` can still name a sibling directory under the same prefix.
 
 ### Application-Layer Enforcement
 
@@ -329,15 +329,15 @@ sudo chmod 0700 /data/shared/tenant-a
 sudo chmod 0700 /data/shared/tenant-b
 ```
 
-Even if a sandbox attempts to access another tenant's path (e.g. via traversal), it is blocked by CubeMaster's path validation, Cubelet's final symlink check, and OS-level permissions.
+Symlink-based redirection is blocked on the host: CubeMaster rejects traversal in `hostPath`, and Cubelet rejects any symlink below an allowed prefix before mounting, even when the link resolves to another directory inside that prefix. Directory permissions remain the defense for a caller that names a sibling path directly.
 
 ### Isolation Layers Summary
 
 | Layer | Mechanism | Purpose |
 |-------|-----------|---------|
-| Directory layout | Isolated subdirectory per tenant; each sandbox only mounts its own path | Structural data isolation; tenants cannot see each other |
+| Directory layout | Isolated subdirectory per tenant; each sandbox only mounts its own path | Structural separation when the platform constructs the path |
 | Application | Platform code constructs paths; user input is not trusted | Tenant isolation under normal operation |
-| Path resolution | Cubelet resolves `hostPath` before mounting and rejects targets outside the configured prefixes | Prevents symlinks under an allowed prefix from exposing unrelated host data |
+| Path resolution | Cubelet rejects symlinks below a configured prefix and rejects targets outside it | Prevents a planted link from redirecting a mount outside the prefix or into another tenant's directory |
 | OS | Directory owner/mode permissions | Last-resort protection against any bypass |
 
 ## Nested Mounts: Shared Read, Writer-Scoped

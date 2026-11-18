@@ -46,7 +46,7 @@ func TestPrepareHostDirVolumeRejectsSymlinkEscape(t *testing.T) {
 	require.Empty(t, calls, "must reject before invoking mount")
 }
 
-func TestPrepareHostDirVolumeAllowsSymlinkInsideAllowedPrefix(t *testing.T) {
+func TestPrepareHostDirVolumeRejectsSymlinkInsideAllowedPrefix(t *testing.T) {
 	allowedRoot := t.TempDir()
 	realDir := filepath.Join(allowedRoot, "tenant", "real")
 	require.NoError(t, os.MkdirAll(realDir, 0755))
@@ -67,6 +67,35 @@ func TestPrepareHostDirVolumeAllowsSymlinkInsideAllowedPrefix(t *testing.T) {
 
 	opts := hostDirTestOpts(t, []string{allowedRoot})
 	err := (&local{}).prepareHostDirVolume(context.Background(), opts, hostDirTestVolume(link), &StorageInfo{})
+	require.ErrorContains(t, err, "is a symlink below allowed host mount prefix")
+	require.Empty(t, calls, "must reject before invoking mount")
+}
+
+// A prefix may itself sit below a symlinked directory that the operator
+// configured (for example /data -> /mnt/ssd/data). Only links below the
+// configured prefix are rejected.
+func TestPrepareHostDirVolumeAllowsSymlinkedPrefixAncestor(t *testing.T) {
+	realRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(realRoot, "shared", "tenant", "data"), 0755))
+	aliasRoot := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.Symlink(realRoot, aliasRoot))
+	prefix := filepath.Join(aliasRoot, "shared")
+	hostPath := filepath.Join(prefix, "tenant", "data")
+
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = t.TempDir()
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	origRun := runHostDirCommand
+	t.Cleanup(func() { runHostDirCommand = origRun })
+	var calls [][]string
+	runHostDirCommand = func(ctx context.Context, name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+
+	opts := hostDirTestOpts(t, []string{prefix})
+	err := (&local{}).prepareHostDirVolume(context.Background(), opts, hostDirTestVolume(hostPath), &StorageInfo{})
 	require.NoError(t, err)
 	require.Len(t, calls, 1)
 	require.Contains(t, calls[0], "--no-canonicalize")
@@ -137,8 +166,57 @@ func TestResolveHostDirSourceRejectsSiblingPrefix(t *testing.T) {
 	require.NoError(t, os.MkdirAll(allowed, 0755))
 	require.NoError(t, os.MkdirAll(sibling, 0755))
 
-	_, err := resolveHostDirSource(sibling, []string{allowed})
+	prefixes, err := resolveHostMountAllowedPrefixes(map[string]string{
+		testHostMountAllowedPrefixesAnnotation: mustJSON(t, []string{allowed}),
+	})
+	require.NoError(t, err)
+
+	_, err = resolveHostDirSource(sibling, prefixes)
 	require.ErrorContains(t, err, "outside allowed host mount prefixes")
+}
+
+func TestResolveHostDirSourceRejectsSymlinkInsideAllowedPrefix(t *testing.T) {
+	root := t.TempDir()
+	tenantA := filepath.Join(root, "tenant-a")
+	tenantB := filepath.Join(root, "tenant-b")
+	require.NoError(t, os.MkdirAll(tenantA, 0755))
+	require.NoError(t, os.MkdirAll(tenantB, 0755))
+	link := filepath.Join(tenantA, "other-tenant")
+	require.NoError(t, os.Symlink(tenantB, link))
+
+	prefixes, err := resolveHostMountAllowedPrefixes(map[string]string{
+		testHostMountAllowedPrefixesAnnotation: mustJSON(t, []string{root}),
+	})
+	require.NoError(t, err)
+
+	_, err = resolveHostDirSource(link, prefixes)
+	require.ErrorContains(t, err, "is a symlink below allowed host mount prefix")
+}
+
+// Spelling the path through the resolved form of a prefix must still walk the
+// caller's components. Otherwise tenant-a -> tenant-b would resolve to
+// tenant-b and leave no symlink to inspect.
+func TestResolveHostDirSourceRejectsSymlinkViaResolvedPrefixSpelling(t *testing.T) {
+	realRoot := t.TempDir()
+	shared := filepath.Join(realRoot, "shared")
+	tenantA := filepath.Join(shared, "tenant-a")
+	tenantB := filepath.Join(shared, "tenant-b")
+	require.NoError(t, os.MkdirAll(tenantA, 0755))
+	require.NoError(t, os.MkdirAll(tenantB, 0755))
+	require.NoError(t, os.Symlink(tenantB, filepath.Join(tenantA, "other-tenant")))
+
+	aliasRoot := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.Symlink(realRoot, aliasRoot))
+	configuredPrefix := filepath.Join(aliasRoot, "shared")
+
+	prefixes, err := resolveHostMountAllowedPrefixes(map[string]string{
+		testHostMountAllowedPrefixesAnnotation: mustJSON(t, []string{configuredPrefix}),
+	})
+	require.NoError(t, err)
+
+	resolvedSpelling := filepath.Join(shared, "tenant-a", "other-tenant")
+	_, err = resolveHostDirSource(resolvedSpelling, prefixes)
+	require.ErrorContains(t, err, "is a symlink below allowed host mount prefix")
 }
 
 func hostDirTestOpts(t *testing.T, prefixes []string) *workflow.CreateContext {
