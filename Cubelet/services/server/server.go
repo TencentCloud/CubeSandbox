@@ -33,12 +33,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/docker/go-metrics"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/resourcemetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -135,13 +137,20 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		imgExpirationSetter images.ExpirationTimeSetter
 	)
 
+	telemetryShutdown, telErr := telemetry.Setup(ctx, "")
+	if telErr != nil {
+		log.G(ctx).Warnf("telemetry setup failed, continuing without tracing: %v", telErr)
+		telemetryShutdown = func(context.Context) error { return nil }
+	}
+
 	s := &Server{
-		Server:       baseServer,
-		tcpServer:    grpc.NewServer(),
-		tapProvider:  new(tapProvider),
-		httpHandlers: make(map[string]http.Handler),
-		config:       config,
-		stopCh:       make(chan struct{}),
+		Server:            baseServer,
+		tcpServer:         grpc.NewServer(),
+		tapProvider:       new(tapProvider),
+		httpHandlers:      make(map[string]http.Handler),
+		config:            config,
+		stopCh:            make(chan struct{}),
+		telemetryShutdown: telemetryShutdown,
 	}
 
 	dynamConf.AppendConfigWatcher(s)
@@ -237,6 +246,7 @@ type Server struct {
 	httpHandlers         map[string]http.Handler
 	config               *srvconfig.Config
 	stopCh               chan struct{}
+	telemetryShutdown    telemetry.Shutdown
 }
 
 func (s *Server) ServeOperation(l net.Listener) error {
@@ -391,6 +401,16 @@ func (s *Server) Stop() {
 		func() {
 			if s.stopCh != nil {
 				close(s.stopCh)
+			}
+		},
+		func() {
+			if s.telemetryShutdown == nil {
+				return
+			}
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.telemetryShutdown(flushCtx); err != nil {
+				CubeLog.WithContext(flushCtx).Errorf("telemetry shutdown: %v", err)
 			}
 		},
 	}

@@ -57,7 +57,8 @@ func GinRequestMiddleware() gin.HandlerFunc {
 
 		defer func() {
 			if err := recover(); err != nil {
-				log.G(ctx).Fatalf("HandlerFunc panic:%s", string(debug.Stack()))
+				rt.RetCode = -1
+				log.G(ctx).Errorf("HandlerFunc panic: %v\n%s", err, debug.Stack())
 				common.WriteAPI(c, &types.Res{
 					Ret: &types.Ret{
 						RetCode: -1,

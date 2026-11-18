@@ -62,6 +62,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/volumefile"
 	cgroupp "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup"
@@ -1465,12 +1466,15 @@ func (l *local) runContainer(
 	if newContainer == nil {
 		newContainer = l.client.NewContainer
 	}
-	c, err := newContainer(ctx, ci.ID, cOpts...)
+	containerCtx, containerSpan := telemetry.Start(ctx, telemetry.SpanRuntimeContainer)
+	c, err := newContainer(containerCtx, ci.ID, cOpts...)
 	if err != nil {
+		telemetry.End(containerSpan, err)
 		workflow.RecordCreateMetric(ctx, ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, err.Error()),
 			constants.CubeNewContainerId, time.Since(start))
 		return ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, fmt.Errorf("failed to create container [%s]: %w", ci.ID, err).Error())
 	}
+	telemetry.End(containerSpan, nil)
 	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, time.Since(start))
 
 	ci.Container = c
@@ -1532,7 +1536,8 @@ func (l *local) runContainer(
 	}
 
 	taskStart := time.Now()
-	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
+	taskCtx, taskSpan := telemetry.Start(ctx, telemetry.SpanRuntimeTask)
+	task, err := c.NewTask(taskCtx, ioCreater, taskOpts...)
 	if err != nil {
 		// Reap for every container, not only the pod. CubeShim answers
 		// "start" with a bare address, so containerd records the endpoint as
@@ -1550,8 +1555,11 @@ func (l *local) runContainer(
 				sandboxIdentity(cubebox), survivors)
 			withdrawIntent = func() {}
 		}
-		return transformError(err)
+		taskErr := transformError(err)
+		telemetry.End(taskSpan, taskErr)
+		return taskErr
 	}
+	telemetry.End(taskSpan, nil)
 	workflow.RecordCreateMetric(ctx, err,
 		constants.CubeShimCreatetId,
 		time.Since(taskStart))
@@ -1596,9 +1604,12 @@ func (l *local) runContainer(
 	}
 	ci.ExitCh = exitCh
 
-	if err := task.Start(ctx); err != nil {
+	startCtx, startSpan := telemetry.Start(ctx, telemetry.SpanRuntimeStart)
+	if err := task.Start(startCtx); err != nil {
+		telemetry.End(startSpan, err)
 		return ret.Err(errorcode.ErrorCode_StartTaskFailed, err.Error())
 	}
+	telemetry.End(startSpan, nil)
 
 	ci.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Pid = task.Pid()

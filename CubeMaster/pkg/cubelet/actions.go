@@ -13,6 +13,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -53,7 +54,7 @@ func Create(ctx context.Context, calleeEp string,
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
 
-	return c.Create(ctx, req)
+	return c.Create(telemetry.InjectGRPC(ctx), req)
 }
 
 func AppSnapshot(ctx context.Context, calleeEp string,
@@ -69,7 +70,7 @@ func AppSnapshot(ctx context.Context, calleeEp string,
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	return c.AppSnapshot(rpcCtx, req)
+	return c.AppSnapshot(telemetry.InjectGRPC(rpcCtx), req)
 }
 
 func appSnapshotContext(ctx context.Context, timeoutInSec int) (context.Context, context.CancelFunc) {
@@ -84,7 +85,7 @@ func CommitSandbox(ctx context.Context, calleeEp string,
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	return c.CommitSandbox(ctx, req)
+	return c.CommitSandbox(telemetry.InjectGRPC(ctx), req)
 }
 
 func RollbackSandbox(ctx context.Context, calleeEp string,
@@ -95,7 +96,7 @@ func RollbackSandbox(ctx context.Context, calleeEp string,
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
-	return c.RollbackSandbox(ctx, req)
+	return c.RollbackSandbox(telemetry.InjectGRPC(ctx), req)
 }
 
 func CleanupTemplate(ctx context.Context, calleeEp string,
@@ -188,11 +189,12 @@ func CreateImage(ctx context.Context, calleeEp string,
 	}
 	defer conn.Close()
 	c := imagesv1.NewImagesClient(conn.Value())
-	ctx, cancel := context.WithTimeout(context.Background(),
+	// Node RPCs keep an independent deadline so caller cancellation does not interrupt a pull.
+	rpcCtx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(config.GetConfig().CubeletConf.CreateImageTimeoutInSec)*time.Second)
 	defer cancel()
 
-	return c.CreateImage(ctx, req)
+	return c.CreateImage(telemetry.InjectGRPC(telemetry.DetachTrace(rpcCtx, ctx)), req)
 }
 
 func DeleteImage(ctx context.Context, calleeEp string, req *imagesv1.DestroyImageRequest) (*imagesv1.DestroyImageResponse,
@@ -234,9 +236,11 @@ func UpdateWithTimeout(ctx context.Context, calleeEp string,
 	if timeout <= 0 {
 		timeout = time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec) * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// The RPC keeps an independent deadline so a client timeout does not abort
+	// Cubelet's in-flight pause; only the caller's trace rides along.
+	rpcCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return c.Update(ctx, req)
+	return c.Update(telemetry.InjectGRPC(telemetry.DetachTrace(rpcCtx, ctx)), req)
 }
 
 func Exec(ctx context.Context, calleeEp string,
