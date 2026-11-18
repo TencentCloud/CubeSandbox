@@ -22,7 +22,8 @@
 # Usage:
 #   tests/unittest/run.sh                 # run the default (self-contained) gate
 #   tests/unittest/run.sh cubemaster agent   # run only the named components
-#   tests/unittest/run.sh -j 1            # one component at a time, live output
+#   tests/unittest/run.sh cubelet            # run both Cubelet CI lanes
+#   tests/unittest/run.sh -j 1               # one component at a time, live output
 #   tests/unittest/run.sh --list          # list components and exit
 #   tests/unittest/run.sh --no-kvm        # skip components needing /dev/kvm
 #   tests/unittest/run.sh -h | --help
@@ -92,9 +93,8 @@ cd "$REPO_ROOT" || exit 2
 WITH_TESTS=(
 	"cubeops|Go|0|make cubeops-test"
 	"ops-agent|Go|0|make ops-agent-test"
-	# CubeMaster's Makefile runs packages one at a time with the no-inline flag
-	# required by its remaining gomonkey tests. Keeping that flag scoped to each
-	# test binary also avoids cross-package runtime corruption on arm64.
+	# Use the same package set and per-package execution as CI, including tools
+	# such as schedsim, without duplicating CubeMaster's test flags here.
 	"cubemaster|Go|0|make cubemaster-test"
 	# CubeTemplateCenter shares CubeMaster's pkg/templatecenter image code
 	# (Linux-only syscall constants), so its unit tests go through the builder
@@ -125,7 +125,9 @@ WITH_TESTS=(
 	# Same prerequisites and package set as CI's `make cubelet-test`, but via
 	# Cubelet's `make test-fast`: one `go test` over every package instead of a
 	# per-package loop with -coverprofile, which serialises ~166 compile+link
-	# steps. Use `make cubelet-test` directly for per-package coverage files.
+	# steps. The requested() alias below also selects cubelet-mount when cubelet
+	# is named, matching CI's two-lane expansion while keeping the default gate
+	# unprivileged. Use `make cubelet-test` directly for per-package coverage.
 	"cubelet|Go|0|make cubelet-test-fast"
 	# Only unit tests (--lib --bins) run here; the tests/integration.rs target
 	# needs a full VM (OS disk images, sudo/ip networking, VFIO, windows guest).
@@ -327,7 +329,12 @@ done
 requested() {
 	[[ ${#SELECTED[@]} -eq 0 ]] && return 0
 	local q="$1" s
-	for s in "${SELECTED[@]}"; do [[ "$s" == "$q" ]] && return 0; done
+	for s in "${SELECTED[@]}"; do
+		[[ "$s" == "$q" ]] && return 0
+		# CI expands a Cubelet change into both its unprivileged and privileged
+		# mount lanes. Preserve that contract for an explicit local Cubelet run.
+		[[ "$s" == "cubelet" && "$q" == "cubelet-mount" ]] && return 0
+	done
 	return 1
 }
 
