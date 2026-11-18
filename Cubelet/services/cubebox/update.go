@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"time"
 
@@ -14,11 +15,11 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
 	"google.golang.org/protobuf/proto"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/hostquota"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -173,6 +174,11 @@ func (s *service) resumeLocked(ctx context.Context, sb *cubeboxstore.CubeBox, op
 	defer preflightCancel()
 
 	if !opts.skipAdmission {
+		// Keep create admission fenced through the bounded resume RPC and state
+		// reconciliation. Unlocking after the check would expose paused quota
+		// to creates before this sandbox is accounted as running.
+		s.cubeboxMgr.admissionMu.Lock()
+		defer s.cubeboxMgr.admissionMu.Unlock()
 		if rejected := s.admitResume(preflightCtx, sb); rejected != nil {
 			return resumeResult{ret: rejected}
 		}
@@ -257,12 +263,9 @@ func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resume
 // (a full reservation) only adds the remaining r fraction; we check that
 // incremental demand against the node quota to model the post-resume state.
 //
-// The check is best-effort, not a hard reservation: concurrent resumes of
-// different sandboxes each read their own snapshot of aggregateAllocated, so a
-// burst can momentarily admit past the quota (the OS/cgroup remains the hard
-// backstop). This matches how create scheduling is optimistic too; operators
-// who want more headroom can lower the release ratio so the reserved fraction
-// absorbs concurrent-resume overshoot.
+// The caller must hold admissionMu through this check and the transition to
+// RUNNING (or reconciliation after failure), as resumeLocked does. A check
+// without that fence is advisory and cannot reserve capacity for a resume.
 func (s *service) admitResume(
 	ctx context.Context,
 	sb *cubeboxstore.CubeBox,
@@ -291,9 +294,13 @@ func (s *service) admitResume(
 	// allocation to avoid overcommit, and resume is far rarer than its VM-wake
 	// cost, so this O(n) scan is acceptable on this path.
 	alloc := s.cubeboxMgr.aggregateAllocated()
-	memQuotaMB := int64(0)
-	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
-		memQuotaMB = bytesToMB(memQuota.Value())
+	cpuQuota := hostquota.CPU(hostConf, runtime.NumCPU())
+	memQuotaMB, err := hostquota.Memory(hostConf, hostquota.DetectMemoryTotalMB)
+	if err != nil || cpuQuota <= 0 || memQuotaMB <= 0 {
+		return &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_Conflict,
+			RetMsg:  fmt.Sprintf("resume cannot determine host quota: cpu=%d memory=%d error=%v", cpuQuota, memQuotaMB, err),
+		}
 	}
 	// Only the released fraction is the incremental demand of resuming.
 	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
@@ -304,7 +311,7 @@ func (s *service) admitResume(
 		memQuotaMB:    memQuotaMB,
 		usedCPUMilli:  alloc.MilliCPU,
 		needCPUMilli:  needCPU,
-		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
+		cpuQuotaMilli: cpuQuota,
 	}); reason != "" {
 		ret := &errorcode.Ret{
 			RetCode: errorcode.ErrorCode_Conflict,
