@@ -409,6 +409,14 @@ jobs:
                           requires_builder: false,
                           run_mode: "cubemaster_host"
                         })
+                    elif $component.component == "CubeTemplateCenter" then
+                      $component,
+                        ($component + {
+                          display_name: "CubeTemplateCenter Docker",
+                          make_target: "test-docker",
+                          requires_builder: false,
+                          run_mode: "cubetemplatecenter_host"
+                        })
                     elif $component.component == "cubelet" then
                       $component,
                         ($component + {
@@ -457,6 +465,13 @@ jobs:
         with:
           go-version-file: CubeMaster/go.mod
           cache-dependency-path: CubeMaster/go.sum
+
+      - name: Set up Go (CubeTemplateCenter)
+        if: matrix.run_mode == 'cubetemplatecenter_host'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: CubeTemplateCenter/go.mod
+          cache-dependency-path: CubeTemplateCenter/go.sum
 
       - name: Detect builder changes
         id: builder_changes
@@ -571,6 +586,9 @@ jobs:
               ;;
             cubemaster_host)
               make -C CubeMaster "${MAKE_TARGET}"
+              ;;
+            cubetemplatecenter_host)
+              make -C CubeTemplateCenter "${MAKE_TARGET}"
               ;;
             *)
               echo "::error::unsupported run mode: ${RUN_MODE}"
