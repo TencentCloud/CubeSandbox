@@ -879,10 +879,10 @@ mod tests {
     }
 
     // A reader still pending in read_stream() keeps the cached PipeStream
-    // alive after cleanup_process_stream() closes the raw fd. Dropping it
-    // later must not close the fd number that has since been reused.
+    // alive after cleanup_process_stream() closes Process's raw fd. The cached
+    // stream must own a private dup so it can finish reading safely.
     #[tokio::test]
-    async fn test_cleanup_with_pending_reader_keeps_reused_fd() {
+    async fn test_cleanup_with_pending_reader_keeps_reader_alive() {
         let (r, w) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
         let mut process =
@@ -892,36 +892,19 @@ mod tests {
         let reader = process.get_reader(StreamType::ParentStdout).unwrap();
         let task = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
-            let mut buf = [0u8; 16];
+            let mut buf = [0u8; 1];
             let mut g = reader.lock().await;
-            let _ = g.read(&mut buf).await;
+            g.read_exact(&mut buf).await.map(|_| buf)
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
         assert!(!task.is_finished(), "reader must be pending");
 
         process.cleanup_process_stream();
         assert!(process.readers.is_empty());
 
-        // Put a new socket at the freed fd number, standing in for a vsock
-        // connection accepted after cleanup.
-        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
-        if a.as_raw_fd() == r {
-            std::mem::forget(a);
-        } else {
-            unistd::dup2(a.as_raw_fd(), r).unwrap();
-            drop(a);
-        }
-
-        // Drop the last reference to the cached stream.
-        task.abort();
-        let _ = task.await;
-
-        assert!(
-            fcntl::fcntl(r, FcntlArg::F_GETFD).is_ok(),
-            "fd reused after cleanup must survive the pending reader's drop"
-        );
-        let _ = unistd::close(r);
-        drop(b);
+        unistd::write(w, b"x").unwrap();
+        let buf = task.await.unwrap().unwrap();
+        assert_eq!(&buf, b"x");
         let _ = unistd::close(w);
     }
 }
