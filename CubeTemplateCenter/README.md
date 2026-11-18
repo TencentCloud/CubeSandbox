@@ -10,6 +10,10 @@ TC owns the build (pull, ext4, fingerprint, S3 upload) and the artifact data (lo
 CubeMaster owns the template API, job state, cross-node distribution, and deletion orchestration.
 Compat matrix and download routes: CubeMaster reverse-proxies to TC (302 to S3 for downloads).
 
+For new builds using S3, TC removes the local ext4 only after the BUILT callback succeeds, preserving the cleanup boundary introduced in #2139. A failed upload fails the build and removes its local file; a failed callback retains the file. Cleanup unlinks only the artifact file and an empty parent directory, leaving scratch directories and concurrent build data untouched. Local-only builds, the fs backend, and reused artifacts retain their existing behavior.
+
+If HEAD or presigning fails after a successful S3 upload, or presigning fails when reusing a verified S3 object, the callback carries a blobstore:s3: object locator so job replay and proxy downloads do not depend on the local file. If HEAD explicitly reports that the uploaded object is missing, the build fails and retains the local file instead of publishing a BUILT result or deleting the remaining copy. If a configured artifact store fails static initialization, builds fail before PULLING and report the backend and underlying cause. Absent or incomplete S3 settings retain the existing local-build behavior. S3 initialization failures reject new builds without preventing service startup; an fs initialization failure still terminates service startup. This is not a connectivity check: unreachable S3 endpoints or buckets are detected by later object-store operations.
+
 ## Run
 
 No `-conf` flag; config is located via env var:
