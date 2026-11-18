@@ -196,7 +196,9 @@ sandbox 的 Cubelet 主机都需配置该引用，并能访问已存在的平台
 `SDK_E2E_VOLUME_PREFIX` 是可选的相对测试根，未设置或仅空白时用 `sdk-e2e/`；
 每个用例追加独立 UUID 和兄弟后缀。runner 无需对象存储密钥、额外 MinIO 凭证
 或对象存储 SDK。
-原有 Volume capability 和插件禁用门控继续生效。
+原有 Volume capability 和插件禁用门控继续生效。依赖插件的用例还会探测所选
+driver，并在 driver、其配置文件或 Volume API 不存在时跳过；raw API 输入检查
+发生在 CubeAPI 向插件分发之前，因此绕过该探测。
 
 `cases/framework/test_volume_api_adapter.py` 离线验证 legacy/v2 路由、opaque
 输入原样透传、无 fallback、raw 错误响应、凭证门控和局部清理行为。在线用例先

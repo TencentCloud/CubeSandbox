@@ -31,6 +31,8 @@ assert_file "${INSTALLER}"
 [[ -x "${INSTALLER}" ]] || fail "installer not executable"
 assert_contains "${SERVICE}" "ExecStart=@LOGROTATE@ --state /var/lib/cube-sandbox-logrotate/status @POLICY@"
 assert_contains "${SERVICE}" "StateDirectory=cube-sandbox-logrotate"
+# Type=oneshot already has no start timeout; a no-op override only misleads.
+assert_not_contains "${SERVICE}" "TimeoutStartSec"
 assert_contains "${TIMER}" "OnCalendar=minutely"
 assert_contains "${INSTALL_SH}" "install_cubeshim_logrotate"
 assert_contains "${ONE_CLICK_DIR}/build-release-bundle.sh" 'scripts/logrotate'

@@ -5,13 +5,10 @@ from __future__ import annotations
 
 import pytest
 
-from framework.capabilities import VOLUME_PLUGIN, require_capabilities
 
-
-# This autouse fixture is the real capability gate for the volume cases: they
-# build their API client / adapter directly instead of the sdk_sandbox fixture,
-# so the per-test requires_capability marker (enforced only inside sdk_sandbox)
-# would not fire on its own.
+# Make every package-local autouse setup fixture depend on the global volume
+# gate. Pytest orders fixtures by dependency, not declaration/discovery order;
+# this guarantees an unavailable plugin skips before host prerequisites run.
 @pytest.fixture(autouse=True)
-def _require_volume_plugin_capability(sdk_backend: str) -> None:
-    require_capabilities(sdk_backend, VOLUME_PLUGIN)
+def _volume_plugin_ready(volume_plugin_gate: None) -> None:
+    pass

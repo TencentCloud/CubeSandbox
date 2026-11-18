@@ -353,27 +353,36 @@ the policy directory with the private state file
 Disabling S3lvol and re-running the installer removes only its policy. The timer
 is host-level, survives role shutdown/upgrades, and is removed by uninstall.
 
-The installer validates both candidate policies before replacing either live
-policy. A rejected candidate is saved outside the policy directory and leaves
-the existing timer and policies untouched. `ONE_CLICK_LOGROTATE_BIN` may select
-a custom executable; if it is missing, discovery falls back to PATH,
-`/usr/sbin/logrotate`, then `/usr/bin/logrotate`.
+The installer validates each candidate policy before replacing its live copy.
+A rejected candidate is saved outside the policy directory and leaves that live
+policy untouched. The two policies are independent: if the storage policy
+cannot be rendered (for example a relative `RCOW_LOG`) or is rejected, only it
+is skipped, and the CubeShim/VMM policy and the timer are still installed. A
+rejected CubeShim/VMM policy leaves the existing timer untouched.
+`ONE_CLICK_LOGROTATE_BIN` may select a custom executable; if it is missing,
+discovery falls back to PATH, `/usr/sbin/logrotate`, then `/usr/bin/logrotate`.
 
 The storage `firstaction` hook requires room for a full copy, delayed compression
 of the previous archive, and a reserve of at least 1 GiB when sharing the source
-filesystem or 512 MiB on a separate archive filesystem. `prerotate` repeats the
-check immediately before the active-log copy. Insufficient space skips
-that entry without truncating its log. `RCOW_LOG_RESERVE_BYTES` raises the reserve;
-it cannot lower the floor. This is a check, not a reservation against concurrent
-writes. `copytruncate` can lose log lines written during its copy/truncate window;
-it does not modify WAL or volume contents.
+filesystem or 512 MiB on a separate archive filesystem. `firstaction` runs
+before logrotate renames or compresses any archive, so insufficient space skips
+that entry and leaves both its log and its existing archives unchanged.
+`RCOW_LOG_RESERVE_BYTES` raises the reserve; it cannot lower the floor. This is
+a check, not a reservation against concurrent writes. `copytruncate` can lose
+log lines written while the active log is copied and truncated, which for a
+large log on a busy disk can take seconds; it does not modify WAL or volume
+contents.
 
 Set `RCOW_LOG_ARCHIVE_DIR` to choose the archive base. A per-source subdirectory
-keeps different logs separate. Paths and reserve settings are captured during
-installation; re-run `install.sh` after editing them. `RCOW_LOG_RESTART_RETAIN`
-is different: it is read by `rcow_start.sh` when archiving a previous run, and
-opt-in cleanup keeps the newest N timestamped restart logs. Leaving it unset
-preserves those logs. Periodic rotation never scans or removes restart archives.
+keeps different logs separate and is recreated if it is removed. Paths and
+reserve settings are captured during installation and written to
+`.one-click.env`, so the policy and the storage service agree on the log path;
+re-run `install.sh` after editing them. `RCOW_LOG_RESTART_RETAIN` is different:
+it is read by `rcow_start.sh` when archiving a previous run, and keeps the
+newest N timestamped restart logs (one-click default 8). Every start writes one,
+including each crash restart, so a crash-looping target adds one every few
+seconds. An explicit empty value keeps all of them. Periodic rotation never
+scans or removes restart archives.
 
 For an existing oversized log, schedule the initial copy when disk IO is
 acceptable. Stop the shared timer, wait for an in-progress rotation to finish,

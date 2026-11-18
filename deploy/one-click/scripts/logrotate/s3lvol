@@ -9,11 +9,13 @@
     copytruncate
     su root root
     olddir @ARCHIVE@
-    # Archive compression/renaming can happen before prerotate.
+    # Recreate the archive directory if it disappears after install.
+    createolddir 0700 root root
+    # firstaction runs before any archive is renamed or compressed, so a
+    # refusal leaves both the active log and the archive set untouched. Do not
+    # add a prerotate guard: by then the archives have already been shifted,
+    # and each refusal there would drop the oldest generation.
     firstaction
-        @SPACE_CHECK@
-    endscript
-    prerotate
         @SPACE_CHECK@
     endscript
 }

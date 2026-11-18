@@ -294,9 +294,11 @@ func MarkDeleteFailed(ctx context.Context, sandboxID, snapshotID, errMsg string)
 	}
 }
 
-// Abort removes a CREATING pause binding. Prefer MarkFailed for user-visible
-// Pause failures; Abort is only for clearing stale bindings when the sandbox is
-// already RUNNING again (see clearStalePauseBindingIfRunning).
+// Abort removes a CREATING pause binding. Prefer MarkFailed for terminal
+// Pause failures where Cubelet work may have started. Abort is for cases where
+// the sandbox is still RUNNING and Pause can be retried: stale bindings after
+// resume (see clearStalePauseBindingIfRunning), and busy rejects (open exec
+// sessions) before the MicroVM is frozen.
 func Abort(ctx context.Context, sandboxID, snapshotID string) {
 	client := getDB()
 	if client == nil {

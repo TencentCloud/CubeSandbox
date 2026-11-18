@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -68,6 +69,7 @@ type s3MetadataKV interface {
 var (
 	formatS3MetadataBaseDevice = formatS3MetadataBaseDeviceImpl
 	mountS3MetadataDevice      = mountS3MetadataDeviceImpl
+	execS3MetadataMount        = utils.ExecV
 	unmountS3MetadataPath      = unmountS3MetadataPathImpl
 	s3MetadataIsMounted        = s3MetadataIsMountedImpl
 
@@ -823,8 +825,25 @@ func mountS3MetadataDeviceImpl(devicePath, mountPath string) error {
 	if devicePath == "" {
 		return errS3EmptyDevicePath("metadata", "ActivateVolume")
 	}
-	if _, stderr, err := utils.ExecV([]string{"mount", devicePath, mountPath}, cmdTimeout); err != nil {
-		return fmt.Errorf("mount s3 metadata %s at %s failed:%s", devicePath, mountPath, stderr)
+	// The type is fixed: formatS3MetadataBaseDeviceImpl makes every metadata
+	// disk ext4, and package disks are clones of that base. Naming it skips
+	// mount's own filesystem probe, which reads the device from user space
+	// while udev is still probing the same freshly attached namespace. On a
+	// storage target backed by a busy disk those reads, each widened by the
+	// device's readahead, were most of a mount that outran cmdTimeout.
+	start := time.Now()
+	_, stderr, err := execS3MetadataMount([]string{"mount", "-t", "ext4", devicePath, mountPath}, cmdTimeout)
+	if err != nil {
+		// stderr alone is empty when the command is killed at its deadline,
+		// which is exactly when the cause matters most. Keep the exec error
+		// (exit status or signal) and how long the mount ran against its
+		// budget, so a timeout and a refused mount read differently.
+		mountErr := fmt.Errorf("mount s3 metadata %s at %s failed after %s (timeout %s): %w",
+			devicePath, mountPath, time.Since(start).Round(time.Millisecond), cmdTimeout, err)
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			return fmt.Errorf("%w: %s", mountErr, msg)
+		}
+		return mountErr
 	}
 	return nil
 }

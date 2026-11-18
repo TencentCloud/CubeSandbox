@@ -148,6 +148,8 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # 从快照恢复，
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
+未关闭的 `cubecli exec` / 交互会话会阻止 Pause。Cubelet 仍返回 `TaskPauseFailed`（130588）和 “pause forbidding / terminate exec tasks first” 类错误，但沙箱保持 `running`（不会落成 `unknown(failed)`）。会话结束后 auto-pause 会重试。该 busy-reject 处理需要 Cubelet、CubeMaster 与 CubeShim 一起升级（`CheckPauseAllowed` 预检在 CubeShim）；只升一侧可能导致状态展示或快照血缘短暂不对。
+
 `pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
 
 `connect(timeout=...)` 可以更新空闲超时，无论沙箱已经在运行，还是需要先从暂停状态恢复。对于运行中的沙箱，正数 timeout 只会在请求窗口更长时延长 deadline；如果要主动缩短生命周期，请使用 `set_timeout(...)`：

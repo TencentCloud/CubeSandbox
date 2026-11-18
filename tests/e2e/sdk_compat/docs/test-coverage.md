@@ -248,6 +248,9 @@ root (unset or blank uses `sdk-e2e/`); each case appends its own UUID and siblin
 suffixes.
 Runner storage credentials, object storage SDKs and direct MinIO access are not
 required. The existing Volume capability and plugin-disable gates still apply.
+Plugin-dependent cases also probe the selected driver and skip when the driver,
+its config file, or the Volume API is absent; the raw API input checks bypass
+that probe because CubeAPI rejects them before plugin dispatch.
 
 `cases/framework/test_volume_api_adapter.py` checks legacy/v2 routing, exact
 opaque input forwarding, no fallback, raw error responses, the credential gate

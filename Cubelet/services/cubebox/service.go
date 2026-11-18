@@ -24,6 +24,8 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	jsoniter "github.com/json-iterator/go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"k8s.io/utils/clock"
@@ -36,6 +38,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -331,19 +334,42 @@ func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSan
 }
 
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
+	ctx = telemetry.ExtractGRPC(ctx)
+	ctx, span := telemetry.Start(ctx, telemetry.SpanCreate,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, req.GetRequestID()),
+			attribute.String(telemetry.AttrInstanceType, req.GetInstanceType()),
+			attribute.String(telemetry.AttrTemplateID,
+				req.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]),
+		))
 	rsp := &cubebox.RunCubeSandboxResponse{
 		RequestID: req.RequestID,
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 		ExtInfo:   map[string][]byte{},
 	}
+	// Registered first, so it runs after the defers below have filled rsp in.
+	defer func() {
+		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, rsp.GetSandboxID()))
+		telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode()))
+	}()
 
 	resumeID := resumeFromPauseSandboxID(req)
 	if resumeID != "" {
+		// Stamp resume attributes before the rollback gate or any other early failure.
+		span.SetAttributes(
+			attribute.String(telemetry.AttrAction, "resume"),
+			attribute.String(telemetry.AttrSnapshotID,
+				strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID])),
+		)
 		if s.resumeRollbackPending(resumeID) {
 			setResumeRollbackPending(rsp.Ret)
 			return rsp, nil
 		}
-		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, resumeID)
+		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
+			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, resumeID)))
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, resumeID)
+		lockSpan.End()
 		if lockErr != nil {
 			if s.resumeRollbackPending(resumeID) {
 				setResumeRollbackPending(rsp.Ret)
@@ -901,8 +927,12 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	// GC leftover / half-finished pause snaps on user Destroy. Never GC while
 	// Pause keep-tombstone / tombstone delete still owns the pause snap.
 	pauseSnapToGC := ""
+	abortedPauseSnapToGC := ""
 	if getErr == nil {
 		pauseSnapToGC = pauseSnapIDToGCOnDestroy(req, sb)
+		if sb != nil && !isPauseKeepTombstone(req) && !isPauseDeleteTombstone(req) {
+			abortedPauseSnapToGC = abortedPauseSnapshotID(sb)
+		}
 	}
 
 	// Final delete of a paused sandbox: only drop the PAUSED CubeBox store row.
@@ -943,14 +973,22 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
 		}
 	}
-	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
+	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && (pauseSnapToGC != "" || abortedPauseSnapToGC != "") {
 		backend, _ := storageBackendFromAnnotations(req.GetAnnotations())
 		if sb != nil {
 			if b := pauseCatalogBackend(sb); b != "" {
 				backend = b
 			}
 		}
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
+		if pauseSnapToGC != "" {
+			s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
+		}
+		if abortedPauseSnapToGC != "" && abortedPauseSnapToGC != pauseSnapToGC {
+			if s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, abortedPauseSnapToGC, cleanupBackendForPauseSnap(backend, abortedPauseSnapToGC)) {
+				clearAbortedPauseSnapshotStamp(sb)
+				_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, req.SandboxID)
+			}
+		}
 	}
 	return rsp, nil
 }

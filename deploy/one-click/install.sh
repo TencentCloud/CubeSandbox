@@ -49,6 +49,7 @@ ENV_FILE="${ONE_CLICK_ENV_FILE:-${SCRIPT_DIR}/.env}"
 snapshot_one_click_toggles "${ENV_FILE}"
 snapshot_one_click_database_intent "${ENV_FILE}"
 snapshot_one_click_observability_intent "${ENV_FILE}"
+snapshot_one_click_rcow_log_intent "${ENV_FILE}"
 if [[ -f "${ENV_FILE}" ]]; then
   load_env_file "${ENV_FILE}"
   # CLI flags must win over .env values: load_env_file uses `set -a; source`,
@@ -59,6 +60,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   # Preserve shell-interpreted observability values, including empty values
   # used to clear settings inherited from a previous runtime.
   capture_one_click_observability_dotenv_values
+  capture_one_click_toggle_dotenv_values
+  # Only non-default storage log values; template defaults are not intent.
+  capture_one_click_rcow_log_dotenv_values
   case "${ONE_CLICK_MODE}" in
     ""|install|upgrade|auto) ;;
     *) die "unsupported --mode: ${ONE_CLICK_MODE} (expected install|upgrade|auto)" ;;
@@ -295,6 +299,9 @@ fi
 # env.example default, which would otherwise ignore an explicit flip back.
 apply_one_click_toggles
 apply_one_click_observability_intent
+# A copied env.example (or the merge output) must not undo
+# `RCOW_LOG=... ./install.sh`; resolved before validation and persistence.
+apply_one_click_rcow_log_intent
 # Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
@@ -2064,6 +2071,13 @@ case "${S3LVOL_WRITEBACK_TOTAL_MB}" in
          S3LVOL_WRITEBACK_TOTAL_MB <= 1048576 )) ||
        die "S3LVOL_WRITEBACK_TOTAL_MB must be between RCOW_WRITEBACK_MB and 1048576" ;;
 esac
+# Restart-archive retention for rcow_start.sh. Only an unset key gets the
+# default; an explicit empty value keeps every restart archive.
+RCOW_LOG_RESTART_RETAIN="${RCOW_LOG_RESTART_RETAIN-8}"
+case "${RCOW_LOG_RESTART_RETAIN}" in
+  '') ;;
+  0*|*[!0-9]*) die "RCOW_LOG_RESTART_RETAIN must be empty or a positive integer" ;;
+esac
 # Leave RCOW_TGT_CPUMASK unset unless the operator (or a previous
 # .one-click.env) set it. rcow_common.sh derives last-two at service start
 # from the service's own affinity; freezing the installer's mask would be
@@ -2340,6 +2354,8 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "OTEL_EXPORTER_OTLP_ENDPOINT" "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}"
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;
@@ -2482,6 +2498,13 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CAPACITY_GB" "${RCOW_CAPACITY_GB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_CACHE_HOT_BUFS" "${RCOW_CACHE_HOT_BUFS}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_WRITEBACK_MB" "${RCOW_WRITEBACK_MB}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "S3LVOL_WRITEBACK_TOTAL_MB" "${S3LVOL_WRITEBACK_TOTAL_MB}"
+# The storage logrotate policy is rendered from this installer's environment,
+# while the storage service reads the runtime env. Persist the same values so
+# the two never disagree about which file is the active log.
+for rcow_log_key in RCOW_LOG_DIR RCOW_LOG RCOW_LOG_ARCHIVE_DIR \
+    RCOW_LOG_RESERVE_BYTES RCOW_LOG_RESTART_RETAIN; do
+  upsert_env_kv "${RUNTIME_ENV_FILE}" "${rcow_log_key}" "${!rcow_log_key:-}"
+done
 if [[ -n "${RCOW_TGT_CPUMASK:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_TGT_CPUMASK" "${RCOW_TGT_CPUMASK}"
 fi

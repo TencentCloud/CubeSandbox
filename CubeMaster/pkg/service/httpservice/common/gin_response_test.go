@@ -12,7 +12,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // These tests lock the response contract that the gin migration must preserve:
@@ -64,6 +69,50 @@ func TestWriteAPI_EnvelopeContract(t *testing.T) {
 	if assert.NotNil(t, res.Ret) {
 		assert.Equal(t, 0, res.Ret.RetCode)
 		assert.Equal(t, "ok", res.Ret.RetMsg)
+	}
+}
+
+func TestWriteAPI_AnnotatesBusinessOutcomeOnRouteSpan(t *testing.T) {
+	previous := otel.GetTracerProvider()
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(t.Context()) })
+
+	tests := []struct {
+		name, path string
+		response   interface{}
+		code       int
+		status     codes.Code
+	}{
+		{"sandbox failure", "/cube/sandbox", &types.Res{Ret: &types.Ret{RetCode: 130001}}, 130001, codes.Error},
+		{"template failure", "/cube/template/from-image", &types.CreateTemplateFromImageRes{Ret: &types.Ret{RetCode: 130001}}, 130001, codes.Error},
+		{"panic recovery response", "/cube/sandbox", &types.Res{Ret: &types.Ret{RetCode: -1}}, -1, codes.Error},
+		{"sandbox success", "/cube/sandbox", &types.Res{Ret: &types.Ret{RetCode: telemetry.SuccessCode}}, telemetry.SuccessCode, codes.Unset},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exporter.Reset()
+			r := newGin(t)
+			r.Use(telemetry.GinMiddleware())
+			r.POST(tc.path, func(c *gin.Context) { WriteAPI(c, tc.response) })
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			assert.Equal(t, http.StatusOK, w.Code)
+			spans := exporter.GetSpans()
+			if len(spans) != 1 {
+				t.Fatalf("got %d spans, want one route span", len(spans))
+			}
+			assert.Equal(t, tc.status, spans[0].Status.Code)
+			found := false
+			for _, attr := range spans[0].Attributes {
+				if string(attr.Key) == telemetry.AttrRetCode {
+					found = true
+					assert.Equal(t, int64(tc.code), attr.Value.AsInt64())
+				}
+			}
+			assert.True(t, found, "route span lacks cube.ret_code")
+		})
 	}
 }
 

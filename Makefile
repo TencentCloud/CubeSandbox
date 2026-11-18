@@ -166,6 +166,7 @@ help:
 	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
+	@printf "  cubetemplatecenter-docker-test Run CubeTemplateCenter Docker-backed tests on the host\n"
 	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
 	@printf "  cubelet-mount-test Run Cubelet mount tests in privileged Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
@@ -501,10 +502,18 @@ cubemaster-test: builder-image
 
 # CubeTemplateCenter shares CubeMaster's pkg/templatecenter/image, which uses
 # Linux-only syscall constants, so its tests cannot run on a macOS host and go
-# through the builder like every other Go component.
+# through the builder like every other Go component. The component Makefile's
+# -short test target keeps Docker-backed cases for the host lane below.
 .PHONY: cubetemplatecenter-test
 cubetemplatecenter-test: builder-image
-	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 go test ./... -count=1'
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeTemplateCenter && go mod download && CUBEMASTER_REQUIRE_EXT4_TESTS=1 make test'
+
+# Docker-backed CubeTemplateCenter tests run on the host so dockertest can reach
+# the daemon and its published 127.0.0.1 ports. The component target fails
+# instead of skipping when the daemon is unavailable.
+.PHONY: cubetemplatecenter-docker-test
+cubetemplatecenter-docker-test:
+	$(MAKE) -C CubeTemplateCenter test-docker
 
 # cubecow-sdk (CGO) and cubevs's generated BPF code are build prerequisites
 # for several Cubelet packages.

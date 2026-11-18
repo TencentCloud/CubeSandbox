@@ -234,6 +234,20 @@ job 表没有 owner 列：TC 重启后，任何仍然存活的 TC 副本都可�
 
 `ArtifactNodePlacement` 行记录哪些节点持有副本，同时驱动删除 Phase 2 与下载就近性。
 
+节点持续从节点视图中缺失满 15 分钟（取异步操作超时；只看是否缺失，不看健康位）时，Phase 2 跳过它，避免失联节点让 artifact 永远停在 `CLEANUP_PENDING`。该节点的行会保留并写入 `deferred_at`，其余行照常删除并通知 TC。每轮 artifact GC 会对节点已回到视图的 deferred 行，用节点当前地址重试销毁，确认成功后才删行；节点一直不回来则该行一直保留。历史回填的 `ip:` 前缀 id 不会被判为缺失。
+
+**范围与限制**：
+- 本机制覆盖 `ArtifactNodePlacement` 行的延迟清理。
+- crashed/unhealthy-but-registered 节点不在范围：只有完全从节点视图消失才计为缺失，健康位被忽略。
+- 历史回填的 `ip:` 前缀 id 来自 20260623145000 迁移中无 `node_id` 的 replica 行，不会被判为缺失。若 artifact 在已退役节点上只剩 `ip:` 行，Phase 2 会持续向旧 IP 重试，artifact 永远停在 `CLEANUP_PENDING`。此类行为封闭的历史存量，可用 `SELECT COUNT(*) FROM t_cube_artifact_node_placement WHERE node_id LIKE 'ip:%'` 确认，必要时手动清理。
+- 用户可见延迟：15 分钟宽限期 + 最多 10 分钟 GC 周期，即节点消失后最多 25 分钟 artifact 才终结。
+
+deferred 行不会被自动回收：该行是"节点上可能仍有文件"的唯一记录，按时间删除会在节点回归时让这些文件静默泄漏。确认节点已永久下线后，运维可执行 `DELETE FROM t_cube_artifact_node_placement WHERE deferred_at > 0 AND node_id = '<node-id>'` 释放其行。**建议先备份，通过受控 CLI 执行，并关注相关 metrics。**
+
+缺失起点只保存在进程内存中：Master 重启会重置计时，HA 各副本独立计时。defer 是幂等的（`deferred_at = 0` 保护），副本间判定时刻不同不会写坏数据；重启只是让收敛最多推迟一个宽限期。defer 日志会记录缺失起点和已缺失时长，便于排障。
+
+**升级顺序**：`deferred_at` 列由迁移 `20261112071208_artifact_placement_deferred_at.sql` 添加。必须先执行迁移，再滚动升级 CubeMaster / CubeTemplateCenter；否则 GC 扫描和 TC backstop 会因列不存在而报错。`CUBE_AUTO_MIGRATION=false` 时，需先手动执行迁移 SQL，再启动新版本。
+
 ### 9.7 共享 artifact 存储
 
 TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供给 cubelet——两个进程必须看到同一份 artifact 字节，或者都能通过同一套 S3 路径 / presigned URL 找到它。
@@ -243,6 +257,19 @@ TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供�
 - `s3Backed=true`：由对象存储统一承载 artifact 字节
 
 因为 artifact 存储是共享的 / 可寻址的，构建期记录的路径与对象引用对 reconciler 始终有效，即使中途发生 TC 重启也不需要把 job “绑死”在某个实例上。
+
+当对象存储才是持久副本时，TC 写出的 ext4 并不是副本，只是构建中间产物。因此 TC
+在构建收尾阶段就把它删掉，构建节点不会再“每构建一次就多留一个 artifact”：
+
+- 上传成功（`s3` 后端）：在 BUILT 上报成功后立即删除本地副本。这类 artifact 由
+  CubeMaster 从对象存储流式读取，本地文件此后不会再被任何流程读到。
+- 上传失败：构建上报 FAILED，本地副本同样删除。旧行为是照样上报 BUILT、不写
+  storage backend，此时 artifact 由 TC 的磁盘提供——只有 Master 恰好共享该副本的
+  artifact 目录时才成立，换成远端 Master 或第二个 TC 副本就取不到了。
+
+两种情况会保留本地文件：`CUBE_ARTIFACT_STORE_BACKEND=fs` 时存储根可能就是同一个
+目录，文件本身就是持久副本；以及上传成功但没能记录下载 URL 时，Master 对这类记录
+返回 502（并不会回退读 TC 的磁盘），保留字节是此时唯一的可恢复副本。
 
 ## 10. 已知限制与后续项
 

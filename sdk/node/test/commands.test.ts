@@ -207,6 +207,54 @@ describe("Commands.run", () => {
     sb.close();
   });
 
+  it("preserves UTF-8 output split across data events", async () => {
+    const sb = await createSandbox();
+    const output = Buffer.concat([Buffer.alloc(32767, "a"), Buffer.from("\u4e2d", "utf-8")]);
+    const stdout = [
+      output.subarray(0, 32768).toString("base64"),
+      output.subarray(32768).toString("base64"),
+    ];
+    const stderr = stdout.map((chunk) => chunk);
+    handler = () => ({
+      status: 200,
+      buffer: Buffer.concat([
+        connectFrame(0, JSON.stringify({ event: { data: { stdout: stdout[0] } } })),
+        connectFrame(0, JSON.stringify({ event: { data: { stderr: stderr[0] } } })),
+        connectFrame(0, JSON.stringify({ event: { data: { stdout: stdout[1] } } })),
+        connectFrame(0, JSON.stringify({ event: { data: { stderr: stderr[1] } } })),
+        connectFrame(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+        connectFrame(0x02, "{}"),
+      ]),
+    });
+
+    const result = await sb.commands.run("printf data");
+    const expected = "a".repeat(32767) + "\u4e2d";
+    expect(result.stdout).toBe(expected);
+    expect(result.stderr).toBe(expected);
+    expect(result.stdout).not.toContain("\ufffd");
+    expect(result.stderr).not.toContain("\ufffd");
+    sb.close();
+  });
+
+  it("replaces genuinely invalid UTF-8", async () => {
+    const sb = await createSandbox();
+    const stdout = Buffer.from([0x6f, 0x6b, 0xff, 0xfe]).toString("base64");
+    const stderr = Buffer.from([0xe4, 0xb8]).toString("base64");
+    handler = () => ({
+      status: 200,
+      buffer: Buffer.concat([
+        connectFrame(0, JSON.stringify({ event: { data: { stdout, stderr } } })),
+        connectFrame(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+        connectFrame(0x02, "{}"),
+      ]),
+    });
+
+    const result = await sb.commands.run("printf data");
+    expect(result.stdout).toBe("ok\uFFFD\uFFFD");
+    expect(result.stderr).toBe("\uFFFD");
+    sb.close();
+  });
+
   it("reports a non-zero exit code", async () => {
     const sb = await createSandbox();
     handler = () => ({

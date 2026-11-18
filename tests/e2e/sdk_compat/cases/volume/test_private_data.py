@@ -267,6 +267,7 @@ def _response_strings(value):
     ],
     ids=["ascii-over-1024-bytes", "utf8-over-1024-bytes", "nul", "non-bmp"],
 )
+@pytest.mark.volume_api_only
 def test_v2_volume_rejects_invalid_private_data(sdk_backend, sdk_e2e_config, private_data):
     config = sdk_e2e_config
     name = f"vol-v2-reject-{uuid.uuid4().hex}"

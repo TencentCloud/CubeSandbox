@@ -381,6 +381,49 @@ def gate_internet_tests(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(scope="session")
+def _volume_plugin_probe(sdk_e2e_config: SdkE2EConfig):
+    from framework.volume import probe_volume_plugin
+
+    try:
+        return probe_volume_plugin(sdk_e2e_config), None
+    except Exception as exc:  # noqa: BLE001 - cache any probe failure once
+        # pytest does not cache fixtures that raise. Cache the failure as data so a
+        # broken backend is probed only once per session/worker.
+        return None, exc
+
+
+@pytest.fixture(autouse=True)
+def volume_plugin_gate(
+    request: pytest.FixtureRequest,
+    sdk_e2e_config: SdkE2EConfig,
+) -> None:
+    if (
+        not request.config.getoption("--run-e2e")
+        or request.node.get_closest_marker("volume") is None
+    ):
+        return
+
+    # Check the selected SDK backend before touching the Cube control plane. This
+    # keeps unsupported backends (for example e2b) side-effect free.
+    sdk_backend = request.getfixturevalue("sdk_backend")
+    from framework.capabilities import VOLUME_PLUGIN
+
+    require_capabilities(sdk_backend, VOLUME_PLUGIN)
+
+    if not sdk_e2e_config.volume_plugin_enabled:
+        from framework.volume import VOLUME_PLUGIN_SKIP_REASON
+
+        pytest.skip(VOLUME_PLUGIN_SKIP_REASON)
+    if request.node.get_closest_marker("volume_api_only") is not None:
+        return
+    probe, probe_error = request.getfixturevalue("_volume_plugin_probe")
+    if probe_error is not None:
+        raise probe_error
+    if not probe.available:
+        pytest.skip(f"volume plugin tests skipped: {probe.reason}")
+
+
+@pytest.fixture(scope="session")
 def _optional_template_exists(sdk_e2e_config: SdkE2EConfig):
     from adapters.api_adapter import ApiClient
 
@@ -440,11 +483,6 @@ def sdk_sandbox(
             "platform lifecycle tests require SDK_E2E_PLATFORM_LIFECYCLE=true "
             "(cube-proxy + lifecycle manager coordination)"
         )
-
-    if request.node.get_closest_marker("volume") and not sdk_e2e_config.volume_plugin_enabled:
-        from framework.volume import VOLUME_PLUGIN_SKIP_REASON
-
-        pytest.skip(VOLUME_PLUGIN_SKIP_REASON)
 
     template_id = _template_id_for_node(request.node) or sdk_e2e_config.cube_template_id
     if not template_id:

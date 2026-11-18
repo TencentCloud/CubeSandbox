@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strings"
@@ -17,6 +18,12 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/hotswap"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"k8s.io/apimachinery/pkg/api/resource"
+)
+
+// Keep in sync with CubeOps maxCPUOvercommit / maxMemOvercommit (quota.go).
+const (
+	maxHostCPUOvercommitFactor = 20.0
+	maxHostMemOvercommitFactor = 3.0
 )
 
 var cfg *Config
@@ -46,6 +53,20 @@ type HostConfigQuota struct {
 	Mem                   string `yaml:"mem_limit"`
 	MvmLimit              int    `yaml:"mvm_limit"`
 	CreationConcurrentNum int    `yaml:"creation_concurrent_num"`
+
+	// CpuOvercommitFactor multiplies detected host CPU when mcpu_limit is unset
+	// (or <= 0). Zero / omitted keeps the historical default of 2.0. Explicit
+	// mcpu_limit always wins and ignores this factor. Must be finite and in
+	// [0, 20]; 0 means "use default". The derived value is also what CubeOps
+	// stores as node Capacity and CubeMaster uses for CPU watermark filters.
+	CpuOvercommitFactor float64 `yaml:"cpu_overcommit_factor"`
+	// MemOvercommitFactor multiplies detected host memory when mem_limit is
+	// unset (or empty). Zero / omitted keeps the historical default of 1.25
+	// (5/4). Explicit mem_limit always wins and ignores this factor. Must be
+	// finite and in [0, 3]; 0 means "use default". Raising this also raises
+	// the Capacity / MemMBTotal watermark CubeMaster uses for memfilter, so
+	// the physical free-memory threshold scales with the same ratio.
+	MemOvercommitFactor float64 `yaml:"mem_overcommit_factor"`
 
 	// PausedResourceReleaseRatio is the paused-resource scheduling dial.
 	// Pausing a sandbox snapshots it to disk and shuts the MicroVM down, so its
@@ -175,6 +196,15 @@ func Init(configPath string, useDefault bool) (*Config, error) {
 	return newCfg, nil
 }
 
+// validateHostOvercommitFactor accepts 0 ("use default") and rejects NaN/Inf,
+// negatives, and values above the CubeOps overcommit ceiling.
+func validateHostOvercommitFactor(name string, f, max float64) error {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f > max {
+		return fmt.Errorf("invalid host.quota.%s: must be finite and in [0, %g] (0 = use default)", name, max)
+	}
+	return nil
+}
+
 func validate(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
@@ -187,6 +217,16 @@ func validate(cfg *Config) error {
 		}
 		if cfg.HostConf.Quota.CreationConcurrentNum < 0 {
 			return fmt.Errorf("invalid host.quota.creation_concurrent_num: must be >= 0")
+		}
+		if err := validateHostOvercommitFactor(
+			"cpu_overcommit_factor", cfg.HostConf.Quota.CpuOvercommitFactor, maxHostCPUOvercommitFactor,
+		); err != nil {
+			return err
+		}
+		if err := validateHostOvercommitFactor(
+			"mem_overcommit_factor", cfg.HostConf.Quota.MemOvercommitFactor, maxHostMemOvercommitFactor,
+		); err != nil {
+			return err
 		}
 		if cfg.HostConf.GC.CodeExpirationTime != "" {
 			t, err := time.ParseDuration(cfg.HostConf.GC.CodeExpirationTime)

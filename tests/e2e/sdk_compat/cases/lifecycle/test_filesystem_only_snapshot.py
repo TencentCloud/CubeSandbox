@@ -748,6 +748,7 @@ def test_sdk_create_snapshot_sends_the_mode(sdk_sandbox, sdk_e2e_config):
     assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"
 
 
+@pytest.mark.volume
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
 @pytest.mark.requires_capability(HOST_MOUNT)
 def test_fs_only_snapshot_drops_external_mounts(sdk_backend, sdk_sandbox, sdk_e2e_config):
