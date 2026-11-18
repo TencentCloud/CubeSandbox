@@ -82,6 +82,10 @@ const (
 	// Master (same snap-* format as normal snapshots). DB Kind=pause_snapshot;
 	// Cubelet only keeps the local catalog under that id.
 	CubeAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// CubeAnnotationPauseAbortedSnapshotID is a Cubelet-local GC handle for a
+	// busy-reject pause attempt whose CoW cleanup failed. User Create must not
+	// set it (see checkAndGetAnnotation).
+	CubeAnnotationPauseAbortedSnapshotID = "cube.master.pause.aborted.snapshot.id"
 	// CubeAnnotationLaunchMemorySnapshotID is the start-image id Cubelet
 	// stamps once. User Create must not set it (see checkAndGetAnnotation).
 	CubeAnnotationLaunchMemorySnapshotID = "cube.master.launch.memory.snapshot.id"

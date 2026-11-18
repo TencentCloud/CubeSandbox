@@ -36,6 +36,11 @@ const (
 	shimUpdateRollbackAction            = "RollbackSnapshot"
 	shimUpdatePauseSnapshotAnnotation   = "cube.shimapi.update.pause.snapshot_config"
 	shimUpdatePauseToSnapshotAction     = "PauseToSnapshot"
+	// shimUpdateCheckPauseAllowedAction is a cheap Pause preflight: the shim
+	// only runs pause_vm_forbidding (open exec check) and returns the same
+	// busy wording as PauseToSnapshot, without freezing the VM or writing a
+	// snapshot. Cubelet calls this before cloning the memory volume.
+	shimUpdateCheckPauseAllowedAction = "CheckPauseAllowed"
 )
 
 // Indirection so tests can observe which package objects rollback detaches.

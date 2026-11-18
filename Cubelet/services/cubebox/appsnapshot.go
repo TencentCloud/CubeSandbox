@@ -918,18 +918,22 @@ func alignUp(value, alignment uint64) uint64 {
 	return value + alignment - value%alignment
 }
 
-func cleanupCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) {
-	cleanupCowSnapshotObjectsOn(ctx, stepLog, "", memoryObject, rootfsObject)
+func cleanupCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) bool {
+	return cleanupCowSnapshotObjectsOn(ctx, stepLog, "", memoryObject, rootfsObject)
 }
 
-func cleanupCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) {
-	cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "memory volume", memoryObject)
-	cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject)
+func cleanupCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) bool {
+	memOK := cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "memory volume", memoryObject)
+	rootOK := cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject)
+	return memOK && rootOK
 }
 
-func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend, objectLabel string, object *storage.CowSnapshotObject) {
+// cleanupCowSnapshotObjectOn deletes one CoW object. Returns false when the
+// delete was attempted and failed (callers that need a GC handle should keep
+// naming the object). Nil / empty objects count as success (nothing to do).
+func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend, objectLabel string, object *storage.CowSnapshotObject) bool {
 	if object == nil || object.Name == "" {
-		return
+		return true
 	}
 	var cleanupErr error
 	if strings.TrimSpace(backend) == "" {
@@ -939,7 +943,9 @@ func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLog
 	}
 	if cleanupErr != nil {
 		stepLog.Warnf("failed to cleanup %s %s: %v", objectLabel, object.Name, cleanupErr)
+		return false
 	}
+	return true
 }
 
 func deactivateCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) error {

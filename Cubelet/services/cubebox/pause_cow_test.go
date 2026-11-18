@@ -5,7 +5,9 @@
 package cubebox
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
 func TestResolvePauseSnapshotID(t *testing.T) {
@@ -73,6 +76,180 @@ func TestStampPauseSnapshotID(t *testing.T) {
 	if got := stampedPauseSnapshotID(sb); got != "snap-abc123def456abc123def456" {
 		t.Fatalf("stampedPauseSnapshotID=%q", got)
 	}
+}
+
+func TestIsPauseBusyReject(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		msg  string
+		want bool
+	}{
+		{pauseBusyRejectMessage, true},
+		{`Others("Other: update sandbox failed:sandbox pause forbidding, terminate exec tasks first")`, true},
+		{"PAUSE FORBIDDING", true},
+		{"terminate exec tasks first", true},
+		{"task pause failed: oom", false},
+		{"", false},
+	} {
+		if got := isPauseBusyReject(tc.msg); got != tc.want {
+			t.Fatalf("isPauseBusyReject(%q)=%v want %v", tc.msg, got, tc.want)
+		}
+	}
+}
+
+func TestApplyPauseBusyRejectLocalState(t *testing.T) {
+	t.Parallel()
+	prev := "snap-prev000000000000000000000001"
+	aborted := "snap-abort00000000000000000000001"
+	sb := newCubeboxWithStatusForTest("sb-busy-apply", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+		PausingAt: time.Now().UnixNano(),
+		Unknown:   true,
+		Reason:    pauseFailedReason,
+		Message:   "pause failed",
+	})
+	stampPauseSnapshotID(sb, aborted)
+
+	applyPauseBusyRejectLocalState(sb, prev, aborted, true)
+	st := sb.GetStatus().Get()
+	require.Equal(t, int64(0), st.PausingAt)
+	require.False(t, st.Unknown)
+	require.Empty(t, st.Reason)
+	require.Equal(t, prev, stampedPauseSnapshotID(sb))
+	require.Empty(t, abortedPauseSnapshotID(sb))
+
+	stampPauseSnapshotID(sb, aborted)
+	_ = sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+		status.PausingAt = time.Now().UnixNano()
+		status.Unknown = true
+		status.Reason = pauseFailedReason
+		return status, nil
+	})
+	applyPauseBusyRejectLocalState(sb, prev, aborted, false)
+	require.Equal(t, prev, stampedPauseSnapshotID(sb))
+	require.Equal(t, aborted, abortedPauseSnapshotID(sb))
+	require.False(t, sb.GetStatus().Get().Unknown)
+}
+
+func TestUpdateWithPauseCowBusyPreflight(t *testing.T) {
+	prev := "snap-prev000000000000000000000001"
+	attempt := "snap-busy00000000000000000000001"
+	sb := newCubeboxWithStatusForTest("sb-busy-preflight", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	})
+	stampPauseSnapshotID(sb, prev)
+	first := sb.FirstContainer()
+	first.Config = &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{{
+			Name:          "root",
+			ContainerPath: "/",
+		}},
+	}
+
+	preflightPauseNotBusyForTest = func(context.Context, *cubeboxstore.CubeBox) error {
+		return errors.New(pauseBusyRejectMessage)
+	}
+	t.Cleanup(func() { preflightPauseNotBusyForTest = nil })
+
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+	rsp, err := s.updateWithPauseCow(context.Background(), &cubebox.UpdateCubeSandboxRequest{
+		RequestID: "req-busy",
+		SandboxID: sb.ID,
+		Annotations: map[string]string{
+			constants.MasterAnnotationPauseSnapshotID: attempt,
+			constants.MasterAnnotationStorageBackend:  "xfs",
+		},
+	}, sb)
+	require.NoError(t, err)
+	require.Equal(t, errorcode.ErrorCode_TaskPauseFailed, rsp.Ret.RetCode)
+	require.Contains(t, rsp.Ret.RetMsg, "pause forbidding")
+	require.Equal(t, prev, stampedPauseSnapshotID(sb))
+	st := sb.GetStatus().Get()
+	require.False(t, st.Unknown)
+	require.NotEqual(t, pauseFailedReason, st.Reason)
+}
+
+func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
+	// Older shims reject CheckPauseAllowed; Pause must still proceed past the
+	// cheap preflight instead of failing closed until CubeShim rolls out.
+	prev := "snap-prev000000000000000000000001"
+	attempt := "snap-oldshim00000000000000000001"
+	sb := newCubeboxWithStatusForTest("sb-old-shim-preflight", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	})
+	stampPauseSnapshotID(sb, prev)
+	first := sb.FirstContainer()
+	first.Config = &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{{
+			Name:          "root",
+			ContainerPath: "/",
+		}},
+	}
+
+	preflightPauseNotBusyForTest = func(context.Context, *cubeboxstore.CubeBox) error {
+		return errors.New("unknown update ext action: CheckPauseAllowed")
+	}
+	t.Cleanup(func() { preflightPauseNotBusyForTest = nil })
+
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+	rsp, err := s.updateWithPauseCow(context.Background(), &cubebox.UpdateCubeSandboxRequest{
+		RequestID: "req-old-shim",
+		SandboxID: sb.ID,
+		Annotations: map[string]string{
+			constants.MasterAnnotationPauseSnapshotID: attempt,
+			constants.MasterAnnotationStorageBackend:  "xfs",
+		},
+	}, sb)
+	require.NoError(t, err)
+	// Fall-through continues into getCubeboxSnapshotSpec, which fails without a
+	// real runtime — that proves we did not early-return the preflight error.
+	require.NotEqual(t, errorcode.ErrorCode_TaskPauseFailed, rsp.Ret.RetCode)
+	require.NotContains(t, rsp.Ret.RetMsg, "CheckPauseAllowed")
+	require.Equal(t, attempt, stampedPauseSnapshotID(sb), "fall-through keeps the in-flight stamp")
+}
+
+func TestClearLocalPauseAttemptRestoresRunning(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() { clearLocalPauseAttempt(nil) })
+
+	sb := newCubeboxWithStatusForTest("sb-busy", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+		PausingAt: time.Now().UnixNano(),
+		PausedAt:  time.Now().UnixNano(),
+		Unknown:   true,
+		Reason:    "PauseFailed",
+		Message:   "pause failed",
+	})
+	clearLocalPauseAttempt(sb)
+	st := sb.GetStatus().Get()
+	require.Equal(t, int64(0), st.PausingAt)
+	require.Equal(t, int64(0), st.PausedAt)
+	require.False(t, st.Unknown)
+	require.Empty(t, st.Reason)
+	require.Empty(t, st.Message)
+}
+
+func TestRestorePauseSnapshotStamp(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() { restorePauseSnapshotStamp(nil, "snap-x") })
+
+	prev := "snap-prev000000000000000000000001"
+	aborted := "snap-abort00000000000000000000001"
+	sb := newCubeboxWithStatusForTest("sb-stamp-restore", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	})
+	stampPauseSnapshotID(sb, prev)
+	stampPauseSnapshotID(sb, aborted)
+	require.Equal(t, aborted, stampedPauseSnapshotID(sb))
+
+	restorePauseSnapshotStamp(sb, prev)
+	require.Equal(t, prev, stampedPauseSnapshotID(sb))
+
+	stampPauseSnapshotID(sb, aborted)
+	restorePauseSnapshotStamp(sb, "")
+	require.Empty(t, stampedPauseSnapshotID(sb))
+	require.NotContains(t, sb.Labels, constants.MasterAnnotationPauseSnapshotID)
+	require.NotContains(t, sb.Annotations, constants.MasterAnnotationPauseSnapshotID)
 }
 
 func TestMarkPauseDestroyPending(t *testing.T) {
@@ -292,11 +469,15 @@ func TestStripUserCubeMasterLabels(t *testing.T) {
 	t.Parallel()
 	got := stripUserCubeMasterLabels(map[string]string{
 		constants.MasterAnnotationPauseSnapshotID:          "snap-forged",
+		constants.MasterAnnotationPauseAbortedSnapshotID:   "snap-aborted",
 		constants.MasterAnnotationRuntimeRestoreSnapshotID: "snap-restore",
 		"app": "ok",
 	})
 	if _, ok := got[constants.MasterAnnotationPauseSnapshotID]; ok {
 		t.Fatal("forged pause id must be stripped from Create Labels")
+	}
+	if _, ok := got[constants.MasterAnnotationPauseAbortedSnapshotID]; ok {
+		t.Fatal("forged aborted pause id must be stripped from Create Labels")
 	}
 	if _, ok := got[constants.MasterAnnotationRuntimeRestoreSnapshotID]; ok {
 		t.Fatal("forged restore-base must be stripped from Create Labels")
