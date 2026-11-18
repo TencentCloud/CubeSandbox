@@ -185,6 +185,13 @@ class ApiClient:
         )
         return resp.status_code, _json_body(resp)
 
+    def list_volumes_raw(self) -> requests.Response:
+        """Return the raw list response for Volume API capability probes."""
+        return self._session.get(
+            f"{self._config.cube_api_url}/volumes",
+            timeout=self._config.api_timeout,
+        )
+
     def create_volume_raw(
         self,
         name: str = "",
@@ -226,10 +233,7 @@ class ApiClient:
         return body
 
     def list_volumes(self) -> list[dict]:
-        resp = self._session.get(
-            f"{self._config.cube_api_url}/volumes",
-            timeout=self._config.api_timeout,
-        )
+        resp = self.list_volumes_raw()
         resp.raise_for_status()
         payload = resp.json()
         return payload if isinstance(payload, list) else []

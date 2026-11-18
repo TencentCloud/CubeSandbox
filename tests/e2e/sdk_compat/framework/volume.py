@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -82,9 +83,25 @@ def probe_volume_plugin(config: SdkE2EConfig) -> VolumePluginProbe:
                     f"volume plugin probe {name!r} returned an invalid volume ID"
                 ) from exc
         elif response.status_code == 404:
-            return VolumePluginProbe(
-                False,
-                "CubeAPI does not expose the Volume API (HTTP 404)",
+            # A create can also return a business-level 404 (for example a
+            # missing backend resource). Only skip when the list route confirms
+            # that this CubeAPI version does not expose the Volume API at all.
+            try:
+                route_response = api.list_volumes_raw()
+            except requests.RequestException as exc:
+                raise RuntimeError(
+                    "volume plugin probe could not distinguish a missing Volume API "
+                    "from a create backend failure"
+                ) from exc
+            if route_response.status_code == 404:
+                return VolumePluginProbe(
+                    False,
+                    "CubeAPI does not expose the Volume API (HTTP 404)",
+                )
+            raise RuntimeError(
+                "volume plugin probe create returned HTTP 404 while the Volume API "
+                f"route returned HTTP {route_response.status_code}: {response.text}. "
+                f"{volume_plugin_misconfigured_hint()}"
             )
         else:
             try:
@@ -122,9 +139,20 @@ def probe_volume_plugin(config: SdkE2EConfig) -> VolumePluginProbe:
         volume_id = None
         return VolumePluginProbe(True)
     finally:
-        if volume_id is not None and not cleanup_attempted:
-            safe_delete_volume(api, volume_id)
-        api.close()
+        try:
+            if volume_id is not None and not cleanup_attempted:
+                cleaned, cleanup_errors = _delete_volume_with_retries(api, volume_id)
+                if not cleaned:
+                    active_error = sys.exc_info()[1]
+                    cleanup_error = RuntimeError(
+                        "volume plugin probe cleanup failed after an invalid create response: "
+                        + "; ".join(cleanup_errors)
+                    )
+                    if active_error is not None:
+                        raise cleanup_error from active_error
+                    raise cleanup_error
+        finally:
+            api.close()
 
 
 def volume_id_from_payload(payload: dict) -> str:

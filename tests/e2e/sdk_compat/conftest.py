@@ -418,7 +418,9 @@ def volume_plugin_gate(
         return
     probe, probe_error = request.getfixturevalue("_volume_plugin_probe")
     if probe_error is not None:
-        raise probe_error
+        # Raise a fresh wrapper instead of repeatedly attaching tracebacks to
+        # the same cached exception object for every volume test.
+        raise RuntimeError(f"volume plugin probe failed: {probe_error}") from probe_error
     if not probe.available:
         pytest.skip(f"volume plugin tests skipped: {probe.reason}")
 
