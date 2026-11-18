@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	goruntime "runtime"
@@ -521,11 +522,12 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node, hostCfg *con
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
-	req.HostFacts = collectHostFactsReport()
+	req.HostFacts = collectHostFactsReport(hostCfg)
 	return req
 }
 
 func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.UpdateNodeStatusRequest {
+	hostCfg := hostConfig()
 	req := &masterclient.UpdateNodeStatusRequest{
 		Conditions:     append([]corev1.NodeCondition(nil), node.Status.Conditions...),
 		Images:         append([]cubeletnodemeta.ContainerImage(nil), node.Status.CubeImages...),
@@ -533,11 +535,11 @@ func (kl *Cubelet) buildStatusRequest(node *cubeletnodemeta.Node) *masterclient.
 		HeartbeatTime:  kl.clock.Now(),
 	}
 	attachResourceReport(req, kl.clock.Now())
-	req.Quota = buildQuotaReport(hostConfig())
+	req.Quota = buildQuotaReport(hostCfg)
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
 	req.InventoryIncomplete = incomplete
-	req.HostFacts = collectHostFactsReport()
+	req.HostFacts = collectHostFactsReport(hostCfg)
 	return req
 }
 
@@ -572,7 +574,10 @@ func buildQuotaReport(hostCfg *config.HostConf) *masterclient.QuotaReport {
 // collectHostFactsReport maps the cached host facts into the master transport
 // type. Returns nil when nothing meaningful was collected so the master treats
 // this heartbeat as carrying no host-facts update.
-func collectHostFactsReport() *masterclient.HostFacts {
+// hostCfg must be the same config used to resolve QuotaCPU/QuotaMemMB so the
+// reported factors cannot disagree with the derived quota (which would look
+// like permanent drift in CubeOps).
+func collectHostFactsReport(hostCfg *config.HostConf) *masterclient.HostFacts {
 	f := versioninfo.CollectHostFacts()
 	out := &masterclient.HostFacts{
 		CPUVendor:             f.CPUVendor,
@@ -591,6 +596,8 @@ func collectHostFactsReport() *masterclient.HostFacts {
 	if memMB, err := readHostMemoryTotalMB(); err == nil {
 		out.MemTotalMB = memMB
 	}
+	out.CpuOvercommitFactor = effectiveCPUOvercommitFactor(hostCfg)
+	out.MemOvercommitFactor = effectiveMemOvercommitFactor(hostCfg)
 	if out.CPUVendor == "" && out.CPUModel == "" && out.CPUIDHash == "" &&
 		out.HostKernelRelease == "" && out.HostKernelFingerprint == "" && out.KVMAPIVersion == 0 &&
 		out.KVMModuleFingerprint == "" && out.KVMModuleTaint == "" &&
@@ -696,7 +703,7 @@ func resolveHostQuotaCPUMilli(hostCfg *config.HostConf, fallbacks ...int64) int6
 	if cpuCount <= 0 {
 		return 0
 	}
-	return int64(cpuCount) * 1000 * defaultHostQuotaCPUOvercommitFactor
+	return int64(math.Round(float64(cpuCount) * 1000 * effectiveCPUOvercommitFactor(hostCfg)))
 }
 
 func resolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
@@ -718,7 +725,32 @@ func resolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
 	if memMB <= 0 {
 		return 0
 	}
-	return roundUpFraction(memMB, defaultHostQuotaMemNumerator, defaultHostQuotaMemDenominator)
+	return scaleCeilMB(memMB, effectiveMemOvercommitFactor(hostCfg))
+}
+
+// scaleCeilMB computes ceil(memMB * factor) without float overshoot that can
+// bump the result by 1MiB for decimal factors (e.g. 102400 * 1.1).
+func scaleCeilMB(memMB int64, factor float64) int64 {
+	const eps = 1e-9
+	return int64(math.Ceil(float64(memMB)*factor - eps))
+}
+
+// effectiveCPUOvercommitFactor returns the CPU multiplier used when deriving
+// quota from host CPU count. Unset / non-positive keeps the historical 2.0x.
+func effectiveCPUOvercommitFactor(hostCfg *config.HostConf) float64 {
+	if hostCfg != nil && hostCfg.Quota.CpuOvercommitFactor > 0 {
+		return hostCfg.Quota.CpuOvercommitFactor
+	}
+	return float64(defaultHostQuotaCPUOvercommitFactor)
+}
+
+// effectiveMemOvercommitFactor returns the memory multiplier used when deriving
+// quota from host MemTotal. Unset / non-positive keeps the historical 1.25x (5/4).
+func effectiveMemOvercommitFactor(hostCfg *config.HostConf) float64 {
+	if hostCfg != nil && hostCfg.Quota.MemOvercommitFactor > 0 {
+		return hostCfg.Quota.MemOvercommitFactor
+	}
+	return float64(defaultHostQuotaMemNumerator) / float64(defaultHostQuotaMemDenominator)
 }
 
 func resolveHostMaxMvmNum(hostCfg *config.HostConf, quotaMemMB int64) int64 {
