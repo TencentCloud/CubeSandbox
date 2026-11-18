@@ -8,21 +8,22 @@ use crate::services::AppServices;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Shared application state passed to every handler via Axum's `State` extractor.
 /// All fields must be cheap to clone (Arc / DashMap / etc.) — Axum clones State
 /// on every request, so real data must live behind Arc.
 #[derive(Clone)]
 pub struct AppState {
-    /// Per-API-key rate limiter (token bucket) shared by all request classes.
+    /// Per-credential rate limiter (token bucket) shared by all request classes.
     /// Used as fallback for classes without a dedicated limiter.
     pub rate_limiter: Arc<DefaultKeyedRateLimiter<String>>,
 
-    /// Optional per-API-key rate limiter for read requests (GET/HEAD).
+    /// Optional per-credential rate limiter for read requests (GET/HEAD).
     /// When `None`, read requests fall back to `rate_limiter`.
     pub read_rate_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
 
-    /// Optional per-API-key rate limiter for write requests
+    /// Optional per-credential rate limiter for write requests
     /// (POST/PUT/PATCH/DELETE). When `None`, write requests fall back to
     /// `rate_limiter`.
     pub write_rate_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
@@ -49,6 +50,11 @@ impl AppState {
         let rate_limiter = keyed_rate_limiter(config.rate_limit_per_sec);
         let read_rate_limiter = config.rate_limit_read_per_sec.map(keyed_rate_limiter);
         let write_rate_limiter = config.rate_limit_write_per_sec.map(keyed_rate_limiter);
+        spawn_rate_limiter_housekeeping(
+            rate_limiter.clone(),
+            read_rate_limiter.clone(),
+            write_rate_limiter.clone(),
+        );
 
         let http_client = reqwest::Client::builder()
             .pool_max_idle_per_host(100)
@@ -76,4 +82,28 @@ impl AppState {
 fn keyed_rate_limiter(per_sec: u32) -> Arc<DefaultKeyedRateLimiter<String>> {
     let quota = Quota::per_second(NonZeroU32::new(per_sec.max(1)).unwrap());
     Arc::new(RateLimiter::keyed(quota))
+}
+
+/// Periodically evict credential buckets whose token state is fresh again.
+/// Without this, rotated callback credentials remain in governor's keyed maps
+/// for the lifetime of the process.
+fn spawn_rate_limiter_housekeeping(
+    shared: Arc<DefaultKeyedRateLimiter<String>>,
+    read: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+    write: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            shared.retain_recent();
+            if let Some(limiter) = read.as_ref() {
+                limiter.retain_recent();
+            }
+            if let Some(limiter) = write.as_ref() {
+                limiter.retain_recent();
+            }
+        }
+    });
 }

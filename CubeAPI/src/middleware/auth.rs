@@ -11,7 +11,7 @@ use axum::{
 
 /// Auth credential extracted from the request headers.
 #[derive(Debug)]
-enum AuthCredential {
+pub(crate) enum AuthCredential {
     /// `Authorization: Bearer <token>`
     Bearer(String),
     /// `X-API-Key: <key>`
@@ -19,7 +19,7 @@ enum AuthCredential {
 }
 
 /// Extract the auth credential from request headers (Bearer takes priority over X-API-Key).
-fn extract_credential(request: &Request) -> Option<AuthCredential> {
+pub(crate) fn extract_credential(request: &Request) -> Option<AuthCredential> {
     let headers = request.headers();
 
     // Prefer Authorization: Bearer
