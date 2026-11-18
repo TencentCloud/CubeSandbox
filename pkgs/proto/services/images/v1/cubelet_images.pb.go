@@ -6,7 +6,13 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v5.28.3
-// source: services/images/v1/images.proto
+// source: services/images/v1/cubelet_images.proto
+
+// File is named cubelet_images.proto (not images.proto) so the registered
+// proto file path stays unique: github.com/containerd/containerd/api also
+// registers a different proto at services/images/v1/images.proto, and
+// protobuf-go panics on duplicate global file registration when both are
+// linked into one binary.
 
 package images
 
@@ -59,11 +65,11 @@ func (x ImageStorageMediaType) String() string {
 }
 
 func (ImageStorageMediaType) Descriptor() protoreflect.EnumDescriptor {
-	return file_services_images_v1_images_proto_enumTypes[0].Descriptor()
+	return file_services_images_v1_cubelet_images_proto_enumTypes[0].Descriptor()
 }
 
 func (ImageStorageMediaType) Type() protoreflect.EnumType {
-	return &file_services_images_v1_images_proto_enumTypes[0]
+	return &file_services_images_v1_cubelet_images_proto_enumTypes[0]
 }
 
 func (x ImageStorageMediaType) Number() protoreflect.EnumNumber {
@@ -72,7 +78,7 @@ func (x ImageStorageMediaType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ImageStorageMediaType.Descriptor instead.
 func (ImageStorageMediaType) EnumDescriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{0}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{0}
 }
 
 // Policy for pulling OCI objects. Possible values are:
@@ -117,11 +123,11 @@ func (x PullPolicy) String() string {
 }
 
 func (PullPolicy) Descriptor() protoreflect.EnumDescriptor {
-	return file_services_images_v1_images_proto_enumTypes[1].Descriptor()
+	return file_services_images_v1_cubelet_images_proto_enumTypes[1].Descriptor()
 }
 
 func (PullPolicy) Type() protoreflect.EnumType {
-	return &file_services_images_v1_images_proto_enumTypes[1]
+	return &file_services_images_v1_cubelet_images_proto_enumTypes[1]
 }
 
 func (x PullPolicy) Number() protoreflect.EnumNumber {
@@ -130,7 +136,7 @@ func (x PullPolicy) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PullPolicy.Descriptor instead.
 func (PullPolicy) EnumDescriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{1}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{1}
 }
 
 type CreateImageRequest struct {
@@ -144,7 +150,7 @@ type CreateImageRequest struct {
 
 func (x *CreateImageRequest) Reset() {
 	*x = CreateImageRequest{}
-	mi := &file_services_images_v1_images_proto_msgTypes[0]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -156,7 +162,7 @@ func (x *CreateImageRequest) String() string {
 func (*CreateImageRequest) ProtoMessage() {}
 
 func (x *CreateImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[0]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -169,7 +175,7 @@ func (x *CreateImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateImageRequest.ProtoReflect.Descriptor instead.
 func (*CreateImageRequest) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{0}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *CreateImageRequest) GetRequestID() string {
@@ -206,7 +212,7 @@ type ImageSpec struct {
 
 func (x *ImageSpec) Reset() {
 	*x = ImageSpec{}
-	mi := &file_services_images_v1_images_proto_msgTypes[1]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -218,7 +224,7 @@ func (x *ImageSpec) String() string {
 func (*ImageSpec) ProtoMessage() {}
 
 func (x *ImageSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[1]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -231,7 +237,7 @@ func (x *ImageSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImageSpec.ProtoReflect.Descriptor instead.
 func (*ImageSpec) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{1}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ImageSpec) GetImage() string {
@@ -282,7 +288,7 @@ type CreateImageRequestResponse struct {
 
 func (x *CreateImageRequestResponse) Reset() {
 	*x = CreateImageRequestResponse{}
-	mi := &file_services_images_v1_images_proto_msgTypes[2]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -294,7 +300,7 @@ func (x *CreateImageRequestResponse) String() string {
 func (*CreateImageRequestResponse) ProtoMessage() {}
 
 func (x *CreateImageRequestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[2]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -307,7 +313,7 @@ func (x *CreateImageRequestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateImageRequestResponse.ProtoReflect.Descriptor instead.
 func (*CreateImageRequestResponse) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{2}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CreateImageRequestResponse) GetRequestID() string {
@@ -336,7 +342,7 @@ type DestroyImageRequest struct {
 
 func (x *DestroyImageRequest) Reset() {
 	*x = DestroyImageRequest{}
-	mi := &file_services_images_v1_images_proto_msgTypes[3]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -348,7 +354,7 @@ func (x *DestroyImageRequest) String() string {
 func (*DestroyImageRequest) ProtoMessage() {}
 
 func (x *DestroyImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[3]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -361,7 +367,7 @@ func (x *DestroyImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyImageRequest.ProtoReflect.Descriptor instead.
 func (*DestroyImageRequest) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{3}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *DestroyImageRequest) GetRequestID() string {
@@ -391,7 +397,7 @@ type DestroyImageResponse struct {
 
 func (x *DestroyImageResponse) Reset() {
 	*x = DestroyImageResponse{}
-	mi := &file_services_images_v1_images_proto_msgTypes[4]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -403,7 +409,7 @@ func (x *DestroyImageResponse) String() string {
 func (*DestroyImageResponse) ProtoMessage() {}
 
 func (x *DestroyImageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[4]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -416,7 +422,7 @@ func (x *DestroyImageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyImageResponse.ProtoReflect.Descriptor instead.
 func (*DestroyImageResponse) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{4}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DestroyImageResponse) GetRequestID() string {
@@ -448,7 +454,7 @@ type VolumUtilsRequest struct {
 
 func (x *VolumUtilsRequest) Reset() {
 	*x = VolumUtilsRequest{}
-	mi := &file_services_images_v1_images_proto_msgTypes[5]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -460,7 +466,7 @@ func (x *VolumUtilsRequest) String() string {
 func (*VolumUtilsRequest) ProtoMessage() {}
 
 func (x *VolumUtilsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[5]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -473,7 +479,7 @@ func (x *VolumUtilsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumUtilsRequest.ProtoReflect.Descriptor instead.
 func (*VolumUtilsRequest) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{5}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *VolumUtilsRequest) GetRequestID() string {
@@ -512,7 +518,7 @@ type VolumUtilsResponse struct {
 
 func (x *VolumUtilsResponse) Reset() {
 	*x = VolumUtilsResponse{}
-	mi := &file_services_images_v1_images_proto_msgTypes[6]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -524,7 +530,7 @@ func (x *VolumUtilsResponse) String() string {
 func (*VolumUtilsResponse) ProtoMessage() {}
 
 func (x *VolumUtilsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[6]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -537,7 +543,7 @@ func (x *VolumUtilsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumUtilsResponse.ProtoReflect.Descriptor instead.
 func (*VolumUtilsResponse) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{6}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *VolumUtilsResponse) GetRequestID() string {
@@ -573,7 +579,7 @@ type CubeListImageRequest struct {
 
 func (x *CubeListImageRequest) Reset() {
 	*x = CubeListImageRequest{}
-	mi := &file_services_images_v1_images_proto_msgTypes[7]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -585,7 +591,7 @@ func (x *CubeListImageRequest) String() string {
 func (*CubeListImageRequest) ProtoMessage() {}
 
 func (x *CubeListImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[7]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -598,7 +604,7 @@ func (x *CubeListImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CubeListImageRequest.ProtoReflect.Descriptor instead.
 func (*CubeListImageRequest) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{7}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CubeListImageRequest) GetRequestID() string {
@@ -629,7 +635,7 @@ type CubeListImageResponse struct {
 
 func (x *CubeListImageResponse) Reset() {
 	*x = CubeListImageResponse{}
-	mi := &file_services_images_v1_images_proto_msgTypes[8]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +647,7 @@ func (x *CubeListImageResponse) String() string {
 func (*CubeListImageResponse) ProtoMessage() {}
 
 func (x *CubeListImageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[8]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +660,7 @@ func (x *CubeListImageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CubeListImageResponse.ProtoReflect.Descriptor instead.
 func (*CubeListImageResponse) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{8}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CubeListImageResponse) GetRequestID() string {
@@ -690,7 +696,7 @@ type ImageVolumeSource struct {
 
 func (x *ImageVolumeSource) Reset() {
 	*x = ImageVolumeSource{}
-	mi := &file_services_images_v1_images_proto_msgTypes[9]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -702,7 +708,7 @@ func (x *ImageVolumeSource) String() string {
 func (*ImageVolumeSource) ProtoMessage() {}
 
 func (x *ImageVolumeSource) ProtoReflect() protoreflect.Message {
-	mi := &file_services_images_v1_images_proto_msgTypes[9]
+	mi := &file_services_images_v1_cubelet_images_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -715,7 +721,7 @@ func (x *ImageVolumeSource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImageVolumeSource.ProtoReflect.Descriptor instead.
 func (*ImageVolumeSource) Descriptor() ([]byte, []int) {
-	return file_services_images_v1_images_proto_rawDescGZIP(), []int{9}
+	return file_services_images_v1_cubelet_images_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ImageVolumeSource) GetReference() *ImageSpec {
@@ -732,11 +738,11 @@ func (x *ImageVolumeSource) GetPullPolicy() PullPolicy {
 	return PullPolicy_Always
 }
 
-var File_services_images_v1_images_proto protoreflect.FileDescriptor
+var File_services_images_v1_cubelet_images_proto protoreflect.FileDescriptor
 
-const file_services_images_v1_images_proto_rawDesc = "" +
+const file_services_images_v1_cubelet_images_proto_rawDesc = "" +
 	"\n" +
-	"\x1fservices/images/v1/images.proto\x12\x1acubelet.services.images.v1\x1a%services/errorcode/v1/errorcode.proto\x1a\x15types/v1/images.proto\"m\n" +
+	"'services/images/v1/cubelet_images.proto\x12\x1acubelet.services.images.v1\x1a%services/errorcode/v1/errorcode.proto\x1a\x15types/v1/images.proto\"m\n" +
 	"\x12CreateImageRequest\x12\x1c\n" +
 	"\trequestID\x18\x01 \x01(\tR\trequestID\x129\n" +
 	"\x04spec\x18\x02 \x01(\v2%.cubelet.services.images.v1.ImageSpecR\x04spec\"\xa7\x02\n" +
@@ -796,20 +802,20 @@ const file_services_images_v1_images_proto_rawDesc = "" +
 	"\vVolumeUtils\x12-.cubelet.services.images.v1.VolumUtilsRequest\x1a..cubelet.services.images.v1.VolumUtilsResponseBJZHgithub.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1;imagesb\x06proto3"
 
 var (
-	file_services_images_v1_images_proto_rawDescOnce sync.Once
-	file_services_images_v1_images_proto_rawDescData []byte
+	file_services_images_v1_cubelet_images_proto_rawDescOnce sync.Once
+	file_services_images_v1_cubelet_images_proto_rawDescData []byte
 )
 
-func file_services_images_v1_images_proto_rawDescGZIP() []byte {
-	file_services_images_v1_images_proto_rawDescOnce.Do(func() {
-		file_services_images_v1_images_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_services_images_v1_images_proto_rawDesc), len(file_services_images_v1_images_proto_rawDesc)))
+func file_services_images_v1_cubelet_images_proto_rawDescGZIP() []byte {
+	file_services_images_v1_cubelet_images_proto_rawDescOnce.Do(func() {
+		file_services_images_v1_cubelet_images_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_services_images_v1_cubelet_images_proto_rawDesc), len(file_services_images_v1_cubelet_images_proto_rawDesc)))
 	})
-	return file_services_images_v1_images_proto_rawDescData
+	return file_services_images_v1_cubelet_images_proto_rawDescData
 }
 
-var file_services_images_v1_images_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_services_images_v1_images_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
-var file_services_images_v1_images_proto_goTypes = []any{
+var file_services_images_v1_cubelet_images_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_services_images_v1_cubelet_images_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_services_images_v1_cubelet_images_proto_goTypes = []any{
 	(ImageStorageMediaType)(0),         // 0: cubelet.services.images.v1.ImageStorageMediaType
 	(PullPolicy)(0),                    // 1: cubelet.services.images.v1.PullPolicy
 	(*CreateImageRequest)(nil),         // 2: cubelet.services.images.v1.CreateImageRequest
@@ -827,7 +833,7 @@ var file_services_images_v1_images_proto_goTypes = []any{
 	(*v11.ImageFilter)(nil),            // 14: cubelet.types.ImageFilter
 	(*v11.Image)(nil),                  // 15: cubelet.types.Image
 }
-var file_services_images_v1_images_proto_depIdxs = []int32{
+var file_services_images_v1_cubelet_images_proto_depIdxs = []int32{
 	3,  // 0: cubelet.services.images.v1.CreateImageRequest.spec:type_name -> cubelet.services.images.v1.ImageSpec
 	12, // 1: cubelet.services.images.v1.ImageSpec.annotations:type_name -> cubelet.services.images.v1.ImageSpec.AnnotationsEntry
 	13, // 2: cubelet.services.images.v1.CreateImageRequestResponse.ret:type_name -> cubelet.services.errorcode.v1.Ret
@@ -854,27 +860,27 @@ var file_services_images_v1_images_proto_depIdxs = []int32{
 	0,  // [0:11] is the sub-list for field type_name
 }
 
-func init() { file_services_images_v1_images_proto_init() }
-func file_services_images_v1_images_proto_init() {
-	if File_services_images_v1_images_proto != nil {
+func init() { file_services_images_v1_cubelet_images_proto_init() }
+func file_services_images_v1_cubelet_images_proto_init() {
+	if File_services_images_v1_cubelet_images_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_images_v1_images_proto_rawDesc), len(file_services_images_v1_images_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_images_v1_cubelet_images_proto_rawDesc), len(file_services_images_v1_cubelet_images_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_services_images_v1_images_proto_goTypes,
-		DependencyIndexes: file_services_images_v1_images_proto_depIdxs,
-		EnumInfos:         file_services_images_v1_images_proto_enumTypes,
-		MessageInfos:      file_services_images_v1_images_proto_msgTypes,
+		GoTypes:           file_services_images_v1_cubelet_images_proto_goTypes,
+		DependencyIndexes: file_services_images_v1_cubelet_images_proto_depIdxs,
+		EnumInfos:         file_services_images_v1_cubelet_images_proto_enumTypes,
+		MessageInfos:      file_services_images_v1_cubelet_images_proto_msgTypes,
 	}.Build()
-	File_services_images_v1_images_proto = out.File
-	file_services_images_v1_images_proto_goTypes = nil
-	file_services_images_v1_images_proto_depIdxs = nil
+	File_services_images_v1_cubelet_images_proto = out.File
+	file_services_images_v1_cubelet_images_proto_goTypes = nil
+	file_services_images_v1_cubelet_images_proto_depIdxs = nil
 }

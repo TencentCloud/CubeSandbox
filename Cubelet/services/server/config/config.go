@@ -232,7 +232,82 @@ func LoadConfig(ctx context.Context, path string, out *Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to load TOML from %s: %w", path, err)
 	}
+	populateV4ServerPluginBlocks(out.Config)
 	return nil
+}
+
+// populateV4ServerPluginBlocks derives the containerd v4 server plugin blocks
+// ("io.containerd.server.v1.grpc" / "io.containerd.server.v1.ttrpc") from the
+// legacy top-level [grpc] / [ttrpc] sections, mirroring containerd's own
+// serviceMigrate (v3 -> v4).
+//
+// containerd v2.3.x reads the server-facing gRPC/TTRPC addresses — the ones
+// handed to every shim as -address / GRPC_ADDRESS / TTRPC_ADDRESS — from
+// these plugin blocks and falls back to /run/containerd/containerd.sock(.ttrpc)
+// when they are absent. Cubelet ships v3 config files whose legacy sections
+// also drive cmd/cubelet/main.go's listener setup, so the blocks are derived
+// additively on every load: the legacy fields stay populated for Cubelet's
+// own serving path and Version is left untouched. The derivation is
+// idempotent — already-present plugin blocks (e.g. from a real v4 file)
+// always win.
+func populateV4ServerPluginBlocks(c *srvconfig.Config) {
+	if c == nil {
+		return
+	}
+	if c.Plugins == nil {
+		c.Plugins = make(map[string]interface{})
+	}
+	grpcAddress := c.GRPC.Address
+	grpcUID := c.GRPC.UID
+	grpcGID := c.GRPC.GID
+	grpcMaxRecv := c.GRPC.MaxRecvMsgSize
+	grpcMaxSend := c.GRPC.MaxSendMsgSize
+	grpcHasLegacy := grpcAddress != "" || grpcUID != 0 || grpcGID != 0 || grpcMaxRecv != 0 || grpcMaxSend != 0
+	if grpcHasLegacy && c.Plugins["io.containerd.server.v1.grpc"] == nil {
+		grpcBlock := map[string]interface{}{}
+		if grpcAddress != "" {
+			grpcBlock["address"] = grpcAddress
+			// Preserve legacy socket ownership semantics: in v3 configs uid/gid
+			// default to 0 and cannot be distinguished from an explicit 0.
+			grpcBlock["uid"] = grpcUID
+			grpcBlock["gid"] = grpcGID
+		} else {
+			if grpcUID != 0 {
+				grpcBlock["uid"] = grpcUID
+			}
+			if grpcGID != 0 {
+				grpcBlock["gid"] = grpcGID
+			}
+		}
+		if grpcMaxRecv != 0 {
+			grpcBlock["max_recv_message_size"] = grpcMaxRecv
+		}
+		if grpcMaxSend != 0 {
+			grpcBlock["max_send_message_size"] = grpcMaxSend
+		}
+		c.Plugins["io.containerd.server.v1.grpc"] = grpcBlock
+	}
+	if c.Plugins["io.containerd.server.v1.ttrpc"] == nil {
+		ttrpcAddress := c.TTRPC.Address
+		ttrpcUID := c.TTRPC.UID
+		ttrpcGID := c.TTRPC.GID
+		if ttrpcAddress == "" && grpcAddress != "" {
+			ttrpcAddress = grpcAddress + ".ttrpc"
+			if ttrpcUID == 0 {
+				ttrpcUID = grpcUID
+			}
+			if ttrpcGID == 0 {
+				ttrpcGID = grpcGID
+			}
+		}
+		if ttrpcAddress != "" || ttrpcUID != 0 || ttrpcGID != 0 {
+			c.Plugins["io.containerd.server.v1.ttrpc"] = map[string]interface{}{
+				"address": ttrpcAddress,
+				"uid":     ttrpcUID,
+				"gid":     ttrpcGID,
+			}
+		}
+	}
 }
 
 func loadConfigFile(ctx context.Context, path string) (*Config, error) {

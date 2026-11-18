@@ -317,3 +317,108 @@ func writeCubeletTOML(t *testing.T, contents string) string {
 	}
 	return path
 }
+
+// TestLoadConfigV3DerivesV4ServerPluginBlocks pins the v3 -> v4 server
+// property migration: containerd v2.3.x reads the shim-facing gRPC/TTRPC
+// addresses from the io.containerd.server.v1.{grpc,ttrpc} plugin blocks and
+// falls back to /run/containerd when they are absent. The derivation must be
+// additive — the legacy [grpc]/[ttrpc] sections stay populated because
+// cmd/cubelet/main.go creates its own listeners from them.
+func TestLoadConfigV3DerivesV4ServerPluginBlocks(t *testing.T) {
+	t.Parallel()
+
+	path := writeCubeletTOML(t, `
+version = 3
+[grpc]
+  address = "/data/cubelet/cubelet.sock"
+  uid = 0
+  gid = 0
+  max_recv_message_size = 16777216
+  max_send_message_size = 16777216
+  tcp_address = ":9999"
+[ttrpc]
+  address = "/data/cubelet/cubelet.sock.ttrpc"
+  uid = 0
+  gid = 0
+`)
+	out := newLoadTarget()
+	if err := LoadConfig(context.Background(), path, out); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	grpcRaw, ok := out.Config.Plugins["io.containerd.server.v1.grpc"]
+	if !ok {
+		t.Fatal("io.containerd.server.v1.grpc block not derived")
+	}
+	grpcBlock := grpcRaw.(map[string]interface{})
+	if grpcBlock["address"] != "/data/cubelet/cubelet.sock" {
+		t.Fatalf("grpc block address = %v, want /data/cubelet/cubelet.sock", grpcBlock["address"])
+	}
+	if grpcBlock["max_recv_message_size"] != 16777216 || grpcBlock["max_send_message_size"] != 16777216 {
+		t.Fatalf("grpc block message sizes = %v / %v, want 16777216 / 16777216",
+			grpcBlock["max_recv_message_size"], grpcBlock["max_send_message_size"])
+	}
+
+	ttrpcRaw, ok := out.Config.Plugins["io.containerd.server.v1.ttrpc"]
+	if !ok {
+		t.Fatal("io.containerd.server.v1.ttrpc block not derived")
+	}
+	ttrpcBlock := ttrpcRaw.(map[string]interface{})
+	if ttrpcBlock["address"] != "/data/cubelet/cubelet.sock.ttrpc" {
+		t.Fatalf("ttrpc block address = %v, want /data/cubelet/cubelet.sock.ttrpc", ttrpcBlock["address"])
+	}
+
+	// The legacy sections must survive for Cubelet's own listener setup.
+	if out.Config.GRPC.Address != "/data/cubelet/cubelet.sock" {
+		t.Fatalf("legacy grpc address = %q, want /data/cubelet/cubelet.sock", out.Config.GRPC.Address)
+	}
+	if out.Config.GRPC.TCPAddress != ":9999" {
+		t.Fatalf("legacy grpc tcp_address = %q, want :9999", out.Config.GRPC.TCPAddress)
+	}
+	if out.Config.TTRPC.Address != "/data/cubelet/cubelet.sock.ttrpc" {
+		t.Fatalf("legacy ttrpc address = %q, want /data/cubelet/cubelet.sock.ttrpc", out.Config.TTRPC.Address)
+	}
+	if out.Version != 3 {
+		t.Fatalf("version = %d, want 3 (file version is preserved)", out.Version)
+	}
+}
+
+// TestPopulateV4ServerPluginBlocksDerivesTTRPCFromGRPC covers the shipped
+// default path: no explicit [ttrpc] section, so the ttrpc block is derived
+// from the grpc address with uid/gid inherited, mirroring containerd's
+// serviceMigrate.
+func TestPopulateV4ServerPluginBlocksDerivesTTRPCFromGRPC(t *testing.T) {
+	t.Parallel()
+
+	c := &containerdconfig.Config{
+		Version: 3,
+		GRPC: containerdconfig.GRPCConfig{
+			Address:        "/data/cubelet/cubelet.sock",
+			UID:            1000,
+			GID:            1000,
+			MaxRecvMsgSize: 16777216,
+			MaxSendMsgSize: 16777216,
+		},
+	}
+
+	populateV4ServerPluginBlocks(c)
+
+	ttrpcRaw, ok := c.Plugins["io.containerd.server.v1.ttrpc"]
+	if !ok {
+		t.Fatal("io.containerd.server.v1.ttrpc block not derived from the grpc section")
+	}
+	ttrpcBlock := ttrpcRaw.(map[string]interface{})
+	if ttrpcBlock["address"] != "/data/cubelet/cubelet.sock.ttrpc" {
+		t.Fatalf("ttrpc address = %v, want /data/cubelet/cubelet.sock.ttrpc", ttrpcBlock["address"])
+	}
+	if ttrpcBlock["uid"] != 1000 || ttrpcBlock["gid"] != 1000 {
+		t.Fatalf("ttrpc uid/gid = %v / %v, want 1000 / 1000 (inherited)", ttrpcBlock["uid"], ttrpcBlock["gid"])
+	}
+
+	// Idempotent: existing blocks always win.
+	c.Plugins["io.containerd.server.v1.grpc"] = map[string]interface{}{"address": "/kept"}
+	populateV4ServerPluginBlocks(c)
+	if got := c.Plugins["io.containerd.server.v1.grpc"].(map[string]interface{})["address"]; got != "/kept" {
+		t.Fatalf("existing grpc block overwritten: address = %v, want /kept", got)
+	}
+}

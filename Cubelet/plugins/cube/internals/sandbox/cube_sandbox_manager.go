@@ -247,7 +247,7 @@ func (c *controllerLocal) Update(
 	return nil
 }
 
-func (c *controllerLocal) getSandbox(ctx context.Context, id string) (task.TaskService, error) {
+func (c *controllerLocal) getSandbox(ctx context.Context, id string) (task.TTRPCTaskService, error) {
 	shim, err := c.shims.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -256,5 +256,5 @@ func (c *controllerLocal) getSandbox(ctx context.Context, id string) (task.TaskS
 	if !ok {
 		return nil, fmt.Errorf("failed to get task client")
 	}
-	return task.NewTaskClient(taskClient), nil
+	return task.NewTTRPCTaskClient(taskClient), nil
 }

@@ -34,7 +34,7 @@ doc: check-proto-tools
 		protoc $(PROTOC_INCLUDE_FLAGS) --doc_out=./doc --doc_opt=markdown,api.md \
 			services/cubebox/v1/cubebox.proto \
 			services/errorcode/v1/errorcode.proto \
-			services/images/v1/images.proto \
+			services/images/v1/cubelet_images.proto \
 			services/snapshot/v1/snapshot.proto \
 			services/volumeplugin/v1/volumeplugin.proto \
 			types/v1/images.proto \

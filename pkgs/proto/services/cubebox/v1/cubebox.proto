@@ -6,7 +6,10 @@ syntax = "proto3";
 
 package cubelet.services.cubebox.v1;
 import "services/errorcode/v1/errorcode.proto";
-import "services/images/v1/images.proto";
+// Named cubelet_images.proto (not images.proto) so its registered proto file
+// path stays unique against github.com/containerd/containerd/api, which also
+// registers a (different) proto at services/images/v1/images.proto.
+import "services/images/v1/cubelet_images.proto";
 import "services/volumeplugin/v1/volumeplugin.proto";
 
 option go_package = "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1;cubebox";
