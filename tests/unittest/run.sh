@@ -87,8 +87,9 @@ WITH_TESTS=(
 	# this flag for the integration tests (CubeMaster/Makefile testlocal/testtt).
 	"cubemaster|Go|0|make builder-run BUILDER_CMD='cd /workspace/CubeMaster && go mod download && if [ -f test/conf.yaml ]; then export CUBE_MASTER_CONFIG_PATH=/workspace/CubeMaster/test/conf.yaml; fi && CI=true go test -short -gcflags=all=-l -timeout=20m ./cmd/... ./pkg/...'"
 	# CubeTemplateCenter shares CubeMaster's pkg/templatecenter image code
-	# (Linux-only syscall constants), so its tests go through the builder like
-	# every other Go component. The Makefile target wraps builder-run.
+	# (Linux-only syscall constants), so its unit tests go through the builder
+	# like every other Go component. Docker-backed cases are excluded here and
+	# covered by the gated cubetemplatecenter-docker lane below.
 	"cubetemplatecenter|Go|0|make cubetemplatecenter-test"
 	# cubevs: the CubeNet/cubevs module's OWN unit tests (dataplane policy, DNS
 	# learning, migration, dump, classify). cubevs-test regenerates the BPF
@@ -132,6 +133,9 @@ GATED_TESTS=(
 	# network plumbing. The component target fails instead of skipping when the
 	# daemon is unavailable.
 	"cubemaster-docker|Go+Docker|0|database tests need a reachable Docker daemon|make -C CubeMaster test-docker"
+	# Same split for CubeTemplateCenter: its reconcile MySQL test runs on the
+	# host so dockertest can reach the daemon without nested-container plumbing.
+	"cubetemplatecenter-docker|Go+Docker|0|reconcile Docker-backed MySQL test needs a reachable Docker daemon|make cubetemplatecenter-docker-test"
 	# The ordinary cubelet entry stays unprivileged. Run this explicitly to cover
 	# tests that format and mount images with CAP_SYS_ADMIN, matching CI's lane.
 	"cubelet-mount|Go|0|mount tests need a privileged root builder|make cubelet-mount-test"
