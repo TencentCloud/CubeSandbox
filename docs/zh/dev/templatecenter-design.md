@@ -74,8 +74,8 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
 ```
 PENDING  ─┬─→ READY             所有副本均 READY
 (template)├─→ PARTIALLY_READY   至少一个副本 READY，且至少一个不是
-          └─→ FAILED            没有 READY 副本、副本落库失败（persistErr），
-                                或构建被强制删除中断
+          └─→ FAILED            没有 READY 副本、创建时副本落库失败
+                                （persistErr），或构建被强制删除中断
 
 CREATING ─┬─→ READY             快照提交成功
 (snapshot)└─→ FAILED            快照提交失败
@@ -84,7 +84,12 @@ CREATING ─┬─→ READY             快照提交成功
                                 模板定义没有 DELETED 状态
 ```
 
-`redo` 会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。对 READY 模板只接受带 `--failed-only` 的 redo；全量或按节点（`--node`）的 redo 会以 `ErrTemplateNotReady` 拒绝，因为其间一旦副本落库失败，就会把一个可用模板发布成 FAILED。
+`redo` 会按同样的汇总规则重新发布 READY / PARTIALLY_READY / FAILED。任何定义状态下都接受 redo，包括 READY（例如扩容后执行 `tpl redo --node <新节点>`）。
+
+副本落库失败（persistErr）时，job 一律以脱敏信息标为失败，但定义状态按路径不同：
+
+- **create**：发布 FAILED；新构建的 artifact 及其副本行会被清理。
+- **redo**（本地或转发到 TC 的）：在清理新 artifact 之后，按已落库的副本行汇总得出。没有 READY 副本时发布 FAILED，这也会解除停留在 PENDING 的定义；否则发布 READY / PARTIALLY_READY，仍在服务的模板绝不会被报告为 FAILED。如果读不到副本行，则保持原状态，不做降级。
 
 不变式：
 

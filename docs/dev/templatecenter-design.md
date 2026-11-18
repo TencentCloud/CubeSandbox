@@ -81,8 +81,8 @@ Initial state depends on the definition kind
 PENDING  ─┬─→ READY             every replica READY
 (template)├─→ PARTIALLY_READY   at least one replica READY, at least one not
           └─→ FAILED            no replica READY, replica persistence failed
-                                (persistErr), or a force delete interrupted
-                                the build
+                                on create (persistErr), or a force delete
+                                interrupted the build
 
 CREATING ─┬─→ READY             snapshot committed
 (snapshot)└─→ FAILED            snapshot commit failed
@@ -93,10 +93,21 @@ any state ──→ (row removed)     delete hard-deletes the definition and its
 ```
 
 READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
-a fresh aggregate status from the same summary rules. A redo on a READY
-template is only accepted with `--failed-only`; a full or node-scoped redo is
-rejected with `ErrTemplateNotReady`, because a replica persistence failure
-during it would publish FAILED over a working template.
+a fresh aggregate status from the same summary rules. Redo is accepted in any
+definition status, including READY (e.g. `tpl redo --node <new-node>` after
+scale-out).
+
+On a replica persistence failure (persistErr) the job always fails with a
+sanitized message, but the definition status depends on the path:
+
+- **create**: published FAILED; the fresh artifact and its replica rows are
+  cleaned up.
+- **redo** (local or TC-forwarded): derived from the persisted replica rows,
+  after any fresh-artifact cleanup. If no READY replica remains it is
+  published FAILED, which also releases a definition left in PENDING.
+  Otherwise READY / PARTIALLY_READY is published, so a template that is still
+  serving is never reported FAILED. If the replica rows cannot be read, the
+  status is left unchanged rather than downgraded.
 
 Invariants:
 
