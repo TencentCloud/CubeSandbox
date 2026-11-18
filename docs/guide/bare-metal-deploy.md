@@ -70,6 +70,33 @@ chmod +x install.sh
 On some aarch64 hosts — older kernels, nested-virtualization setups, or certain ARM cores — KVM does not expose a guest PMUv3. MicroVMs still boot on these hosts; the hypervisor initializes the vCPU without a PMU and the guest simply sees no hardware performance counters. No action is needed.
 :::
 
+### OpenTelemetry tracing (optional)
+
+Tracing is off by default. Configure it **before install** by setting
+`OTEL_EXPORTER_OTLP_ENDPOINT` in the `.env` next to `install.sh`.
+
+The receiver is an externally supplied OTLP/**gRPC** receiver — an OpenTelemetry
+Collector or a Tempo OTLP/gRPC receiver. The value is
+`http://<receiver-host>:<OTLP-gRPC-port>` for plaintext, where `receiver-host`
+and `OTLP-gRPC-port` are the receiver's actual IP or DNS name and gRPC listener
+port. Use the receiver's OTLP/gRPC address, not a Grafana/Tempo query URL. For
+example:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.5:4317
+```
+
+The installer persists the value, and CubeAPI, CubeMaster, CubeTemplateCenter,
+Cubelet, and the CubeShim Cubelet launches all export spans. The shim inherits
+Cubelet's environment when a new shim process starts, so sandboxes started after
+install are traced. Each service exports under its own name, so do not set a
+shared `OTEL_SERVICE_NAME`. It applies to both a fresh install and an upgrade, and
+one-click never installs a collector. To disable tracing again, set
+`OTEL_EXPORTER_OTLP_ENDPOINT=` (empty) in `.env` and re-run the installer — see the
+[one-click README · OpenTelemetry tracing](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md#opentelemetry-tracing-optional)
+for the upgrade details and the `cp env.example .env` caveat. For the traced
+workflows and how to read a trace, see [Distributed Tracing](./tracing.md).
+
 ## Step 2: Create a Template
 
 After installation, create a code interpreter template using a pre-built image:

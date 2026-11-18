@@ -170,6 +170,36 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 
 若 COS/OBS 端点要求虚拟主机寻址，在 `.env` 中设置 `CUBE_S3_ADDRESSING_STYLE=virtual`。CubeMaster 和 CubeTemplateCenter 使用此共享 blobstore 配置；CubeOps 会继承它，除非显式设置非空的 `CUBE_OPS_S3_ADDRESSING_STYLE`。仅对支持存储桶子域名的外部端点使用 virtual；内置 MinIO 使用路径寻址。从 `.env` 读取这两个配置项需要 `python3`。两个配置项均接受 `auto`、`path` 或 `virtual`，默认为空，并会持久化到 `.one-click.env`。升级时，显式的 `.env` 值优先于安装器进程环境中的值，空值也会生效；两者都未指定的键保留原运行时配置。warehouse 仍使用独立的 `cube-ops` 存储桶。这些配置项不控制 S3 Volume 插件或 S3lvol。
 
+### OpenTelemetry 链路追踪（可选）
+
+链路追踪默认关闭。请在**安装前**在 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT`，然后（重新）执行 `install.sh` 生效——全新安装与升级同样适用。
+
+也可设置 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`。两者同时设置时，traces 专用地址优先；两个值都为空时才关闭追踪。
+
+接收端是外部自备的 OTLP/**gRPC** 接收器——OpenTelemetry Collector 或 Tempo 的 OTLP/gRPC 接收端。明文场景下取值为 `http://<receiver-host>:<OTLP-gRPC-port>`，其中 `receiver-host` 与 `OTLP-gRPC-port` 是接收端实际的 IP 或 DNS 名以及 gRPC 监听端口。请填接收端的 OTLP/gRPC 地址，而不是 Grafana/Tempo 的查询地址。例如：
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.5:4317
+```
+
+Span 来自沙箱生命周期各服务——CubeAPI、CubeMaster、CubeTemplateCenter、Cubelet，以及由 Cubelet 启动的 CubeShim。各服务以各自的服务名上报（`cube-api`、`cubemaster`、`cubetemplatecenter`、`cubelet`、`cube-shim`），因此**不要**设置共享的 `OTEL_SERVICE_NAME`。
+
+安装器会把 endpoint 持久化到 `.one-click.env`，各单元通过 `EnvironmentFile` 加载；重新执行安装后，CubeAPI、CubeMaster、CubeTemplateCenter、Cubelet 会读到新值，因此已有沙箱的请求 span 也会导出。
+
+CubeShim 是例外：它是 Cubelet 为每个沙箱单独启动的进程，只有在新的 shim 进程启动时才继承 Cubelet 的环境变量，因此已在运行的 shim 会保留旧设置，只有新启动沙箱后 CubeShim 的 span 才生效。
+
+由于这两个 endpoint 是开关式配置项，若要关闭追踪，在 `.env` 中将 `OTEL_EXPORTER_OTLP_ENDPOINT=` 和 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=` 都设为空值并重新执行安装——`cp env.example .env` 的注意事项见 [CubeS3lvol 的停止与升级语义](#cubes3lvol-的停止与升级语义) 中的 `ONE_CLICK_ENABLE_S3LVOL` 说明。
+
+one-click 不会安装任何接收端。
+
+要查看某个 trace，可在追踪后端按 trace ID 查询，或用 TraceQL，例如：
+
+```traceql
+{ resource.service.name = "cubelet" && name = "cubelet.sandbox.pause" }
+```
+
+被追踪的工作流以及如何解读 trace，见 [分布式链路追踪](../../docs/zh/guide/tracing.md)。
+
 ## 目标机安装
 
 把 `cube-sandbox-one-click-<version>.tar.gz` 拷到目标机后：

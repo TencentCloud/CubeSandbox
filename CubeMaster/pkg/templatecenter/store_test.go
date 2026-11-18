@@ -108,7 +108,7 @@ func TestCreateTemplateReplicasCleansUntrackedPhysicalVariant(t *testing.T) {
 	patches.ApplyFunc(templateBuildTargets, func(string, bool, []*node.Node) []*node.Node {
 		return []*node.Node{target}
 	})
-	patches.ApplyFunc(createReplicaOnNode, func(context.Context, *node.Node, *sandboxtypes.CreateCubeSandboxReq, replicaRunOptions) (ReplicaStatus, string) {
+	patches.ApplyFunc(createReplicaOnNode, func(context.Context, *node.Node, string, *sandboxtypes.CreateCubeSandboxReq, replicaRunOptions) (ReplicaStatus, string) {
 		return ReplicaStatus{
 			NodeID:            target.ID(),
 			NodeIP:            target.HostIP(),

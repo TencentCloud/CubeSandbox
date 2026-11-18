@@ -181,6 +181,61 @@ One-click does not create an extra global `configs/` layer on the target machine
 
 For COS/OBS endpoints that require virtual-hosted addressing, set `CUBE_S3_ADDRESSING_STYLE=virtual` in `.env`. CubeMaster and CubeTemplateCenter use this shared blobstore setting; CubeOps inherits it unless `CUBE_OPS_S3_ADDRESSING_STYLE` is non-empty. Use virtual addressing with an external endpoint that supports bucket subdomains. Keep the bundled MinIO on path-style addressing. Reading these settings from `.env` requires `python3`. Both keys accept `auto`, `path`, or `virtual`, default to empty, and are persisted to `.one-click.env`. On upgrades, explicit `.env` values take precedence over installer environment values, including empty values; omitted keys keep their previous runtime setting. The warehouse keeps its separate `cube-ops` bucket. These keys do not configure the S3 volume plugin or S3lvol.
 
+### OpenTelemetry tracing (optional)
+
+Tracing is off by default. Configure it **before install** by setting
+`OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and (re-)running `install.sh` — it
+applies to both a fresh install and an upgrade.
+
+You can instead set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. If both are set,
+the traces-specific address takes precedence. Both values must be empty to
+disable tracing.
+
+The receiver is an externally supplied OTLP/**gRPC** receiver — an OpenTelemetry
+Collector or a Tempo OTLP/gRPC receiver. The value is
+`http://<receiver-host>:<OTLP-gRPC-port>` for plaintext, where `receiver-host`
+and `OTLP-gRPC-port` are the receiver's actual IP or DNS name and gRPC listener
+port. Use the receiver's OTLP/gRPC address, not a Grafana/Tempo query URL. For
+example:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.0.5:4317
+```
+
+Spans come from the sandbox lifecycle services — CubeAPI, CubeMaster,
+CubeTemplateCenter, Cubelet, and the CubeShim that Cubelet launches. Each exports
+under its own service name (`cube-api`, `cubemaster`, `cubetemplatecenter`,
+`cubelet`, `cube-shim`), so do **not** set a shared `OTEL_SERVICE_NAME`.
+
+The installer persists the endpoint into `.one-click.env`, which every unit loads
+via `EnvironmentFile`; re-running install picks up the new value for CubeAPI,
+CubeMaster, CubeTemplateCenter, and Cubelet, so their request spans for existing
+sandboxes are exported.
+
+The CubeShim is the exception: it is a separate process Cubelet launches per
+sandbox and inherits Cubelet's environment only when a new shim process starts,
+so an already-running shim keeps its previous setting and only CubeShim spans
+wait on a new sandbox being started.
+
+Because both endpoints are toggle-style keys, to turn tracing back off set
+`OTEL_EXPORTER_OTLP_ENDPOINT=` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=`
+(both empty) in `.env` and re-run install — see the
+`ONE_CLICK_ENABLE_S3LVOL` note in
+[CubeS3lvol stop/upgrade semantics](#cubes3lvol-stopupgrade-semantics) for the
+`cp env.example .env` caveat.
+
+One-click never installs a collector.
+
+To inspect a trace, look it up in your tracing backend by trace ID, or with
+TraceQL, e.g.
+
+```traceql
+{ resource.service.name = "cubelet" && name = "cubelet.sandbox.pause" }
+```
+
+For the traced workflows and how to read a trace, see
+[Distributed Tracing](../../docs/guide/tracing.md).
+
 ## Target Machine Installation
 
 After copying `cube-sandbox-one-click-<version>.tar.gz` to the target machine:

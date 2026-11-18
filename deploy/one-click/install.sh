@@ -60,6 +60,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   # Preserve shell-interpreted observability values, including empty values
   # used to clear settings inherited from a previous runtime.
   capture_one_click_observability_dotenv_values
+  capture_one_click_toggle_dotenv_values
   # Only non-default storage log values; template defaults are not intent.
   capture_one_click_rcow_log_dotenv_values
   case "${ONE_CLICK_MODE}" in
@@ -2412,6 +2413,8 @@ elif [[ -f "${SCRIPT_DIR}/release-manifest.json" ]]; then
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "OTEL_EXPORTER_OTLP_ENDPOINT" "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}"
 MIRROR="${MIRROR:-}"
 case "${MIRROR}" in
   ""|cn) ;;
