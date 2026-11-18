@@ -52,6 +52,13 @@ func TestAppSnapshotRestoreWithReadOnlyParentAndWritableNestedHostDir(t *testing
 
 			req := proto.Clone(fixture).(*cubebox.RunCubeSandboxRequest)
 			req.RequestID = uuid.New().String()
+			if req.Annotations == nil {
+				req.Annotations = map[string]string{}
+			}
+			prefixes, _, err := cubebox.HostMountAllowedPrefixes(req.Annotations)
+			require.NoError(t, err)
+			req.Annotations[cubebox.AnnotationHostMountAllowedPrefixes] =
+				cubebox.EncodeHostMountAllowedPrefixes(append(prefixes, teamDir))
 			req.Volumes = append(req.Volumes,
 				hostDirVolume(agentVolumeName, agentADir),
 				hostDirVolume(teamVolumeName, teamDir),

@@ -42,7 +42,7 @@ func TestBindHostDirRW(t *testing.T) {
 		t.Fatalf("expected 1 command, got %d", len(calls))
 	}
 	got := strings.Join(calls[0], " ")
-	want := "/usr/bin/mount --rbind /host/path /bind/dest"
+	want := "/usr/bin/mount --no-canonicalize --rbind /host/path /bind/dest"
 	if got != want {
 		t.Fatalf("unexpected command: got %q want %q", got, want)
 	}
@@ -70,7 +70,7 @@ func TestBindHostDirReadOnlyAddsRemount(t *testing.T) {
 	}
 
 	gotBind := strings.Join(calls[0], " ")
-	wantBind := "/usr/bin/mount --rbind /host/path /bind/dest"
+	wantBind := "/usr/bin/mount --no-canonicalize --rbind /host/path /bind/dest"
 	if gotBind != wantBind {
 		t.Fatalf("unexpected bind command: got %q want %q", gotBind, wantBind)
 	}

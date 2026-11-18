@@ -78,7 +78,10 @@ func bindHostDir(ctx context.Context, srcPath, bindDest string, readOnly bool) e
 	mountCtx, cancel := context.WithTimeout(ctx, hostDirMountTimeout)
 	defer cancel()
 
-	if err := runHostDirCommand(mountCtx, hostDirMountBinary, "--rbind", srcPath, bindDest); err != nil {
+	// --no-canonicalize keeps the pinned /proc/<pid>/fd/<n> source intact so
+	// the kernel mounts the descriptor's target rather than re-resolving a
+	// user-controlled path.
+	if err := runHostDirCommand(mountCtx, hostDirMountBinary, "--no-canonicalize", "--rbind", srcPath, bindDest); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("bind mount %s -> %s timed out after %s: %w", srcPath, bindDest, hostDirMountTimeout, err)
 		}
@@ -114,10 +117,17 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 	if hdv == nil {
 		return nil
 	}
+	if len(hdv.GetVolumeSources()) == 0 {
+		return nil
+	}
 
 	sandboxID := opts.SandboxID
 	if sandboxID == "" {
 		return fmt.Errorf("prepareHostDirVolume: sandbox ID is empty")
+	}
+	allowedPrefixes, err := resolveHostMountAllowedPrefixes(opts.ReqInfo.GetAnnotations())
+	if err != nil {
+		return fmt.Errorf("prepareHostDirVolume: %w", err)
 	}
 
 	if result.HostDirBackendInfos == nil {
@@ -130,6 +140,10 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 		}
 		if src.GetHostPath() == "" {
 			return fmt.Errorf("prepareHostDirVolume: volume %q has empty host_path", src.GetName())
+		}
+		resolvedSource, err := resolveHostDirSource(src.GetHostPath(), allowedPrefixes)
+		if err != nil {
+			return fmt.Errorf("prepareHostDirVolume: volume %q: %w", src.GetName(), err)
 		}
 
 		roStr := "rw"
@@ -159,15 +173,139 @@ func (l *local) prepareHostDirVolume(ctx context.Context, opts *workflow.CreateC
 			ReadOnly:   readOnly,
 		}
 
-		log.G(ctx).Infof("[hostdir] binding %s -> %s (ro=%v)", src.GetHostPath(), bindDest, readOnly)
-		if err := bindHostDir(ctx, src.GetHostPath(), bindDest, readOnly); err != nil {
+		sourceFile, err := openHostDirSource(resolvedSource)
+		if err != nil {
+			return fmt.Errorf("prepareHostDirVolume: volume %q: %w", src.GetName(), err)
+		}
+		sourcePath := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), sourceFile.Fd())
+		log.G(ctx).Infof("[hostdir] binding %s -> %s (ro=%v)", resolvedSource, bindDest, readOnly)
+		if err := func() error {
+			defer sourceFile.Close()
+			return bindHostDir(ctx, sourcePath, bindDest, readOnly)
+		}(); err != nil {
 			return fmt.Errorf("prepareHostDirVolume: %w", err)
 		}
 
 		log.G(ctx).Infof("[hostdir] bound %s -> %s (ro=%v, shareDir=%s)",
-			src.GetHostPath(), bindDest, readOnly, shareDir)
+			resolvedSource, bindDest, readOnly, shareDir)
 	}
 	return nil
+}
+
+func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]string, error) {
+	rawPrefixes, ok, err := cubebox.HostMountAllowedPrefixes(annotations)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("missing %s annotation", cubebox.AnnotationHostMountAllowedPrefixes)
+	}
+	if len(rawPrefixes) == 0 {
+		return nil, fmt.Errorf("%s annotation is empty", cubebox.AnnotationHostMountAllowedPrefixes)
+	}
+
+	prefixes := make([]string, 0, len(rawPrefixes))
+	for _, raw := range rawPrefixes {
+		cleaned := filepath.Clean(raw)
+		if !filepath.IsAbs(cleaned) || cleaned == "/" {
+			return nil, fmt.Errorf("invalid allowed host mount prefix %q", raw)
+		}
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("resolve allowed host mount prefix %q: %w", raw, err)
+		}
+		if resolved == string(filepath.Separator) {
+			return nil, fmt.Errorf("allowed host mount prefix %q resolves to the filesystem root", raw)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("stat allowed host mount prefix %q: %w", raw, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("allowed host mount prefix %q is not a directory", raw)
+		}
+		prefixes = append(prefixes, filepath.Clean(resolved))
+	}
+	if len(prefixes) == 0 {
+		return nil, errors.New("no allowed host mount prefix exists on this node")
+	}
+	return prefixes, nil
+}
+
+func resolveHostDirSource(hostPath string, allowedPrefixes []string) (string, error) {
+	cleaned := filepath.Clean(hostPath)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("host path %q is not absolute", hostPath)
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve host path %q: %w", hostPath, err)
+	}
+	resolved = filepath.Clean(resolved)
+	for _, prefix := range allowedPrefixes {
+		if hostDirPathWithin(prefix, resolved) {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("host path %q resolves to %q, outside allowed host mount prefixes", hostPath, resolved)
+}
+
+func hostDirPathWithin(prefix, path string) bool {
+	rel, err := filepath.Rel(prefix, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// openHostDirSource pins the resolved directory and rejects symlinks during
+// every component lookup. The returned descriptor is what Cubelet mounts, so a
+// concurrent rename cannot redirect the bind to another path.
+func openHostDirSource(resolvedPath string) (*os.File, error) {
+	dirFlags := unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC
+	fd, err := unix.Open("/", dirFlags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem root: %w", err)
+	}
+
+	rel, err := filepath.Rel("/", resolvedPath)
+	if err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("make %q relative to root: %w", resolvedPath, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		unix.Close(fd)
+		return nil, fmt.Errorf("resolved path %q escapes the filesystem root", resolvedPath)
+	}
+
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		nextFD, err := unix.Openat(fd, part, dirFlags|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			unix.Close(fd)
+			return nil, fmt.Errorf("open %q without following symlinks: %w", resolvedPath, err)
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(nextFD, &stat); err != nil {
+			unix.Close(nextFD)
+			unix.Close(fd)
+			return nil, fmt.Errorf("stat %q: %w", resolvedPath, err)
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+			unix.Close(nextFD)
+			unix.Close(fd)
+			return nil, fmt.Errorf("host path %q is not a directory", resolvedPath)
+		}
+		unix.Close(fd)
+		fd = nextFD
+	}
+
+	return os.NewFile(uintptr(fd), resolvedPath), nil
 }
 
 // validateHostDirSourceName requires a single path segment, so a volume stays
