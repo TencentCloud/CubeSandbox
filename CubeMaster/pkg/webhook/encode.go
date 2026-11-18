@@ -62,15 +62,45 @@ func RestoreEvent(s EventSnapshot) (*Event, error) {
 		}
 		text[key] = decoded
 	}
+	// snapshot_id is omitempty: only snapshot events carry it.
+	if raw, ok := fields["snapshot_id"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return nil, ErrInvalidEvent
+		}
+		text["snapshot_id"] = value
+	}
+	// volume_id is omitempty: only volume events carry it.
+	if raw, ok := fields["volume_id"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return nil, ErrInvalidEvent
+		}
+		text["volume_id"] = value
+	}
 	id, err := uuid.Parse(text["id"])
-	if err != nil || id != s.ID || text["version"] != VersionV2 || text["type"] != s.Type || strings.TrimSpace(text["sandbox_id"]) == "" {
+	if err != nil || id != s.ID || text["version"] != VersionV2 || text["type"] != s.Type {
+		return nil, ErrInvalidEvent
+	}
+	// The identifying id depends on the category: a template event has no
+	// sandbox, a snapshot event has no template of its own.
+	if IsSandboxEvent(s.Type) && strings.TrimSpace(text["sandbox_id"]) == "" {
+		return nil, ErrInvalidEvent
+	}
+	if IsTemplateEvent(s.Type) && strings.TrimSpace(text["sandbox_template_id"]) == "" {
+		return nil, ErrInvalidEvent
+	}
+	if IsSnapshotEvent(s.Type) && strings.TrimSpace(text["snapshot_id"]) == "" {
+		return nil, ErrInvalidEvent
+	}
+	if IsVolumeEvent(s.Type) && strings.TrimSpace(text["volume_id"]) == "" {
 		return nil, ErrInvalidEvent
 	}
 	timestamp, err := time.Parse(time.RFC3339Nano, text["timestamp"])
 	if err != nil || !timestamp.Equal(s.OccurredAt) {
 		return nil, ErrInvalidEvent
 	}
-	for _, key := range []string{"sandbox_id", "sandbox_execution_id", "sandbox_template_id", "sandbox_build_id", "sandbox_team_id"} {
+	for _, key := range []string{"sandbox_id", "sandbox_execution_id", "snapshot_id", "volume_id", "sandbox_template_id", "sandbox_build_id", "sandbox_team_id"} {
 		if len(text[key]) > maxStringBytes {
 			return nil, ErrInvalidEvent
 		}
@@ -93,19 +123,24 @@ func RestoreEvent(s EventSnapshot) (*Event, error) {
 }
 
 type envelope struct {
-	ID                 uuid.UUID      `json:"id"`
-	Version            string         `json:"version"`
-	Type               string         `json:"type"`
-	Timestamp          string         `json:"timestamp"`
-	EventCategory      string         `json:"event_category"`
-	EventLabel         string         `json:"event_label"`
-	SandboxID          string         `json:"sandbox_id"`
-	SandboxExecutionID string         `json:"sandbox_execution_id"`
-	SandboxTemplateID  string         `json:"sandbox_template_id"`
-	SandboxBuildID     string         `json:"sandbox_build_id"`
-	SandboxTeamID      string         `json:"sandbox_team_id"`
-	EventData          map[string]any `json:"event_data,omitempty"`
-	EventsTTLDays      int            `json:"events_ttl_days,omitempty"`
+	ID                 uuid.UUID `json:"id"`
+	Version            string    `json:"version"`
+	Type               string    `json:"type"`
+	Timestamp          string    `json:"timestamp"`
+	EventCategory      string    `json:"event_category"`
+	EventLabel         string    `json:"event_label"`
+	SandboxID          string    `json:"sandbox_id"`
+	SandboxExecutionID string    `json:"sandbox_execution_id"`
+	SandboxTemplateID  string    `json:"sandbox_template_id"`
+	// snapshot_id, not sandbox_snapshot_id: a snapshot is its own resource, not
+	// an attribute of the sandbox that produced it, and every other Cube API
+	// surface already spells it snapshot_id.
+	SnapshotID     string         `json:"snapshot_id,omitempty"`
+	VolumeID       string         `json:"volume_id,omitempty"`
+	SandboxBuildID string         `json:"sandbox_build_id"`
+	SandboxTeamID  string         `json:"sandbox_team_id"`
+	EventData      map[string]any `json:"event_data,omitempty"`
+	EventsTTLDays  int            `json:"events_ttl_days,omitempty"`
 }
 
 // Encode validates explicit protocol data and marshals once in the background.
@@ -121,12 +156,15 @@ func Encode(c *CapturedEvent, p *ProtocolEventData) (*Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	// event_category and event_label stay empty: the v2 envelope keeps the keys
+	// for wire compatibility, but Cube has no legacy classification to map them
+	// from and inventing one would add a second source of truth beside `type`.
 	in := c.input
 	body, err := json.Marshal(envelope{
 		ID: in.ID, Version: VersionV2, Type: in.Type,
 		Timestamp: in.OccurredAt.Format(time.RFC3339Nano),
 		SandboxID: in.SandboxID, SandboxExecutionID: in.ExecutionID,
-		SandboxTemplateID: in.TemplateID, SandboxBuildID: in.BuildID,
+		SandboxTemplateID: in.TemplateID, SnapshotID: in.SnapshotID, VolumeID: in.VolumeID, SandboxBuildID: in.BuildID,
 		SandboxTeamID: in.TeamID, EventData: data,
 	})
 	if err != nil {
@@ -141,7 +179,11 @@ func protocolData(eventType string, p *ProtocolEventData) (map[string]any, error
 		(p.ResumeMode != "" && eventType != TypeResumed) ||
 		(p.KillReason != "" && eventType != TypeKilled) ||
 		((p.SetTimeout != nil || p.NetworkEgress != nil) && eventType != TypeUpdated) {
-		return nil, fmt.Errorf("%w: fields do not belong to event type", ErrInvalidEvent)
+		// Template and snapshot events carry their own data via TemplateInfo/ErrorMsg,
+		// so the above guard does not apply to them.
+		if !IsTemplateEvent(eventType) && !IsSnapshotEvent(eventType) {
+			return nil, fmt.Errorf("%w: fields do not belong to event type", ErrInvalidEvent)
+		}
 	}
 	data := make(map[string]any)
 	if p.SandboxMetadata != nil {
@@ -178,6 +220,39 @@ func protocolData(eventType string, p *ProtocolEventData) (map[string]any, error
 			reason = "unknown"
 		}
 		data["kill_reason"] = reason
+	case TypeTemplateBuildStarted:
+		data["source_image_ref"] = p.SourceImageRef
+		data["instance_type"] = p.InstanceType
+		data["build_mode"] = p.BuildMode
+	case TypeTemplateBuildCompleted:
+		data["source_image_ref"] = p.SourceImageRef
+		data["artifact_id"] = p.ArtifactID
+		data["instance_type"] = p.InstanceType
+		data["build_mode"] = p.BuildMode
+		if p.ReadyNodeCount >= 0 {
+			data["ready_node_count"] = p.ReadyNodeCount
+		}
+	case TypeTemplateBuildFailed:
+		data["source_image_ref"] = p.SourceImageRef
+		data["error_message"] = p.ErrorMsg
+		data["build_mode"] = p.BuildMode
+	case TypeTemplateDeleted:
+		data["instance_type"] = p.InstanceType
+	case TypeTemplateMigrated:
+		data["instance_type"] = p.InstanceType
+		if p.ReadyNodeCount >= 0 {
+			data["ready_node_count"] = p.ReadyNodeCount
+		}
+	case TypeSnapshotCreated:
+		data["backend"] = p.InstanceType
+	case TypeSnapshotDeleted:
+		data["error_message"] = p.ErrorMsg
+	case TypeSnapshotRollback:
+		data["new_gen"] = p.NewGen
+	case TypeVolumeCreated, TypeVolumeDeleted:
+		if p.VolumeDriver != "" {
+			data["volume_driver"] = p.VolumeDriver
+		}
 	}
 	if eventType == TypePaused || eventType == TypeKilled {
 		execution := ExecutionData{}

@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/server"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/cube"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
@@ -392,6 +393,7 @@ func (a *App) startWebhooks(ctx context.Context, cfg *config.Config) {
 		sandbox.SetWebhookPublisher(a.WebhookPublisher())
 		task.SetWebhookPublisher(a.WebhookPublisher())
 		templatecenter.SetWebhookPublisher(a.WebhookPublisher())
+		cube.SetVolumeWebhookPublisher(a.WebhookPublisher())
 		if err != nil {
 			CubeLog.Warnf("webhooks disabled: invalid startup configuration; values redacted")
 		}

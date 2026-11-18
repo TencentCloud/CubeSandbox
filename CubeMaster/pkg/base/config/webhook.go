@@ -77,6 +77,32 @@ func (c WebhookConf) MarshalJSON() ([]byte, error) {
 
 var ErrWebhookConfig = errors.New("webhooks disabled: invalid configuration (values redacted)")
 
+// webhookEventNames is the closed set of event names a subscription may select.
+// pkg/base/config cannot import pkg/webhook (webhook depends on the parsed
+// config), so the names are repeated here; keep them in sync with event.go.
+var webhookEventNames = map[string]struct{}{
+	"sandbox.lifecycle.created":                      {},
+	"sandbox.lifecycle.killed":                       {},
+	"sandbox.lifecycle.paused":                       {},
+	"sandbox.lifecycle.resumed":                      {},
+	"sandbox.lifecycle.updated":                      {},
+	"sandbox.lifecycle.checkpointed":                 {},
+	"template.lifecycle.build.started":               {},
+	"template.lifecycle.build.completed":             {},
+	"template.lifecycle.build.failed":                {},
+	"template.lifecycle.deleted":                     {},
+	"template.lifecycle.migrated":                    {},
+	"template.lifecycle.snapshot.created":            {},
+	"template.lifecycle.snapshot.deleted":            {},
+	"template.lifecycle.snapshot.rollback.completed": {},
+	"volume.lifecycle.created":                       {},
+	"volume.lifecycle.deleted":                       {},
+}
+
+// maxWebhookEventsPerSubscription bounds one subscription's event list at the
+// number of supported events, so subscribing to every one of them stays valid.
+var maxWebhookEventsPerSubscription = len(webhookEventNames)
+
 func (c WebhookConf) Validate() error {
 	s := c.Store
 	if c.Invalid || c.IngressCapacity < 1 || c.IngressCapacity > 4096 || c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 1000 ||
@@ -91,7 +117,7 @@ func (c WebhookConf) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, sub := range c.Subscriptions {
-		if strings.TrimSpace(sub.ID) == "" || len(sub.ID) > 1024 || !utf8.ValidString(sub.ID) || strings.IndexFunc(sub.ID, unicode.IsControl) >= 0 || seen[sub.ID] || len(sub.Events) == 0 || len(sub.Events) > 6 {
+		if strings.TrimSpace(sub.ID) == "" || len(sub.ID) > 1024 || !utf8.ValidString(sub.ID) || strings.IndexFunc(sub.ID, unicode.IsControl) >= 0 || seen[sub.ID] || len(sub.Events) == 0 || len(sub.Events) > maxWebhookEventsPerSubscription {
 			return ErrWebhookConfig
 		}
 		seen[sub.ID] = true
@@ -100,12 +126,7 @@ func (c WebhookConf) Validate() error {
 		}
 		events := map[string]bool{}
 		for _, e := range sub.Events {
-			switch e {
-			case "sandbox.lifecycle.created", "sandbox.lifecycle.killed", "sandbox.lifecycle.paused", "sandbox.lifecycle.resumed", "sandbox.lifecycle.updated", "sandbox.lifecycle.checkpointed":
-			default:
-				return ErrWebhookConfig
-			}
-			if events[e] {
+			if _, ok := webhookEventNames[e]; !ok || events[e] {
 				return ErrWebhookConfig
 			}
 			events[e] = true

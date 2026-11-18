@@ -49,7 +49,7 @@ webhooks:
 | `allowed_cidrs` | 空 | 最多 64 个有效 CIDR，允许私网/回环目标 |
 | `subscriptions` | 空 | 最多 64 个订阅 |
 | `subscriptions[].enabled` | `false` | 订阅开关 |
-| `subscriptions[].id`, `.url`, `.events` | 未设置 | 必填；ID ≤1024 字节，URL ≤4096 字节，1–6 个不同的支持事件 |
+| `subscriptions[].id`, `.url`, `.events` | 未设置 | 必填；ID ≤1024 字节，URL ≤4096 字节，1–16 个不同的支持事件 |
 
 这些数量限制不是进程 RSS 上限。全局开启但没有活动订阅时，不执行捕获或投递。
 关闭时跳过通知准备；开启后仍消耗 CPU 和内存。
@@ -64,6 +64,20 @@ webhooks:
 | `sandbox.lifecycle.checkpointed` | 实际执行的快照任务完成本地工作并持久化 READY，位于最终查询前。后续查询失败不撤回通知；只查询 READY 不重复发布。 |
 | `sandbox.lifecycle.updated` | 公开 SetTimeout/Refresh 返回可用有限截止时间，或既有节点网络更新成功。best-effort spec 写失败不撤销节点网络成功。 |
 | `sandbox.lifecycle.killed` | 既有同步销毁调用或异步 destroy handler 成功，包括原有容忍/warn-only 情况。任务入队成功不发布。 |
+| `template.lifecycle.build.started` | 构建任务被接受并转发给 CubeTemplateCenter，位于镜像拉取之前。`build_mode` 为转发构建的 `remote:<instance_type>` 或重分布构建的 `redo:<instance_type>`。 |
+| `template.lifecycle.build.completed` | 后置步骤注册 artifact 且模板达到 READY，无论构建发生在本地还是 Master 重启后resume。 |
+| `template.lifecycle.build.failed` | 所有持久化 FAILED 的路径：builder 状态回调、重启后续跑、BUILT reconciler，以及任务尚未到达 builder 就失败的情况。仅在 FAILED 行写入后发布。 |
+| `template.lifecycle.deleted` | 模板任务清理对全部目标成功，位于删除调用返回之前。 |
+| `template.lifecycle.migrated` | redo 重分布模板且任务最终 READY。失败或回滚的 redo 不发布，订阅方不会看到被撤销的迁移。 |
+| `template.lifecycle.snapshot.created` | 快照任务持久化 READY 且副本注册完成——与 `checkpointed` 同一时点，但以 `snapshot_id` 标识，便于与 `snapshot.deleted` 关联。 |
+| `template.lifecycle.snapshot.deleted` | 快照删除任务移除快照文件及其记录。 |
+| `template.lifecycle.snapshot.rollback.completed` | 回滚任务提交新 generation。 |
+| `volume.lifecycle.created` | 卷插件创建后端且卷记录落库。`event_data.volume_driver` 标明插件名。 |
+| `volume.lifecycle.deleted` | 卷插件销毁后端且记录被硬删除。仍被节点挂载使用的卷会在两步之前被拒绝，因此不发布事件。 |
+
+模板、快照和卷事件是 Cube 的扩展：E2B 只定义了 sandbox 生命周期，原生 E2B
+消费端不会订阅它们。三者分别以 `sandbox_template_id`、`snapshot_id`、`volume_id`
+标识，缺失标识的事件在 restore 时会被拒绝。
 
 XFS 与 S3 的 pause/checkpoint 都表示**本地成功**，不表示 S3 上传完成、远端耐久性或
 跨节点恢复能力。后续上传状态不撤回或重复事件。创建、暂停、READY 写入或最终 resume

@@ -2,7 +2,7 @@
 
 [中文](README_zh.md) · [User guide](../../../docs/guide/webhooks.md)
 
-CubeMaster observes six lifecycle success boundaries and sends JSON POSTs to
+CubeMaster observes sixteen lifecycle success boundaries and sends JSON POSTs to
 static cluster-wide subscriptions. Notifications are disabled by default, using
 bounded process-local memory and finite retries. Restart/crash can lose pending
 work; there is no persistence, takeover, ordering or exactly-once guarantee.
