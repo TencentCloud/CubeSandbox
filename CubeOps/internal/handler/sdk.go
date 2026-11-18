@@ -209,10 +209,10 @@ func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
 		case 400:
 			logging.G(ctx).Errorf("sdk: cubemaster bad request: %s", msg)
 			httputil.WriteError(c, http.StatusBadRequest, msg)
-		case 130490:
-			// Sandbox is pausing — retryable. R11 fix: must be 503, not 502.
+		case 130490, 130591:
+			// A lifecycle operation or resume rollback is pending.
 			c.Header("Retry-After", "2")
-			logging.G(ctx).Errorf("sdk: cubemaster sandbox pausing: %s", msg)
+			logging.G(ctx).Errorf("sdk: cubemaster lifecycle operation pending: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		case 130589:
 			// Resume failed — retryable. R11 fix: must be 503, not 502.
@@ -277,10 +277,10 @@ func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
 		case 130409:
 			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
 			httputil.WriteError(c, http.StatusConflict, msg)
-		case 130490:
-			// R11 fix: pausing → 503 + Retry-After, not 502.
+		case 130490, 130591:
+			// A lifecycle operation or resume rollback is pending.
 			c.Header("Retry-After", "2")
-			logging.G(ctx).Errorf("sdk: cubemaster sandbox pausing: %s", msg)
+			logging.G(ctx).Errorf("sdk: cubemaster lifecycle operation pending: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		case 130589:
 			// R11 fix: resume failed → 503 + Retry-After, not 502.
@@ -434,10 +434,10 @@ func (h *SDKHandler) GetSandbox(c *gin.Context) {
 		case 130409:
 			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
 			httputil.WriteError(c, http.StatusConflict, msg)
-		case 130490:
-			// R11 fix: pausing → 503 + Retry-After, not 502.
+		case 130490, 130591:
+			// A lifecycle operation or resume rollback is pending.
 			c.Header("Retry-After", "2")
-			logging.G(ctx).Errorf("sdk: cubemaster sandbox pausing: %s", msg)
+			logging.G(ctx).Errorf("sdk: cubemaster lifecycle operation pending: %s", msg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
 		case 130589:
 			// R11 fix: resume failed → 503 + Retry-After, not 502.
