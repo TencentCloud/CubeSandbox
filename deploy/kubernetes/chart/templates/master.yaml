@@ -15,13 +15,19 @@ spec:
       app.kubernetes.io/component: master
   template:
     metadata:
-      annotations:
-        checksum/runtime-config: {{ tpl (.Files.Get "files/cube-master/conf.yaml") . | sha256sum }}
       labels:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master
       annotations:
+        # cube.masterConf is the rendered files/cube-master/conf.yaml, so this
+        # alone covers every config edit; a second hash of the same template
+        # would only duplicate it.
         checksum/config: {{ include "cube.masterConf" . | sha256sum | quote }}
+        # The admin token arrives as an env secretKeyRef, which a running
+        # container reads only at start. Without this the token could rotate in
+        # the Secret with no pod pick it up, or be picked up by only the pod
+        # that happened to restart, leaving CubeMaster and CubeProxy disagreeing.
+        checksum/admin-token: {{ include "cube.adminToken" . | sha256sum | quote }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -48,6 +54,16 @@ spec:
               value: /data/CubeMaster/storage
             - name: CUBE_NODE_IPS
               value: {{ join "," .Values.controlPlane.master.nodeIPs | quote }}
+            # CubeMaster sends this token when it asks CubeProxy to drop a
+            # sandbox's cached route after resume. It must come from the same
+            # release Secret CubeProxy reads: conf.yaml is rendered separately,
+            # so baking a generated token into it would diverge on a fresh
+            # install and every resume purge would get 403.
+            - name: CUBE_PROXY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: cube-admin-token
             # CubeTemplateCenter's address, injected as an environment variable
             # rather than rendered into conf.yaml: an address is a deployment
             # fact, and this is the exact counterpart of CUBE_MASTER_ADDR on the

@@ -177,14 +177,11 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 
 ### Resume 后的 CubeProxy 缓存
 
-Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由。CubeMaster 随后 best-effort 调用 CubeProxy `POST /admin/backend_cache/delete` 清理 `local_cache`，避免流量仍打到 pause 前的旧 IP（同机 504）。
+Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由。CubeMaster 随后调用 CubeProxy 的 `POST /admin/backend_cache/delete` 清理 `local_cache`，避免流量继续打到 pause 前的旧 IP；清理失败时，Resume 会直接返回错误。
 
-要使该清理成功，**CubeMaster 与 CubeProxy 必须配置相同的 admin token**：
+**CubeMaster 与 CubeProxy 必须配置相同的 admin token**：Helm 安装由 Chart 自动完成，手写部署需自行对齐。两端不一致时清理会返回 **403**，旧路由不会自行过期，沙箱将一直不可达。
 
-- CubeMaster：`cubeproxy.admin_token`（请求头 `X-Cube-Admin-Token`）
-- CubeProxy：`nginx.conf` 中的 `$cube_admin_token`（见 `CubeProxy/lua/admin_phase.lua`）
-
-若只配一侧或两端不一致，清理会返回 **403**：Redis 路由已正确，但 CubeProxy 可能继续使用过期缓存直至条目过期。使用 Resume 时请在部署／Helm 中对齐该 token。
+轮换 `lifecycleManager.adminToken` 时，master、proxy、lifecycle-manager 会在同一次 `helm upgrade` 中依次滚动；滚动完成前发起的 Resume 可能因旧 token 仍被校验而失败。请等滚动结束后重试。
 
 ## 平台自动暂停 / 自动恢复
 

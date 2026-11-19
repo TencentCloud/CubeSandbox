@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,11 @@ import (
 const (
 	backendCacheDeletePath = "/admin/backend_cache/delete"
 	defaultAdminTimeout    = 3 * time.Second
+	// envAdminToken is the runtime form of CubeProxyConf.AdminToken. The Helm
+	// chart passes the release Secret directly so CubeMaster and CubeProxy use
+	// one value even on a fresh install, where Helm's per-file rendering cannot
+	// share a generated yaml value.
+	envAdminToken = "CUBE_PROXY_ADMIN_TOKEN"
 	// purgeAttempts covers a replica reloading or a blipped connection.
 	// Past that the endpoint is not going to answer and waiting only
 	// delays telling the caller.
@@ -230,10 +236,8 @@ func postBackendCacheDelete(ctx context.Context, adminURL, sandboxID string) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if cfg := config.GetConfig(); cfg != nil && cfg.CubeProxyConf != nil {
-		if tok := strings.TrimSpace(cfg.CubeProxyConf.AdminToken); tok != "" {
-			req.Header.Set("X-Cube-Admin-Token", tok)
-		}
+	if tok := resolveAdminToken(os.Getenv(envAdminToken), config.GetConfig()); tok != "" {
+		req.Header.Set("X-Cube-Admin-Token", tok)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -252,4 +256,17 @@ func postBackendCacheDelete(ctx context.Context, adminURL, sandboxID string) err
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return nil
+}
+
+// resolveAdminToken prefers the deployment-provided environment value over the
+// yaml setting. The chart injects the release Secret through the environment;
+// a hand-written conf.yaml keeps working when the variable is unset.
+func resolveAdminToken(envValue string, cfg *config.Config) string {
+	if tok := strings.TrimSpace(envValue); tok != "" {
+		return tok
+	}
+	if cfg != nil && cfg.CubeProxyConf != nil {
+		return strings.TrimSpace(cfg.CubeProxyConf.AdminToken)
+	}
+	return ""
 }

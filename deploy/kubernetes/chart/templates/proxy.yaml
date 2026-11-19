@@ -149,6 +149,10 @@ spec:
         app.kubernetes.io/component: cube-proxy
       annotations:
         checksum/entrypoint: {{ $proxyEntrypointChecksum | quote }}
+        # The admin token arrives as an env secretKeyRef, which a running
+        # container reads only at start; roll on rotation so the proxy and
+        # CubeMaster never end up validating different tokens.
+        checksum/admin-token: {{ include "cube.adminToken" . | sha256sum | quote }}
         {{- if and (eq .Values.cubeProxy.tls.mode "selfSigned") $rotateOnSanChange }}
         checksum/proxy-cert: {{ $certChecksum | quote }}
         {{- end }}
