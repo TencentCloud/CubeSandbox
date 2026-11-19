@@ -6,7 +6,9 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -138,10 +141,18 @@ func TestResumeQuotaRejection(t *testing.T) {
 		usedMemMB, needMemMB, memQuotaMB, usedCPUMilli, needCPUMilli, cpuQuota int64
 		wantReject                                                             bool
 	}{
-		{"fits", 2048, 4096, 8192, 1000, 2000, 8000, false},
+		{"fits with headroom", 2048, 4096, 8192, 1000, 2000, 8000, false},
 		{"mem exceeds quota", 6000, 4096, 8192, 0, 0, 0, true},
 		{"cpu exceeds quota", 0, 0, 0, 7000, 2000, 8000, true},
-		{"exact fit is allowed", 4096, 4096, 8192, 6000, 2000, 8000, false},
+		// The boundary matches the scheduler filters (memfilter.go /
+		// cpufilter.go reject when free <= need): filling the node exactly is
+		// rejected, so an allocation an ordinary create is refused for can
+		// never be admitted as a resume (#2042's baseline: the 4th create of
+		// 6144+2048 vs quota 8192 is rejected, and so is the resume).
+		{"exact fill is rejected (mem)", 4096, 4096, 8192, 6000, 1000, 8000, true},
+		{"exact fill is rejected (cpu)", 1000, 1000, 8192, 6000, 2000, 8000, true},
+		{"issue #2042 boundary: 6144 + 2048 vs 8192", 6144, 2048, 8192, 0, 0, 0, true},
+		{"one MB under the boundary still fits", 6143, 2048, 8192, 0, 0, 0, false},
 		{"unbounded quota never rejects", 999999, 999999, 0, 999999, 999999, 0, false},
 	}
 	for _, tc := range cases {
@@ -186,7 +197,14 @@ func TestAdmitResumeNoOpWhenPolicyDisabled(t *testing.T) {
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{}}}
 	sb := sandboxWithResourceForTest("sb", cubeboxstore.Status{PausedAt: time.Now().UnixNano()}, "1000m", "2Gi", 1, 0, 0)
 
-	require.Nil(t, s.admitResume(context.Background(), sb))
+	release, rejected := s.admitResume(context.Background(), sb)
+	require.Nil(t, rejected)
+	require.NotNil(t, release, "admitResume must always return a safe-to-defer release")
+	release()
+	// Policy off registers nothing, so the ledger stays empty.
+	memMB, cpuMilli := s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB)
+	assert.Zero(t, cpuMilli)
 }
 
 // TestResumeDemandUsesBytePrecision locks the fix for the admission/accounting
@@ -252,11 +270,13 @@ func TestAdmitResumeRejectsWhenResourceMetadataIsMissing(t *testing.T) {
 	sb := newCubeboxWithStatusForTest("sb-no-resource", cubeboxstore.Status{PausedAt: time.Now().UnixNano()})
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
 
-	ret := s.admitResume(context.Background(), sb)
+	release, ret := s.admitResume(context.Background(), sb)
 
 	require.NotNil(t, ret)
 	assert.Equal(t, errorcode.ErrorCode_Conflict, ret.RetCode)
 	assert.Contains(t, ret.RetMsg, "missing resource metadata")
+	require.NotNil(t, release)
+	release() // no-op on rejection; must be safe to call
 }
 
 func TestAdmitResumeRejectsWhenCapacityExceeded(t *testing.T) {
@@ -277,10 +297,14 @@ func TestAdmitResumeRejectsWhenCapacityExceeded(t *testing.T) {
 	}, "4000m", "8Gi", 4, 0, 0)
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
 
-	ret := s.admitResume(context.Background(), sb)
+	release, ret := s.admitResume(context.Background(), sb)
 
 	require.NotNil(t, ret, "admitResume must reject when post-resume demand exceeds quota")
 	assert.Equal(t, errorcode.ErrorCode_Conflict, ret.RetCode)
+	release()
+	// A rejected resume must not leave a phantom reservation behind.
+	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB, "rejection must not register a reservation")
 }
 
 func TestResumeLockedSkipsAdmissionWhenFlagSet(t *testing.T) {
@@ -392,11 +416,14 @@ func TestAdmitPausedReplaceRejectsResumeCreateOverQuota(t *testing.T) {
 	sb.SandboxID = "sb-resume-create"
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
 
-	rejected := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-resume-create"))
+	release, rejected := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-resume-create"))
 
 	require.NotNil(t, rejected, "resume Create must be rejected when it exceeds the node quota")
 	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected.RetCode)
 	assert.Contains(t, rejected.RetMsg, "mem quota")
+	release()
+	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB, "a rejected resume must not register a reservation")
 }
 
 func TestAdmitPausedReplaceAllowsWhenResumeFits(t *testing.T) {
@@ -418,8 +445,25 @@ func TestAdmitPausedReplaceAllowsWhenResumeFits(t *testing.T) {
 	sb.SandboxID = "sb-fits"
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
 
-	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-fits")),
-		"a resume that fits the node quota must be admitted")
+	release, rejected := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-fits"))
+	assert.Nil(t, rejected, "a resume that fits the node quota must be admitted")
+	require.NotNil(t, release)
+
+	// While the reservation is held, the admitted demand is visible to the
+	// ledger, so a second resume of the same size no longer fits the 16Gi node
+	// that already carries this 8Gi reservation.
+	memMB, cpuMilli := s.cubeboxMgr.resumeReservations.totals()
+	assert.Equal(t, int64(8192), memMB, "admission must reserve the sandbox's full memory quota")
+	assert.Equal(t, int64(4000), cpuMilli, "admission must reserve the sandbox's full cpu quota")
+
+	release()
+	memMB, cpuMilli = s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB, "release must drop the reservation")
+	assert.Zero(t, cpuMilli)
+	// release is idempotent: a second call must not panic or go negative.
+	release()
+	memMB, _ = s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB)
 }
 
 func TestAdmitPausedReplaceNoOpWhenPolicyDisabled(t *testing.T) {
@@ -441,7 +485,12 @@ func TestAdmitPausedReplaceNoOpWhenPolicyDisabled(t *testing.T) {
 	sb.SandboxID = "sb-policy-off"
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
 
-	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-policy-off")))
+	release, rejected := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-policy-off"))
+	assert.Nil(t, rejected)
+	require.NotNil(t, release)
+	release()
+	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB, "policy off must not reserve anything")
 }
 
 func TestAdmitPausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) {
@@ -469,14 +518,61 @@ func TestAdmitPausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) 
 	running.SandboxID = "sb-running"
 	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: paused}}}
 
-	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("")),
-		"an ordinary create without the desired-id annotation is not a replacement")
-	assert.Nil(t, s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-elsewhere")),
-		"a desired id this node does not hold is a cross-node or fresh create")
+	release, rejected := s.admitPausedReplace(context.Background(), pausedReplaceRequest(""))
+	assert.Nil(t, rejected, "an ordinary create without the desired-id annotation is not a replacement")
+	release()
+	release, rejected = s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-elsewhere"))
+	assert.Nil(t, rejected, "a desired id this node does not hold is a cross-node or fresh create")
+	release()
 
 	sRunning := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: running}}}
-	assert.Nil(t, sRunning.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-running")),
+	release, rejected = sRunning.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-running"))
+	assert.Nil(t, rejected,
 		"a live sandbox collision is rejected downstream as already exists, never here")
+	release()
+	memMB, _ := sRunning.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB, "non-replacements must not reserve anything")
+}
+
+// TestAdmitPausedReplaceFailsClosedOnStoreError covers the fail-closed
+// requirement: with the release-ratio policy on, a real store error (not
+// not-found) leaves the local tombstone state UNKNOWN, and admission must
+// reject rather than silently skip the quota gate. Not-found must keep the
+// no-op behaviour (cross-node restore / fresh create).
+func TestAdmitPausedReplaceFailsClosedOnStoreError(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 4000
+	hostConf.Quota.Mem = "4Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// A store I/O failure must fail closed: the tombstone may or may not
+	// exist, and admitting blindly is exactly the silent bypass #2042 asks to
+	// prevent.
+	storeErr := errors.New("boltdb: unexpected EOF")
+	sErr := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{getErr: storeErr}}}
+	release, rejected := sErr.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-unknown"))
+	require.NotNil(t, rejected, "a store error under the policy must reject, not no-op")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected.RetCode)
+	assert.Contains(t, rejected.RetMsg, "cannot read the local sandbox state")
+	release()
+
+	// Not-found is not an error state: cross-node restore and fresh creates
+	// keep their no-op path.
+	sNotFound := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{
+		getErr: utils.ErrorKeyNotFound,
+	}}}
+	release, rejected = sNotFound.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-gone"))
+	assert.Nil(t, rejected, "not-found must keep the no-op (cross-node restore) behaviour")
+	release()
+	memMB, _ := sNotFound.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB)
 }
 
 // TestCreateRejectsResumeOverQuotaBeforeTheFlowRuns is the regression test for
@@ -593,4 +689,138 @@ func TestCreateRejectsResumeOverQuotaAfterPausePackageExpansion(t *testing.T) {
 	assert.Equal(t, "snap-test",
 		thinReq.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID],
 		"applyTo must re-stamp the pause snapshot id")
+}
+
+// TestConcurrentResumesDoNotBothPassQuota is the direct regression for the
+// #2042 concurrency repro: two resumes of DIFFERENT sandboxes hold different
+// per-sandbox lifecycle locks, so they reach admission in parallel. Each reads
+// the same aggregateAllocated snapshot (the two PAUSED tombstones contribute
+// 0 at ratio 1.0), and without a node-level reservation both would compute
+// 0+4096 < 8192 and pass, ending with the node filled to exactly its 8 GiB
+// quota — an allocation an ordinary create is rejected for. The ledger makes
+// check-and-register atomic, so exactly one may pass regardless of
+// interleaving.
+//
+// The goroutines call admitResume directly (the shared core admitPausedReplace
+// delegates to) so every touch of the shared fixtures — the store scan and the
+// ledger — happens inside the ledger critical section; GetStatus mutates the
+// record it is called on, and this keeps each goroutine's lazy-init writes to
+// its own tombstone. The sequential
+// TestResumeReservationBlocksSecondUntilReleased covers the full
+// admitPausedReplace path.
+func TestConcurrentResumesDoNotBothPassQuota(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 0 // isolate the memory dimension
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// Two paused tombstones each wanting the full 4 GiB back on resume
+	// (ratio 1.0, tombstones contribute nothing to used). One fits
+	// (0+4096 < 8192); the second only fits if it cannot see the first's
+	// reservation (0+4096+4096 == 8192 >= 8192).
+	tombA := sandboxWithResourceForTest("sb-a", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tombB := sandboxWithResourceForTest("sb-b", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{
+		list: []*cubeboxstore.CubeBox{tombA, tombB},
+	}}}
+
+	const rounds = 64
+	for round := 0; round < rounds; round++ {
+		results := make([]*errorcode.Ret, 2)
+		releases := make([]func(), 2)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, tomb := range []*cubeboxstore.CubeBox{tombA, tombB} {
+			wg.Add(1)
+			go func(i int, tomb *cubeboxstore.CubeBox) {
+				defer wg.Done()
+				<-start // maximize the chance both hit the gate together
+				releases[i], results[i] = s.admitResume(context.Background(), tomb)
+			}(i, tomb)
+		}
+		close(start)
+		wg.Wait()
+
+		passed := 0
+		for i := range results {
+			if results[i] == nil {
+				passed++
+				require.NotNil(t, releases[i])
+				releases[i]()
+			}
+		}
+		assert.Equal(t, 1, passed,
+			"round %d: exactly one of the two over-subscription resumes may pass", round)
+
+		memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+		require.Zero(t, memMB, "round %d: reservations must be empty after release", round)
+	}
+}
+
+// TestResumeReservationBlocksSecondUntilReleased is the deterministic companion
+// to the race above: it pins the ledger semantics without relying on goroutine
+// interleaving — while one resume holds its reservation, a second identical
+// resume that would over-subscribe the node is rejected, and once released it is
+// admitted.
+func TestResumeReservationBlocksSecondUntilReleased(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 0
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	running := sandboxWithResourceForTest("sb-running", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	}, "0m", "5Gi", 0, 0, 0)
+	running.SandboxID = "sb-running"
+	tombA := sandboxWithResourceForTest("sb-a", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "2Gi", 0, 0, 0)
+	tombA.SandboxID = "sb-a"
+	tombB := sandboxWithResourceForTest("sb-b", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "2Gi", 0, 0, 0)
+	tombB.SandboxID = "sb-b"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{
+		list: []*cubeboxstore.CubeBox{running, tombA, tombB},
+	}}}
+
+	// A fits on its own: 5120 + 2048 == 7168 < 8192.
+	releaseA, rejectedA := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-a"))
+	require.Nil(t, rejectedA)
+	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	assert.Equal(t, int64(2048), memMB, "the admitted resume holds its full 2 GiB")
+
+	// With A's 2048 reserved, B sees used 5120 + reserved 2048 + need 2048 ==
+	// 9216 >= 8192 and is rejected — the concurrent repro cannot double-spend.
+	releaseB, rejectedB := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-b"))
+	require.NotNil(t, rejectedB, "the second resume must see the first's reservation")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rejectedB.RetCode)
+	releaseB()
+
+	// Once A releases (its create failed, say), B fits again.
+	releaseA()
+	memMB, _ = s.cubeboxMgr.resumeReservations.totals()
+	assert.Zero(t, memMB, "releasing A frees its reservation")
+
+	releaseB2, rejectedB2 := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-b"))
+	assert.Nil(t, rejectedB2, "after A's release the same resume fits")
+	releaseB2()
 }

@@ -148,7 +148,16 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	// may be replaced (not PAUSING — pause may still own the lifecycle lock /
 	// cleanup). Reject PAUSING and other non-paused collisions as already exists.
 	if !workflow.ReuseFor(opts).CubeboxMeta {
-		if sb, paused := pausedReplaceTarget(ctx, l.cubeboxManger, realReq); sb != nil {
+		sb, paused, resolveErr := pausedReplaceTarget(ctx, l.cubeboxManger, realReq)
+		if resolveErr != nil {
+			// Local state unknown: fail closed rather than guess. Treating a
+			// store error as "no tombstone" would recreate over a live or
+			// pausing record; PreConditionFailed is checked by the engine
+			// before failover, so the paused tombstone survives for a retry.
+			return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
+				"cannot resolve the paused sandbox to replace: %v", resolveErr)
+		}
+		if sb != nil {
 			if paused {
 				// Everything below deletes the old sandbox's records, and this
 				// row is the last place its shim identity survives: once it is

@@ -19,6 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/core/events/exchange"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	jsoniter "github.com/json-iterator/go"
@@ -302,7 +303,7 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 
 // pausedReplaceTarget resolves the local record a Create-from-pause request
 // would replace. CubeMaster sends a resume as a thin Create carrying
-// cube.master.desired_sandbox_id; when this node holds a record under that ID,
+// cube.master.desired.sandbox.id; when this node holds a record under that ID,
 // it is the tombstone the new sandbox replaces.
 //
 // sb is nil when the request is not a replacement or this node holds no record
@@ -313,21 +314,36 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // callers must reject as already-exists rather than replace: PAUSING may still
 // own the lifecycle lock and its cleanup, and a live sandbox must not be
 // touched.
+//
+// A real store error is returned as err rather than flattened into "no local
+// record": not-found genuinely means this node holds no tombstone, but an I/O
+// or corruption error means the local state is UNKNOWN, and every caller must
+// fail closed on unknown — silently treating it as "not a replacement" would
+// skip the shim gate, the quota gate and the replacement branch at once, and
+// a resume could slip past all three without a log line.
 func pausedReplaceTarget(
 	ctx context.Context,
 	mgr cubes.CubeboxAPI,
 	req *cubebox.RunCubeSandboxRequest,
-) (sb *cubeboxstore.CubeBox, paused bool) {
+) (sb *cubeboxstore.CubeBox, paused bool, err error) {
 	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
 	if desired == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	sb, err := mgr.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
-		return nil, false
+	sb, getErr := mgr.Get(ctx, desired)
+	if getErr != nil {
+		if errors.Is(getErr, utils.ErrorKeyNotFound) || errdefs.IsNotFound(getErr) {
+			// No local record for the desired id: cross-node restore or a
+			// fresh create that merely pins its id. Not a replacement.
+			return nil, false, nil
+		}
+		return nil, false, getErr
+	}
+	if sb == nil || sb.SandboxID != desired {
+		return nil, false, nil
 	}
 	st := sb.GetStatus()
-	return sb, st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED
+	return sb, st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED, nil
 }
 
 // gatePausedReplace refuses to start a resume that would replace a PAUSED
@@ -342,7 +358,13 @@ func pausedReplaceTarget(
 // failing later would strand those allocations and, via failover, destroy the
 // paused sandbox the user asked to resume.
 func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
-	sb, paused := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+	sb, paused, err := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+	if err != nil {
+		// Local state unknown: fail closed. Proceeding would skip the
+		// eligibility wait for a tombstone that may well exist, letting the
+		// replacement delete the row while the old runtime still lives.
+		return fmt.Errorf("cannot resolve the paused sandbox to replace: %w", err)
+	}
 	if !paused {
 		// No local PAUSED tombstone to replace; live or pausing collisions are
 		// rejected by the create step as already exists.
@@ -539,8 +561,13 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	// Same reasoning as the gate above: the resume quota admission must run
 	// before the create flow allocates network/volume/cgroup, and Conflict
 	// (not a failover-triggering code) keeps the paused tombstone intact so
-	// the user can retry after freeing capacity.
-	if rejected := s.admitPausedReplace(ctx, req); rejected != nil {
+	// the user can retry after freeing capacity. The returned release func
+	// drops the node-level reservation the admission registered; deferring it
+	// here covers every exit — success (the flow's Save has folded the demand
+	// into the store aggregate), failure, panic and cancellation alike.
+	releaseReservation, rejected := s.admitPausedReplace(ctx, req)
+	defer releaseReservation()
+	if rejected != nil {
 		rsp.Ret.RetMsg = rejected.RetMsg
 		rsp.Ret.RetCode = rejected.RetCode
 		return rsp, nil

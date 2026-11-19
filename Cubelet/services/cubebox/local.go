@@ -280,6 +280,13 @@ type local struct {
 	// than a plain field. Zero — the value before that call, and the
 	// fail-closed one — means the intent never ages out. Nanoseconds.
 	shimIntentTTL atomic.Int64
+
+	// resumeReservations is the node-level admission ledger for resumes: its
+	// mutex serializes the read-check-register step of admitResume and it
+	// tracks admitted demand that aggregateAllocated cannot see yet (or whose
+	// tombstone row the create flow has already deleted). Zero value is ready
+	// to use; see resumeReservationLedger.
+	resumeReservations resumeReservationLedger
 }
 
 const (
