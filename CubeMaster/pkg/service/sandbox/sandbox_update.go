@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -148,6 +149,12 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		lockOpts.TTL = sandboxlock.PauseTTL
 	case "resume":
 		lockOpts.TTL = sandboxlock.ResumeTTL
+		// An xfs-s3 Resume may download a whole checkpoint before Cubelet
+		// answers; keep the lock for as long as this Master works on it.
+		if rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID); err == nil && rec != nil &&
+			constants.IsXFSS3Backend(rec.Backend) {
+			lockOpts.Renew = true
+		}
 	}
 	err := sandboxlock.WithLock(ctx, req.SandboxID, lockOpts, func(ctx context.Context) error {
 		// Client/HTTP cancel must not abort bookkeeping or release the lock

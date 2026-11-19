@@ -42,6 +42,7 @@ func setupPauseDeleteTest(t *testing.T) *gorm.DB {
 	origDestroy := destroyOnCubelet
 	origCleanup := cleanupTemplateOnCubelet
 	origAddr := cubeletAddr
+	origList := listOnCubelet
 	Init(db)
 	cubeletAddr = func(hostIP string) string { return hostIP + ":50051" }
 	t.Cleanup(func() {
@@ -49,6 +50,7 @@ func setupPauseDeleteTest(t *testing.T) *gorm.DB {
 		destroyOnCubelet = origDestroy
 		cleanupTemplateOnCubelet = origCleanup
 		cubeletAddr = origAddr
+		listOnCubelet = origList
 	})
 	return db
 }
@@ -427,4 +429,84 @@ func TestPausedCleanupRetryRepeatsNodeOperation(t *testing.T) {
 	handled, err = TryDeletePaused(context.Background(), "req", "sb", "127.0.0.1")
 	require.False(t, handled)
 	require.NoError(t, err)
+}
+
+// seedPinnedXFSS3Binding is a READY xfs-s3 binding on 10.0.0.8 whose last
+// Resume went to target and has no known outcome.
+func seedPinnedXFSS3Binding(t *testing.T, db *gorm.DB, target string) {
+	t.Helper()
+	require.NoError(t, db.Table(constants.PauseSnapshotTableName).Create(&models.PauseSnapshotRecord{
+		SnapshotID: "snap-pinned00000000000000001", SandboxID: "sb-pinned", NodeID: "node-1", NodeIP: "10.0.0.8",
+		InstanceType: cubebox.InstanceType_cubebox.String(), Status: statusReady, Backend: constants.SnapshotBackendXFSS3,
+		ResumeTarget: target, ResumeState: ResumeInflight, ResumeAttempt: 2,
+	}).Error)
+}
+
+func listAnswer(state cubebox.ContainerState, err error) func(context.Context, string, *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
+	return func(_ context.Context, _ string, req *cubebox.ListCubeSandboxRequest) (*cubebox.ListCubeSandboxResponse, error) {
+		if err != nil {
+			return nil, err
+		}
+		if state == cubebox.ContainerState_CONTAINER_UNKNOWN {
+			return &cubebox.ListCubeSandboxResponse{}, nil
+		}
+		return &cubebox.ListCubeSandboxResponse{Items: []*cubebox.CubeSandbox{{
+			Id:         req.GetId(),
+			Containers: []*cubebox.Container{{Id: req.GetId(), State: state}},
+		}}}, nil
+	}
+}
+
+func TestTryDeletePausedDestroysWhatAnUnresolvedResumeStarted(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPinnedXFSS3Binding(t, db, "10.0.0.9")
+	destroys, cleans := mockCubeletOK(t)
+	listOnCubelet = listAnswer(cubebox.ContainerState_CONTAINER_RUNNING, nil)
+
+	handled, err := TryDeletePaused(context.Background(), "req", "sb-pinned", "10.0.0.8")
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.Len(t, *destroys, 2)
+	require.Equal(t, "10.0.0.9:50051", (*destroys)[0].addr, "the instance on the attempt's node goes first")
+	require.Empty(t, (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone], "a live instance needs a full destroy")
+	require.Equal(t, "10.0.0.8:50051", (*destroys)[1].addr)
+	require.Equal(t, []string{"10.0.0.9:50051", "10.0.0.8:50051"}, []string{(*cleans)[0].addr, (*cleans)[1].addr},
+		"both nodes drop their copy of the package")
+	_, err = GetBySandbox(context.Background(), "sb-pinned")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestTryDeletePausedKeepsTheBindingWhenTheAttemptNodeCannotBeAsked(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPinnedXFSS3Binding(t, db, "10.0.0.9")
+	destroys, cleans := mockCubeletOK(t)
+	listOnCubelet = listAnswer(cubebox.ContainerState_CONTAINER_UNKNOWN, errors.New("connection refused"))
+
+	handled, err := TryDeletePaused(context.Background(), "req", "sb-pinned", "10.0.0.8")
+	require.Error(t, err)
+	require.True(t, handled)
+	require.Empty(t, *destroys)
+	require.Empty(t, *cleans)
+	rec, err := GetBySandbox(context.Background(), "sb-pinned")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.9", PinnedResumeTarget(rec))
+}
+
+func TestTryDeletePausedSkipsAnAttemptNodeWithoutTheSandbox(t *testing.T) {
+	for name, state := range map[string]cubebox.ContainerState{
+		"absent":              cubebox.ContainerState_CONTAINER_UNKNOWN,
+		"same-node tombstone": cubebox.ContainerState_CONTAINER_PAUSED,
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := setupPauseDeleteTest(t)
+			seedPinnedXFSS3Binding(t, db, "10.0.0.8")
+			destroys, _ := mockCubeletOK(t)
+			listOnCubelet = listAnswer(state, nil)
+
+			_, err := TryDeletePaused(context.Background(), "req", "sb-pinned", "10.0.0.8")
+			require.NoError(t, err)
+			require.Len(t, *destroys, 1, "only the usual tombstone delete")
+			require.Equal(t, "true", (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone])
+		})
+	}
 }

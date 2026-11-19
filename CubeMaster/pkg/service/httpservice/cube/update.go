@@ -72,6 +72,35 @@ func handleUpdateAction(c *gin.Context) {
 	common.WriteAPI(c, rsp)
 }
 
+// handleResumePinReleaseAction serves POST /cube/sandbox/resume-pin/release,
+// the operator's release of an xfs-s3 resume attempt pinned to a node that
+// is down for good.
+func handleResumePinReleaseAction(c *gin.Context) {
+	rt := CubeLog.GetTraceInfo(c.Request.Context())
+	rt.RetCode = -1
+	rsp := &types.Res{Ret: &types.Ret{RetCode: -1, RetMsg: http.StatusText(http.StatusNotFound)}}
+	req := &types.ReleaseResumePinRequest{}
+	if err := utils.DecodeHttpBody(c.Request.Body, req); err != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "请求体解析失败"
+		common.WriteAPI(c, rsp)
+		return
+	}
+	if req.RequestID == "" {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = "requestID is empty"
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		common.WriteAPI(c, rsp)
+		return
+	}
+	rt.RequestID = req.RequestID
+	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
+		"RequestId": req.RequestID,
+	}))
+	rsp = sandbox.ReleaseResumePin(CubeLog.WithRequestTrace(ctx, rt), req)
+	common.WriteAPI(c, rsp)
+}
+
 // handleSandboxNetworkAction serves POST /cube/sandbox/network, which replaces
 // the egress policy of a running sandbox.
 func handleSandboxNetworkAction(c *gin.Context) {

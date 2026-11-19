@@ -90,6 +90,9 @@ type Record struct {
 	RemoteStatus        string
 	OriginHostFactsJSON string
 	ExportUUIDs         string
+	ResumeTarget        string
+	ResumeState         string
+	ResumeAttempt       int
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -381,6 +384,9 @@ func recordFromModel(row *models.PauseSnapshotRecord) *Record {
 		RemoteStatus:        row.RemoteStatus,
 		OriginHostFactsJSON: row.OriginHostFactsJSON,
 		ExportUUIDs:         row.ExportUUIDs,
+		ResumeTarget:        strings.TrimSpace(row.ResumeTarget),
+		ResumeState:         strings.TrimSpace(row.ResumeState),
+		ResumeAttempt:       row.ResumeAttempt,
 		CreatedAt:           row.CreatedAt,
 		UpdatedAt:           row.UpdatedAt,
 	}

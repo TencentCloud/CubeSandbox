@@ -58,6 +58,12 @@ type PauseSnapshotRecord struct {
 	RemoteStatus        string    `json:"remote_status" gorm:"column:remote_status"`
 	OriginHostFactsJSON string    `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
 	ExportUUIDs         string    `json:"export_uuids" gorm:"column:export_uuids"`
+	// ResumeTarget/ResumeState/ResumeAttempt record the latest Resume sent
+	// for this binding (xfs-s3): while it is inflight, Resume stays on
+	// ResumeTarget.
+	ResumeTarget  string `json:"resume_target" gorm:"column:resume_target"`
+	ResumeState   string `json:"resume_state" gorm:"column:resume_state"`
+	ResumeAttempt int    `json:"resume_attempt" gorm:"column:resume_attempt"`
 }
 
 func (PauseSnapshotRecord) TableName() string {

@@ -79,7 +79,8 @@ func resolvePersistedCreateBackend(req *sandboxtypes.CreateCubeSandboxReq) (stri
 
 func isPinnedSnapshotBackend(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case constants.SnapshotBackendXFS, constants.SnapshotBackendS3, constants.SnapshotBackendJFS:
+	case constants.SnapshotBackendXFS, constants.SnapshotBackendS3, constants.SnapshotBackendJFS,
+		constants.SnapshotBackendXFSS3:
 		return true
 	default:
 		return false

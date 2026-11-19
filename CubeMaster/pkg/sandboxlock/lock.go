@@ -52,6 +52,9 @@ const (
 	// unlockScript deletes KEYS[1] only when its value still equals ARGV[1]
 	// (this holder's token). Returns 1 if deleted, 0 if ownership was lost.
 	unlockScript = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+	// renewScript extends KEYS[1] to ARGV[2] seconds only while it still
+	// holds this holder's token. Returns 1 if extended, 0 if ownership was lost.
+	renewScript = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("EXPIRE", KEYS[1], ARGV[2]) else return 0 end`
 )
 
 var (
@@ -72,6 +75,10 @@ type Options struct {
 	// Value is an optional debug prefix stored with the random lock token
 	// (e.g. "pause"). Ownership always uses a per-acquire UUID suffix.
 	Value string
+	// Renew keeps extending the TTL while fn runs, for operations whose
+	// length the TTL cannot bound (an xfs-s3 Resume downloads a whole
+	// checkpoint first). The TTL then only covers a holder that died.
+	Renew bool
 }
 
 // WithLock waits for the per-sandbox op lock, runs fn, then token-safe unlock.
@@ -117,7 +124,50 @@ func withLock(ctx context.Context, r doer, key, token string, opts Options, fn f
 			log.G(ctx).Warnf("sandboxlock: unlock %s failed: %v", key, err)
 		}
 	}()
+	if opts.Renew {
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			renewWhileHeld(ctx, r, key, token, opts.TTL, stop)
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+	}
 	return fn(ctx)
+}
+
+// renewWhileHeld extends the lock every third of its TTL until stop closes
+// or the lock turns out to belong to someone else.
+func renewWhileHeld(ctx context.Context, r doer, key, token string, ttl time.Duration, stop <-chan struct{}) {
+	ttlSec := int(ttl.Seconds())
+	if ttlSec < 1 {
+		ttlSec = 1
+	}
+	every := ttl / 3
+	if every <= 0 {
+		every = time.Second
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		reply, err := r.Do("EVAL", renewScript, 1, key, token, ttlSec)
+		if err != nil {
+			log.G(ctx).Warnf("sandboxlock: renew %s failed: %v", key, err)
+			continue
+		}
+		if n, ok := reply.(int64); ok && n == 0 {
+			log.G(ctx).Errorf("sandboxlock: %s is no longer held by this operation", key)
+			return
+		}
+	}
 }
 
 func unlock(r doer, key, token string) error {

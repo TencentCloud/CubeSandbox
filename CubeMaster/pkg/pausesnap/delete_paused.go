@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -21,6 +22,7 @@ import (
 var (
 	destroyOnCubelet         = cubelet.Destroy
 	cleanupTemplateOnCubelet = cubelet.CleanupTemplate
+	listOnCubelet            = cubelet.List
 	cubeletAddr              = cubelet.GetCubeletAddr
 )
 
@@ -60,6 +62,10 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 		return true, fmt.Errorf("pause snapshot %s has no source node for sandbox %s", rec.SnapshotID, sandboxID)
 	}
 
+	if err := destroyUnresolvedResume(ctx, requestID, sandboxID, rec); err != nil {
+		return true, err
+	}
+
 	addr := cubeletAddr(hostIP)
 	if isShimGonePauseSnapshot(rec.Status) {
 		if err := destroyPausedTombstone(ctx, addr, requestID, sandboxID, hostIP); err != nil {
@@ -80,6 +86,78 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 		log.G(ctx).Warnf("delete pause snap meta %s after cleanup: %v", rec.SnapshotID, err)
 	}
 	return true, nil
+}
+
+// destroyUnresolvedResume stops what an xfs-s3 Resume with an unknown
+// outcome may have started. The binding still says PAUSED, yet the sandbox
+// may run on the attempt's node; deleting only the binding and the origin's
+// tombstone would leave that instance running with nothing pointing at it.
+// The node is asked first: an instance in any state but PAUSED is destroyed,
+// and a node that cannot be asked keeps the binding so Delete can be retried.
+// A same-node attempt that never ran leaves the PAUSED tombstone, which the
+// usual path below deletes.
+func destroyUnresolvedResume(ctx context.Context, requestID, sandboxID string, rec *Record) error {
+	target := PinnedResumeTarget(rec)
+	if !constants.IsXFSS3Backend(rec.Backend) || target == "" {
+		return nil
+	}
+	addr := cubeletAddr(target)
+	listCtx, cancel := context.WithTimeout(ctx, askAttemptNodeTimeout)
+	listRsp, err := listOnCubelet(listCtx, addr, &cubebox.ListCubeSandboxRequest{Id: &sandboxID})
+	cancel()
+	if err != nil {
+		return fmt.Errorf("sandbox %s may run on %s, where its last resume was sent, and that node cannot be asked: %w",
+			sandboxID, target, err)
+	}
+	if !HoldsLiveSandbox(listRsp, sandboxID) {
+		return nil
+	}
+	log.G(ctx).Warnf("delete paused %s: destroying the instance its unresolved resume started on %s", sandboxID, target)
+	destroyRsp, err := destroyOnCubelet(ctx, addr, &cubebox.DestroyCubeSandboxRequest{
+		RequestID: requestID,
+		SandboxID: sandboxID,
+		Annotations: map[string]string{
+			constants.CubeAnnotationsInsType: cubebox.InstanceType_cubebox.String(),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("destroy resumed sandbox %s on %s: %w", sandboxID, target, err)
+	}
+	if err := checkDestroyRet(destroyRsp, sandboxID, "destroy resumed sandbox"); err != nil {
+		return err
+	}
+	if destroyRsp != nil {
+		volrefcount.ApplyFromExtInfo(ctx, destroyRsp.GetExtInfo())
+	}
+	if target != strings.TrimSpace(rec.NodeIP) {
+		// The attempt's node also holds the checkpoint it downloaded.
+		if err := cleanupPauseSnapshotOnCubelet(ctx, addr, requestID, rec.SnapshotID, rec.Backend); err != nil {
+			log.G(ctx).Warnf("delete paused %s: package %s on %s left to orphan reconciliation: %v",
+				sandboxID, rec.SnapshotID, target, err)
+		}
+	}
+	return nil
+}
+
+// askAttemptNodeTimeout bounds asking the attempt's node what it holds.
+const askAttemptNodeTimeout = 15 * time.Second
+
+// HoldsLiveSandbox reports whether a List answer shows sandboxID in any state
+// other than PAUSED. The PAUSED tombstone a Pause leaves is the one record
+// that proves nothing runs; a record without container states counts as live.
+func HoldsLiveSandbox(listRsp *cubebox.ListCubeSandboxResponse, sandboxID string) bool {
+	for _, item := range listRsp.GetItems() {
+		if item.GetId() != sandboxID {
+			continue
+		}
+		for _, c := range item.GetContainers() {
+			if c.GetId() == sandboxID {
+				return c.GetState() != cubebox.ContainerState_CONTAINER_PAUSED
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // isShimGonePauseSnapshot reports whether the sandbox process is already
