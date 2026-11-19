@@ -213,7 +213,11 @@ var (
 // because the slots are created with an empty CPU spec.
 //
 // Opt-in via enable_numa_affinity. A single-NUMA host gains nothing from the
-// v2 pool, so the setting is ignored there and the v1 pool stays in use.
+// v2 pool, so the setting is ignored there and the v1 pool stays in use. The
+// count is the one from the NUMA sysfs, so a node without CPUs counts as well:
+// a host with one CPU node and one memory-only (CXL / PMEM) node passes this
+// check and is then rejected by the bootstrap, because that node cannot be
+// bound and the switch has no per-node opt-out (see initPoolV2Late).
 func (c *Config) NumaAffinityEnabled() bool {
 	if c == nil || !c.EnableNumaAffinity {
 		return false
@@ -406,7 +410,8 @@ func (p *cgPool) initPoolV2Late() error {
 			// off is the supported configuration there, and this error is how the
 			// operator is told, instead of the node reporting ready with a pool
 			// that binds nothing.
-			return fmt.Errorf("cgroup pool v2 init: numa%d has no cpus to bind (cpulist is empty)", numaNode.NodeId)
+			return fmt.Errorf("cgroup pool v2 init: numa%d has no cpus to bind (cpulist is empty; "+
+				"enable_numa_affinity has to stay off on a host with such a node)", numaNode.NodeId)
 		}
 		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
 		createErr := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId)
