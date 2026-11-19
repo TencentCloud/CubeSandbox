@@ -14,6 +14,10 @@ services:
     command:
       - --default-authentication-plugin=mysql_native_password
       - --skip-name-resolve
+      # --skip-log-bin prevents binlogs from filling the host disk(MYSQL_VOLUME ).
+      #  External instances are unaffected;
+      # keep binlog enabled there only if replication/PITR is needed.
+      - --skip-log-bin
     healthcheck:
       test:
         [
