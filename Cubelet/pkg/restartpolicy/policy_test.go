@@ -73,14 +73,36 @@ func TestBackoffDelayCaps(t *testing.T) {
 	}
 }
 
-func TestResetCount(t *testing.T) {
-	b := Backoff{StableDuration: time.Minute}
+func TestStable(t *testing.T) {
 	now := time.Now()
-	if b.ResetCount(now.Add(-time.Second).UnixNano(), now) {
-		t.Fatal("too soon")
+	b := Backoff{StableDuration: time.Minute}
+
+	cases := []struct {
+		name        string
+		stableSince int64
+		want        bool
+	}{
+		{"too soon", now.Add(-time.Second).UnixNano(), false},
+		{"window elapsed", now.Add(-2 * time.Minute).UnixNano(), true},
+		// The boundary must be inclusive: a run that has been up exactly
+		// StableDuration is stable. The e2e test sleeps stableDuration+2s and
+		// expects a reset, so an off-by-one here would be user visible.
+		{"exactly at window", now.Add(-time.Minute).UnixNano(), true},
+		{"one nanosecond short", now.Add(-time.Minute + time.Nanosecond).UnixNano(), false},
+		// Unknown anchor: never guess, or a row written before the anchor
+		// existed would clear its streak immediately on upgrade.
+		{"zero anchor", 0, false},
+		{"negative anchor", -1, false},
 	}
-	if !b.ResetCount(now.Add(-2*time.Minute).UnixNano(), now) {
-		t.Fatal("stable window elapsed")
+	for _, c := range cases {
+		if got := b.Stable(c.stableSince, now); got != c.want {
+			t.Errorf("%s: Stable = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// StableDuration 0 disables the reset entirely.
+	if (Backoff{}).Stable(now.Add(-time.Hour).UnixNano(), now) {
+		t.Error("zero StableDuration must disable the reset")
 	}
 }
 

@@ -309,7 +309,7 @@ A create request can set `restartPolicy`. The meaning matches Kubernetes `restar
 
 A restart keeps the disk, the network, the volume and host mounts, and the sandbox ID, then cold-starts. Memory is not kept.
 
-Repeated failures wait 10 seconds, then double, capped at 300 seconds; after 10 minutes of stability the restart count resets. The restart limit is `restartBackoff.maxRestarts` (default `0` means unlimited); a global cap can be set with `cubelet_conf.max_restarts_cap` (once set, even `0` is tightened to that cap). After the limit the sandbox stops restarting and is not brought up again, but it still counts toward the node's `MvmNum` quota until idle timeout or an explicit destroy.
+Repeated failures wait 10 seconds, then double, capped at 300 seconds; after 10 minutes of stability the restart count resets. "Stability" is measured from the moment the current run started being up -- a sandbox is created, restarted successfully, or resumed from a pause. A **failed** restart attempt does not restart that clock, so a crash loop cannot renew its own budget. The reset is applied by the node as soon as the window elapses; it does not wait for the next exit. The restart limit is `restartBackoff.maxRestarts` (default `0` means unlimited); a global cap can be set with `cubelet_conf.max_restarts_cap` (once set, even `0` is tightened to that cap). After the limit the sandbox stops restarting and is not brought up again, but it still counts toward the node's `MvmNum` quota until idle timeout or an explicit destroy. Restarting cubelet does not revive a sandbox that already reached the limit: the stable-period reset only ever returns the retry budget, it never takes the decision to start a sandbox that the policy already gave up on.
 
 ### Liveness probe
 

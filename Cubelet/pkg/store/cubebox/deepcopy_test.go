@@ -262,3 +262,46 @@ func TestNilDeepCopy(t *testing.T) {
 		t.Errorf("DeepCopy of nil StatusStorage should return nil")
 	}
 }
+
+// TestCubeBoxDeepCopyKeepsRestartBookkeeping guards every restart field that
+// Store.Sync serialises. DeepCopy copies Metadata field by field, so a field
+// left out is silently dropped from the bolt row: the value looks right in
+// memory and disappears after a restart. StableSince in particular anchors the
+// stability window, so losing it would stop a sandbox's streak from ever
+// clearing.
+func TestCubeBoxDeepCopyKeepsRestartBookkeeping(t *testing.T) {
+	original := &CubeBox{
+		Metadata: Metadata{
+			ID:                      "restart-fields",
+			RestartCount:            3,
+			LastRestartAt:           111,
+			LastSuccessfulRestartAt: 222,
+			LastFailedRestartAt:     333,
+			LastExitCode:            9,
+			LastExitReason:          "Error",
+			RestartState:            "BackOff",
+			NextRestartAt:           444,
+			StatusSeq:               55,
+			DestroyFailCount:        2,
+			StableSince:             666,
+		},
+	}
+
+	copied := original.DeepCopy()
+	if copied.StableSince != original.StableSince {
+		t.Fatalf("StableSince = %d, want %d", copied.StableSince, original.StableSince)
+	}
+	// Spelled out so a future added field fails this test until it is handled.
+	if copied.RestartCount != 3 || copied.LastRestartAt != 111 ||
+		copied.LastSuccessfulRestartAt != 222 || copied.LastFailedRestartAt != 333 ||
+		copied.LastExitCode != 9 || copied.LastExitReason != "Error" ||
+		copied.RestartState != "BackOff" || copied.NextRestartAt != 444 ||
+		copied.StatusSeq != 55 || copied.DestroyFailCount != 2 {
+		t.Fatalf("restart bookkeeping not preserved: %+v", copied.Metadata)
+	}
+	// The copy must be detached, not an alias.
+	copied.StableSince = 0
+	if original.StableSince != 666 {
+		t.Fatal("DeepCopy aliased the original")
+	}
+}

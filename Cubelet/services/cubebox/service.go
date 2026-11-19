@@ -228,6 +228,7 @@ func init() {
 			restarts.bind(s)
 			restarts.Recover()
 			restarts.startStatusReporter()
+			restarts.startStabilizer()
 
 			go func() {
 				CubeLog.Info("Start subscribing containerd event")
