@@ -292,13 +292,18 @@ func TestRestartPinsTheHighestNumaNode(t *testing.T) {
 
 func TestRestartRejectsNumaNodePastTheLastOne(t *testing.T) {
 	restoreNumaQueries(t, 11, 12)
-	s := &service{}
+	s := &service{numaNodeIndex: 1}
 	info := &workflow.CreateContext{}
 	req := &cubebox.RunCubeSandboxRequest{
 		Annotations: map[string]string{constants.MasterAnnotationsNumaNode: "12"},
 	}
 	if err := s.setRequestResource(info, req); err == nil {
 		t.Fatal("node id past the last one was accepted")
+	}
+	// Both callers drop the error, so what stays in the context decides where
+	// the sandbox lands: the round-robin pick from index 1 (-> 2), not 0.
+	if info.NumaNode != 2 {
+		t.Fatalf("numa node %d after a rejected pin, want the round-robin 2", info.NumaNode)
 	}
 }
 

@@ -45,6 +45,12 @@ func (s *service) setRequestResource(createInfo *workflow.CreateContext, reqInfo
 				// highest node is a valid pin: pkg/numa rejects a host whose node
 				// ids are not 0..max.
 				if numaNode < 0 || numaNode > int32(numaMaxNodeID()) {
+					// Both callers drop this error, so what is left in the
+					// context is what the sandbox ends up with. Leaving it at 0
+					// would pile every mis-annotated sandbox onto node 0 once
+					// the switch makes the node decide the cpuset, so fall back
+					// to the round-robin pick the annotation tried to override.
+					createInfo.NumaNode = s.getNextNumaNode()
 					return fmt.Errorf("invalid numa node: %d", numaNode)
 				}
 
