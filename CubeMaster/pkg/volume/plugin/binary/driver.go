@@ -133,7 +133,9 @@ func (p *Plugin) Create(
 // Destroy forks the binary with --op destroy.
 func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) error {
 	if strings.ContainsRune(privateData, '\x00') {
-		return fmt.Errorf("binary plugin %q destroy: volume %q private_data must not contain NUL", p.name, volumeID)
+		return &plugin.NotStartedError{
+			Cause: fmt.Errorf("binary plugin %q destroy: volume %q private_data must not contain NUL", p.name, volumeID),
+		}
 	}
 	var resp struct {
 		Error string `json:"error"`
@@ -165,7 +167,10 @@ func (p *Plugin) execute(ctx context.Context, args ...string) ([]byte, []byte, e
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, nil, &plugin.NotStartedError{Cause: err}
+	}
+	err := cmd.Wait()
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
