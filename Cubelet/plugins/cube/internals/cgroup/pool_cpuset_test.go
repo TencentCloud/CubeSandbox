@@ -7,6 +7,7 @@ package cgroup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,6 +42,19 @@ func TestApplyCpusetFiles(t *testing.T) {
 	// A missing directory is an error: the caller must learn that the mask was
 	// never applied instead of starting with an unbound pool.
 	require.Error(t, applyCpusetFiles(filepath.Join(dir, "missing"), "0", 0))
+}
+
+// A write that the kernel does not keep would leave the slot unbound while the
+// bootstrap reports success, so the value is read back and compared.
+func TestApplyCpusetFilesRejectsSwallowedWrite(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cpuset.mems"), nil, 0644))
+	// /dev/null swallows the write, so the read-back cannot find the mask.
+	require.NoError(t, os.Symlink(os.DevNull, filepath.Join(dir, "cpuset.cpus")))
+
+	err := applyCpusetFiles(dir, "0-3", 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reads back")
 }
 
 func readCpusetFile(t *testing.T, dir, name string) string {
@@ -177,17 +191,50 @@ func TestInitPoolV2LateStrictness(t *testing.T) {
 
 // A single-NUMA host gains nothing from the per-NUMA pool, and that fallback is
 // what keeps existing non-NUMA deployments on the v1 pool.
-func TestNumaAffinityEnabledSingleNumaHost(t *testing.T) {
+func TestNumaAffinityEnabled(t *testing.T) {
 	old := numaNodeCount
 	t.Cleanup(func() { numaNodeCount = old })
 
-	numaNodeCount = func() int { return 1 }
-	require.False(t, (&Config{EnableNumaAffinity: true}).NumaAffinityEnabled())
-
-	numaNodeCount = func() int { return 12 }
-	require.True(t, (&Config{EnableNumaAffinity: true}).NumaAffinityEnabled())
-	require.False(t, (&Config{EnableNumaAffinity: false}).NumaAffinityEnabled())
-
 	var nilConfig *Config
-	require.False(t, nilConfig.NumaAffinityEnabled())
+	for _, tc := range []struct {
+		name  string
+		cfg   *Config
+		nodes int
+		want  bool
+	}{
+		{"nil config", nilConfig, 12, false},
+		{"switch off", &Config{EnableNumaAffinity: false}, 12, false},
+		{"switch on, single NUMA", &Config{EnableNumaAffinity: true}, 1, false},
+		{"switch on, multi NUMA", &Config{EnableNumaAffinity: true}, 12, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			numaNodeCount = func() int { return tc.nodes }
+			require.Equal(t, tc.want, tc.cfg.NumaAffinityEnabled())
+		})
+	}
+}
+
+// numanodes come from os.ReadDir, which sorts lexicographically: on a host with
+// 11+ nodes the slice order is node0, node1, node10, node11, node2, ... The pool
+// has to be indexed by node id, otherwise a node's slots are range-checked with
+// another node's ranger and tidyPoolV2 deletes slots that are in use.
+func TestInitPoolV2IndexesByNodeID(t *testing.T) {
+	old := getAllNumaNodes
+	t.Cleanup(func() { getAllNumaNodes = old })
+
+	order := []int{0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9}
+	getAllNumaNodes = func() []numa.NumaNode {
+		nodes := make([]numa.NumaNode, 0, len(order))
+		for _, id := range order {
+			nodes = append(nodes, numa.NumaNode{NodeId: id, Cpulist: fmt.Sprintf("%d", id)})
+		}
+		return nodes
+	}
+
+	p := &cgPool{initialSize: 2}
+	require.NoError(t, p.initPoolV2())
+	require.Len(t, p.poolV2.numaPools, 12)
+	for i := range p.poolV2.numaPools {
+		require.Equal(t, i, p.poolV2.numaPools[i].numaNode.NodeId, "numaPools[%d]", i)
+	}
 }

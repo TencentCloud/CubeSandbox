@@ -192,10 +192,14 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 	return nil
 }
 
-// numaNodeCount is a variable rather than a direct call because pkg/numa is
-// not injectable and the single-NUMA fallback is the only thing that keeps
-// existing non-NUMA deployments on the v1 pool.
-var numaNodeCount = numa.GetNumaNodeCount
+// numaNodeCount and getAllNumaNodes are variables rather than direct calls
+// because pkg/numa is not injectable: the single-NUMA fallback and the >= 11
+// node ordering (see initPoolV2) are the two things worth pinning in a test
+// without a NUMA host.
+var (
+	numaNodeCount   = numa.GetNumaNodeCount
+	getAllNumaNodes = numa.GetAllNumaNodes
+)
 
 // NumaAffinityEnabled reports whether the per-NUMA cgroup pool should be used.
 // The v2 pool keeps one subtree per NUMA node (numa<N>) whose cpuset.cpus and
@@ -218,7 +222,7 @@ func (c *Config) NumaAffinityEnabled() bool {
 }
 
 func (p *cgPool) initPoolV2() error {
-	numaNodes := numa.GetAllNumaNodes()
+	numaNodes := getAllNumaNodes()
 	maxNumaNodeID := 0
 	for _, node := range numaNodes {
 		if node.NodeId > maxNumaNodeID {
@@ -229,17 +233,22 @@ func (p *cgPool) initPoolV2() error {
 	p.poolV2.handle = p.poolV2Handle
 	p.poolV2.numaPools = make([]cgPoolV2Numa, nodeCount)
 
+	// Index by nd.NodeId, never by the position in numaNodes: GetAllNumaNodes
+	// reads /sys/devices/system/node with os.ReadDir, which sorts
+	// lexicographically, so on a host with 11+ nodes the slice order is
+	// node0, node1, node10, node11, node2, ... Using the position would pair a
+	// slot's ranger with another node's directory, and tidyPoolV2 range-checks
+	// the directories it lists against that ranger - so it would delete in-use
+	// slots of the wrong node once a node grows past the initial pool size.
 	for _, nd := range numaNodes {
-		numaId := nd.NodeId
-		numaNode := &numaNodes[numaId]
 		cgRanger, err := allocator.NewSimpleLinearRanger(0, uint16(p.initialSize))
 		if err != nil {
 			return fmt.Errorf("create cg ranger error: %w", err)
 		}
 		alloc := allocator.NewAllocator[uint16](cgRanger)
-		p.poolV2.numaPools[numaId].allocator = alloc
-		p.poolV2.numaPools[numaId].cgRanger = cgRanger
-		p.poolV2.numaPools[numaId].numaNode = *numaNode
+		p.poolV2.numaPools[nd.NodeId].allocator = alloc
+		p.poolV2.numaPools[nd.NodeId].cgRanger = cgRanger
+		p.poolV2.numaPools[nd.NodeId].numaNode = nd
 	}
 
 	return nil
@@ -265,7 +274,8 @@ func ensureNumaSlotCpuset(h handle.Interface, slot, cpulist string, nodeID int) 
 }
 
 // applyCpusetFiles makes dir carry exactly cpulist / nodeID, writing only the
-// files that differ so a healthy slot costs two reads.
+// files that differ and reading both back afterwards, so a nil return means the
+// mask is what a child cgroup will inherit rather than "the write was accepted".
 func applyCpusetFiles(dir, cpulist string, nodeID int) error {
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("cpuset directory %s: %w", dir, err)
@@ -287,6 +297,19 @@ func applyCpusetFiles(dir, cpulist string, nodeID int) error {
 			return fmt.Errorf("write %s=%s: %w", file, w.val, err)
 		}
 	}
+	// cgroupfs accepts a write and may still keep something else (a rejected
+	// controller, a kernel that re-formats the range), so the value has to be
+	// read back: the bootstrap treats a nil return as "this slot is bound".
+	for _, w := range want {
+		file := path.Join(dir, w.name)
+		cur, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read back %s: %w", file, err)
+		}
+		if got := strings.TrimSpace(string(cur)); got != w.val {
+			return fmt.Errorf("%s reads back %q, want %q", file, got, w.val)
+		}
+	}
 	return nil
 }
 
@@ -302,7 +325,7 @@ func (p *cgPool) initPoolV2Late() error {
 	for i := 0; i < len(p.poolV2.numaPools); i++ {
 		numaPool := &p.poolV2.numaPools[i]
 		numaNode := numaPool.numaNode
-		log.G(ctx).Errorf("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
+		log.G(ctx).Infof("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
 		if strict && numaNode.Cpulist == "" {
 			// An empty mask is written as an empty cpuset.cpus, which the kernel
 			// accepts, so nothing below would notice: on v1 the slot then hands an
@@ -334,8 +357,8 @@ func (p *cgPool) initPoolV2Late() error {
 				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w",
 					numaNode.NodeId, slot, applyErr)
 			}
-			// The re-assert above succeeded, so the slot does carry the mask. That
-			// is the case this tolerance is for: the slot of a previous run, where
+			// The re-assert above wrote the mask and read it back, so the slot is
+			// bound. That is the case this tolerance is for: the slot of a previous run, where
 			// creating an existing cgroup is an error on v1. It cannot tell such a
 			// slot apart from one v2 left half-created (MkdirAll ran, then
 			// toggleControllers or Load failed): the mask is right there too, so
