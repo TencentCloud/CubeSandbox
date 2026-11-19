@@ -34,13 +34,17 @@
 #define AIO_FILE_SIZE   (8ULL * 1024 * 1024)
 #define REGION_OFF      (1ULL * 1024 * 1024)
 #define CHUNK_SIZE      (64 * 1024)
-#define N_SLOTS         64
+#define N_SLOTS         80
 #define REGION_SIZE     ((uint64_t)N_SLOTS * CHUNK_SIZE)
 #define N_CHUNKS        12
 #define N_EXPORTS       4
 #define N_READS         8
 #define MAX_GETS        128
 #define POLL_TIMEOUT_SEC 10
+/* Quiet window for the yield case: long against a poll, short for a test. */
+#define YIELD_QUIET_MS   200
+/* Past both the first preheat window and the chunks cold_reads() checks. */
+#define YIELD_READ_CHUNK (N_CHUNKS - 2)
 #define ENDPOINT        "cos.example.test"
 #define BUCKET          "preheat-bucket"
 
@@ -659,6 +663,11 @@ main(int argc, char **argv)
 			  stats.slots_total, N_SLOTS);
 	}
 
+	/* [1] and [2] are about the preheat windows themselves and assert on the
+	 * GETs issued the moment a walk starts; yielding to foreground reads is
+	 * [3]'s subject. */
+	s3_cache_set_foreground_quiet_us(cache, 0);
+
 	printf("\n[1] one import preheats, then concurrent cold reads hit\n");
 	rc = make_export(cache, client, 0, &one);
 	check_u64("template export is created", (uint64_t)-rc, 0);
@@ -715,6 +724,68 @@ main(int argc, char **argv)
 	}
 	for (i = 0; i < N_EXPORTS; i++) {
 		drop_export(&many[i]);
+	}
+
+	printf("\n[3] preheat stands aside while the cache device is being read\n");
+	s3_cache_set_foreground_quiet_us(cache, YIELD_QUIET_MS * 1000);
+	rc = make_export(cache, client, N_EXPORTS + 1, &one);
+	check_u64("yielding template export is created", (uint64_t)-rc, 0);
+	if (rc == 0) {
+		struct read_slot slot = {0};
+		struct spdk_bs_dev_cb_args args = {0};
+		uint8_t *buf = spdk_dma_zmalloc(AIO_BLOCK_SIZE, AIO_BLOCK_SIZE, NULL);
+		uint64_t resumed_at;
+
+		base = g_ngets;
+		rc = s3_export_bs_dev_preheat(one.dev);
+		check_u64("preheat is accepted right after the import",
+			  (uint64_t)-rc, 0);
+		check_u64("but leaves the window to the import's reader",
+			  g_ngets - base, 0);
+		poll_for_ms(YIELD_QUIET_MS / 4);
+		check_u64("and keeps out of it", g_ngets - base, 0);
+		poll_for_ms(YIELD_QUIET_MS);
+		check_u64("the walk starts by itself once nothing has read",
+			  g_ngets - base, S3_EXPORT_PREHEAT_MAX);
+
+		/* A reader arrives with that window in flight -- the read a
+		 * restoring guest issues -- for an object the walk has not reached,
+		 * so it fetches that one by itself. */
+		args.channel = one.ch;
+		args.cb_fn = read_done;
+		args.cb_arg = &slot;
+		check_true("read buffer is allocated", buf != NULL, NULL);
+		if (buf) {
+			uint64_t deadline;
+
+			one.dev->read(one.dev, one.ch, buf,
+				      (uint64_t)YIELD_READ_CHUNK *
+				      (CHUNK_SIZE / AIO_BLOCK_SIZE), 1, &args);
+			check_u64("the read fetches its own object",
+				  g_ngets - base, S3_EXPORT_PREHEAT_MAX + 1);
+			complete_outstanding();
+			check_true("the foreground read completes",
+				   poll_until_reads(&slot, 1) && slot.status == 0,
+				   NULL);
+			resumed_at = now_ms();
+			poll_for_ms(YIELD_QUIET_MS / 4);
+			check_u64("the window in flight finishes and is not replaced",
+				  g_ngets - base, S3_EXPORT_PREHEAT_MAX + 1);
+			deadline = now_ms() + POLL_TIMEOUT_SEC * 1000;
+			while (g_ngets - base < N_CHUNKS && now_ms() < deadline) {
+				poll_for_ms(5);
+			}
+			check_u64("the rest is issued once the reads have stopped",
+				  g_ngets - base, N_CHUNKS);
+			check_true("and not before the quiet window had passed",
+				   now_ms() - resumed_at >= YIELD_QUIET_MS - 20,
+				   NULL);
+			check_true("the resumed walk drains onto the local cache",
+				   drain_preheat(cache), NULL);
+			spdk_dma_free(buf);
+		}
+		cold_reads(cache, &one, N_READS, "post-yield");
+		drop_export(&one);
 	}
 
 	printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);

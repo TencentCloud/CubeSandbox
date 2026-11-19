@@ -33,6 +33,7 @@
 
 #include "spdk/stdinc.h"
 #include "spdk/blob.h"
+#include "spdk/env.h"
 #include "spdk/log.h"
 #include "spdk/string.h"
 #include "spdk/thread.h"
@@ -185,6 +186,7 @@ struct s3_export_dev {
 	uint64_t                   shared_cache_hits;
 	uint64_t                   shared_cache_misses;
 	uint64_t                   shared_cache_fallbacks;
+	uint64_t                   shared_cache_bypasses;
 
 	/* One walk of this device's manifest into the lvstore object cache.
 	 * Started at most once. In-flight GETs count toward preheat_inflight
@@ -402,6 +404,7 @@ export_io_complete(struct s3_export_io *io)
 		status = -ENOENT;
 	}
 
+	s3_cache_foreground_touch(dev->shared_cache);
 	export_io_drop(io);
 	cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, status);
 	if (lifetime_ref) {
@@ -1381,6 +1384,20 @@ export_preheat_pump(struct s3_export_dev *dev)
 		}
 		return;
 	}
+	/* Foreground reads own the cache device. The GETs below end as whole
+	 * object writes on it, and a restoring guest that faults its memory in
+	 * one read at a time pays for every one of those it queues behind. So no
+	 * new work is issued while such reads are arriving; what is already in
+	 * flight finishes, and the poller comes back once the device is quiet.
+	 * Without a wakeup to come back on, the walk carries on rather than
+	 * strand itself.
+	 * Nothing depends on the walk completing, so a volume that is read
+	 * without pause simply caches what it reads instead. */
+	if ((dev->preheat_cursor < dev->m->num_chunks || dev->preheat_has_retry) &&
+	    s3_cache_foreground_active(dev->shared_cache) &&
+	    export_preheat_arm_poller(dev)) {
+		return;
+	}
 	dev->preheat_pumping = true;
 	/* Finish the current pass before revisiting blocked chunks. Otherwise one
 	 * busy early reservation can repeatedly rewind the cursor and starve every
@@ -1813,6 +1830,36 @@ export_cache_read_done(void *cb_arg, int status)
  * Read path
  * ========================================================================== */
 
+/* Completion of a probe read: the cache has already timed it. */
+static void
+export_cache_probe_done(void *cb_arg, int status)
+{
+	(void)status;
+	spdk_dma_free(cb_arg);
+}
+
+/* While the cache device is slow, re-measure it now and then with a read no
+ * caller waits on. Its completion updates the cache's verdict. */
+static void
+export_cache_probe(struct s3_export_dev *dev, struct spdk_io_channel *cache_ch,
+		   const struct s3_cache_object_id *id, uint32_t object_len)
+{
+	void *buf;
+
+	if (!s3_cache_object_probe_due(dev->shared_cache)) {
+		return;
+	}
+	buf = spdk_dma_zmalloc(S3LVOL_BLOCK_SIZE, S3LVOL_BLOCK_SIZE, NULL);
+	if (!buf) {
+		return;
+	}
+	if (s3_cache_object_read_on_channel(dev->shared_cache, cache_ch, id,
+					    object_len, 0, S3LVOL_BLOCK_SIZE, buf,
+					    export_cache_probe_done, buf) != 0) {
+		spdk_dma_free(buf);
+	}
+}
+
 /* The read itself. \p is_retry marks an I/O that has already been through one
  * refetch, so a 404 against the manifest just fetched is reported rather than
  * sent round again. */
@@ -1869,6 +1916,9 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 	io->num_pending = 1;
 
 	__atomic_fetch_add(&dev->reads, 1, __ATOMIC_RELAXED);
+	/* Every read through this parent is a consumer waiting, whether it ends
+	 * in RAM, on the cache device or in S3. Template preheat yields to it. */
+	s3_cache_foreground_touch(dev->shared_cache);
 
 	while (remaining > 0 && io->status == 0) {
 		uint32_t chunk_size = io->m->chunk_size;
@@ -1973,6 +2023,17 @@ export_read_internal(struct spdk_bs_dev *bs_dev, struct spdk_io_channel *channel
 				cache_io->dst = buf;
 				snprintf(cache_io->key, sizeof(cache_io->key), "%s",
 					 key);
+				/* A busy cache device is slower than S3 for the
+				 * same immutable bytes; see
+				 * S3_CACHE_OBJECT_SLOW_READ_US. */
+				if (s3_cache_object_reads_slow(dev->shared_cache)) {
+					export_cache_probe(dev, export_ch->cache_ch, &id,
+							   object_len);
+					__atomic_fetch_add(&dev->shared_cache_bypasses, 1,
+							   __ATOMIC_RELAXED);
+					export_cache_submit_s3(cache_io);
+					goto next;
+				}
 				rc = s3_cache_object_read_on_channel(
 					dev->shared_cache, export_ch->cache_ch, &id,
 					object_len, offset_in_chunk, length, buf,
@@ -2305,12 +2366,13 @@ export_destroy(struct spdk_bs_dev *bs_dev)
 	       " exact fallback(s), %" PRIu64
 	       " shared-cache hit(s), %" PRIu64 " shared-cache miss(es), %" PRIu64
 	       " shared-cache fallback(s), %" PRIu64
+	       " slow-cache bypass(es), %" PRIu64
 	       " manifest refetch(es)\n",
 		       dev->m->uuid_str, dev->reads, dev->bytes_read, dev->zero_fills,
 		       dev->whole_gets, dev->coalesced_reads, dev->ready_hits,
 	       dev->exact_fallbacks, dev->shared_cache_hits,
 	       dev->shared_cache_misses, dev->shared_cache_fallbacks,
-	       dev->refetches);
+	       dev->shared_cache_bypasses, dev->refetches);
 
 	/* No wait for a refetch, deliberately.
 	 *
@@ -2840,6 +2902,11 @@ s3_export_bs_dev_create(struct s3_client *client, struct s3_export_manifest *m,
 			 m->src.endpoint);
 		snprintf(dev->cache_bucket, sizeof(dev->cache_bucket), "%s",
 			 s3_client_bucket(client));
+		/* An export is imported because something is about to read it.
+		 * Counting the import as that reader's first sign gives it the
+		 * quiet window to arrive in, instead of meeting a device already
+		 * queued deep with this export's own preheat. */
+		s3_cache_foreground_touch(shared_cache);
 	}
 	dev->chunk_shift      = (uint32_t)spdk_u32log2(m->chunk_size);
 	dev->blocks_per_chunk = m->chunk_size / S3LVOL_BLOCK_SIZE;
