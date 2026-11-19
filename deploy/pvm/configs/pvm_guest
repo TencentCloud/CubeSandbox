@@ -1099,7 +1099,8 @@ CONFIG_DAMON=y
 # CONFIG_DAMON_VADDR is not set
 CONFIG_DAMON_PADDR=y
 # CONFIG_DAMON_SYSFS is not set
-# CONFIG_DAMON_RECLAIM is not set
+# CONFIG_DAMON_DBGFS is not set
+CONFIG_DAMON_RECLAIM=y
 # CONFIG_DAMON_LRU_SORT is not set
 # end of Data Access Monitoring
 
