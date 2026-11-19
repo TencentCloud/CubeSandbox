@@ -227,8 +227,6 @@ After the fix, you can compare digests only, without printing the token itself:
 
 Also note: an updated Secret does not mean processes using subPath have read the new file. If the Pod Template checksum wasn't triggered, roll CubeMaster explicitly.
 
-> **Update (2026-11-18):** the chart no longer renders the admin token into CubeMaster's `conf.yaml`. CubeMaster reads `CUBE_PROXY_ADMIN_TOKEN` from the release Secret, so a fresh install has exactly one generated value, and rotating the token rolls master, proxy and lifecycle-manager. The workaround above is still what you need on releases cut before that fix.
-
 ### 6.2 Don't Lose the traffic token After connect()
 
 With network.allow_public_traffic=false, the v0.7.0 Python SDK returns the traffic token only in the create() response. The new object returned by Sandbox.connect() does not contain it; if the Adapter only saved sandbox_id, file and command calls after recovery will be rejected by CubeProxy with 403.

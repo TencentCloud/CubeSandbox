@@ -177,18 +177,11 @@ See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentclou
 
 ### CubeProxy cache after Resume
 
-Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then purges CubeProxy `local_cache` via `POST /admin/backend_cache/delete` so traffic does not keep routing to the pre-pause IP (same-node 504); a refused purge is returned as an error rather than ignored.
+Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then purges CubeProxy's `local_cache` via `POST /admin/backend_cache/delete` so traffic no longer routes to the pre-pause IP; if the purge fails, the resume returns an error.
 
-For that purge to succeed, **CubeMaster and CubeProxy must share the same admin token**:
+**CubeMaster and CubeProxy must share the same admin token**: on a Helm install the chart wires both sides automatically; hand-written deployments must align them. If the two tokens differ, the purge returns **403**, the stale route never expires on its own, and the sandbox stays unreachable.
 
-- CubeProxy: `$cube_admin_token` in `nginx.conf` (see `CubeProxy/lua/admin_phase.lua`), filled from `CUBE_PROXY_ADMIN_TOKEN`
-- CubeMaster: `CUBE_PROXY_ADMIN_TOKEN` when set, otherwise `cube_proxy_conf.admin_token` in `conf.yaml`; either way it is sent as `X-Cube-Admin-Token` (see `CubeMaster/pkg/cubeproxy/admin.go`)
-
-The Helm chart wires both sides from one source: it generates a token (or takes `lifecycleManager.adminToken`) and persists it in the release Secret as `cube-admin-token`. CubeProxy, CubeMaster and the lifecycle manager each read that key through their own environment variable, and the chart renders `cube_proxy_conf.admin_token` empty on purpose — Helm evaluates each template separately, so a second generated value would diverge from the Secret on a fresh install.
-
-Rotating `lifecycleManager.adminToken` on a Helm install therefore rolls the master, proxy and lifecycle-manager Pods in the same upgrade: the chart hashes the token into a `checksum/admin-token` Pod annotation. The three Deployments still restart in sequence rather than atomically, so a resume that lands mid-rollout can fail while a not-yet-restarted proxy replica still validates the old token. The purge only retries a few times (two 500ms backoffs, each request capped at 3s), so the resume returns an error instead of recovering when the rollout finishes — retry the pause/resume cycle (or purge that route manually) after the rotation completes. If you change the Secret outside Helm, restart those three workloads yourself — an env `secretKeyRef` is only read when a container starts, so a running Pod keeps the old value.
-
-If the token is set on only one side, or the values differ, cache purge returns **403**: Redis is still correct, but CubeProxy keeps routing to the cached backend for every later request. A cache hit renews the entry's TTL, so that mapping never expires on its own — the sandbox stays unreachable until the route is actually purged. Align the token in deploy / Helm values whenever Resume is used.
+Rotating `lifecycleManager.adminToken` rolls the master, proxy and lifecycle-manager Pods in sequence during the same `helm upgrade`; a Resume issued before the rollout finishes can fail while the old token is still being validated. Wait for the rollout to complete and retry the Resume.
 
 ## Platform-managed Auto-pause / Auto-resume
 
