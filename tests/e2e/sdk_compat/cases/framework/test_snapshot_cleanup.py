@@ -10,11 +10,46 @@ from types import SimpleNamespace
 
 import pytest
 
+from cases.lifecycle import test_filesystem_only_snapshot as filesystem_only
 from cases.lifecycle import test_snapshot_delete_reference as lifecycle
 from framework import cleanup
 from framework.models import CodeResult
 
 pytestmark = pytest.mark.framework
+
+
+@pytest.mark.parametrize(
+    ("create_options", "expected"),
+    [
+        (None, {"template": "snap-1", "timeout": 600}),
+        (
+            {"timeout": 321, "restartPolicy": "OnFailure"},
+            {"template": "snap-1", "timeout": 321, "restartPolicy": "OnFailure"},
+        ),
+    ],
+)
+def test_filesystem_snapshot_restore_uses_long_timeout(monkeypatch, create_options, expected):
+    captured = None
+    sandbox = object()
+
+    def create(*args, **kwargs):
+        nonlocal captured
+        captured = kwargs["create_options"]
+        return sandbox
+
+    monkeypatch.setattr(filesystem_only, "create_adapter_with_capacity_retry", create)
+    monkeypatch.setattr(filesystem_only, "wait_until_data_plane_ready", lambda *args, **kwargs: None)
+
+    result = filesystem_only._create_from_snapshot(
+        "cubesandbox",
+        SimpleNamespace(default_timeout=1, command_timeout=1),
+        "snap-1",
+        role="child",
+        create_options=create_options,
+    )
+
+    assert result is sandbox
+    assert captured == expected
 
 
 @pytest.mark.parametrize("delete_before_capture", [False, True])

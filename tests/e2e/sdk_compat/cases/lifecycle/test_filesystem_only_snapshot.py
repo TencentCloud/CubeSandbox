@@ -59,6 +59,8 @@ pytestmark = [
 FS_ONLY = "fs-only"
 FULL = "full"
 ROLLBACK_UNSUPPORTED = "snapshot_filesystem_only_rollback_unsupported"
+# Keep restored sandboxes alive through long lifecycle cases and their cleanup.
+SNAPSHOT_RESTORE_TIMEOUT = 600
 
 # External mounts an fs-only package never carries. A cold boot re-mounts only
 # what the caller declares on the create request, so a package that recorded
@@ -135,10 +137,11 @@ def _create_from_snapshot(
 
     A cold boot is a full guest start, which takes longer than a memory
     restore, so the first data-plane call must not race envd/CubeProxy.
-    ``create_options`` carries anything the case needs on top of the template
-    (restart policy, TTL); the template itself always comes from the snapshot.
+    The helper gives restored sandboxes a long default TTL. ``create_options``
+    carries case-specific overrides such as restart policy or a different TTL;
+    the template itself always comes from the snapshot.
     """
-    options = {"template": snapshot_id}
+    options = {"template": snapshot_id, "timeout": SNAPSHOT_RESTORE_TIMEOUT}
     options.update(create_options or {})
     sandbox = create_adapter_with_capacity_retry(
         sdk_backend,
