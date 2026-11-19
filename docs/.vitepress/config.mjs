@@ -215,7 +215,8 @@ export default withMermaid(defineConfig({
                   items: [
                     { text: 'Requirements', link: '/guide/cross-node-snapshot/requirements' },
                     { text: 'JuiceFS Service', link: '/guide/cross-node-snapshot/juicefs' },
-                    { text: 'CubeS3lvol Service', link: '/guide/cross-node-snapshot/cubes3lvol' }
+                    { text: 'CubeS3lvol Service', link: '/guide/cross-node-snapshot/cubes3lvol' },
+                    { text: 'xfs-s3 Backend', link: '/guide/cross-node-snapshot/xfs-s3' }
                   ]
                 }
               ]
@@ -371,6 +372,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Architecture Overview', link: '/architecture/overview' },
                 { text: 'JuiceFS Storage Architecture', link: '/architecture/juicefs-storage' },
+                { text: 'xfs-s3 Storage Architecture', link: '/architecture/xfs-s3' },
                 { text: 'CubeVS Network Model', link: '/architecture/network' }
               ]
             }
@@ -462,7 +464,8 @@ export default withMermaid(defineConfig({
                   items: [
                     { text: '跨机条件', link: '/zh/guide/cross-node-snapshot/requirements' },
                     { text: 'JuiceFS 服务配置', link: '/zh/guide/cross-node-snapshot/juicefs' },
-                    { text: 'CubeS3lvol 服务配置', link: '/zh/guide/cross-node-snapshot/cubes3lvol' }
+                    { text: 'CubeS3lvol 服务配置', link: '/zh/guide/cross-node-snapshot/cubes3lvol' },
+                    { text: 'xfs-s3 后端', link: '/zh/guide/cross-node-snapshot/xfs-s3' }
                   ]
                 }
               ]
@@ -618,6 +621,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '架构概览 (Overview)', link: '/zh/architecture/overview' },
                 { text: 'JuiceFS 跨机存储架构', link: '/zh/architecture/juicefs-storage' },
+                { text: 'xfs-s3 存储架构', link: '/zh/architecture/xfs-s3' },
                 { text: 'CubeVS 网络模型', link: '/zh/architecture/network' }
               ]
             }

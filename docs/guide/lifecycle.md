@@ -173,7 +173,7 @@ The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 | `N > 0` | start a new N-second window from resume |
 | `N < -1` | reject the request with HTTP 400 |
 
-See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (`jfs` or `s3`, with `remote_status=ready`) is documented in [Cross-Node Migration](./cross-node-snapshot/requirements.md).
+See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (`jfs`, `s3` or `xfs-s3`, with `remote_status=ready`) is documented in [Cross-Node Migration](./cross-node-snapshot/requirements.md).
 
 ### CubeProxy cache after Resume
 
