@@ -63,7 +63,11 @@ type cgPool struct {
 	// runtime.
 	reparentFileEnabled func() bool
 	// Injected closure; reports whether the per-NUMA pool is in use, which
-	// decides how strictly the pool bootstrap treats a broken slot.
+	// decides how strictly the pool bootstrap treats a broken slot. Unlike
+	// reparentFileEnabled above this one cannot change at runtime:
+	// enable_numa_affinity is read from config.toml once at plugin init and the
+	// dynamic config watcher never looks at it. It is a closure only so tests
+	// can drive both modes.
 	numaAffinityInUse func() bool
 }
 
