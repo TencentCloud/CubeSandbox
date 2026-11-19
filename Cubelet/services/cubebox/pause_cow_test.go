@@ -191,7 +191,13 @@ func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
 	}
 	t.Cleanup(func() { preflightPauseNotBusyForTest = nil })
 
-	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+	// getErr stops getCubeboxSnapshotSpec at the store lookup, before the nil
+	// containerd client. Reaching that error proves the unknown preflight
+	// action was not treated as a busy reject.
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{
+		cb:     sb,
+		getErr: errors.New("runtime unavailable"),
+	}}}
 	rsp, err := s.updateWithPauseCow(context.Background(), &cubebox.UpdateCubeSandboxRequest{
 		RequestID: "req-old-shim",
 		SandboxID: sb.ID,
@@ -201,9 +207,8 @@ func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
 		},
 	}, sb)
 	require.NoError(t, err)
-	// Fall-through continues into getCubeboxSnapshotSpec, which fails without a
-	// real runtime — that proves we did not early-return the preflight error.
 	require.NotEqual(t, errorcode.ErrorCode_TaskPauseFailed, rsp.Ret.RetCode)
+	require.Contains(t, rsp.Ret.RetMsg, "failed to get cubebox")
 	require.NotContains(t, rsp.Ret.RetMsg, "CheckPauseAllowed")
 	require.Equal(t, attempt, stampedPauseSnapshotID(sb), "fall-through keeps the in-flight stamp")
 }

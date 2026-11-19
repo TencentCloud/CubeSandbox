@@ -168,12 +168,12 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 	// that Destroy runs beside the restart loop, and the loop is the only
 	// owner of the next destroy and create. Normal Create still sets Failover.
 	createInfo := &workflow.CreateContext{
-		ReqInfo:           proto.Clone(req).(*cubebox.RunCubeSandboxRequest),
-		Failover:          false,
-		IsRestart:         true,
-		SavedContainerIDs: ids,
-		RestartPrior:      prior,
-		LocalRunTemplate:  template,
+		ReqInfo:               proto.Clone(req).(*cubebox.RunCubeSandboxRequest),
+		Failover:              false,
+		IsRestart:             true,
+		SavedContainerIDs:     ids,
+		RestartPrior:          prior,
+		LocalRunTemplate:      template,
 		SnapshotWritableLayer: effectiveSandboxWritableLayer(old),
 		BaseWorkflowInfo:      workflow.BaseWorkflowInfo{SandboxID: sandboxID},
 	}
