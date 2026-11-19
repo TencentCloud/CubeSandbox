@@ -27,10 +27,12 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 
 	persistErr := errors.New("upsert template replica fail: invalid connection")
 
-	var publishedStatus, publishedLastError string
+	var publishCalls int
+	var publishedTemplateID, publishedJobID, publishedLastError string
 	patches.ApplyFunc(publishCreateFailedIfJobActive,
 		func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
-			publishedStatus = StatusFailed
+			publishCalls++
+			publishedTemplateID, publishedJobID = templateID, jobID
 			publishedLastError = lastError
 			return true, nil
 		})
@@ -40,9 +42,11 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 		context.Background(), "tpl-1", "job-1", 2, persistErr,
 	)
 
-	// Definition must be published as FAILED.
-	if publishedStatus != StatusFailed {
-		t.Fatalf("published status = %q, want %q", publishedStatus, StatusFailed)
+	// The FAILED write is called exactly once, for this template and job. The
+	// write itself is covered by publish_create_failed_test.go.
+	if publishCalls != 1 || publishedTemplateID != "tpl-1" || publishedJobID != "job-1" {
+		t.Fatalf("publish calls = %d (template=%q job=%q), want 1 for tpl-1/job-1",
+			publishCalls, publishedTemplateID, publishedJobID)
 	}
 	// The error written to the definition must be sanitized: no raw DB error.
 	if strings.Contains(publishedLastError, "invalid connection") {
@@ -186,9 +190,10 @@ var rawDBErrLeaks = []string{"Error 1045", "Access denied", "template_replicas",
 // persistErrCallChainRecorder captures the side effects of the persistErr
 // branch through the real finish call chain.
 type persistErrCallChainRecorder struct {
-	publishedStatuses []string
-	publishedErrors   []string
-	jobUpdates        []map[string]any
+	// publishCalls records "templateID/jobID" for each FAILED publish call.
+	publishCalls    []string
+	publishedErrors []string
+	jobUpdates      []map[string]any
 	// publishErr, when set, is returned by the stubbed definition publish.
 	publishErr error
 }
@@ -234,7 +239,7 @@ func patchPersistErrCommon(patches *gomonkey.Patches, rec *persistErrCallChainRe
 		return []ReplicaStatus{{NodeID: "node-a", Status: ReplicaStatusReady}}, persistErr
 	})
 	patches.ApplyFunc(publishCreateFailedIfJobActive, func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
-		rec.publishedStatuses = append(rec.publishedStatuses, StatusFailed)
+		rec.publishCalls = append(rec.publishCalls, templateID+"/"+jobID)
 		rec.publishedErrors = append(rec.publishedErrors, lastError)
 		return true, rec.publishErr
 	})
@@ -243,9 +248,10 @@ func patchPersistErrCommon(patches *gomonkey.Patches, rec *persistErrCallChainRe
 
 func assertPersistErrOutcome(t *testing.T, rec *persistErrCallChainRecorder) {
 	t.Helper()
-	// Definition: published exactly once, as FAILED, with a sanitized message.
-	if len(rec.publishedStatuses) != 1 || rec.publishedStatuses[0] != StatusFailed {
-		t.Fatalf("published definition statuses = %v, want exactly [%s]", rec.publishedStatuses, StatusFailed)
+	// Definition: the FAILED publish is called exactly once, for this template
+	// and job, with a sanitized message.
+	if len(rec.publishCalls) != 1 || rec.publishCalls[0] != "tpl-1/job-1" {
+		t.Fatalf("FAILED publish calls = %v, want exactly [tpl-1/job-1]", rec.publishCalls)
 	}
 	// Job row: terminal FAILED with a sanitized error_message.
 	if got := rec.lastJobStatus(); got != JobStatusFailed {
@@ -363,8 +369,8 @@ func TestFinishTemplateImageJobAfterArtifact_NonCreatePersistErrLeavesDefinition
 	if !errors.Is(err, persistErr) {
 		t.Fatalf("returned error %v does not wrap persistErr", err)
 	}
-	if len(rec.publishedStatuses) != 0 {
-		t.Fatalf("published definition statuses = %v, want none for a non-CREATE job", rec.publishedStatuses)
+	if len(rec.publishCalls) != 0 {
+		t.Fatalf("FAILED publish calls = %v, want none for a non-CREATE job", rec.publishCalls)
 	}
 	if got := rec.lastJobStatus(); got != JobStatusFailed {
 		t.Fatalf("job status = %q, want %q", got, JobStatusFailed)

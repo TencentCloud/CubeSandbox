@@ -68,7 +68,7 @@ DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 
 ### 3.2a Definition states
 
-`t_cube_template_definitions.status` tracks the user-visible template
+`t_cube_template_definition.status` tracks the user-visible template
 lifecycle, independently of the build job row above.
 
 Initial state depends on the definition kind
@@ -128,8 +128,10 @@ Invariants:
   `GetTemplateInfo` errors after the definition row exists. These are not
   covered yet.
 - A definition row already marked DELETING suppresses the publish path
-  (`publishTemplateStatusWithAlias` returns `ErrTemplateNotFound`), so a
-  concurrent delete is never turned into a second failure.
+  (`publishTemplateStatusWithAlias` on finalize / redo, and
+  `publishCreateFailedIfJobActive` on the create persistErr path, both return
+  `ErrTemplateNotFound`), so a concurrent delete is never turned into a second
+  failure.
 - Alias claim on publish is gated on `status != FAILED`: READY and
   PARTIALLY_READY claim the requested alias, FAILED skips the claim. Skipping
   the claim does not release an alias the template already holds. A manual

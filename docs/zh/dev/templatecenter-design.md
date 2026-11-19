@@ -64,7 +64,7 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
 
 ### 3.2a 模板定义状态
 
-`t_cube_template_definitions.status` 描述用户可见的模板生命周期，与上面的构建 job 行相互独立。
+`t_cube_template_definition.status` 描述用户可见的模板生命周期，与上面的构建 job 行相互独立。
 
 初始状态取决于定义的 kind（`ensureTemplateDefinitionWithOptions`）：
 
@@ -94,7 +94,7 @@ CREATING ─┬─→ READY             快照提交成功
 
 - PENDING 和 CREATING 会被 `hasActiveDefinitionBuild` 视为构建进行中，普通（非强制）删除会以 `ErrTemplateAttemptInProgress` 拒绝。强制删除会先把定义标为 FAILED（`UpdateDefinitionStatus`），再删除该行。
 - 只写 job 行的 `template_status` 不会更新定义。create 的 persistErr 路径会通过 `publishCreateFailedIfJobActive` 发布 FAILED。仍然只写 job 行的失败可能让 PENDING 的定义一直停留在 PENDING，包括：redo 的 persistErr，以及定义行存在之后 `prepareRedoTemplateReplicas`、`refreshTemplateReplicaSummary`、`GetTemplateInfo` 出错。这些目前尚未覆盖。
-- 定义行已处于 DELETING 时，发布路径会被抑制（`publishTemplateStatusWithAlias` 返回 `ErrTemplateNotFound`），因此并发删除不会被演变成第二次失败。
+- 定义行已处于 DELETING 时，发布路径会被抑制（finalize / redo 使用的 `publishTemplateStatusWithAlias` 和 create persistErr 路径使用的 `publishCreateFailedIfJobActive` 都会返回 `ErrTemplateNotFound`），因此并发删除不会被演变成第二次失败。
 - 发布时的别名认领条件是 `status != FAILED`：READY 和 PARTIALLY_READY 会认领请求的别名，FAILED 跳过认领。跳过认领不会释放模板已经持有的别名。手动设置别名（`SetTemplateAlias`）更严格，要求 READY。
 - 创建沙箱不检查定义状态，只要求某个健康节点上有 READY 副本（`EnsureTemplateLocalityReady`）。因此定义状态是面向用户的汇总信息，而不是调度闸门。
 - 定义的 `last_error` 和 job 行的 `error_message` 都会通过 API 返回。create 的 persistErr 路径向 job 行写入脱敏后、用户可读的文本；发布成功时定义也写入同样的文本（发布失败时只更新 job 行，且除定义已不存在外会追加 "; template status could not be updated"）。原始驱动 / 数据库错误只进 CubeMaster 日志。其他失败路径（包括 redo 的 persistErr）仍会把原始错误写进 job 行（后续处理）。
