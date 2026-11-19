@@ -58,29 +58,18 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   [plugins."io.cubelet.internal.v1.cgroup"]
     pool_size = 3000
     pool_workers = 1
-    # Place every sandbox cgroup under the per-NUMA subtree (numa<N>) so that it
-    # inherits that node's cpuset.cpus / cpuset.mems: the node picked at create
-    # time then binds CPU cores and memory instead of only labelling the sandbox.
-    # Requires more than one NUMA node and a usable cpuset controller (mounted
-    # controllers on a cgroup v1 host, the unified hierarchy on v2); cubelet
-    # refuses to start when it is enabled and the controller is missing, or when
-    # a node reports no CPUs at all (memory-only CXL/PMEM node, or every CPU of
-    # that node parked in cgroup_disable_cpuset_list). This is a host-wide
-    # switch with no per-node allow list, and placement round-robins over every
-    # node id, so a host that carries such a node cannot enable the feature at
-    # all: leave it off there, the startup error is how cubelet says so.
-    # Only cubelet reads this key. Off by default.
-    #
-    # Runtime behaviour, so that it is not a surprise in production:
-    # - Only sandboxes created after the restart are placed this way; running
-    #   ones keep their cgroup until they are recreated.
-    # - Nothing is migrated: pages faulted in before the shim entered the cgroup
-    #   stay on the node they were allocated from (cpuset.memory_migrate stays 0,
-    #   and the shim joins the cgroup after envd init).
-    # - The node is round-robin unless the cube.master.instance.numa_node
-    #   annotation pins one.
-    # - A full per-node pool fails the create; there is no fallback to the v1
-    #   pool for that sandbox.
+    # Bind each sandbox to a per-NUMA cgroup subtree (numa<N>) so the node
+    # picked at create time also pins CPU cores and memory. Off by default; it
+    # needs more than one NUMA node and a usable cpuset controller, and cubelet
+    # refuses to start when a node has no CPUs at all (memory-only CXL/PMEM
+    # node, or every CPU of it parked in cgroup_disable_cpuset_list) - a host
+    # like that has to leave it off.
+    # Runtime notes:
+    # - Only sandboxes created after the restart are placed this way.
+    # - Nothing is migrated; pages already faulted in stay on their node.
+    # - The node is round-robin unless cube.master.instance.numa_node pins one.
+    # - A full per-node pool fails the create, with no fallback to the v1 pool.
+    # - Only cubelet reads this key, so restarting cubelet is enough.
     enable_numa_affinity = false
     pool_trigger_interval_in_ms = 1000
     vm_cpu_overhead = "0"
