@@ -410,10 +410,6 @@ func (m *restartMgr) Recover() {
 		dead := (cb.MainStatus() != nil && cb.MainStatus().IsTerminated()) ||
 			(len(cb.AllContainers()) == 0 && cb.LastExitReason != "")
 		if dead {
-			if !restartpolicy.FromProto(req.GetRestartBackoff()).Allow(cb.RestartCount) {
-				m.setState(cb.ID, restartpolicy.StateGaveUp, 0)
-				continue
-			}
 			reason := restartpolicy.Reason(cb.LastExitReason)
 			if reason == "" {
 				reason = restartpolicy.ReasonForExit(cb.LastExitCode)
@@ -451,21 +447,17 @@ func (m *restartMgr) restartLoop(ctx context.Context, sandboxID string, req *cub
 		if cb.IsPaused() {
 			return
 		}
-		if backoff.ResetCount(cb.LastRestartAt, time.Now()) && cb.RestartCount != 0 {
-			cb.Lock()
-			applyRestartTransition(cb, restartTransition{resetCount: true})
-			if err := m.store.Save(ctx, cb); err != nil {
-				log.G(ctx).Warnf("restart: save reset count for %s: %v", sandboxID, err)
-			}
-			cb.Unlock()
-		}
-		if !backoff.Allow(cb.RestartCount) {
-			m.setState(sandboxID, restartpolicy.StateGaveUp, 0)
-			log.G(ctx).Warnf("restart: sandbox %s gave up after %d restarts", sandboxID, cb.RestartCount)
+		delay, count, allowed, err := m.setBackoff(sandboxID, backoff, time.Now())
+		if err != nil {
+			log.G(ctx).Errorf("restart: set backoff for sandbox %s: %v", sandboxID, err)
+			m.Stop(sandboxID)
 			return
 		}
-		delay := backoff.Delay(cb.RestartCount)
-		m.setState(sandboxID, restartpolicy.StateBackOff, time.Now().Add(delay).UnixNano())
+		if !allowed {
+			log.G(ctx).Warnf("restart: sandbox %s gave up after %d restarts", sandboxID, count)
+			m.Stop(sandboxID)
+			return
+		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -644,6 +636,49 @@ func (m *restartMgr) noteExit(sandboxID string, exitCode int32, reason restartpo
 	if err := m.store.Save(context.Background(), cb); err != nil {
 		log.G(context.Background()).Warnf("restart: save exit for %s: %v", sandboxID, err)
 	}
+}
+
+func (m *restartMgr) setBackoff(sandboxID string, backoff restartpolicy.Backoff, now time.Time) (time.Duration, int32, bool, error) {
+	cb, err := m.store.Get(context.Background(), sandboxID)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if cb == nil {
+		return 0, 0, false, fmt.Errorf("sandbox not found")
+	}
+	cb.Lock()
+	if backoff.ResetCount(cb.LastRestartAt, now) && cb.RestartCount != 0 {
+		applyRestartTransition(cb, restartTransition{resetCount: true})
+	}
+	count := cb.RestartCount
+	if !backoff.Allow(count) {
+		applyRestartTransition(cb, restartTransition{
+			setState: true,
+			state:    restartpolicy.StateGaveUp,
+			setNext:  true,
+			bumpSeq:  true,
+		})
+		if err := m.store.Save(context.Background(), cb); err != nil {
+			log.G(context.Background()).Warnf("restart: save state %s for %s: %v", restartpolicy.StateGaveUp, sandboxID, err)
+		}
+		cb.Unlock()
+		m.observe(sandboxID)
+		return 0, count, false, nil
+	}
+	delay := backoff.Delay(count)
+	applyRestartTransition(cb, restartTransition{
+		setState:      true,
+		state:         restartpolicy.StateBackOff,
+		setNext:       true,
+		nextRestartAt: now.Add(delay).UnixNano(),
+		bumpSeq:       true,
+	})
+	if err := m.store.Save(context.Background(), cb); err != nil {
+		log.G(context.Background()).Warnf("restart: save state %s for %s: %v", restartpolicy.StateBackOff, sandboxID, err)
+	}
+	cb.Unlock()
+	m.observe(sandboxID)
+	return delay, count, true, nil
 }
 
 func (m *restartMgr) setState(sandboxID, state string, next int64) {
