@@ -89,6 +89,7 @@ done
 PASS_TOTAL=0
 FAIL_TOTAL=0
 XFAIL_TOTAL=0
+SKIP_TOTAL=0
 XPASS_TOTAL=0
 SUITES_OK=0
 SUITES_BAD=0
@@ -104,6 +105,14 @@ parse_counts()
 	    -e 's/.*result:[[:space:]]*\([0-9]\+\)[[:space:]]*passed,[[:space:]]*\([0-9]\+\)[[:space:]]*failed.*/\1 \2/p' \
 	    -e 's/.*===[[:space:]]*\([0-9]\+\)[[:space:]]*passed,[[:space:]]*\([0-9]\+\)[[:space:]]*failed.*/\1 \2/p' \
 	    | tail -1
+}
+
+# Tests a suite skipped for a missing host precondition (for example the real
+# logrotate checks without logrotate or root). Shown next to the pass count so
+# "15/15" cannot hide five contract tests that never ran.
+parse_skipped()
+{
+	sed -n -e 's/^skipped:[[:space:]]*\([0-9]\+\)[[:space:]]*$/\1/p' | tail -1
 }
 
 # Expected failures, for suites that have any. An XPASS is surfaced rather than
@@ -186,14 +195,19 @@ run_suite()
 	PASS_TOTAL=$((PASS_TOTAL + p))
 	FAIL_TOTAL=$((FAIL_TOTAL + f))
 
-	local xc xf xp note=""
+	local xc xf xp sk note=""
+	sk="$(parse_skipped <"${log}")"
+	if [ -n "${sk}" ] && [ "${sk}" -gt 0 ]; then
+		SKIP_TOTAL=$((SKIP_TOTAL + sk))
+		note=" (${sk} skipped)"
+	fi
 	xc="$(parse_xcounts <"${log}")"
 	if [ -n "${xc}" ]; then
 		xf="${xc%% *}"
 		xp="${xc##* }"
 		XFAIL_TOTAL=$((XFAIL_TOTAL + xf))
 		XPASS_TOTAL=$((XPASS_TOTAL + xp))
-		[ "${xf}" -gt 0 ] && note=" (${xf} xfail)"
+		[ "${xf}" -gt 0 ] && note="${note} (${xf} xfail)"
 		if [ "${xp}" -gt 0 ]; then
 			note="${note} (${xp} XPASS -- a backend capability changed)"
 			XPASS_NAMES="${XPASS_NAMES}  ${name}: ${xp} assertion(s) now pass that were expected to fail (see ${log})"$'\n'
@@ -619,6 +633,9 @@ echo "=========================================================="
 printf 'suites:     %d ok, %d failed, %d skipped\n' \
        "${SUITES_OK}" "${SUITES_BAD}" "${SUITES_SKIPPED}"
 printf 'assertions: %d passed, %d failed' "${PASS_TOTAL}" "${FAIL_TOTAL}"
+if [ "${SKIP_TOTAL}" -gt 0 ]; then
+	printf ', %d skipped' "${SKIP_TOTAL}"
+fi
 if [ "${XFAIL_TOTAL}" -gt 0 ] || [ "${XPASS_TOTAL}" -gt 0 ]; then
 	printf ', %d expected-fail, %d unexpected-pass' \
 	       "${XFAIL_TOTAL}" "${XPASS_TOTAL}"

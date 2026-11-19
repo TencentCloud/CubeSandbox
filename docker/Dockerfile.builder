@@ -117,6 +117,7 @@ RUN . /etc/buildenv \
         libssl-dev \
         libtool \
         llvm \
+        logrotate \
         make \
         meson \
         mtools \

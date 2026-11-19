@@ -20,15 +20,17 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/lock"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/s3store"
-	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 	cubelog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -36,6 +38,8 @@ import (
 // this process. The DB advisory lock is per connection, so two goroutines
 // here could otherwise both hold it.
 var artifactBuildLocks = newKeyedMutex()
+
+var getDB = templatecenter.GetDB
 
 // keyedMutex is a per-key mutex set with automatic cleanup of idle entries.
 type keyedMutex struct {
@@ -91,7 +95,18 @@ func (k *keyedMutex) Lock(key string) func() {
 //     the artifact metadata in result_json; CubeMaster finalizes the record
 //     when it resumes the job for distribution)
 //   - Distribute artifact to Cubelet nodes
-func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdSHA string, envdData []byte) error {
+func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL string, envdSHA string, envdData []byte) (err error) {
+	requestID := ""
+	if req.Request != nil {
+		requestID = req.Request.RequestID
+	}
+	ctx, buildSpan := telemetry.Start(ctx, telemetry.SpanTemplateImageBuild, trace.WithAttributes(
+		attribute.String(telemetry.AttrJobID, jobID),
+		attribute.String(telemetry.AttrTemplateID, req.TemplateID),
+		attribute.String(telemetry.AttrRequestID, requestID),
+	))
+	defer func() { telemetry.End(buildSpan, err) }()
+
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
@@ -125,6 +140,12 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 	// loop-mount is enabled) exist and that mkfs.ext4 supports -d BEFORE
 	// spending minutes pulling an image, so a misconfigured host fails fast
 	// at PULLING with a clear message instead of deep inside BUILDING_EXT4.
+	s3Client, s3CfgEnabled := SharedS3Client()
+	if err := sharedS3.initErr; err != nil {
+		// No build phase has started; this is a storage initialization failure.
+		reportFailed("", err.Error())
+		return err
+	}
 	reportPhase(templatecenter.JobPhasePulling, 5)
 	if err := image.EnsureArtifactBuildPreflight(ctx); err != nil {
 		errMsg := fmt.Sprintf("build preflight fail: %v", err)
@@ -136,13 +157,22 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 	// Step 2: Pull image. Progress callbacks stream into the shared Redis
 	// live-snapshot sink so any CubeMaster replica can serve the progress query.
 	pullProgress := newPullProgressSink(ctx, jobID).withReporter(reporter)
-	source, err := image.PrepareSource(ctx, image.SourceSpec{
+	prepareCtx, prepareSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImagePrepareSource,
+		trace.WithAttributes(attribute.String(telemetry.AttrJobID, jobID)))
+	source, err := image.PrepareSource(prepareCtx, image.SourceSpec{
 		ImageRef:         req.SourceImageRef,
 		RegistryUsername: req.RegistryUsername,
 		RegistryPassword: req.RegistryPassword,
 		DownloadBaseURL:  downloadBaseURL,
 		OnPullProgress:   pullProgress.onProgress,
 	})
+	if source != nil {
+		prepareSpan.SetAttributes(
+			attribute.String(telemetry.AttrExportMode, source.ExportMode.Name()),
+			attribute.Bool(telemetry.AttrPullDeferred, source.ExportMode != image.ExportModeDocker),
+		)
+	}
+	telemetry.End(prepareSpan, err)
 	if err != nil {
 		pullProgress.flush(false)
 		errMsg := fmt.Sprintf("pull image fail: %v", err)
@@ -151,7 +181,14 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		return fmt.Errorf("pull image: %w", err)
 	}
 	if source.Cleanup != nil {
-		defer source.Cleanup(context.Background())
+		// Cleanup must run even if the build was canceled.
+		cleanupBase := telemetry.DetachTrace(context.Background(), ctx)
+		defer func() {
+			cleanupCtx, cleanupSpan := telemetry.StartIfTraced(cleanupBase, telemetry.SpanTemplateArtifactCleanup,
+				trace.WithAttributes(attribute.String(telemetry.AttrJobID, jobID)))
+			source.Cleanup(cleanupCtx)
+			telemetry.End(cleanupSpan, nil)
+		}()
 	}
 	// Docker/Podman engine pulls complete inside PrepareSource; dockerless and
 	// native modes keep streaming during BuildExt4, so their flush waits.
@@ -207,46 +244,52 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		logger.Warnf("report fingerprint fail: %v", err)
 	}
 
-	// Resolve S3 config once for both reuse and fresh-build paths. This is
-	// done before acquiring the artifact lock so the lock-free polling path
-	// can still generate presigned URLs when reusing an artifact built by a
-	// sibling replica.
-	s3Client, s3CfgEnabled := SharedS3Client()
-	if !s3CfgEnabled && tcconfig.ArtifactStoreBackend() == "fs" {
-		return fmt.Errorf("CUBE_ARTIFACT_STORE_BACKEND=fs but the artifact store failed to open")
-	}
-
 	// Step 6: Serialize same-spec builds (fingerprint, not artifactID — the
 	// latter includes a UUID). The in-process lock protects filesystem work
 	// between goroutines; the DB session lock excludes sibling TC replicas.
 	// DB-less tests use only the in-process mutex. After waiting, reuse a
 	// READY artifact another job already produced.
+	_, waitSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageBuildLockWait,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrTemplateID, req.TemplateID),
+		))
 	unlockLocal := artifactBuildLocks.Lock(fingerprint)
 	defer unlockLocal()
 
-	db := templatecenter.GetDB()
+	db := getDB()
 	if db == nil {
+		telemetry.End(waitSpan, nil)
 		return runBuildLocked(ctx, jobID, req, artifactID, fingerprint, source, reporter, caPEM, caFingerprint, envdPayload, pullProgress, pullProgressFlushed, s3CfgEnabled, s3Client, logger)
 	}
 
-	// Cross-instance lock with polling fallback. If another replica is already
-	// building this spec, wait briefly and try to reuse its output.
+	// Wait for the cross-instance lock, reusing any artifact published in the meantime.
 	const lockPollInterval = 5 * time.Second
 	for {
+		acquired := false
 		err := lock.WithBuildLock(ctx, db, fingerprint, func() error {
+			acquired = true
+			telemetry.End(waitSpan, nil)
 			return runBuildLocked(ctx, jobID, req, artifactID, fingerprint, source, reporter, caPEM, caFingerprint, envdPayload, pullProgress, pullProgressFlushed, s3CfgEnabled, s3Client, logger)
 		})
+		if acquired {
+			return err
+		}
 		if !errors.Is(err, lock.ErrBuildInProgress) {
+			telemetry.End(waitSpan, err)
 			return err
 		}
 		logger.Infof("another replica is building spec %s, waiting to reuse", fingerprint[:16])
 
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
+			waitSpan.SetAttributes(attribute.Bool(telemetry.AttrReused, true))
+			telemetry.End(waitSpan, nil)
 			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
 		}
 
 		select {
 		case <-ctx.Done():
+			telemetry.End(waitSpan, ctx.Err())
 			return ctx.Err()
 		case <-time.After(lockPollInterval):
 		}
@@ -293,11 +336,12 @@ func runBuildLocked(
 		}
 	}
 
-	if db := templatecenter.GetDB(); db != nil {
+	if db := getDB(); db != nil {
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
 			logger.Infof("artifact already built by a sibling job, reusing: artifact_id=%s path=%s", existing.ArtifactID, existing.Ext4Path)
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
+			trace.SpanFromContext(ctx).SetAttributes(attribute.Bool(telemetry.AttrReused, true))
 			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
 		}
 	}
@@ -348,7 +392,14 @@ func runBuildLocked(
 		// Remove the half-written store dir so a failed build does not leak
 		// disk. BuildExt4 cleans up on its own error paths, but a partially
 		// created dir (or a PostRootfsExport failure) can survive.
-		if cleanupErr := cleanupArtifactResidue(ctx, artifactID); cleanupErr != nil {
+		cleanupCtx, cleanupSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactCleanup,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrJobID, jobID),
+				attribute.String(telemetry.AttrArtifactID, artifactID),
+			))
+		cleanupErr := cleanupArtifactResidue(cleanupCtx, artifactID)
+		telemetry.End(cleanupSpan, cleanupErr)
+		if cleanupErr != nil {
 			logger.Warnf("cleanup artifact residue after failed build: %v", cleanupErr)
 		}
 		reportFailed(templatecenter.JobPhaseBuildingExt4, errMsg)
@@ -366,7 +417,14 @@ func runBuildLocked(
 	artifactURL := ""
 	uploaded := false
 	if s3CfgEnabled && s3Client != nil {
-		url, err := uploadBuiltArtifact(ctx, s3Client, artifactID, &result, logger)
+		publishCtx, publishSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactPublish,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrJobID, jobID),
+				attribute.String(telemetry.AttrArtifactID, artifactID),
+				attribute.String(telemetry.AttrStorageBackend, s3Client.BackendName()),
+			))
+		url, err := uploadBuiltArtifact(publishCtx, s3Client, artifactID, &result, logger)
+		telemetry.End(publishSpan, err)
 		if err != nil {
 			logger.Errorf("%v", err)
 			reportFailed(templatecenter.JobPhaseBuildingExt4, err.Error())
@@ -374,6 +432,10 @@ func runBuildLocked(
 		}
 		uploaded = true
 		artifactURL = url
+		if artifactURL == "" && s3Client.BackendName() == "s3" {
+			// PUT established the durable copy even if HEAD or presigning failed.
+			artifactURL = blobstore.ObjectLocator("s3", s3Client.FullObjectKey(artifactID))
+		}
 	}
 
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
@@ -485,16 +547,26 @@ func reportArtifactBuilt(
 		payload["resolved_user"] = resolvedUser
 	}
 	// Only stamp backend/key after a successful upload (or reuse of an
-	// already-stored object). A configured client that failed Put must
-	// leave the three store columns empty so Master stays on local disk.
+	// already-stored object). Local-only builds leave these fields empty.
 	if inStore && s3Client != nil {
 		payload["storage_backend"] = s3Client.BackendName()
 		if objectKey == "" {
 			objectKey = s3Client.FullObjectKey(artifactID)
 		}
 		payload["object_key"] = objectKey
+		if s3Client.BackendName() == "s3" && strings.TrimSpace(artifactURL) == "" {
+			// Both a completed upload and a verified reused object are durable.
+			payload["artifact_url"] = blobstore.ObjectLocator("s3", objectKey)
+		}
 	}
-	if err := reporter.Report(ctx, jobID, payload); err != nil {
+	callbackCtx, callbackSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactCallback,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrArtifactID, artifactID),
+		))
+	err := reporter.Report(callbackCtx, jobID, payload)
+	telemetry.End(callbackSpan, err)
+	if err != nil {
 		logger.Errorf("report BUILT status fail: %v", err)
 		return fmt.Errorf("report BUILT status: %w", err)
 	}
@@ -520,29 +592,36 @@ type artifactS3Ops interface {
 // is skipped. Returning "" keeps the artifact on the local-disk download path
 // (and `tpl merge` can migrate it to S3 later).
 func artifactPresignedURL(ctx context.Context, s3CfgEnabled bool, s3Client artifactS3Ops, artifactID string, logger *cubelog.Entry) string {
+	url, _ := artifactDownloadURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
+	return url
+}
+
+// artifactDownloadURL distinguishes a confirmed missing object from a failed
+// HEAD or presign request. Only a confirmed absence contradicts a successful PUT.
+func artifactDownloadURL(ctx context.Context, s3CfgEnabled bool, s3Client artifactS3Ops, artifactID string, logger *cubelog.Entry) (url string, missing bool) {
 	if !s3CfgEnabled || s3Client == nil {
-		return ""
+		return "", false
 	}
 	exists, err := s3Client.Stat(ctx, artifactID)
 	if err != nil {
 		logger.Warnf("stat s3 object before presign fail: %v", err)
-		return ""
+		return "", false
 	}
 	if !exists {
 		logger.Warnf("artifact %s has no s3 object (predates s3 or was never uploaded); not presigning, keeping the local-disk download path", artifactID)
-		return ""
+		return "", true
 	}
-	url, err := s3Client.PresignedGetURL(ctx, artifactID)
+	url, err = s3Client.PresignedGetURL(ctx, artifactID)
 	if err != nil {
 		if !errors.Is(err, blobstore.ErrUnsupported) {
 			logger.Warnf("generate s3 presigned url fail: %v", err)
 		}
-		return ""
+		return "", false
 	}
 	if blobstore.IsObjectLocator(url) {
-		return ""
+		return "", false
 	}
-	return url
+	return url, false
 }
 
 // cleanupArtifactResidue removes the work dir and the artifact store dir for a
@@ -624,7 +703,12 @@ func uploadBuiltArtifact(
 		purgeLocalArtifactCopy(result.Ext4Path, logger)
 		return "", fmt.Errorf("upload artifact to %s store: %w", store.BackendName(), err)
 	}
-	return artifactPresignedURL(ctx, true, store, artifactID, logger), nil
+	url, missing := artifactDownloadURL(ctx, true, store, artifactID, logger)
+	if missing {
+		// Do not advertise a missing object or discard the remaining local copy.
+		return "", fmt.Errorf("artifact %s is missing from %s store after upload", artifactID, store.BackendName())
+	}
+	return url, nil
 }
 
 // purgeBuiltArtifactAfterReport removes the local ext4 once BUILT has been
@@ -745,10 +829,9 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 //     configured -- checking only os.Stat(Ext4Path) meant a replica other
 //     than the one that built the artifact would always see the local file
 //     "missing" and silently fall through to a full rebuild.
-//   - If the HEAD check itself errors (transient network issue, not
-//     necessarily a missing object), fall back to os.Stat rather than
-//     forcing an unnecessary rebuild when a valid local copy exists on this
-//     replica.
+//   - If HEAD errors, check any retained local copy (for example, from a
+//     legacy build or a failed callback). New S3 builds remove that copy after
+//     the BUILT callback succeeds, so a HEAD error normally forces a rebuild.
 //   - Local-only artifacts (no ArtifactURL, or S3 not configured on this
 //     replica) are verified with os.Stat only, since that IS the artifact's
 //     only copy in that mode.

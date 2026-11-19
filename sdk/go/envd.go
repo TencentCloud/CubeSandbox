@@ -101,10 +101,11 @@ func (s *Sandbox) startProcess(ctx context.Context, payload processStartRequest,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	originalBody := resp.Body
+	defer originalBody.Close()
 
-	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, apiErrorFromResponse(resp)
+	if err := validateConnectResponse(resp); err != nil {
+		return nil, err
 	}
 
 	result, err := parseProcessStartStream(resp.Body, opts.OnStdout, opts.OnStderr)
@@ -423,10 +424,28 @@ func (s *Sandbox) filesystemRPC(ctx context.Context, method string, reqBody any,
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	originalBody := resp.Body
+	defer originalBody.Close()
+	var reader io.Reader = originalBody
+	if resp.StatusCode >= http.StatusBadRequest {
+		reader = io.LimitReader(originalBody, maxErrorBodyBytes)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, resp.StatusCode, err
+	}
+	if isRoutingPage(resp.StatusCode, responseMediaType(resp), body) {
+		// A misrouted Web UI / gateway page must not masquerade as a
+		// filesystem error (e.g. Exists silently reporting "does not exist"):
+		// surface the routing diagnostic instead. Genuine envd errors are
+		// Connect JSON and keep their existing classification below.
+		if resp.StatusCode == http.StatusOK {
+			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, newHTMLRoutingError(resp.Header.Get("Content-Type")))
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if verr := validateConnectResponse(resp); verr != nil {
+			return nil, resp.StatusCode, fmt.Errorf("filesystem %s failed: %w", method, verr)
+		}
 	}
 	return body, resp.StatusCode, nil
 }
@@ -588,10 +607,11 @@ func (s *Sandbox) watchDir(ctx context.Context, path string, options ...fileRequ
 		cancel()
 		return nil, err
 	}
-	if resp.StatusCode >= http.StatusBadRequest {
-		defer resp.Body.Close()
+	body := resp.Body
+	if err := validateConnectResponse(resp); err != nil {
+		defer body.Close()
 		cancel()
-		return nil, apiErrorFromResponse(resp)
+		return nil, err
 	}
 
 	events := make(chan WatchEvent, 64)

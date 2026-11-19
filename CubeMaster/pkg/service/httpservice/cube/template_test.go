@@ -282,6 +282,44 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 
+func TestGetTemplateIncludesFailedJobWithoutPersistedRequest(t *testing.T) {
+	origGetTemplateInfoFn := getTemplateInfoFn
+	origGetTemplateRequestFn := getTemplateRequestFn
+	origResolveTemplateIdentifierFn := resolveTemplateIdentifierFn
+	t.Cleanup(func() {
+		getTemplateInfoFn = origGetTemplateInfoFn
+		getTemplateRequestFn = origGetTemplateRequestFn
+		resolveTemplateIdentifierFn = origResolveTemplateIdentifierFn
+	})
+	resolveTemplateIdentifierFn = func(ctx context.Context, identifier string) (string, error) {
+		return identifier, nil
+	}
+	getTemplateInfoFn = func(ctx context.Context, templateID string) (*templatecenter.TemplateInfo, error) {
+		return &templatecenter.TemplateInfo{
+			TemplateID: templateID,
+			Status:     templatecenter.StatusFailed,
+			LastError:  "source image pull timed out",
+		}, nil
+	}
+	getTemplateRequestFn = func(ctx context.Context, templateID string) (*types.CreateCubeSandboxReq, error) {
+		return nil, templatecenter.ErrTemplateNotFound
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/cube/template?template_id=tpl-failed&include_request=true", nil)
+	rt := &CubeLog.RequestTrace{}
+	resp := getTemplate(req, rt)
+
+	got, ok := resp.(*templateResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+	assert.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode)
+	assert.Equal(t, templatecenter.StatusFailed, got.Status)
+	assert.Equal(t, "source image pull timed out", got.LastError)
+	assert.Nil(t, got.CreateRequest)
+	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
+}
+
 func TestGetTemplateResolvesAliasBeforeLookup(t *testing.T) {
 	origGetTemplateInfoFn := getTemplateInfoFn
 	origGetTemplateRequestFn := getTemplateRequestFn

@@ -6,10 +6,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
 import sys
+
+PLACEHOLDER = re.compile(r'@(LOG|ARCHIVE|SPACE_CHECK)@')
 
 
 def positive(value):
@@ -28,12 +31,16 @@ def regular_log(path):
 
 def check_space(log, archive, reserve=None):
     source = regular_log(log)
+    # The policy's createolddir normally recreates a removed archive
+    # directory first; doing it here too keeps rotation from wedging if a
+    # logrotate build runs firstaction before creating olddir.
+    os.makedirs(archive, mode=0o700, exist_ok=True)
     # Keep a floor on both filesystems, with more headroom when the copy
     # competes with the storage backend and cubelet on the source device.
     floor = 2**30 if source.st_dev == archive.stat().st_dev else 512 * 2**20
     reserve = max(floor, reserve or 0)
-    # firstaction runs before delaycompress writes the previous archive;
-    # prerotate checks again immediately before the active-log copy.
+    # firstaction runs before any archive is renamed, so the previous .1 is
+    # still uncompressed and its delayed compression has to fit as well.
     previous = archive / (log.name + '.1')
     try:
         compression = regular_log(previous).st_size
@@ -75,10 +82,15 @@ def render(template, helper):
     command = ['python3', str(helper), 'check-space', str(log), str(archive)]
     if reserve:
         command += ['--reserve-bytes', str(positive(reserve))]
-    policy = template.read_text(encoding='utf-8')
-    policy = policy.replace('@LOG@', json.dumps(str(log), ensure_ascii=False))
-    policy = policy.replace('@ARCHIVE@', str(archive))
-    policy = policy.replace('@SPACE_CHECK@', ' '.join(shlex.quote(x) for x in command))
+    values = {
+        'LOG': json.dumps(str(log), ensure_ascii=False),
+        'ARCHIVE': str(archive),
+        'SPACE_CHECK': ' '.join(shlex.quote(x) for x in command),
+    }
+    # One pass, so a path that happens to contain a placeholder name is
+    # never substituted a second time.
+    policy = PLACEHOLDER.sub(lambda m: values[m.group(1)],
+                             template.read_text(encoding='utf-8'))
     # logrotate validates olddir even in --debug mode. No log contents or
     # rotation state are touched when rendering the candidate policy.
     archive.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -8,9 +8,11 @@ so no probe or envd is needed. The printed ids are read back with
 template. That makes this module single-node only, like the other cubecli
 log checks.
 
-The default image is ``redis:7-alpine``. It runs fine as a non-root user and
-ships ``redis:x:999:1000`` in ``/etc/passwd``, which is enough to check name
-lookup, the primary group from passwd, and an explicit numeric group.
+The default ``sandbox-code`` image ships ``user:x:1000:1000`` in
+``/etc/passwd``, which is enough to check name lookup, the primary group from
+passwd, and an explicit numeric group. ``CUBE_TEMPLATE_E2E_IMAGE`` can override
+it consistently with the other live template-build cases; the override image
+must provide the same ``user`` account.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ pytestmark = [
     pytest.mark.p1,
 ]
 
-DEFAULT_IMAGE = "cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine"
+DEFAULT_IMAGE = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
 DEFAULT_WRITABLE_LAYER_SIZE = "1G"
 MARKER = "cube-e2e-user"
 START_CMD = ["sh"]
@@ -46,7 +48,7 @@ ID_RE = re.compile(rf"{MARKER} uid=(\d+) gid=(\d+)")
 
 
 def _image() -> str:
-    return os.environ.get("SDK_E2E_TEMPLATE_USER_IMAGE") or DEFAULT_IMAGE
+    return os.environ.get("CUBE_TEMPLATE_E2E_IMAGE") or DEFAULT_IMAGE
 
 
 @pytest.fixture
@@ -129,9 +131,9 @@ def _build(cfg: Config, user: str | None):
 @pytest.mark.parametrize(
     ("user", "expected"),
     [
-        pytest.param("redis", (999, 1000), id="username"),
-        pytest.param("redis:2000", (999, 2000), id="username-gid"),
-        pytest.param("1000:1000", (1000, 1000), id="uid-gid-not-in-passwd"),
+        pytest.param("user", (1000, 1000), id="username"),
+        pytest.param("user:2000", (1000, 2000), id="username-gid"),
+        pytest.param("1234:1234", (1234, 1234), id="uid-gid-not-in-passwd"),
         pytest.param(None, (0, 0), id="omitted-stays-root"),
     ],
 )

@@ -676,30 +676,37 @@ def test_backoff_follows_configured_schedule(sdk_sandbox, sdk_e2e_config):
         interval=0.5,
     )
     _assert_backoff(first, config=sdk_e2e_config, initial=3, multiplier=4, cap=6, jitter=0.1)
-    wait_for_restart_status(
-        sdk_sandbox,
-        lambda item: bool(item) and item.get("restartState") == "Running" and _count(item) == 1,
-        timeout=sdk_e2e_config.restart_policy_wait,
-    )
     wait_until_data_plane_ready(
         sdk_sandbox,
-        timeout=sdk_e2e_config.default_timeout,
+        timeout=sdk_e2e_config.restart_policy_wait,
         command_timeout=sdk_e2e_config.command_timeout,
     )
+    running = wait_for_restart_status(
+        sdk_sandbox,
+        # A slow ARM64 cold start can consume another restart before becoming
+        # usable. Capture the generation only after data-plane readiness.
+        lambda item: bool(item)
+        and item.get("restartState") == "Running"
+        and _count(item) >= 1,
+        timeout=sdk_e2e_config.restart_policy_wait,
+    )
+    running_count = _count(running)
     crash_guest(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
     second = wait_for_restart_status(
         sdk_sandbox,
         lambda item: bool(item)
         and item.get("restartState") == "BackOff"
         and bool(item.get("nextRestartAt"))
-        and _count(item) == 1,
+        and _count(item) == running_count,
         timeout=sdk_e2e_config.restart_policy_wait,
         interval=0.5,
     )
     _assert_backoff(second, config=sdk_e2e_config, initial=3, multiplier=4, cap=6, jitter=0.1)
     wait_for_restart_status(
         sdk_sandbox,
-        lambda item: bool(item) and item.get("restartState") == "Running" and _count(item) == 2,
+        lambda item: bool(item)
+        and item.get("restartState") == "Running"
+        and _count(item) >= running_count + 1,
         timeout=sdk_e2e_config.restart_policy_wait,
     )
 

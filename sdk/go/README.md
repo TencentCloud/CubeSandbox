@@ -522,6 +522,34 @@ cfg := cubesandbox.Config{
 client := cubesandbox.NewClient(cfg)
 ```
 
+If one of the covered Go SDK calls (`Commands.Run`, `Files.WatchDir`,
+`Pty.Create`/`Connect`, `Pty.Kill`/`Resize`/`SendStdin`,
+`Files.List`/`Stat`/`Exists`/`Remove`/`Rename`/`MakeDir`) returns an HTML/text
+page or invalid envelope, check
+the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
+Connect streams and unary PTY calls reject HTTP 200 responses labeled
+`text/html`. On HTTP 200, filesystem RPCs recognize `text/html` or a
+case-insensitive `<!doctype` / `<html` body prefix after leading whitespace.
+JSON API error documents retain the existing exception. Plain-text or JSON
+login pages without these HTML indicators continue through normal response
+handling and may produce decoding errors.
+On HTTP errors, the SDK treats HTML pages as routing errors and checks non-JSON
+`text/*` responses for misrouting only on 404. Routing errors clear the
+not-found classifications, while 401/403 responses keep `ErrAuthentication`.
+JSON API error documents keep their classification even when labeled `text/*`.
+**Breaking behavior change.** `Pty.Kill` returns an error for a 404 HTML routing
+page. A genuine process-not-found response still returns `(false, nil)`.
+Non-200 routing page
+messages are truncated before the SDK appends the routing hint. For redirects
+surfaced by stream validation, the diagnostic includes only the truncated URL path.
+HTTP error diagnostics retain at most 64 KiB of response content. The API error
+parser may read one extra byte to detect truncation. PTY unary calls and filesystem
+RPCs read at most 64 KiB on HTTP errors. Larger error documents may be truncated
+before JSON decoding. Successful filesystem responses are read in full.
+This diagnostic
+does not cover `RunCode`, which uses the separate Jupyter endpoint, nor the
+plain-HTTP `Files.Read`/`Files.Write` paths.
+
 ## Integration Tests
 
 Unit tests do not require a live service:

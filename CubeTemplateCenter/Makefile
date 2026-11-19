@@ -1,4 +1,4 @@
-.PHONY: build test clean proto fmt lint
+.PHONY: build test test-docker test-integration clean proto fmt lint
 
 GOPATH ?= $(shell go env GOPATH)
 BUILD_FLAGS := -trimpath
@@ -9,7 +9,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 # CubeMaster 共享代码里 image/disk.go 用了 unix.F_SETPIPE_SZ / CAP_SYS_ADMIN,
 # 是 Linux-only 的。模板中心沿用它, 所以本仓库构建也固定 linux.
 export GOOS := linux
-export GOARCH := amd64
+export GOARCH ?= $(shell go env GOARCH)
 
 APPS := templatecenter
 
@@ -23,12 +23,23 @@ $(APPS): %:
 		          -X github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version.Version=$(VERSION)" \
 		./cmd/$@/
 
-# 本仓库无业务测试, test target 仅编译验证 (CGO=0 + GOOS=linux 跨编译).
-# 在 mac 上 GOOS=linux + CGO_ENABLED=1 会因为缺 Linux header 失败,
-# 所以 CGO_ENABLED=0 (不启用 race). CI 里跑测试请用 Linux 容器.
+# -gcflags=all=-l disables inlining: the gomonkey-based tests in ./pkg/image
+# patch function machine code, and an inlined call site bypasses the patch.
+# The Docker-backed MySQL tests are excluded here with -short; they run in the
+# separate test-docker target on a host that can reach a Docker daemon.
 test:
-	CGO_ENABLED=0 go test -short -count=1 ./...
+	CGO_ENABLED=0 go test -short -gcflags=all=-l -count=1 ./...
 
+# Docker-backed tests must run where the daemon and its published 127.0.0.1
+# ports are reachable. Failing instead of skipping keeps CI honest: a missing
+# daemon is an environment error, not a reason to report green.
+test-docker:
+	@command -v docker >/dev/null 2>&1 || { echo "error: docker is not installed"; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "error: docker daemon is not reachable"; exit 1; }
+	CI=true CUBEMASTER_REQUIRE_DOCKER_TESTS=1 CGO_ENABLED=0 go test -v -count=1 \
+		-gcflags=all=-l -timeout=20m ./pkg/reconcile
+
+# Full local integration run; CI uses the narrower test-docker lane.
 test-integration:
 	CGO_ENABLED=0 CUBEMASTER_REQUIRE_DOCKER_TESTS=1 go test -count=1 ./...
 

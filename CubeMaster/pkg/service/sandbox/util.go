@@ -1087,6 +1087,7 @@ func setCreateTimeEnvVarsAnnotation(out map[string]string, envVars map[string]st
 func rejectUserCubeMasterAnnotation(key string) bool {
 	switch strings.TrimSpace(key) {
 	case constants.CubeAnnotationPauseSnapshotID,
+		constants.CubeAnnotationPauseAbortedSnapshotID,
 		constants.CubeAnnotationLaunchMemorySnapshotID,
 		constants.CubeAnnotationRuntimeRestoreSnapshotID,
 		constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt:

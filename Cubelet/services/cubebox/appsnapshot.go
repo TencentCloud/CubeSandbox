@@ -27,12 +27,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -74,6 +77,19 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 
 	createReq := req.GetCreateRequest()
+	ctx = telemetry.ExtractGRPC(ctx)
+	ctx, span := telemetry.Start(ctx, telemetry.SpanImageAppSnapshot,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrRequestID, createReq.GetRequestID()),
+			attribute.String(telemetry.AttrTemplateID, createReq.GetAnnotations()[constants.MasterAnnotationAppSnapshotTemplateID]),
+		))
+	// Defer before recovery so it records the recovered response code.
+	defer func() {
+		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, rsp.GetSandboxID()))
+		telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode()))
+	}()
+
 	if createReq == nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = "create_request is required"
@@ -142,6 +158,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		AppID:        getAppID(createReq.Annotations),
 		Qualifier:    getUserAgent(ctx),
 	}
+
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
 
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
@@ -901,18 +918,22 @@ func alignUp(value, alignment uint64) uint64 {
 	return value + alignment - value%alignment
 }
 
-func cleanupCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) {
-	cleanupCowSnapshotObjectsOn(ctx, stepLog, "", memoryObject, rootfsObject)
+func cleanupCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) bool {
+	return cleanupCowSnapshotObjectsOn(ctx, stepLog, "", memoryObject, rootfsObject)
 }
 
-func cleanupCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) {
-	cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "memory volume", memoryObject)
-	cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject)
+func cleanupCowSnapshotObjectsOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend string, memoryObject, rootfsObject *storage.CowSnapshotObject) bool {
+	memOK := cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "memory volume", memoryObject)
+	rootOK := cleanupCowSnapshotObjectOn(ctx, stepLog, backend, "rootfs snapshot", rootfsObject)
+	return memOK && rootOK
 }
 
-func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend, objectLabel string, object *storage.CowSnapshotObject) {
+// cleanupCowSnapshotObjectOn deletes one CoW object. Returns false when the
+// delete was attempted and failed (callers that need a GC handle should keep
+// naming the object). Nil / empty objects count as success (nothing to do).
+func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLogEntry, backend, objectLabel string, object *storage.CowSnapshotObject) bool {
 	if object == nil || object.Name == "" {
-		return
+		return true
 	}
 	var cleanupErr error
 	if strings.TrimSpace(backend) == "" {
@@ -922,7 +943,9 @@ func cleanupCowSnapshotObjectOn(ctx context.Context, stepLog *log.CubeWrapperLog
 	}
 	if cleanupErr != nil {
 		stepLog.Warnf("failed to cleanup %s %s: %v", objectLabel, object.Name, cleanupErr)
+		return false
 	}
+	return true
 }
 
 func deactivateCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) error {

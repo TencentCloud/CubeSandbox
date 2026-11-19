@@ -105,3 +105,9 @@ runtime-values.yaml
 !/tests/e2e/webhook/*.py
 !/tests/e2e/webhook/*.md
 !/tests/e2e/webhook/env.example
+
+# Local community PR and OTel build/test artifacts
+/.tmp-community-release/
+/.tmp-ghcr/
+/.tmp-otel-024f2acfe949/
+/.tmp-otel-20261105-7eb4ae6f/

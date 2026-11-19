@@ -210,6 +210,11 @@ const (
 	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
 	// the local catalog under this id; Kind=pause_snapshot.
 	MasterAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// MasterAnnotationPauseAbortedSnapshotID names a pause attempt whose
+	// CoW artifacts could not be cleaned after a pre-freeze busy reject.
+	// The live pause.snapshot.id stamp is restored to the previous base;
+	// Destroy GC also collects this aborted id.
+	MasterAnnotationPauseAbortedSnapshotID = "cube.master.pause.aborted.snapshot.id"
 	// MasterAnnotationLaunchMemorySnapshotID is the template or customer
 	// snapshot the sandbox was first started from. Pause may clone it only
 	// when it is still the VM's last restore (first Pause after

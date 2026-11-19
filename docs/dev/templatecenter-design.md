@@ -324,6 +324,48 @@ objects with no CLEANUP_PENDING row left for the backstop.
 `ArtifactNodePlacement` rows record which nodes hold a copy; they drive both
 Phase 2 deletion and download locality.
 
+A node that stays absent from the node view for 15 minutes (the async
+operation timeout; health is ignored, only absence counts) is skipped in Phase
+2 so a dead node cannot pin the artifact in CLEANUP_PENDING forever. Its row is
+kept with `deferred_at` set while the other rows are dropped and TC is
+notified. Each artifact GC pass retries deferred rows whose node is back in
+the view, using the node's current address, and deletes a row only after a
+confirmed destroy. A node that never returns keeps its row. Legacy `ip:` ids
+are never treated as absent.
+
+**Scope and limits**:
+- This mechanism covers deferred cleanup of `ArtifactNodePlacement` rows.
+- crashed/unhealthy-but-registered nodes are out of scope: only complete
+  disappearance from the node view counts as absence, health is ignored.
+- Legacy `ip:` ids come from the 20260623145000 backfill of replica rows
+  without `node_id`. They are never treated as absent: an artifact with only
+  `ip:` placements on a retired node stays CLEANUP_PENDING. These are a closed
+  historical set; verify with
+  `SELECT COUNT(*) FROM t_cube_artifact_node_placement WHERE node_id LIKE 'ip:%'`
+  and clean up manually if needed.
+- User-visible delay: 15m grace + up to one 10m GC cadence, i.e. at most ~25
+  minutes after the node disappears before the artifact finalises.
+
+Deferred rows are never reaped automatically: the row is the only record that
+the node may still hold the files, so dropping it by age would silently leak
+them if the node returns. Once a node is confirmed gone for good, an operator
+can release its rows with `DELETE FROM t_cube_artifact_node_placement WHERE
+deferred_at > 0 AND node_id = '<node-id>'`. **Back up first, use a controlled
+CLI, and watch relevant metrics.**
+
+The absence start time is kept in process memory only: a Master restart resets
+the timer, and HA replicas keep independent clocks. Deferral is idempotent
+(`deferred_at = 0` guard), so replicas disagreeing on the exact moment is safe;
+a restart merely postpones convergence by up to one grace period. The deferral
+log records the absence start and elapsed time for observability.
+
+**Upgrade order**: the `deferred_at` column is added by migration
+`20261112071208_artifact_placement_deferred_at.sql`. Apply the migration before
+rolling out new CubeMaster / CubeTemplateCenter binaries; otherwise the GC scan
+and the TC backstop will fail with an unknown-column error. With
+`CUBE_AUTO_MIGRATION=false`, run the migration SQL manually before starting the
+new binaries.
+
 ### 9.7 Shared artifact store
 
 TC writes the ext4 and CubeMaster serves it to cubelet over

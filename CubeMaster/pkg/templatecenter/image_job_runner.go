@@ -15,8 +15,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // distributionFailure decides whether a distribution outcome is terminal, and
@@ -81,12 +84,20 @@ func finishTemplateImageJobAfterArtifact(
 	artifact *models.RootfsArtifact,
 	generatedReq *types.CreateCubeSandboxReq,
 	builtFreshArtifact bool,
-) error {
+) (err error) {
 	logger := log.G(ctx).WithFields(map[string]any{
 		"job_id":      jobID,
 		"template_id": req.TemplateID,
 		"artifact_id": artifact.ArtifactID,
 	})
+	ctx, completeSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateImageComplete,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrTemplateID, req.TemplateID),
+			attribute.String(telemetry.AttrArtifactID, artifact.ArtifactID),
+		))
+	defer func() { telemetry.End(completeSpan, err) }()
+
 	readyTargets, expected, ready, failed, distErr := distributeRootfsArtifact(ctx, req, generatedReq, artifact, req.TemplateID, jobID)
 	// Logged at Info even on success: before this, the only way to tell a
 	// distribution that failed on every node from one that never ran was that
@@ -153,30 +164,31 @@ func finishTemplateImageJobAfterArtifact(
 			return listErr
 		}
 	}
+	registryCtx, registrySpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateRegistry,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrJobID, jobID),
+			attribute.String(telemetry.AttrTemplateID, req.TemplateID),
+		))
 	var info *TemplateInfo
-	storedReq, err := normalizeStoredTemplateRequest(generatedReq, true)
-	if err != nil {
+	storedReq, registryErr := normalizeStoredTemplateRequest(generatedReq, true)
+	if registryErr == nil {
+		_, registryErr = ensureTemplateDefinitionWithOptions(registryCtx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
+			StorageBackend: req.Backend,
+		})
+	}
+	telemetry.End(registrySpan, registryErr)
+	if registryErr != nil {
+		err = registryErr
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,
 			"template_status": StatusFailed,
-			"error_message":   err.Error(),
+			"error_message":   registryErr.Error(),
 		})
 		return err
 	}
-	if _, err := ensureTemplateDefinitionWithOptions(ctx, req.TemplateID, storedReq, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), definitionCreateOptions{
-		StorageBackend: req.Backend,
-	}); err != nil {
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
-			"status":          JobStatusFailed,
-			"phase":           JobPhaseCreatingTemplate,
-			"progress":        100,
-			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
-		return err
-	}
+
 	logger.Infof("template definition written; creating replicas on %d node(s)", len(readyTargets))
 	replicas, persistErr := createTemplateReplicasOnNodes(ctx, req.TemplateID, generatedReq, readyTargets, replicaRunOptions{
 		ArtifactID: artifact.ArtifactID,
@@ -186,6 +198,8 @@ func finishTemplateImageJobAfterArtifact(
 	// jobErrMsg overrides err.Error() in the job row when the raw error must
 	// not be exposed through the build-status API.
 	jobErrMsg := ""
+	var finalizeSpan trace.Span
+	finalizeCtx := ctx
 	if persistErr != nil {
 		err = persistErr
 		// Only a CREATE owns the definition it just wrote. Other operations
@@ -198,9 +212,15 @@ func finishTemplateImageJobAfterArtifact(
 		// finalizeTemplateReplicas claims the alias *before* publishing the
 		// READY status so a client that sees READY can always resolve the
 		// alias; claimWarning captures a non-fatal alias-transfer note.
-		info, claimWarning, err = finalizeTemplateReplicas(ctx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
+		finalizeCtx, finalizeSpan = telemetry.StartIfTraced(ctx, telemetry.SpanTemplateFinalize,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrJobID, jobID),
+				attribute.String(telemetry.AttrTemplateID, req.TemplateID),
+			))
+		info, claimWarning, err = finalizeTemplateReplicas(finalizeCtx, req.TemplateID, jobID, generatedReq.InstanceType, constants.GetAppSnapshotVersion(generatedReq.Annotations), replicas)
 	}
 	if err != nil {
+		telemetry.End(finalizeSpan, err)
 		if builtFreshArtifact {
 			if cleanupErr := cleanupFailedRootfsArtifact(ctx, artifact, req.InstanceType, req.TemplateID); cleanupErr != nil {
 				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
@@ -235,7 +255,7 @@ func finishTemplateImageJobAfterArtifact(
 	if errorMessage == "" && claimWarning != "" {
 		errorMessage = claimWarning
 	}
-	_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+	writeErr := updateTemplateImageJob(finalizeCtx, jobID, map[string]any{
 		"status":          jobStatus,
 		"phase":           jobPhase,
 		"progress":        100,
@@ -243,6 +263,11 @@ func finishTemplateImageJobAfterArtifact(
 		"result_json":     string(resultPayload),
 		"error_message":   errorMessage,
 	})
+	spanErr := writeErr
+	if spanErr == nil && info.Status == StatusFailed {
+		spanErr = errors.New("template status failed")
+	}
+	telemetry.End(finalizeSpan, spanErr)
 	if jobStatus == JobStatusFailed {
 		return fmt.Errorf("template creation failed: %s", errorMessage)
 	}

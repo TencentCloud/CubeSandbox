@@ -17,6 +17,7 @@ import pytest
 from cubesandbox import Config, Template
 from cubesandbox._exceptions import ApiError, TemplateNotFoundError
 
+from cases.templates.test_alias import DEFAULT_IMAGE
 from framework.build_throttle import template_build_slot
 
 pytestmark = [
@@ -26,7 +27,6 @@ pytestmark = [
     pytest.mark.p1,
 ]
 
-DEFAULT_IMAGE = "cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
 DEFAULT_WRITABLE_LAYER_SIZE = "1G"
 
 

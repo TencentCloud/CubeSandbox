@@ -417,28 +417,37 @@ periodic check, not a strict instantaneous byte ceiling. Role shutdown and
 upgrades do not disable the host timer; uninstall removes it.
 
 Rotation uses `copytruncate` to preserve the storage process's open descriptor.
-There is a small concurrent-tail log-loss window; WAL and volume data are not
-modified. Archives go into a per-source directory under `rotated/` beside the
-log, or under `RCOW_LOG_ARCHIVE_DIR`. The `firstaction` hook checks for a singly
-linked regular file and enough free space for the complete active-log copy,
-the previous archive's delayed compression, and an additional reserve. The
-`prerotate` hook repeats the check before copying the active log. The
-reserve is at least 1 GiB on the source filesystem and 512 MiB on a separate
-archive filesystem; `RCOW_LOG_RESERVE_BYTES` can raise it. A failed check skips
-rotation without truncating the active log. This check does not reserve blocks
-against concurrent disk writers, so operators still need disk-space monitoring.
+Log lines written while the active log is being copied and truncated can be
+lost; that window lasts as long as the copy, which for a 256 MiB log on a busy
+disk can be seconds. WAL and volume data are not modified. Archives go into a
+per-source directory under `rotated/` beside the log, or under
+`RCOW_LOG_ARCHIVE_DIR`; the directory is recreated if it is removed. The
+`firstaction` hook checks for a singly linked regular file and enough free
+space for the complete active-log copy, the previous archive's delayed
+compression, and an additional reserve. The reserve is at least 1 GiB on the
+source filesystem and 512 MiB on a separate archive filesystem;
+`RCOW_LOG_RESERVE_BYTES` can raise it. `firstaction` runs before any archive is
+renamed or compressed, so a failed check leaves both the active log and the
+existing archives unchanged. This check does not reserve blocks against
+concurrent disk writers, so operators still need disk-space monitoring.
 
 `RCOW_LOG`, `RCOW_LOG_DIR`, archive and reserve settings are resolved at install
-time; re-run the installer after changing them. Archive directory names must
-not contain whitespace or logrotate metacharacters. `ONE_CLICK_LOGROTATE_BIN`
-selects the executable; a stale override warns and falls back to system
-lookup for both host policies in the same install.
+time and written to `.one-click.env`, so the policy and the storage service use
+the same log path; re-run the installer after changing them. Archive directory
+names must not contain whitespace or logrotate metacharacters. A storage policy
+that cannot be rendered or is rejected by logrotate is skipped on its own: the
+CubeShim/VMM policy and the shared timer are still installed.
+`ONE_CLICK_LOGROTATE_BIN` selects the executable; a stale override warns and
+falls back to system lookup for both host policies in the same install.
 
-Timestamped restart archives are separate from periodic rotation. They are kept
-by default. Set `RCOW_LOG_RESTART_RETAIN=8` in the storage service environment to
-keep the newest eight matching archives when `rcow_start.sh` moves the previous
-run's log. Cleanup skips symlinks, hard links and unrelated files, and rechecks
-the inode before removal. It also covers existing matching restart archives.
+Timestamped restart archives are separate from periodic rotation. A new one is
+written on every start, including each crash restart (`RestartSec=3s`), so a
+crash-looping target produces one every few seconds. One-click sets
+`RCOW_LOG_RESTART_RETAIN=8`, which keeps the newest eight matching archives
+when `rcow_start.sh` moves the previous run's log; an explicit empty value keeps
+all of them. Cleanup skips symlinks, hard links and unrelated files, and
+rechecks the inode before removal. It also covers existing matching restart
+archives.
 
 For an oversized legacy log, use the one-time procedure in
 [service management](../docs/guide/service-management.md#rotating-s3lvol-logs)

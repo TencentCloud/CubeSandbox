@@ -165,11 +165,16 @@ func runArtifactGCPass(ctx context.Context) {
 	logger := log.G(ctx).WithFields(map[string]any{"component": "artifact_gc"})
 
 	candidates, ok := listArtifactGCCandidatesLocked(ctx)
-	if !ok || len(candidates) == 0 {
+	if !ok {
 		return
 	}
-	logger.Infof("artifact gc: evaluating %d candidate artifacts", len(candidates))
-	processArtifactGCCandidates(ctx, candidates)
+	if len(candidates) > 0 {
+		logger.Infof("artifact gc: evaluating %d candidate artifacts", len(candidates))
+		processArtifactGCCandidates(ctx, candidates)
+	}
+	// Deferred placements outlive their artifact row, so the candidates above
+	// cannot reach them; runs lock-free, and overlap is safe (idempotent destroy).
+	reconcileDeferredArtifactPlacements(ctx)
 }
 
 func processArtifactGCCandidates(ctx context.Context, candidates []models.RootfsArtifact) {
