@@ -10,7 +10,9 @@ import {
   DEFAULT_ENVD_USER,
   ENVD_PORT,
   encodeConnectEnvelope,
+  htmlResponseError,
   readConnectFrames,
+  streamHttpErrorDetail,
 } from "./commands.js";
 import { FilesystemNotFoundError, PartialWriteError } from "./exceptions.js";
 import type { Sandbox } from "./sandbox.js";
@@ -278,8 +280,15 @@ export class Filesystem {
       },
     );
     if (resp.status >= 400) {
+      const detail = await streamHttpErrorDetail(resp);
       controller.abort();
-      throw new Error(`WatchDir failed: HTTP ${resp.status}`);
+      const suffix = detail ? `: ${detail}` : "";
+      throw new Error(`WatchDir failed: HTTP ${resp.status}${suffix}`);
+    }
+    const htmlError = htmlResponseError(resp);
+    if (htmlError) {
+      controller.abort();
+      throw new Error(`WatchDir failed: ${htmlError}`);
     }
     if (!resp.body) {
       controller.abort();

@@ -23,8 +23,10 @@ import {
   ENVD_PORT,
   encodeConnectEnvelope,
   exitCodeFromStatus,
+  htmlResponseError,
   raiseConnectEndStream,
   readConnectFrames,
+  streamHttpErrorDetail,
   userHeaders,
 } from "./commands.js";
 import { ApiError, CubeSandboxError } from "./exceptions.js";
@@ -472,9 +474,15 @@ export class Pty {
 
     if (resp.status >= 400) {
       control.clearIdle();
-      const detail = (await resp.text().catch(() => "")).trim();
+      const detail = await streamHttpErrorDetail(resp);
       const suffix = detail ? `: ${detail}` : "";
       throw new ApiError(`${method} failed: HTTP ${resp.status}${suffix}`, resp.status);
+    }
+    const htmlError = htmlResponseError(resp);
+    if (htmlError) {
+      control.clearIdle();
+      await resp.body?.cancel().catch(() => undefined);
+      throw new CubeSandboxError(`${method} failed: ${htmlError}`);
     }
     if (!resp.body) {
       control.clearIdle();

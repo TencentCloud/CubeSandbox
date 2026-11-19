@@ -13,6 +13,114 @@ export const CONNECT_END_STREAM_FLAG = 0x02;
 export const CONNECT_COMPRESSED_FLAG = 0x01;
 export const MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024;
 export const DEFAULT_ENVD_USER = "root";
+const CONNECT_KNOWN_FLAGS = CONNECT_COMPRESSED_FLAG | CONNECT_END_STREAM_FLAG;
+// Hints shared with the Go SDK (sdk/go/connect.go). The routing hint is for
+// HTML pages; a body that is not Connect-framed can also be a compressed
+// response, so its hint names that cause too.
+const ROUTING_HINT =
+  "check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint points to a web service";
+const NOT_AN_ENVELOPE_HINT =
+  "check whether CUBE_PROXY_NODE_IP is configured, the data-plane endpoint points to a web service, or the response was compressed";
+// Bounds for reading an HTTP error page on a Connect stream request.
+const MAX_ROUTING_PAGE_PEEK_BYTES = 4096;
+const MAX_DIAGNOSTIC_LEN = 200;
+
+interface HttpResponseLike {
+  status: number;
+  headers: { get(name: string): string | null };
+}
+
+function mediaType(resp: HttpResponseLike): string {
+  return (resp.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
+}
+
+/**
+ * Diagnose an HTTP 200 ``text/html`` response on a Connect stream. A Connect
+ * stream is never labelled ``text/html``; such a response means the request
+ * reached a Web UI or portal page instead of CubeProxy. Returns ``null`` for
+ * anything else and never reads the body. Mirrors the Go SDK.
+ */
+export function htmlResponseError(resp: HttpResponseLike): string | null {
+  if (resp.status !== 200 || mediaType(resp) !== "text/html") {
+    return null;
+  }
+  const contentType = resp.headers.get("content-type") ?? "";
+  return `received HTML instead of a Connect response (content-type ${JSON.stringify(contentType)}); ${ROUTING_HINT}`;
+}
+
+/**
+ * Whether an HTTP error body looks like a Web UI or gateway page. A JSON
+ * error document keeps the server's message even when labelled text/html.
+ */
+function isRoutingPage(type: string, body: Buffer): boolean {
+  const trimmed = body.toString("latin1").trim();
+  if (trimmed.startsWith("{")) {
+    return false;
+  }
+  const head = trimmed.slice(0, "<!doctype".length).toLowerCase();
+  return type === "text/html" || head.startsWith("<!doctype") || head.startsWith("<html");
+}
+
+function routingPageHint(status: number): string {
+  if (status === 401 || status === 403) {
+    return "received an HTML/text page instead of a Connect stream; check credentials or whether a portal is intercepting the request";
+  }
+  if (status >= 500) {
+    return "received an HTML error page instead of a Connect stream; the request may have reached CubeProxy but the upstream envd or sandbox node is unreachable";
+  }
+  return `response may be an HTML/text page instead of a Connect stream; ${ROUTING_HINT}`;
+}
+
+function truncateDiagnostic(message: string): string {
+  const chars = Array.from(message);
+  return chars.length <= MAX_DIAGNOSTIC_LEN
+    ? message
+    : `${chars.slice(0, MAX_DIAGNOSTIC_LEN).join("")}...`;
+}
+
+/**
+ * Describe an HTTP error response to a Connect stream request: the trimmed
+ * body text, as before, except that an HTML page (a misrouted request landing
+ * on a Web UI, gateway or portal) is reported from a bounded prefix of its
+ * body followed by the same hint the Go SDK gives.
+ */
+export async function streamHttpErrorDetail(
+  resp: HttpResponseLike & { body: ReadableStream<Uint8Array> | null },
+): Promise<string> {
+  if (!resp.body) {
+    return "";
+  }
+  const reader = resp.body.getReader();
+  const chunks: Buffer[] = [];
+  let length = 0;
+  try {
+    while (length < MAX_ROUTING_PAGE_PEEK_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(Buffer.from(value));
+      length += value.length;
+    }
+    const peek = Buffer.concat(chunks);
+    if (isRoutingPage(mediaType(resp), peek)) {
+      await reader.cancel().catch(() => undefined);
+      const text = peek.subarray(0, MAX_ROUTING_PAGE_PEEK_BYTES).toString("utf-8").trim();
+      const hint = routingPageHint(resp.status);
+      return text ? `${truncateDiagnostic(text)}; ${hint}` : hint;
+    }
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    // Report whatever was read before the body failed.
+  }
+  return Buffer.concat(chunks).toString("utf-8").trim();
+}
 
 /** Result of running a shell command inside the sandbox. */
 export interface CommandResult {
@@ -138,6 +246,15 @@ export async function* readConnectFrames(
     for (;;) {
       while (buffered >= 5) {
         const { flags, size } = peekHeader();
+        // A misrouted HTML, JSON or gzip body would otherwise be read as an
+        // envelope ("<!DOC" -> flags 0x3c, length 558124867) and reported as
+        // an oversized message. Reject unknown flags before the length.
+        if (flags & ~CONNECT_KNOWN_FLAGS) {
+          const head = take(5).toString("hex");
+          throw new Error(
+            `response is not a Connect envelope (first 5 bytes: ${head}); ${NOT_AN_ENVELOPE_HINT}`,
+          );
+        }
         if (size > MAX_CONNECT_ENVELOPE_SIZE) {
           throw new Error(`Connect stream message too large: ${size} bytes`);
         }
@@ -277,9 +394,15 @@ export class Commands {
 
     if (resp.status >= 400) {
       idle.clear();
-      const detail = (await resp.text().catch(() => "")).trim();
+      const detail = await streamHttpErrorDetail(resp);
       const suffix = detail ? `: ${detail}` : "";
       throw new Error(`command failed: HTTP ${resp.status}${suffix}`);
+    }
+    const htmlError = htmlResponseError(resp);
+    if (htmlError) {
+      idle.clear();
+      await resp.body?.cancel().catch(() => undefined);
+      throw new Error(htmlError);
     }
     if (!resp.body) {
       idle.clear();
