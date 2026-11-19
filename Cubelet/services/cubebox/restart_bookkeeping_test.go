@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
@@ -51,6 +52,68 @@ func TestApplyRestartBookkeepingKeepsSeq(t *testing.T) {
 	applyRestartBookkeeping(resumed, prior, false)
 	if resumed.StatusSeq != 8 || resumed.RestartCount != 3 || resumed.RestartState != restartpolicy.StateRunning {
 		t.Fatalf("resume seq=%d count=%d state=%s", resumed.StatusSeq, resumed.RestartCount, resumed.RestartState)
+	}
+}
+
+func TestSetBackoffResetsStableStreakAtomically(t *testing.T) {
+	now := time.Date(2026, time.November, 19, 2, 0, 0, 0, time.UTC)
+	cb := &cubeboxstore.CubeBox{}
+	cb.ID = "sb"
+	cb.RestartCount = 2
+	cb.StatusSeq = 7
+	cb.RestartState = restartpolicy.StateRunning
+	cb.LastRestartAt = now.Add(-9 * time.Second).UnixNano()
+	store := &memBoxes{cb: cb}
+	m := newRestartMgr(store)
+	backoff := restartpolicy.Backoff{
+		Initial:        3 * time.Second,
+		Max:            6 * time.Second,
+		Multiplier:     4,
+		MaxRestarts:    5,
+		StableDuration: 8 * time.Second,
+	}
+
+	delay, count, allowed, err := m.setBackoff("sb", backoff, now)
+	if err != nil || !allowed {
+		t.Fatalf("err=%v allowed=%t", err, allowed)
+	}
+	if delay != 3*time.Second || count != 0 {
+		t.Fatalf("delay=%s count=%d", delay, count)
+	}
+	if cb.RestartCount != 0 || cb.RestartState != restartpolicy.StateBackOff {
+		t.Fatalf("count=%d state=%s", cb.RestartCount, cb.RestartState)
+	}
+	if cb.NextRestartAt != now.Add(3*time.Second).UnixNano() || cb.StatusSeq != 8 {
+		t.Fatalf("next=%d seq=%d", cb.NextRestartAt, cb.StatusSeq)
+	}
+	if store.saves != 1 || len(store.saved) != 1 {
+		t.Fatalf("saves=%d snapshots=%d", store.saves, len(store.saved))
+	}
+	saved := store.saved[0]
+	if saved.RestartCount != 0 || saved.RestartState != restartpolicy.StateBackOff ||
+		saved.NextRestartAt != now.Add(3*time.Second).UnixNano() || saved.StatusSeq != 8 {
+		t.Fatalf("saved count=%d state=%s next=%d seq=%d",
+			saved.RestartCount, saved.RestartState, saved.NextRestartAt, saved.StatusSeq)
+	}
+}
+
+func TestSetBackoffGivesUpWithoutStableReset(t *testing.T) {
+	now := time.Date(2026, time.November, 19, 2, 0, 0, 0, time.UTC)
+	cb := &cubeboxstore.CubeBox{}
+	cb.ID = "sb"
+	cb.RestartCount = 2
+	cb.StatusSeq = 7
+	cb.RestartState = restartpolicy.StateRunning
+	cb.LastRestartAt = now.Add(-time.Second).UnixNano()
+	m := newRestartMgr(&memBoxes{cb: cb})
+	backoff := restartpolicy.Backoff{Initial: time.Second, MaxRestarts: 2, StableDuration: 8 * time.Second}
+
+	_, count, allowed, err := m.setBackoff("sb", backoff, now)
+	if err != nil || allowed || count != 2 {
+		t.Fatalf("err=%v allowed=%t count=%d", err, allowed, count)
+	}
+	if cb.RestartState != restartpolicy.StateGaveUp || cb.StatusSeq != 8 || cb.NextRestartAt != 0 {
+		t.Fatalf("state=%s seq=%d next=%d", cb.RestartState, cb.StatusSeq, cb.NextRestartAt)
 	}
 }
 
@@ -115,6 +178,44 @@ func TestMarkResumedAfterPause(t *testing.T) {
 	markResumedAfterPause(nil)
 }
 
+func TestRecoverResetsSpentRetriesAfterStablePeriod(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	cb.ID = "sb"
+	cb.RestartCount = 2
+	cb.LastRestartAt = time.Now().Add(-time.Minute).UnixNano()
+	cb.LastExitReason = "Error"
+	cb.RestartState = restartpolicy.StateBackOff
+	if err := cb.SetOriginalRequest(&cubebox.RunCubeSandboxRequest{
+		RestartPolicy: restartpolicy.OnFailure,
+		RestartBackoff: &cubebox.RestartBackoffConfig{
+			InitialIntervalSecond: 60,
+			MaxRestarts:           2,
+			StableDurationSecond:  1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := newRestartMgr(&memBoxes{cb: cb})
+	m.Recover()
+	t.Cleanup(func() { m.Stop("sb") })
+	deadline := time.Now().Add(time.Second)
+	for {
+		cb.Lock()
+		count, state := cb.RestartCount, cb.RestartState
+		cb.Unlock()
+		if count == 0 {
+			if state != restartpolicy.StateBackOff {
+				t.Fatalf("count=%d state=%s", count, state)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("count=%d state=%s", count, state)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestRecoverGaveUpWhenRetriesSpent(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
 	cb.ID = "sb"
@@ -129,16 +230,31 @@ func TestRecoverGaveUpWhenRetriesSpent(t *testing.T) {
 	}
 	m := newRestartMgr(&memBoxes{cb: cb})
 	m.Recover()
-	if cb.RestartState != restartpolicy.StateGaveUp {
-		t.Fatalf("state %s", cb.RestartState)
-	}
-	if cb.StatusSeq == 0 {
-		t.Fatal("gave up did not advance status seq")
+	deadline := time.Now().Add(time.Second)
+	for {
+		cb.Lock()
+		state, seq := cb.RestartState, cb.StatusSeq
+		cb.Unlock()
+		m.mu.Lock()
+		run := m.runs["sb"]
+		m.mu.Unlock()
+		if state == restartpolicy.StateGaveUp && run == nil {
+			if seq == 0 {
+				t.Fatal("gave up did not advance status seq")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state %s run=%v", state, run != nil)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
 type memBoxes struct {
-	cb *cubeboxstore.CubeBox
+	cb    *cubeboxstore.CubeBox
+	saves int
+	saved []*cubeboxstore.CubeBox
 }
 
 func (m *memBoxes) Init(context.Context) error { return nil }
@@ -152,7 +268,9 @@ func (m *memBoxes) List() []*cubeboxstore.CubeBox { return []*cubeboxstore.CubeB
 func (m *memBoxes) IsImageInUse(string) (bool, error) {
 	return false, nil
 }
-func (m *memBoxes) Save(context.Context, *cubeboxstore.CubeBox, ...cubes.UpdateCubeboxOpt) error {
+func (m *memBoxes) Save(_ context.Context, cb *cubeboxstore.CubeBox, _ ...cubes.UpdateCubeboxOpt) error {
+	m.saves++
+	m.saved = append(m.saved, cb.DeepCopy())
 	return nil
 }
 func (m *memBoxes) SyncByID(context.Context, string, ...cubes.UpdateCubeboxOpt) error {
