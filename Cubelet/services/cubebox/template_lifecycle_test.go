@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"syscall"
 	"testing"
 	"time"
@@ -85,14 +86,57 @@ func TestTemplatePreStopFailureContinuesTerminationAndIsNotRetried(t *testing.T)
 	require.Equal(t, []syscall.Signal{syscall.SIGTERM}, task.signals)
 }
 
+func TestTemplatePreStopRetriesAfterPersistFailure(t *testing.T) {
+	process := &templateHookTestProcess{}
+	task := &templateHookTestTask{process: process}
+	c := &cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{Config: &cubeboxpb.ContainerConfig{
+			Lifecycle: &cubeboxpb.TemplateLifecycleCommands{PreStop: []string{"/bin/flush"}},
+		}},
+		Status:    cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: 1}),
+		Container: &templateHookTestContainer{task: task},
+	}
+	sb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sandbox-persist-retry"}}
+	syncCalls := 0
+	manager := &templateHookTestStore{
+		syncErr: errors.New("temporary write failure"),
+		sync: func(id string) {
+			syncCalls++
+			require.Equal(t, sb.ID, id)
+			require.True(t, c.Status.Get().TemplatePreStopStarted)
+			require.False(t, process.started, "the attempt must be saved before exec")
+		},
+	}
+	l := &local{cubeboxManger: manager}
+	opts := &workflow.DestroyContext{DestroyInfo: &cubeboxpb.DestroyCubeSandboxRequest{}}
+	l.runTemplatePreStop(t.Context(), sb, c, opts)
+	require.False(t, c.Status.Get().TemplatePreStopStarted)
+	require.False(t, process.started)
+	require.Nil(t, task.spec)
+	require.Empty(t, task.signals)
+
+	manager.syncErr = nil
+	l.runTemplatePreStop(t.Context(), sb, c, opts)
+	require.True(t, c.Status.Get().TemplatePreStopStarted)
+	require.True(t, process.started)
+	require.True(t, process.deleted)
+	require.Equal(t, []syscall.Signal{syscall.SIGTERM}, task.signals)
+	require.Equal(t, 2, syncCalls)
+
+	l.runTemplatePreStop(t.Context(), sb, c, opts)
+	require.Equal(t, 2, syncCalls, "a successfully recorded attempt must not be repeated")
+	require.Len(t, task.signals, 1)
+}
+
 type templateHookTestStore struct {
 	cubes.CubeboxAPI
-	sync func(string)
+	sync    func(string)
+	syncErr error
 }
 
 func (s *templateHookTestStore) SyncByID(_ context.Context, id string, _ ...cubes.UpdateCubeboxOpt) error {
 	s.sync(id)
-	return nil
+	return s.syncErr
 }
 
 type templateHookTestContainer struct {

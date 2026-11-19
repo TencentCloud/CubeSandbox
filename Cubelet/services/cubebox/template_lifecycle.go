@@ -67,6 +67,12 @@ func (l *local) runTemplatePreStop(ctx context.Context, sb *cubeboxstore.CubeBox
 		return status, nil
 	})
 	if err := l.cubeboxManger.SyncByID(ctx, sb.ID, cubes.WithNoEvent); err != nil {
+		// The hook has not run. Let a later delete retry persist the attempt
+		// again rather than treating this failed write as an execution.
+		c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.TemplatePreStopStarted = false
+			return status, nil
+		})
 		logger.Warnf("preStop hook skipped: failed to persist attempt: %v", err)
 		return
 	}
