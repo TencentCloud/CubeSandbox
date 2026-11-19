@@ -268,6 +268,14 @@ func (h *handler) ListSubdir(subdir string) ([]string, error) {
 	return utils.GetAllDirname(dirname)
 }
 
+// CpusetDir returns the cgroup directory itself: the unified hierarchy has no
+// per-controller cpuset mount, the mask lives in the cgroup's own cpuset.cpus /
+// cpuset.mems. Those files only exist when the cpuset controller is enabled for
+// the subtree, which is the same precondition CreateWithCpuSet has.
+func (h *handler) CpusetDir(group string) (string, error) {
+	return path.Join(h.root, group), nil
+}
+
 func (h *handler) AddProc(group string, pid uint64) error {
 	m, err := cgroup2.Load(group, cgroup2.WithMountpoint(h.root))
 	if err != nil {

@@ -29,6 +29,7 @@ import (
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -109,6 +110,17 @@ func (l *CgPlugin) init() error {
 	}
 
 	l.config.parseAndSetDynamicConfig(dynamConf.GetConfig())
+	if l.config.EnableNumaAffinity {
+		// One line with the effective state, including the node count the pool
+		// will see. The count is cached, and the pool bootstrap below reads the
+		// same sysfs regardless of the switch (pkg/numa panics when
+		// /sys/devices/system/node is unreadable), so this branch does not make
+		// such a host safe - it only avoids repeating the lookup just to log it.
+		log.L.Infof("cgroup numa affinity: enabled=%v (enable_numa_affinity=true, numa_nodes=%d)",
+			l.config.NumaAffinityEnabled(), numa.GetNumaNodeCount())
+	} else {
+		log.L.Infof("cgroup numa affinity: disabled (enable_numa_affinity=false)")
+	}
 
 	err = l.initPool()
 	if err != nil {
@@ -227,6 +239,7 @@ func (l *CgPlugin) initPool() error {
 		workers:             l.config.PoolWorkers,
 		triggerInterval:     time.Duration(l.config.PoolTriggerIntervalInMs) * time.Millisecond,
 		reparentFileEnabled: l.config.ShouldSetMemoryReparentFile,
+		numaAffinityInUse:   l.config.NumaAffinityEnabled,
 	}
 	if err := p.init(); err != nil {
 		return err
@@ -324,7 +337,10 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 		}
 	}
 	var fullCgID *uint32
-	usePoolV2 := false
+	// Per-NUMA pool: the sandbox cgroup is created under numa<N> and inherits
+	// that node's cpuset.cpus / cpuset.mems, which is what makes the placement
+	// picked in resource.go bind CPU cores and memory instead of being a label.
+	usePoolV2 := l.config.NumaAffinityEnabled()
 	numa := opts.GetNumaNode()
 
 	defer func() {
@@ -377,6 +393,11 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 
 	return nil
 }
+
+// Injected for tests: the write targets a hard-coded /sys/fs/cgroup path, so a
+// unit test that walks the pool bootstrap would otherwise write to a live cgroup
+// of the host it runs on.
+var setupMemoryReparentFileFn = setupMemoryReparentFile
 
 func setupMemoryReparentFile(ctx context.Context, fullCgID uint32, set bool) error {
 

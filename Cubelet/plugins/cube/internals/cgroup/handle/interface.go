@@ -14,6 +14,14 @@ type Interface interface {
 	IsExist(ctx context.Context, group string) bool
 	Create(ctx context.Context, group string) error
 	CreateWithCpuSet(ctx context.Context, group string, cpuset string, numaId int) error
+	// CpusetDir returns the directory that carries cpuset.cpus / cpuset.mems
+	// for group: the controller mount on cgroup v1, the cgroup itself on the
+	// unified hierarchy. An error means that directory cannot be resolved at
+	// all (no cpuset mount on v1); a backend without a per-controller mount
+	// returns the cgroup path and lets the caller's read of the files be what
+	// fails, which is the only check that can see a controller that is not
+	// enabled for the subtree.
+	CpusetDir(group string) (string, error)
 	Update(ctx context.Context, group string, cpu, mem resource.Quantity) error
 	Delete(ctx context.Context, group string) error
 	List() ([]string, error)

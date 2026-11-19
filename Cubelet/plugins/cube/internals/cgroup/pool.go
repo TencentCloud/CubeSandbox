@@ -6,9 +6,12 @@ package cgroup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +62,13 @@ type cgPool struct {
 	// Injected closure; the dynamic config watcher can flip the value at
 	// runtime.
 	reparentFileEnabled func() bool
+	// Injected closure; reports whether the per-NUMA pool is in use, which
+	// decides how strictly the pool bootstrap treats a broken slot. Unlike
+	// reparentFileEnabled above this one cannot change at runtime:
+	// enable_numa_affinity is read from config.toml once at plugin init and the
+	// dynamic config watcher never looks at it. It is a closure only so tests
+	// can drive both modes.
+	numaAffinityInUse func() bool
 }
 
 func (p *cgPool) addIndividualCgroup(group ...string) {
@@ -93,7 +103,7 @@ func (p *cgPool) createCgroup(ctx context.Context, fullCgID uint32) error {
 
 	// Best effort: a disabled config still writes 0 to any existing
 	// reparent file; failures do not fail creation.
-	_ = setupMemoryReparentFile(ctx, fullCgID, p.reparentFileEnabled())
+	_ = setupMemoryReparentFileFn(ctx, fullCgID, p.reparentFileEnabled())
 
 	return nil
 }
@@ -180,15 +190,48 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 		if err := p.createCgroup(ctx, uint32(cgId)); err != nil {
 			log.G(ctx).Errorf("cgroup pool v1 init: %v", err)
 		} else {
-			_ = setupMemoryReparentFile(ctx, uint32(cgId), p.reparentFileEnabled())
+			_ = setupMemoryReparentFileFn(ctx, uint32(cgId), p.reparentFileEnabled())
 		}
 	}
 
 	return nil
 }
 
+// numaNodeCount and getAllNumaNodes are variables rather than direct calls
+// because pkg/numa is not injectable: the single-NUMA fallback and the >= 11
+// node ordering (see initPoolV2) are the two things worth pinning in a test
+// without a NUMA host.
+var (
+	numaNodeCount   = numa.GetNumaNodeCount
+	getAllNumaNodes = numa.GetAllNumaNodes
+)
+
+// NumaAffinityEnabled reports whether the per-NUMA cgroup pool should be used.
+// The v2 pool keeps one subtree per NUMA node (numa<N>) whose cpuset.cpus and
+// cpuset.mems carry that node's cpulist / node id; a sandbox cgroup created
+// under it inherits the binding, which is what turns the NUMA node picked for
+// the sandbox into a real CPU + memory affinity constraint.
+//
+// Inheritance is what makes that work on both backends: the unified hierarchy
+// hands a child the effective parent mask, and on cgroup v1 containerd's cpuset
+// controller copies cpuset.cpus / cpuset.mems into each new child (copyIfNeeded)
+// because the slots are created with an empty CPU spec.
+//
+// Opt-in via enable_numa_affinity. A single-NUMA host gains nothing from the
+// v2 pool, so the setting is ignored there and the v1 pool stays in use. The
+// count is the one from the NUMA sysfs, so a node without CPUs counts as well:
+// a host with one CPU node and one memory-only (CXL / PMEM) node passes this
+// check and is then rejected by the bootstrap, because that node cannot be
+// bound and the switch has no per-node opt-out (see initPoolV2Late).
+func (c *Config) NumaAffinityEnabled() bool {
+	if c == nil || !c.EnableNumaAffinity {
+		return false
+	}
+	return numaNodeCount() > 1
+}
+
 func (p *cgPool) initPoolV2() error {
-	numaNodes := numa.GetAllNumaNodes()
+	numaNodes := getAllNumaNodes()
 	maxNumaNodeID := 0
 	for _, node := range numaNodes {
 		if node.NodeId > maxNumaNodeID {
@@ -199,42 +242,276 @@ func (p *cgPool) initPoolV2() error {
 	p.poolV2.handle = p.poolV2Handle
 	p.poolV2.numaPools = make([]cgPoolV2Numa, nodeCount)
 
+	// Index by nd.NodeId, never by the position in numaNodes: GetAllNumaNodes
+	// reads /sys/devices/system/node with os.ReadDir, which sorts
+	// lexicographically, so on a host with 11+ nodes the slice order is
+	// node0, node1, node10, node11, node2, ... Using the position would pair a
+	// slot's ranger with another node's directory, and tidyPoolV2 range-checks
+	// the directories it lists against that ranger - so it would delete in-use
+	// slots of the wrong node once a node grows past the initial pool size.
 	for _, nd := range numaNodes {
-		numaId := nd.NodeId
-		numaNode := &numaNodes[numaId]
 		cgRanger, err := allocator.NewSimpleLinearRanger(0, uint16(p.initialSize))
 		if err != nil {
 			return fmt.Errorf("create cg ranger error: %w", err)
 		}
 		alloc := allocator.NewAllocator[uint16](cgRanger)
-		p.poolV2.numaPools[numaId].allocator = alloc
-		p.poolV2.numaPools[numaId].cgRanger = cgRanger
-		p.poolV2.numaPools[numaId].numaNode = *numaNode
+		p.poolV2.numaPools[nd.NodeId].allocator = alloc
+		p.poolV2.numaPools[nd.NodeId].cgRanger = cgRanger
+		p.poolV2.numaPools[nd.NodeId].numaNode = nd
 	}
 
 	return nil
 }
 
+// ensureNumaSlotCpuset (re)applies a node's cpulist / node id to the node
+// directory of the per-NUMA pool (numa<N>). The directory outlives a cubelet
+// restart, and creating an existing cgroup is a no-op or an error depending on
+// the driver, so the values are re-asserted on every startup; this also repairs
+// the node directory whose mask drifted (CPU hot-add, manual change). The
+// sandbox slots below it are a separate matter, see ensureSandboxSlotCpuset.
+//
+// The directory is resolved by the handle, so a cgroup v1 host with the cpuset
+// controller co-mounted (cpu,cpuacct,cpuset) or on a non-default root is handled
+// too, and a controller that is not available is an error instead of a silent
+// no-op. On the unified hierarchy the handle points at the cgroup itself, so
+// the same re-assert is what keeps the node's mask current.
+func ensureNumaSlotCpuset(h handle.Interface, slot, cpulist string, nodeID int) error {
+	dir, err := h.CpusetDir(slot)
+	if err != nil {
+		return err
+	}
+	return applyCpusetFiles(dir, cpulist, nodeID)
+}
+
+// ensureSandboxSlotCpuset repairs the mask of one per-sandbox slot under a node
+// directory. On cgroup v1 a slot takes a copy of the parent mask when it is
+// created (containerd's copyIfNeeded) and createCgroup returns early for a slot
+// that already exists, so one that predates a CPU hot-add - or any widening of
+// the node mask - keeps the old cpuset, and a sandbox placed on it silently
+// misses the new CPUs. The unified hierarchy needs nothing here: an unset child
+// tracks its parent, and cpuset.cpus may not even be exposed on the slot, in
+// which case there is nothing to repair.
+func ensureSandboxSlotCpuset(h handle.Interface, group, cpulist string, nodeID int) error {
+	dir, err := h.CpusetDir(group)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cpuset.cpus")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return applyCpusetFiles(dir, cpulist, nodeID)
+}
+
+// parseCPUList parses a cpuset list ("0-3,8,10-11") into the set of ids it
+// names. An empty list is an empty set, which is what a slot that was never
+// written reads back as.
+func parseCPUList(list string) (map[int]struct{}, error) {
+	ids := make(map[int]struct{})
+	list = strings.TrimSpace(list)
+	if list == "" {
+		return ids, nil
+	}
+	for _, part := range strings.Split(list, ",") {
+		lo, hi, isRange := strings.Cut(strings.TrimSpace(part), "-")
+		start, err := strconv.Atoi(strings.TrimSpace(lo))
+		if err != nil {
+			return nil, fmt.Errorf("parse cpu list %q: %w", list, err)
+		}
+		end := start
+		if isRange {
+			if end, err = strconv.Atoi(strings.TrimSpace(hi)); err != nil {
+				return nil, fmt.Errorf("parse cpu list %q: %w", list, err)
+			}
+		}
+		if end < start {
+			return nil, fmt.Errorf("parse cpu list %q: %q ends before it starts", list, part)
+		}
+		for id := start; id <= end; id++ {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids, nil
+}
+
+// sameCPUSet reports whether two cpuset lists name the same ids. cgroupfs
+// returns the effective set rather than the text it was given, so the
+// comparison has to be on parsed sets; comparing text alone would reject a
+// slot that is bound correctly, which with the switch on fails startup.
+//
+// The text check first is only an optimization for the common case, not a
+// relaxation: equal text always means equal sets.
+func sameCPUSet(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	return sameCPUSetIDs(a, b)
+}
+
+// sameCPUSetIDs is the exact comparison: both lists are parsed into sets of ids.
+func sameCPUSetIDs(a, b string) bool {
+	left, err := parseCPUList(a)
+	if err != nil {
+		return false
+	}
+	right, err := parseCPUList(b)
+	if err != nil {
+		return false
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for id := range left {
+		if _, ok := right[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// applyCpusetFiles makes dir carry exactly cpulist / nodeID, and returns nil
+// only when the written values read back as expected, so a nil return means the
+// mask is what a child cgroup will inherit rather than "the write was accepted".
+func applyCpusetFiles(dir, cpulist string, nodeID int) error {
+	names := [2]string{"cpuset.cpus", "cpuset.mems"}
+	want := [2]string{cpulist, strconv.Itoa(nodeID)}
+	var wrote [2]bool
+
+	for i := 0; i < len(names); i++ {
+		file := path.Join(dir, names[i])
+		cur, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", file, err)
+		}
+		if sameCPUSet(string(cur), want[i]) {
+			continue
+		}
+		if err := os.WriteFile(file, []byte(want[i]), 0644); err != nil {
+			return fmt.Errorf("write %s=%s: %w", names[i], want[i], err)
+		}
+		wrote[i] = true
+	}
+
+	// cgroupfs can accept a write and keep something else, so only the written
+	// files are read back; a value that matched on the first read is proven.
+	for i := 0; i < len(names); i++ {
+		if !wrote[i] {
+			continue
+		}
+		file := path.Join(dir, names[i])
+		cur, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read back %s: %w", file, err)
+		}
+		if got := strings.TrimSpace(string(cur)); !sameCPUSet(got, want[i]) {
+			return fmt.Errorf("%s reads back %q, want %q", file, got, want[i])
+		}
+	}
+	return nil
+}
+
 func (p *cgPool) initPoolV2Late() error {
 	ctx := context.Background()
+	// With the switch on this pool is what Create hands out, so a slot that
+	// cannot be bootstrapped has to fail startup: the node would otherwise
+	// report ready and then place every sandbox in a pool that carries no mask.
+	// With the switch off the pool is unused and the default path is kept as it
+	// was: a slot that cannot be created still fails startup, and only the
+	// re-assert below is a warning, because it did not exist before.
+	strict := p.numaAffinityInUse != nil && p.numaAffinityInUse()
 	for i := 0; i < len(p.poolV2.numaPools); i++ {
 		numaPool := &p.poolV2.numaPools[i]
 		numaNode := numaPool.numaNode
-		log.G(ctx).Errorf("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
-		err := p.poolV2.handle.CreateWithCpuSet(ctx, fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId), numaNode.Cpulist, numaNode.NodeId)
-		if err != nil {
-			log.G(ctx).Errorf("cgroup pool v2 init, failed to create cgroup for numa%d: %v", numaNode.NodeId, err)
-			return err
+		log.G(ctx).Infof("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
+		if strict && numaNode.Cpulist == "" {
+			// An empty mask is written as an empty cpuset.cpus, which the kernel
+			// accepts, so nothing below would notice: on v1 the slot then hands an
+			// empty cpuset to its children (AddProc fails at attach, and setCgroup
+			// only logs it), on v2 the empty write means "inherit" and the node
+			// keeps the root mask. Either way the node would serve sandboxes with
+			// no affinity at all, so reject it at startup instead.
+			//
+			// Reachable without a broken host: memory-only nodes (CXL / PMEM)
+			// report an empty cpulist, and removeDisabledCpus returns "" when
+			// every CPU of a node is in cgroup_disable_cpuset_list.
+			//
+			// There is no per-node opt-out to soften this with: the switch is
+			// host-wide and placement round-robins over every node id, so a host
+			// carrying such a node cannot enable the feature at all. Leaving it
+			// off is the supported configuration there, and this error is how the
+			// operator is told, instead of the node reporting ready with a pool
+			// that binds nothing.
+			return fmt.Errorf("cgroup pool v2 init: numa%d has no cpus to bind (cpulist is empty; "+
+				"enable_numa_affinity has to stay off on a host with such a node)", numaNode.NodeId)
+		}
+		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
+		createErr := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId)
+		applyErr := ensureNumaSlotCpuset(p.poolV2.handle, slot, numaNode.Cpulist, numaNode.NodeId)
+		if strict {
+			// The pool is what Create hands out, so a slot that cannot be proven
+			// to carry the node mask has to fail startup: otherwise the node
+			// reports ready and then places every sandbox in a pool with no
+			// affinity at all.
+			if applyErr != nil {
+				// Keep createErr too: it is usually what explains the failed apply
+				// (e.g. the cpuset controller could not be enabled).
+				if createErr != nil {
+					return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: %w",
+						numaNode.NodeId, slot, errors.Join(createErr, applyErr))
+				}
+				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w",
+					numaNode.NodeId, slot, applyErr)
+			}
+			// The apply above succeeded - the mask was written and read back - so
+			// the slot is bound, and a create error on its own is tolerated: that
+			// is the slot of a previous run, where creating an existing cgroup is
+			// an error on v1. It cannot tell such a slot apart from one v2 left
+			// half-created (MkdirAll ran, then toggleControllers or Load failed):
+			// the mask is right there too, only the controllers it should have
+			// enabled are missing, and those surface on the first sandbox, in
+			// SetCubeboxCgroupLimit.
+			if createErr != nil {
+				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
+			}
+		} else if createErr != nil {
+			// Unchanged from before the switch: a slot that cannot be created is
+			// fatal, so the default path keeps failing startup exactly as it did.
+			log.G(ctx).Errorf("cgroup pool v2 init, failed to create cgroup for numa%d: %v", numaNode.NodeId, createErr)
+			return createErr
+		} else if applyErr != nil {
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
+		var slotMaskFails int
+		var firstSlotMaskErr error
 		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {
 			fullCgID := MakeFullCgID(shortCgId, true, int32(numaNode.NodeId))
 			if err := p.createCgroup(ctx, fullCgID); err != nil {
 				log.G(ctx).Errorf("cgroup pool v2 init: create fullCgID: %d failed: %v", fullCgID, err)
-			} else {
-				_ = setupMemoryReparentFile(ctx, fullCgID, p.reparentFileEnabled())
+				continue
 			}
-
+			_ = setupMemoryReparentFileFn(ctx, fullCgID, p.reparentFileEnabled())
+			if strict {
+				// The slots are repaired too, otherwise a slot created before a
+				// CPU hot-add keeps its old mask and the sandbox placed on it
+				// silently misses the new CPUs. Best effort, unlike the node
+				// directory above: one slot that cannot be patched does not make
+				// the whole pool useless, so it is logged once instead.
+				if err := ensureSandboxSlotCpuset(p.poolV2.handle, MakeCgroupPathByID(fullCgID),
+					numaNode.Cpulist, numaNode.NodeId); err != nil {
+					slotMaskFails++
+					if firstSlotMaskErr == nil {
+						firstSlotMaskErr = err
+					}
+				}
+			}
+		}
+		if slotMaskFails > 0 {
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d: %d sandbox slot(s) kept their previous cpuset: %v",
+				numaNode.NodeId, slotMaskFails, firstSlotMaskErr)
 		}
 
 	}
@@ -487,7 +764,7 @@ func setupAllCgroupsMemoryReparentFile(ctx context.Context, set bool) error {
 	errcnt := 0
 	succCnt := 0
 	for _, fullCgID := range allCgIds {
-		err := setupMemoryReparentFile(ctx, fullCgID, set)
+		err := setupMemoryReparentFileFn(ctx, fullCgID, set)
 		if err != nil {
 			errcnt++
 			log.G(ctx).Errorf("failed to setup memory.reparent_file for cgroup %d: %v", fullCgID, err)
