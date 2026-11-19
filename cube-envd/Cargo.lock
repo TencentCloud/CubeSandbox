@@ -433,6 +433,7 @@ dependencies = [
  "http-body-util",
  "jiff",
  "libc",
+ "memchr",
  "protoc-bin-vendored",
  "reqwest",
  "serde",

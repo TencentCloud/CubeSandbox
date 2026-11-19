@@ -464,7 +464,6 @@ connection termination after response headers, must be handled by callers.
 | [Filesystem schema](../proto/filesystem.proto) | All Filesystem message and enum definitions. |
 | [HTTP routing and handlers](../src/transport/rest.rs) | HTTP response and content-type behavior. |
 | [Authentication](../src/transport/auth.rs) | Token and signed-file handling. |
-| [Maintained SDK acceptance](../../tests/e2e/sdk_compat/README.md#selected-envd-acceptance) | Runnable health, command, file and template scenarios. |
 | [File transfer tests](../tests/FILE_TRANSFERS.md) | Range, multipart, signatures, compose and error coverage. |
 
 Only registered production routes and the two production protobuf services are

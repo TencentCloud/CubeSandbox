@@ -155,6 +155,30 @@ def main():
                 print('FUSE fault passed:', operation, error, status, fs.events, flush=True)
             finally:
                 fs.close()
+        # Return short/Interrupted/zero from a real direct-I/O FUSE write.
+        # Only the first write is held; retries proceed through the normal fixture.
+        for outcome in ('short', 'eintr', 'zero'):
+            fs = UploadFilesystem(mount, hold='write')
+            content = bytes(range(256)) * 400
+            try:
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(post, mount / 'file', content)
+                    _, unique, payload = fs.pending_operation.get(timeout=5)
+                    offset, size = struct.unpack_from('<QI', payload, 8)
+                    if outcome == 'eintr':
+                        fs.reply(unique, error=errno.EINTR)
+                    else:
+                        count = min(size, 7) if outcome == 'short' else 0
+                        fs.data[offset:offset + count] = payload[40:40 + count]
+                        fs.reply(unique, struct.pack('<II', count, 0))
+                    assert result.result(timeout=10)[0] == (500 if outcome == 'zero' else 200)
+                    assert bytes(fs.data) == (b'' if outcome == 'zero' else content)
+                    assert get(mount / 'file') == bytes(fs.data)
+                    if outcome != 'zero':
+                        assert fs.events.count('write') > 1, fs.events
+                    print('direct-I/O write result passed:', outcome, len(fs.data), flush=True)
+            finally:
+                fs.close()
         # Hold the bound O_PATH object's metadata before its data open; retarget link.
         fs = UploadFilesystem(mount, hold='attributes')
         link = root / 'link'

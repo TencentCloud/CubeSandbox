@@ -2,12 +2,12 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 
 use http::StatusCode;
 
-use super::upload::{body_status, io_status, status, write_info, Result, UploadError, CHUNK};
+use super::upload::{body_status, status, write_bytes, write_info, Result, UploadError, CHUNK};
 use super::Context;
 
 const HEADER_LIMIT: usize = 16 * 1024;
@@ -280,10 +280,10 @@ impl Parser<'_> {
             context.check().map_err(status)?;
             let mut found = None;
             let mut retain = None;
-            for start in 0..self.buffer.len().saturating_sub(delimiter.len() - 1) {
-                if !self.buffer[start..].starts_with(delimiter) {
-                    continue;
-                }
+            let mut search = 0;
+            while let Some(offset) = memchr::memmem::find(&self.buffer[search..], delimiter) {
+                let start = search + offset;
+                search = start + 1;
                 let suffix = &self.buffer[start + delimiter.len()..];
                 if suffix.starts_with(b"--") {
                     found = Some((start, start + delimiter.len() + 2, true));
@@ -374,17 +374,7 @@ impl PartWriter<'_> {
         let Some(file) = self.file.as_mut() else {
             return Ok(());
         };
-        let mut pending = bytes;
-        while !pending.is_empty() {
-            context.check().map_err(status)?;
-            match file.write(pending) {
-                Ok(0) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
-                Ok(count) => pending = &pending[count..],
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(io_status(error).into()),
-            }
-        }
-        Ok(())
+        write_bytes(context, file, bytes)
     }
 
     fn push(&mut self, context: &Context, bytes: &[u8], end: bool) -> Result<()> {

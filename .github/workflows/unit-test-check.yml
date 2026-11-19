@@ -27,7 +27,6 @@ on:
       - 'tests/perf/**'
       - 'tests/unittest/run.sh'
       - 'docker/Dockerfile.builder'
-      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
       - 'Makefile'
@@ -56,7 +55,6 @@ on:
       - 'tests/perf/**'
       - 'tests/unittest/run.sh'
       - 'docker/Dockerfile.builder'
-      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/unit-test-check.yml'
       - 'Makefile'
@@ -210,7 +208,7 @@ jobs:
             while IFS= read -r file; do
               [[ -n "${file}" ]] || continue
               case "${file}" in
-                rust-toolchain.toml|docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
+                docker/Dockerfile.builder|.github/workflows/build-builder-image.yml|.github/workflows/unit-test-check.yml|Makefile)
                   add_all_components
                   ;;
                 tests/unittest/run.sh)
@@ -499,7 +497,7 @@ jobs:
           builder_inputs_changed="false"
           while IFS= read -r file; do
             case "${file}" in
-              rust-toolchain.toml|docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
                 builder_inputs_changed="true"
                 break
                 ;;

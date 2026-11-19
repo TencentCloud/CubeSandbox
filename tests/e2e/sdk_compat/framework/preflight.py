@@ -57,7 +57,7 @@ def run_preflight(
     errors: list[str] = []
     details: dict[str, Any] = {"backends": config.backends}
     effective_template_ids = set(template_ids or set())
-    if require_default_template and config.cube_template_id:
+    if config.cube_template_id:
         effective_template_ids.add(config.cube_template_id)
 
     if require_default_template and not config.cube_template_id:

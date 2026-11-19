@@ -25,7 +25,7 @@ return 405 after authorization.
 
 ## Execution
 
-Use the root pinned Rust toolchain, read-only source mounts, persistent Cargo
+Use the component-local pinned Rust toolchain, read-only source mounts, persistent Cargo
 and build caches. Before any tests, arrange a **private,
 writable cgroup v2 mount** with CPU/memory controllers delegated and all runner
 processes moved below its root. Never bind a host cgroup mount writable. Run with
@@ -55,12 +55,12 @@ also cover overlapping requests, final response completion, errors and disconnec
 
 Run the complete component checks from the repository root inside the isolated
 validation environment defined by the
-[component workflow](../../.github/workflows/build-cube-envd-image.yml):
+[component isolation instructions](../README.md#tests):
 
 ```sh
 make -C cube-envd ci
 ```
 
-The workflow stores build output in a Docker-managed volume selected through
+The documented test command stores build output in a Docker-managed volume selected through
 `CARGO_TARGET_DIR`; no host cache path is required. With no override, native
 builds use `cube-envd/target`.

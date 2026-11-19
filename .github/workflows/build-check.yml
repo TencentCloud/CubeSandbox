@@ -19,7 +19,6 @@ on:
       - 'agent/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
-      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
       - 'Makefile'
@@ -40,7 +39,6 @@ on:
       - 'agent/**'
       - 'examples/volume/s3/**'
       - 'docker/Dockerfile.builder'
-      - 'rust-toolchain.toml'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
       - 'Makefile'
@@ -153,7 +151,7 @@ jobs:
           builder_inputs_changed="false"
           while IFS= read -r file; do
             case "${file}" in
-              rust-toolchain.toml|docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
                 builder_inputs_changed="true"
                 break
                 ;;

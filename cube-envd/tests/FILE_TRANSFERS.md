@@ -13,6 +13,37 @@ removed payload and eight-job limits are not restored. Signed requests cover
 read/write binding, expiration, header-token priority, username and path binding.
 Compose checks ordered publication, source cleanup, ownership and inherited umask.
 
+The upload bridge also has deterministic Body-frame tests (no TCP-frame
+assumptions). Run them with:
+
+```sh
+cargo test --manifest-path cube-envd/Cargo.toml --locked --lib filesystem::upload::tests
+```
+
+They cover empty/interleaved frames, whole-frame identity, 32 KiB and 128 KiB
+boundaries and tails, a prefix before EOF, Body errors versus normal EOF,
+unexpected channel closure, backpressure, file-side early failure, and request
+cancellation waking a blocking reader. The shared write loop is checked with
+partial writes, EINTR, zero progress, EIO/ENOSPC/EDQUOT and cancellation after a
+short write; each syscall receives at most 128 KiB.
+
+Owner drop probes verify the lifetime of the actual backing allocation, including
+three independent 4 MiB owners simultaneously retained by producer, queue and
+consumer (12 MiB). Completion/failure/cancellation release those references.
+Queue capacity 1 is a message count, **not** a byte or backing-memory cap.
+Transport prefetch, decoder/parser buffers and other requests add further memory.
+
+The producer forwards each nonempty `Bytes` frame once without a payload copy.
+Raw uploads write those bytes directly in the existing file task, capped at
+128 KiB per syscall; gzip/multipart retain their 32 KiB streaming Read buffers.
+Multipart candidate search reuses the locked `memchr` dependency; suffix/padding
+validation and cross-read retention remain in the parser. Regression inputs
+include false boundary candidates, binary data, CRLF/LF and one-byte reads.
+Decoders/parsers and the kernel may still copy data. Keep throughput measurements
+on the final uninstrumented musl release artifact, with complete readback outside
+timing, and keep strace diagnostics separate. These regression tests establish
+streaming and ownership behavior; they do not establish a throughput guarantee.
+
 For kernel faults and pressure, run beside a freshly built daemon in an isolated
 Linux container with private mount/PID namespaces, a private writable cgroup v2
 subtree, `/dev/fuse` and mount privileges. Never use a shared daemon or host
@@ -33,7 +64,8 @@ python3 -B cube-envd/tests/file_compose_failures.py
 ```
 
 These cover real FUSE read/write errors, ENOSPC/EDQUOT and EMFILE responses,
-actual tmpfs exhaustion, inode/parent replacement, device/FIFO behavior,
+short writes, one-shot EINTR, zero-byte write results, actual tmpfs exhaustion,
+inode/parent replacement, device/FIFO behavior,
 blocked calls, independent request progress, disconnects, and resource cleanup.
 Already blocked kernel syscalls finish or must be released by the fixture before
 worker reclamation; cancellation prevents subsequent work. An accepted compose

@@ -18,10 +18,8 @@
 - [目录结构](#目录结构)
 - [前提条件](#前提条件)
 - [构建组件](#构建组件)
-- [构建沙箱镜像](#构建沙箱镜像)
-- [创建模板并使用 SDK](#创建模板并使用-sdk)
+- [运行 daemon](#运行-daemon)
 - [运行配置与排查](#运行配置与排查)
-- [性能](#性能)
 - [测试](#测试)
 
 ## 功能
@@ -108,13 +106,14 @@ flowchart TD
 
 ## 目录结构
 
-`cube-envd` 是独立的 Cargo 项目，工具链由仓库根目录的 `rust-toolchain.toml`
-统一指定。以下为源码导航；各子目录中的 `mod.rs` 定义该模块的主要类型和接口。
+`cube-envd` 是独立的 Cargo 项目，由组件内的
+[`rust-toolchain.toml`](rust-toolchain.toml) 指定工具链。以下为源码导航；各子目录中的 `mod.rs` 定义该模块的主要类型和接口。
 
 ```text
 cube-envd/
 ├── Cargo.toml / Cargo.lock       # 依赖、feature 与锁定版本
 ├── Makefile                     # build、fmt、clippy、test、ci 入口
+├── rust-toolchain.toml          # 组件自己的 Rust 版本与工具
 ├── build.rs                     # 生成协议绑定并注入版本信息
 ├── proto/                       # Process、Filesystem 及测试协议定义
 ├── src/
@@ -164,42 +163,33 @@ cube-envd/
 │   │   └── idle.rs             # HTTP 空闲连接处理
 │   └── conformance/            # test-support feature 下的协议测试服务
 ├── tests/                      # Rust 集成测试、Python 场景与共享夹具
-└── doc/                        # 中英文 API 文档和模板 / SDK 使用指南
+└── doc/                        # 中英文 API 文档和本地使用指南
 ```
 
 Tokio 提供异步执行，Axum 和 connectrpc 提供服务及传输层，buffa 提供 protobuf
 消息，libc 提供 Linux 系统调用。`build.rs` 使用依赖提供的 protoc，无需额外安装
-系统 protoc。生成的绑定位于 Cargo 构建输出目录；发布镜像不启用 `test-support`。
+系统 protoc。生成的绑定位于 Cargo 构建输出目录；生产构建不应启用 `test-support`。
 
-镜像及平台集成入口位于组件目录外：[Dockerfile](../docker/Dockerfile.cube-base-rust)、
-[共享 entrypoint](../docker/cube-entrypoint.sh)、[CI workflow](../.github/workflows/build-cube-envd-image.yml)
-和 [SDK E2E](../tests/e2e/sdk_compat/README_zh.md)。
+本次组件改动不包含镜像发布、部署包和 SDK/平台 E2E 接线。下文测试容器仅为
+Linux 组件测试提供隔离，不作为沙箱运行镜像或发布镜像。
 
 ## 前提条件
 
 下文命令均从**仓库根目录**执行。
 
-- daemon 在 Linux 上运行。本机编译需要 Git、Make、本机编译器/链接器，以及
-  根目录 [`rust-toolchain.toml`](../rust-toolchain.toml) 指定的 Rust 工具链，
-  当前为 **1.89.0**。
-- 镜像与静态二进制构建使用带 Buildx 的 Docker。Dockerfile 提供 Rust 和构建
-  工具，此路径不要求宿主安装 Rust。构建其他架构的运行层需要对应原生 builder
-  或已配置的 Docker 模拟执行支持。
-- 模板和 SDK 使用需要已有 CubeSandbox 平台，其 API、模板构建器、计算与代理
-  服务应正常工作。构建节点必须能读取所选镜像；本地 Docker tag 不会自动出现在
-  远端节点。平台部署参见[部署说明](../deploy/one-click/README.md)。
-- Python SDK 要求 Python 3.9 或更新版本。下文示例使用虚拟环境。
+- Linux、Git、Make、本机编译器/链接器和 rustup。组件内工具链文件指定
+  Rust **1.89.0**、rustfmt 和 Clippy；其他项目沿用各自的工具链选择。
+- 完整测试需要 Python 3、socat、sudo、capability 工具、iproute2、具有
+  `/home/user` 的 `user` 账号及私有可写 cgroup v2。使用[测试节](#测试)的
+  组件隔离容器。
 
 ## 构建组件
 
 使用已安装的锁定工具链执行本机开发构建：
 
 ```bash
-cargo --version
-rustc --version
-rustfmt --version
-cargo clippy --version
 make -C cube-envd build
+(cd cube-envd && cargo --version && rustc --version)
 
 cube-envd/target/debug/cube-envd -version
 cube-envd/target/debug/cube-envd cube-version
@@ -210,132 +200,72 @@ cube-envd/target/debug/cube-envd -commit
 子目录。`-version` 输出 envd 兼容版本，`cube-version` 输出 Rust 产品版本，
 `-commit` 输出构建使用的源码 revision。兼容版本号不代表支持上游所有功能。
 没有 Git 元数据的源码归档，本机 Cargo 构建需通过 `CUBE_ENVD_COMMIT` 提供完整
-源码提交 SHA；下文根 Makefile 的镜像构建与二进制导出目标则需传入
-`CUBE_COMMIT=<完整源码提交 SHA>`。
+源码提交 SHA。
 
-需要静态发布程序时，使用仓库的 Docker 导出目标：
-
-```bash
-make cube-envd TARGET_ARCH=amd64
-# _output/bin/cube-envd/amd64/envd
-
-make cube-envd TARGET_ARCH=arm64
-# _output/bin/cube-envd/arm64/envd
-```
-
-| 构建架构 | Rust target | 导出的程序 |
-| --- | --- | --- |
-| amd64 / x86_64 | `x86_64-unknown-linux-musl` | `_output/bin/cube-envd/amd64/envd` |
-| arm64 / aarch64 | `aarch64-unknown-linux-musl` | `_output/bin/cube-envd/arm64/envd` |
-
-`OUTPUT_DIR` 可修改导出根目录。通过 `ENVD_LOCAL_PATH` 显式选择二进制并打入
-部署包的方式，见[镜像与部署包说明](../docker/README.md#export-a-daemon-for-existing-package-inputs)。
-
-## 构建沙箱镜像
+本机 release 构建仍使用锁定依赖：
 
 ```bash
-# 现有 Go 实现。
-make cube-base TARGET_ARCH=amd64 CUBE_BASE_IMAGE=cubesandbox-base:go-local
-
-# 显式选择 Rust。
-make cube-base-rust TARGET_ARCH=amd64 CUBE_BASE_RUST_IMAGE=cubesandbox-base:rust-local
-make cube-base-rust TARGET_ARCH=arm64 CUBE_BASE_RUST_IMAGE=cubesandbox-base:rust-local-arm64
-
-# 使用现有示例的基础镜像参数添加 nginx。
-docker build --build-arg CUBE_BASE_IMAGE=cubesandbox-base:rust-local \
-  -t cubesandbox-demo-nginx:rust-local examples/cubesandbox-base-nginx
-
-# 查看所选 amd64 daemon 的身份，不启动 guest 服务。
-docker run --rm --entrypoint /usr/bin/envd cubesandbox-base:rust-local -version
-docker run --rm --entrypoint /usr/bin/envd cubesandbox-base:rust-local cube-version
-docker run --rm --entrypoint /usr/bin/envd cubesandbox-base:rust-local -commit
+(cd cube-envd && cargo build --release --locked)
 ```
 
-这些命令只构建本地镜像，不发布镜像。Rust 镜像使用
-[Dockerfile.cube-base-rust](../docker/Dockerfile.cube-base-rust)、根工具链和锁定
-依赖构建，并将程序安装到 `/usr/bin/envd`。镜像提供 UID 1000 的 `user` 账户，
-SDK 默认命令用户仍为 root。
+需要 musl 程序时，先安装对应 Rust target 和兼容链接器，再在组件目录构建，例如：
 
-镜像通过 tini 和共享入口脚本运行 envd 及可选的应用 CMD。
-不要在 CMD 中再次启动 envd。有 CMD 时，envd 退出不会终止应用，容器使用应用的退出码。
-TERM/INT/HUP 只转发给应用，入口脚本继续等待，不设置强杀超时。
-无 CMD 时原样返回 envd 的退出码，包括零。入口脚本不会静默重启 daemon 或切换为 Go。
-若要重新使用 Go，请选择 Go 镜像创建新模板，
-再从该模板创建 sandbox；此操作不迁移已有 Rust sandbox 的状态。
+```bash
+(cd cube-envd && cargo build --release --locked --target x86_64-unknown-linux-musl)
+```
 
-## 创建模板并使用 SDK
+交叉编译还需要目标 sysroot/链接器，不代表原生 ARM 验收。本组件不新增
+Docker 导出或镜像选择目标。
 
-完整操作步骤见[模板与 SDK 使用指南](doc/usage_zh.md)，包括镜像可达性、模板 READY、
-SDK 配置、命令执行、文件读写和资源清理。接口字段与协议见
-[API 文档](doc/cube-envd-api_zh.md)。
+## 运行 daemon
+
+启动程序及检查 health、文件操作见[本地使用指南](doc/usage_zh.md)。应在可丢弃的
+Linux guest 或容器内运行：文件、进程和初始化请求会操作所在环境。镜像生命周期、
+entrypoint 监督及平台创建流程独立维护。
 
 ## 运行配置与排查
 
 | 配置 | 含义 |
 | --- | --- |
-| `ENVD_PORT` | 镜像监听端口，默认 `49983`；模板探针和暴露端口需保持一致。 |
-| `ENVD_LOG_FILE` | 镜像日志位置，默认 `/var/log/envd.log`；`-` 表示输出到容器 stdout/stderr。 |
-| `ENVD_EXTRA_ARGS` | 镜像附加参数，按空白分词，不执行 shell 表达式。 |
-| `ENVD_BIN` | 镜像 entrypoint 使用的程序，默认 `/usr/bin/envd`。 |
-| `-cgroup-root` | daemon 的 cgroup 根目录，默认 `/sys/fs/cgroup`。 |
-| `-isnotfc` | 选择非 Firecracker guest 模式；镜像 entrypoint 在未提供时自动添加。 |
-| `--log-format json` | 使用结构化 daemon 日志。 |
+| `-port` | 监听端口，默认 `49983`。 |
+| `-cgroup-root` | daemon cgroup 根目录，默认 `/sys/fs/cgroup`。 |
+| `-isnotfc` | 非 Firecracker 模式，关闭 MMDS/日志导出任务。 |
+| `--log-format json` | 向 stdout/stderr 输出结构化日志。 |
 
 Rust 使用带 CPU、memory controller 的可写 cgroup v2 创建额外进程分组。
 如果初始化失败，例如环境使用 cgroup v1 或只读层级，会记录原因并使用 no-op
 manager。子进程继承既有 cgroup 归属，VM/平台限制独立存在；如果已经成功初始化，
 后续归组失败仍会拒绝对应子进程。TCP 转发还需要 socat 和 guest 地址 `169.254.0.21`。
 
-模板无法 READY 时，先看构建任务与 daemon 日志，检查镜像可达性、架构和 49983
-探针。READY 后 SDK 调用失败时，检查 API/代理路由、凭据及所选模板。
-镜像标签不能单独证明运行中 daemon 的身份；现有验收用例通过 SDK 检查其实际
-运行的可执行程序。
-
-## 性能
-
-原生 amd64 SDK/CubeProxy 对比中，修复后 Rust 的实测结果如下。
-每场景、每个实现共 500 个正式样本，分为五组独立 sandbox 测量，并发为 1。
-
-| 场景 | Rust median ms | Go median ms |
-| --- | ---: | ---: |
-| 短命令 | 14.348 | 16.026 |
-| 4 KiB 读 | 1.813 | 1.451 |
-| 4 KiB 写 | 1.475 | 1.319 |
-| 4 MiB 读 | 26.965 | 33.636 |
-| 4 MiB 写 | 31.493 | 12.764 |
-
-短命令与 4 KiB 读取相对修复前 Rust 均在五组中改善；大文件写入仍明显落后 Go。
-这是暖缓存、固定内容下的 SDK 端到端延迟，不代表所有场景或生产性能。
-修复前后对比、p95、逐组结果、资源与并发限制见[详细性能报告](doc/performance_zh.md)。
+启动异常时检查 daemon 日志与 `/health`。协议调用失败时，核对端点、访问令牌、
+执行用户和文件权限。独立程序不解析镜像 entrypoint 的 ENVD_* 包装选项。
 
 ## 测试
 
-已完成的本地功能验证结果及脱敏日志见[功能验收报告](doc/validation_zh.md)。
-
 完整组件检查命令为 `make -C cube-envd ci`。
-应在[组件 workflow](../.github/workflows/build-cube-envd-image.yml)和
-[验证 Dockerfile](../docker/tests/Dockerfile.envd-ci)定义的隔离环境中运行：源码只读
+应在组件内[验证 Dockerfile](tests/isolate/Dockerfile)和
+[cgroup bootstrap](tests/isolate/prepare-cgroup.sh)定义的隔离环境中运行：源码只读
 挂载，使用 Docker 管理的 Cargo/构建缓存卷及私有可写 cgroup，并在启动测试 daemon 前移除
 SYS_TIME。不要在宿主执行测试 cgroup bootstrap，也不要为通过测试而授权修改宿主时钟。
-workflow 在容器内设置 `CARGO_TARGET_DIR`，不要求宿主具有特定目录结构；
+测试命令在容器内设置 `CARGO_TARGET_DIR`，不要求宿主具有特定目录结构；
 本机构建在没有覆盖设置时使用 `cube-envd/target`。
 
-在使用 cgroup v2 的 Linux Docker 宿主上，从仓库根目录运行与 CI 相同的环境：
+在使用 cgroup v2 的 Linux Docker 宿主上，从仓库根目录运行组件测试环境：
 
 ```bash
-version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+version=$(sed -n 's/^channel = "\(.*\)"/\1/p' cube-envd/rust-toolchain.toml)
 docker build --build-arg RUST_VERSION="$version" \
-  -f docker/tests/Dockerfile.envd-ci -t envd-ci .
+  -f cube-envd/tests/isolate/Dockerfile -t envd-ci cube-envd
 docker run --rm --init --privileged --cgroupns private \
   -v "$PWD:/workspace:ro" \
   -v envd-ci-cargo:/usr/local/cargo -v envd-ci-target:/target \
   -e NO_PROXY=localhost,127.0.0.1,::1 -e no_proxy=localhost,127.0.0.1,::1 \
-  -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=2 envd-ci \
-  bash docker/tests/prepare-cgroup.sh make -C cube-envd ci
+  -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS=2 \
+  -w /workspace envd-ci \
+  bash cube-envd/tests/isolate/prepare-cgroup.sh make -C cube-envd ci
 ```
 
-裸机直接运行 `cargo test` 不等同于上述环境。验证镜像与两种 sandbox 镜像一样，
-会创建 `user` 账号和 `/home/user`。启动命令测试有意覆盖 `-cmd`：它以 root
+裸机直接运行 `cargo test` 不等同于上述环境。测试镜像为夹具创建 `user` 账号和 `/home/user`。启动命令测试有意覆盖 `-cmd`：它以 root
 在 `/home/user` 中执行，与[上游 Go envd](https://github.com/e2b-dev/infra/blob/2026.16/packages/envd/main.go#L206-L225)一致。
 两种实现都会拒绝不存在的启动目录；这不代表普通 Process RPC 总是使用 `/home/user`。
 bootstrap 在测试前从 capability 集合移除 SYS_TIME；仅使用
@@ -349,8 +279,6 @@ bootstrap 在测试前从 capability 集合移除 SYS_TIME；仅使用
 | 进程 / PTY | [进程测试](tests/process_start_list.rs)、[PTY 测试](tests/process_pty.rs) | 命令生命周期、输入输出及终端行为。 |
 | 文件系统 / HTTP 文件 | [文件系统测试](tests/FILESYSTEM.md)、[文件传输测试](tests/FILE_TRANSFERS.md) | 元数据、监听、上传下载和拼接。 |
 | guest 服务 | [guest 服务测试](tests/GUEST_SERVICES.md) | 初始化、元数据、日志、指标、转发和空闲处理。 |
-| 镜像 | [Docker 测试](../docker/README.md) | entrypoint 监督、daemon 身份和健康检查。 |
-| SDK / 平台 | [SDK E2E](../tests/e2e/sdk_compat/README_zh.md) | 新模板就绪、sandbox 创建、健康、命令、文件及可选 Go/Rust 性能对比。 |
 
 VM 快照用例需要对应测试文档说明的夹具。跳过的用例不代表兼容性已验证。
 交叉编译和 QEMU 执行不能证明原生 arm64 平台行为；Firecracker 与 Cloud Hypervisor

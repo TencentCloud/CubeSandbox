@@ -433,7 +433,6 @@ daemon 不另设 RPC 消息或上传文件的总大小上限，但仍受解析�
 | [Filesystem schema](../proto/filesystem.proto) | 全部 Filesystem 消息与枚举定义。 |
 | [HTTP 路由与 handler](../src/transport/rest.rs) | HTTP 响应与 Content-Type 行为。 |
 | [认证实现](../src/transport/auth.rs) | 令牌与签名文件处理。 |
-| [现有 SDK 验收](../../tests/e2e/sdk_compat/README_zh.md#选定-envd-验收) | 可运行的健康、命令、文件和模板场景。 |
 | [文件传输测试](../tests/FILE_TRANSFERS.md) | Range、multipart、签名、compose 与错误覆盖。 |
 
 本文仅覆盖已注册的生产路由和两个生产 protobuf service，测试专用 conformance

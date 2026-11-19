@@ -1,81 +1,51 @@
-# Create a template and use cube-envd
+# Run cube-envd locally
 
 [中文](usage_zh.md) · [Component overview](../README.md)
 
-Run commands from the repository root. First build an image using the [README](../README.md#build-a-sandbox-image).
+The component builds a standalone Linux daemon. Image publishing, template
+selection, one-click installation and SDK/platform E2E integration are separate
+follow-up work; this change does not install or select a daemon for the platform.
 
-Configure `cubemastercli` for the existing deployment, then create a template
-from an image accessible to its builder. The local-tag example below requires a
-Docker exporter using the same Docker image store as the image build. The default
-native exporter pulls from a registry and does not read local Docker tags.
-Local Docker export requires `CUBEMASTER_NATIVE_ROOTFS_EXPORT_ENABLED=false` in
-the build service and no higher-priority skopeo/umoci tools; see
-[selected envd acceptance](../../tests/e2e/sdk_compat/README.md#selected-envd-acceptance).
-With the default exporter, distribute the image through your existing registry
-and replace the `--image` value below with that accessible reference.
+## Build and start
+
+Run from the repository root, in a disposable Linux guest or container whose
+files and processes may be changed by the API. Use the component's
+[isolated test environment](../README.md#tests) for the complete suite.
 
 ```bash
-cubemastercli tpl create-from-image \
-  --image cubesandbox-demo-nginx:rust-local \
-  --cpu 1000 --memory 512 \
-  --writable-layer-size 1G \
-  --expose-port 49983 --expose-port 80 \
-  --probe 49983 --probe-path /health
+make -C cube-envd build
+cube-envd/target/debug/cube-envd -version
+cube-envd/target/debug/cube-envd cube-version
+cube-envd/target/debug/cube-envd -commit
+cube-envd/target/debug/cube-envd -isnotfc -port 49983
 ```
 
-Otherwise use an image reference available through your deployment's existing
-image distribution mechanism. See the
-[custom image tutorial](../../docs/guide/tutorials/bring-your-own-image.md) for CLI
-configuration and image access. The CLI watches the build by default; wait for
-successful completion and a **READY** template. The readiness probe is envd's
-`49983/health`, not nginx's port 80 or a Jupyter endpoint. Keep the resulting
-template ID for SDK use.
+If `CARGO_TARGET_DIR` is set, use its `debug/cube-envd` executable instead.
+The last command runs in the foreground; use another terminal in the same
+environment for the requests below. `-isnotfc` disables Firecracker MMDS/log
+export tasks. Writable cgroup v2 enables envd process grouping; initialization
+failure logs a warning and uses the existing no-op fallback.
+
+## Health and file operations
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e ./sdk/python
-
-# Replace these values for your deployment and the template just created.
-export CUBE_API_URL=http://127.0.0.1:3000
-export CUBE_TEMPLATE_ID=tpl-replace-with-your-template
-export CUBE_PROXY_NODE_IP=127.0.0.1
-export CUBE_PROXY_PORT_HTTP=80
-export CUBE_SANDBOX_DOMAIN=cube.app
 export NO_PROXY=localhost,127.0.0.1,::1
 export no_proxy="$NO_PROXY"
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:49983/health
+# 204
+
+printf 'hello from cube-envd\n你好\n' | curl -fsS \
+  -X POST -H 'Content-Type: application/octet-stream' --data-binary @- \
+  'http://127.0.0.1:49983/files?path=/tmp/envd-example.txt&username=root'
+curl -fsS 'http://127.0.0.1:49983/files?path=/tmp/envd-example.txt&username=root'
 ```
 
-`CUBE_PROXY_NODE_IP` is a CubeProxy node, not the guest IP. Omit it when the
-deployment's sandbox DNS already routes correctly. Provide `CUBE_API_KEY` when
-the platform requires authentication; for a private HTTPS CA, configure
-`SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` for the SDK's HTTP clients.
+These requests target the newly launched daemon directly. They do not validate
+CubeProxy, template readiness, SDK routing or image lifecycle. If `/init` has
+configured an access token, include its `X-Access-Token` header. See the
+[API reference](cube-envd-api.md) for initialization, Process/PTY streams,
+Filesystem RPC, gzip/multipart, signed file requests and error behavior.
 
-```python
-import os
-from cubesandbox import Sandbox, Template
-
-template_id = os.environ["CUBE_TEMPLATE_ID"]
-assert Template.get(template_id).status == "READY"
-sandbox = Sandbox.create(timeout=300)
-try:
-    result = sandbox.commands.run("printf 'hello from cube-envd'", timeout=30)
-    assert result.exit_code == 0
-    assert result.stdout == "hello from cube-envd"
-    assert result.stderr == ""
-
-    content = "hello from the SDK\n你好\n"
-    sandbox.files.write("/tmp/envd-example.txt", content)
-    assert sandbox.files.read("/tmp/envd-example.txt") == content
-    print(sandbox.sandbox_id, result.stdout)
-finally:
-    sandbox.kill()
-```
-
-The example removes its sandbox and leaves the template available for reuse.
-After all its sandboxes are gone, remove the template when no longer needed with
-`Template.delete(template_id)`. To run the complete image-to-template-to-sandbox
-flow with health 204, running-daemon identity, command/file assertions, logs and
-automatic cleanup, use the existing
-[selected-envd acceptance entry point](../../tests/e2e/sdk_compat/README.md#selected-envd-acceptance).
-It also provides three independently runnable scenarios.
+Stop the foreground daemon with Ctrl-C after the check and remove the example
+file in the disposable environment. To run process, file and protocol
+regression tests, see the [isolated test instructions](../README.md#tests).

@@ -7,9 +7,6 @@ on:
       - '**/*.go'
       - '**/*.rs'
       - 'Makefile'
-      - 'rust-toolchain.toml'
-      - 'docker/Dockerfile.builder'
-      - '.github/workflows/build-builder-image.yml'
       - 'agent/Makefile'
       - 'CubeAPI/Makefile'
       - 'Cubelet/Makefile'
@@ -91,7 +88,7 @@ jobs:
           builder_inputs_changed="false"
           while IFS= read -r file; do
             case "${file}" in
-              rust-toolchain.toml|docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
+              docker/Dockerfile.builder|.github/workflows/build-builder-image.yml)
                 builder_inputs_changed="true"
                 break
                 ;;
