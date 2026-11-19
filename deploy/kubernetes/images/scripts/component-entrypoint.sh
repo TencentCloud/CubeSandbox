@@ -1030,6 +1030,58 @@ kill_pidfile() {
 
 
 
+# patch_extra_volume_plugins <config.toml> <entries>
+# Appends third-party volume plugins (chart values volumePlugins.extra,
+# rendered as "name|type|path;...") to Cubelet's config.toml. config.toml
+# is reset from the image by stage_component on every start; the marker
+# lines still make a repeated call in one start rewrite rather than duplicate
+# the blocks, so the file always reflects the current values.
+patch_extra_volume_plugins() {
+  local config="$1" raw="$2"
+  local marker_prefix="# extra-volume-plugin:"
+  local tmp_file
+  tmp_file="$(mktemp)"
+  # Drop previously written blocks: a marker line plus the 4 lines after it.
+  awk -v prefix="${marker_prefix}" '
+    index($0, prefix) == 1 { skip = 5 }
+    skip > 0 { skip--; next }
+    { print }
+  ' "${config}" >"${tmp_file}"
+  cat "${tmp_file}" >"${config}"
+  rm -f "${tmp_file}"
+
+  [[ -n "${raw//[[:space:];]/}" ]] || return 0
+  local entry name type path key
+  local -a entries
+  IFS=';' read -r -a entries <<<"${raw}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry//[[:space:]]/}" ]] || continue
+    IFS='|' read -r name type path <<<"${entry}"
+    if [[ ! "${name}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      printf '[cube-component:cubelet] FATAL: invalid extra volume plugin name %q\n' "${name}" >&2
+      return 1
+    fi
+    case "${type}" in
+      rpc) key="socket_path" ;;
+      binary) key="binary_path" ;;
+      *)
+        printf '[cube-component:cubelet] FATAL: extra volume plugin %s: type must be rpc or binary, got %q\n' "${name}" "${type}" >&2
+        return 1
+        ;;
+    esac
+    if [[ -z "${path}" || "${path}" == *'"'* ]]; then
+      printf '[cube-component:cubelet] FATAL: extra volume plugin %s: invalid path %q\n' "${name}" "${path}" >&2
+      return 1
+    fi
+    if grep -Eq "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"${name}\"" "${config}"; then
+      printf '[cube-component:cubelet] FATAL: extra volume plugin %s collides with a packaged plugin\n' "${name}" >&2
+      return 1
+    fi
+    printf '%s %s\n[[plugins."io.cubelet.internal.v1.storage".volume_plugins]]\n  name = "%s"\n  type = "%s"\n  %s = "%s"\n' \
+      "${marker_prefix}" "${name}" "${name}" "${type}" "${key}" "${path}" >>"${config}"
+  done
+}
+
 run_cubelet() {
   local bin="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
   local cfg="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
@@ -1126,6 +1178,8 @@ run_cubelet() {
       "${CUBE_JFS_ROOT:-.}" \
       "${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
   fi
+  patch_extra_volume_plugins "${cfg}" "${CUBE_EXTRA_VOLUME_PLUGINS:-}" \
+    || fail "invalid CUBE_EXTRA_VOLUME_PLUGINS"
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
     sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${CUBE_TAP_INIT_NUM}/" "${cfg}"
