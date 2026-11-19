@@ -4,6 +4,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use containerd_shim_cube_rs::snapshot::cmd::SnapshotArgs;
+use containerd_shim_cube_rs::snapshot::verify::VerifyRestoreArgs;
 
 #[derive(Parser, Debug)]
 #[command(version = env!("CUBE_VERSION_FULL"), about, long_about = None)]
@@ -16,6 +17,12 @@ pub enum SubCommands {
     /// snapshot command
     #[clap(name = "snapshot", about = "snapshot command")]
     Snapshot(SnapshotArgs),
+    /// Restore a pause package into an isolated throwaway VM and check its agent
+    #[clap(
+        name = "verify-restore",
+        about = "Restore a pause package into an isolated throwaway VM and check its agent"
+    )]
+    VerifyRestore(VerifyRestoreArgs),
     /// login command
     #[clap(name = "login", about = "Enter the guest by debug console")]
     Login(LoginArgs),
