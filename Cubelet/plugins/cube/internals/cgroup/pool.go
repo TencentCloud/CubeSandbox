@@ -336,16 +336,23 @@ func parseCPUList(list string) (map[int]struct{}, error) {
 	return ids, nil
 }
 
-// sameCPUSet reports whether two cpuset lists name the same ids. cgroupfs does
-// not hand back the text it was given, it prints the effective set: "0-0" comes
-// back as "0", and overlapping or adjacent ranges come back merged. The list
-// being written can be non-canonical to begin with, because removeDisabledCpus
-// splits a range once per disabled CPU, in the order cgroup_disable_cpuset_list
-// gives them ("0-6,6-95" for a nested disable list, "0-0" for a two-CPU node
-// with one CPU disabled). Comparing the text would therefore reject a slot that
-// is bound correctly - and with the switch on that rejection is a startup
-// failure on a host that can actually be bound.
+// sameCPUSet reports whether two cpuset lists name the same ids. cgroupfs
+// returns the effective set rather than the text it was given, so the
+// comparison has to be on parsed sets; comparing text alone would reject a
+// slot that is bound correctly, which with the switch on fails startup.
+//
+// The text check first is only an optimization for the common case, not a
+// relaxation: equal text always means equal sets.
 func sameCPUSet(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	return sameCPUSetIDs(a, b)
+}
+
+// sameCPUSetIDs is the exact comparison: both lists are parsed into sets of ids.
+func sameCPUSetIDs(a, b string) bool {
 	left, err := parseCPUList(a)
 	if err != nil {
 		return false
@@ -365,43 +372,42 @@ func sameCPUSet(a, b string) bool {
 	return true
 }
 
-// applyCpusetFiles makes dir carry exactly cpulist / nodeID, writing only the
-// files that differ and reading both back afterwards, so a nil return means the
+// applyCpusetFiles makes dir carry exactly cpulist / nodeID, and returns nil
+// only when the written values read back as expected, so a nil return means the
 // mask is what a child cgroup will inherit rather than "the write was accepted".
-// Both comparisons are on the parsed set, because the kernel normalises what it
-// prints and cpulist is not always canonical itself (see sameCPUSet).
 func applyCpusetFiles(dir, cpulist string, nodeID int) error {
-	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("cpuset directory %s: %w", dir, err)
-	}
-	want := []struct{ name, val string }{
-		{"cpuset.cpus", cpulist},
-		{"cpuset.mems", fmt.Sprintf("%d", nodeID)},
-	}
-	for _, w := range want {
-		file := path.Join(dir, w.name)
+	names := [2]string{"cpuset.cpus", "cpuset.mems"}
+	want := [2]string{cpulist, strconv.Itoa(nodeID)}
+	var wrote [2]bool
+
+	for i := 0; i < len(names); i++ {
+		file := path.Join(dir, names[i])
 		cur, err := os.ReadFile(file)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", file, err)
 		}
-		if sameCPUSet(string(cur), w.val) {
+		if sameCPUSet(string(cur), want[i]) {
 			continue
 		}
-		if err := os.WriteFile(file, []byte(w.val), 0644); err != nil {
-			return fmt.Errorf("write %s=%s: %w", file, w.val, err)
+		if err := os.WriteFile(file, []byte(want[i]), 0644); err != nil {
+			return fmt.Errorf("write %s=%s: %w", names[i], want[i], err)
 		}
+		wrote[i] = true
 	}
-	// cgroupfs accepts a write and may still keep something else (a controller
-	// that is not enabled, a value the caller may not set), so the value has to
-	// be read back: the bootstrap treats a nil return as "this slot is bound".
-	for _, w := range want {
-		file := path.Join(dir, w.name)
+
+	// cgroupfs can accept a write and keep something else, so only the written
+	// files are read back; a value that matched on the first read is proven.
+	for i := 0; i < len(names); i++ {
+		if !wrote[i] {
+			continue
+		}
+		file := path.Join(dir, names[i])
 		cur, err := os.ReadFile(file)
 		if err != nil {
 			return fmt.Errorf("read back %s: %w", file, err)
 		}
-		if got := strings.TrimSpace(string(cur)); !sameCPUSet(got, w.val) {
-			return fmt.Errorf("%s reads back %q, want %q", file, got, w.val)
+		if got := strings.TrimSpace(string(cur)); !sameCPUSet(got, want[i]) {
+			return fmt.Errorf("%s reads back %q, want %q", file, got, want[i])
 		}
 	}
 	return nil

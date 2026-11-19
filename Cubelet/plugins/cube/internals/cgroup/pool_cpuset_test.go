@@ -343,3 +343,28 @@ func TestInitPoolV2IndexesByNodeID(t *testing.T) {
 		require.Equal(t, i, p.poolV2.numaPools[i].numaNode.NodeId, "numaPools[%d]", i)
 	}
 }
+
+// The bootstrap compares a slot's mask against the node's for every
+// pre-created slot, and the overwhelmingly common case is that the two are the
+// same text. That case has to stay allocation free: it is the reason a startup
+// with the switch on does not spend most of its time parsing cpu lists.
+func BenchmarkSameCPUSet(b *testing.B) {
+	const mask = "16-31,208-223"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if !sameCPUSet(mask, mask) {
+			b.Fatal("equal masks compared unequal")
+		}
+	}
+}
+
+// The non-canonical case still has to be correct, so it is benchmarked too;
+// it is expected to allocate, and it is rare.
+func BenchmarkSameCPUSetIDs(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if !sameCPUSetIDs("0-95", "0-6,6-95") {
+			b.Fatal("equal sets compared unequal")
+		}
+	}
+}
