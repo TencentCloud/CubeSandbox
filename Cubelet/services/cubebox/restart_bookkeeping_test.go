@@ -273,6 +273,35 @@ func TestRestartPinsTheAnnotatedNumaNode(t *testing.T) {
 	}
 }
 
+// The highest node id is a valid pin: the check used to compare against the node
+// count, so pinning the last node of the host was rejected.
+func TestRestartPinsTheHighestNumaNode(t *testing.T) {
+	restoreNumaQueries(t, 11, 12)
+	s := &service{numaNodeIndex: 1}
+	info := &workflow.CreateContext{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationsNumaNode: "11"},
+	}
+	if err := s.setRequestResource(info, req); err != nil {
+		t.Fatalf("highest node id rejected: %v", err)
+	}
+	if info.NumaNode != 11 {
+		t.Fatalf("numa node %d, want 11", info.NumaNode)
+	}
+}
+
+func TestRestartRejectsNumaNodePastTheLastOne(t *testing.T) {
+	restoreNumaQueries(t, 11, 12)
+	s := &service{}
+	info := &workflow.CreateContext{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationsNumaNode: "12"},
+	}
+	if err := s.setRequestResource(info, req); err == nil {
+		t.Fatal("node id past the last one was accepted")
+	}
+}
+
 func TestRestartRoundRobinsWhenNumaIsUnspecified(t *testing.T) {
 	restoreNumaQueries(t, 2, 2)
 	s := &service{}

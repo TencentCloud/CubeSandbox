@@ -41,7 +41,10 @@ func (s *service) setRequestResource(createInfo *workflow.CreateContext, reqInfo
 		if numaStr, ok := reqInfo.GetAnnotations()[constants.MasterAnnotationsNumaNode]; ok {
 			var numaNode int32
 			if _, err := fmt.Sscanf(numaStr, "%d", &numaNode); err == nil {
-				if numaNode < 0 || numaNode >= int32(numaMaxNodeID()) {
+				// maxNumaNodeID is the last node id, not the node count, so the
+				// highest node is a valid pin: pkg/numa rejects a host whose node
+				// ids are not 0..max.
+				if numaNode < 0 || numaNode > int32(numaMaxNodeID()) {
 					return fmt.Errorf("invalid numa node: %d", numaNode)
 				}
 
