@@ -177,12 +177,15 @@ func ValidateLabels(labels map[string]string) error {
 }
 
 // ValidateLabelsSkippingReserved validates user labels while exempting
-// control-plane reserved labels (scheduling-disabled) kept on the register path.
+// reserved keys (data plane, isolation and machine-type) kept on the register
+// path.
+//
+// The label budget is deliberately not enforced here. Callers already check
+// CountUserLabels, the same definition the label API uses, and a total-length
+// check here would reject a node that the API legitimately filled with 64
+// operator labels plus reserved keys — its next Cubelet re-registration would
+// then fail with "register labels invalid".
 func ValidateLabelsSkippingReserved(labels map[string]string) error {
-	if len(labels) > maxLabelsPerNode {
-		return fmt.Errorf("%w: label request cannot contain more than %d labels, got %d",
-			ErrInvalidLabel, maxLabelsPerNode, len(labels))
-	}
 	for k, v := range labels {
 		if IsReservedLabelKey(k) {
 			continue

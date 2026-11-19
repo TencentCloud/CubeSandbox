@@ -4,7 +4,11 @@
 package node
 
 import (
+	"flag"
+	"strings"
 	"testing"
+
+	"github.com/urfave/cli"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
 )
@@ -34,6 +38,60 @@ func TestRejectMachineTypeLabel(t *testing.T) {
 	}
 	if err := rejectMachineTypeLabel(map[string]string{"team": "infra"}, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPrintMachineTypeResultsReportsFailures(t *testing.T) {
+	// A partial failure must make the command exit non-zero in both output
+	// modes; the unbind action relies on this return value and has no separate
+	// failed check of its own.
+	cases := []struct {
+		name    string
+		json    bool
+		results []model.MachineTypeNodeResult
+		wantErr bool
+	}{
+		{
+			name: "table all ok",
+			results: []model.MachineTypeNodeResult{
+				{NodeID: "n1", OK: true},
+				{NodeID: "n2", OK: true},
+			},
+		},
+		{
+			name: "table partial failure",
+			results: []model.MachineTypeNodeResult{
+				{NodeID: "n1", OK: true},
+				{NodeID: "n2", Error: "node is bound to \"other\""},
+			},
+			wantErr: true,
+		},
+		{
+			name: "json partial failure",
+			json: true,
+			results: []model.MachineTypeNodeResult{
+				{NodeID: "n1", OK: true},
+				{NodeID: "n2", Error: "node is bound to \"other\""},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			set := flag.NewFlagSet("machine-type", flag.ContinueOnError)
+			set.Bool("json", tc.json, "")
+			c := cli.NewContext(nil, set, nil)
+			err := printMachineTypeResults(c, tc.results)
+			if tc.wantErr && err == nil {
+				t.Fatal("partial failure must return an error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "1 of 2") {
+				t.Fatalf("error = %v, want a per-node failure count", err)
+			}
+		})
 	}
 }
 

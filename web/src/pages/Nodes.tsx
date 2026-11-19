@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { clusterApi, machineTypeApi } from '@/api/client';
 import { NodesHeaderTabs } from '@/components/nodes/NodesHeaderTabs';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -26,7 +26,6 @@ export default function NodesPage() {
     refetchInterval: 15_000,
   });
   const { t } = useTranslation('nodes');
-  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const machineType = params.get('machineType') ?? '';
   const [query, setQuery] = useState('');
@@ -96,12 +95,21 @@ export default function NodesPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {visible.map((n) => (
-          <Link
-            key={n.nodeID}
-            to={`/nodes/${n.nodeID}`}
-            className="block hover:opacity-90 transition-opacity"
-          >
-            <Card className="panel-hover h-full">
+          // The whole card stays clickable through an overlay link, while the
+          // machine-type badge is its own link on top. Nesting a button inside
+          // the card's <a> was invalid (an anchor must not contain interactive
+          // content) and confused keyboard/AT navigation.
+          <div key={n.nodeID} className="relative hover:opacity-90 transition-opacity">
+            <Link
+              to={`/nodes/${n.nodeID}`}
+              className="absolute inset-0 z-0 rounded-xl"
+              aria-label={
+                n.hostname && n.hostname !== n.nodeID ? `${n.hostname} (${n.nodeID})` : n.nodeID
+              }
+            >
+              <span className="sr-only">{n.nodeID}</span>
+            </Link>
+            <Card className="panel-hover pointer-events-none h-full">
               <CardHeader>
                 <div className="flex items-center gap-3">
                   <span className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
@@ -133,23 +141,15 @@ export default function NodesPage() {
                       <CardDescription className="font-mono text-xs">{n.nodeID}</CardDescription>
                     )}
                     {n.machineType && (
-                      <button
-                        type="button"
-                        className="mt-1"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          navigate(`/nodes?machineType=${encodeURIComponent(n.machineType)}`);
-                        }}
+                      <Link
+                        to={`/nodes?machineType=${encodeURIComponent(n.machineType)}`}
+                        className="pointer-events-auto relative z-10 mt-1 inline-flex"
+                        title={n.machineType}
                       >
-                        <Badge
-                          tone="mute"
-                          className="max-w-[14rem] truncate font-mono text-[11px]"
-                          title={n.machineType}
-                        >
+                        <Badge tone="mute" className="max-w-[14rem] truncate font-mono text-[11px]">
                           {typeName(n.machineType)}
                         </Badge>
-                      </button>
+                      </Link>
                     )}
                   </div>
                 </div>
@@ -194,7 +194,7 @@ export default function NodesPage() {
                 </div>
               )}
             </Card>
-          </Link>
+          </div>
         ))}
       </div>
 

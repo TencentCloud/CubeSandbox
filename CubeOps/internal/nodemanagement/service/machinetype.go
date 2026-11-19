@@ -69,13 +69,88 @@ func (svc *NodeService) CreateMachineType(ctx context.Context, req *model.Create
 		}
 		return nil, err
 	}
+	// Bind is not transactional with the catalog insert. Track what each node
+	// lost so a failure can restore the previous state instead of leaving a
+	// half-created type that a retry cannot finish (it would hit 409).
+	applied := make([]machineTypeBinding, 0, len(nodeIDs))
 	for _, id := range nodeIDs {
+		prev, err := svc.machineTypeBeforeBind(ctx, id)
+		if err != nil {
+			return nil, svc.rollbackMachineTypeCreate(ctx, name, applied, fmt.Errorf("bind %s: %w", id, err), operator)
+		}
 		if err := svc.setMachineTypeLabel(ctx, id, name, operator); err != nil {
-			return nil, fmt.Errorf("bind %s: %w", id, err)
+			return nil, svc.rollbackMachineTypeCreate(ctx, name, applied, fmt.Errorf("bind %s: %w", id, err), operator)
+		}
+		if prev != name {
+			applied = append(applied, machineTypeBinding{nodeID: id, prev: prev})
 		}
 	}
 	logging.G(ctx).Infof("nodemgmt: machine type created: name=%s operator=%s nodes=%d", name, operator, len(nodeIDs))
 	return svc.GetMachineType(ctx, name)
+}
+
+// machineTypeBinding records the machine-type a node had before this operation
+// took ownership of it, so a failed pass can put it back.
+type machineTypeBinding struct {
+	nodeID string
+	prev   string
+}
+
+func (svc *NodeService) machineTypeBeforeBind(ctx context.Context, nodeID string) (string, error) {
+	reg, err := svc.store.GetRegistration(ctx, nodeID)
+	if err != nil {
+		return "", err
+	}
+	labels, err := store.ParseLabelsJSON(reg.LabelsJSON)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
+	}
+	return model.MachineTypeValue(labels), nil
+}
+
+// rollbackMachineTypeCreate undoes the bindings already written and removes the
+// catalog row, so the create looks atomic to the caller. Cleanup failures are
+// reported alongside the original error instead of replacing it: the operator
+// still needs to see why the create failed.
+func (svc *NodeService) rollbackMachineTypeCreate(ctx context.Context, name string, applied []machineTypeBinding, cause error, operator string) error {
+	var restoreErrs []string
+	for i := len(applied) - 1; i >= 0; i-- {
+		b := applied[i]
+		var err error
+		if b.prev == "" {
+			err = svc.clearMachineTypeIfBoundTo(ctx, b.nodeID, name, false, operator)
+		} else {
+			err = svc.setMachineTypeLabel(ctx, b.nodeID, b.prev, operator)
+		}
+		if err != nil {
+			restoreErrs = append(restoreErrs, fmt.Sprintf("%s: %v", b.nodeID, err))
+			logging.G(ctx).Warnf("nodemgmt: machine type create rollback failed: name=%s node=%s: %v", name, b.nodeID, err)
+		}
+	}
+	if err := svc.store.DeleteMachineType(ctx, name); err != nil && !errors.Is(err, store.ErrNotFound) {
+		restoreErrs = append(restoreErrs, fmt.Sprintf("delete catalog row: %v", err))
+		logging.G(ctx).Warnf("nodemgmt: machine type create rollback failed to delete row: name=%s: %v", name, err)
+	}
+	if len(restoreErrs) == 0 {
+		logging.G(ctx).Warnf("nodemgmt: machine type create rolled back: name=%s rolled_back=%d", name, len(applied))
+		return cause
+	}
+	return fmt.Errorf("%w (rollback incomplete: %s)", cause, strings.Join(restoreErrs, "; "))
+}
+
+// restoreMachineTypeBindings puts name back on nodes a failed delete had
+// already unbound. Best effort: the original error is what the caller sees, so
+// cleanup problems are logged rather than raised.
+func (svc *NodeService) restoreMachineTypeBindings(ctx context.Context, name string, cleared []machineTypeBinding, operator string) {
+	for i := len(cleared) - 1; i >= 0; i-- {
+		b := cleared[i]
+		if err := svc.setMachineTypeLabel(ctx, b.nodeID, b.prev, operator); err != nil {
+			logging.G(ctx).Warnf("nodemgmt: machine type delete rollback failed: name=%s node=%s: %v", name, b.nodeID, err)
+		}
+	}
+	if len(cleared) > 0 {
+		logging.G(ctx).Warnf("nodemgmt: machine type delete rolled back: name=%s restored=%d", name, len(cleared))
+	}
 }
 
 // UpdateMachineType changes the display name and description. The name is immutable.
@@ -131,14 +206,20 @@ func (svc *NodeService) DeleteMachineType(ctx context.Context, name string, unbi
 		}
 		return fmt.Errorf("%w: %s nodes=%s", ErrMachineTypeInUse, name, strings.Join(ids, ","))
 	}
+	cleared := make([]machineTypeBinding, 0, len(members))
 	for _, n := range members {
 		// strictMismatch is false: a node that moved to another type since the
 		// membership scan no longer occupies name.
 		if err := svc.clearMachineTypeIfBoundTo(ctx, n.NodeID, name, false, operator); err != nil {
+			svc.restoreMachineTypeBindings(ctx, name, cleared, operator)
 			return fmt.Errorf("unbind %s: %w", n.NodeID, err)
 		}
+		cleared = append(cleared, machineTypeBinding{nodeID: n.NodeID, prev: name})
 	}
 	if err := svc.store.DeleteMachineType(ctx, name); err != nil {
+		// The row survived, so the members must come back; otherwise the type
+		// still exists but half its nodes silently left it.
+		svc.restoreMachineTypeBindings(ctx, name, cleared, operator)
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("%w: %s", ErrMachineTypeNotFound, name)
 		}

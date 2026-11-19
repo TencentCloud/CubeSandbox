@@ -370,6 +370,98 @@ func TestConcurrentLabelWritersPreserveIsolationUserAndMachineType(t *testing.T)
 	}
 }
 
+func TestCreateMachineTypeRollsBackOnBindFailure(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	registerFactNode(t, svc, "n1", "cpu-a", "6.6.1")
+	registerFactNode(t, svc, "n2", "cpu-a", "6.6.1")
+	if _, err := svc.CreateMachineType(ctx, &model.CreateMachineTypeRequest{Name: "e2e-label-prev"}, "admin"); err != nil {
+		t.Fatalf("seed type: %v", err)
+	}
+	if err := svc.SetNodeMachineType(ctx, "n1", "e2e-label-prev", "admin"); err != nil {
+		t.Fatalf("seed n1 binding: %v", err)
+	}
+
+	fs.failMutateFor = map[string]error{"n2": errors.New("db down during bind")}
+	_, err := svc.CreateMachineType(ctx, &model.CreateMachineTypeRequest{
+		Name:    "e2e-label-half",
+		NodeIDs: []string{"n1", "n2"},
+	}, "admin")
+	if err == nil {
+		t.Fatal("bind failure must surface")
+	}
+
+	// The catalog row must not survive, otherwise a retry hits 409.
+	if _, err := fs.GetMachineType(ctx, "e2e-label-half"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("catalog row survived the failed create: %v", err)
+	}
+	// n1 was bound before the failure and must be back on its previous type.
+	snap, err := svc.GetNode(ctx, "n1")
+	if err != nil {
+		t.Fatalf("get n1: %v", err)
+	}
+	if got := model.MachineTypeValue(snap.Labels); got != "e2e-label-prev" {
+		t.Fatalf("n1 machine type = %q, want e2e-label-prev", got)
+	}
+
+	// With the failure cleared, the same create must succeed.
+	delete(fs.failMutateFor, "n2")
+	if _, err := svc.CreateMachineType(ctx, &model.CreateMachineTypeRequest{
+		Name:    "e2e-label-half",
+		NodeIDs: []string{"n1", "n2"},
+	}, "admin"); err != nil {
+		t.Fatalf("retry after rollback: %v", err)
+	}
+	view, err := svc.GetMachineType(ctx, "e2e-label-half")
+	if err != nil {
+		t.Fatalf("get created type: %v", err)
+	}
+	if view.NodeCount != 2 {
+		t.Fatalf("members = %d, want 2", view.NodeCount)
+	}
+}
+
+func TestDeleteMachineTypeRestoresLabelsOnRowFailure(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	registerFactNode(t, svc, "n1", "cpu-a", "6.6.1")
+	registerFactNode(t, svc, "n2", "cpu-a", "6.6.1")
+	if _, err := svc.CreateMachineType(ctx, &model.CreateMachineTypeRequest{
+		Name:    "e2e-label-del",
+		NodeIDs: []string{"n1", "n2"},
+	}, "admin"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	fs.failOnDeleteMachineType = errors.New("db down during delete")
+	err := svc.DeleteMachineType(ctx, "e2e-label-del", true, "admin")
+	if err == nil {
+		t.Fatal("catalog delete failure must surface")
+	}
+	// The row is still there, so its members must not have been silently unbound.
+	if _, err := fs.GetMachineType(ctx, "e2e-label-del"); err != nil {
+		t.Fatalf("catalog row should survive: %v", err)
+	}
+	for _, id := range []string{"n1", "n2"} {
+		snap, err := svc.GetNode(ctx, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := model.MachineTypeValue(snap.Labels); got != "e2e-label-del" {
+			t.Fatalf("%s machine type = %q, want e2e-label-del", id, got)
+		}
+	}
+
+	// Once the store recovers the delete must go through.
+	fs.failOnDeleteMachineType = nil
+	if err := svc.DeleteMachineType(ctx, "e2e-label-del", true, "admin"); err != nil {
+		t.Fatalf("retry delete: %v", err)
+	}
+	if _, err := fs.GetMachineType(ctx, "e2e-label-del"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("catalog row should be gone: %v", err)
+	}
+}
+
 func containsWarning(warnings []string, want string) bool {
 	for _, w := range warnings {
 		if w == want {
