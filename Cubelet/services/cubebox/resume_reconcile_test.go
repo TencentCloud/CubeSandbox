@@ -52,6 +52,13 @@ func (f *fakeCubeboxAPI) Get(ctx context.Context, id string) (*cubeboxstore.Cube
 	if cb != nil && cb.ID == id {
 		return cb, nil
 	}
+	// Multi-record fixtures (e.g. the concurrent-resume ledger tests) seed
+	// list; resolve by id there so several paused tombstones can coexist.
+	for _, sb := range f.list {
+		if sb != nil && (sb.ID == id || sb.SandboxID == id) {
+			return sb, nil
+		}
+	}
 	return nil, nil
 }
 

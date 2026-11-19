@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -200,9 +201,14 @@ func (s *service) resumeLocked(ctx context.Context, sb *cubeboxstore.CubeBox, op
 	defer preflightCancel()
 
 	if !opts.skipAdmission {
-		if rejected := s.admitResume(preflightCtx, sb); rejected != nil {
+		release, rejected := s.admitResume(preflightCtx, sb)
+		if rejected != nil {
 			return resumeResult{ret: rejected}
 		}
+		// Hold the reservation until the transition settles: on success the
+		// row flips to running in the store aggregate (double-counted for the
+		// tail of this call — conservative), on failure the demand is dropped.
+		defer release()
 	}
 	if err := preflightCtx.Err(); err != nil {
 		return resumeResult{ret: &errorcode.Ret{
@@ -278,29 +284,39 @@ func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resume
 // here -- rather than overcommitting host RAM and risking an OOM -- is the
 // explicit trade-off the policy makes.
 //
-// It returns a non-nil business error when resume must be rejected, or nil to
-// proceed. Under a release ratio r the still-paused sandbox
-// already contributes (1-r) of its quota to aggregateAllocated, so resuming it
-// (a full reservation) only adds the remaining r fraction; we check that
-// incremental demand against the node quota to model the post-resume state.
+// It returns a release func plus a business error: on rejection (or no-op)
+// release is noopRelease and the error is non-nil; on admission the error is
+// nil and the caller MUST defer release() for as long as the resume is in
+// flight (until the create flow's Save folds the demand into the store
+// aggregate, or the attempt fails). Admission is a hard node-level
+// reservation, not a best-effort snapshot: the check reads aggregateAllocated
+// plus the in-flight reservations, and registers this sandbox's demand, all
+// under the ledger lock, so concurrent resumes of different sandboxes
+// serialize at the gate and cannot both pass on a stale snapshot (#2042).
+// See resumeReservationLedger for what the reservation covers and why it
+// over- (never under-)counts at the window edges.
 //
-// The check is best-effort, not a hard reservation: concurrent resumes of
-// different sandboxes each read their own snapshot of aggregateAllocated, so a
-// burst can momentarily admit past the quota (the OS/cgroup remains the hard
-// backstop). This matches how create scheduling is optimistic too; operators
-// who want more headroom can lower the release ratio so the reserved fraction
-// absorbs concurrent-resume overshoot.
+// Under a release ratio r the still-paused sandbox already contributes (1-r)
+// of its quota to aggregateAllocated, so resuming it only adds the remaining
+// r fraction; the check compares that incremental demand, while the
+// reservation records the full quota (the tombstone row disappears mid-flow,
+// before the new row is saved).
+//
+// The rejection boundary matches the scheduler's mem/cpu filters, which
+// reject when free <= need: a resume that would fill the node exactly is
+// rejected here too, so the same allocation cannot be refused as an ordinary
+// create yet admitted as a resume.
 func (s *service) admitResume(
 	ctx context.Context,
 	sb *cubeboxstore.CubeBox,
-) *errorcode.Ret {
+) (func(), *errorcode.Ret) {
 	// GetHostConf always returns a non-nil config (it falls back to defaults).
 	hostConf := config.GetHostConf()
 	releaseRatio := clampRatio(hostConf.Quota.PausedResourceReleaseRatio)
 	if releaseRatio <= 0 {
 		// Policy off: paused sandboxes kept their full quota, so resume is
 		// guaranteed and needs no admission check (legacy behaviour).
-		return nil
+		return noopRelease, nil
 	}
 	if sb.ResourceWithOverHead == nil {
 		// Policy active but we cannot size this sandbox's demand. Fail closed
@@ -311,13 +327,20 @@ func (s *service) admitResume(
 			RetMsg:  "resume rejected by paused_resource_release_ratio policy: missing resource metadata",
 		}
 		log.G(ctx).Warnf("admitResume reject sandbox=%s: missing resource metadata under paused_resource_release_ratio policy", sb.ID)
-		return ret
+		return noopRelease, ret
 	}
 
-	// Recomputed live (no cache) on purpose: admission must reflect the current
-	// allocation to avoid overcommit, and resume is far rarer than its VM-wake
-	// cost, so this O(n) scan is acceptable on this path.
+	// One critical section for read-check-register: the store aggregate is
+	// recomputed live (no cache) inside the ledger lock so no concurrent
+	// admission can slip between observing it and registering this demand.
+	// Resume is far rarer than its VM-wake cost, so the O(n) scan under the
+	// lock is acceptable; the create flow itself runs outside it.
+	ledger := &s.cubeboxMgr.resumeReservations
+	ledger.Lock()
+	defer ledger.Unlock()
+
 	alloc := s.cubeboxMgr.aggregateAllocated()
+	reservedMemMB, reservedCPUMilli := ledger.totalsLocked()
 	memQuotaMB := int64(0)
 	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
 		memQuotaMB = bytesToMB(memQuota.Value())
@@ -326,10 +349,12 @@ func (s *service) admitResume(
 	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
 
 	if reason := resumeQuotaRejection(resumeQuotaCheck{
-		usedMemMB:     alloc.MemoryMB,
+		// In-flight reservations count as used: they are admitted demand the
+		// store cannot show yet (or still shows as a tombstone fraction).
+		usedMemMB:     alloc.MemoryMB + reservedMemMB,
 		needMemMB:     needMemMB,
 		memQuotaMB:    memQuotaMB,
-		usedCPUMilli:  alloc.MilliCPU,
+		usedCPUMilli:  alloc.MilliCPU + reservedCPUMilli,
 		needCPUMilli:  needCPU,
 		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
 	}); reason != "" {
@@ -342,36 +367,71 @@ func (s *service) admitResume(
 		// up capacity and retry), not a backend failure that should read as a
 		// 500. The descriptive RetMsg is carried through to the client.
 		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, ret.RetMsg)
-		return ret
+		return noopRelease, ret
 	}
 
-	return nil
+	// Reserve the FULL quota, not the r fraction checked above: the flow
+	// deletes the tombstone (dropping its (1-r) contribution) before the new
+	// row is saved, and reserving less would under-count the node in that
+	// window. See resumeReservationLedger.
+	id := sb.SandboxID
+	if id == "" {
+		id = sb.ID
+	}
+	release := ledger.reserveLocked(id,
+		bytesToMB(sb.ResourceWithOverHead.HostMemQ.Value()),
+		sb.ResourceWithOverHead.HostCpuQ.MilliValue())
+	return release, nil
 }
 
 // admitPausedReplace applies the admitResume quota check to the Create-from-pause
 // path. Since the cubecow pause rework, Resume no longer goes through
 // Update(resume)/resumeLocked: CubeMaster sends a thin Create carrying
-// cube.master.desired_sandbox_id and Cubelet recreates the sandbox from the
+// cube.master.desired.sandbox.id and Cubelet recreates the sandbox from the
 // pause package, replacing the local PAUSED tombstone. Without this gate a
 // same-node resume (XFS is always pinned to the origin; Master placement never
 // consults the scheduler for it) bypasses the node CPU/memory quota entirely
 // once paused_resource_release_ratio has released the paused sandbox's share —
 // the exact allocation an ordinary create would be rejected for.
 //
-// It returns a non-nil business error when the resume must be rejected, or nil
-// to proceed. There is nothing to check when the request is not a paused
-// replacement or this node holds no PAUSED record for it (cross-node restore:
-// Master's restoreplace.Select already ran the scheduler filters against the
-// target node).
+// It returns a release func plus a business error, mirroring admitResume: the
+// caller defers release() so the node-level reservation covers the whole
+// create flow and is dropped exactly once on every exit path. There is nothing
+// to check when the request is not a paused replacement or this node holds no
+// PAUSED record for it (cross-node restore: Master's restoreplace.Select
+// already ran the scheduler filters against the target node). A real store
+// error while resolving the tombstone fails closed: under the release-ratio
+// policy an unresolvable local state must never silently admit a resume, and
+// even with the policy off the replacement branch in the create flow needs a
+// trustworthy answer to avoid colliding with a live sandbox.
 func (s *service) admitPausedReplace(
 	ctx context.Context,
 	req *cubebox.RunCubeSandboxRequest,
-) *errorcode.Ret {
-	sb, paused := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+) (func(), *errorcode.Ret) {
+	sb, paused, err := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+	if err != nil {
+		if clampRatio(config.GetHostConf().Quota.PausedResourceReleaseRatio) <= 0 {
+			// Policy off: admission is a no-op by design (legacy guaranteed
+			// resume); the shim gate upstream of this call still fails closed
+			// on the same store error, so nothing unsafe slips through here.
+			return noopRelease, nil
+		}
+		// Policy on: the local state is unknown, so the quota cannot be
+		// checked. Fail closed — admitting here is exactly the silent
+		// quota bypass #2042 asks to prevent. Conflict keeps the rejection
+		// retriable at the API edge once the store recovers.
+		ret := &errorcode.Ret{
+			RetCode: errorcode.ErrorCode_Conflict,
+			RetMsg:  fmt.Sprintf("resume rejected by paused_resource_release_ratio policy: cannot read the local sandbox state: %v", err),
+		}
+		log.G(ctx).Warnf("admitPausedReplace fail closed sandbox=%s: %v",
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
+		return noopRelease, ret
+	}
 	if !paused {
 		// Live or in-flight-pause collisions are rejected downstream as
 		// already exists; only a PAUSED tombstone is a resume replacement.
-		return nil
+		return noopRelease, nil
 	}
 	return s.admitResume(ctx, sb)
 }
@@ -399,9 +459,16 @@ type resumeQuotaCheck struct {
 
 // resumeQuotaRejection is the pure decision behind admitResume: it returns a
 // non-empty human-readable reason when bringing a paused sandbox back would
-// push the node past its CPU or memory quota, or "" when the resume fits. A
-// non-positive quota means "unbounded" for that dimension and is skipped, which
-// matches how the rest of the cubelet treats an unset host quota.
+// fill or exceed the node's CPU or memory quota, or "" when the resume fits.
+// A non-positive quota means "unbounded" for that dimension and is skipped,
+// which matches how the rest of the cubelet treats an unset host quota.
+//
+// The boundary is >= (reject when free <= need), matching the scheduler's
+// memfilter/cpufilter, which refuse a node when quotaMemFree <= need. A resume
+// that would fill the node to exactly 100% is rejected here too, so the same
+// allocation is never refused as an ordinary create yet admitted as a resume
+// (the #2042 baseline: used 6144 + need 2048 vs quota 8192 must be rejected on
+// both paths).
 func resumeQuotaRejection(c resumeQuotaCheck) string {
 	// NOTE: these two reason formats are an explicit cross-language contract:
 	// the WebUI parses them by regex in web/src/lib/sandboxActionError.ts
@@ -409,12 +476,15 @@ func resumeQuotaRejection(c resumeQuotaCheck) string {
 	// the exact wording ("need %dMB + used %dMB > mem quota %dMB" and the "%dm"
 	// CPU variant) in sync with that regex, or the frontend silently falls back
 	// to a generic message. TestResumeQuotaRejectionMessageFormat locks the
-	// format on this side.
-	if c.memQuotaMB > 0 && c.usedMemMB+c.needMemMB > c.memQuotaMB {
+	// format on this side. The literal ">" in the wording is part of that
+	// regex contract and stays even though the decision boundary is ">=" (an
+	// exact fill is rejected with this message; the numbers still tell the
+	// operator what does not fit).
+	if c.memQuotaMB > 0 && c.usedMemMB+c.needMemMB >= c.memQuotaMB {
 		return fmt.Sprintf("need %dMB + used %dMB > mem quota %dMB",
 			c.needMemMB, c.usedMemMB, c.memQuotaMB)
 	}
-	if c.cpuQuotaMilli > 0 && c.usedCPUMilli+c.needCPUMilli > c.cpuQuotaMilli {
+	if c.cpuQuotaMilli > 0 && c.usedCPUMilli+c.needCPUMilli >= c.cpuQuotaMilli {
 		return fmt.Sprintf("need %dm + used %dm > cpu quota %dm",
 			c.needCPUMilli, c.usedCPUMilli, c.cpuQuotaMilli)
 	}
