@@ -320,7 +320,14 @@ func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSan
 		return false, nil
 	}
 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
+	hasRow := err == nil && sb != nil && sb.SandboxID == desired
+	noRow := (err == nil && sb == nil) || errors.Is(err, utils.ErrorKeyNotFound)
+	if !hasRow {
+		if !noRow {
+			// The record exists but cannot be read. Do not turn a store error
+			// into permission to delete a rootfs.
+			return false, nil
+		}
 		// No local record to replace. An ordinary create that happens to
 		// carry the annotation has nothing to reclaim. A pause resume can
 		// still reach here: createContainers deletes the paused tombstone
