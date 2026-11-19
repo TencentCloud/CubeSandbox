@@ -1,8 +1,9 @@
 # 性能测试
 
-`tests/perf` 包含两组测试：
+`tests/perf` 包含通用性能测试和 JuiceFS 生命周期测试两组测试，并提供并发搜索和报告工具。
 
 - `cubebench.sh`：通用性能测试，覆盖冷启动、部署密度、快照、回滚、克隆、暂停和恢复，生成 Markdown 报告。
+- `cubebench.sh search`：根据 3.2、4.3 的创建 P95 或 4.6 的恢复 P95，搜索满足 P95 ≤ 100 ms 的并发上限。
 - `cubebench_jfs_local.py`：在控制节点本机执行 JuiceFS 本地生命周期测试，输出 JSON。
 - `cubebench_jfs_cross_node.py`：在控制节点本机执行 JuiceFS 跨节点测试，输出 JSON。
 - `cubebench_jfs_report.py`：将上述两个 JSON 渲染为第 4.1–4.4 节对应的 Markdown 表格。
@@ -56,6 +57,72 @@ CUBE_PROXY_NODE_IP=21.130.247.183 \
 ```
 
 3.3 会读取运行机的内存数据，因此只适用于运行机本身就是 Cubelet 的单节点部署；多节点环境会跳过该项。完整环境变量和故障排查说明可执行 `help` 或查看 `cubebench.sh` 文件头部。
+
+### 按 P95 延迟目标搜索并发
+
+从仓库根目录运行 `cubebench.sh search`，搜索满足 P95 ≤ 100 ms 的并发上限。默认参考最近一次完整搜索中同一章节的记录。首次运行或最近一次没有该章节时，从并发 16 开始。
+
+| 章节 | 判定指标 | 并发方式 |
+|---|---|---|
+| 3.2 从模板创建 | 创建 P95 | 滑动窗口。一个请求完成后即可发起下一个请求。 |
+| 4.3 从快照创建 | 创建 P95 | 同步波次。等整波完成后再发下一波。 |
+| 4.6 暂停后恢复 | 恢复 P95 | 同步波次。同一波先完成暂停，再执行恢复。两种操作都必须成功。 |
+
+每轮用 500 个样本计算 P95。4.3 和 4.6 的最后一波也按指定并发数执行。补齐的操作计入错误和吞吐统计，延迟统计只取前 500 个样本。比较优化前后的结果时，请对照同一章节。
+
+同一章节的两轮之间默认等待 5 秒。可用 `--settle` 指定秒数，也可通过 `CUBE_BENCH_SLO_SETTLE` 设置默认值。集群实际补池所需的时间取决于负载。
+
+#### 常用命令
+
+```bash
+# 查看搜索帮助、可搜索章节；预览不会访问集群
+bash tests/perf/cubebench.sh search help
+bash tests/perf/cubebench.sh search sections
+bash tests/perf/cubebench.sh search --preview
+
+# 正式测试前填写本集群已有的 READY 模板和快照 ID；仅 4.3 需要快照
+export CUBE_TEMPLATE_ID=tpl-example
+export CUBE_SNAPSHOT_ID=snap-example
+
+# 搜索全部三个场景，执行前交互确认清理集群沙箱
+bash tests/perf/cubebench.sh search
+
+# 仅搜索 3.2，并查看最近完成的默认报告（Linux）
+bash tests/perf/cubebench.sh search 3.2
+cat /tmp/cubebench-search-latest/search.md
+cat /tmp/cubebench-search-latest/3.2/curve.csv
+
+# 取消同一章节两轮之间的等待
+bash tests/perf/cubebench.sh search --settle 0 3.2
+
+# 搜索第 4 章中支持的 4.3 和 4.6；-y 跳过清理确认
+bash tests/perf/cubebench.sh search -y 4
+
+# 忽略历史，全部场景从并发 16 开始
+bash tests/perf/cubebench.sh search --no-history
+
+# 指定 Markdown 报告位置
+OUTPUT_MD=/tmp/cubebench-3.2.md bash tests/perf/cubebench.sh search 3.2
+```
+
+默认报告写入系统临时目录中的 `cubebench-search-YYYYMMDD_HHMMSS/search.md`。可以用 `TMPDIR` 指定临时目录。每章的 `curve.csv` 按执行顺序记录 `round,concurrency,p95_ms`，包含同一并发的各次确认测量。`OUTPUT_MD` 只指定 Markdown 报告的位置。
+
+所有选定章节执行完毕且没有运行错误时，脚本更新同一目录中的 `cubebench-search-latest` 链接。如果某一章的历史、配置或测量出错，报告会标记 `FAILED`，其余章节继续执行。最终命令返回非零，保留原链接。可用 `--history /path/to/previous-search 3.2` 复用指定目录中已完成的 3.2 记录。
+
+多节点集群也可以从控制节点执行，沿用上面配置的模板和快照：
+
+```bash
+CUBE_MASTER_IP=192.0.2.10 \
+CUBE_API_URL=http://192.0.2.10:3000 \
+CUBE_PROXY_NODE_IP=192.0.2.11 \
+  bash tests/perf/cubebench.sh search 3.2 4
+```
+
+如需接入外部测量系统，可单独调用规划器。例如 `echo '[]' | python3 tests/perf/cubebench_slo_search.py` 只给出首个测点；已有本轮记录时将数组从标准输入传入。
+
+规划器按并发取历史 P95 的中位数，通过单调回归平滑曲线，估算与 100 ms 的交点。历史只用于选点。规划器根据本轮读数修正预测，在已测通过与失败点之间做线性插值；区间收窄过慢时改用二分。
+
+当 `next_case` 为 `null` 时，查看 `results[0].status`。在达标并发构成连续区间的假设下，报告 `confirmed_boundary` 需要对相邻的两个并发各测至少三轮。较低并发的各轮 P95 中位数须 ≤ 100 ms，较高并发的中位数须 > 100 ms。并发 1 确认超限时，报告最低并发仍超限。并发 500 确认达标时，只能得出上限至少为 500。若已测结果不满足单调性，查看 `unstable_or_non_monotonic`。每章最多 48 轮，预算耗尽仍未确认时，报告 `case_budget_exhausted`。
 
 ## JuiceFS 生命周期性能测试
 
@@ -196,5 +263,6 @@ python3 tests/perf/cubebench_jfs_cross_node.py --help
 离线单元测试不会连接真实集群：
 
 ```bash
+make cubebench-test
 python3 -m unittest discover -s tests/perf -p 'test_jfs_bench.py'
 ```

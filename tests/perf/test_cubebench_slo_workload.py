@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import cubebench_slo_workload as bench
+from cubebench_slo_search import read_measurement
 
 
 class SandboxFixture:
@@ -322,6 +323,29 @@ class WorkloadTest(unittest.TestCase):
         self.assertEqual(doc["status"], "failed")
         self.assertEqual(doc["summary"]["successful"], 2)
         self.assertEqual({r["sandbox_id"] for r in doc["raw"]}, set(result.stdout.splitlines()))
+
+    def test_search_reads_full_waves_and_500_latency_samples(self):
+        for section, source_env in (("4.3", "CUBE_SNAPSHOT_ID"), ("4.6", "CUBE_TEMPLATE_ID")):
+            with self.subTest(section=section), patch.dict(os.environ, CUBE_SNAPSHOT_ID="snapshot",
+                                                           CUBE_TEMPLATE_ID="template"):
+                args = self.args(section, "-c", "32", "--requests", "500", "-n", "1")
+                self.assertEqual(bench.run(args, self.fixture.create), 0)
+                doc = self.report()
+                group = doc if section == "4.3" else doc["operations"]["resume"]
+                summary = group["summary"]
+                self.assertEqual((summary["successful"], summary["latency_samples"]), (512, 500))
+                measurement = read_measurement(self.path, section, 32)
+                self.assertEqual(measurement["p95_ms"], summary["p95"])
+                self.assertEqual(measurement["requests"], 500)
+
+                with patch.dict(os.environ, {source_env: "different-source"}), \
+                        self.assertRaisesRegex(ValueError, source_env):
+                    read_measurement(self.path, section, 32)
+
+                summary["successful"] = 500
+                self.path.write_text(json.dumps(doc))
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    read_measurement(self.path, section, 32)
 
 
 if __name__ == "__main__":

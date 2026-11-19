@@ -76,6 +76,11 @@
 #   bash cubebench.sh 4.1 4.3               # same, "run" may be omitted
 #   bash cubebench.sh run 4                 # run a whole chapter (all 4.x sections)
 #   bash cubebench.sh run -y 4.3            # skip the destructive-run confirmation prompt
+#   bash cubebench.sh search                # search all three P95 concurrency boundaries
+#   bash cubebench.sh search 4.3            # search one section, using its latest history if available
+#   bash cubebench.sh search --history DIR 4 # use prior readings for 4.3 and 4.6
+#   bash cubebench.sh search --preview      # print first probes without running measurements
+#   bash cubebench.sh search sections       # list searchable sections
 #   bash cubebench.sh sections              # list the selectable sections
 #   bash cubebench.sh help
 #
@@ -2012,6 +2017,21 @@ run_mvm_bench() {
 main() {
 	local sub="${1:-run}"
 	case "$sub" in
+	search)
+		shift
+		case "${1:-}" in
+		sections)
+			if [ "$#" -ne 1 ]; then
+				color_echo "ERROR: search sections takes no arguments" >&2
+				return 2
+			fi
+			local section
+			for section in 3.2 4.3 4.6; do section_title "$section"; done
+			;;
+		help) "$PYTHON_BIN" "$REPO_ROOT/tests/perf/cubebench_slo_search.py" run --help ;;
+		*) "$PYTHON_BIN" "$REPO_ROOT/tests/perf/cubebench_slo_search.py" run "$@" ;;
+		esac
+		;;
 	sections)
 		cmd_sections
 		;;
