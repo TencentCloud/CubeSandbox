@@ -84,6 +84,12 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 	if applyPauseBindingToInfo(ctx, req, rsp, rec, locatedHost) {
 		return
 	}
+	if len(rsp.Data) == 0 && req.SandboxID != "" && req.HostID == "" && rec == nil {
+		if err := recoverSandboxInfoRoute(ctx, req.SandboxID, locatedHost, cubeletReq, rsp); err != nil {
+			setError(errorcode.ErrorCode_ReqCubeAPIFailed, rsp)
+			return
+		}
+	}
 	if len(rsp.Data) == 0 {
 		setError(errorcode.ErrorCode_NotFoundAtCubelet, rsp)
 		return
@@ -94,6 +100,45 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 		return
 	}
 	return
+}
+
+// 旧节点成功返回空时，只核对一次共享代理位置；保留显式节点和暂停绑定的语义。
+func recoverSandboxInfoRoute(ctx context.Context, sandboxID, locatedHost string,
+	cubeletReq *cubebox.ListCubeSandboxRequest, rsp *types.GetCubeSandboxRes) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID)
+	if !ok || proxyMap == nil {
+		return nil
+	}
+	hostIP := strings.TrimSpace(proxyMap.HostIP)
+	if hostIP == "" || hostIP == strings.TrimSpace(locatedHost) {
+		return nil
+	}
+	n, exists := localcache.GetNodesByIp(hostIP)
+	if !exists || n == nil || !n.Healthy {
+		return nil
+	}
+	log.G(ctx).Infof("Info: empty cached host sandbox=%s cached=%s; checking shared host=%s",
+		sandboxID, locatedHost, hostIP)
+	candidate := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
+	if err := doget(ctx, cubelet.GetCubeletAddr(hostIP), cubeletReq, candidate); err != nil {
+		return err
+	}
+	item := findSandboxData(candidate.Data, sandboxID)
+	if item == nil {
+		return nil
+	}
+	// 以实际返回的完整实例标识为准，不能仅凭代理记录改写本地位置。
+	rsp.Data = []*types.SandboxData{item}
+	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+		SandboxID: sandboxID,
+		HostIP:    hostIP,
+	})
+	log.G(ctx).Infof("Info: corrected cached host sandbox=%s old=%s host=%s state=%d",
+		sandboxID, locatedHost, hostIP, item.Status)
+	return nil
 }
 
 func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
