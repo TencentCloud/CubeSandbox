@@ -65,6 +65,12 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            {{- with .Values.volumePlugins.extra }}
+            # name|type|path entries appended to Cubelet config.toml by
+            # component-entrypoint.sh run_cubelet (see volumePlugins.extra).
+            - name: CUBE_EXTRA_VOLUME_PLUGINS
+              value: {{ include "cube.extraVolumePluginsEnv" . | quote }}
+            {{- end }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
