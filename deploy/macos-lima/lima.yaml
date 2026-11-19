@@ -1,0 +1,48 @@
+# Lima VM for a single-node CubeSandbox on an Apple Silicon Mac.
+#
+# Requires M3 or newer, macOS 15+, and Lima >= 2.0 built with a macOS 15+ SDK
+# (Homebrew's Lima 1.0.x bottle refuses nestedVirtualization even on capable
+# hardware). Cube's sandboxes are KVM microVMs, so the VM needs /dev/kvm:
+# vz + nestedVirtualization gives the guest EL2 and the Linux KVM module loads.
+#
+# Created by deploy/macos-lima/up.sh; see docs/guide/macos-lima-deploy.md.
+vmType: vz
+nestedVirtualization: true
+vmOpts:
+  vz:
+    rosetta:
+      enabled: false
+images:
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+# install.sh needs >= 7.5 GB; templates are built and restored at 2 vCPU / 2 GiB each.
+cpus: 8
+memory: "16GiB"
+disk: "120GiB"
+mounts: []
+containerd:
+  system: false
+  user: false
+portForwards:
+# CubeAPI (E2B-compatible control plane) on host port 13000.
+- guestPort: 3000
+  hostPort: 13000
+# Cube Proxy (sandbox data plane: Host: <port>-<sandboxID>.<domain>).
+- guestPort: 80
+  hostPort: 18080
+# Everything else stays inside the VM (MySQL, Redis, CubeMaster, ...).
+- guestPortRange: [1, 65535]
+  ignore: true
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y xfsprogs cpu-checker curl ca-certificates jq unzip zip make git bc file e2fsprogs
+probes:
+- description: "/dev/kvm present (nested virtualization works)"
+  script: |
+    #!/bin/bash
+    timeout 60s bash -c "until [ -e /dev/kvm ]; do sleep 1; done"
