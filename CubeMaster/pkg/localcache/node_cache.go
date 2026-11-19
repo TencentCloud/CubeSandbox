@@ -276,6 +276,8 @@ func (l *local) getInstanceTypeName(n *node.Node) string {
 	return product
 }
 
+// Sorted buckets are traversed by readers after they release the lock, so
+// writers build a new slice and swap the map entry instead of editing in place.
 func (l *local) appendSortedNodes(n *node.Node) {
 	if n == nil || !n.Healthy {
 		return
@@ -285,12 +287,11 @@ func (l *local) appendSortedNodes(n *node.Node) {
 	defer l.lockSortedNodes.Unlock()
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
-	}
-	ref.Append(n)
-	ref.AllSortByIndex()
-	l.sortedNodesByClusters[product] = ref
+	updated := make(node.NodeList, 0, len(ref)+1)
+	updated = append(updated, ref...)
+	updated = append(updated, n)
+	updated.AllSortByIndex()
+	l.sortedNodesByClusters[product] = updated
 }
 
 func (l *local) delSortedNodes(n *node.Node) {
@@ -299,11 +300,13 @@ func (l *local) delSortedNodes(n *node.Node) {
 
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
+	updated := make(node.NodeList, 0, len(ref))
+	for _, item := range ref {
+		if item.ID() != n.ID() {
+			updated = append(updated, item)
+		}
 	}
-	ref.Remove(n)
-	l.sortedNodesByClusters[product] = ref
+	l.sortedNodesByClusters[product] = updated
 }
 
 func (l *local) updateSortedNodes(n *node.Node) {
@@ -311,18 +314,33 @@ func (l *local) updateSortedNodes(n *node.Node) {
 	defer l.lockSortedNodes.Unlock()
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
-	}
+
 	if !n.Healthy {
-		ref.Remove(n)
-	} else {
-
-		ref.Add(n)
-
-		ref.AllSortByIndex()
+		updated := make(node.NodeList, 0, len(ref))
+		for _, item := range ref {
+			if item.ID() != n.ID() {
+				updated = append(updated, item)
+			}
+		}
+		l.sortedNodesByClusters[product] = updated
+		return
 	}
-	l.sortedNodesByClusters[product] = ref
+
+	updated := make(node.NodeList, 0, len(ref))
+	exists := false
+	for _, item := range ref {
+		if item.ID() == n.ID() {
+			updated = append(updated, n)
+			exists = true
+		} else {
+			updated = append(updated, item)
+		}
+	}
+	if !exists {
+		updated = append(updated, n)
+	}
+	updated.AllSortByIndex()
+	l.sortedNodesByClusters[product] = updated
 }
 
 func (l *local) updateNodeFromMetaData(n *node.Node) error {
