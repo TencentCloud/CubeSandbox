@@ -61,7 +61,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 				"cpuUsage":   getAbsScore(n.QuotaCpuUsage, 1000),
 				"memUsage":   getAbsScore(n.QuotaMemUsage, 1024),
 				"mvmNum":     getAbsScore(n.MvmNum, 1),
-				"score":      strconv.FormatFloat(n.Score, 'f', 2, 64),
+				"score":      strconv.FormatFloat(n.GetScore(), 'f', 2, 64),
 				"cpuPercent": getAbsScore(n.QuotaCpuUsage*100, n.QuotaCpu) + "%",
 				"memPercent": getAbsScore(n.QuotaMemUsage*100, n.QuotaMem) + "%",
 				"numPercent": getAbsScore(n.MvmNum*100, n.MaxMvmLimit) + "%",
@@ -155,7 +155,7 @@ func GetStatPercents() map[string]string {
 		addPercentMetric(percentMap, "pcpuUsage", n.QuotaCpuUsage/1000)
 		addPercentMetric(percentMap, "pmemUsage", n.QuotaMemUsage/1024)
 		addPercentMetric(percentMap, "pmvmNum", n.MvmNum)
-		addPercentMetric(percentMap, "pscore", int64(n.Score*1e6))
+		addPercentMetric(percentMap, "pscore", int64(n.GetScore()*1e6))
 		addPercentMetric(percentMap, "pcpuPercent", n.QuotaCpuUsage*100/n.QuotaCpu)
 		addPercentMetric(percentMap, "pmemPercent", n.QuotaMemUsage*100/n.QuotaMem)
 		addPercentMetric(percentMap, "pmvmPercent", n.MvmNum*100/n.MaxMvmLimit)

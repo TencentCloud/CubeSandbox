@@ -85,7 +85,7 @@ func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (no
 	for i := range inList {
 		nodes.Append(&node.NodeScore{
 			InsID:    inList[i].ID(),
-			Score:    inList[i].Score,
+			Score:    inList[i].GetScore(),
 			MvmNum:   inList[i].MvmNum,
 			OrigNode: inList[i],
 		})

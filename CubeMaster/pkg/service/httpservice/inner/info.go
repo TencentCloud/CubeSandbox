@@ -46,8 +46,8 @@ func getNodeInfo(ctx context.Context, req *types.GetNodeReq) (rsp *types.GetNode
 				MetricLocalUpdateAt: n.MetricLocalUpdateAt,
 				MetaDataUpdateAt:    n.MetaDataUpdateAt,
 				MetricUpdate:        n.MetricUpdate,
-				Score:               n.Score,
 			})
+			rsp.Data[len(rsp.Data)-1].SetScore(n.GetScore())
 		} else {
 			rsp.Data = append(rsp.Data, n)
 		}
@@ -63,13 +63,14 @@ func getNodeInfo(ctx context.Context, req *types.GetNodeReq) (rsp *types.GetNode
 	}
 	if req.ScoreOnly {
 		for _, n := range nodes {
-			rsp.Data = append(rsp.Data, &node.Node{
+			partial := &node.Node{
 				InsID:               n.ID(),
-				Score:               n.Score,
 				MetricLocalUpdateAt: n.MetricLocalUpdateAt,
 				MetaDataUpdateAt:    n.MetaDataUpdateAt,
 				MetricUpdate:        n.MetricUpdate,
-			})
+			}
+			partial.SetScore(n.GetScore())
+			rsp.Data = append(rsp.Data, partial)
 		}
 	} else {
 		rsp.Data = nodes
