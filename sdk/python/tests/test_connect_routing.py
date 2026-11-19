@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
+import json
 from unittest.mock import patch
 
 import httpx
@@ -26,6 +29,77 @@ def _html(content_type: str | None = "text/html; charset=utf-8") -> httpx.Respon
     return httpx.Response(200, headers=headers, stream=httpx.ByteStream(HTML_PAGE))
 
 
+class _ChunkedStream(httpx.SyncByteStream):
+    """Deliver ``data`` in small pieces so envelope headers span chunks."""
+
+    def __init__(self, data: bytes, size: int = 3) -> None:
+        self._data = data
+        self._size = size
+
+    def __iter__(self):
+        for i in range(0, len(self._data), self._size):
+            yield self._data[i : i + self._size]
+
+
+def _stream(*frames: bytes, chunked: bool = True) -> httpx.Response:
+    body = b"".join(frames)
+    stream = _ChunkedStream(body) if chunked else httpx.ByteStream(body)
+    return httpx.Response(200, headers={"content-type": "application/connect+json"}, stream=stream)
+
+
+def _data_event(**fields: bytes) -> bytes:
+    payload = {k: base64.b64encode(v).decode() for k, v in fields.items()}
+    return connect_envelope(0, json.dumps({"event": {"data": payload}}))
+
+
+def _pty_open(sb, method: str):
+    if method == "create":
+        return sb.pty.create(PtySize(rows=24, cols=80))
+    return sb.pty.connect(123)
+
+
+# -- valid Connect streams --------------------------------------------------
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_commands_run_parses_a_valid_multi_frame_stream(chunked):
+    sb = make_sandbox()
+    response = _stream(
+        connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+        _data_event(stdout=b"hello\n"),
+        _data_event(stderr=b"warn\n"),
+        _data_event(stdout=b"world\n"),
+        connect_envelope(0, '{"event":{"end":{"exitCode":3,"exited":true}}}'),
+        connect_envelope(0x02, "{}"),
+        chunked=chunked,
+    )
+    with patch.object(sb, "_build_data_client", return_value=_client(response)):
+        result = sb.commands.run("echo hello")
+    assert result.stdout == "hello\nworld\n"
+    assert result.stderr == "warn\n"
+    assert result.exit_code == 3
+
+
+@pytest.mark.parametrize("method", ["create", "connect"])
+@pytest.mark.parametrize("chunked", [False, True])
+def test_pty_parses_a_valid_stream(method, chunked):
+    sb = make_sandbox()
+    response = _stream(
+        connect_envelope(0, '{"event":{"start":{"pid":123}}}'),
+        _data_event(pty=b"$ "),
+        _data_event(pty=b"ls\r\n"),
+        connect_envelope(0, '{"event":{"end":{"exitCode":0,"exited":true}}}'),
+        connect_envelope(0x02, "{}"),
+        chunked=chunked,
+    )
+    with patch.object(sb, "_build_data_client", return_value=_client(response)):
+        handle = _pty_open(sb, method)
+        output = b"".join(handle)
+    assert handle.pid == 123
+    assert output == b"$ ls\r\n"
+    assert handle.exit_code == 0
+
+
 def test_header_error_rejects_unknown_flags_before_the_length():
     from cubesandbox._commands import _connect_header_error
 
@@ -34,6 +108,25 @@ def test_header_error_rejects_unknown_flags_before_the_length():
     assert message is not None
     assert "not a Connect envelope" in message
     assert HTML_PAGE[:5].hex() in message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        HTML_PAGE,
+        b"\xef\xbb\xbf" + HTML_PAGE,  # UTF-8 BOM
+        b"\n" + HTML_PAGE,
+        b'{"error":{"code":"unavailable","message":"no upstream"}}',
+        gzip.compress(b"payload"),
+    ],
+    ids=["html", "bom", "leading-newline", "json", "gzip"],
+)
+def test_header_error_rejects_non_envelope_prefixes(body):
+    from cubesandbox._commands import _connect_header_error
+
+    message = _connect_header_error(body[:5])
+    assert message is not None
+    assert body[:5].hex() in message
 
 
 @pytest.mark.parametrize("flags", [0x00, 0x01, 0x02, 0x03])
@@ -46,7 +139,7 @@ def test_header_error_accepts_connect_flags(flags):
 def test_commands_run_reports_html_content_type():
     sb = make_sandbox()
     with patch.object(sb, "_build_data_client", return_value=_client(_html())):
-        with pytest.raises(RuntimeError, match="received HTML instead of a Connect response") as exc:
+        with pytest.raises(RuntimeError, match="received HTML instead of a Connect") as exc:
             sb.commands.run("echo hi")
     assert "CUBE_PROXY_NODE_IP" in str(exc.value)
 
@@ -75,15 +168,98 @@ def test_watch_dir_reports_non_envelope_body():
                 list(watcher)
 
 
-def test_pty_create_reports_html_content_type():
+@pytest.mark.parametrize("method", ["create", "connect"])
+def test_pty_reports_html_content_type(method):
     sb = make_sandbox()
     with patch.object(sb, "_build_data_client", return_value=_client(_html())):
         with pytest.raises(CubeSandboxError, match="received HTML instead of a Connect response"):
-            sb.pty.create(PtySize(rows=24, cols=80))
+            _pty_open(sb, method)
 
 
-def test_pty_create_reports_non_envelope_body():
+@pytest.mark.parametrize("method", ["create", "connect"])
+def test_pty_reports_non_envelope_body(method):
     sb = make_sandbox()
     with patch.object(sb, "_build_data_client", return_value=_client(_html(None))):
         with pytest.raises(CubeSandboxError, match="not a Connect envelope"):
-            sb.pty.create(PtySize(rows=24, cols=80))
+            _pty_open(sb, method)
+
+
+# -- HTTP error pages ---------------------------------------------------------
+
+
+def _error_page(status: int, body: bytes, content_type: str | None) -> httpx.Response:
+    headers = {"content-type": content_type} if content_type else {}
+    return httpx.Response(status, headers=headers, stream=httpx.ByteStream(body))
+
+
+def _call(sb, target: str) -> str:
+    """Run ``target`` against the mocked response and return its error message."""
+    errors = (RuntimeError, IOError, CubeSandboxError)
+    with pytest.raises(errors) as exc:
+        if target == "run":
+            sb.commands.run("echo hi")
+        elif target == "watch":
+            sb.files.watch_dir("/tmp")
+        else:
+            _pty_open(sb, target)
+    return str(exc.value)
+
+
+TARGETS = ["run", "watch", "create", "connect"]
+
+
+@pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.parametrize(
+    ("status", "hint"),
+    [
+        (404, "CUBE_PROXY_NODE_IP"),
+        (502, "upstream envd or sandbox node is unreachable"),
+        (401, "check credentials"),
+    ],
+)
+def test_html_error_page_carries_routing_hint(target, status, hint):
+    sb = make_sandbox()
+    page = _error_page(status, b"<html><body>404 Not Found</body></html>", "text/html")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert f"HTTP {status}: <html><body>404 Not Found</body></html>; " in message
+    assert hint in message
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_html_error_page_without_content_type_carries_routing_hint(target):
+    sb = make_sandbox()
+    page = _error_page(404, b"\n<!DOCTYPE html><html></html>", None)
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert "CUBE_PROXY_NODE_IP" in message
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_html_error_page_is_truncated(target):
+    sb = make_sandbox()
+    body = b"<!DOCTYPE html>" + b"x" * 100_000
+    page = _error_page(502, body, "text/html")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert "x" * 300 not in message
+    assert "...; received an HTML error page" in message
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_json_error_keeps_server_message(target):
+    sb = make_sandbox()
+    body = b'{"code":"not_found","message":"process not found"}'
+    page = _error_page(404, body, "text/html")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert message.endswith("HTTP 404: process not found")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_plain_text_error_has_no_routing_hint(target):
+    sb = make_sandbox()
+    page = _error_page(500, b"envd crashed", "text/plain")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert message.endswith("HTTP 500: envd crashed")

@@ -24,10 +24,20 @@ CONNECT_COMPRESSED_FLAG = 0x01
 MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024
 DEFAULT_ENVD_USER = "root"
 _CONNECT_KNOWN_FLAGS = CONNECT_COMPRESSED_FLAG | CONNECT_END_STREAM_FLAG
+# Hints shared with the Go SDK (sdk/go/connect.go). The routing hint is for
+# HTML pages; a body that is not Connect-framed can also be a compressed
+# response, so its hint names that cause too.
 _ROUTING_HINT = (
     "check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint "
     "points to a web service"
 )
+_NOT_AN_ENVELOPE_HINT = (
+    "check whether CUBE_PROXY_NODE_IP is configured, the data-plane endpoint "
+    "points to a web service, or the response was compressed"
+)
+# Bounds for reading an HTTP error page on a Connect stream request.
+_MAX_ROUTING_PAGE_PEEK_BYTES = 4096
+_MAX_DIAGNOSTIC_LEN = 200
 
 
 def _connect_header_error(header: bytes | bytearray) -> str | None:
@@ -41,10 +51,13 @@ def _connect_header_error(header: bytes | bytearray) -> str | None:
     if header[0] & ~_CONNECT_KNOWN_FLAGS:
         return (
             f"response is not a Connect envelope (first 5 bytes: {bytes(header[:5]).hex()}); "
-            "check whether CUBE_PROXY_NODE_IP is configured, the data-plane endpoint "
-            "points to a web service, or the response was compressed"
+            f"{_NOT_AN_ENVELOPE_HINT}"
         )
     return None
+
+
+def _media_type(resp: httpx.Response) -> str:
+    return resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
 
 
 def _html_response_error(resp: httpx.Response) -> str | None:
@@ -54,15 +67,67 @@ def _html_response_error(resp: httpx.Response) -> str | None:
     the request reached a Web UI or portal page instead of CubeProxy. The
     body is not read.
     """
-    if resp.status_code != 200:
+    if resp.status_code != 200 or _media_type(resp) != "text/html":
         return None
     content_type = resp.headers.get("content-type", "")
-    if content_type.split(";", 1)[0].strip().lower() != "text/html":
-        return None
     return (
         f'received HTML instead of a Connect response (content-type "{content_type}"); '
         f"{_ROUTING_HINT}"
     )
+
+
+def _is_routing_page(media_type: str, body: bytes) -> bool:
+    """Whether an HTTP error body looks like a Web UI or gateway page.
+
+    A JSON error document keeps the server's message even when it is
+    labelled ``text/html``.
+    """
+    trimmed = body.strip()
+    if trimmed.startswith(b"{"):
+        return False
+    head = trimmed[: len(b"<!doctype")].lower()
+    return media_type == "text/html" or head.startswith((b"<!doctype", b"<html"))
+
+
+def _routing_page_hint(status_code: int) -> str:
+    if status_code in (401, 403):
+        return (
+            "received an HTML/text page instead of a Connect stream; check credentials "
+            "or whether a portal is intercepting the request"
+        )
+    if status_code >= 500:
+        return (
+            "received an HTML error page instead of a Connect stream; the request may "
+            "have reached CubeProxy but the upstream envd or sandbox node is unreachable"
+        )
+    return f"response may be an HTML/text page instead of a Connect stream; {_ROUTING_HINT}"
+
+
+def _truncate_diagnostic(message: str) -> str:
+    if len(message) <= _MAX_DIAGNOSTIC_LEN:
+        return message
+    return message[:_MAX_DIAGNOSTIC_LEN] + "..."
+
+
+def _stream_http_error_detail(resp: httpx.Response) -> str:
+    """Describe an HTTP error response to a Connect stream request.
+
+    Like :func:`_http_error_detail`, but an HTML page (a misrouted request
+    landing on a Web UI, gateway or portal) is reported from a bounded
+    prefix of its body, followed by the same hint the Go SDK gives, instead
+    of being returned in full.
+    """
+    chunks = resp.iter_bytes()
+    peek = bytearray()
+    for chunk in chunks:
+        peek.extend(chunk)
+        if len(peek) >= _MAX_ROUTING_PAGE_PEEK_BYTES:
+            break
+    if _is_routing_page(_media_type(resp), bytes(peek)):
+        text = bytes(peek[:_MAX_ROUTING_PAGE_PEEK_BYTES]).decode("utf-8", "replace").strip()
+        hint = _routing_page_hint(resp.status_code)
+        return f"{_truncate_diagnostic(text)}; {hint}" if text else hint
+    return _error_detail_from_body(bytes(peek) + b"".join(chunks))
 
 
 @dataclass
@@ -170,7 +235,7 @@ class Commands:
             timeout=effective_timeout,
         ) as resp:
             if resp.status_code >= 400:
-                detail = _http_error_detail(resp)
+                detail = _stream_http_error_detail(resp)
                 suffix = f": {detail}" if detail else ""
                 raise RuntimeError(f"command failed: HTTP {resp.status_code}{suffix}")
             html_error = _html_response_error(resp)
@@ -261,7 +326,10 @@ def _raise_connect_end_stream(raw: bytes) -> None:
 def _http_error_detail(resp) -> str:
     # Only called on HTTP error responses. Reading the body here is safe because
     # successful command streams are parsed incrementally by iter_raw().
-    raw = resp.read()
+    return _error_detail_from_body(resp.read())
+
+
+def _error_detail_from_body(raw: bytes) -> str:
     if not raw:
         return ""
     text = raw.decode("utf-8", "replace").strip()

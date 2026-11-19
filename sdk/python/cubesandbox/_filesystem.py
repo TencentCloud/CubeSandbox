@@ -16,6 +16,7 @@ from ._commands import (
     MAX_CONNECT_ENVELOPE_SIZE,
     _connect_header_error,
     _html_response_error,
+    _stream_http_error_detail,
     _user_headers,
 )
 from ._exceptions import FilesystemNotFoundError, PartialWriteError
@@ -274,8 +275,12 @@ class Filesystem:
             stream=True,
         )
         if resp.status_code >= 400:
-            resp.close()
-            raise IOError(f"WatchDir failed: HTTP {resp.status_code}")
+            try:
+                detail = _stream_http_error_detail(resp)
+            finally:
+                resp.close()
+            suffix = f": {detail}" if detail else ""
+            raise IOError(f"WatchDir failed: HTTP {resp.status_code}{suffix}")
         html_error = _html_response_error(resp)
         if html_error:
             resp.close()

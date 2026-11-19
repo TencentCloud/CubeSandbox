@@ -315,7 +315,7 @@ export default withMermaid(defineConfig({
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
                 { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' },
                 { text: 'HeartbeatExpired (Clock Skew)', link: '/guide/troubleshooting/node-heartbeat-expired-clock-skew' },
-                { text: 'Go SDK Connect Stream Routing', link: '/guide/troubleshooting/sdk-connect-stream-routing' }
+                { text: 'SDK Connect Stream Routing', link: '/guide/troubleshooting/sdk-connect-stream-routing' }
               ]
             },
             {
@@ -562,7 +562,7 @@ export default withMermaid(defineConfig({
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
                 { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' },
                 { text: 'HeartbeatExpired（时钟偏移）', link: '/zh/guide/troubleshooting/node-heartbeat-expired-clock-skew' },
-                { text: 'Go SDK Connect 流路由', link: '/zh/guide/troubleshooting/sdk-connect-stream-routing' }
+                { text: 'SDK Connect 流路由', link: '/zh/guide/troubleshooting/sdk-connect-stream-routing' }
               ]
             },
             {

@@ -33,6 +33,7 @@ from ._commands import (
     _html_response_error,
     _http_error_detail,
     _raise_connect_end_stream,
+    _stream_http_error_detail,
     _user_headers,
 )
 from ._exceptions import CubeSandboxError
@@ -426,7 +427,7 @@ class Pty:
         resp = resp_ctx.__enter__()
         try:
             if resp.status_code >= 400:
-                detail = _http_error_detail(resp)
+                detail = _stream_http_error_detail(resp)
                 suffix = f": {detail}" if detail else ""
                 raise CubeSandboxError(
                     f"{method} failed: HTTP {resp.status_code}{suffix}",
