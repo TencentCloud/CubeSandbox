@@ -211,19 +211,16 @@ func buildSnapshotReadinessProbeConfig(ctx context.Context, c *cubebox.Container
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe TimeoutMs[%v]", probe.TimeoutMs)
 	}
 
-	probeTimeoutMs := probe.GetProbeTimeoutMs()
-	if probeTimeoutMs <= 5 {
-		probeTimeoutMs = 100
-	}
+	timeout := snapshotReadinessProbeTimeout(c)
 	cfg := &telnet.ProbeConfig{
 		Addr:             ci.IP,
 		InitialDelay:     0,
-		Timeout:          time.Duration(probeTimeoutMs) * time.Millisecond,
+		Timeout:          timeout,
 		Period:           0,
 		SuccessThreshold: 1,
 		FailureThreshold: 1,
 		InstanceType:     ci.InstanceType,
-		ProbeTimeout:     time.Duration(probeTimeoutMs) * time.Millisecond,
+		ProbeTimeout:     timeout,
 	}
 
 	handler := probe.GetProbeHandler()

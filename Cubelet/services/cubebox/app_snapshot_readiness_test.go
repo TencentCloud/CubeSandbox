@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -46,4 +47,19 @@ func TestWaitSnapshotReadinessProbeReturnsOnContextCancellation(t *testing.T) {
 	err := waitSnapshotReadinessProbe(ctx, make(chan error))
 
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSnapshotReadinessProbeTimeoutDefaultsToOneSecond(t *testing.T) {
+	// CubeAPI templates never set a probe timeout; one attempt gets 1 s.
+	unset := &cubebox.ContainerConfig{Probe: &cubebox.Probe{TimeoutMs: 30000}}
+	if got := snapshotReadinessProbeTimeout(unset); got != time.Second {
+		t.Fatalf("unset probe timeout = %v, want 1s", got)
+	}
+	if got := snapshotReadinessProbeTimeout(nil); got != time.Second {
+		t.Fatalf("no config = %v, want 1s", got)
+	}
+	set := &cubebox.ContainerConfig{Probe: &cubebox.Probe{TimeoutMs: 30000, ProbeTimeoutMs: 2500}}
+	if got := snapshotReadinessProbeTimeout(set); got != 2500*time.Millisecond {
+		t.Fatalf("declared probe timeout = %v, want 2.5s", got)
+	}
 }
