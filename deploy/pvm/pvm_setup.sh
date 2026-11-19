@@ -36,6 +36,8 @@
 #   PVM_SETUP_SKIP_PLACE=1   Skip the guest vmlinux placement step
 #   PVM_SETUP_SKIP_GRUB=1    Do not touch GRUB default / do not regenerate
 #                            the GRUB configuration after installation
+#   PVM_SETUP_FAMILY         Override distro detection (rpm/deb; for tests)
+#   PVM_SETUP_MODULES_LOAD_DIR Override /etc/modules-load.d (for tests)
 #   PVM_SETUP_TOOLBOX_ROOT   Override the cubetoolbox install prefix
 #                            (default: /usr/local/services/cubetoolbox)
 #   PVM_SETUP_ASSETS_DIR     Override the in-repo kernel-artifacts dir
@@ -106,8 +108,10 @@ GUEST_BUILD_DIR="${PVM_SETUP_GUEST_BUILD_DIR:-${WORK_DIR}/pvm-guest-build}"
 TOOLBOX_ROOT="${PVM_SETUP_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 TOOLBOX_VMLINUX_DIR="${TOOLBOX_ROOT}/cube-kernel-scf"
 ASSETS_DIR="${PVM_SETUP_ASSETS_DIR:-${REPO_ROOT}/deploy/one-click/assets/kernel-artifacts}"
+PVM_MODULES_LOAD_DIR="${PVM_SETUP_MODULES_LOAD_DIR:-/etc/modules-load.d}"
 
 ASSUME_YES="${PVM_SETUP_ASSUME_YES:-0}"
+TARGET_HOST_KERNEL_RELEASE=""
 
 # ------------------------- Logging helpers -------------------------
 log()  { echo -e "\033[1;32m[INFO ]\033[0m $*"; }
@@ -193,7 +197,7 @@ detect_family() {
     fi
 }
 
-FAMILY="$(detect_family)"
+FAMILY="${PVM_SETUP_FAMILY:-$(detect_family)}"
 log "Detected distribution family: ${FAMILY}"
 
 # ------------------------- User confirmation -------------------------
@@ -328,10 +332,10 @@ run_builds_in_parallel() {
         } >>"${logfile}" 2>/dev/null || true
     }
 
-    # SKIP_DEPS=1 for every child script invocation: the common deps were
-    # already installed above, so no sub-script needs to hit the package
-    # manager again. ensure_build_tools inside each script still verifies
-    # that make / gcc / bc / bison / flex / python3 are actually present.
+    # The guest build uses only the common dependency set installed above, so
+    # it receives SKIP_DEPS=1. The RPM host build must still resolve the full
+    # BuildRequires from its generated dist-rpm spec; that set is intentionally
+    # not duplicated here and is installed by build-pvm-host-kernel-pkg.sh.
     #
     # Invoke the child scripts explicitly through `bash` rather than relying
     # on the executable bit / shebang. This keeps things working even when
@@ -356,7 +360,7 @@ run_builds_in_parallel() {
         # to be written to the log file twice. Plain `>>` keeps the file
         # line-for-line faithful; the output is still visible on the
         # terminal because main()'s outer tee mirrors it.
-        SKIP_DEPS=1 WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >>"${host_log}"  2>&1
+        SKIP_DEPS="${SKIP_DEPS:-0}" WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >>"${host_log}"  2>&1
         local host_rc=$?
         if [[ "${host_rc}" -ne 0 ]]; then
             err "pvm-host build failed (rc=${host_rc}). Full log: ${host_log}"
@@ -398,7 +402,7 @@ run_builds_in_parallel() {
     _append_run_banner "${host_log}"  "host (parallel)"  "${HOST_BUILD_DIR}"
     _append_run_banner "${guest_log}" "guest (parallel)" "${GUEST_BUILD_DIR}"
 
-    SKIP_DEPS=1 WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >>"${host_log}"  2>&1 &
+    SKIP_DEPS="${SKIP_DEPS:-0}" WORK_DIR="${HOST_BUILD_DIR}"  bash "${HOST_BUILD_SCRIPT}"  >>"${host_log}"  2>&1 &
     local host_pid=$!
 
     SKIP_DEPS=1 WORK_DIR="${GUEST_BUILD_DIR}" bash "${GUEST_BUILD_SCRIPT}" >>"${guest_log}" 2>&1 &
@@ -438,11 +442,36 @@ list_host_packages() {
 
 install_pvm_host_rpm() {
     local packages=()
-    mapfile -t packages < <(list_host_packages '*.rpm')
-    if [[ "${#packages[@]}" -eq 0 ]]; then
-        err "No RPM packages found in ${HOST_BUILD_DIR}/output"
-        exit 1
+    local core_packages=()
+    local core version package
+    local matches=()
+    mapfile -t core_packages < <(list_host_packages 'kernel-core-[0-9]*.oc9.*.rpm')
+    if [[ "${#core_packages[@]}" -ne 1 ]]; then
+        err "Expected exactly one kernel-core RPM in ${HOST_BUILD_DIR}/output, found ${#core_packages[@]}"
+        return 2
     fi
+    core="${core_packages[0]}"
+    version="$(basename "${core}")"
+    version="${version#kernel-core-}"
+    version="${version%.x86_64.rpm}"
+    TARGET_HOST_KERNEL_RELEASE="${version}.x86_64"
+
+    # dist-rpm produces a complete release set, but host installation needs
+    # only the five matching runtime/development packages. Do not install
+    # debuginfo, source, perf, bpftool, or kernel-tools packages implicitly.
+    for package in kernel kernel-core kernel-modules kernel-devel kernel-headers; do
+        matches=()
+        if [[ "${package}" == "kernel" ]]; then
+            mapfile -t matches < <(list_host_packages "kernel-${version}.x86_64.rpm")
+        else
+            mapfile -t matches < <(list_host_packages "${package}-${version}.x86_64.rpm")
+        fi
+        if [[ "${#matches[@]}" -ne 1 ]]; then
+            err "Expected exactly one ${package}-${version}.x86_64.rpm, found ${#matches[@]}"
+            return 2
+        fi
+        packages+=("${matches[0]}")
+    done
 
     echo
     log "The following pvm-host RPM packages are ready to be installed:"
@@ -470,7 +499,10 @@ install_pvm_host_rpm() {
     fi
 
     log "Installing pvm-host packages via ${SUDO:+${SUDO} }${installer} install -y ..."
-    ${SUDO} "${installer}" install -y "${packages[@]}"
+    if ! ${SUDO} "${installer}" install -y "${packages[@]}"; then
+        err "Failed to install the pvm-host RPM package set"
+        return 2
+    fi
     log "pvm-host packages installed."
 }
 
@@ -509,6 +541,10 @@ install_pvm_host_deb() {
 # kernel by extracting KERNELRELEASE from the built source tree. Prints the
 # release string on stdout, or nothing if detection fails.
 detect_host_kernel_release() {
+    if [[ -n "${TARGET_HOST_KERNEL_RELEASE}" ]]; then
+        printf '%s\n' "${TARGET_HOST_KERNEL_RELEASE}"
+        return 0
+    fi
     local src="${HOST_BUILD_DIR}/linux"
     if [[ ! -f "${src}/include/config/kernel.release" ]]; then
         return 0
@@ -617,12 +653,12 @@ set_grub_default_pvm_host() {
 # Debian/Ubuntu it supersedes the older /etc/modules file and is still the
 # recommended mechanism.
 enable_kvm_pvm_autoload() {
-    local conf="/etc/modules-load.d/kvm_pvm.conf"
+    local conf="${PVM_MODULES_LOAD_DIR}/kvm_pvm.conf"
     log "Enabling auto-load of kernel module 'kvm_pvm' on boot via ${conf}"
 
     # Make sure the directory exists (it does on any systemd-based distro,
     # but be defensive for minimal images).
-    ${SUDO} mkdir -p /etc/modules-load.d
+    ${SUDO} mkdir -p "${PVM_MODULES_LOAD_DIR}"
 
     # Atomic write via a tempfile + install, so an interrupted run can't
     # leave behind a half-written conf file.
@@ -671,10 +707,10 @@ install_pvm_host_package() {
     # non-zero when the user declines the interactive prompt; in that case
     # we must NOT reconfigure GRUB nor enable kvm_pvm auto-loading, because
     # the machine will keep booting the existing (non-pvm) kernel.
-    local installed=0
+    local install_rc=0
     case "${FAMILY}" in
-        rpm) install_pvm_host_rpm && installed=1 || installed=0 ;;
-        deb) install_pvm_host_deb && installed=1 || installed=0 ;;
+        rpm) install_pvm_host_rpm || install_rc=$? ;;
+        deb) install_pvm_host_deb || install_rc=$? ;;
         *)
             err "Unknown distribution family; cannot install pvm-host package automatically."
             err "Please install the artifacts in ${HOST_BUILD_DIR}/output manually."
@@ -682,9 +718,13 @@ install_pvm_host_package() {
             ;;
     esac
 
-    if [[ "${installed}" -ne 1 ]]; then
+    if [[ "${install_rc}" -eq 1 ]]; then
         warn "pvm-host package was not installed; skipping GRUB default switch and kvm_pvm auto-load setup."
         return 0
+    fi
+    if [[ "${install_rc}" -ne 0 ]]; then
+        err "pvm-host package installation failed; GRUB and module configuration were not changed."
+        return "${install_rc}"
     fi
 
     set_grub_default_pvm_host

@@ -87,10 +87,17 @@ check_pod_name_for() {
   printf 'pvm-check-%s-%s-%s' "$safe" "$suffix" "$RELEASE_NAME" | cut -c1-63
 }
 
+yaml_single_quote() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
 create_check_pod() {
   pod_name=$1
   node_name=$2
   require_fingerprint=$3
+  state_dir_yaml="$(yaml_single_quote "$STATE_DIR")"
+  desired_kernel_pattern_yaml="$(yaml_single_quote "$DESIRED_KERNEL_PATTERN")"
+  kernel_boot_args_yaml="$(yaml_single_quote "$KERNEL_BOOT_ARGS")"
 
   {
     cat <<EOF
@@ -125,13 +132,13 @@ EOF
         - name: HOST_ROOT
           value: /host
         - name: STATE_DIR
-          value: "${STATE_DIR}"
+          value: '${state_dir_yaml}'
         - name: PVM_ENABLED
           value: "1"
         - name: DESIRED_KERNEL_PATTERN
-          value: "${DESIRED_KERNEL_PATTERN}"
+          value: '${desired_kernel_pattern_yaml}'
         - name: KERNEL_BOOT_ARGS
-          value: "${KERNEL_BOOT_ARGS}"
+          value: '${kernel_boot_args_yaml}'
       volumeMounts:
         - name: host-root
           mountPath: /host
