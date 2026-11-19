@@ -124,3 +124,54 @@ func TestCleanupTemplateJFSOnNodeWithoutJFSIsANoop(t *testing.T) {
 	require.NotEqual(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
 	require.Equal(t, 1, swept)
 }
+
+func TestCleanupTemplateRetiresOnlyXFSS3PausePackages(t *testing.T) {
+	for _, tc := range []struct {
+		name, backend, kind string
+		marker, keep        bool
+		wantRetired         int
+	}{
+		{name: "template", backend: "xfs-s3", kind: storage.CatalogKindTemplate},
+		{name: "missing-template", backend: "xfs-s3"},
+		{name: "pause-catalog", backend: "xfs-s3", kind: storage.CatalogKindPauseSnapshot, wantRetired: 1},
+		{name: "pause-marker", backend: "xfs-s3", marker: true, wantRetired: 1},
+		{name: "live-pause", backend: "xfs-s3", kind: storage.CatalogKindPauseSnapshot, keep: true, wantRetired: 1},
+		{name: "local-gc", backend: "xfs", marker: true, wantRetired: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installCleanupTemplateTestHooks(t)
+			origMarker, origRetire := isXFSS3Package, retireXFSS3Checkpoint
+			t.Cleanup(func() { isXFSS3Package, retireXFSS3Checkpoint = origMarker, origRetire })
+			const snap = "snap-cleanup-xfss3"
+			getLocalSnapshotForFn = func(context.Context, string, string) (*storage.SnapshotCatalogEntry, error) {
+				if tc.kind == "" {
+					return nil, storage.ErrSnapshotCatalogNotFound
+				}
+				return &storage.SnapshotCatalogEntry{SnapshotID: snap, Kind: tc.kind}, nil
+			}
+			isXFSS3Package = func(context.Context, string) bool { return tc.marker }
+			retired := 0
+			retireXFSS3Checkpoint = func(_ context.Context, id string) { require.Equal(t, snap, id); retired++ }
+			listCubeboxesForTest = func() []*cubeboxstore.CubeBox { return nil }
+			if tc.keep {
+				live := newCubeboxWithStatusForTest("sb-cleanup-xfss3", cubeboxstore.Status{StartedAt: time.Now().UnixNano()})
+				stampPauseSnapshotID(live, snap)
+				live.BindRestoreBase(snap)
+				listCubeboxesForTest = func() []*cubeboxstore.CubeBox { return []*cubeboxstore.CubeBox{live} }
+			}
+			deleted := 0
+			cleanupTemplateLocalDataFn = func(context.Context, string, string) error { deleted++; return nil }
+			rsp, err := (&service{}).cleanupTemplate(context.Background(), &cubebox.CleanupTemplateRequest{
+				TemplateID: snap, Backend: tc.backend, Objects: []*cubebox.CowObjectRef{{Name: "n", Kind: "snapshot", Role: "rootfs"}},
+			}, true)
+			require.NoError(t, err)
+			require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode(), rsp.GetRet().GetRetMsg())
+			require.Equal(t, tc.wantRetired, retired)
+			if tc.keep {
+				require.Zero(t, deleted)
+			} else {
+				require.Equal(t, 1, deleted)
+			}
+		})
+	}
+}

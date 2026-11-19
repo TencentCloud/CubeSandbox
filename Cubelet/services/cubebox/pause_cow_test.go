@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +168,52 @@ func TestUpdateWithPauseCowBusyPreflight(t *testing.T) {
 	st := sb.GetStatus().Get()
 	require.False(t, st.Unknown)
 	require.NotEqual(t, pauseFailedReason, st.Reason)
+}
+
+func TestUpdateWithPauseCowXFSS3RefusalRollsBackTheStamp(t *testing.T) {
+	// A store the node cannot use refuses the pause before the guest is
+	// frozen: the sandbox keeps running, the stamp goes back, and the message
+	// carries the prefix Master aborts the binding on.
+	prev := "snap-prev000000000000000000000001"
+	attempt := "snap-xfss300000000000000000000001"
+	sb := newCubeboxWithStatusForTest("sb-xfss3-refused", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	})
+	stampPauseSnapshotID(sb, prev)
+	first := sb.FirstContainer()
+	first.Config = &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{{
+			Name:          "root",
+			ContainerPath: "/",
+		}},
+	}
+
+	readyBefore := xfss3Ready
+	xfss3Ready = func() error { return errors.New("no credentials") }
+	t.Cleanup(func() { xfss3Ready = readyBefore })
+	preflightPauseNotBusyForTest = func(context.Context, *cubeboxstore.CubeBox) error {
+		t.Fatal("a refused xfs-s3 pause must not reach the busy preflight")
+		return nil
+	}
+	t.Cleanup(func() { preflightPauseNotBusyForTest = nil })
+
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+	rsp, err := s.updateWithPauseCow(context.Background(), &cubebox.UpdateCubeSandboxRequest{
+		RequestID: "req-xfss3-refused",
+		SandboxID: sb.ID,
+		Annotations: map[string]string{
+			constants.MasterAnnotationPauseSnapshotID: attempt,
+			constants.MasterAnnotationStorageBackend:  "xfs-s3",
+		},
+	}, sb)
+	require.NoError(t, err)
+	require.Equal(t, errorcode.ErrorCode_PreConditionFailed, rsp.Ret.RetCode)
+	require.True(t, strings.HasPrefix(rsp.Ret.RetMsg, xfss3PauseRefusedPrefix+": "), rsp.Ret.RetMsg)
+	require.Contains(t, rsp.Ret.RetMsg, "no credentials")
+	require.Equal(t, prev, stampedPauseSnapshotID(sb))
+	st := sb.GetStatus().Get()
+	require.False(t, st.Unknown)
+	require.Zero(t, st.PausingAt)
 }
 
 func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {

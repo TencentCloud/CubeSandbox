@@ -22,7 +22,10 @@ import (
 
 var _ api.SnapshotServer = &service{}
 
-var snapshotUploadStatus = storage.SnapshotUploadStatus
+var (
+	snapshotUploadStatus  = storage.SnapshotUploadStatus
+	xfss3CheckpointStatus = storage.XFSS3CheckpointStatus
+)
 
 func init() {
 	registry.Register(&plugin.Registration{
@@ -60,7 +63,7 @@ const (
 func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.StatusResponse, error) {
 	rsp := s.statusOne(ctx, req.GetRequestId(), req.GetSnapshotId(), req.GetBackend())
 	wait := min(time.Duration(req.GetWaitReadyMs())*time.Millisecond, statusWaitMax)
-	if wait <= 0 || !storage.RemoteSnapshotBackend(rsp.GetBackend()) {
+	if wait <= 0 || !(storage.RemoteSnapshotBackend(rsp.GetBackend()) || cow.IsXFSS3Backend(rsp.GetBackend())) {
 		return rsp, nil
 	}
 	deadline := time.NewTimer(wait)
@@ -82,7 +85,7 @@ func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.Stat
 
 func uploadSettled(rsp *api.StatusResponse) bool {
 	switch rsp.GetState() {
-	case cow.RemoteStateReady, cow.RemoteStateFailed:
+	case cow.RemoteStateReady, cow.RemoteStateFailed, cow.RemoteStateExported:
 		return true
 	}
 	return false
@@ -112,6 +115,17 @@ func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBacke
 		// Unknown backend is not an s3lvol export failure; leave State unset
 		// so Master keeps remote_status=inprogress.
 		return unsetStatus(requestID, snapshotID, strings.TrimSpace(rawBackend), err.Error())
+	}
+	if backend == cow.BackendXFSS3 {
+		st := xfss3CheckpointStatus(ctx, snapshotID)
+		return &api.StatusResponse{
+			RequestId:   requestID,
+			SnapshotId:  snapshotID,
+			Backend:     backend,
+			State:       st.State,
+			Message:     st.Message,
+			RemoteReady: st.State == cow.RemoteStateReady,
+		}
 	}
 	rsp := &api.StatusResponse{
 		RequestId:  requestID,
@@ -169,7 +183,11 @@ func normalizeStatusBackend(raw string) (string, error) {
 		return cow.BackendS3, nil
 	case "jfs", "juicefs":
 		return cow.BackendJFS, nil
+	case cow.BackendXFSS3:
+		// Not normalized to xfs: the origin answers for its export and any
+		// other node for its own readback of the checkpoint.
+		return cow.BackendXFSS3, nil
 	default:
-		return "", fmt.Errorf("unsupported backend %q (want xfs, s3 or jfs)", raw)
+		return "", fmt.Errorf("unsupported backend %q (want xfs, s3, jfs or xfs-s3)", raw)
 	}
 }

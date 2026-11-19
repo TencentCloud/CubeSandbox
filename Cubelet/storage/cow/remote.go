@@ -16,6 +16,10 @@ const (
 	RemoteStateRunning = "running" // upload in progress / cubecow INPROGRESS
 	RemoteStateReady   = "ready"   // remote_uuids present / cubecow DONE
 	RemoteStateFailed  = "failed"
+	// RemoteStateExported is an xfs-s3 origin's last word: every object is
+	// committed, and only a node other than the origin may now read it
+	// back and report ready.
+	RemoteStateExported = "exported"
 )
 
 // cubecow_get_volume_info export_status values (s3-support).

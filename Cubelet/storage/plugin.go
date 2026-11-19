@@ -484,6 +484,11 @@ func init() {
 			// until the loop succeeds.
 			localStorage.startS3CowInitLoop(ic.Context)
 
+			// xfs-s3 exports a returned Pause promised to finish.
+			if localStorage.useCowStorage() {
+				go ResumeXFSS3Exports(ic.Context)
+			}
+
 			return localStorage, nil
 		},
 	})
