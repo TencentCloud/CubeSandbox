@@ -296,6 +296,14 @@ grep -q "creating a new lvstore" /tmp/rcow_ctl_start1.log &&
 	pass "it created rather than attached (nothing was recorded yet)" ||
 	fail "it did not take the create path on an empty bstore.json"
 
+[ "$(rpc rcow_lvstore_attached "{\"lvs_name\":\"${RCOW_LVS_NAME}\"}")" = true ] &&
+	pass "rcow_lvstore_attached answers true for the created lvstore" ||
+	fail "rcow_lvstore_attached does not report the created lvstore"
+
+[ "$(rpc rcow_lvstore_attached '{"lvs_name":"ctl-absent"}')" = false ] &&
+	pass "and false for a name that was never attached" ||
+	fail "rcow_lvstore_attached does not answer false for an unknown lvstore"
+
 [ "$(rcow_subsys_count)" = "${RCOW_NUM_SUBSYS}" ] &&
 	pass "all ${RCOW_NUM_SUBSYS} subsystems exist" ||
 	fail "only $(rcow_subsys_count) subsystems exist"
@@ -463,6 +471,10 @@ if grep -q "creating a new lvstore" /tmp/rcow_ctl_start2.log; then
 else
 	pass "it attached rather than created"
 fi
+
+[ "$(rpc rcow_lvstore_attached "{\"lvs_name\":\"${RCOW_LVS_NAME}\"}")" = true ] &&
+	pass "rcow_lvstore_attached answers true once the attach has replayed" ||
+	fail "rcow_lvstore_attached does not report the attached lvstore"
 
 grep -q "replay: 3 restored, 0 refused, 0 failed" /tmp/rcow_ctl_start2.log &&
 	pass "all three volumes were restored" ||

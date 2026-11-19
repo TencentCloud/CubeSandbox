@@ -947,6 +947,9 @@ rcow_target_alive()
 # answers RPCs -- rcow_get_bdev in particular -- before it has attached
 # anything, because the device paths in that answer come from the registry and
 # the host's sysfs, which both survive a hot restart.
+#
+# The rcow_lvstore_attached RPC answers the same question with one lookup, but
+# only targets built with it have it.
 rcow_lvstore_attached()
 {
 	local out
