@@ -12,6 +12,7 @@ import type { QuotaViewDto, QuotaSpecDto } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Section } from '@/components/ui/section';
 import { Skeleton } from '@/components/ui/skeleton';
 import { showToast } from '@/components/ui/ToastProvider';
 import {
@@ -25,6 +26,7 @@ import {
   History,
 } from 'lucide-react';
 import { cn, formatRelative } from '@/lib/utils';
+import { NodeLabelsSection } from '@/components/nodes/NodeLabelsSection';
 
 // ── Resource bar ──────────────────────────────────────────────────────────────
 
@@ -72,30 +74,6 @@ function KpiCard({
         </span>
       </div>
       <ResourceBar pct={pct} />
-    </div>
-  );
-}
-
-// ── Section wrapper ───────────────────────────────────────────────────────────
-
-function Section({
-  title,
-  children,
-  action,
-}: {
-  title: string;
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
-          {title}
-        </span>
-        {action}
-      </div>
-      {children}
     </div>
   );
 }
@@ -1054,6 +1032,19 @@ export default function NodeDetailPage() {
           ))}
         </div>
       </Section>
+
+      {/* labels */}
+      <NodeLabelsSection nodeID={data.nodeID} labels={data.labels ?? {}} />
+
+      {data.hostFacts && (
+        <Section title={t('labels.hostFacts')}>
+          <div className="grid gap-3 rounded-xl border border-border/60 bg-card/40 px-4 py-3 sm:grid-cols-3">
+            <StatRow label={t('labels.cpuModel')} value={data.hostFacts.cpuModel} mono />
+            <StatRow label={t('labels.cpuidHash')} value={data.hostFacts.cpuidHash} mono />
+            <StatRow label={t('labels.kernel')} value={data.hostFacts.hostKernelRelease} mono />
+          </div>
+        </Section>
+      )}
 
       {/* quota settings */}
       <QuotaSettingsSection nodeID={data.nodeID} />

@@ -42,7 +42,10 @@ func (h *ClusterHandler) Register(r *gin.RouterGroup) {
 	r.GET("/cluster/versions", h.Versions)
 	r.GET("/nodes", h.ListNodes)
 	r.GET("/nodes/:nodeID", h.GetNode)
+	h.registerMachineTypes(r)
 	r.PATCH("/nodes/:nodeID/labels", h.UpdateLabels)
+	r.PUT("/nodes/:nodeID/labels", h.ReplaceLabels)
+	r.DELETE("/nodes/:nodeID/labels", h.DeleteLabelByQuery)
 	r.DELETE("/nodes/:nodeID/labels/:key", h.DeleteLabel)
 	r.PUT("/nodes/:nodeID/isolation", h.Isolate)
 	r.DELETE("/nodes/:nodeID/isolation", h.Unisolate)
@@ -69,7 +72,11 @@ func (h *ClusterHandler) ListNodes(c *gin.Context) {
 	}
 	used := h.fetchUsedResources(c.Request.Context())
 	views := make([]nmhandler.NodeView, 0, len(nodes))
+	filter := c.Query("machineType")
 	for _, n := range nodes {
+		if !model.MachineTypeMatches(model.MachineTypeValue(n.Labels), filter) {
+			continue
+		}
 		views = append(views, nmhandler.ToNodeView(n, used))
 	}
 	httputil.WriteJSON(c, http.StatusOK, views)
@@ -110,6 +117,40 @@ func (h *ClusterHandler) UpdateLabels(c *gin.Context) {
 	}
 	if err := h.svc.UpdateNodeLabels(c.Request.Context(), nodeID, req.Labels, auth.UsernameFromContext(c.Request.Context())); err != nil {
 		logging.G(c.Request.Context()).Errorf("cluster: update labels failed: node=%s: %v", nodeID, err)
+		nmhandler.MapNodeError(c, err)
+		return
+	}
+	httputil.WriteNoContent(c)
+}
+
+// ReplaceLabels replaces the complete user-label set of a node (PUT), keeping
+// control-plane-owned labels intact. PATCH keeps the historical merge semantics.
+func (h *ClusterHandler) ReplaceLabels(c *gin.Context) {
+	nodeID := c.Param("nodeID")
+	var req model.UpdateNodeLabelsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(c.Request.Context()).Errorf("cluster: replace labels invalid body: node=%s: %v", nodeID, err)
+		httputil.WriteError(c, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if err := h.svc.ReplaceNodeLabels(c.Request.Context(), nodeID, req.Labels, auth.UsernameFromContext(c.Request.Context())); err != nil {
+		logging.G(c.Request.Context()).Errorf("cluster: replace labels failed: node=%s: %v", nodeID, err)
+		nmhandler.MapNodeError(c, err)
+		return
+	}
+	httputil.WriteNoContent(c)
+}
+
+// DeleteLabelByQuery deletes a label whose key contains '/'. The path form
+// cannot carry such a key reliably through proxies and Gin's path matching.
+func (h *ClusterHandler) DeleteLabelByQuery(c *gin.Context) {
+	key := c.Query("key")
+	if key == "" {
+		httputil.WriteError(c, http.StatusBadRequest, "query parameter key is required")
+		return
+	}
+	if err := h.svc.DeleteNodeLabel(c.Request.Context(), c.Param("nodeID"), key, auth.UsernameFromContext(c.Request.Context())); err != nil {
+		logging.G(c.Request.Context()).Errorf("cluster: delete label failed: node=%s key=%s: %v", c.Param("nodeID"), key, err)
 		nmhandler.MapNodeError(c, err)
 		return
 	}

@@ -72,6 +72,8 @@ Per-node `HostFacts` are also available with `cubeopscli node list --json`.
 | `host_kernel_release` | `uname -r` | Equality |
 | `kvm_module_taint` | Forced, out-of-tree, or unsigned KVM module marker | Reject non-empty target |
 
+By default, both equality gates apply. Machines that share a CPU and differ only by a host-kernel patch level can be exempted from the kernel gate by binding them to a [machine type](../node-operations.md#machine-types).
+
 ## Inspection commands
 
 ```bash

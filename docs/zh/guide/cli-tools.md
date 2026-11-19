@@ -9,7 +9,7 @@ CubeSandbox 随宿主机安装包提供多种运维和排障命令行工具。�
 | 工具 | 运行位置 | 访问对象 | 主要用途 |
 |------|----------|----------|----------|
 | `cubemastercli` | 控制节点、跳板机，或任何能访问 CubeMaster 的机器 | CubeMaster HTTP API，默认端口 `8089` | 集群级 sandbox、模板、快照、volume 运维 |
-| `cubeopscli` | 控制节点、跳板机，或任何能访问 CubeOps 的机器 | CubeOps HTTP API，默认端口 `3010` | 节点列表、隔离/解除隔离、删除节点 |
+| `cubeopscli` | 控制节点、跳板机，或任何能访问 CubeOps 的机器 | CubeOps HTTP API，默认端口 `3010` | 节点列表、隔离/解除隔离、删除节点、机型、节点标签 |
 | `cubecli` | 运行 Cubelet 和 containerd 的计算节点 | 本地 Cubelet/containerd 状态 | 单节点 sandbox/container 查看、容器 shell、日志、存储清理、本地运行时排障 |
 | `cube-runtime` | 承载目标 sandbox MVM 的计算节点 | 本地 CubeShim hybrid-vsock/debug console | 登录 guest MVM 或执行底层 VM snapshot 辅助操作 |
 
@@ -105,7 +105,7 @@ cubeopscli version --versiononly
 
 `cubeopscli --version` 与 `cubeopscli version` 输出发布版本（如 `cubeopscli v0.7.0 (<commit>) built at <timestamp>`）；`cubeopscli version --versiononly` 只输出语义化版本号。
 
-增加、隔离与删除节点的详细用法见[节点相关操作](./node-operations.md)。
+增加、隔离与删除节点的详细用法，以及机型与节点标签命令（`machine-type`、`node label`）和 `node groups` 的用法，见[节点相关操作](./node-operations.md)。
 
 ## `cubecli`
 

@@ -7,6 +7,8 @@ lang: en-US
 
 For day-to-day node management, use the `cubeopscli` CLI on the control node, or the WebUI node detail page (port 12088).
 
+This page covers the main compute-node operations in a CubeSandbox cluster: inspecting node compatibility, managing machine types and node labels, and adding, isolating, or deleting nodes.
+
 > `cubeopscli` reaches the CubeOps service at `127.0.0.1:3010` by default. For split deployments such as the Terraform cluster edition, point it at the control-plane address with `--address` and `--port`.
 
 Use the following commands to confirm node IDs and the current state:
@@ -41,6 +43,65 @@ type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5(cordoned)
 - `unknown` groups nodes that reported no `cpuid_hash`/`host_kernel_release` (for example, a cubelet old enough to never collect them). Their class cannot be verified, so cross-node restore fails closed for them.
 
 Use this to see how many node types a cluster mixes before building templates on shared backends, scheduling cross-node restores, or planning rolling host-kernel upgrades.
+
+## Machine types
+
+A machine type declares a group of nodes that may restore memory snapshots onto each other.
+
+The default cross-node restore rule requires the source and target nodes to share the same CPU **and** an identical host kernel. After a rolling host-kernel upgrade, machines that differ only by a kernel patch level get blocked, although their memory state is compatible. Binding such machines to one machine type waives the kernel requirement:
+
+- Create a machine type and bind nodes to it in the WebUI (**Nodes → Machine types**) or with `cubeopscli machine-type`.
+- A bound node carries the label `cube.cubesandbox.io/machine-type=<name>`; a node without the label is simply unbound — nothing to enable per node.
+- A machine type waives only the kernel comparison; the CPU must still match.
+
+Restore compatibility then works as follows:
+
+| Source node | Target must match |
+|---|---|
+| No machine type | `cpuid_hash` and `host_kernel_release` (unchanged) |
+| Machine type `<T>` | Machine type `<T>` and `cpuid_hash`; the host kernel is no longer compared |
+
+A machine type that contains more than one CPU only produces a warning — those nodes still cannot restore onto each other. To see the CPU and kernel spread inside a type, use `cubeopscli machine-type get <name>`.
+
+Deleting a type that still has nodes bound requires unbinding them at the same time (CLI: `--unbind`).
+
+```bash
+# Create a machine type and bind its first nodes.
+cubeopscli machine-type create intel-oc9-k66 \
+  --display-name "Intel OC9" \
+  --description "same CPU, mixed host kernel" \
+  --nodes node-1,node-2
+
+# Inspect types: members, CPU and kernel spread, warnings.
+cubeopscli machine-type list
+cubeopscli machine-type get intel-oc9-k66
+
+# Bind or unbind single nodes later; bind moves a node off its previous type.
+cubeopscli machine-type bind intel-oc9-k66 node-3
+cubeopscli machine-type unbind node-3
+
+# Find nodes by type assignment.
+cubeopscli node list --machine-type intel-oc9-k66
+cubeopscli node list --unassigned-machine-type
+
+# Deleting a type with bound nodes requires --unbind.
+cubeopscli machine-type delete intel-oc9-k66 --unbind
+```
+
+The same commands are available as `cubeopscli node machine-type …`.
+
+## Node labels
+
+Nodes carry free-form labels for your own bookkeeping, for example `team=infra` or `zone=gz`:
+
+```bash
+cubeopscli node label list node-1
+cubeopscli node label set node-1 team=infra
+cubeopscli node label replace node-1 team=infra zone=gz
+cubeopscli node label delete node-1 team
+```
+
+`set` adds or updates single labels, while `replace` installs the complete label set: any label missing from the command is deleted. System labels — the machine type, isolation state, and the data-plane labels reported by Cubelet (`kubernetes.io/*`, `beta.kubernetes.io/*`, `cube.cloud.tencentcloud.com/*`) — are never touched by label commands. The machine type is managed by the machine-type commands above; isolation is changed only with `node isolate` / `node unisolate`.
 
 ## Add a node
 
