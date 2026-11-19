@@ -351,11 +351,8 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 				captureCtx, cb, rsp.TemplateID, layout.MetaWork,
 				payload.MemoryDevPath(), snapshotTypeForCmd, sourceRootfs.DevPath, mode,
 			)
-			if captureErr == nil && mode.IsFsOnly() {
-				// A cold boot mounts what the package names, so the package must
-				// name the layer this sandbox actually uses -- see
-				// recordWritableLayer for why it cannot be derived.
-				captureErr = recordWritableLayer(layout.MetaWork, cb.RootfsWritableLayer)
+			if captureErr == nil {
+				captureErr = recordWritableLayer(layout.MetaWork, effectiveSandboxWritableLayer(cb))
 			}
 			if shimSnapshotUnsupported(captureErr) {
 				captureStarted = false

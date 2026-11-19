@@ -748,6 +748,237 @@ def test_sdk_create_snapshot_sends_the_mode(sdk_sandbox, sdk_e2e_config):
     assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"
 
 
+_LAYER_NEW = "/tmp/sdk-compat-layer-new.txt"
+_LAYER_EDIT = "/etc/os-release"
+_LAYER_DELETE = "/etc/issue"
+_LAYER_MARK = "CUBE_WL_KEPT"
+_LAYER_DELETED_FLAG = "/tmp/sdk-compat-layer-deleted"
+_RESTART_CREATE = {
+    "restartPolicy": "OnFailure",
+    "restartBackoff": {
+        "initialIntervalSecond": 1,
+        "multiplier": 1,
+        "maxRestarts": 3,
+    },
+    "timeout": 600,
+}
+
+
+def _plant_layer_changes(sandbox, *, timeout: int) -> None:
+    """New file, an edit of a base file, and deletion of another base file."""
+    assert_command_ok(
+        sandbox.run_command(
+            f"printf %s created-after-boot > {_LAYER_NEW} && "
+            f"printf '\\n{_LAYER_MARK}=1\\n' >> {_LAYER_EDIT} && "
+            f"if [ -e {_LAYER_DELETE} ]; then rm -f {_LAYER_DELETE}; printf %s yes > {_LAYER_DELETED_FLAG}; "
+            f"else printf %s no > {_LAYER_DELETED_FLAG}; fi && sync",
+            timeout=timeout,
+        )
+    )
+
+
+def _assert_layer_changes(sandbox, *, timeout: int) -> None:
+    assert sandbox.read_file(_LAYER_NEW) == "created-after-boot", (
+        "a file created in the writable layer is missing"
+    )
+    edited = sandbox.read_file(_LAYER_EDIT)
+    assert _LAYER_MARK in edited, (
+        "an edit to a base-image file fell back to the lower directory"
+    )
+    if sandbox.read_file(_LAYER_DELETED_FLAG) == "yes":
+        deleted = sandbox.run_command(f"test ! -e {_LAYER_DELETE}", timeout=timeout)
+        assert getattr(deleted, "exit_code", 1) in (0, None), (
+            f"{_LAYER_DELETE} came back; the deletion whiteout was not on the mounted layer"
+        )
+
+
+def _restart_sandbox(sandbox, sdk_e2e_config) -> None:
+    crash_guest(sandbox, timeout=sdk_e2e_config.command_timeout)
+    status = wait_for_restart_status(
+        sandbox,
+        lambda item: bool(item)
+        and item.get("restartState") == "Running"
+        and item.get("restartCount", 0) >= 1,
+        timeout=sdk_e2e_config.restart_policy_wait,
+    )
+    assert status is not None, "sandbox never came back after the guest crash"
+    wait_until_data_plane_ready(
+        sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+        command_timeout=sdk_e2e_config.command_timeout,
+    )
+
+
+@pytest.mark.p1
+@pytest.mark.slow
+@pytest.mark.requires_capability(RESTART_POLICY)
+def test_restart_then_fs_only_snapshot_keeps_the_writable_layer(
+    sdk_backend,
+    sdk_sandbox,
+    sdk_e2e_config,
+):
+    """Restart, then an fs-only snapshot, keeps the writable layer."""
+    source = create_adapter_with_capacity_retry(
+        sdk_backend,
+        sdk_e2e_config,
+        metadata={"test_suite": "sdk_compat", "test_role": "fs_only_after_restart"},
+        create_options=dict(_RESTART_CREATE),
+    )
+    api = ApiClient(sdk_e2e_config)
+    snapshot_id = None
+    child = None
+    cleanup_errors: list[str] = []
+    try:
+        wait_until_data_plane_ready(
+            source,
+            timeout=sdk_e2e_config.default_timeout,
+            command_timeout=sdk_e2e_config.command_timeout,
+        )
+        _plant_layer_changes(source, timeout=sdk_e2e_config.command_timeout)
+        _restart_sandbox(source, sdk_e2e_config)
+        _assert_layer_changes(source, timeout=sdk_e2e_config.command_timeout)
+
+        snapshot = _create_snapshot(api, source.sandbox_id, mode=FS_ONLY)
+        snapshot_id = snapshot["snapshotID"]
+        _assert_snapshot_mode(snapshot, FS_ONLY)
+        child = _create_from_snapshot(
+            sdk_backend,
+            sdk_e2e_config,
+            snapshot_id,
+            role="fs_only_after_restart_child",
+        )
+        _assert_layer_changes(child, timeout=sdk_e2e_config.command_timeout)
+    finally:
+        api.close()
+        cleanup_errors = _release(
+            sdk_e2e_config,
+            [sb for sb in (child, source) if sb is not None],
+            sdk_sandbox,
+            [snapshot_id] if snapshot_id else [],
+        )
+    assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"
+
+
+@pytest.mark.p1
+@pytest.mark.slow
+@pytest.mark.requires_capability(RESTART_POLICY)
+def test_fs_only_pause_resume_restart_keeps_the_writable_layer(
+    sdk_backend,
+    sdk_sandbox,
+    sdk_e2e_config,
+):
+    """Pause, resume, then restart keeps the writable layer."""
+    state_path, _ = _guest_paths(sdk_sandbox)
+    sdk_sandbox.write_file(state_path, "before-fs-only-snapshot")
+
+    api = ApiClient(sdk_e2e_config)
+    snapshot_ids: list[str] = []
+    child = None
+    resumed = None
+    grandchild = None
+    cleanup_errors: list[str] = []
+    try:
+        first = _create_snapshot(api, sdk_sandbox.sandbox_id, mode=FS_ONLY)
+        snapshot_ids.append(first["snapshotID"])
+        child = _create_from_snapshot(
+            sdk_backend,
+            sdk_e2e_config,
+            first["snapshotID"],
+            role="fs_only_pause_restart",
+            create_options=dict(_RESTART_CREATE),
+        )
+        _plant_layer_changes(child, timeout=sdk_e2e_config.command_timeout)
+        child.pause(timeout=sdk_e2e_config.default_timeout)
+        wait_until_paused(child, timeout=sdk_e2e_config.default_timeout)
+        resumed = child.resume_or_connect(timeout=sdk_e2e_config.default_timeout)
+        wait_until_data_plane_ready(
+            resumed,
+            timeout=sdk_e2e_config.default_timeout,
+            command_timeout=sdk_e2e_config.command_timeout,
+        )
+        _assert_layer_changes(resumed, timeout=sdk_e2e_config.command_timeout)
+        _restart_sandbox(resumed, sdk_e2e_config)
+        _assert_layer_changes(resumed, timeout=sdk_e2e_config.command_timeout)
+
+        second = _create_snapshot(api, resumed.sandbox_id, mode=FS_ONLY)
+        snapshot_ids.append(second["snapshotID"])
+        grandchild = _create_from_snapshot(
+            sdk_backend,
+            sdk_e2e_config,
+            second["snapshotID"],
+            role="fs_only_pause_restart_grandchild",
+        )
+        _assert_layer_changes(grandchild, timeout=sdk_e2e_config.command_timeout)
+    finally:
+        api.close()
+        owner = resumed if resumed is not None else child
+        cleanup_errors = _release(
+            sdk_e2e_config,
+            [sb for sb in (grandchild, owner) if sb is not None],
+            sdk_sandbox,
+            snapshot_ids,
+        )
+    assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"
+
+
+@pytest.mark.p1
+@pytest.mark.slow
+@pytest.mark.requires_capability(RESTART_POLICY)
+def test_full_snapshot_then_restart_and_fs_only_keeps_the_writable_layer(
+    sdk_backend,
+    sdk_sandbox,
+    sdk_e2e_config,
+):
+    """A full snapshot, a restart, then an fs-only snapshot keeps the writable layer."""
+    api = ApiClient(sdk_e2e_config)
+    snapshot_ids: list[str] = []
+    child = None
+    grandchild = None
+    great = None
+    cleanup_errors: list[str] = []
+    try:
+        seeding = _create_snapshot(api, sdk_sandbox.sandbox_id, mode=FS_ONLY)
+        snapshot_ids.append(seeding["snapshotID"])
+        child = _create_from_snapshot(
+            sdk_backend,
+            sdk_e2e_config,
+            seeding["snapshotID"],
+            role="full_then_restart_child",
+        )
+        _plant_layer_changes(child, timeout=sdk_e2e_config.command_timeout)
+        full = _create_snapshot(api, child.sandbox_id)
+        snapshot_ids.append(full["snapshotID"])
+        _assert_snapshot_mode(full, FULL)
+        grandchild = _create_from_snapshot(
+            sdk_backend,
+            sdk_e2e_config,
+            full["snapshotID"],
+            role="full_then_restart_grandchild",
+            create_options=dict(_RESTART_CREATE),
+        )
+        _assert_layer_changes(grandchild, timeout=sdk_e2e_config.command_timeout)
+        _restart_sandbox(grandchild, sdk_e2e_config)
+        _assert_layer_changes(grandchild, timeout=sdk_e2e_config.command_timeout)
+        again = _create_snapshot(api, grandchild.sandbox_id, mode=FS_ONLY)
+        snapshot_ids.append(again["snapshotID"])
+        great = _create_from_snapshot(
+            sdk_backend,
+            sdk_e2e_config,
+            again["snapshotID"],
+            role="full_then_restart_great",
+        )
+        _assert_layer_changes(great, timeout=sdk_e2e_config.command_timeout)
+    finally:
+        api.close()
+        cleanup_errors = _release(
+            sdk_e2e_config,
+            [sb for sb in (great, grandchild, child) if sb is not None],
+            sdk_sandbox,
+            snapshot_ids,
+        )
+    assert not cleanup_errors, f"cleanup failed: {cleanup_errors!r}"
+
+
 @pytest.mark.volume
 @pytest.mark.requires_capability(VOLUME_PLUGIN)
 @pytest.mark.requires_capability(HOST_MOUNT)

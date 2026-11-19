@@ -157,14 +157,11 @@ type CreateContext struct {
 	// pause/resume. Master supplies it through the typed proto field.
 	SnapshotMode snapshotmode.Mode
 
-	// SnapshotWritableLayer names the overlay upper directory the snapshot's
-	// rootfs was written by ("disk/<container id>"). A cold boot boots the
-	// captured disk, so it must mount that layer instead of deriving a fresh
-	// one from this sandbox's own ids -- a fresh name would be empty and the
-	// guest would see the base image alone. The CBRI plugin fills this from the
-	// snapshot package while resolving the boot artifacts, and only for a cold
-	// boot; ordinary creates leave it empty.
+	// SnapshotWritableLayer is the overlay upper ("disk/<id>") this create must mount.
 	SnapshotWritableLayer string
+
+	// PriorWritableLayer is the layer on the paused row Resume is replacing.
+	PriorWritableLayer string
 
 	// IsRestart rebuilds a sandbox that already has an ID, disk and network.
 	// Plugins consult Retain and WantsSnapshotRestore instead of guessing.

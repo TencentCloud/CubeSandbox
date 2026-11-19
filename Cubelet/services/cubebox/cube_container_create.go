@@ -165,6 +165,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 					if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
 						opts.RestartPrior = restartPriorFrom(sb)
 					}
+					opts.PriorWritableLayer = strings.TrimSpace(sb.RootfsWritableLayer)
 					// CDP user-delete hook requires UserMarkDeletedTime before store delete.
 					if sb.UserMarkDeletedTime == nil {
 						now := time.Now()
@@ -1314,16 +1315,17 @@ func (l *local) prepareVolumePmemsMounts(ctx context.Context, flowOpts *workflow
 	return append([]oci.SpecOpts{}, oci.WithMounts(mounts)), nil
 }
 
-// writableLayerSubdir is the ext4 directory the guest mounts as the overlay upper.
-// A template memory snapshot already has that mount: the template sandbox id is
-// <templateID>_<index>, and restore reconnects the existing process instead of
-// calling setup_bundle, so guest writes land in that directory on the cloned
-// volume. A restart cold-boots and must mount the same directory. A sandbox
-// that did not come from a template keeps using its container id.
+// writableLayerSubdir is the overlay upper the guest mounts.
 func writableLayerSubdir(flowOpts *workflow.CreateContext, containerID, index string) string {
-	if flowOpts != nil && flowOpts.SnapshotWritableLayer != "" {
-		// A cold boot reuses the layer the snapshot captured.
+	index = strings.TrimSpace(index)
+	main := index == "" || index == "0"
+	if main && flowOpts != nil && flowOpts.SnapshotWritableLayer != "" {
 		return flowOpts.SnapshotWritableLayer
+	}
+	if !main && flowOpts != nil && flowOpts.IsRestart {
+		if derived, ok := indexedWritableLayer(flowOpts.SnapshotWritableLayer, index); ok {
+			return derived
+		}
 	}
 	if flowOpts != nil && flowOpts.IsRestart && flowOpts.ReqInfo != nil {
 		annotations := flowOpts.ReqInfo.GetAnnotations()
@@ -1332,13 +1334,39 @@ func writableLayerSubdir(flowOpts *workflow.CreateContext, containerID, index st
 			templateID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
 		}
 		if templateID != "" {
-			if strings.TrimSpace(index) == "" {
+			if index == "" {
 				index = "0"
 			}
 			return "disk/" + templateID + "_" + index
 		}
 	}
 	return "disk/" + containerID
+}
+
+// indexedWritableLayer is "disk/<stem>_<index>" for a main layer "disk/<stem>_0".
+func indexedWritableLayer(layer, index string) (string, bool) {
+	const prefix = "disk/"
+	name, ok := strings.CutPrefix(strings.TrimSpace(layer), prefix)
+	if !ok || !strings.HasSuffix(name, "_0") {
+		return "", false
+	}
+	stem := strings.TrimSuffix(name, "_0")
+	if stem == "" || strings.ContainsAny(stem, `/\`) || strings.TrimSpace(index) == "" {
+		return "", false
+	}
+	return prefix + stem + "_" + index, true
+}
+
+// rememberWritableLayer records the main container's upper. Side containers do not.
+func rememberWritableLayer(cb *cubeboxstore.CubeBox, index, layer string) {
+	if cb == nil {
+		return
+	}
+	index = strings.TrimSpace(index)
+	if index != "" && index != "0" {
+		return
+	}
+	cb.RootfsWritableLayer = layer
 }
 
 func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.CreateContext, containerReq *cubebox.ContainerConfig,
@@ -1386,11 +1414,7 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 	index, _ := ctx.Value(constants.KCubeIndexContext).(string)
 	layer := writableLayerSubdir(flowOpts, containerReq.GetId(), index)
 	annotations[constants.AnnotationsRootfsWlayerSubdir] = layer
-	if cb := cubeboxstore.GetCubeBox(ctx); cb != nil && flowOpts != nil && flowOpts.SnapshotWritableLayer != "" {
-		// Remember the captured layer so an in-place restart mounts the same
-		// directory instead of deriving an empty one from the new container id.
-		cb.RootfsWritableLayer = layer
-	}
+	rememberWritableLayer(cubeboxstore.GetCubeBox(ctx), index, layer)
 	log.G(ctx).Debugf("writable rootfs:%+v", blkPath)
 
 	return oci.WithAnnotations(annotations), nil

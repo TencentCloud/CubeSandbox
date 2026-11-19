@@ -50,6 +50,7 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 			log.G(podCtx).Errorf("failed to recover pod, skip this pod: %v", err)
 			continue
 		}
+		cb.ReconcileRecoveredWritableLayer(podCtx)
 
 		log.G(podCtx).Infof("Loaded sandbox %v", utils.InterfaceToString(&cb))
 		if cb.GetStatus() != nil && cb.GetStatus().IsTerminated() {
