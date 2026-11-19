@@ -380,5 +380,11 @@ void s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index,
  * consumed.
  */
 uint64_t s3_overlay_min_seq(const struct s3_overlay *ov);
+/** Owner-thread export fence helpers; include in-flight and pending data. */
+uint64_t s3_overlay_max_seq(const struct s3_overlay *ov);
+uint32_t s3_overlay_chunk_before_seq(const struct s3_overlay *ov, uint64_t chunk,
+                                     uint64_t cutoff);
+int s3_overlay_next_dirty_before_seq(struct s3_overlay *ov, uint64_t cutoff,
+                                       uint64_t *chunk_index);
 
 #endif /* S3LVOL_OVERLAY_H */

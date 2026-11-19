@@ -203,3 +203,8 @@ Pagination parameters on the C ABI:
 
 - Inputs: `page_size` (unsigned integer) + `page_token` (string; pass empty on the first call to request the first page).
 - Outputs: JSON array + next-page token (empty means last page) + total count (only `list_volumes` provides this field).
+
+
+### 跨节点卷容量和异步导出的失败边界
+
+导入返回的 `size_bytes` 为真实块设备容量；旧版本导入后保留的零容量不是空卷，查询详情和派生快照、克隆时会补查并持久化修复。几何信息查询失败则返回错误。对已经接受的导出标识，底层明确报告不存在时，`get_volume_info` 返回 `export_status=FAILED`；连接类错误仍保持未知状态，避免将暂时通信失败误判为导出数据丢失。

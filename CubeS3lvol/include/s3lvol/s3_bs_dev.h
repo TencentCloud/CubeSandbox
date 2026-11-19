@@ -184,6 +184,8 @@ int s3_bs_dev_wal_apply(struct spdk_bs_dev *bs_dev,
 /** Overlay occupancy at the moment WAL replay completes (not after it has
  *  drained), for attach diagnostics. */
 void s3_bs_dev_log_overlay(struct spdk_bs_dev *bs_dev);
+/** True while a physical chunk has unflushed or in-flight overlay data. */
+bool s3_bs_dev_chunk_is_live(struct spdk_bs_dev *bs_dev, uint64_t chunk_index);
 
 /**
  * Wait until everything acknowledged so far has reached S3 (INV2).
@@ -201,6 +203,10 @@ void s3_bs_dev_log_overlay(struct spdk_bs_dev *bs_dev);
  */
 void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 		     s3_bs_dev_cb cb_fn, void *cb_arg);
+
+/** Drain for export using an idle-progress budget, after the same WAL fence. */
+void s3_bs_dev_drain_progress(struct spdk_bs_dev *bs_dev, uint64_t idle_us,
+                              s3_bs_dev_cb cb_fn, void *cb_arg);
 
 /**
  * Make every write submitted before this call durable in the local WAL.

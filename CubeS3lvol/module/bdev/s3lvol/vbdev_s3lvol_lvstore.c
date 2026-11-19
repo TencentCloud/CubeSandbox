@@ -2876,9 +2876,9 @@ s3lvol_lvstore_unload(struct s3lvol_lvstore *lvs,
  * "the data is in the process" and "the data is in the object store".
  *
  * timeout_us of 0 takes the flusher's default; see s3_bs_dev_drain(). */
-void
-s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
-		     spdk_lvs_op_complete cb_fn, void *cb_arg)
+static void
+lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us, bool progress,
+	      spdk_lvs_op_complete cb_fn, void *cb_arg)
 {
 	if (!lvs || !lvs->bs_dev) {
 		if (cb_fn) {
@@ -2911,7 +2911,11 @@ s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
 		return;
 	}
 
-	s3_bs_dev_drain(lvs->bs_dev, timeout_us, (s3_bs_dev_cb)cb_fn, cb_arg);
+	if (progress) {
+		s3_bs_dev_drain_progress(lvs->bs_dev, timeout_us, (s3_bs_dev_cb)cb_fn, cb_arg);
+	} else {
+		s3_bs_dev_drain(lvs->bs_dev, timeout_us, (s3_bs_dev_cb)cb_fn, cb_arg);
+	}
 }
 
 void
@@ -4942,4 +4946,15 @@ s3lvol_lvol_resize(struct spdk_lvol *lvol, uint64_t size_bytes,
 
 	spdk_lvol_resize(lvol, size_bytes, s3lvol_lvol_resize_cb, ctx);
 	return 0;
+}
+
+void s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
+			   spdk_lvs_op_complete cb_fn, void *cb_arg)
+{
+	lvstore_flush(lvs, timeout_us, false, cb_fn, cb_arg);
+}
+void s3lvol_lvstore_flush_progress(struct s3lvol_lvstore *lvs, uint64_t idle_us,
+				    spdk_lvs_op_complete cb_fn, void *cb_arg)
+{
+	lvstore_flush(lvs, idle_us, true, cb_fn, cb_arg);
 }

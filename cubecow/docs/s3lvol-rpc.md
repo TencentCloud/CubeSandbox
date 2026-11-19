@@ -490,3 +490,12 @@ The following idempotency semantics are the cornerstone of cubecow client crash 
 | Metrics | `metrics` | `cubecow_get_metrics` | None | Reads local counters only |
 | **Startup initialization** | `S3Engine::initialize` | Triggered by `cubecow_init` | `rcow_deactive_bdev` × 1 (`__cbc_probe_*`, liveness probe) [+ per residual tmp clone: `rcow_delete_lvol`] | The probe expects a `not found` keyword |
 
+
+
+## 跨节点导入和导出失败的处理
+
+`rcow_get_lvol` 额外返回 `size_bytes`，从已注册块设备的容量取得，逻辑卷停用后仍然有效。`total_clusters`、`allocated_clusters` 在底层 blob 关闭时可能为零，不能用来断言卷为空。cubecow 在导入激活后读取并保存真实容量；旧索引中的零容量会在读取详情、创建快照或克隆前查询并修复。无法确定容量时返回错误，不发布零容量成功结果。
+
+导出在写入日志和共享内存的刷出边界之后，固定当前待上传数据的序号范围；只等待此范围的数据，后续无关写入不扩张等待范围。期限衡量此范围内数据是否实际完成刷出：成功上传并减少待完成数据才续期，失败重试或反复覆盖但没有完成的数据不会续期。引用导出逐一检查物理数据块，若有边界之后产生的未刷出数据，则改走通过块存储读取的复制导出，避免发布不完整的引用。它没有随根文件系统容量增长而固定失败的总传输期限。关闭或卸载存储仍使用原有总时限。等待取得刷出执行权仍保留既有的有限重试预算，不会被其他上传重置；这个准入预算与实际数据传输所用的进度期限分开，避免队列饥饿变成永久等待。
+
+已接受的导出 UUID（Universally Unique Identifier，通用唯一标识符）在进行中可被查询。如果查询明确返回不存在，cubecow 返回 `export_status=FAILED`，且按快照名原子查询明确返回无导出状态时，上层据此结束等待；存储重挂载或写入日志回放期间的暂时缺失仍保持未知状态。RPC（Remote Procedure Call，远程过程调用）的连接故障、暂时不可用等仍为未知状态，允许后续查询恢复。没有修改 S3（Amazon Simple Storage Service，亚马逊简单存储服务）对象格式、快照格式或写入确认的持久性边界。

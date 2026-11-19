@@ -1107,6 +1107,97 @@ overlay", probe.done, NULL);
 		}
 	}
 
+
+	printf("\n[10b] export drain follows successful progress, not total duration\n");
+	{
+		struct drain_probe probe = { .status = -1, .done = false };
+		for (uint32_t c = 0; c < TEST_CHUNKS; c++) {
+			s3_overlay_write(ov, (uint64_t)c * BLOCKS_PER_CHUNK, 1, blk, 900+c);
+		}
+		/* The complete transfer exceeds 100 ms, but each batch makes progress
+		 * within that interval. The same work with a total deadline fails. */
+		s3_flusher_drain_progress(fl, 100000, drain_cb, &probe);
+		for (uint32_t rounds = 0; fake.n_pending > 0 && rounds < TEST_CHUNKS+1; rounds++) {
+			usleep(30000);
+			fake_complete_all(&fake, 0);
+		}
+		check_true("healthy large export survives its total elapsed time", probe.done && probe.status == 0, NULL);
+		check_true("all export chunks reached S3", !s3_overlay_has_dirty(ov), NULL);
+	}
+
+	printf("\n[10c] failed uploads do not renew an export's progress budget\n");
+	{
+		struct drain_probe probe = { .status = -1, .done = false };
+		s3_overlay_write(ov, 0, 1, blk, 950);
+		s3_flusher_drain_progress(fl, 10000, drain_cb, &probe);
+		usleep(20000);
+		/* Advance the deadline check before completing requests, as a real
+		 * poller does. In-flight callbacks must still be waited for safely. */
+		s3_flusher_kick(fl);
+		fake_complete_all(&fake, -EIO);
+		check_true("stalled export reports timeout", probe.done && probe.status == -ETIMEDOUT, NULL);
+		check_true("failed data remains dirty", s3_overlay_has_dirty(ov), NULL);
+		s3_flusher_kick(fl);
+		while (fake.n_pending > 0) { fake_complete_all(&fake, 0); }
+	}
+
+	printf("\n[10d] partial progress does not rescue a drain after later idle timeout\n");
+	{
+		struct drain_probe probe = { .status = -1, .done = false };
+		struct fake_pending first;
+
+		for (uint32_t c = 0; c < TEST_CHUNKS; c++) {
+			s3_overlay_write(ov, (uint64_t)c * BLOCKS_PER_CHUNK, 1, blk,
+					 980 + c);
+		}
+		s3_flusher_drain_progress(fl, 10000, drain_cb, &probe);
+		check_true("multiple uploads are outstanding", fake.n_pending > 1,
+			   NULL);
+
+		/* Land one successful upload inside the idle window, leaving the other
+		 * requests outstanding. The completion starts the next queued chunk. */
+		first = fake.pending[0];
+		memmove(&fake.pending[0], &fake.pending[1],
+			(sizeof(fake.pending[0]) * (fake.n_pending - 1)));
+		fake.n_pending--;
+		fake.completed++;
+		first.cb(first.cb_arg, 0);
+		check_true("partial progress does not finish the drain",
+			   !probe.done && fake.n_pending > 0, NULL);
+
+		/* No further success arrives within the renewed idle window. Advance
+		 * the poller deadline while uploads remain in flight, then let those
+		 * callbacks arrive late. They must be drained safely without changing
+		 * the already-expired result to success. */
+		usleep(20000);
+		s3_flusher_kick(fl);
+		check_true("expired drain still waits for callbacks", !probe.done, NULL);
+		fake_complete_all(&fake, 0);
+		check_true("late success cannot revive an expired drain",
+			   probe.done && probe.status == -ETIMEDOUT, NULL);
+		s3_flusher_kick(fl);
+		while (fake.n_pending > 0) { fake_complete_all(&fake, 0); }
+	}
+
+
+	printf("\n[10e] export fence excludes later unrelated writers\n");
+	{
+		struct drain_probe probe = { .status = -1, .done = false };
+		s3_overlay_write(ov, 0, 1, blk, 2000);
+		s3_overlay_write(ov, BLOCKS_PER_CHUNK, 1, blk, 2001);
+		s3_flusher_drain_progress(fl, 100000, drain_cb, &probe);
+		for (uint32_t c = 2; c < TEST_CHUNKS; c++) {
+			s3_overlay_write(ov, (uint64_t)c * BLOCKS_PER_CHUNK, 1, blk, 3000+c);
+		}
+		fake_complete_all(&fake, 0);
+		check_true("fenced export completes despite later dirty writes", probe.done && probe.status == 0, NULL);
+		check_true("unrelated writes remain queued", s3_overlay_has_dirty(ov), NULL);
+		struct drain_probe cleanup = { .status = -1, .done = false };
+		s3_flusher_drain(fl, 0, drain_cb, &cleanup);
+		while (fake.n_pending > 0) { fake_complete_all(&fake, 0); }
+		check_true("ordinary drain still waits for all data", cleanup.done && cleanup.status == 0, NULL);
+	}
+
 	/* --- suspend / resume --- */
 	printf("\n[11] suspend is reversible and distinct from destroy\n");
 	{
