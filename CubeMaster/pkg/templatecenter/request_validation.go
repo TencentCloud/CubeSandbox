@@ -154,7 +154,12 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		{"post_start", cloned.Lifecycle.GetPostStart()},
 		{"pre_stop", cloned.Lifecycle.GetPreStop()},
 	} {
-		if len(hook.argv) > 0 && strings.TrimSpace(hook.argv[0]) == "" {
+		// The JSON endpoint preserves an explicit [] as a non-nil slice.
+		// A nil slice is an omitted hook, so either hook can remain optional.
+		if hook.argv == nil {
+			continue
+		}
+		if len(hook.argv) == 0 || strings.TrimSpace(hook.argv[0]) == "" {
 			return nil, fmt.Errorf("lifecycle.%s requires a non-blank executable", hook.name)
 		}
 		for _, arg := range hook.argv {
