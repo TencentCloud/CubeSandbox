@@ -295,13 +295,27 @@ func (p *cgPool) initPoolV2Late() error {
 	// With the switch on this pool is what Create hands out, so a slot that
 	// cannot be bootstrapped has to fail startup: the node would otherwise
 	// report ready and then place every sandbox in a pool that carries no mask.
-	// With the switch off the pool is unused and startup stays as tolerant as it
-	// was before the switch existed.
+	// With the switch off the pool is unused and the default path is kept as it
+	// was: a slot that cannot be created still fails startup, and only the
+	// re-assert below is a warning, because it did not exist before.
 	strict := p.numaAffinityInUse != nil && p.numaAffinityInUse()
 	for i := 0; i < len(p.poolV2.numaPools); i++ {
 		numaPool := &p.poolV2.numaPools[i]
 		numaNode := numaPool.numaNode
 		log.G(ctx).Errorf("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
+		if strict && numaNode.Cpulist == "" {
+			// An empty mask is written as an empty cpuset.cpus, which the kernel
+			// accepts, so nothing below would notice: on v1 the slot then hands an
+			// empty cpuset to its children (AddProc fails at attach, and setCgroup
+			// only logs it), on v2 the empty write means "inherit" and the node
+			// keeps the root mask. Either way the node would serve sandboxes with
+			// no affinity at all, so reject it at startup instead.
+			//
+			// Reachable without a broken host: memory-only nodes (CXL / PMEM)
+			// report an empty cpulist, and removeDisabledCpus returns "" when
+			// every CPU of a node is in cgroup_disable_cpuset_list.
+			return fmt.Errorf("cgroup pool v2 init: numa%d has no cpus to bind (cpulist is empty)", numaNode.NodeId)
+		}
 		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
 		createErr := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId)
 		applyErr := ensureNumaSlotCpuset(p.poolV2.handle, slot, numaNode.Cpulist, numaNode.NodeId)
@@ -320,18 +334,23 @@ func (p *cgPool) initPoolV2Late() error {
 				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w",
 					numaNode.NodeId, slot, applyErr)
 			}
-			// The re-assert above succeeded, so a create failure here can only be
-			// the slot of a previous run.
+			// The re-assert above succeeded, so the slot does carry the mask. That
+			// is the case this tolerance is for: the slot of a previous run, where
+			// creating an existing cgroup is an error on v1. It cannot tell such a
+			// slot apart from one v2 left half-created (MkdirAll ran, then
+			// toggleControllers or Load failed): the mask is right there too, so
+			// only the controllers it should have enabled are missing, and those
+			// surface on the first sandbox, in SetCubeboxCgroupLimit.
 			if createErr != nil {
 				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
 			}
-		} else {
-			if createErr != nil {
-				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
-			}
-			if applyErr != nil {
-				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
-			}
+		} else if createErr != nil {
+			// Unchanged from before the switch: a slot that cannot be created is
+			// fatal, so the default path keeps failing startup exactly as it did.
+			log.G(ctx).Errorf("cgroup pool v2 init, failed to create cgroup for numa%d: %v", numaNode.NodeId, createErr)
+			return createErr
+		} else if applyErr != nil {
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
 		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {

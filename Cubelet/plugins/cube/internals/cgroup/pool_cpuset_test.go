@@ -75,6 +75,13 @@ func (h *cpusetTestHandle) CpusetDir(string) (string, error) {
 
 func newCpusetTestPool(t *testing.T, h handle.Interface, strict bool) *cgPool {
 	t.Helper()
+	return newCpusetTestPoolWithCPUs(t, h, strict, "0-3")
+}
+
+// newCpusetTestPoolWithCPUs also sets the node's cpulist, so the empty-mask
+// case (a memory-only node) can be driven without a fake numa sysfs.
+func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, strict bool, cpulist string) *cgPool {
+	t.Helper()
 	ranger, err := allocator.NewSimpleLinearRanger(0, 1)
 	require.NoError(t, err)
 	return &cgPool{
@@ -86,7 +93,7 @@ func newCpusetTestPool(t *testing.T, h handle.Interface, strict bool) *cgPool {
 			numaPools: []cgPoolV2Numa{{
 				allocator: allocator.NewAllocator[uint16](ranger),
 				cgRanger:  ranger,
-				numaNode:  numa.NumaNode{NodeId: 0, Cpulist: "0-3"},
+				numaNode:  numa.NumaNode{NodeId: 0, Cpulist: cpulist},
 			}},
 		},
 		reparentFileEnabled: func() bool { return false },
@@ -104,8 +111,10 @@ func newSlotDir(t *testing.T) string {
 }
 
 // strict decides whether a broken slot stops startup, which is the whole point
-// of the switch: with it off the pool is unused and startup stays tolerant, with
-// it on a slot that carries no mask must not be handed out.
+// of the switch: with it on a slot that carries no mask must not be handed out.
+// With it off the pool is unused and the path stays the one from before the
+// switch, so a create failure is still fatal there and only the re-assert is a
+// warning.
 func TestInitPoolV2LateStrictness(t *testing.T) {
 	t.Run("strict, apply fails, slot missing", func(t *testing.T) {
 		h := &cpusetTestHandle{dir: filepath.Join(t.TempDir(), "missing")}
@@ -133,16 +142,36 @@ func TestInitPoolV2LateStrictness(t *testing.T) {
 		require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
 	})
 
+	// A memory-only node reports an empty cpulist; writing that is accepted by
+	// the kernel but leaves the slot without any mask, which is exactly what the
+	// strict path exists to reject.
+	t.Run("strict, node has no cpus", func(t *testing.T) {
+		h := &cpusetTestHandle{dir: newSlotDir(t)}
+		err := newCpusetTestPoolWithCPUs(t, h, true, "").initPoolV2Late()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no cpus to bind")
+	})
+
 	t.Run("strict, healthy slot", func(t *testing.T) {
 		h := &cpusetTestHandle{dir: newSlotDir(t)}
 		require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
 	})
 
 	t.Run("not strict, apply fails", func(t *testing.T) {
-		// Switch off: the pool is unused, so a slot that cannot be repaired is
-		// only a warning, exactly as before the switch existed.
+		// Switch off: the pool is unused, and the re-assert is new here, so it is
+		// only a warning rather than a reason not to start.
 		h := &cpusetTestHandle{dirErr: errors.New("cpuset controller is not available")}
 		require.NoError(t, newCpusetTestPool(t, h, false).initPoolV2Late())
+	})
+
+	t.Run("not strict, create fails", func(t *testing.T) {
+		// Before the switch existed this returned the error, so it still does:
+		// a default deployment must not start on a host where the v2 pool root
+		// cannot be created.
+		h := &cpusetTestHandle{createErr: errors.New("create pool v2 root")}
+		err := newCpusetTestPool(t, h, false).initPoolV2Late()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "create pool v2 root")
 	})
 }
 
