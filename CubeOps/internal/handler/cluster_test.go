@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -14,10 +15,15 @@ import (
 
 	nmhandler "github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/handler"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/service"
+	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/store"
 )
 
 // fakeClusterNodeService is a stub nmhandler.NodeService for cluster handler tests.
 type fakeClusterNodeService struct {
+	setNodeLabel          func(ctx context.Context, nodeID string, labels map[string]string) error
+	replaceNodeLabel      func(ctx context.Context, nodeID string, labels map[string]string) error
+	deleteNodeLabel       func(ctx context.Context, nodeID, key string) error
 	listNodes             func(ctx context.Context) ([]*model.NodeSnapshot, error)
 	getNode               func(ctx context.Context, nodeID string) (*model.NodeSnapshot, error)
 	getVersionMatrix      func(ctx context.Context) (*model.VersionMatrix, error)
@@ -38,9 +44,22 @@ func (f *fakeClusterNodeService) ListNodes(ctx context.Context) ([]*model.NodeSn
 	return f.listNodes(ctx)
 }
 func (f *fakeClusterNodeService) UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
+	if f.setNodeLabel != nil {
+		return f.setNodeLabel(ctx, nodeID, labels)
+	}
+	return errors.New("not implemented")
+}
+
+func (f *fakeClusterNodeService) ReplaceNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
+	if f.replaceNodeLabel != nil {
+		return f.replaceNodeLabel(ctx, nodeID, labels)
+	}
 	return errors.New("not implemented")
 }
 func (f *fakeClusterNodeService) DeleteNodeLabel(ctx context.Context, nodeID, key, operator string) error {
+	if f.deleteNodeLabel != nil {
+		return f.deleteNodeLabel(ctx, nodeID, key)
+	}
 	return errors.New("not implemented")
 }
 func (f *fakeClusterNodeService) SetNodeSchedulingDisabled(ctx context.Context, nodeID string, disabled bool, operator, detail string) (*model.NodeSnapshot, error) {
@@ -78,6 +97,36 @@ func (f *fakeClusterNodeService) GetClusterQuotaDefaults(ctx context.Context) (*
 }
 func (f *fakeClusterNodeService) SetClusterQuotaDefaults(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error) {
 	return nil, nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) CreateMachineType(context.Context, *model.CreateMachineTypeRequest, string) (*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) UpdateMachineType(context.Context, string, *model.UpdateMachineTypeRequest, string) (*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) DeleteMachineType(context.Context, string, bool, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) GetMachineType(context.Context, string) (*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) ListMachineTypes(context.Context) ([]*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) SetNodeMachineType(context.Context, string, string, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) ClearNodeMachineType(context.Context, string, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) BindMachineTypeNodes(context.Context, string, []string, string) (*model.MachineTypeBindResult, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) UnbindMachineTypeNodes(context.Context, string, []string, string) (*model.MachineTypeBindResult, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeClusterNodeService) ReplaceMachineTypeNodes(context.Context, string, []string, string) (*model.MachineTypeBindResult, error) {
+	return nil, errors.New("not implemented")
 }
 
 func newClusterRouter(t *testing.T, cm CubeMasterClient, svc nmhandler.NodeService) *gin.Engine {
@@ -302,5 +351,88 @@ func TestCluster_ListOperations_FiltersQuotaOps(t *testing.T) {
 		if op.Type == model.OpSetQuota || op.Type == model.OpSetClusterQuota {
 			t.Errorf("quota op %q must be filtered out", op.Type)
 		}
+	}
+}
+
+func TestCluster_LabelsRoutes(t *testing.T) {
+	var gotMethod string
+	var gotLabels map[string]string
+	var gotKey string
+	svc := &fakeClusterNodeService{
+		listNodes: func(context.Context) ([]*model.NodeSnapshot, error) { return testNodes(), nil },
+		setNodeLabel: func(_ context.Context, _ string, labels map[string]string) error {
+			gotMethod, gotLabels = http.MethodPatch, labels
+			return nil
+		},
+		replaceNodeLabel: func(_ context.Context, _ string, labels map[string]string) error {
+			gotMethod, gotLabels = http.MethodPut, labels
+			return nil
+		},
+		deleteNodeLabel: func(_ context.Context, _, key string) error {
+			gotMethod, gotKey = http.MethodDelete, key
+			return nil
+		},
+	}
+	r := newClusterRouter(t, &fakeCM{}, svc)
+
+	body := `{"labels":{"team":"infra"}}`
+	w := httptestRecorder(t, r, http.MethodPatch, "/api/v1/nodes/n-1/labels", body)
+	if w.Code != http.StatusNoContent || gotMethod != http.MethodPatch || gotLabels["team"] != "infra" {
+		t.Fatalf("patch: code=%d method=%s labels=%v body=%s", w.Code, gotMethod, gotLabels, w.Body.String())
+	}
+
+	w = httptestRecorder(t, r, http.MethodPut, "/api/v1/nodes/n-1/labels", body)
+	if w.Code != http.StatusNoContent || gotMethod != http.MethodPut {
+		t.Fatalf("put: code=%d method=%s body=%s", w.Code, gotMethod, w.Body.String())
+	}
+
+	// Label keys contain '/', so delete must travel as a query parameter.
+	w = httptestRecorder(t, r, http.MethodDelete,
+		"/api/v1/nodes/n-1/labels?key=cube.cubesandbox.io%2Fmachine-type", "")
+	if w.Code != http.StatusNoContent || gotKey != "cube.cubesandbox.io/machine-type" {
+		t.Fatalf("delete: code=%d key=%q body=%s", w.Code, gotKey, w.Body.String())
+	}
+
+	// A delete without a key must be rejected up front, not silently succeed.
+	w = httptestRecorder(t, r, http.MethodDelete, "/api/v1/nodes/n-1/labels", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("delete without key: code=%d, want 400 body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestCluster_LabelRoutesErrorMapping(t *testing.T) {
+	svc := &fakeClusterNodeService{
+		listNodes: func(context.Context) ([]*model.NodeSnapshot, error) { return testNodes(), nil },
+		setNodeLabel: func(_ context.Context, nodeID string, _ map[string]string) error {
+			if nodeID == "missing" {
+				return store.ErrNotFound
+			}
+			return fmt.Errorf("%w: bad label", service.ErrInvalidLabel)
+		},
+		deleteNodeLabel: func(_ context.Context, _, key string) error {
+			if key == "kube.star" {
+				return fmt.Errorf("%w: %q", service.ErrReservedLabel, key)
+			}
+			return nil
+		},
+	}
+	r := newClusterRouter(t, &fakeCM{}, svc)
+
+	// Unknown node maps to 404 through MapNodeError.
+	w := httptestRecorder(t, r, http.MethodPatch, "/api/v1/nodes/missing/labels", `{"labels":{"team":"x"}}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing node: code=%d, want 404 body=%s", w.Code, w.Body.String())
+	}
+
+	// Invalid input maps to 400.
+	w = httptestRecorder(t, r, http.MethodPatch, "/api/v1/nodes/n-1/labels", `{"labels":{"team":"x"}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid label: code=%d, want 400 body=%s", w.Code, w.Body.String())
+	}
+
+	// A reserved key maps to 403.
+	w = httptestRecorder(t, r, http.MethodDelete, "/api/v1/nodes/n-1/labels?key=kube.star", "")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("reserved key: code=%d, want 403 body=%s", w.Code, w.Body.String())
 	}
 }

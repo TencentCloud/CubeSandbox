@@ -4,6 +4,10 @@
 import { http, HttpResponse } from 'msw';
 import {
   createSandbox,
+  clearNodeMachineType,
+  createMachineType,
+  deleteMachineType,
+  deleteNodeLabel,
   deleteSandbox,
   getClusterOverview,
   getNode,
@@ -12,13 +16,18 @@ import {
   getSandboxLogs,
   getTemplate,
   getTemplateCompat,
+  listMachineTypes,
   listNodes,
   listSandboxes,
   listTemplates,
   mockDelay,
+  patchNodeLabels,
   pauseSandbox,
+  replaceMachineTypeNodes,
+  replaceNodeLabels,
   resetMockState,
   resumeSandbox,
+  setNodeMachineType,
 } from '../fixtures';
 import {
   createImportJobs,
@@ -56,15 +65,104 @@ export const handlers = [
     return HttpResponse.json(getVersionMatrix());
   }),
 
-  http.get('/cubeapi/v1/nodes', async () => {
+  // Node inventory and labels are CubeOps routes (/opsapi/v1/...).
+  http.get('/opsapi/v1/nodes', async () => {
     await mockDelay();
     return HttpResponse.json(listNodes());
   }),
 
-  http.get('/cubeapi/v1/nodes/:nodeID', async ({ params }) => {
+  http.get('/opsapi/v1/nodes/:nodeID', async ({ params }) => {
     await mockDelay();
     const node = getNode(String(params.nodeID));
     return node ? HttpResponse.json(node) : notFound(`node ${params.nodeID} not found`);
+  }),
+
+  // PATCH merges, PUT replaces, DELETE removes one key (?key=, because keys
+  // contain '/').
+  http.patch('/opsapi/v1/nodes/:nodeID/labels', async ({ params, request }) => {
+    await mockDelay();
+    const body = (await request.json()) as { labels?: Record<string, string> };
+    const result = patchNodeLabels(String(params.nodeID), body.labels ?? {});
+    return result.ok
+      ? new HttpResponse(null, { status: 204 })
+      : opsError(result.status, result.error);
+  }),
+
+  http.put('/opsapi/v1/nodes/:nodeID/labels', async ({ params, request }) => {
+    await mockDelay();
+    const body = (await request.json().catch(() => null)) as {
+      labels?: Record<string, string>;
+    } | null;
+    if (!body || body.labels == null) {
+      return opsError(400, 'labels must not be empty; send {} to clear user labels');
+    }
+    const result = replaceNodeLabels(String(params.nodeID), body.labels);
+    return result.ok
+      ? new HttpResponse(null, { status: 204 })
+      : opsError(result.status, result.error);
+  }),
+
+  http.get('/opsapi/v1/machine-types', async () => {
+    await mockDelay();
+    return HttpResponse.json(listMachineTypes());
+  }),
+
+  http.post('/opsapi/v1/machine-types', async ({ request }) => {
+    await mockDelay();
+    const body = (await request.json()) as {
+      name?: string;
+      displayName?: string;
+      description?: string;
+      nodeIDs?: string[];
+    };
+    const result = createMachineType(body);
+    return result.ok
+      ? HttpResponse.json(result.view, { status: 201 })
+      : opsError(result.status, result.error);
+  }),
+
+  http.put('/opsapi/v1/machine-types/:name/nodes', async ({ params, request }) => {
+    await mockDelay();
+    const body = (await request.json()) as { nodeIDs?: string[] };
+    if (!body || body.nodeIDs == null) return opsError(400, 'nodeIDs is required');
+    const result = replaceMachineTypeNodes(String(params.name), body.nodeIDs);
+    return result.ok ? HttpResponse.json(result.result) : opsError(result.status, result.error);
+  }),
+
+  http.delete('/opsapi/v1/machine-types/:name', async ({ params, request }) => {
+    await mockDelay();
+    const unbind = new URL(request.url).searchParams.get('unbind') === 'true';
+    const result = deleteMachineType(String(params.name), unbind);
+    return result.ok
+      ? new HttpResponse(null, { status: 204 })
+      : opsError(result.status, result.error);
+  }),
+
+  http.put('/opsapi/v1/nodes/:nodeID/machine-type', async ({ params, request }) => {
+    await mockDelay();
+    const body = (await request.json()) as { machineType?: string };
+    const result = setNodeMachineType(String(params.nodeID), body.machineType ?? '');
+    return result.ok
+      ? new HttpResponse(null, { status: 204 })
+      : opsError(result.status, result.error);
+  }),
+
+  http.delete('/opsapi/v1/nodes/:nodeID/machine-type', async ({ params }) => {
+    await mockDelay();
+    const result = clearNodeMachineType(String(params.nodeID));
+    return result.ok
+      ? new HttpResponse(null, { status: 204 })
+      : opsError(result.status, result.error);
+  }),
+
+  http.delete('/opsapi/v1/nodes/:nodeID/labels', async ({ params, request }) => {
+    await mockDelay();
+    const key = new URL(request.url).searchParams.get('key') ?? '';
+    if (!key) return opsError(400, 'query parameter key is required');
+    const result = deleteNodeLabel(String(params.nodeID), key);
+    return result.ok
+      ? new HttpResponse(null, { status: 204 })
+      : opsError(result.status, result.error);
   }),
 
   http.get('/cubeapi/v1/templates', async () => {

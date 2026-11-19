@@ -7,8 +7,10 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 )
 
@@ -497,5 +499,240 @@ func TestListCompatibleNodesForFactors_ListError(t *testing.T) {
 	stubCandidates(t, nil, wantErr)
 	if _, err := ListCompatibleNodesForFactors(context.Background(), intelFacts(), false); !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+}
+
+// A label-scoped aggregate must not pre-filter candidates by kernel release,
+// or same-machine-type peers on a different kernel never appear in the preview.
+func TestListCompatibleNodesForMode_MachineTypeSkipsKernelPreFilter(t *testing.T) {
+	origin := intelFacts()
+	otherKernel := intelFacts()
+	otherKernel.HostKernelRelease = "6.6.a-different-kernel"
+	differentType := intelFacts()
+	differentType.HostKernelRelease = "6.6.a-different-kernel"
+
+	var gotCPUID, gotKernel string
+	var gotMatchAll bool
+	orig := queryCandidatesFn
+	t.Cleanup(func() { queryCandidatesFn = orig })
+	queryCandidatesFn = func(_ context.Context, cpuidHash, kernelRelease string, matchAll bool) ([]*nodemeta.CandidateNode, error) {
+		gotCPUID, gotKernel, gotMatchAll = cpuidHash, kernelRelease, matchAll
+		return []*nodemeta.CandidateNode{
+			{NodeID: "same-type", HostIP: "10.0.0.2", HostFacts: otherKernel,
+				NodeLabels: map[string]string{constants.LabelMachineType: "intel-k66"}},
+			{NodeID: "other-type", HostIP: "10.0.0.3", HostFacts: differentType,
+				NodeLabels: map[string]string{constants.LabelMachineType: "amd-k66"}},
+		}, nil
+	}
+
+	nodes, err := listCompatibleNodesForMode(context.Background(), origin, false, true, "intel-k66")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if gotCPUID != "" || gotKernel != "" || !gotMatchAll {
+		t.Fatalf("query must not filter by host facts when label-scoped, got cpuid=%q kernel=%q matchAll=%v",
+			gotCPUID, gotKernel, gotMatchAll)
+	}
+	if len(nodes) != 1 || nodes[0].NodeID != "same-type" {
+		t.Fatalf("nodes = %+v, want only same-type", nodes)
+	}
+	for _, d := range nodes[0].Dimensions {
+		if d.Name == "host_kernel_release" && d.Required {
+			t.Fatalf("host_kernel_release must not be required when the machine type matches: %+v", d)
+		}
+	}
+}
+
+// Without a machine type the aggregate keeps the historical strict query.
+func TestListCompatibleNodesForMode_NoMachineTypeKeepsStrictQuery(t *testing.T) {
+	origin := intelFacts()
+	var gotCPUID, gotKernel string
+	var gotMatchAll bool
+	orig := queryCandidatesFn
+	t.Cleanup(func() { queryCandidatesFn = orig })
+	queryCandidatesFn = func(_ context.Context, cpuidHash, kernelRelease string, matchAll bool) ([]*nodemeta.CandidateNode, error) {
+		gotCPUID, gotKernel, gotMatchAll = cpuidHash, kernelRelease, matchAll
+		return nil, nil
+	}
+
+	if _, err := listCompatibleNodesForMode(context.Background(), origin, false, true, ""); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if gotCPUID != origin.CPUIDHash || gotKernel != origin.HostKernelRelease || gotMatchAll {
+		t.Fatalf("strict query expected, got cpuid=%q kernel=%q matchAll=%v",
+			gotCPUID, gotKernel, gotMatchAll)
+	}
+}
+
+// A different machine type must be rejected even when cpuid and kernel match:
+// placement filters such a target by label, so a "compatible" preview would send
+// the operator to a node resume refuses.
+func TestListCompatibleNodesForMode_DifferentMachineTypeRejected(t *testing.T) {
+	origin := intelFacts()
+	var gotMatchAll bool
+	orig := queryCandidatesFn
+	t.Cleanup(func() { queryCandidatesFn = orig })
+	queryCandidatesFn = func(_ context.Context, _, _ string, matchAll bool) ([]*nodemeta.CandidateNode, error) {
+		gotMatchAll = matchAll
+		// Same CPU and same kernel release, so every HostFacts dimension matches;
+		// only the operator-declared group differs.
+		same := *origin
+		return []*nodemeta.CandidateNode{{
+			NodeID:     "other-type",
+			HostIP:     "10.0.0.3",
+			HostFacts:  &same,
+			NodeLabels: map[string]string{constants.LabelMachineType: "amd-k66"},
+		}}, nil
+	}
+
+	nodes, err := listCompatibleNodesForMode(context.Background(), origin, false, true, "intel-k66")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !gotMatchAll {
+		t.Fatal("label-scoped query must not pre-filter by host facts")
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("different machine type must be rejected, got %+v", nodes)
+	}
+}
+
+func TestListCompatibleNodesForMode_IncludeAllReportsMachineTypeMismatch(t *testing.T) {
+	origin := intelFacts()
+	orig := queryCandidatesFn
+	t.Cleanup(func() { queryCandidatesFn = orig })
+	queryCandidatesFn = func(context.Context, string, string, bool) ([]*nodemeta.CandidateNode, error) {
+		same := *origin
+		return []*nodemeta.CandidateNode{{
+			NodeID:     "other-type",
+			HostIP:     "10.0.0.3",
+			HostFacts:  &same,
+			NodeLabels: map[string]string{constants.LabelMachineType: "amd-k66"},
+		}}, nil
+	}
+
+	nodes, err := listCompatibleNodesForMode(context.Background(), origin, true, true, "intel-k66")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Compatible {
+		t.Fatalf("nodes = %+v, want one incompatible entry", nodes)
+	}
+	if !strings.Contains(nodes[0].Reason, "machine_type") {
+		t.Fatalf("reason = %q, want it to name machine_type", nodes[0].Reason)
+	}
+}
+
+// The preview must fail when the two sides declare different machine types,
+// because placement filters by label before comparing host facts.
+func TestMachineTypeDimensionRequiresEquality(t *testing.T) {
+	if _, ok := machineTypeDimension(true, "", "intel-k66"); ok {
+		t.Fatal("an origin without a machine type must not add the dimension")
+	}
+	if _, ok := machineTypeDimension(false, "intel-k66", "intel-k66"); ok {
+		t.Fatal("filesystem-only snapshots must not require the dimension")
+	}
+
+	dim, ok := machineTypeDimension(true, "intel-k66", "amd-k66")
+	if !ok {
+		t.Fatal("expected a machine_type dimension")
+	}
+	if !dim.Required || dim.Match {
+		t.Fatalf("different machine types must be a required mismatch: %+v", dim)
+	}
+
+	dim, ok = machineTypeDimension(true, " intel-k66 ", "intel-k66")
+	if !ok || !dim.Match {
+		t.Fatalf("trimmed values must match: %+v ok=%v", dim, ok)
+	}
+}
+
+// hostFactDimensionsFor is the only place that assembles the label-aware
+// HostFacts dimensions; this table pins the truth table the previews rely on.
+func TestHostFactDimensionsFor_TruthTable(t *testing.T) {
+	sameKernel := intelFacts()
+	sameKernel.HostKernelRelease = "6.6.same"
+	otherKernel := intelFacts()
+	otherKernel.HostKernelRelease = "6.6.other"
+	otherCPU := intelFacts()
+	otherCPU.CPUIDHash = "sha256:other"
+	otherCPU.HostKernelRelease = "6.6.same"
+
+	cases := []struct {
+		name             string
+		origin, target   *nodemeta.HostFacts
+		originType       string
+		targetType       string
+		hostFactsRequire bool
+		wantCompatible   bool
+		wantRequired     map[string]bool
+	}{
+		{
+			name:   "no origin machine type keeps the strict policy",
+			origin: sameKernel, target: otherKernel,
+			originType: "", targetType: "intel-k66", hostFactsRequire: true,
+			wantCompatible: false,
+			wantRequired:   map[string]bool{"cpuid_hash": true, "host_kernel_release": true},
+		},
+		{
+			name:   "matching machine type demotes the kernel release",
+			origin: otherKernel, target: sameKernel,
+			originType: "intel-k66", targetType: "intel-k66", hostFactsRequire: true,
+			wantCompatible: true,
+			wantRequired:   map[string]bool{"cpuid_hash": true, "host_kernel_release": false, "machine_type": true},
+		},
+		{
+			name:   "different machine type is a required mismatch even with identical facts",
+			origin: sameKernel, target: sameKernel,
+			originType: "intel-k66", targetType: "amd-k66", hostFactsRequire: true,
+			wantCompatible: false,
+			wantRequired:   map[string]bool{"cpuid_hash": true, "host_kernel_release": true, "machine_type": true},
+		},
+		{
+			name:   "target without a machine type cannot join a labelled group",
+			origin: sameKernel, target: sameKernel,
+			originType: "intel-k66", targetType: "", hostFactsRequire: true,
+			wantCompatible: false,
+			wantRequired:   map[string]bool{"cpuid_hash": true, "host_kernel_release": true, "machine_type": true},
+		},
+		{
+			name:   "matching machine type still requires the same CPU",
+			origin: sameKernel, target: otherCPU,
+			originType: "intel-k66", targetType: "intel-k66", hostFactsRequire: true,
+			wantCompatible: false,
+			wantRequired:   map[string]bool{"cpuid_hash": true, "host_kernel_release": false, "machine_type": true},
+		},
+		{
+			name:   "filesystem-only ignores host facts and the machine type",
+			origin: otherCPU, target: otherKernel,
+			originType: "intel-k66", targetType: "amd-k66", hostFactsRequire: false,
+			wantCompatible: true,
+			wantRequired:   map[string]bool{"cpuid_hash": false, "host_kernel_release": false},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dims := hostFactDimensionsFor(tc.origin, tc.target, tc.originType, tc.targetType, tc.hostFactsRequire)
+			if got := allRequiredDimensionsMatch(dims); got != tc.wantCompatible {
+				t.Fatalf("compatible = %v, want %v (dims=%+v)", got, tc.wantCompatible, dims)
+			}
+			byName := map[string]RestoreCompatDimension{}
+			for _, d := range dims {
+				byName[d.Name] = d
+			}
+			for name, required := range tc.wantRequired {
+				dim, ok := byName[name]
+				if !ok {
+					t.Fatalf("missing dimension %q in %+v", name, dims)
+				}
+				if dim.Required != required {
+					t.Errorf("%s required = %v, want %v", name, dim.Required, required)
+				}
+			}
+			if _, ok := byName["machine_type"]; ok != (tc.originType != "" && tc.hostFactsRequire) {
+				t.Errorf("machine_type dimension presence = %v", ok)
+			}
+		})
 	}
 }

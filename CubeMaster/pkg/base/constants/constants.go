@@ -329,6 +329,12 @@ const (
 	LabelSchedulingDisabled = "cube.cloud.tencentcloud.com/scheduling-disabled"
 	// LabelSchedulingDisabledValue is the only legal value for LabelSchedulingDisabled.
 	LabelSchedulingDisabledValue = "true"
+
+	// LabelMachineType groups nodes into an operator-declared machine type.
+	// The restore layer reads it: same value + same cpuid_hash lets a
+	// cross-node memory restore skip the host kernel release comparison.
+	// CubeOps owns writing it.
+	LabelMachineType = "cube.cubesandbox.io/machine-type"
 )
 
 const (

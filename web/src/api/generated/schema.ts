@@ -1065,6 +1065,24 @@ export interface components {
             heartbeatTime?: string | null;
             hostIP: string;
             instanceType?: string;
+            /**
+             * Node labels as stored by CubeOps, including control-plane-owned
+             * keys. Hand-maintained in this generated file: the Ops node routes
+             * are served by CubeOps and are not part of openapi.yml, which only
+             * covers the CubeAPI surface. Keep it in sync with
+             * CubeOps/internal/nodemanagement/handler/common.go (NodeView).
+             */
+            labels?: { [key: string]: string };
+            /** Catalog machine type bound to this node. Empty when unassigned. */
+            machineType?: string;
+            /** Host identity used for cross-node restore. */
+            hostFacts?: {
+                cpuVendor?: string;
+                cpuModel?: string;
+                cpuidHash?: string;
+                hostKernelRelease?: string;
+                kvmModuleTaint?: string;
+            };
             localTemplates?: string[];
             /** Format: int64 */
             maxMvmSlots: number;

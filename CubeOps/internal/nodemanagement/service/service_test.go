@@ -1543,3 +1543,221 @@ func TestUpdateNodeStatus_QuotaSelfHealsDriftedCapacity(t *testing.T) {
 		t.Fatalf("persisted capacity=%+v, want %+v", gotCap, want)
 	}
 }
+
+// --- label semantics: merge vs replace, control-plane owned keys ---
+
+func TestReplaceNodeLabels_RemovesUnlistedUserLabels(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1",
+		Labels: map[string]string{"zone": "gz", "rack": "r1"},
+	})
+
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", map[string]string{"zone": "sh"}, "admin"); err != nil {
+		t.Fatalf("replace labels: %v", err)
+	}
+	snap, err := svc.GetNode(ctx, "node-1")
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if snap.Labels["zone"] != "sh" {
+		t.Errorf("zone = %q, want sh", snap.Labels["zone"])
+	}
+	if _, ok := snap.Labels["rack"]; ok {
+		t.Error("rack should be removed by replace")
+	}
+}
+
+func TestUpdateNodeLabels_MachineTypeIsReserved(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1",
+		Labels: map[string]string{"zone": "gz"},
+	})
+	seedMachineTypeLabel(t, fs, "node-1", "intel-k66")
+	if err := svc.UpdateNodeLabels(ctx, "node-1", map[string]string{model.LabelMachineType: "amd-k66"}, "admin"); !errors.Is(err, service.ErrReservedLabel) {
+		t.Fatalf("machine-type write = %v, want ErrReservedLabel", err)
+	}
+	if err := svc.UpdateNodeLabels(ctx, "node-1", map[string]string{"zone": "sh"}, "admin"); err != nil {
+		t.Fatalf("update labels: %v", err)
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Fatalf("machine-type = %q, want intel-k66", snap.Labels[model.LabelMachineType])
+	}
+}
+
+func TestReplaceNodeLabels_RejectsReservedKeys(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", map[string]string{model.LabelSchedulingDisabled: "true"}, "admin"); err == nil {
+		t.Error("replace must reject the isolation reserved key")
+	}
+}
+
+func TestRegisterNode_PreservesControlPlaneLabels(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+
+	// Simulate the admin path writing machine-type.
+	reg, _ := fs.GetRegistration(ctx, "node-1")
+	if err := fs.UpdateLabels(ctx, "node-1", map[string]string{
+		model.LabelMachineType:        "intel-k66",
+		model.LabelSchedulingDisabled: "true",
+	}); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+	_ = reg
+
+	// A Cubelet re-registration must not clear or overwrite control-plane
+	// owned labels.
+	_, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1",
+		Labels: map[string]string{"zone": "gz", model.LabelMachineType: "amd-k66"},
+	})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Errorf("machine-type = %q, want preserved intel-k66", snap.Labels[model.LabelMachineType])
+	}
+	if snap.Labels[model.LabelSchedulingDisabled] != "true" {
+		t.Errorf("scheduling-disabled = %q, want preserved true", snap.Labels[model.LabelSchedulingDisabled])
+	}
+}
+
+func TestDeleteNodeLabel_RejectsMachineType(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	seedMachineTypeLabel(t, fs, "node-1", "intel-k66")
+	if err := svc.DeleteNodeLabel(ctx, "node-1", model.LabelMachineType, "admin"); !errors.Is(err, service.ErrReservedLabel) {
+		t.Fatalf("delete machine-type = %v, want ErrReservedLabel", err)
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Fatalf("machine-type = %q, want preserved", snap.Labels[model.LabelMachineType])
+	}
+}
+
+func TestReplaceNodeLabels_LabelLimit(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	labels := make(map[string]string, 65)
+	for i := 0; i < 65; i++ {
+		labels[fmt.Sprintf("k-%d", i)] = "v"
+	}
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", labels, "admin"); err == nil {
+		t.Fatal("replace must enforce the per-node label limit")
+	}
+}
+
+func TestReplaceNodeLabels_KeepsMachineType(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1",
+		Labels: map[string]string{"team": "infra"},
+	})
+	seedMachineTypeLabel(t, fs, "node-1", "intel-k66")
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", map[string]string{"zone": "gz"}, "admin"); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Errorf("machine-type must survive replace, got %q", snap.Labels[model.LabelMachineType])
+	}
+	if _, ok := snap.Labels["team"]; ok {
+		t.Error("team should be removed by replace")
+	}
+	if err := svc.UpdateNodeLabels(ctx, "node-1", map[string]string{model.LabelMachineType: "amd-k66"}, "admin"); !errors.Is(err, service.ErrReservedLabel) {
+		t.Fatalf("update machine-type = %v, want ErrReservedLabel", err)
+	}
+	if err := svc.DeleteNodeLabel(ctx, "node-1", model.LabelMachineType, "admin"); !errors.Is(err, service.ErrReservedLabel) {
+		t.Fatalf("delete machine-type = %v, want ErrReservedLabel", err)
+	}
+}
+
+func TestReplaceNodeLabels_RejectsMachineTypeInPayload(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	seedMachineTypeLabel(t, fs, "node-1", "intel-k66")
+	// replace must not silently ignore a supplied machine-type.
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", map[string]string{
+		model.LabelMachineType: "amd-k66",
+		"zone":                 "gz",
+	}, "admin"); err == nil {
+		t.Fatal("replace must reject machine-type in the payload")
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Errorf("machine-type changed to %q", snap.Labels[model.LabelMachineType])
+	}
+}
+
+func TestReplaceNodeLabels_RejectsNilBody(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1",
+		Labels: map[string]string{"zone": "gz"},
+	})
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", nil, "admin"); err == nil {
+		t.Fatal("nil labels must be rejected instead of clearing everything")
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels["zone"] != "gz" {
+		t.Error("labels must survive a rejected nil replace")
+	}
+}
+
+func TestReplaceNodeLabels_MachineTypeDoesNotConsumeLimit(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	seedMachineTypeLabel(t, fs, "node-1", "intel-k66")
+	labels := make(map[string]string, maxLabelsForTest())
+	for i := 0; i < maxLabelsForTest(); i++ {
+		labels[fmt.Sprintf("k-%d", i)] = "v"
+	}
+	// machine-type is reserved and does not consume the 64-label operator budget.
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", labels, "admin"); err != nil {
+		t.Fatalf("64 user labels plus machine-type must be accepted: %v", err)
+	}
+	snap, _ := svc.GetNode(ctx, "node-1")
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Fatalf("machine-type = %q, want preserved", snap.Labels[model.LabelMachineType])
+	}
+	labels["extra"] = "v"
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", labels, "admin"); err == nil {
+		t.Fatal("65 user labels must still be rejected")
+	}
+}
+
+func maxLabelsForTest() int { return 64 }
+
+func TestUpdateNodeLabels_RejectsMachineTypeValue(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	for _, value := range []string{"", "Intel-K66", "intel_k66", "-abc", "intel-k66"} {
+		if err := svc.UpdateNodeLabels(ctx, "node-1", map[string]string{model.LabelMachineType: value}, "admin"); !errors.Is(err, service.ErrReservedLabel) {
+			t.Errorf("machine-type %q: err = %v, want ErrReservedLabel", value, err)
+		}
+	}
+}
+
+func TestUpdateNodeLabels_NotFoundDoesNotWriteSnapshot(t *testing.T) {
+	svc, _ := newTestService(t)
+	if err := svc.UpdateNodeLabels(context.Background(), "missing", map[string]string{"a": "b"}, "admin"); err == nil {
+		t.Fatal("expected error for missing node")
+	}
+}

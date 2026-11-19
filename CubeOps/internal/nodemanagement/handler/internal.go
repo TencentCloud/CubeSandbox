@@ -6,6 +6,7 @@ package handler
 import (
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -27,9 +28,13 @@ func NewInternalHandler(svc NodeService) *InternalHandler {
 func (h *InternalHandler) Register(r *gin.RouterGroup) {
 	r.GET("/nodes", h.ListNodes)
 	r.GET("/nodes/:nodeID", h.GetNode)
+	h.registerMachineTypes(r)
 	r.PUT("/nodes/:nodeID/isolation", h.Isolate)
 	r.DELETE("/nodes/:nodeID/isolation", h.Unisolate)
 	r.PUT("/nodes/:nodeID/labels", h.SetLabels)
+	r.PATCH("/nodes/:nodeID/labels", h.SetLabels)
+	r.PUT("/nodes/:nodeID/labels/replace", h.ReplaceLabels)
+	r.DELETE("/nodes/:nodeID/labels", h.DeleteLabelByQuery)
 	r.DELETE("/nodes/:nodeID/labels/:key", h.DeleteLabel)
 	r.DELETE("/nodes/:nodeID", h.DeleteNode)
 
@@ -67,6 +72,15 @@ func (h *InternalHandler) ListNodes(c *gin.Context) {
 			httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 			return
 		}
+	}
+	if filter := c.Query("machineType"); filter != "" {
+		filtered := make([]*model.NodeSnapshot, 0, len(nodes))
+		for _, n := range nodes {
+			if n != nil && model.MachineTypeMatches(model.MachineTypeValue(n.Labels), filter) {
+				filtered = append(filtered, n)
+			}
+		}
+		nodes = filtered
 	}
 
 	if scoreOnly := c.Query("score_only"); scoreOnly == "true" {
@@ -125,6 +139,22 @@ func (h *InternalHandler) writeIsolation(c *gin.Context, disabled bool) {
 	httputil.WriteJSON(c, http.StatusOK, snap)
 }
 
+// labelOperator is the audit operator for a label write. Internal routes are
+// unauthenticated, so the caller states its identity with ?operator= (as the
+// quota routes do); default is "internal".
+func labelOperator(c *gin.Context) string {
+	operator := strings.TrimSpace(c.Query("operator"))
+	if operator == "" {
+		return "internal"
+	}
+	// Cap at the audit column width (varchar(128)).
+	const maxOperatorLen = 128
+	if utf8.RuneCountInString(operator) > maxOperatorLen {
+		return string([]rune(operator)[:maxOperatorLen])
+	}
+	return operator
+}
+
 func (h *InternalHandler) SetLabels(c *gin.Context) {
 	nodeID := c.Param("nodeID")
 	var req struct {
@@ -135,7 +165,7 @@ func (h *InternalHandler) SetLabels(c *gin.Context) {
 		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := h.svc.UpdateNodeLabels(c.Request.Context(), nodeID, req.Labels, "internal"); err != nil {
+	if err := h.svc.UpdateNodeLabels(c.Request.Context(), nodeID, req.Labels, labelOperator(c)); err != nil {
 		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: set-labels failed: node=%s: %v", nodeID, err)
 		MapNodeError(c, err)
 		return
@@ -148,10 +178,56 @@ func (h *InternalHandler) SetLabels(c *gin.Context) {
 	httputil.WriteJSON(c, http.StatusOK, snap)
 }
 
+// ReplaceLabels replaces the complete user-label set. PATCH keeps the merge
+// semantics that the previous PUT route had.
+func (h *InternalHandler) ReplaceLabels(c *gin.Context) {
+	nodeID := c.Param("nodeID")
+	var req struct {
+		Labels map[string]string `json:"labels"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: replace-labels invalid body: node=%s: %v", nodeID, err)
+		httputil.WriteError(c, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := h.svc.ReplaceNodeLabels(c.Request.Context(), nodeID, req.Labels, labelOperator(c)); err != nil {
+		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: replace-labels failed: node=%s: %v", nodeID, err)
+		MapNodeError(c, err)
+		return
+	}
+	snap, err := h.svc.GetNode(c.Request.Context(), nodeID)
+	if err != nil {
+		MapNodeError(c, err)
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, snap)
+}
+
+// DeleteLabelByQuery deletes a label key that may contain '/'; the path
+// parameter cannot carry such a key.
+func (h *InternalHandler) DeleteLabelByQuery(c *gin.Context) {
+	key := c.Query("key")
+	if key == "" {
+		httputil.WriteError(c, http.StatusBadRequest, "query parameter key is required")
+		return
+	}
+	if err := h.svc.DeleteNodeLabel(c.Request.Context(), c.Param("nodeID"), key, labelOperator(c)); err != nil {
+		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: delete-label failed: node=%s key=%s: %v", c.Param("nodeID"), key, err)
+		MapNodeError(c, err)
+		return
+	}
+	snap, err := h.svc.GetNode(c.Request.Context(), c.Param("nodeID"))
+	if err != nil {
+		MapNodeError(c, err)
+		return
+	}
+	httputil.WriteJSON(c, http.StatusOK, snap)
+}
+
 func (h *InternalHandler) DeleteLabel(c *gin.Context) {
 	nodeID := c.Param("nodeID")
 	key := c.Param("key")
-	if err := h.svc.DeleteNodeLabel(c.Request.Context(), nodeID, key, "internal"); err != nil {
+	if err := h.svc.DeleteNodeLabel(c.Request.Context(), nodeID, key, labelOperator(c)); err != nil {
 		logging.G(c.Request.Context()).Errorf("nodemgmt-internal: delete-label failed: node=%s key=%s: %v", nodeID, key, err)
 		MapNodeError(c, err)
 		return

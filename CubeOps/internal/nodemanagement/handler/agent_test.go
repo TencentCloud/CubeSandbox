@@ -56,6 +56,10 @@ func (f *fakeNodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot,
 func (f *fakeNodeService) UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
 	return f.updateNodeLabels(ctx, nodeID, labels, operator)
 }
+
+func (f *fakeNodeService) ReplaceNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
+	return f.updateNodeLabels(ctx, nodeID, labels, operator)
+}
 func (f *fakeNodeService) DeleteNodeLabel(ctx context.Context, nodeID, key, operator string) error {
 	return f.deleteNodeLabel(ctx, nodeID, key, operator)
 }
@@ -100,6 +104,37 @@ func (f *fakeNodeService) SetClusterQuotaDefaults(ctx context.Context, ratio *fl
 		return &model.ClusterQuotaDefaults{PausedReleaseRatio: ratio}, &model.QuotaPropagation{}, nil
 	}
 	return f.setClusterQuotaDefaults(ctx, ratio, operator)
+}
+
+func (f *fakeNodeService) CreateMachineType(context.Context, *model.CreateMachineTypeRequest, string) (*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeNodeService) UpdateMachineType(context.Context, string, *model.UpdateMachineTypeRequest, string) (*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeNodeService) DeleteMachineType(context.Context, string, bool, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeNodeService) GetMachineType(context.Context, string) (*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeNodeService) ListMachineTypes(context.Context) ([]*model.MachineTypeView, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeNodeService) SetNodeMachineType(context.Context, string, string, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeNodeService) ClearNodeMachineType(context.Context, string, string) error {
+	return errors.New("not implemented")
+}
+func (f *fakeNodeService) BindMachineTypeNodes(context.Context, string, []string, string) (*model.MachineTypeBindResult, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeNodeService) UnbindMachineTypeNodes(context.Context, string, []string, string) (*model.MachineTypeBindResult, error) {
+	return nil, errors.New("not implemented")
+}
+func (f *fakeNodeService) ReplaceMachineTypeNodes(context.Context, string, []string, string) (*model.MachineTypeBindResult, error) {
+	return nil, errors.New("not implemented")
 }
 
 func TestAgent_RegisterNode(t *testing.T) {

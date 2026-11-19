@@ -9,7 +9,7 @@ Use these tools from trusted operator machines only. They bypass the public Cube
 | Tool | Run From | Talks To | Main Use |
 |------|----------|----------|----------|
 | `cubemastercli` | Control node, jumpserver, or any host that can reach CubeMaster | CubeMaster HTTP API, default port `8089` | Cluster-wide sandbox, template, snapshot, and volume operations |
-| `cubeopscli` | Control node, jumpserver, or any host that can reach CubeOps | CubeOps HTTP API, default port `3010` | Node list, isolate/unisolate, delete node |
+| `cubeopscli` | Control node, jumpserver, or any host that can reach CubeOps | CubeOps HTTP API, default port `3010` | Node list, isolate/unisolate, delete node, machine types, node labels |
 | `cubecli` | The compute node that runs Cubelet and containerd | Local Cubelet/containerd state | Per-node sandbox/container inspection, container shell, logs, storage cleanup, local runtime debugging |
 | `cube-runtime` | The compute node that hosts the sandbox MVM | Local CubeShim hybrid-vsock/debug console | Enter the guest MVM or run low-level VM snapshot helpers |
 
@@ -93,7 +93,7 @@ Deleting a node requires it to be **isolated and free of sandboxes**; in a batch
 
 `cubeopscli --version` and `cubeopscli version` print the release version (e.g. `cubeopscli v0.7.0 (<commit>) built at <timestamp>`); `cubeopscli version --versiononly` prints just the semantic version.
 
-For adding, isolating, and deleting nodes, see [Node Operations](./node-operations.md).
+For adding, isolating, and deleting nodes — and for the machine-type and node-label commands (`machine-type`, `node label`), along with `node groups` — see [Node Operations](./node-operations.md).
 
 ## `cubecli`
 
