@@ -7,6 +7,8 @@ package localcache
 import (
 	"sync"
 	"time"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 )
 
 // absenceTracker records since when a node id has been missing (cleared on
@@ -60,4 +62,47 @@ func AbsentSince(nodeID string) (since time.Time, ok bool) {
 		since = l.absence.noteAbsentLocked(nodeID, time.Now())
 	})
 	return since, ok
+}
+
+// viewStaleAfter exceeds the worst-case sync (6 x 10s timeouts + 31s backoff);
+// an older view cannot prove a registered node stopped sending heartbeats.
+const viewStaleAfter = 3 * time.Minute
+
+// UnreachableSince returns when CubeMaster last saw a registered node's CubeOps
+// receive time change; only local clocks are compared, so skew cannot matter.
+func UnreachableSince(nodeID string) (time.Time, bool) {
+	if nodeID == "" || !l.synced.Load() {
+		return time.Time{}, false
+	}
+	received, observed, present := l.heartbeatTimes(nodeID)
+	if !present {
+		return AbsentSince(nodeID)
+	}
+	if received.IsZero() || observed.IsZero() ||
+		time.Since(time.Unix(0, l.syncedAt.Load())) > viewStaleAfter {
+		return time.Time{}, false
+	}
+	return l.heartbeatObservedAt(observed), true
+}
+
+// heartbeatTimes reads both stamps under lockMetaData, which every writer holds;
+// Clone reads unlocked and could observe a torn time.Time.
+func (l *local) heartbeatTimes(nodeID string) (received, observed time.Time, present bool) {
+	v, present := l.cache.Get(nodeID)
+	n, ok := v.(*node.Node)
+	if !present || !ok || n == nil {
+		return time.Time{}, time.Time{}, present
+	}
+	l.lockMetaData.Lock()
+	defer l.lockMetaData.Unlock()
+	return n.HeartbeatReceivedAt, n.HeartbeatObservedAt, true
+}
+
+// heartbeatObservedAt never predates the last resume from a stale view: changes
+// that happened while CubeMaster could not sync were not observable.
+func (l *local) heartbeatObservedAt(observed time.Time) time.Time {
+	if resumed := l.resumedAt.Load(); resumed != 0 && time.Unix(0, resumed).After(observed) {
+		return time.Unix(0, resumed)
+	}
+	return observed
 }

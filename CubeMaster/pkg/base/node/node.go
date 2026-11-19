@@ -80,6 +80,12 @@ type Node struct {
 
 	MetaDataUpdateAt time.Time `json:"MetaDataUpdateAt,omitempty"`
 
+	HeartbeatReceivedAt time.Time `json:"HeartbeatReceivedAt,omitempty"`
+
+	// HeartbeatObservedAt is CubeMaster's own clock when HeartbeatReceivedAt last
+	// changed, so reachability never compares clocks across control planes.
+	HeartbeatObservedAt time.Time `json:"-"`
+
 	ReportedReady bool `json:"ReportedReady,omitempty"`
 
 	Healthy bool `json:"Healthy"`
@@ -249,6 +255,7 @@ func (n *Node) Clone() *Node {
 		DedicatedClusterId: n.DedicatedClusterId, HostStatus: n.HostStatus,
 		CreateConcurrentNum: n.CreateConcurrentNum, MaxMvmLimit: n.MaxMvmLimit,
 		QuotaCpu: n.QuotaCpu, QuotaMem: n.QuotaMem, MetaDataUpdateAt: n.MetaDataUpdateAt,
+		HeartbeatReceivedAt: n.HeartbeatReceivedAt, HeartbeatObservedAt: n.HeartbeatObservedAt,
 		ReportedReady: n.ReportedReady, Healthy: n.Healthy, UnhealthyReason: n.UnhealthyReason,
 		QuotaCpuUsage: n.QuotaCpuUsage, QuotaMemUsage: n.QuotaMemUsage,
 		CpuUtil: n.CpuUtil, CpuLoadUsage: n.CpuLoadUsage, MemUsage: n.MemUsage,

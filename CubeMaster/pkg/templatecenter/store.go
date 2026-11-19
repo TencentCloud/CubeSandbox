@@ -474,8 +474,8 @@ func resolveReadyJFSTemplateVariant(ctx context.Context, templateID, variantID s
 	var replica models.TemplateReplica
 	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
 		Select("template_variant_id").
-		Where("template_id = ? AND template_variant_id = ? AND status = ?",
-			strings.TrimSpace(templateID), strings.TrimSpace(variantID), ReplicaStatusReady).
+		Where("template_id = ? AND template_variant_id = ? AND status = ? AND cleanup_required = ?",
+			strings.TrimSpace(templateID), strings.TrimSpace(variantID), ReplicaStatusReady, false).
 		First(&replica).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -2206,8 +2206,10 @@ func evaluateCompat(replica ReplicaStatus, _, _, _ string) string {
 	return CompatStatusUnknown
 }
 
+// isReplicaSchedulable rejects rows flagged cleanup_required: a READY row kept for
+// an unreachable node after deletion must not serve a reused template id.
 func isReplicaSchedulable(replica ReplicaStatus) bool {
-	return replica.Status == ReplicaStatusReady
+	return replica.Status == ReplicaStatusReady && !replica.CleanupRequired
 }
 
 // bindGuestVersionToReplica records pin versions on the replica. CompatStatus
@@ -2378,7 +2380,7 @@ func isTemplateReplicaSchedulable(ctx context.Context, templateID, nodeID string
 
 func isReplicaSchedulableNow(ctx context.Context, replica ReplicaStatus) bool {
 	_ = ctx
-	return strings.TrimSpace(replica.Status) == ReplicaStatusReady
+	return strings.TrimSpace(replica.Status) == ReplicaStatusReady && !replica.CleanupRequired
 }
 
 func EnsureTemplateLocalityReady(ctx context.Context, templateID, instanceType string) error {
@@ -2463,7 +2465,7 @@ func warmReadyTemplateLocality(ctx context.Context) error {
 	}
 	var replicas []models.TemplateReplica
 	if err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("status = ?", ReplicaStatusReady).
+		Where("status = ? AND cleanup_required = ?", ReplicaStatusReady, false).
 		Find(&replicas).Error; err != nil {
 		return err
 	}

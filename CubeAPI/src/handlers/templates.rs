@@ -259,11 +259,11 @@ pub struct DeleteTemplateQuery {
     params(
         ("templateID" = String, Path, description = "Template or snapshot identifier, alias, or snapshot name"),
         ("instance_type" = Option<String>, Query, description = "CubeMaster instance_type filter"),
-        ("sync" = Option<bool>, Query, description = "Wait for deletion to complete before returning"),
+        ("sync" = Option<bool>, Query, description = "Wait for the delete to finish before returning; nodes unreachable past the 15-minute grace period are still cleaned in the background"),
         ("snapshot_only" = Option<bool>, Query, description = "Only match snapshots by id or name; a miss is 404 and never deletes a template")
     ),
     responses(
-        (status = 204, description = "Template or snapshot deleted"),
+        (status = 204, description = "Template or snapshot deleted; data on nodes unreachable past the 15-minute grace period is cleaned in the background once they return"),
         (status = 404, description = "Template or snapshot not found", body = ApiError),
         (status = 409, description = "Name matches both a template alias and a snapshot, or several snapshots", body = ApiError),
         (status = 500, description = "Unexpected backend error", body = ApiError)

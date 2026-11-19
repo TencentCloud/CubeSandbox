@@ -42,8 +42,14 @@ type local struct {
 	emptySyncStreak atomic.Int32
 
 	// synced is set once any node-view sync succeeded (an empty view is valid).
-	synced  atomic.Bool
-	absence absenceTracker
+	synced atomic.Bool
+	// syncedAt is the last successful sync in UnixNano; stored before synced.
+	syncedAt atomic.Int64
+	// resumedAt is the first successful sync after a gap over viewStaleAfter.
+	resumedAt atomic.Int64
+	// stallWarnedAt rate-limits the mass heartbeat-stall warning (UnixNano).
+	stallWarnedAt atomic.Int64
+	absence       absenceTracker
 }
 
 // The node and template-locality stores exist from package load so nodemeta
@@ -230,6 +236,10 @@ func (l *local) addNodeCache(n *node.Node) {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
 	}
+	// A node first seen here starts aging from CubeMaster's own clock.
+	if n.HeartbeatObservedAt.IsZero() {
+		n.HeartbeatObservedAt = time.Now()
+	}
 	// Same lock as AbsentSince, so no concurrent reader sees "not present"
 	// mid-transition and records a bogus absence start for a present node.
 	l.absence.withLock(func() {
@@ -388,6 +398,12 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CreateConcurrentNum = n.CreateConcurrentNum
 		old.MaxMvmLimit = n.MaxMvmLimit
 		old.MetaDataUpdateAt = n.MetaDataUpdateAt
+		// Compare whole seconds: CubeOps serves nanoseconds from Redis but seconds
+		// after a DB rebuild, which must not count as a new heartbeat.
+		if old.HeartbeatObservedAt.IsZero() || old.HeartbeatReceivedAt.Unix() != n.HeartbeatReceivedAt.Unix() {
+			old.HeartbeatObservedAt = time.Now()
+		}
+		old.HeartbeatReceivedAt = n.HeartbeatReceivedAt
 		old.DeviceClass = n.DeviceClass
 		old.DeviceID = n.DeviceID
 		old.MachineHostIP = n.MachineHostIP

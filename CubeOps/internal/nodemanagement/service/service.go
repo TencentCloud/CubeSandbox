@@ -138,6 +138,7 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		return nil, err
 	}
 
+	now := time.Now()
 	snap := &model.NodeSnapshot{
 		NodeID:              req.NodeID,
 		HostIP:              req.HostIP,
@@ -152,11 +153,12 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		CreateConcurrentNum: req.CreateConcurrentNum,
 		MaxMvmNum:           req.MaxMvmNum,
 		// Use the persisted value so the response matches the DB, preserving the previous ratio for nil or non-reporting cubelets.
-		PausedReleaseRatio: reg.PausedReleaseRatio,
-		HostFacts:          cloneHostFacts(mergedFacts),
-		HeartbeatTime:      time.Now(),
+		PausedReleaseRatio:  reg.PausedReleaseRatio,
+		HostFacts:           cloneHostFacts(mergedFacts),
+		HeartbeatTime:       now,
+		HeartbeatReceivedAt: now,
 	}
-	applyCurrentHealth(snap, time.Now())
+	applyCurrentHealth(snap, now)
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 
 	svc.ensureClusterRow(ctx, req.NodeID)
@@ -176,6 +178,7 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	if req.HeartbeatTime.IsZero() {
 		req.HeartbeatTime = time.Now()
 	}
+	receivedAt := time.Now()
 
 	reg, err := svc.store.GetRegistration(ctx, nodeID)
 	if err != nil {
@@ -187,12 +190,13 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 
 	reportedReady := ReadyConditionTrue(req.Conditions)
 	status := &store.NodeStatus{
-		NodeID:             nodeID,
-		ConditionsJSON:     model.MustJSON(req.Conditions),
-		ImagesJSON:         model.MustJSON(req.Images),
-		LocalTemplatesJSON: model.MustJSON(req.LocalTemplates),
-		HeartbeatUnix:      req.HeartbeatTime.Unix(),
-		Healthy:            reportedReady,
+		NodeID:                nodeID,
+		ConditionsJSON:        model.MustJSON(req.Conditions),
+		ImagesJSON:            model.MustJSON(req.Images),
+		LocalTemplatesJSON:    model.MustJSON(req.LocalTemplates),
+		HeartbeatUnix:         req.HeartbeatTime.Unix(),
+		HeartbeatReceivedUnix: receivedAt.Unix(),
+		Healthy:               reportedReady,
 	}
 	if err := svc.store.UpsertStatus(ctx, status); err != nil {
 		logging.G(ctx).Errorf("nodemgmt: heartbeat upsert failed: node=%s: %v", nodeID, err)
@@ -208,6 +212,7 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	snap.Images = append([]model.ContainerImage(nil), req.Images...)
 	snap.LocalTemplates = append([]model.LocalTemplate(nil), req.LocalTemplates...)
 	snap.HeartbeatTime = req.HeartbeatTime
+	snap.HeartbeatReceivedAt = receivedAt
 	snap.ReportedReady = reportedReady
 	applyCurrentHealth(snap, time.Now())
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)

@@ -980,7 +980,7 @@ paths:
           type: string
       - name: sync
         in: query
-        description: Wait for deletion to complete before returning
+        description: Wait for the delete to finish before returning; nodes unreachable past the 15-minute grace period are still cleaned in the background
         required: false
         schema:
           type: boolean
@@ -992,7 +992,7 @@ paths:
           type: boolean
       responses:
         '204':
-          description: Template or snapshot deleted
+          description: Template or snapshot deleted; data on nodes unreachable past the 15-minute grace period is cleaned in the background once they return
         '404':
           description: Template or snapshot not found
           content:

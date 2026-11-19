@@ -79,7 +79,8 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 		}
 		// Set only after addNodeCache has filled the cache: AbsentSince gates on
 		// synced, else a node about to be (re-)added is briefly seen as absent.
-		l.synced.Store(true)
+		l.markSyncSucceeded(time.Now())
+		l.warnOnMassHeartbeatStall(ctx, allFromDb)
 		if update {
 			if len(allFromDb) == 0 {
 				cur := l.emptySyncStreak.Add(1)
@@ -165,12 +166,57 @@ func (l *local) syncAllFromDB(ctx context.Context, update bool) error {
 		}
 		allFromDb[n.InsID] = struct{}{}
 	}
-	l.synced.Store(true)
+	l.markSyncSucceeded(time.Now())
 
 	if update {
 		l.checkDirty(ctx, allFromDb, false)
 	}
 	return nil
+}
+
+// markSyncSucceeded records a successful sync; after a gap over viewStaleAfter it
+// also stores resumedAt first, so readers of a fresh syncedAt see it.
+func (l *local) markSyncSucceeded(now time.Time) {
+	if prev := l.syncedAt.Load(); prev != 0 && now.Sub(time.Unix(0, prev)) > viewStaleAfter {
+		l.resumedAt.Store(now.UnixNano())
+	}
+	l.syncedAt.Store(now.UnixNano())
+	l.synced.Store(true)
+}
+
+// heartbeatStallWarnAfter flags a node whose receive time has not moved for a
+// minute; heartbeats arrive every second, so that many stalls is not churn.
+const heartbeatStallWarnAfter = time.Minute
+
+// warnOnMassHeartbeatStall warns, at most once a minute, when over half of the
+// nodes with a known receive time stopped advancing (e.g. CubeOps cannot persist).
+func (l *local) warnOnMassHeartbeatStall(ctx context.Context, ids map[string]struct{}) {
+	now := time.Now()
+	known, stalled := 0, 0
+	l.lockMetaData.Lock()
+	for id := range ids {
+		v, ok := l.cache.Get(id)
+		n, _ := v.(*node.Node)
+		if !ok || n == nil || n.HeartbeatReceivedAt.IsZero() {
+			continue
+		}
+		known++
+		if now.Sub(l.heartbeatObservedAt(n.HeartbeatObservedAt)) > heartbeatStallWarnAfter {
+			stalled++
+		}
+	}
+	l.lockMetaData.Unlock()
+	if known == 0 || stalled*2 <= known {
+		return
+	}
+	last := l.stallWarnedAt.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < time.Minute {
+		return
+	}
+	if l.stallWarnedAt.CompareAndSwap(last, now.UnixNano()) {
+		log.G(ctx).Warnf("syncAllFromDB: %d of %d nodes have no new heartbeat in CubeOps for over %s; cleanup may treat them as unreachable",
+			stalled, known, heartbeatStallWarnAfter)
+	}
 }
 
 func (l *local) loadFromDBByIDs(hostIDs []string) ([]*node.Node, error) {
