@@ -2715,6 +2715,14 @@ components:
           - integer
           - 'null'
           format: int32
+          description: |-
+            Seconds of uninterrupted uptime after which the restart count is
+            reset. Zero or omitted uses the node default (600). The clock starts
+            when the current run starts being up -- on create, on a successful
+            restart, or on resume -- and a failed attempt does not restart it.
+            The reset is applied as soon as the window elapses; it does not wait
+            for the next exit, and it never revives a sandbox that already
+            reached maxRestarts.
     RestartStatus:
       type: object
       description: |-

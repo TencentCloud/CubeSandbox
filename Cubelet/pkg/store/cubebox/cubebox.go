@@ -72,6 +72,13 @@ type Metadata struct {
 	// It is not the user-visible restart count.
 	DestroyFailCount int32 `json:"destroy_fail_count,omitempty"`
 
+	// StableSince is when the current run started being up: set on create, on a
+	// successful restart, and on resume. It is deliberately NOT written by a
+	// failed restart attempt, so a crash loop cannot renew its own streak. Zero
+	// means the anchor is unknown (a row written before this field existed);
+	// Recover backfills it rather than guessing from LastRestartAt.
+	StableSince int64 `json:"stable_since,omitempty"`
+
 	MetaLock sync.Mutex `json:"-"`
 }
 

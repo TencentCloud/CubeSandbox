@@ -177,13 +177,18 @@ func (b Backoff) Delay(restartCount int32) time.Duration {
 	return base + time.Duration(float64(base)*b.Jitter*rand.Float64())
 }
 
-// ResetCount reports whether the sandbox has been stable long enough to
-// forget the restart streak.
-func (b Backoff) ResetCount(lastRestartAt int64, now time.Time) bool {
-	if b.StableDuration <= 0 || lastRestartAt <= 0 {
+// Stable reports whether a run that started being up at stableSince has stayed
+// up long enough to clear the restart streak.
+//
+// stableSince anchors the *current run*, not the last restart attempt: a failed
+// attempt must not renew the streak, or a crash loop would keep resetting its own
+// budget. A non-positive value means the anchor is unknown, and the policy
+// declines to clear the streak rather than guess.
+func (b Backoff) Stable(stableSince int64, now time.Time) bool {
+	if b.StableDuration <= 0 || stableSince <= 0 {
 		return false
 	}
-	return now.Sub(time.Unix(0, lastRestartAt)) >= b.StableDuration
+	return now.Sub(time.Unix(0, stableSince)) >= b.StableDuration
 }
 
 // Validate checks policy, backoff and liveness fields. Never combined with

@@ -405,6 +405,7 @@ func (m *restartMgr) Recover() {
 		if cb.RestartState == restartpolicy.StateGaveUp {
 			continue
 		}
+		m.backfillStableAnchor(cb)
 		// A crash between restart-destroy and create leaves the cubebox row
 		// with no containers. Treat that the same as an exited sandbox.
 		dead := (cb.MainStatus() != nil && cb.MainStatus().IsTerminated()) ||
@@ -638,6 +639,13 @@ func (m *restartMgr) noteExit(sandboxID string, exitCode int32, reason restartpo
 	}
 }
 
+// setBackoff decides whether another restart is allowed and records the wait.
+//
+// Clearing the streak is *not* done here. That used to be the only place the
+// stability window was evaluated, which meant a healthy sandbox kept a stale
+// restartCount until it happened to exit again. stabilizeOne owns that
+// decision now, so this function does exactly one thing: judge the budget and
+// write the BackOff/GaveUp state.
 func (m *restartMgr) setBackoff(sandboxID string, backoff restartpolicy.Backoff, now time.Time) (time.Duration, int32, bool, error) {
 	cb, err := m.store.Get(context.Background(), sandboxID)
 	if err != nil {
@@ -647,9 +655,6 @@ func (m *restartMgr) setBackoff(sandboxID string, backoff restartpolicy.Backoff,
 		return 0, 0, false, fmt.Errorf("sandbox not found")
 	}
 	cb.Lock()
-	if backoff.ResetCount(cb.LastRestartAt, now) && cb.RestartCount != 0 {
-		applyRestartTransition(cb, restartTransition{resetCount: true})
-	}
 	count := cb.RestartCount
 	if !backoff.Allow(count) {
 		applyRestartTransition(cb, restartTransition{

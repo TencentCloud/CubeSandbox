@@ -127,6 +127,9 @@ _TERMINAL_HOLD_SECONDS = 15
 _HEALTHY_WINDOW_SECONDS = 62
 _KILL_WINDOW_SECONDS = 20
 _MARKER = "cube-e2e-restart-marker"
+# Room for the stabilizer sweep plus control-plane reporting latency, on top of
+# one full stable window.
+_STABLE_CLEAR_SLACK_SECONDS = 30
 
 
 @pytest.fixture(autouse=True)
@@ -755,6 +758,73 @@ def test_stable_period_resets_count_and_backoff(sdk_sandbox, sdk_e2e_config):
         timeout=sdk_e2e_config.restart_policy_wait,
     )
     assert _count(final) == 1, f"sandbox={sdk_sandbox.sandbox_id} status={final!r}"
+
+
+@pytest.mark.p2
+@pytest.mark.slow
+@pytest.mark.requires_capability(COMMANDS)
+@pytest.mark.sandbox_create_options(
+    restartPolicy="OnFailure",
+    restartBackoff=_STABLE,
+    livenessProbe=_FAST_PROBE,
+    timeout=1800,
+)
+def test_stable_period_clears_count_without_another_exit(sdk_sandbox, sdk_e2e_config):
+    """The streak clears while the sandbox keeps running, not when it exits.
+
+    test_stable_period_resets_count_and_backoff crashes the guest a second time
+    and only then expects restartCount == 0. That shape cannot tell the two
+    implementations apart: the old one also cleared the count, because it
+    re-evaluated the window at the top of the restart loop, i.e. after that
+    crash.
+
+    This case removes the second crash. It crashes once, waits for the restart
+    to land so restartCount is 1, and then stays quiet for longer than the
+    stable window. Only a node that evaluates stability on its own clock returns
+    the budget here; one that waits for the next exit keeps restartCount == 1
+    forever and this times out.
+    """
+    sandbox_id = sdk_sandbox.sandbox_id
+    wait_until_data_plane_ready(
+        sdk_sandbox,
+        timeout=sdk_e2e_config.default_timeout,
+        command_timeout=sdk_e2e_config.command_timeout,
+    )
+
+    crash_guest(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
+    restarted = wait_for_restart_status(
+        sdk_sandbox,
+        lambda item: bool(item)
+        and item.get("restartState") == "Running"
+        and _count(item) == 1,
+        timeout=sdk_e2e_config.restart_policy_wait,
+    )
+    assert _count(restarted) == 1, f"sandbox={sandbox_id} restarted={restarted!r}"
+
+    # No further crash from here on. The count must reach 0 purely because time
+    # passed, which is what the stabilizer is for.
+    # The node sweeps once a second, so 30s past the window is generous. Keeping
+    # this bounded (rather than reusing restart_policy_wait) makes a node that
+    # never evaluates stability fail in half a minute instead of five.
+    cleared = wait_for_restart_status(
+        sdk_sandbox,
+        lambda item: bool(item)
+        and item.get("restartState") == "Running"
+        and _count(item) == 0,
+        timeout=_STABLE["stableDurationSecond"] + _STABLE_CLEAR_SLACK_SECONDS,
+        interval=1,
+    )
+    assert _count(cleared) == 0, (
+        f"sandbox={sandbox_id} streak was not cleared while the guest stayed up: {cleared!r}"
+    )
+
+    # The guest must still be up. A count that fell to 0 because the sandbox
+    # crashed again would be a different (and wrong) reason for this assertion
+    # to hold, so rule it out.
+    state = fetch_state(sdk_sandbox)
+    assert state == "running", (
+        f"sandbox={sandbox_id} state={state} after the reset status={cleared!r}"
+    )
 
 
 @pytest.mark.p2

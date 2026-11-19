@@ -286,6 +286,8 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			return err
 		}
 		sandBox.RestartState = restartpolicy.StateRunning
+		// A brand-new sandbox is up from now: anchor its stability window.
+		sandBox.StableSince = time.Now().UnixNano()
 	}
 	if sandBox.Metadata.Labels == nil {
 		sandBox.Metadata.Labels = make(map[string]string)

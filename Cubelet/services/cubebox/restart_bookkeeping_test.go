@@ -55,14 +55,21 @@ func TestApplyRestartBookkeepingKeepsSeq(t *testing.T) {
 	}
 }
 
-func TestSetBackoffResetsStableStreakAtomically(t *testing.T) {
+// TestSetBackoffWritesOnce keeps the guarantee PR #2338 established: the
+// backoff state reaches the store in a single write with a single StatusSeq
+// bump, so control-plane readers never see restartCount and restartState from
+// different generations.
+//
+// It no longer asserts that the streak is cleared here. Clearing moved to the
+// stabilizer (see restart_stabilize_test.go), because doing it only in this
+// function meant a healthy sandbox never had its streak re-evaluated.
+func TestSetBackoffWritesOnce(t *testing.T) {
 	now := time.Date(2026, time.November, 19, 2, 0, 0, 0, time.UTC)
 	cb := &cubeboxstore.CubeBox{}
 	cb.ID = "sb"
 	cb.RestartCount = 2
 	cb.StatusSeq = 7
 	cb.RestartState = restartpolicy.StateRunning
-	cb.LastRestartAt = now.Add(-9 * time.Second).UnixNano()
 	store := &memBoxes{cb: cb}
 	m := newRestartMgr(store)
 	backoff := restartpolicy.Backoff{
@@ -77,23 +84,24 @@ func TestSetBackoffResetsStableStreakAtomically(t *testing.T) {
 	if err != nil || !allowed {
 		t.Fatalf("err=%v allowed=%t", err, allowed)
 	}
-	if delay != 3*time.Second || count != 0 {
+	// Delay(2) = 3s * 4^2 = 48s, capped at Max 6s.
+	if delay != 6*time.Second || count != 2 {
 		t.Fatalf("delay=%s count=%d", delay, count)
 	}
-	if cb.RestartCount != 0 || cb.RestartState != restartpolicy.StateBackOff {
-		t.Fatalf("count=%d state=%s", cb.RestartCount, cb.RestartState)
+	if cb.RestartState != restartpolicy.StateBackOff {
+		t.Fatalf("state=%s", cb.RestartState)
 	}
-	if cb.NextRestartAt != now.Add(3*time.Second).UnixNano() || cb.StatusSeq != 8 {
+	if cb.NextRestartAt != now.Add(6*time.Second).UnixNano() || cb.StatusSeq != 8 {
 		t.Fatalf("next=%d seq=%d", cb.NextRestartAt, cb.StatusSeq)
 	}
 	if store.saves != 1 || len(store.saved) != 1 {
 		t.Fatalf("saves=%d snapshots=%d", store.saves, len(store.saved))
 	}
 	saved := store.saved[0]
-	if saved.RestartCount != 0 || saved.RestartState != restartpolicy.StateBackOff ||
-		saved.NextRestartAt != now.Add(3*time.Second).UnixNano() || saved.StatusSeq != 8 {
-		t.Fatalf("saved count=%d state=%s next=%d seq=%d",
-			saved.RestartCount, saved.RestartState, saved.NextRestartAt, saved.StatusSeq)
+	if saved.RestartState != restartpolicy.StateBackOff ||
+		saved.NextRestartAt != now.Add(6*time.Second).UnixNano() || saved.StatusSeq != 8 {
+		t.Fatalf("saved state=%s next=%d seq=%d",
+			saved.RestartState, saved.NextRestartAt, saved.StatusSeq)
 	}
 }
 
@@ -178,7 +186,27 @@ func TestMarkResumedAfterPause(t *testing.T) {
 	markResumedAfterPause(nil)
 }
 
-func TestRecoverResetsSpentRetriesAfterStablePeriod(t *testing.T) {
+// TestRecoverDoesNotReviveExhausted pins the outcome that D3 changed.
+//
+// Before this change a spent budget was cleared inside setBackoff, so recovery
+// re-entered the loop, saw Allow(0) == true and restarted a sandbox the user had
+// already lost -- contradicting docs/guide/lifecycle.md ("after the limit the
+// sandbox ... is not brought up again"). Now the reset lives in the stabilizer,
+// which only touches Running sandboxes, so recovery of a spent BackOff row ends
+// in GaveUp with the budget untouched.
+//
+// The assertion is exactly GaveUp rather than "BackOff or GaveUp", because both
+// paths start from BackOff and accepting either would make the test pass under
+// the old behaviour too.
+//
+// Scope note, stated honestly: with the anchor backfill in place, StableSince is
+// fresh at recovery time, so a mutant that reintroduces the reset inside
+// setBackoff is *not* caught by this test -- the reset would not fire either
+// way. What this test does pin is the end state the user observes: a spent
+// budget ends in GaveUp and is never cleared. The "no reset path exists" claim
+// is carried by the code structure (setBackoff no longer calls Stable) and by
+// TestSetBackoffWritesOnce, not by this test.
+func TestRecoverDoesNotReviveExhausted(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
 	cb.ID = "sb"
 	cb.RestartCount = 2
@@ -198,19 +226,21 @@ func TestRecoverResetsSpentRetriesAfterStablePeriod(t *testing.T) {
 	m := newRestartMgr(&memBoxes{cb: cb})
 	m.Recover()
 	t.Cleanup(func() { m.Stop("sb") })
-	deadline := time.Now().Add(time.Second)
+
+	// The verdict is reached on the restart-loop goroutine.
+	deadline := time.Now().Add(2 * time.Second)
 	for {
 		cb.Lock()
 		count, state := cb.RestartCount, cb.RestartState
 		cb.Unlock()
-		if count == 0 {
-			if state != restartpolicy.StateBackOff {
-				t.Fatalf("count=%d state=%s", count, state)
+		if state == restartpolicy.StateGaveUp {
+			if count != 2 {
+				t.Fatalf("recovery cleared a spent budget: count=%d", count)
 			}
-			break
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("count=%d state=%s", count, state)
+			t.Fatalf("spent sandbox was not given up: count=%d state=%s (BackOff here means it is about to restart, which is D3)", count, state)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -255,12 +285,15 @@ type memBoxes struct {
 	cb    *cubeboxstore.CubeBox
 	saves int
 	saved []*cubeboxstore.CubeBox
+	// saveErr makes Save fail, so tests can exercise the rollback path.
+	saveErr error
 }
 
-func (m *memBoxes) Init(context.Context) error { return nil }
 func (m *memBoxes) Get(context.Context, string) (*cubeboxstore.CubeBox, error) {
 	return m.cb, nil
 }
+
+func (m *memBoxes) Init(context.Context) error { return nil }
 func (m *memBoxes) FindContainerOfCubebox(context.Context, string) (*cubeboxstore.Container, *cubeboxstore.CubeBox, error) {
 	return nil, nil, nil
 }
@@ -270,6 +303,9 @@ func (m *memBoxes) IsImageInUse(string) (bool, error) {
 }
 func (m *memBoxes) Save(_ context.Context, cb *cubeboxstore.CubeBox, _ ...cubes.UpdateCubeboxOpt) error {
 	m.saves++
+	if m.saveErr != nil {
+		return m.saveErr
+	}
 	m.saved = append(m.saved, cb.DeepCopy())
 	return nil
 }
