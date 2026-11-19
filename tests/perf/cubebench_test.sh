@@ -76,3 +76,45 @@ assert_report_line '| CPU Model | Test CPU |' "$report"
 assert_report_line '| CPU Config | 8 logical CPUs (1 socket, 4 cores/socket, 2 threads/core) |' "$report"
 assert_report_line '| NUMA Nodes | 1 |' "$report"
 printf 'PASS: C locale environment report\n'
+
+# Check search-round validation and dispatch without a cluster.
+(
+	tmp=$(mktemp -d)
+	trap 'rm -rf -- "$tmp"' EXIT
+	export CUBE_TEMPLATE_ID=tpl-test CUBE_SNAPSHOT_ID=snap-test
+	export CUBE_BENCH_SLO_OUTPUT="$tmp/samples.json" CUBE_BENCH_SLO_CONCURRENCY=16
+	OUTPUT_MD="$tmp/report.md"
+	for section in 3.2 4.3 4.6; do validate_slo_round "$section"; done
+	for c in 0 501 foo 01 ""; do
+		if CUBE_BENCH_SLO_CONCURRENCY="$c" validate_slo_round 3.2; then exit 1; fi
+	done
+	if validate_slo_round 3.3 || CUBE_SNAPSHOT_ID="" validate_slo_round 4.3; then exit 1; fi
+	(
+		cd "$tmp"
+		WORK_DIR="$PWD/work"
+		EXAMPLES_DIR="$PWD/examples"
+		CUBE_BENCH_SDK_VENV="external SDK"
+		mkdir -p "$WORK_DIR" "$EXAMPLES_DIR" "$CUBE_BENCH_SDK_VENV/bin"
+		printf '%s\n' 'echo activated >> "$WORK_DIR/activations"' > "$CUBE_BENCH_SDK_VENV/bin/activate"
+		python() { echo test-sdk-version; }
+		validate_slo_round 4.3
+		cd "$WORK_DIR"
+		prepare_snapshot_bench
+		prepare_snapshot_bench
+		[[ "$PWD" == "$EXAMPLES_DIR" && "$SDK_INSTALLED_VERSION" == test-sdk-version ]]
+		[[ "$(cat "$WORK_DIR/activations")" == activated ]]
+	)
+	touch "$CUBE_BENCH_SLO_OUTPUT"
+	if validate_slo_round 3.2; then exit 1; fi
+	prepare_snapshot_bench() { :; }
+	run_cube_bench() { printf '%s\n' "$*" >"$tmp/args"; }
+	python() { printf '%s\n' "$*" >"$tmp/args"; }
+	run_slo_round 3.2
+	grep -Fx -- "-c 16 -n 500 -w 0 -m create-only --no-tui -o $CUBE_BENCH_SLO_OUTPUT" "$tmp/args"
+	run_slo_round 4.3
+	grep -Fx -- "$REPO_ROOT/tests/perf/cubebench_slo_workload.py 4.3 -c 16 -n 1 --requests 500 --output $CUBE_BENCH_SLO_OUTPUT" "$tmp/args"
+	run_slo_round 4.6
+	grep -Fx -- "$REPO_ROOT/tests/perf/cubebench_slo_workload.py 4.6 -c 16 -n 1 --requests 500 --output $CUBE_BENCH_SLO_OUTPUT" "$tmp/args"
+)
+
+python3 -m unittest discover -s "$SCRIPT_DIR" -p 'test_cubebench_slo*.py'
