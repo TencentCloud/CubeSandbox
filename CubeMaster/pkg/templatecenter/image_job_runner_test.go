@@ -28,11 +28,11 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 	persistErr := errors.New("upsert template replica fail: invalid connection")
 
 	var publishedStatus, publishedLastError string
-	patches.ApplyFunc(publishTemplateStatusWithAlias,
-		func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-			publishedStatus = status
+	patches.ApplyFunc(publishCreateFailedIfJobActive,
+		func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
+			publishedStatus = StatusFailed
 			publishedLastError = lastError
-			return "", "", nil
+			return true, nil
 		})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
@@ -65,7 +65,7 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 }
 
 // TestMarkDefinitionFailedOnPersistErr_TemplateNotFound verifies that when
-// publishTemplateStatusWithAlias returns ErrTemplateNotFound (concurrent
+// publishCreateFailedIfJobActive returns ErrTemplateNotFound (concurrent
 // delete removed the definition row), the update error is suppressed and
 // the returned error contains only persistErr.
 func TestMarkDefinitionFailedOnPersistErr_TemplateNotFound(t *testing.T) {
@@ -74,9 +74,9 @@ func TestMarkDefinitionFailedOnPersistErr_TemplateNotFound(t *testing.T) {
 
 	persistErr := errors.New("upsert template replica fail: invalid connection")
 
-	patches.ApplyFunc(publishTemplateStatusWithAlias,
-		func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-			return "", "", ErrTemplateNotFound
+	patches.ApplyFunc(publishCreateFailedIfJobActive,
+		func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
+			return false, ErrTemplateNotFound
 		})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
@@ -98,7 +98,7 @@ func TestMarkDefinitionFailedOnPersistErr_TemplateNotFound(t *testing.T) {
 }
 
 // TestMarkDefinitionFailedOnPersistErr_JoinsErrors verifies that when
-// publishTemplateStatusWithAlias returns a non-ErrTemplateNotFound error,
+// publishCreateFailedIfJobActive returns a non-ErrTemplateNotFound error,
 // the returned error satisfies errors.Is for both the original persistErr
 // and the update error (via errors.Join).
 func TestMarkDefinitionFailedOnPersistErr_JoinsErrors(t *testing.T) {
@@ -108,9 +108,9 @@ func TestMarkDefinitionFailedOnPersistErr_JoinsErrors(t *testing.T) {
 	persistErr := errors.New("upsert template replica fail: invalid connection")
 	updateErr := errors.New("database connection timeout")
 
-	patches.ApplyFunc(publishTemplateStatusWithAlias,
-		func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-			return "", "", updateErr
+	patches.ApplyFunc(publishCreateFailedIfJobActive,
+		func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
+			return false, updateErr
 		})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
@@ -152,10 +152,10 @@ func TestMarkDefinitionFailedOnPersistErr_SanitizesErrorMessage(t *testing.T) {
 	rawDBErr := errors.New(rawDBErrText)
 
 	var publishedLastError string
-	patches.ApplyFunc(publishTemplateStatusWithAlias,
-		func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
+	patches.ApplyFunc(publishCreateFailedIfJobActive,
+		func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
 			publishedLastError = lastError
-			return "", "", nil
+			return true, nil
 		})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 
@@ -189,6 +189,8 @@ type persistErrCallChainRecorder struct {
 	publishedStatuses []string
 	publishedErrors   []string
 	jobUpdates        []map[string]any
+	// publishErr, when set, is returned by the stubbed definition publish.
+	publishErr error
 }
 
 // lastJobErrorMessage returns the error_message of the last job-row update
@@ -231,10 +233,10 @@ func patchPersistErrCommon(patches *gomonkey.Patches, rec *persistErrCallChainRe
 		// exact shape that used to leave the definition stuck in PENDING.
 		return []ReplicaStatus{{NodeID: "node-a", Status: ReplicaStatusReady}}, persistErr
 	})
-	patches.ApplyFunc(publishTemplateStatusWithAlias, func(ctx context.Context, templateID, jobID, status, lastError string) (string, string, error) {
-		rec.publishedStatuses = append(rec.publishedStatuses, status)
+	patches.ApplyFunc(publishCreateFailedIfJobActive, func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
+		rec.publishedStatuses = append(rec.publishedStatuses, StatusFailed)
 		rec.publishedErrors = append(rec.publishedErrors, lastError)
-		return "", "", nil
+		return true, rec.publishErr
 	})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
 }
@@ -366,5 +368,86 @@ func TestFinishTemplateImageJobAfterArtifact_NonCreatePersistErrLeavesDefinition
 	}
 	if got := rec.lastJobStatus(); got != JobStatusFailed {
 		t.Fatalf("job status = %q, want %q", got, JobStatusFailed)
+	}
+	// Sanitisation is scoped to CREATE: a REDO job row still stores the raw
+	// error, as before this change. If sanitisation is ever extended to redo,
+	// this assertion must be updated together with the docs.
+	if jobMsg, _ := rec.lastJobErrorMessage(); jobMsg != persistErr.Error() {
+		t.Fatalf("REDO job error_message = %q, want the raw persistErr %q", jobMsg, persistErr.Error())
+	}
+}
+
+// runCreatePersistErrChain drives a CREATE through the persistErr branch of
+// finishTemplateImageJobAfterArtifact and reports whether the artifact cleanup
+// ran.
+func runCreatePersistErrChain(t *testing.T, rec *persistErrCallChainRecorder, persistErr error, builtFreshArtifact bool) (error, bool) {
+	t.Helper()
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patchPersistErrCommon(patches, rec, persistErr)
+	targets := []*node.Node{{InsID: "node-a", IP: "10.0.0.1", Healthy: true}}
+	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
+		return targets, 1, 1, 0, nil
+	})
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{JobID: jobID, TemplateID: "tpl-1", Operation: JobOperationCreate}, nil
+	})
+	cleanedUp := false
+	patches.ApplyFunc(cleanupFailedRootfsArtifact, func(ctx context.Context, artifact *models.RootfsArtifact, instanceType, templateID string) error {
+		cleanedUp = true
+		return nil
+	})
+	req := &types.CreateTemplateFromImageReq{
+		Request:      &types.Request{RequestID: "req-1"},
+		TemplateID:   "tpl-1",
+		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
+	}
+	err := finishTemplateImageJobAfterArtifact(context.Background(), "job-1", req,
+		&models.RootfsArtifact{ArtifactID: "artifact-1"}, &types.CreateCubeSandboxReq{InstanceType: req.InstanceType}, builtFreshArtifact)
+	return err, cleanedUp
+}
+
+// An adopted artifact (builtFreshArtifact == false) is not owned by this job:
+// the definition is still published FAILED, but the artifact is not cleaned up.
+func TestFinishTemplateImageJobAfterArtifact_PersistErrAdoptedArtifactSkipsCleanup(t *testing.T) {
+	rec := &persistErrCallChainRecorder{}
+	persistErr := errors.New(rawDBErrText)
+
+	err, cleanedUp := runCreatePersistErrChain(t, rec, persistErr, false)
+
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("returned error %v does not wrap persistErr", err)
+	}
+	if cleanedUp {
+		t.Fatal("an adopted artifact must not be cleaned up")
+	}
+	assertPersistErrOutcome(t, rec)
+}
+
+// When the definition publish itself fails, the job row reports it with a
+// sanitized note and the returned error still wraps the raw persistErr.
+func TestFinishTemplateImageJobAfterArtifact_PersistErrPublishFailure(t *testing.T) {
+	rec := &persistErrCallChainRecorder{publishErr: errors.New("database connection timeout")}
+	persistErr := errors.New(rawDBErrText)
+
+	err, _ := runCreatePersistErrChain(t, rec, persistErr, true)
+
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("returned error %v does not wrap persistErr", err)
+	}
+	if !errors.Is(err, rec.publishErr) {
+		t.Fatalf("returned error %v does not wrap the publish error", err)
+	}
+	if got := rec.lastJobStatus(); got != JobStatusFailed {
+		t.Fatalf("job status = %q, want %q", got, JobStatusFailed)
+	}
+	jobMsg, _ := rec.lastJobErrorMessage()
+	if !strings.Contains(jobMsg, "template status could not be updated") {
+		t.Fatalf("job error_message missing status-update note: %q", jobMsg)
+	}
+	for _, leak := range append(rawDBErrLeaks, "database connection timeout") {
+		if strings.Contains(jobMsg, leak) {
+			t.Fatalf("job error_message leaks %q: %q", leak, jobMsg)
+		}
 	}
 }

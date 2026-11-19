@@ -1676,6 +1676,67 @@ func claimTemplateAliasByJobOrderTx(tx *gorm.DB, templateID string, claimantJobR
 	return result, nil
 }
 
+// publishCreateFailedIfJobActive publishes FAILED on templateID only while
+// jobID is still a non-terminal CREATE job of that template, checked in the
+// same transaction as the write. The finish path does not hold the template
+// write lock, so by the time a replica persist error is handled the template
+// may have been force-deleted and re-created under the same template_id; a
+// plain publish by template_id would then demote the new generation. A
+// PENDING check is not enough, since the new generation is PENDING while it
+// builds.
+//
+// published is false (with a nil error) when the job row is gone, terminal or
+// not a CREATE: the definition is left alone. A DELETING definition returns
+// ErrTemplateNotFound, as in publishTemplateStatusWithAlias. FAILED never
+// claims an alias, so no alias handling is needed here.
+func publishCreateFailedIfJobActive(ctx context.Context, templateID, jobID, lastError string) (published bool, err error) {
+	if !isReady() {
+		return false, ErrTemplateStoreNotInitialized
+	}
+	err = retryOnceOnDeadlock(func() error {
+		published = false
+		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// Same lock order as publishTemplateStatusWithAlias: definition, then job.
+			target, err := lockTemplateDefinitionTx(tx, templateID)
+			if err != nil {
+				return err
+			}
+			if target.Status == StatusDeleting {
+				return ErrTemplateNotFound
+			}
+			job, err := getCreateRedoImageJobByIDTx(tx, templateID, jobID)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if job.Operation != JobOperationCreate || templateJobTerminal(job.Status) {
+				return nil
+			}
+			if err := tx.Table(constants.TemplateDefinitionTableName).
+				Where("template_id = ?", templateID).
+				Updates(map[string]any{
+					"status":     StatusFailed,
+					"last_error": lastError,
+					"updated_at": time.Now(),
+				}).Error; err != nil {
+				return err
+			}
+			published = true
+			return nil
+		})
+	})
+	if err != nil {
+		published = false
+		return false, err
+	}
+	if published {
+		invalidateTemplateCaches(templateID)
+	}
+	return published, nil
+}
+
 func lockTemplateDefinitionTx(tx *gorm.DB, templateID string) (*models.TemplateDefinition, error) {
 	def := &models.TemplateDefinition{}
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).

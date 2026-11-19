@@ -80,9 +80,10 @@ Initial state depends on the definition kind
 ```
 PENDING  ─┬─→ READY             every replica READY
 (template)├─→ PARTIALLY_READY   at least one replica READY, at least one not
-          └─→ FAILED            no replica READY, replica persistence failed
-                                on create (persistErr, see caveat below), or
-                                a force delete interrupted the build
+          └─→ FAILED            the aggregate says no replica READY, or
+                                replica persistence failed on create
+                                (persistErr, see caveat below), or a force
+                                delete interrupted the build
 
 CREATING ─┬─→ READY             snapshot committed
 (snapshot)└─→ FAILED            snapshot commit failed
@@ -96,7 +97,11 @@ READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
 a fresh aggregate status from the same summary rules on success.
 
 On a replica persistence failure (persistErr) during **create**, the
-definition is published FAILED with a sanitized message. If the job built a
+definition is published FAILED with a sanitized message, but only while that
+job is still the template's active, non-terminal CREATE
+(`publishCreateFailedIfJobActive` checks the job row in the same transaction).
+If the template was force-deleted and re-created under the same ID in the
+meantime, the new generation's definition is left alone. If the job built a
 fresh artifact, that artifact and its replica rows are then cleaned up. Redo
 and other operations are not changed by this: on persistErr they still fail
 only the job (follow-up).
@@ -117,7 +122,7 @@ Invariants:
   (`UpdateDefinitionStatus`) and then removes the row.
 - Writing only the job row's `template_status` does not update the
   definition. The create persistErr path publishes FAILED through
-  `publishTemplateStatusWithAlias`. Failures that still write only the job
+  `publishCreateFailedIfJobActive`. Failures that still write only the job
   row can leave a PENDING definition stuck in PENDING: redo persistErr, and
   `prepareRedoTemplateReplicas`, `refreshTemplateReplicaSummary` or
   `GetTemplateInfo` errors after the definition row exists. These are not
@@ -134,7 +139,9 @@ Invariants:
   definition status is a user-visible summary and not a scheduling gate.
 - `last_error` (definition) and `error_message` (job row) are both returned
   by the API. The create persistErr path writes sanitized, user-readable text
-  to both, and the raw driver or DB error goes to CubeMaster logs only. Other
+  to the job row, and to the definition when the publish succeeds (if the
+  publish fails, only the job row is updated, with "; template status could
+  not be updated" appended unless the definition is gone). The raw driver or DB error goes to CubeMaster logs only. Other
   failure paths (including redo persistErr) still write the raw error to the
   job row (follow-up).
 

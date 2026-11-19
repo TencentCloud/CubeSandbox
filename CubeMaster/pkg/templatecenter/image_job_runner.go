@@ -275,7 +275,10 @@ func finishTemplateImageJobAfterArtifact(
 }
 
 // markDefinitionFailedOnPersistErr marks the template definition as FAILED
-// after replica persistence fails and invalidates caches.
+// after replica persistence fails on a CREATE, but only while this job is
+// still the template's active CREATE (see publishCreateFailedIfJobActive).
+// If the template was force-deleted and re-created under the same ID in the
+// meantime, the definition belongs to a newer generation and is left alone.
 //
 // It returns two values:
 //   - userMsg: a sanitized, user-readable message. Both the definition's
@@ -286,8 +289,8 @@ func finishTemplateImageJobAfterArtifact(
 //     any) for logs and for the caller's return value only.
 //
 // ErrTemplateNotFound from the publish is suppressed: a concurrent normal
-// delete must not be turned into a second failure, and the job is still
-// failed with the original persistErr.
+// delete must not be turned into a second failure. The job row still gets the
+// sanitized userMsg; persistErr only reaches the return value.
 func markDefinitionFailedOnPersistErr(
 	ctx context.Context,
 	templateID, jobID string,
@@ -300,13 +303,16 @@ func markDefinitionFailedOnPersistErr(
 		readyTargetCount, jobID,
 	)
 	err = persistErr
-	if _, _, updErr := publishTemplateStatusWithAlias(ctx, templateID, jobID, StatusFailed, userMsg); updErr != nil {
+	published, updErr := publishCreateFailedIfJobActive(ctx, templateID, jobID, userMsg)
+	if updErr != nil {
 		log.G(ctx).Errorf("mark template definition FAILED after replica persist error, template=%s job=%s err=%v", templateID, jobID, updErr)
 		if !errors.Is(updErr, ErrTemplateNotFound) {
 			err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
 			userMsg += "; template status could not be updated"
 		}
 		invalidateTemplateCaches(templateID)
+	} else if !published {
+		log.G(ctx).Warnf("job %s is no longer the active CREATE of template %s; definition status left unchanged", jobID, templateID)
 	}
 	return userMsg, err
 }

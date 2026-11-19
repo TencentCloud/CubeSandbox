@@ -189,9 +189,10 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 		log.G(ctx).Warnf("force-deleting template %s with no node locator; cubelet-side cleanup is skipped", templateID)
 	}
 	// The in-use check MUST run before any status is rewritten. shouldCheckInUse
-	// returns false once the definition reads FAILED, so failing the in-flight
-	// work first would silently skip this check and let a force delete pull the
-	// artifact out from under a running sandbox.
+	// returns false once the definition reads FAILED and no READY replica
+	// remains, so failing the in-flight work first would silently skip this
+	// check and let a force delete pull the artifact out from under a running
+	// sandbox.
 	if targets.shouldCheckInUse() {
 		inUse, err := runInUseCheck(ctx, templateID, targets.InstanceType)
 		if err != nil {
