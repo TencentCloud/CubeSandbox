@@ -106,8 +106,6 @@ func TestAggregateSandboxResourcesPartialRelease(t *testing.T) {
 	// running 1000m/2Gi + reserved 50% of paused 2000m/4Gi = 2000m/4096MB.
 	assert.Equal(t, int64(2000), got.MilliCPU, "running + reserved half of paused CPU")
 	assert.Equal(t, int64(4096), got.MemoryMB, "running + reserved half of paused mem")
-	// Liveness is unaffected by the ratio: paused is still not running and
-	// holds no NIC queues; the object and its disk snapshot still count.
 	assert.Equal(t, int64(1), got.MvmRunningNum)
 	assert.Equal(t, int64(4), got.NicQueues)
 	assert.Equal(t, int64(2), got.MvmNum)
