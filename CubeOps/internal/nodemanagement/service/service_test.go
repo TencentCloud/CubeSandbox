@@ -1012,6 +1012,51 @@ func TestRegisterNode_LabelLimitBoundary(t *testing.T) {
 	}
 }
 
+// The label API lets an operator fill all 64 operator labels while the node
+// keeps machine-type, isolation and data-plane keys. The register path must
+// accept that same node, otherwise its next Cubelet re-registration fails and
+// the node stops refreshing capacity and labels.
+func TestRegisterNode_AcceptsLabelsFilledByAPIWithReservedKeys(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	seedMachineTypeLabel(t, fs, "node-1", "intel-k66")
+	if _, err := svc.SetNodeSchedulingDisabled(ctx, "node-1", true, "admin", ""); err != nil {
+		t.Fatalf("isolate: %v", err)
+	}
+
+	user := make(map[string]string, maxLabelsForTest())
+	for i := 0; i < maxLabelsForTest(); i++ {
+		user[fmt.Sprintf("k-%d", i)] = "v"
+	}
+	if err := svc.ReplaceNodeLabels(ctx, "node-1", user, "admin"); err != nil {
+		t.Fatalf("replace 64 user labels: %v", err)
+	}
+
+	// Cubelet re-registers with its own data-plane labels on top of that state.
+	cubelet := map[string]string{
+		"kubernetes.io/arch":     "amd64",
+		"beta.kubernetes.io/os":  "linux",
+		"kubernetes.io/hostname": "node-1",
+	}
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1", Labels: cubelet}); err != nil {
+		t.Fatalf("re-register after the API filled the budget: %v", err)
+	}
+
+	snap, err := svc.GetNode(ctx, "node-1")
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if snap.Labels[model.LabelMachineType] != "intel-k66" {
+		t.Fatalf("machine-type = %q, want preserved", snap.Labels[model.LabelMachineType])
+	}
+	if snap.Labels[model.LabelSchedulingDisabled] != model.LabelSchedulingDisabledValue {
+		t.Fatalf("isolation = %q, want preserved", snap.Labels[model.LabelSchedulingDisabled])
+	}
+}
+
 // --- T4: surviving exported functions ---
 
 func TestGetNodeComponentVersions(t *testing.T) {

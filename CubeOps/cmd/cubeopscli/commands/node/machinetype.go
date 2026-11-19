@@ -243,43 +243,46 @@ func machineTypeUnbindAction(c *cli.Context) error {
 	if err := initNodeHTTP(c); err != nil {
 		return err
 	}
-	var failed error
 	results := make([]model.MachineTypeNodeResult, 0, c.NArg())
 	for _, nodeID := range c.Args() {
 		path := fmt.Sprintf("/internal/v1/nodes/%s/machine-type", url.PathEscape(nodeID))
 		if err := machineTypeReq(c, http.MethodDelete, path, nil, nil); err != nil {
 			results = append(results, model.MachineTypeNodeResult{NodeID: nodeID, Error: err.Error()})
-			failed = err
 			continue
 		}
 		results = append(results, model.MachineTypeNodeResult{NodeID: nodeID, OK: true})
 	}
-	if err := printMachineTypeResults(c, results); err != nil {
-		return err
-	}
-	if failed != nil && !c.Bool("json") {
-		return errors.New("one or more nodes failed")
-	}
-	return nil
+	// printMachineTypeResults already returns an error when any node failed, in
+	// both table and --json modes, so its return value is the exit code.
+	return printMachineTypeResults(c, results)
 }
 
 func printMachineTypeResults(c *cli.Context, results []model.MachineTypeNodeResult) error {
 	if c.Bool("json") {
-		return printJSON(map[string]interface{}{"results": results})
+		if err := printJSON(map[string]interface{}{"results": results}); err != nil {
+			return err
+		}
+	} else {
+		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
+		fmt.Fprintln(w, "NODE_ID\tRESULT\tERROR")
+		for _, r := range results {
+			status := "ok"
+			if !r.OK {
+				status = "failed"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\n", r.NodeID, status, r.Error)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
 	}
-	w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
-	fmt.Fprintln(w, "NODE_ID\tRESULT\tERROR")
+	// A partial failure is an error in both modes, matching `node label`: a
+	// script consuming --json must not see exit 0 after a node failed.
 	failed := 0
 	for _, r := range results {
-		status := "ok"
 		if !r.OK {
-			status = "failed"
 			failed++
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", r.NodeID, status, r.Error)
-	}
-	if err := w.Flush(); err != nil {
-		return err
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d node(s) failed", failed, len(results))

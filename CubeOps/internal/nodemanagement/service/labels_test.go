@@ -6,6 +6,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,6 +45,31 @@ func TestValidateLabelsSkippingReserved(t *testing.T) {
 	bad := map[string]string{model.LabelSchedulingDisabled: "true", "": "v"}
 	if err := service.ValidateLabelsSkippingReserved(bad); err == nil {
 		t.Error("invalid user label should still be rejected")
+	}
+}
+
+// The register path and the label API must share one budget definition. A node
+// the API filled with 64 operator labels still carries the reserved keys, so a
+// total-length check on the register side used to reject its next re-register.
+func TestValidateLabelsSkippingReserved_IgnoresReservedInBudget(t *testing.T) {
+	labels := make(map[string]string, 69)
+	for i := 0; i < 64; i++ {
+		labels[fmt.Sprintf("k-%d", i)] = "v"
+	}
+	labels[model.LabelSchedulingDisabled] = model.LabelSchedulingDisabledValue
+	labels[model.LabelMachineType] = "intel-k66"
+	labels["kubernetes.io/arch"] = "amd64"
+	labels["beta.kubernetes.io/os"] = "linux"
+	labels["cube.cloud.tencentcloud.com/instance-type"] = "cubebox"
+
+	if len(labels) <= 64 {
+		t.Fatalf("test map must exceed the total budget, got %d", len(labels))
+	}
+	if err := service.ValidateLabelsSkippingReserved(labels); err != nil {
+		t.Fatalf("reserved keys must not consume the operator budget: %v", err)
+	}
+	if got := service.CountUserLabels(labels); got != 64 {
+		t.Fatalf("CountUserLabels = %d, want 64", got)
 	}
 }
 

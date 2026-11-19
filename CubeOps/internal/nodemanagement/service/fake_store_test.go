@@ -24,6 +24,12 @@ type fakeNodeStore struct {
 	failOnGetRegistration error
 	failOnUpdateLabels    error
 	failOnUpdateQuota     error
+	// failMutateFor fails MutateLabels only for the listed node IDs, so a
+	// multi-node operation can fail part-way and exercise rollback.
+	failMutateFor map[string]error
+	// failOnDeleteMachineType makes the catalog row delete fail after the
+	// membership writes already ran.
+	failOnDeleteMachineType error
 
 	updateQuotaCalls     int
 	updateHostFactsCalls int
@@ -116,6 +122,9 @@ func (f *fakeNodeStore) MutateLabels(_ context.Context, nodeID string, fn func(c
 	defer f.mu.Unlock()
 	if f.failOnGetRegistration != nil {
 		return nil, false, f.failOnGetRegistration
+	}
+	if err := f.failMutateFor[nodeID]; err != nil {
+		return nil, false, err
 	}
 	reg, ok := f.regs[nodeID]
 	if !ok {
@@ -481,6 +490,9 @@ func (f *fakeNodeStore) DeleteMachineType(_ context.Context, name string) error 
 	defer f.mu.Unlock()
 	if _, ok := f.machineTypes[name]; !ok {
 		return store.ErrNotFound
+	}
+	if f.failOnDeleteMachineType != nil {
+		return f.failOnDeleteMachineType
 	}
 	delete(f.machineTypes, name)
 	return nil
