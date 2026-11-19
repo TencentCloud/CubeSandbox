@@ -6,6 +6,7 @@ package cgroup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -191,6 +192,11 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 	return nil
 }
 
+// numaNodeCount is a variable rather than a direct call because pkg/numa is
+// not injectable and the single-NUMA fallback is the only thing that keeps
+// existing non-NUMA deployments on the v1 pool.
+var numaNodeCount = numa.GetNumaNodeCount
+
 // NumaAffinityEnabled reports whether the per-NUMA cgroup pool should be used.
 // The v2 pool keeps one subtree per NUMA node (numa<N>) whose cpuset.cpus and
 // cpuset.mems carry that node's cpulist / node id; a sandbox cgroup created
@@ -208,7 +214,7 @@ func (c *Config) NumaAffinityEnabled() bool {
 	if c == nil || !c.EnableNumaAffinity {
 		return false
 	}
-	return numa.GetNumaNodeCount() > 1
+	return numaNodeCount() > 1
 }
 
 func (p *cgPool) initPoolV2() error {
@@ -299,19 +305,33 @@ func (p *cgPool) initPoolV2Late() error {
 		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
 		createErr := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId)
 		applyErr := ensureNumaSlotCpuset(p.poolV2.handle, slot, numaNode.Cpulist, numaNode.NodeId)
-		if applyErr != nil && strict {
-			return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w", numaNode.NodeId, slot, applyErr)
-		}
-		if createErr != nil {
-			// Only the slot of a previous run is worth tolerating: it exists and
-			// already carries the mask, which the re-assert above just proved.
-			if strict && applyErr != nil {
-				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: %w", numaNode.NodeId, slot, createErr)
+		if strict {
+			// The pool is what Create hands out, so a slot that cannot be proven
+			// to carry the node mask has to fail startup: otherwise the node
+			// reports ready and then places every sandbox in a pool with no
+			// affinity at all.
+			if applyErr != nil {
+				// Keep createErr too: it is usually what explains the failed apply
+				// (e.g. the cpuset controller could not be enabled).
+				if createErr != nil {
+					return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: %w",
+						numaNode.NodeId, slot, errors.Join(createErr, applyErr))
+				}
+				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w",
+					numaNode.NodeId, slot, applyErr)
 			}
-			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
-		}
-		if applyErr != nil {
-			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
+			// The re-assert above succeeded, so a create failure here can only be
+			// the slot of a previous run.
+			if createErr != nil {
+				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
+			}
+		} else {
+			if createErr != nil {
+				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
+			}
+			if applyErr != nil {
+				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
+			}
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
 		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {

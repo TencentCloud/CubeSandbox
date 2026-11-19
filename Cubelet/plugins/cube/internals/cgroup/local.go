@@ -111,8 +111,11 @@ func (l *CgPlugin) init() error {
 
 	l.config.parseAndSetDynamicConfig(dynamConf.GetConfig())
 	if l.config.EnableNumaAffinity {
-		// NumaInfo is parsed lazily and panics when /sys/devices/system/node is
-		// unreadable, so only touch it when the switch is on.
+		// One line with the effective state, including the node count the pool
+		// will see. The count is cached, and the pool bootstrap below reads the
+		// same sysfs regardless of the switch (pkg/numa panics when
+		// /sys/devices/system/node is unreadable), so this branch does not make
+		// such a host safe - it only avoids repeating the lookup just to log it.
 		log.L.Infof("cgroup numa affinity: enabled=%v (enable_numa_affinity=true, numa_nodes=%d)",
 			l.config.NumaAffinityEnabled(), numa.GetNumaNodeCount())
 	} else {
