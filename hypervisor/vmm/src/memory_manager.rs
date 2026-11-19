@@ -2448,6 +2448,7 @@ impl MemoryManager {
         {
             self.save_range_to_file(&memory_file, &range, file_off)?;
         }
+        sync_memory_snapshot(&memory_file, memory_file_target.path())?;
 
         info!(
             "PagemapAnon snapshot saved: {} anon bytes written to {:?}",
@@ -2596,6 +2597,7 @@ impl MemoryManager {
         {
             self.save_range_to_file(&memory_file, &range, file_off)?;
         }
+        sync_memory_snapshot(&memory_file, memory_file_target.path())?;
         info!(
             "Soft-dirty snapshot saved: {} dirty bytes written to {:?}",
             stats.saved_bytes,
@@ -2641,6 +2643,21 @@ impl MemoryManager {
 
 const FUSE_SNAPSHOT_WRITE_ALIGN: u64 = 1 << 20;
 const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
+
+/// Make a written memory snapshot durable before the caller is told it is
+/// saved.
+///
+/// The image is written through the page cache, and for an external target
+/// that is a block device the caller detaches and seals as soon as the save
+/// returns. Closing the file only flushes a block device when this was its
+/// last opener, and a device that is detached with dirty pages left drops
+/// them without an error: the seal then publishes the base image with none of
+/// the guest's writes in it, and the sandbox resumes from stale memory.
+fn sync_memory_snapshot(memory_file: &File, path: &Path) -> result::Result<(), MigratableError> {
+    memory_file.sync_all().map_err(|e| {
+        MigratableError::MigrateSend(anyhow!("Failed to sync memory snapshot {:?}: {}", path, e))
+    })
+}
 
 /// Window size used to coalesce incremental snapshot writes, 0 for page
 /// granular writes. FUSE targets (JuiceFS) get 1 MiB windows, because
@@ -3279,6 +3296,7 @@ impl Transportable for MemoryManager {
                 // Move to next range.
                 offset += range.length;
             }
+            sync_memory_snapshot(&memory_file, memory_file_target.path())?;
             return Ok(());
         }
 
@@ -3298,6 +3316,7 @@ impl Transportable for MemoryManager {
                     self.save_range_to_file(&memory_file, range, file_offset)?;
                     file_offset += range.length;
                 }
+                sync_memory_snapshot(&memory_file, memory_file_target.path())?;
             }
         }
         Ok(())
