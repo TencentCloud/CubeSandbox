@@ -82,6 +82,18 @@ cubemastercli tpl create-from-image \
 }
 ```
 
+命令会直接执行，不会隐式启动 shell。如果需要使用 `&&`、管道、重定向或环境变量展开等 shell 功能，请显式调用 shell。例如，当镜像包含 `/bin/sh` 时，`postStart` 钩子可以这样配置：
+
+```json
+{
+  "postStart": {
+    "exec": {
+      "command": ["/bin/sh", "-c", "mkdir -p /tmp/workspace-cache && echo ready > /tmp/workspace-ready"]
+    }
+  }
+}
+```
+
 - `postStart` 在每个新沙箱就绪前执行，包括从模板快照创建的沙箱。命令最多运行 10 秒。如果命令返回非零退出码或超时，沙箱创建失败并开始清理。
 - `preStop` 在优雅删除期间、guest 仍可执行命令时运行。钩子执行和发送 `SIGTERM` 后等待主进程退出共用最多 5 秒。删除请求剩余时间较短时，这个时限也会缩短。Cubelet 会记录钩子的失败和超时，并继续删除。重试删除时会跳过已尝试执行的钩子。
 

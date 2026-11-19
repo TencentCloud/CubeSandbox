@@ -82,6 +82,18 @@ Use the optional `lifecycle` field in the CubeAPI `POST /templates` request to r
 }
 ```
 
+Commands run directly, without an implicit shell. To use shell features such as `&&`, pipes, redirection, or environment variable expansion, invoke a shell explicitly. For example, if the image includes `/bin/sh`, a `postStart` hook can use:
+
+```json
+{
+  "postStart": {
+    "exec": {
+      "command": ["/bin/sh", "-c", "mkdir -p /tmp/workspace-cache && echo ready > /tmp/workspace-ready"]
+    }
+  }
+}
+```
+
 - `postStart` runs in each new sandbox, including one created from a template snapshot, before it becomes ready. The command has up to 10 seconds to finish. A nonzero exit status or a timeout causes sandbox creation to fail and starts cleanup.
 - `preStop` runs during graceful deletion while the guest can still execute commands. The hook and the wait for the main process to exit after `SIGTERM` share up to 5 seconds. A shorter deletion deadline can reduce that time. Cubelet logs hook failures and timeouts and continues deletion. A deletion retry skips a hook that has already been attempted.
 
