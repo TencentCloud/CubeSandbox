@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/allocator"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle"
+	v2 "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle/v2"
 )
 
 // applyCpusetFiles is what repairs a per-NUMA slot on every start, so cover the
@@ -55,6 +56,56 @@ func TestApplyCpusetFilesRejectsSwallowedWrite(t *testing.T) {
 	err := applyCpusetFiles(dir, "0-3", 0)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reads back")
+}
+
+// cgroupfs prints the effective set rather than the text it was given, and
+// removeDisabledCpus can hand it a list that is not canonical, so the read-back
+// has to compare sets: a text comparison rejects a slot that is bound.
+func TestSameCPUSet(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"identical", "0-15,192-207", "0-15,192-207", true},
+		{"single-element range prints as one id", "0", "0-0", true},
+		{"overlapping ranges print merged", "0-95", "0-6,6-95", true},
+		{"adjacent ranges print merged", "0-95", "0-47,48-95", true},
+		{"adjacent single ids print merged", "0-95", "0-6,7-95", true},
+		{"one id short", "0-95", "0-94", false},
+		{"untouched against untouched", "", " ", true},
+		{"untouched against a mask", "", "0-3", false},
+		{"unparsable list", "0-3", "x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, sameCPUSet(tc.a, tc.b))
+		})
+	}
+}
+
+// A slot that already names the right set is left alone even when the text
+// differs, so a host whose cpulist is non-canonical keeps a working slot
+// instead of failing startup.
+func TestApplyCpusetFilesKeepsKernelSpelling(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cpuset.cpus"), []byte("0-95\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cpuset.mems"), []byte("0"), 0644))
+
+	// What removeDisabledCpus emits for node cpulist 0-95 with an unsorted
+	// cgroup_disable_cpuset_list of "7,5"; the kernel prints it back as "0-95".
+	require.NoError(t, applyCpusetFiles(dir, "0-6,6-95", 0))
+	require.Equal(t, "0-95\n", readCpusetFile(t, dir, "cpuset.cpus"))
+}
+
+// The unified hierarchy has no per-controller mount, so the mask lives in the
+// cgroup's own files and CpusetDir hands back that directory. The v1 backend
+// resolves it from /proc/mounts instead and has no injection point here.
+func TestV2CpusetDirPointsAtTheCgroupItself(t *testing.T) {
+	h := v2.NewV2Handle(2)
+	group := "cube_sandbox_v2/sandbox/numa3"
+	dir, err := h.CpusetDir(group)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(handle.RootMountPoint, group), dir)
 }
 
 func readCpusetFile(t *testing.T, dir, name string) string {
@@ -192,6 +243,8 @@ func TestInitPoolV2LateStrictness(t *testing.T) {
 // A single-NUMA host gains nothing from the per-NUMA pool, and that fallback is
 // what keeps existing non-NUMA deployments on the v1 pool.
 func TestNumaAffinityEnabled(t *testing.T) {
+	// The pool reads this var without a lock, so these subtests must not be
+	// parallelised.
 	old := numaNodeCount
 	t.Cleanup(func() { numaNodeCount = old })
 

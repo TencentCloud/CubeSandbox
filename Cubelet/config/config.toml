@@ -65,8 +65,10 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # controllers on a cgroup v1 host, the unified hierarchy on v2); cubelet
     # refuses to start when it is enabled and the controller is missing, or when
     # a node reports no CPUs at all (memory-only CXL/PMEM node, or every CPU of
-    # that node parked in cgroup_disable_cpuset_list - such a node cannot be
-    # bound, so the node has to be excluded from the feature instead).
+    # that node parked in cgroup_disable_cpuset_list). This is a host-wide
+    # switch with no per-node allow list, and placement round-robins over every
+    # node id, so a host that carries such a node cannot enable the feature at
+    # all: leave it off there, the startup error is how cubelet says so.
     # Only cubelet reads this key. Off by default.
     #
     # Runtime behaviour, so that it is not a surprise in production:

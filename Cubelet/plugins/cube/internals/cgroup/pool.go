@@ -273,9 +273,71 @@ func ensureNumaSlotCpuset(h handle.Interface, slot, cpulist string, nodeID int) 
 	return applyCpusetFiles(dir, cpulist, nodeID)
 }
 
+// parseCPUList parses a cpuset list ("0-3,8,10-11") into the set of ids it
+// names. An empty list is an empty set, which is what a slot that was never
+// written reads back as.
+func parseCPUList(list string) (map[int]struct{}, error) {
+	ids := make(map[int]struct{})
+	list = strings.TrimSpace(list)
+	if list == "" {
+		return ids, nil
+	}
+	for _, part := range strings.Split(list, ",") {
+		lo, hi, isRange := strings.Cut(strings.TrimSpace(part), "-")
+		start, err := strconv.Atoi(strings.TrimSpace(lo))
+		if err != nil {
+			return nil, fmt.Errorf("parse cpu list %q: %w", list, err)
+		}
+		end := start
+		if isRange {
+			if end, err = strconv.Atoi(strings.TrimSpace(hi)); err != nil {
+				return nil, fmt.Errorf("parse cpu list %q: %w", list, err)
+			}
+		}
+		if end < start {
+			return nil, fmt.Errorf("parse cpu list %q: %q ends before it starts", list, part)
+		}
+		for id := start; id <= end; id++ {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids, nil
+}
+
+// sameCPUSet reports whether two cpuset lists name the same ids. cgroupfs does
+// not hand back the text it was given, it prints the effective set: "0-0" comes
+// back as "0", and overlapping or adjacent ranges come back merged. The list
+// being written can be non-canonical to begin with, because removeDisabledCpus
+// splits a range once per disabled CPU, in the order cgroup_disable_cpuset_list
+// gives them ("0-6,6-95" for a nested disable list, "0-0" for a two-CPU node
+// with one CPU disabled). Comparing the text would therefore reject a slot that
+// is bound correctly - and with the switch on that rejection is a startup
+// failure on a host that can actually be bound.
+func sameCPUSet(a, b string) bool {
+	left, err := parseCPUList(a)
+	if err != nil {
+		return false
+	}
+	right, err := parseCPUList(b)
+	if err != nil {
+		return false
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for id := range left {
+		if _, ok := right[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // applyCpusetFiles makes dir carry exactly cpulist / nodeID, writing only the
 // files that differ and reading both back afterwards, so a nil return means the
 // mask is what a child cgroup will inherit rather than "the write was accepted".
+// Both comparisons are on the parsed set, because the kernel normalises what it
+// prints and cpulist is not always canonical itself (see sameCPUSet).
 func applyCpusetFiles(dir, cpulist string, nodeID int) error {
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("cpuset directory %s: %w", dir, err)
@@ -290,23 +352,23 @@ func applyCpusetFiles(dir, cpulist string, nodeID int) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", file, err)
 		}
-		if strings.TrimSpace(string(cur)) == w.val {
+		if sameCPUSet(string(cur), w.val) {
 			continue
 		}
 		if err := os.WriteFile(file, []byte(w.val), 0644); err != nil {
 			return fmt.Errorf("write %s=%s: %w", file, w.val, err)
 		}
 	}
-	// cgroupfs accepts a write and may still keep something else (a rejected
-	// controller, a kernel that re-formats the range), so the value has to be
-	// read back: the bootstrap treats a nil return as "this slot is bound".
+	// cgroupfs accepts a write and may still keep something else (a controller
+	// that is not enabled, a value the caller may not set), so the value has to
+	// be read back: the bootstrap treats a nil return as "this slot is bound".
 	for _, w := range want {
 		file := path.Join(dir, w.name)
 		cur, err := os.ReadFile(file)
 		if err != nil {
 			return fmt.Errorf("read back %s: %w", file, err)
 		}
-		if got := strings.TrimSpace(string(cur)); got != w.val {
+		if got := strings.TrimSpace(string(cur)); !sameCPUSet(got, w.val) {
 			return fmt.Errorf("%s reads back %q, want %q", file, got, w.val)
 		}
 	}
@@ -337,6 +399,13 @@ func (p *cgPool) initPoolV2Late() error {
 			// Reachable without a broken host: memory-only nodes (CXL / PMEM)
 			// report an empty cpulist, and removeDisabledCpus returns "" when
 			// every CPU of a node is in cgroup_disable_cpuset_list.
+			//
+			// There is no per-node opt-out to soften this with: the switch is
+			// host-wide and placement round-robins over every node id, so a host
+			// carrying such a node cannot enable the feature at all. Leaving it
+			// off is the supported configuration there, and this error is how the
+			// operator is told, instead of the node reporting ready with a pool
+			// that binds nothing.
 			return fmt.Errorf("cgroup pool v2 init: numa%d has no cpus to bind (cpulist is empty)", numaNode.NodeId)
 		}
 		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
@@ -357,13 +426,14 @@ func (p *cgPool) initPoolV2Late() error {
 				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w",
 					numaNode.NodeId, slot, applyErr)
 			}
-			// The re-assert above wrote the mask and read it back, so the slot is
-			// bound. That is the case this tolerance is for: the slot of a previous run, where
-			// creating an existing cgroup is an error on v1. It cannot tell such a
-			// slot apart from one v2 left half-created (MkdirAll ran, then
-			// toggleControllers or Load failed): the mask is right there too, so
-			// only the controllers it should have enabled are missing, and those
-			// surface on the first sandbox, in SetCubeboxCgroupLimit.
+			// The apply above succeeded - the mask was written and read back - so
+			// the slot is bound, and a create error on its own is tolerated: that
+			// is the slot of a previous run, where creating an existing cgroup is
+			// an error on v1. It cannot tell such a slot apart from one v2 left
+			// half-created (MkdirAll ran, then toggleControllers or Load failed):
+			// the mask is right there too, only the controllers it should have
+			// enabled are missing, and those surface on the first sandbox, in
+			// SetCubeboxCgroupLimit.
 			if createErr != nil {
 				log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
 			}
