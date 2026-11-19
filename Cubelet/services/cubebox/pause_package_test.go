@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	volumeplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
 )
 
 func TestResumeFromPauseSandboxID(t *testing.T) {
@@ -141,6 +142,33 @@ func TestPauseRestoreBindingKeepsSameNodeResumeLocal(t *testing.T) {
 	req := &cubebox.RunCubeSandboxRequest{}
 	pauseRestoreBindingFrom(thin, "snap-1", "s3").applyTo(req)
 	assert.Empty(t, req.Annotations[constants.MasterAnnotationSnapshotCrossNode])
+}
+
+func TestPauseRestoreRequiresFreshSourcesForAllPluginVolumes(t *testing.T) {
+	const sources = cubebox.AnnotationPluginVolumeSources
+	packed := &cubebox.RunCubeSandboxRequest{
+		Volumes: []*cubebox.Volume{
+			{Name: "shared"},
+			{Name: "native", VolumeSource: &cubebox.VolumeSource{
+				PluginVolume: &volumeplugin.PluginVolumeSource{Driver: "s3"},
+			}},
+		},
+		Annotations: map[string]string{
+			sources: `[{"name":"shared","driver":"s3","private_data":"old"}]`,
+		},
+	}
+	volumes, err := pausePackagePluginVolumes(packed)
+	require.NoError(t, err)
+	require.Len(t, volumes, 2)
+	require.Error(t, applyPausePluginVolumes(packed, nil))
+	require.Error(t, applyPausePluginVolumes(packed, map[string]string{
+		sources: `[{"name":"shared","driver":"s3"},{"name":"other","driver":"s3"}]`,
+	}))
+
+	fresh := `[{"name":"shared","driver":"s3","private_data":"current"},{"name":"native","driver":"s3"}]`
+	require.NoError(t, applyPausePluginVolumes(packed, map[string]string{sources: fresh}))
+	require.Equal(t, fresh, packed.GetAnnotations()[sources])
+	require.NoError(t, applyPausePluginVolumes(&cubebox.RunCubeSandboxRequest{}, nil))
 }
 
 func TestMergeThinNetworkFieldsOntoPackedPauseSpec(t *testing.T) {

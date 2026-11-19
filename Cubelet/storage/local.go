@@ -887,7 +887,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		if retErr == nil {
 			return
 		}
-		if cleanupErr := l.cleanupCreateResult(ctx, result); cleanupErr != nil {
+		if cleanupErr := l.cleanupCreateResult(ctx, result, opts); cleanupErr != nil {
 			retErr = ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "%v (cleanup failed: %v)", retErr, cleanupErr)
 		}
 	}()
@@ -971,7 +971,7 @@ func (l *local) prepareRequestVolumes(ctx context.Context, opts *workflow.Create
 	return nil
 }
 
-func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) error {
+func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo, create *workflow.CreateContext) error {
 	if result == nil {
 		return nil
 	}
@@ -980,6 +980,9 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 			SandboxID:  result.SandboxID,
 			IsRollBack: true,
 		},
+	}
+	if create != nil && !create.PluginVolumeAttachUncertain {
+		cleanupOpts.CreateVolumeRollback = create
 	}
 	var errs error
 	if err := l.destroy(ctx, result, cleanupOpts); err != nil {

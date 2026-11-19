@@ -62,12 +62,6 @@ type AttachRequest struct {
 	// >0 → already attached by other sandboxes; reuse existing host mount.
 	RefCount int64
 
-	// NodeRefFirstAttach is set by Manager.Attach to true when this attach
-	// took the node-local ref-count from 0 to 1, i.e. this is the first
-	// sandbox on this node to reference the volume.  Cubelet uses it to
-	// notify CubeMaster to increment its cross-node ref-count by one.
-	NodeRefFirstAttach bool
-
 	// VolumeBaseDir is the parent directory Cubelet requires the plugin to
 	// mount this volume under.  The plugin MUST return a HostPath located
 	// inside this directory (typically "<VolumeBaseDir>/<plugin-name>-<volumeID>").
@@ -96,6 +90,14 @@ type AttachResult struct {
 	Metadata map[string]string
 }
 
+// AttachNotStartedError confirms no plugin attach ran and this attempt left no holder.
+type AttachNotStartedError struct {
+	Cause error
+}
+
+func (e *AttachNotStartedError) Error() string { return e.Cause.Error() }
+func (e *AttachNotStartedError) Unwrap() error { return e.Cause }
+
 // DetachRequest is the counterpart of AttachRequest.
 type DetachRequest struct {
 	SandboxID string
@@ -123,4 +125,11 @@ type DetachRequest struct {
 	// this node referencing the volume.  Cubelet uses it to notify CubeMaster
 	// to decrement its cross-node ref-count by one.
 	NodeRefLastDetach bool
+	// CreateReportClaimed marks the last detach of a mount whose +1 was
+	// claimed by a successful Create, rather than a legacy mount.
+	CreateReportClaimed bool
+
+	// RequireRecordedHolder requires proof that this call released a holder.
+	// It is used internally when Create must confirm its own rollback.
+	RequireRecordedHolder bool `json:"-"`
 }

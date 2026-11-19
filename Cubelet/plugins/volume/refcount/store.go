@@ -72,6 +72,10 @@ type RefCountRecord struct {
 
 	// Driver is stored for informational / recovery purposes.
 	Driver string `json:"driver"`
+
+	// ReportPending starts true and becomes false when a successful Create
+	// claims the +1. Nil identifies a legacy mount.
+	ReportPending *bool `json:"report_pending,omitempty"`
 }
 
 // Store is a persistent reference-count store backed by a bbolt database.
@@ -140,7 +144,17 @@ type AcquireResult struct {
 // The caller should pass Before to the plugin as MountRequest.RefCount so
 // the plugin can detect first-attach (Before == 0).
 func (s *Store) Acquire(namespace, volumeID, sandboxID, driver string) (AcquireResult, error) {
+	pending := true
+	return s.acquire(namespace, volumeID, sandboxID, driver, &pending)
+}
 
+// Restore undoes a failed Detach without starting a new report obligation.
+func (s *Store) Restore(namespace, volumeID, sandboxID, driver string, reportPending *bool) error {
+	_, err := s.acquire(namespace, volumeID, sandboxID, driver, reportPending)
+	return err
+}
+
+func (s *Store) acquire(namespace, volumeID, sandboxID, driver string, reportPending *bool) (AcquireResult, error) {
 	var res AcquireResult
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketName))
@@ -160,6 +174,9 @@ func (s *Store) Acquire(namespace, volumeID, sandboxID, driver string) (AcquireR
 		}
 
 		rec.SandboxIDs[sandboxID] = struct{}{}
+		if rec.Count == 0 {
+			rec.ReportPending = reportPending
+		}
 		rec.Count = int64(len(rec.SandboxIDs))
 		rec.Driver = driver
 		res.After = rec.Count
@@ -168,13 +185,49 @@ func (s *Store) Acquire(namespace, volumeID, sandboxID, driver string) (AcquireR
 	return res, err
 }
 
+// TakeCreateReports claims the pending transitions for a successful holder.
+// Claim all volumes atomically so a failed write cannot lose part of a reply.
+func (s *Store) TakeCreateReports(namespace, sandboxID string, volumeIDs []string) ([]string, error) {
+	var reports []string
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(BucketName))
+		for _, id := range volumeIDs {
+			k := key(namespace, id)
+			rec, err := getRecord(b, k)
+			if err != nil {
+				return err
+			}
+			if _, held := rec.SandboxIDs[sandboxID]; !held {
+				return fmt.Errorf("refcount: successful sandbox %q does not hold volume %q", sandboxID, id)
+			}
+			if rec.ReportPending != nil && *rec.ReportPending {
+				*rec.ReportPending = false
+				if err := putRecord(b, k, rec); err != nil {
+					return err
+				}
+				reports = append(reports, id)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return reports, nil
+}
+
 // ReleaseResult is returned by Release.
 type ReleaseResult struct {
 	// After is the ref-count AFTER this sandbox was removed (≥ 0).
 	// 0 means this was the last sandbox; host-level cleanup is appropriate.
 	After int64
 	// NotHeld is true when sandboxID was not in the set (idempotent call).
-	NotHeld bool
+	NotHeld       bool
+	ReportPending *bool
+}
+
+func (r ReleaseResult) LastReportedDetach() bool {
+	return r.After == 0 && !r.NotHeld && (r.ReportPending == nil || !*r.ReportPending)
 }
 
 // Release removes sandboxID from the holder set of (namespace, volumeID).
@@ -203,6 +256,7 @@ func (s *Store) Release(namespace, volumeID, sandboxID string) (ReleaseResult, e
 		}
 
 		delete(rec.SandboxIDs, sandboxID)
+		res.ReportPending = rec.ReportPending
 		rec.Count = int64(len(rec.SandboxIDs))
 		res.After = rec.Count
 
