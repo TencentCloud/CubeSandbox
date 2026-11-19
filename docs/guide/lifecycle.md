@@ -165,6 +165,8 @@ When connecting or resuming a paused sandbox while another lifecycle operation o
 
 A retry or delete during rollback of a failed resume on the same Cubelet returns HTTP 503 with `Retry-After: 2` through CubeAPI and the CubeOps SDK endpoints. If rollback times out, Cubelet retries resource cleanup in the background and keeps the original pause snapshot available for a later resume. After 60 failed cleanup attempts, it emits an error log requesting operator investigation and reduces cleanup retries to once every 10 minutes. Resume and delete remain blocked until cleanup succeeds, so a retry cannot reuse resources still owned by the failed runtime. Operators should investigate the Cubelet rollback errors and runtime/storage health; clearing the gate alone does not make resource reuse safe.
 
+Treat `Retry-After` as the minimum delay before another request; cleanup can take longer. Retry the intended operation with the same sandbox ID, and bound the total retry time in your client. If HTTP 503 persists, inspect the Cubelet rollback error logs for that ID.
+
 The rollback gate and remembered runtime process identities are held in Cubelet memory and are lost when Cubelet restarts. This gate only coordinates requests reaching the same Cubelet; it does not provide cluster-wide coordination when an S3-backed resume retry is placed on another node. Cross-node rollback coordination and recovery of pending rollback state after restart remain outside this mechanism's scope.
 
 The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
