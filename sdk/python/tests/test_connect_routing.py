@@ -139,7 +139,7 @@ def test_header_error_accepts_connect_flags(flags):
 def test_commands_run_reports_html_content_type():
     sb = make_sandbox()
     with patch.object(sb, "_build_data_client", return_value=_client(_html())):
-        with pytest.raises(RuntimeError, match="received HTML instead of a Connect") as exc:
+        with pytest.raises(RuntimeError, match="^command failed: received HTML instead of") as exc:
             sb.commands.run("echo hi")
     assert "CUBE_PROXY_NODE_IP" in str(exc.value)
 
@@ -263,3 +263,112 @@ def test_plain_text_error_has_no_routing_hint(target):
     with patch.object(sb, "_build_data_client", return_value=_client(page)):
         message = _call(sb, target)
     assert message.endswith("HTTP 500: envd crashed")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_404_text_page_carries_routing_hint(target):
+    # Go's net/http.NotFound, a common shape for a misrouted request.
+    sb = make_sandbox()
+    page = _error_page(404, b"404 page not found\n", "text/plain; charset=utf-8")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert "HTTP 404: 404 page not found; response may be an HTML/text page" in message
+    assert "CUBE_PROXY_NODE_IP" in message
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "content_type", "routing"),
+    [
+        (404, b"<html><body>gateway</body></html>", None, True),
+        (502, b'{"unexpected":1}', "text/html", True),
+        (404, b'{"message": "process not fou', "text/html", False),
+        (404, b'{"detail":"not found"}', "text/plain", False),
+        (500, b"404 page not found", "text/plain", False),
+        (404, b"   ", "text/plain", False),
+        (404, b"not found", "application/octet-stream", False),
+    ],
+    ids=[
+        "html-without-doctype",
+        "html-labelled-non-error-json",
+        "truncated-json",
+        "json-error-text",
+        "text-on-500",
+        "blank-text-404",
+        "binary-404",
+    ],
+)
+def test_routing_page_classification_matches_go(status, body, content_type, routing):
+    from cubesandbox._commands import _is_routing_page
+
+    media_type = (content_type or "").split(";")[0]
+    assert _is_routing_page(status, media_type, body) is routing
+
+
+class _CountingStream(httpx.SyncByteStream):
+    """An endless body that records how much of it was read."""
+
+    def __init__(self, chunk: bytes = b"x" * 1024) -> None:
+        self.chunk = chunk
+        self.read = 0
+
+    def __iter__(self):
+        while True:
+            self.read += len(self.chunk)
+            yield self.chunk
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_error_body_read_is_bounded(target):
+    sb = make_sandbox()
+    stream = _CountingStream()
+    page = httpx.Response(502, headers={"content-type": "text/plain"}, stream=stream)
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert stream.read <= 64 * 1024 + len(stream.chunk)
+    assert message.endswith(" [truncated]")
+    assert len(message) < 64 * 1024 + 100
+
+
+class _FailingStream(httpx.SyncByteStream):
+    def __iter__(self):
+        yield b"partial"
+        raise httpx.ReadError("connection reset")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_unreadable_error_body_keeps_the_status_error(target):
+    sb = make_sandbox()
+    page = httpx.Response(502, headers={"content-type": "text/plain"}, stream=_FailingStream())
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert message.endswith("HTTP 502")
+
+
+def test_watch_dir_keeps_ioerror_when_error_body_fails():
+    sb = make_sandbox()
+    page = httpx.Response(502, headers={"content-type": "text/plain"}, stream=_FailingStream())
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        with pytest.raises(IOError, match="^WatchDir failed: HTTP 502$"):
+            sb.files.watch_dir("/tmp")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_routing_page_is_cut_on_a_character_boundary(target):
+    sb = make_sandbox()
+    body = ("<html>" + "中" * 100).encode("utf-8")
+    page = _error_page(502, body, "text/html")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    shown = message.split("HTTP 502: ", 1)[1].split("...; ", 1)[0]
+    assert "\ufffd" not in shown
+    assert len(shown.encode("utf-8")) <= 200
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_control_characters_are_replaced(target):
+    sb = make_sandbox()
+    page = _error_page(500, b"\x1b[31mboom\x07", "text/plain")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert "\x1b" not in message and "\x07" not in message
+    assert message.endswith("HTTP 500: \ufffd[31mboom\ufffd")
