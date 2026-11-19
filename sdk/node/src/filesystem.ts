@@ -10,10 +10,9 @@ import {
   DEFAULT_ENVD_USER,
   ENVD_PORT,
   encodeConnectEnvelope,
-  htmlResponseError,
   readConnectFrames,
-  streamHttpErrorDetail,
 } from "./commands.js";
+import { htmlResponseError, streamHttpErrorDetail } from "./connect.js";
 import { FilesystemNotFoundError, PartialWriteError } from "./exceptions.js";
 import type { Sandbox } from "./sandbox.js";
 

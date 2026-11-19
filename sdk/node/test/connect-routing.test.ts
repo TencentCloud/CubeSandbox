@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { encodeConnectEnvelope, readConnectFrames } from "../src/commands.js";
 import { Config } from "../src/config.js";
+import { isRoutingPage, streamHttpErrorDetail, truncateDiagnostic } from "../src/connect.js";
 import { CubeSandboxError, Sandbox } from "../src/index.js";
 
 const SANDBOX_DATA = {
@@ -29,25 +30,39 @@ interface Reply {
   contentType?: string | null;
   /** Write the body a few bytes at a time so envelope headers span chunks. */
   chunked?: boolean;
+  /** After the body: keep writing it forever, or keep the response open. */
+  after?: "end" | "repeat" | "hang";
 }
 
 let server: Server;
 let port: number;
 let reply: Reply = { status: 200, body: HTML_PAGE };
+// Resolves when the server sees the client close the last data-plane response.
+let responseClosed: Promise<void> = Promise.resolve();
 
 async function send(res: ServerResponse, r: Reply): Promise<void> {
   const headers = r.contentType ? { "content-type": r.contentType } : {};
   res.writeHead(r.status, headers);
   const body = Buffer.from(r.body);
-  if (!r.chunked) {
+  const after = r.after ?? "end";
+  if (!r.chunked && after === "end") {
     res.end(body);
     return;
   }
-  for (let i = 0; i < body.length; i += 3) {
-    res.write(body.subarray(i, i + 3));
+  const step = r.chunked ? 3 : body.length;
+  for (let i = 0; i < body.length; i += step) {
+    res.write(body.subarray(i, i + step));
     await new Promise((resolve) => setImmediate(resolve));
   }
-  res.end();
+  if (after === "end") {
+    res.end();
+  } else if (after === "repeat") {
+    while (!res.destroyed) {
+      if (!res.write(body)) {
+        await new Promise((resolve) => res.once("drain", resolve).once("close", resolve));
+      }
+    }
+  }
 }
 
 beforeAll(async () => {
@@ -59,6 +74,7 @@ beforeAll(async () => {
         res.end(JSON.stringify(SANDBOX_DATA));
         return;
       }
+      responseClosed = new Promise((resolve) => res.once("close", () => resolve()));
       void send(res, reply);
     });
   });
@@ -209,7 +225,7 @@ describe("HTTP 200 text/html responses", () => {
   it("commands.run reports the routing problem", async () => {
     const sb = await createSandbox(html());
     await expect(sb.commands.run("echo hi")).rejects.toThrow(
-      /^received HTML instead of a Connect response \(content-type "text\/html; charset=utf-8"\); check whether CUBE_PROXY_NODE_IP is configured/,
+      /^command failed: received HTML instead of a Connect response \(content-type "text\/html; charset=utf-8"\); check whether CUBE_PROXY_NODE_IP is configured/,
     );
   });
 
@@ -299,4 +315,121 @@ describe("HTTP error pages", () => {
       expect(err.message).toMatch(/HTTP 500: envd crashed$/);
     });
   });
+});
+
+async function closedWithin(ms: number): Promise<boolean> {
+  return Promise.race([
+    responseClosed.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+  ]);
+}
+
+describe("Go routing-page parity", () => {
+  it.each(TARGETS)("%s: a 404 text page carries the routing hint", async (target) => {
+    // Go's net/http.NotFound, a common shape for a misrouted request.
+    const sb = await createSandbox({
+      status: 404,
+      body: "404 page not found\n",
+      contentType: "text/plain; charset=utf-8",
+    });
+    const err = await errorOf(sb, target);
+    expect(err.message).toContain("HTTP 404: 404 page not found; response may be an HTML/text page");
+    expect(err.message).toContain("CUBE_PROXY_NODE_IP");
+  });
+
+  it.each([
+    ["html without doctype", 404, "<html><body>gateway</body></html>", "", true],
+    ["html labelled non-error json", 502, '{"unexpected":1}', "text/html", true],
+    ["truncated json", 404, '{"message": "process not fou', "text/html", false],
+    ["json error as text", 404, '{"detail":"not found"}', "text/plain", false],
+    ["text on 500", 500, "404 page not found", "text/plain", false],
+    ["blank text 404", 404, "   ", "text/plain", false],
+    ["binary 404", 404, "not found", "application/octet-stream", false],
+  ])("classifies %s like Go", (_label, status, body, type, routing) => {
+    expect(isRoutingPage(status, type, Buffer.from(body))).toBe(routing);
+  });
+});
+
+describe("error body reads", () => {
+  it.each(TARGETS)("%s: an endless error body is bounded and released", async (target) => {
+    const sb = await createSandbox({
+      status: 502,
+      body: "x".repeat(16 * 1024),
+      contentType: "text/plain",
+      after: "repeat",
+    });
+    const err = await errorOf(sb, target);
+    expect(err.message).toMatch(/ \[truncated\]$/);
+    expect(err.message.length).toBeLessThan(64 * 1024 + 100);
+    expect(await closedWithin(2000)).toBe(true);
+  });
+
+  it("commands.run: a stalled error body is bounded by the idle timeout", async () => {
+    const sb = await createSandbox({
+      status: 502,
+      body: "upstream error",
+      contentType: "text/plain",
+      after: "hang",
+    });
+    const started = Date.now();
+    const err = await sb.commands.run("echo hi", { timeoutMs: 300 }).then(
+      () => new Error("expected commands.run to fail"),
+      (e: unknown) => e as Error,
+    );
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(err.message).toMatch(/^command failed: HTTP 502/);
+    expect(await closedWithin(2000)).toBe(true);
+  });
+
+  it("returns no detail without a body", async () => {
+    const headers = new Headers({ "content-type": "text/html" });
+    expect(await streamHttpErrorDetail({ status: 502, headers, body: null })).toBe("");
+  });
+
+  it.each(TARGETS)("%s: a routing page is cut on a character boundary", async (target) => {
+    const sb = await createSandbox({
+      status: 502,
+      body: `<html>${"中".repeat(100)}`,
+      contentType: "text/html",
+    });
+    const err = await errorOf(sb, target);
+    const shown = err.message.split("HTTP 502: ")[1].split("...; ")[0];
+    expect(shown).not.toContain("\ufffd");
+    expect(Buffer.byteLength(shown)).toBeLessThanOrEqual(200);
+  });
+
+  it("truncateDiagnostic keeps short text and cuts long text at 200 bytes", () => {
+    expect(truncateDiagnostic("a".repeat(200))).toBe("a".repeat(200));
+    expect(truncateDiagnostic("a".repeat(201))).toBe(`${"a".repeat(200)}...`);
+    expect(truncateDiagnostic(`a${"é".repeat(100)}`)).toBe(`a${"é".repeat(99)}...`);
+  });
+
+  it.each(TARGETS)("%s: control characters are replaced", async (target) => {
+    const sb = await createSandbox({
+      status: 500,
+      body: "\x1b[31mboom\x07",
+      contentType: "text/plain",
+    });
+    const err = await errorOf(sb, target);
+    expect(err.message).toMatch(/HTTP 500: \ufffd\[31mboom\ufffd$/);
+  });
+});
+
+describe("connection release", () => {
+  it("commands.run releases a non-envelope stream it rejected", async () => {
+    const sb = await createSandbox({ ...html(null), after: "hang" });
+    const err = await errorOf(sb, "run");
+    expect(err.message).toMatch(/not a Connect envelope/);
+    expect(await closedWithin(2000)).toBe(true);
+  });
+
+  it.each(["run", "watch", "create"] as const)(
+    "%s releases a 200 text/html response",
+    async (target) => {
+      const sb = await createSandbox({ ...html("text/html"), after: "hang" });
+      const err = await errorOf(sb, target);
+      expect(err.message).toMatch(/received HTML instead of a Connect response/);
+      expect(await closedWithin(2000)).toBe(true);
+    },
+  );
 });

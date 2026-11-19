@@ -23,12 +23,11 @@ import {
   ENVD_PORT,
   encodeConnectEnvelope,
   exitCodeFromStatus,
-  htmlResponseError,
   raiseConnectEndStream,
   readConnectFrames,
-  streamHttpErrorDetail,
   userHeaders,
 } from "./commands.js";
+import { htmlResponseError, streamHttpErrorDetail } from "./connect.js";
 import { ApiError, CubeSandboxError } from "./exceptions.js";
 import type { Sandbox } from "./sandbox.js";
 
@@ -473,8 +472,9 @@ export class Pty {
     }
 
     if (resp.status >= 400) {
-      control.clearIdle();
+      // The idle timer keeps bounding the error-body read.
       const detail = await streamHttpErrorDetail(resp);
+      control.clearIdle();
       const suffix = detail ? `: ${detail}` : "";
       throw new ApiError(`${method} failed: HTTP ${resp.status}${suffix}`, resp.status);
     }
