@@ -61,10 +61,15 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 	}
 	excludeTemplateID = strings.TrimSpace(excludeTemplateID)
 
+	// A cleanup tombstone (cleanup_required, template record already gone) only
+	// tracks node-side data for the orphan sweep; it no longer owns the artifact.
 	var replicaCount int64
-	q := tx.Table(constants.TemplateReplicaTableName).Where("artifact_id = ?", artifactID)
+	q := tx.Table(constants.TemplateReplicaTableName+" AS r").Where("r.artifact_id = ?", artifactID).
+		Where("NOT (r.cleanup_required = ? AND NOT EXISTS (SELECT 1 FROM "+constants.TemplateDefinitionTableName+
+			" d WHERE d.template_id = r.template_id AND d.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM "+
+			constants.SnapshotTableName+" s WHERE s.snapshot_id = r.template_id AND s.deleted_at IS NULL))", true)
 	if excludeTemplateID != "" {
-		q = q.Where("template_id <> ?", excludeTemplateID)
+		q = q.Where("r.template_id <> ?", excludeTemplateID)
 	}
 	if err := q.Count(&replicaCount).Error; err != nil {
 		return 0, err
@@ -203,9 +208,9 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			logger.Infof("artifact cleanup: node %s already deferred, GC will retry it", nodes[i].NodeID)
 			continue
 		}
-		if since, absent := placementNodeAbsentLongEnough(&nodes[i], phase2Now); absent {
+		if since, unreachable := placementNodeUnreachableLongEnough(&nodes[i], phase2Now); unreachable {
 			deferredNodeIDs = append(deferredNodeIDs, nodes[i].NodeID)
-			logger.Warnf("artifact cleanup: node %s absent past grace (since=%s absent_for=%s), node-side destroy deferred",
+			logger.Warnf("artifact cleanup: node %s unreachable past grace (since=%s unreachable_for=%s), node-side destroy deferred",
 				nodes[i].NodeID, since.UTC().Format(time.RFC3339), phase2Now.Sub(since).Round(time.Second))
 			continue
 		}

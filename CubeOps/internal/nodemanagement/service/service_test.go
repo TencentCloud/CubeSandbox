@@ -57,6 +57,9 @@ func TestRegisterNode(t *testing.T) {
 	if reg.HostIP != "10.0.0.1" {
 		t.Errorf("reg hostIP = %s", reg.HostIP)
 	}
+	if snap.HeartbeatReceivedAt.IsZero() {
+		t.Error("registration must record when CubeOps received it")
+	}
 }
 
 func TestRegisterNode_RejectsSchedulingLabel(t *testing.T) {
@@ -107,6 +110,28 @@ func TestRegisterNode_RejectsInvalidLabels(t *testing.T) {
 	}
 }
 
+func TestSnapshotUpdatePreservesHeartbeatReceivedAt(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	_, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receivedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	stored := &model.NodeSnapshot{NodeID: "node-1", HeartbeatReceivedAt: receivedAt, Labels: map[string]string{}}
+	restore := nodemetric.SetNodeSnapshotHooks(
+		func(string) (*model.NodeSnapshot, error) { return stored, nil },
+		func(snap *model.NodeSnapshot) { stored = snap },
+	)
+	defer restore()
+	if _, err := svc.SetNodeSchedulingDisabled(ctx, "node-1", true, "admin", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !stored.HeartbeatReceivedAt.Equal(receivedAt) {
+		t.Fatalf("snapshot update reset heartbeat receive time to %s", stored.HeartbeatReceivedAt)
+	}
+}
+
 func TestUpdateNodeStatus(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
@@ -122,6 +147,31 @@ func TestUpdateNodeStatus(t *testing.T) {
 	}
 	if !snap.Healthy {
 		t.Errorf("expected healthy")
+	}
+}
+
+func TestUpdateNodeStatusSkewedCubeletClock(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	_, _ = svc.RegisterNode(ctx, &model.RegisterNodeRequest{NodeID: "node-1"})
+	reported := time.Now().Add(-time.Hour)
+	before := time.Now()
+	snap, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{
+		Conditions:    []model.NodeCondition{{Type: "Ready", Status: "True"}},
+		HeartbeatTime: reported,
+	})
+	if err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if !snap.HeartbeatTime.Equal(reported) || snap.HeartbeatReceivedAt.Before(before) || snap.HeartbeatReceivedAt.After(time.Now()) {
+		t.Fatalf("reported=%s received=%s", snap.HeartbeatTime, snap.HeartbeatReceivedAt)
+	}
+	if snap.Healthy || snap.UnhealthyReason != model.ReasonHeartbeatExpired {
+		t.Fatalf("existing health verdict must remain HeartbeatExpired: %+v", snap)
+	}
+	persisted, err := fs.GetStatus(ctx, "node-1")
+	if err != nil || persisted.HeartbeatReceivedUnix != snap.HeartbeatReceivedAt.Unix() {
+		t.Fatalf("persisted receive time: status=%+v err=%v", persisted, err)
 	}
 }
 

@@ -105,17 +105,23 @@ const (
 	placementAbsenceGrace = snapshotOperationTimeout
 )
 
-// placementNodeAbsentLongEnough returns the observed absence start when the node
-// has missed the full grace period; legacy "ip:" and present nodes return false.
-func placementNodeAbsentLongEnough(p *models.ArtifactNodePlacement, now time.Time) (time.Time, bool) {
-	if p == nil || p.NodeID == "" || strings.HasPrefix(p.NodeID, legacyPlacementNodeIDPrefix) {
-		return time.Time{}, false
-	}
-	since, ok := localcache.AbsentSince(p.NodeID)
+// nodeUnreachableLongEnough reports nodes absent from the view or from which no
+// heartbeat has reached CubeOps for the full grace period.
+func nodeUnreachableLongEnough(nodeID string, now time.Time) (time.Time, bool) {
+	since, ok := localcache.UnreachableSince(nodeID)
 	if !ok || now.Sub(since) < placementAbsenceGrace {
 		return time.Time{}, false
 	}
 	return since, true
+}
+
+// placementNodeUnreachableLongEnough excludes legacy ids, which have no stable
+// node identity and therefore cannot use the node-view reachability signal.
+func placementNodeUnreachableLongEnough(p *models.ArtifactNodePlacement, now time.Time) (time.Time, bool) {
+	if p == nil || p.NodeID == "" || strings.HasPrefix(p.NodeID, legacyPlacementNodeIDPrefix) {
+		return time.Time{}, false
+	}
+	return nodeUnreachableLongEnough(p.NodeID, now)
 }
 
 // deferredScanCursor is the last (artifact_id, node_id) scanned. Pages rotate
@@ -211,6 +217,9 @@ func reconcileDeferredArtifactPlacements(ctx context.Context) {
 		p := &rows[i]
 		cached, ok := localcache.GetNode(p.NodeID)
 		if !ok || cached == nil || cached.HostIP() == "" {
+			continue
+		}
+		if _, unreachable := nodeUnreachableLongEnough(p.NodeID, time.Now()); unreachable {
 			continue
 		}
 		if live, err := artifactRowIsLive(ctx, p.ArtifactID); err != nil {

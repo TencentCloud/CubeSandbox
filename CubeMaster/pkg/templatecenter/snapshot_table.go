@@ -268,7 +268,8 @@ func releaseSnapshotArtifactReferences(ctx context.Context, snapshotID string, t
 		}); err != nil {
 			return err
 		}
-		if err := tx.Unscoped().Where("template_id = ?", snapshotID).Delete(&models.TemplateReplica{}).Error; err != nil {
+		// cleanup_required rows are tombstones the orphan sweep still has to finish.
+		if err := tx.Unscoped().Where("template_id = ? AND cleanup_required = ?", snapshotID, false).Delete(&models.TemplateReplica{}).Error; err != nil {
 			return err
 		}
 		return tx.Unscoped().Where("template_id = ?", snapshotID).Delete(&models.TemplateDefinition{}).Error

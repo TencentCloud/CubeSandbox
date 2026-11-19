@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -330,6 +332,161 @@ func TestDeleteTemplateWithTargetsPreservesMetadataAfterArtifactFailure(t *testi
 	}
 	if invalidated {
 		t.Fatal("cache should remain intact after artifact cleanup failure")
+	}
+}
+
+// stubDeferringCleanup stubs reachability, tombstones and RPCs; the returned
+// maps record marks and RPC calls per node.
+func stubDeferringCleanup(t *testing.T, tombstones map[string]bool, markErr error) (marked, rpcs map[string]int) {
+	marked, rpcs, _ = stubDeferringCleanupFull(t, tombstones, markErr, nil, nil)
+	return marked, rpcs
+}
+
+// stubDeferringCleanupFull also stubs flag clearing; rpcErrs maps an address to
+// the cubelet error it returns, and clearErr fails every flag clear.
+func stubDeferringCleanupFull(t *testing.T, tombstones map[string]bool, markErr error, rpcErrs map[string]error, clearErr error) (marked, rpcs, cleared map[string]int) {
+	t.Helper()
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	now := time.Now()
+	patches.ApplyFunc(localcache.UnreachableSince, func(id string) (time.Time, bool) {
+		switch id {
+		case "gone":
+			return now.Add(-placementAbsenceGrace - time.Minute), true
+		case "recent":
+			return now.Add(-time.Minute), true
+		default:
+			return time.Time{}, false
+		}
+	})
+
+	origMark, origClear := markReplicaCleanupRequired, clearReplicaCleanupRequired
+	origCleanup, origAddr := cleanupTemplateOnCubelet, getCubeletAddrForDelete
+	t.Cleanup(func() {
+		markReplicaCleanupRequired, clearReplicaCleanupRequired = origMark, origClear
+		cleanupTemplateOnCubelet, getCubeletAddrForDelete = origCleanup, origAddr
+	})
+	marked, rpcs, cleared = map[string]int{}, map[string]int{}, map[string]int{}
+	markReplicaCleanupRequired = func(_ context.Context, _ string, l templateCleanupLocator) (bool, error) {
+		if markErr != nil {
+			return false, markErr
+		}
+		if !tombstones[l.NodeID] {
+			return false, nil
+		}
+		marked[l.NodeID]++
+		return true, nil
+	}
+	clearReplicaCleanupRequired = func(_ context.Context, _ string, l templateCleanupLocator) error {
+		if clearErr != nil {
+			return clearErr
+		}
+		cleared[l.NodeID]++
+		return nil
+	}
+	getCubeletAddrForDelete = func(ip string) string { return ip }
+	cleanupTemplateOnCubelet = func(_ context.Context, addr string, _ *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+		rpcs[addr]++
+		return &cubeboxv1.CleanupTemplateResponse{}, rpcErrs[addr]
+	}
+	return marked, rpcs, cleared
+}
+
+// A redo flag on a node that confirmed cleanup must be cleared so metadata
+// cleanup deletes the row; tombstoned and failing nodes keep theirs.
+func TestCleanupDeferringUnreachableClearsFlagOnlyWhenConfirmed(t *testing.T) {
+	rpcErr := errors.New("connection refused")
+	_, rpcs, cleared := stubDeferringCleanupFull(t, map[string]bool{"gone": true},
+		nil, map[string]error{"10.0.0.4": rpcErr}, nil)
+	err := cleanupTemplateReplicasDeferringUnreachable(context.Background(), "tpl-1", []templateCleanupLocator{
+		{NodeID: "gone", NodeIP: "10.0.0.1"},
+		{NodeID: "healthy", NodeIP: "10.0.0.3"},
+		{NodeID: "broken", NodeIP: "10.0.0.4"},
+		{NodeID: "after", NodeIP: "10.0.0.5"},
+	}, "")
+	if !errors.Is(err, rpcErr) {
+		t.Fatalf("a failed RPC must fail the cleanup, got %v", err)
+	}
+	if rpcs["10.0.0.5"] != 1 {
+		t.Fatalf("a failing node must not stop later nodes: %v", rpcs)
+	}
+	if cleared["healthy"] != 1 || cleared["after"] != 1 || cleared["gone"] != 0 || cleared["broken"] != 0 {
+		t.Fatalf("only confirmed nodes may clear the flag: %v", cleared)
+	}
+}
+
+// An already-gone template on the node counts as confirmed cleanup.
+func TestCleanupDeferringUnreachableClearsFlagOnIgnorableNotFound(t *testing.T) {
+	_, _, cleared := stubDeferringCleanupFull(t, nil, nil,
+		map[string]error{"10.0.0.3": errors.New("snapshot path not found")}, nil)
+	err := cleanupTemplateReplicasDeferringUnreachable(context.Background(), "tpl-1",
+		[]templateCleanupLocator{{NodeID: "healthy", NodeIP: "10.0.0.3"}}, "")
+	if err != nil || cleared["healthy"] != 1 {
+		t.Fatalf("not-found must count as confirmed: err=%v cleared=%v", err, cleared)
+	}
+}
+
+func TestCleanupDeferringUnreachableFailsWhenFlagClearFails(t *testing.T) {
+	clearErr := errors.New("db down")
+	_, _, _ = stubDeferringCleanupFull(t, nil, nil, nil, clearErr)
+	err := cleanupTemplateReplicasDeferringUnreachable(context.Background(), "tpl-1",
+		[]templateCleanupLocator{{NodeID: "healthy", NodeIP: "10.0.0.3"}}, "")
+	if !errors.Is(err, clearErr) {
+		t.Fatalf("want flag-clear error, got %v", err)
+	}
+}
+
+func TestCleanupTemplateReplicasWithLocatorsNeverSkips(t *testing.T) {
+	_, rpcs := stubDeferringCleanup(t, map[string]bool{"gone": true}, nil)
+	err := cleanupTemplateReplicasWithLocators(context.Background(), "tpl-1",
+		[]templateCleanupLocator{{NodeID: "gone", NodeIP: "10.0.0.1"}}, "")
+	if err != nil || rpcs["10.0.0.1"] != 1 {
+		t.Fatalf("the shared cleanup must keep nil meaning 'node confirmed': err=%v rpcs=%v", err, rpcs)
+	}
+}
+
+func TestCleanupDeferringUnreachableTombstonesOnlyLongUnreachableNodes(t *testing.T) {
+	marked, rpcs := stubDeferringCleanup(t, map[string]bool{"gone": true, "recent": true, "healthy": true}, nil)
+	locators := []templateCleanupLocator{
+		{NodeID: "gone", NodeIP: "10.0.0.1"},
+		{NodeID: "recent", NodeIP: "10.0.0.2"},
+		{NodeID: "healthy", NodeIP: "10.0.0.3"},
+	}
+	if err := cleanupTemplateReplicasDeferringUnreachable(context.Background(), "tpl-1", locators, ""); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if marked["gone"] != 1 || marked["recent"] != 0 || marked["healthy"] != 0 {
+		t.Fatalf("only the node past grace is tombstoned: %v", marked)
+	}
+	if rpcs["10.0.0.1"] != 0 || rpcs["10.0.0.2"] != 1 || rpcs["10.0.0.3"] != 1 {
+		t.Fatalf("unexpected RPC calls: %v", rpcs)
+	}
+}
+
+// Without a replica row nothing records the pending node-side cleanup, so the
+// locator must still be called rather than silently dropped.
+func TestCleanupDeferringUnreachableFailsClosedWithoutReplicaRow(t *testing.T) {
+	_, rpcs := stubDeferringCleanup(t, nil, nil)
+	err := cleanupTemplateReplicasDeferringUnreachable(context.Background(), "tpl-1",
+		[]templateCleanupLocator{{NodeID: "gone", NodeIP: "10.0.0.1"}}, "")
+	if err != nil || rpcs["10.0.0.1"] != 1 {
+		t.Fatalf("a locator without a replica row must still be cleaned: err=%v rpcs=%v", err, rpcs)
+	}
+}
+
+// A tombstone that cannot be persisted must abort the delete before any RPC.
+func TestCleanupDeferringUnreachableAbortsWhenTombstoneFails(t *testing.T) {
+	markErr := errors.New("db down")
+	_, rpcs := stubDeferringCleanup(t, map[string]bool{"gone": true, "healthy": true}, markErr)
+	err := cleanupTemplateReplicasDeferringUnreachable(context.Background(), "tpl-1", []templateCleanupLocator{
+		{NodeID: "healthy", NodeIP: "10.0.0.3"},
+		{NodeID: "gone", NodeIP: "10.0.0.1"},
+	}, "")
+	if !errors.Is(err, markErr) {
+		t.Fatalf("want tombstone error, got %v", err)
+	}
+	if len(rpcs) != 0 {
+		t.Fatalf("no RPC may run once the tombstone failed: %v", rpcs)
 	}
 }
 

@@ -232,21 +232,28 @@ job 表没有 owner 列：TC 重启后，任何仍然存活的 TC 副本都可�
 
 ### 9.6 节点放置
 
-`ArtifactNodePlacement` 行记录哪些节点持有副本，同时驱动删除 Phase 2 与下载就近性。
+`ArtifactNodePlacement` 行记录哪些节点持有副本，同时驱动 artifact 删除时逐节点的物理清理（即 §9.5 三阶段中的第二阶段）与下载就近性。
 
-节点持续从节点视图中缺失满 15 分钟（取异步操作超时；只看是否缺失，不看健康位）时，Phase 2 跳过它，避免失联节点让 artifact 永远停在 `CLEANUP_PENDING`。该节点的行会保留并写入 `deferred_at`，其余行照常删除并通知 TC。每轮 artifact GC 会对节点已回到视图的 deferred 行，用节点当前地址重试销毁，确认成功后才删行；节点一直不回来则该行一直保留。历史回填的 `ip:` 前缀 id 不会被判为缺失。
+删除 artifact 时，CubeMaster 要依次通知每个 placement 行对应的节点删掉本地 ext4。若某个节点已经失联，这个通知永远不可能成功，整轮删除就会一直卡在 `CLEANUP_PENDING`，artifact 行和它占用的模板指纹都无法释放。
+
+因此，当节点从节点视图缺失，或仍在视图但心跳过期持续满 15 分钟（取异步操作超时）时，该节点不再参与本轮物理清理：不向它发销毁请求，其 placement 行保留并写入 `deferred_at`；其余节点的行照常清理，随后通知 TC 删除 artifact 并释放指纹。每轮 artifact GC 会针对已恢复可达的 deferred 行，用节点当前地址重试销毁，确认成功后才删行；节点一直不可达则该行一直保留。历史回填的 `ip:` 前缀 id 不参与判定。
 
 **范围与限制**：
-- 本机制覆盖 `ArtifactNodePlacement` 行的延迟清理。
-- crashed/unhealthy-but-registered 节点不在范围：只有完全从节点视图消失才计为缺失，健康位被忽略。
-- 历史回填的 `ip:` 前缀 id 来自 20260623145000 迁移中无 `node_id` 的 replica 行，不会被判为缺失。若 artifact 在已退役节点上只剩 `ip:` 行，Phase 2 会持续向旧 IP 重试，artifact 永远停在 `CLEANUP_PENDING`。此类行为封闭的历史存量，可用 `SELECT COUNT(*) FROM t_cube_artifact_node_placement WHERE node_id LIKE 'ip:%'` 确认，必要时手动清理。
-- 用户可见延迟：15 分钟宽限期 + 最多 10 分钟 GC 周期，即节点消失后最多 25 分钟 artifact 才终结。
+- 本机制覆盖 `ArtifactNodePlacement` 行的延迟清理。模板/快照删除遇到超过宽限期的不可达节点时，不向其发 Cubelet 清理请求，并把该节点的 replica 行标记为 `cleanup_required=true` 后保留，随后继续执行 artifact 与元数据清理，删除接口因此可以先返回成功。该节点上的模板本地数据此时尚未确认删除：节点恢复后，孤儿清理会用节点当前地址补发请求，确认成功后才删行；节点一直不可达则该行一直保留，运维可见。
+- 已完成删除、且模板与快照记录都已不存在的 `cleanup_required=true` replica 行只用于追踪节点侧数据，不再算作 artifact 的引用，因此不会阻止 artifact 收尾或把它恢复为 `READY`。模板记录仍在的 replica 照常计为引用。
+- 墓碑复用了 `cleanup_required`，该标志也用于标记需要 redo 的失败副本。删除时，节点确认清理成功后会清除该标志，因此删除完成后只有被延迟的节点保留它。这些节点恢复之前不要复用已删除的模板 id：孤儿清理按模板 id 补发清理请求。
+- 不可达节点若没有对应的 replica 行（例如 locator 只来自快照或 job 记录），无处记录待清理状态，仍会发 Cubelet 请求，失败则删除失败并可重试。redo 不会跳过不可达节点；孤儿清理对超过宽限期仍不可达的节点跳过本轮请求，保留该节点的 `t_cube_template_replica` 清理记录，待节点恢复后再重试；宽限期内仍会正常发起请求。
+- 节点仍在视图中时，只看 `HeartbeatReceivedAt`，即 CubeOps 最近一次成功持久化该节点心跳的服务端时间；`Healthy` 和 `UnhealthyReason` 来自 Cubelet 自报墙钟，不参与判定，因此 Cubelet 时钟偏快或偏慢都不会误判（时钟偏快的节点停止心跳后仍会长期报告 Healthy）。该时间以 `t_cube_node_status.heartbeat_received_unix` 的 Unix 秒保存，与数据库和系统时区无关。接收时间未知时 fail-closed，未来时间按当前时间钳制。
+- 节点视图超过 3 分钟（大于单次同步最坏耗时）未成功同步时不下结论，避免 CubeOps 故障时把所有节点判为不可达。CubeOps 刚恢复时接收时间仍是旧值，直到节点下一次心跳，此刻发起的清理可能被延后，后续重试会收敛。
+- 心跳分支依赖 `cube_ops_addr`：DB loader 或旧版 CubeOps 不提供接收时间时，只保留视图缺失判定。CubeOps 与 CubeMaster 的控制面时钟需保持同步。
+- 历史回填的 `ip:` 前缀 id 来自 20260623145000 迁移中无 `node_id` 的 replica 行，不会被判为不可达。若 artifact 在已退役节点上只剩 `ip:` 行，每轮清理仍会向旧 IP 重试销毁，artifact 永远停在 `CLEANUP_PENDING`。此类行为封闭的历史存量，可用 `SELECT COUNT(*) FROM t_cube_artifact_node_placement WHERE node_id LIKE 'ip:%'` 确认，必要时手动清理。
+- 用户可见延迟：15 分钟宽限期 + 最多 10 分钟 GC 周期，即节点不可达后最多 25 分钟 artifact 才终结。
 
 deferred 行不会被自动回收：该行是"节点上可能仍有文件"的唯一记录，按时间删除会在节点回归时让这些文件静默泄漏。确认节点已永久下线后，运维可执行 `DELETE FROM t_cube_artifact_node_placement WHERE deferred_at > 0 AND node_id = '<node-id>'` 释放其行。**建议先备份，通过受控 CLI 执行，并关注相关 metrics。**
 
-缺失起点只保存在进程内存中：Master 重启会重置计时，HA 各副本独立计时。defer 是幂等的（`deferred_at = 0` 保护），副本间判定时刻不同不会写坏数据；重启只是让收敛最多推迟一个宽限期。defer 日志会记录缺失起点和已缺失时长，便于排障。
+视图缺失起点只保存在进程内存中，Master 重启会重置计时；心跳过期使用 CubeOps 持久化的服务端接收时间，重启和 HA 副本间共享同一起点。defer 是幂等的（`deferred_at = 0` 保护），副本间判定时刻不同不会写坏数据；视图缺失的重启计时只会推迟收敛。日志会记录不可达起点和时长。
 
-**升级顺序**：`deferred_at` 列由迁移 `20261112071208_artifact_placement_deferred_at.sql` 添加。必须先执行迁移，再滚动升级 CubeMaster / CubeTemplateCenter；否则 GC 扫描和 TC backstop 会因列不存在而报错。`CUBE_AUTO_MIGRATION=false` 时，需先手动执行迁移 SQL，再启动新版本。
+**升级顺序**：`deferred_at` 列由迁移 `20261112071208_artifact_placement_deferred_at.sql` 添加。必须先执行迁移，再滚动升级 CubeMaster / CubeTemplateCenter；否则 GC 扫描和 TC backstop 会因列不存在而报错。`CUBE_AUTO_MIGRATION=false` 时，需先手动执行迁移 SQL，再启动新版本。心跳接收时间由迁移 `20261119125300_node_heartbeat_received_unix.sql` 添加，需先执行迁移并完成全部 CubeOps 副本升级。已有行保持 0，不做时区不可靠的回填；在线节点在下一次心跳后恢复该判定，迁移前已永久失联且仍留在视图的节点保持 fail-closed。滚动升级期间旧副本不填写该时间，也只会暂时 fail-closed。
 
 ### 9.7 共享 artifact 存储
 

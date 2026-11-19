@@ -7,6 +7,8 @@ package templatecenter
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -33,9 +35,10 @@ import (
 // address; only when the node is absent from the cache does it fall back to
 // the stored IP (the node may be briefly unregistered yet reachable).
 //
-// A row whose node never comes back simply stays: it is small, visible to
-// operators, and retried every tick at negligible cost -- the same "tombstone
-// until cleaned" discipline the artifact placements follow.
+// A row whose node never comes back simply stays: it is small and visible to
+// operators. Rows on a node unreachable past the grace period are skipped, not
+// retried, until the node returns -- the same "tombstone until cleaned"
+// discipline the artifact placements follow.
 
 // orphanCleanupReplica is the projection the sweep needs.
 type orphanCleanupReplica struct {
@@ -48,17 +51,32 @@ type orphanCleanupReplica struct {
 
 // Seams, so the sweep can be tested without a database or a live cubelet.
 var (
+	// orphanScanCursor is the last row id scanned: pages rotate from it so rows
+	// on long-unreachable nodes cannot pin the LIMIT window and starve the rest.
+	orphanScanCursor struct {
+		mu sync.Mutex
+		id uint
+	}
+
 	listOrphanCleanupReplicas = func(ctx context.Context, limit int) ([]orphanCleanupReplica, error) {
-		var rows []orphanCleanupReplica
-		err := store.db.WithContext(ctx).
-			Table(constants.TemplateReplicaTableName+" AS r").
-			Select("r.id, r.template_id, r.node_id, r.node_ip, r.template_variant_id").
-			Where("r.cleanup_required = ?", true).
-			Where("NOT EXISTS (SELECT 1 FROM " + constants.TemplateDefinitionTableName + " d WHERE d.template_id = r.template_id AND d.deleted_at IS NULL)").
-			Where("NOT EXISTS (SELECT 1 FROM " + constants.SnapshotTableName + " s WHERE s.snapshot_id = r.template_id AND s.deleted_at IS NULL)").
-			Limit(limit).
-			Find(&rows).Error
-		return rows, err
+		orphanScanCursor.mu.Lock()
+		after := orphanScanCursor.id
+		orphanScanCursor.mu.Unlock()
+		rows, err := listOrphanCleanupReplicasAfter(ctx, after, limit)
+		if err == nil && len(rows) == 0 && after != 0 {
+			rows, err = listOrphanCleanupReplicasAfter(ctx, 0, limit)
+		}
+		if err != nil {
+			return nil, err
+		}
+		orphanScanCursor.mu.Lock()
+		defer orphanScanCursor.mu.Unlock()
+		if len(rows) < limit {
+			orphanScanCursor.id = 0
+		} else {
+			orphanScanCursor.id = rows[len(rows)-1].ID
+		}
+		return rows, nil
 	}
 	deleteReplicaRowByID = func(ctx context.Context, id uint) error {
 		return store.db.WithContext(ctx).Unscoped().
@@ -74,6 +92,22 @@ var (
 		return cleanupTemplateReplicasWithLocators(ctx, templateID, []templateCleanupLocator{locator}, backend)
 	}
 )
+
+// listOrphanCleanupReplicasAfter reads one page of tombstones with id > afterID.
+func listOrphanCleanupReplicasAfter(ctx context.Context, afterID uint, limit int) ([]orphanCleanupReplica, error) {
+	var rows []orphanCleanupReplica
+	err := store.db.WithContext(ctx).
+		Table(constants.TemplateReplicaTableName+" AS r").
+		Select("r.id, r.template_id, r.node_id, r.node_ip, r.template_variant_id").
+		Where("r.cleanup_required = ?", true).
+		Where("r.id > ?", afterID).
+		Where("NOT EXISTS (SELECT 1 FROM " + constants.TemplateDefinitionTableName + " d WHERE d.template_id = r.template_id AND d.deleted_at IS NULL)").
+		Where("NOT EXISTS (SELECT 1 FROM " + constants.SnapshotTableName + " s WHERE s.snapshot_id = r.template_id AND s.deleted_at IS NULL)").
+		Order("r.id ASC").
+		Limit(limit).
+		Find(&rows).Error
+	return rows, err
+}
 
 // reconcileOrphanReplicaCleanups replays the cubelet-side template cleanup
 // for every replica row a finished delete left behind. Runs inside the
@@ -93,6 +127,11 @@ func reconcileOrphanReplicaCleanups(ctx context.Context) error {
 	logger.Warnf("found %d orphan replica cleanup(s) left by earlier deletes; retrying cubelet cleanup", len(rows))
 
 	for _, row := range rows {
+		// Retrying a node that stays unreachable only burns the pass; keep the
+		// tombstone and wait for the node to return.
+		if _, unreachable := nodeUnreachableLongEnough(row.NodeID, time.Now()); unreachable {
+			continue
+		}
 		locator := templateCleanupLocator{
 			NodeID:            row.NodeID,
 			NodeIP:            row.NodeIP,

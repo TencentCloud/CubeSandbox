@@ -79,6 +79,8 @@ type Node struct {
 
 	MetaDataUpdateAt time.Time `json:"MetaDataUpdateAt,omitempty"`
 
+	HeartbeatReceivedAt time.Time `json:"HeartbeatReceivedAt,omitempty"`
+
 	ReportedReady bool `json:"ReportedReady,omitempty"`
 
 	Healthy bool `json:"Healthy"`
@@ -222,7 +224,8 @@ func (n *Node) Clone() *Node {
 		DedicatedClusterId: n.DedicatedClusterId, HostStatus: n.HostStatus,
 		CreateConcurrentNum: n.CreateConcurrentNum, MaxMvmLimit: n.MaxMvmLimit,
 		QuotaCpu: n.QuotaCpu, QuotaMem: n.QuotaMem, MetaDataUpdateAt: n.MetaDataUpdateAt,
-		ReportedReady: n.ReportedReady, Healthy: n.Healthy, UnhealthyReason: n.UnhealthyReason,
+		HeartbeatReceivedAt: n.HeartbeatReceivedAt,
+		ReportedReady:       n.ReportedReady, Healthy: n.Healthy, UnhealthyReason: n.UnhealthyReason,
 		Score: n.Score, QuotaCpuUsage: n.QuotaCpuUsage, QuotaMemUsage: n.QuotaMemUsage,
 		CpuUtil: n.CpuUtil, CpuLoadUsage: n.CpuLoadUsage, MemUsage: n.MemUsage,
 		DataDiskUsagePer: n.DataDiskUsagePer, StorageDiskUsagePer: n.StorageDiskUsagePer,
