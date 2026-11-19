@@ -121,7 +121,10 @@ type cpusetTestHandle struct {
 
 	createErr error
 	dir       string
-	dirErr    error
+	// dirs maps a specific group to its directory, so the node directory and
+	// the sandbox slots below it can be told apart.
+	dirs   map[string]string
+	dirErr error
 }
 
 func (h *cpusetTestHandle) IsExist(context.Context, string) bool { return true }
@@ -131,9 +134,12 @@ func (h *cpusetTestHandle) CreateWithCpuSet(context.Context, string, string, int
 	return h.createErr
 }
 
-func (h *cpusetTestHandle) CpusetDir(string) (string, error) {
+func (h *cpusetTestHandle) CpusetDir(group string) (string, error) {
 	if h.dirErr != nil {
 		return "", h.dirErr
+	}
+	if dir, ok := h.dirs[group]; ok {
+		return dir, nil
 	}
 	return h.dir, nil
 }
@@ -149,6 +155,9 @@ func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, strict bool, cp
 	t.Helper()
 	ranger, err := allocator.NewSimpleLinearRanger(0, 1)
 	require.NoError(t, err)
+	prevReparent := setupMemoryReparentFileFn
+	setupMemoryReparentFileFn = func(context.Context, uint32, bool) error { return nil }
+	t.Cleanup(func() { setupMemoryReparentFileFn = prevReparent })
 	return &cgPool{
 		initialSize:  1,
 		poolV1Handle: h,
@@ -173,6 +182,49 @@ func newSlotDir(t *testing.T) string {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0644))
 	}
 	return dir
+}
+
+// A v1 slot copies the parent mask when it is created, so one that predates a
+// CPU hot-add keeps the old mask; with the switch on the bootstrap repairs it,
+// otherwise a sandbox placed on it silently misses the new CPUs.
+func TestInitPoolV2LateRepairsSandboxSlots(t *testing.T) {
+	nodeDir := newSlotDir(t)
+	slotDir := newSlotDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(slotDir, "cpuset.cpus"), []byte("0"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(slotDir, "cpuset.mems"), []byte("0"), 0644))
+
+	group := MakeCgroupPathByID(MakeFullCgID(0, true, 0))
+	h := &cpusetTestHandle{dir: nodeDir, dirs: map[string]string{group: slotDir}}
+	require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
+
+	require.Equal(t, "0-3", readCpusetFile(t, slotDir, "cpuset.cpus"))
+	require.Equal(t, "0", readCpusetFile(t, slotDir, "cpuset.mems"))
+}
+
+// With the switch off the pool is not handed out, so the bootstrap has to leave
+// the slots exactly as it found them.
+func TestInitPoolV2LateLeavesSandboxSlotsAloneWhenOff(t *testing.T) {
+	nodeDir := newSlotDir(t)
+	slotDir := newSlotDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(slotDir, "cpuset.cpus"), []byte("0"), 0644))
+
+	group := MakeCgroupPathByID(MakeFullCgID(0, true, 0))
+	h := &cpusetTestHandle{dir: nodeDir, dirs: map[string]string{group: slotDir}}
+	require.NoError(t, newCpusetTestPool(t, h, false).initPoolV2Late())
+
+	require.Equal(t, "0", readCpusetFile(t, slotDir, "cpuset.cpus"))
+}
+
+// A slot without cpuset files (nothing to repair there, e.g. an unset child on
+// the unified hierarchy) must not make the bootstrap complain.
+func TestInitPoolV2LateToleratesSlotWithoutCpuset(t *testing.T) {
+	nodeDir := newSlotDir(t)
+	group := MakeCgroupPathByID(MakeFullCgID(0, true, 0))
+	h := &cpusetTestHandle{
+		dir:  nodeDir,
+		dirs: map[string]string{group: filepath.Join(t.TempDir(), "gone")},
+	}
+	require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
 }
 
 // strict decides whether a broken slot stops startup, which is the whole point

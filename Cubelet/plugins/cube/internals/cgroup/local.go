@@ -394,6 +394,11 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 	return nil
 }
 
+// Injected for tests: the write targets a hard-coded /sys/fs/cgroup path, so a
+// unit test that walks the pool bootstrap would otherwise write to a live cgroup
+// of the host it runs on.
+var setupMemoryReparentFileFn = setupMemoryReparentFile
+
 func setupMemoryReparentFile(ctx context.Context, fullCgID uint32, set bool) error {
 
 	var err error

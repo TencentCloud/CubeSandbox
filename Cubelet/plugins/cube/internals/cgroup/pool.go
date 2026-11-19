@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,7 +99,7 @@ func (p *cgPool) createCgroup(ctx context.Context, fullCgID uint32) error {
 
 	// Best effort: a disabled config still writes 0 to any existing
 	// reparent file; failures do not fail creation.
-	_ = setupMemoryReparentFile(ctx, fullCgID, p.reparentFileEnabled())
+	_ = setupMemoryReparentFileFn(ctx, fullCgID, p.reparentFileEnabled())
 
 	return nil
 }
@@ -185,7 +186,7 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 		if err := p.createCgroup(ctx, uint32(cgId)); err != nil {
 			log.G(ctx).Errorf("cgroup pool v1 init: %v", err)
 		} else {
-			_ = setupMemoryReparentFile(ctx, uint32(cgId), p.reparentFileEnabled())
+			_ = setupMemoryReparentFileFn(ctx, uint32(cgId), p.reparentFileEnabled())
 		}
 	}
 
@@ -258,20 +259,43 @@ func (p *cgPool) initPoolV2() error {
 	return nil
 }
 
-// ensureNumaSlotCpuset (re)applies a node's cpulist / node id to one per-NUMA
-// slot. The slot outlives a cubelet restart, and creating an existing cgroup is
-// a no-op or an error depending on the driver, so the values are re-asserted on
-// every startup; this also repairs a slot whose mask drifted (CPU hot-add,
-// manual change).
+// ensureNumaSlotCpuset (re)applies a node's cpulist / node id to the node
+// directory of the per-NUMA pool (numa<N>). The directory outlives a cubelet
+// restart, and creating an existing cgroup is a no-op or an error depending on
+// the driver, so the values are re-asserted on every startup; this also repairs
+// the node directory whose mask drifted (CPU hot-add, manual change). The
+// sandbox slots below it are a separate matter, see ensureSandboxSlotCpuset.
 //
 // The directory is resolved by the handle, so a cgroup v1 host with the cpuset
 // controller co-mounted (cpu,cpuacct,cpuset) or on a non-default root is handled
 // too, and a controller that is not available is an error instead of a silent
-// no-op. On the unified hierarchy the handle points at the cgroup itself and
-// the same re-assert doubles as a repair of a stale mask.
+// no-op. On the unified hierarchy the handle points at the cgroup itself, so
+// the same re-assert is what keeps the node's mask current.
 func ensureNumaSlotCpuset(h handle.Interface, slot, cpulist string, nodeID int) error {
 	dir, err := h.CpusetDir(slot)
 	if err != nil {
+		return err
+	}
+	return applyCpusetFiles(dir, cpulist, nodeID)
+}
+
+// ensureSandboxSlotCpuset repairs the mask of one per-sandbox slot under a node
+// directory. On cgroup v1 a slot takes a copy of the parent mask when it is
+// created (containerd's copyIfNeeded) and createCgroup returns early for a slot
+// that already exists, so one that predates a CPU hot-add - or any widening of
+// the node mask - keeps the old cpuset, and a sandbox placed on it silently
+// misses the new CPUs. The unified hierarchy needs nothing here: an unset child
+// tracks its parent, and cpuset.cpus may not even be exposed on the slot, in
+// which case there is nothing to repair.
+func ensureSandboxSlotCpuset(h handle.Interface, group, cpulist string, nodeID int) error {
+	dir, err := h.CpusetDir(group)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cpuset.cpus")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
 	return applyCpusetFiles(dir, cpulist, nodeID)
@@ -451,14 +475,33 @@ func (p *cgPool) initPoolV2Late() error {
 			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
+		var slotMaskFails int
+		var firstSlotMaskErr error
 		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {
 			fullCgID := MakeFullCgID(shortCgId, true, int32(numaNode.NodeId))
 			if err := p.createCgroup(ctx, fullCgID); err != nil {
 				log.G(ctx).Errorf("cgroup pool v2 init: create fullCgID: %d failed: %v", fullCgID, err)
-			} else {
-				_ = setupMemoryReparentFile(ctx, fullCgID, p.reparentFileEnabled())
+				continue
 			}
-
+			_ = setupMemoryReparentFileFn(ctx, fullCgID, p.reparentFileEnabled())
+			if strict {
+				// The slots are repaired too, otherwise a slot created before a
+				// CPU hot-add keeps its old mask and the sandbox placed on it
+				// silently misses the new CPUs. Best effort, unlike the node
+				// directory above: one slot that cannot be patched does not make
+				// the whole pool useless, so it is logged once instead.
+				if err := ensureSandboxSlotCpuset(p.poolV2.handle, MakeCgroupPathByID(fullCgID),
+					numaNode.Cpulist, numaNode.NodeId); err != nil {
+					slotMaskFails++
+					if firstSlotMaskErr == nil {
+						firstSlotMaskErr = err
+					}
+				}
+			}
+		}
+		if slotMaskFails > 0 {
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d: %d sandbox slot(s) kept their previous cpuset: %v",
+				numaNode.NodeId, slotMaskFails, firstSlotMaskErr)
 		}
 
 	}
@@ -711,7 +754,7 @@ func setupAllCgroupsMemoryReparentFile(ctx context.Context, set bool) error {
 	errcnt := 0
 	succCnt := 0
 	for _, fullCgID := range allCgIds {
-		err := setupMemoryReparentFile(ctx, fullCgID, set)
+		err := setupMemoryReparentFileFn(ctx, fullCgID, set)
 		if err != nil {
 			errcnt++
 			log.G(ctx).Errorf("failed to setup memory.reparent_file for cgroup %d: %v", fullCgID, err)
