@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -252,13 +253,25 @@ func applyTemplateImageSpec(imageSpecIn *types.ImageSpec, imageSpecOut *types.Im
 // applySnapshotTemplateAnnotationsAndLabels preserves the placement-selected
 // shim while copying the saved snapshot request. Static operator configuration
 // uses the ordinary merge and keeps its component override precedence.
+//
+// The saved request carries the source sandbox's labels, its user metadata
+// included. When the create request brings user metadata, the new sandbox
+// gets exactly that metadata: none of the source's is kept, and Cube's own
+// labels still come from the snapshot (a request cannot override them). A
+// request without user metadata keeps inheriting the source's.
 func applySnapshotTemplateAnnotationsAndLabels(reqIn, reqOut *types.CreateCubeSandboxReq) {
 	key := constants.CubeAnnotationComponentCubeShimVersion
 	selected, bound := reqOut.Annotations[key]
+	requested := maps.Clone(reqOut.Labels)
+	maps.DeleteFunc(requested, func(k, _ string) bool { return !webhook.IsUserMetadataKey(k) })
 	applyTemplateAnnotationsAndLabels(reqIn, reqOut)
 	delete(reqOut.Annotations, key)
 	if bound {
 		reqOut.Annotations[key] = selected
+	}
+	if len(requested) > 0 {
+		maps.DeleteFunc(reqOut.Labels, func(k, _ string) bool { return webhook.IsUserMetadataKey(k) })
+		maps.Copy(reqOut.Labels, requested)
 	}
 }
 
