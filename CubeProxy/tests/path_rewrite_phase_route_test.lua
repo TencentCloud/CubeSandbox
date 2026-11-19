@@ -3,7 +3,7 @@ package.path = "./lua/?.lua;" .. package.path
 -- path_rewrite_phase.lua is a top-level phase script, so every case re-runs
 -- it via dofile against a freshly mocked ngx.
 
-local resolved, gated, touched, upstream_uri
+local resolved, gated, begun, upstream_uri
 
 package.loaded["utils"] = {
     respond_bad_request = function()
@@ -22,8 +22,8 @@ package.loaded["sandbox_state"] = {
     end,
 }
 package.loaded["activity"] = {
-    touch = function(ins_id)
-        touched[#touched + 1] = ins_id
+    begin = function(ins_id)
+        begun[#begun + 1] = ins_id
     end,
 }
 package.loaded["request_host"] = {
@@ -31,7 +31,7 @@ package.loaded["request_host"] = {
 }
 
 local function run(uri)
-    resolved, gated, touched, upstream_uri = {}, {}, {}, nil
+    resolved, gated, begun, upstream_uri = {}, {}, {}, nil
     ngx = {
         ERR = "ERR",
         var = { uri = uri, http_x_cube_request_id = "test-request" },
@@ -45,17 +45,17 @@ local function run(uri)
     return pcall(dofile, "lua/path_rewrite_phase.lua")
 end
 
--- A routed request is gated, stamped at request start, then resolved.
+-- A routed request is gated, begun at request start, then resolved.
 local ok, err = run("/sandbox/7c8fbcd/49983/files?path=/tmp")
 assert(ok, "routed request raised: " .. tostring(err))
 assert(upstream_uri == "/files?path=/tmp", "unexpected upstream uri: " .. tostring(upstream_uri))
 assert(#gated == 1 and gated[1] == "7c8fbcd", "gate must see the routed ins_id")
-assert(#touched == 1 and touched[1] == "7c8fbcd", "activity must be stamped at request start")
+assert(#begun == 1 and begun[1] == "7c8fbcd", "activity must begin at request start")
 assert(#resolved == 1 and resolved[1].container_port == "49983", "backend must be resolved once")
 
--- A malformed path is rejected before the gate and must not stamp activity.
+-- A malformed path is rejected before the gate and must not begin activity.
 ok, err = run("/sandbox/evil.id/49983/")
 assert(not ok and type(err) == "table" and err.status == 400, "malformed path must return 400")
-assert(#gated == 0 and #touched == 0 and #resolved == 0, "malformed path must not gate, stamp or resolve")
+assert(#gated == 0 and #begun == 0 and #resolved == 0, "malformed path must not gate, begin or resolve")
 
 print("path_rewrite_phase route tests passed")

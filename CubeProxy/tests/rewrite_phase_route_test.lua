@@ -5,7 +5,7 @@ package.path = "./lua/?.lua;" .. package.path
 
 local resolved = {} -- recorded resolve_backend(ins_id, container_port) calls
 local gated = {}    -- recorded state.gate(ins_id) calls
-local touched = {}  -- recorded activity.touch(ins_id) calls
+local begun = {}  -- recorded activity.begin(ins_id) calls
 local response_body
 
 package.loaded["sandbox_backend"] = {
@@ -20,8 +20,8 @@ package.loaded["sandbox_state"] = {
     end,
 }
 package.loaded["activity"] = {
-    touch = function(ins_id)
-        touched[#touched + 1] = ins_id
+    begin = function(ins_id)
+        begun[#begun + 1] = ins_id
     end,
 }
 package.loaded["request_host"] = {
@@ -46,7 +46,7 @@ ngx = {
 local function run(case)
     resolved = {}
     gated = {}
-    touched = {}
+    begun = {}
     response_body = nil
     ngx.var = {
         http_x_cube_request_id = "test-request",
@@ -70,9 +70,9 @@ local function expect_route(case, want_id, want_port, message)
     assert(#gated == 1 and gated[1] == want_id,
         string.format("%s: gate must see the routed ins_id: got=%s want=%s",
             message, tostring(gated[1]), tostring(want_id)))
-    assert(#touched == 1 and touched[1] == want_id,
-        string.format("%s: activity must be stamped at request start: got=%s want=%s",
-            message, tostring(touched[1]), tostring(want_id)))
+    assert(#begun == 1 and begun[1] == want_id,
+        string.format("%s: activity must begin after backend admission: got=%s want=%s",
+            message, tostring(begun[1]), tostring(want_id)))
 end
 
 local function expect_bad_request(case, message)
@@ -84,7 +84,7 @@ local function expect_bad_request(case, message)
         message .. ": unexpected response body")
     assert(#resolved == 0, message .. ": backend must not be resolved")
     assert(#gated == 0, message .. ": gate must not run for unroutable requests")
-    assert(#touched == 0, message .. ": unroutable requests must not stamp activity")
+    assert(#begun == 0, message .. ": unroutable requests must not begin activity")
 end
 
 -- Host-based routing keeps working exactly as before.
