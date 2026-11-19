@@ -856,6 +856,52 @@ test_flush_handshake(void)
 		   !view.covers_prefix, NULL);
 	s3_overlay_flush_end(ov, 0, true);
 
+	/* --- a version written after the merge was not uploaded --- */
+	{
+		uint64_t target = 0;
+
+		s3_overlay_drop_chunk(ov, 0);
+		fill_pattern(blk, 1, 0, 0xE1);
+		s3_overlay_write(ov, 0, 1, blk, 30);
+		s3_overlay_next_dirty(ov, true, &idx);
+		rc = s3_overlay_flush_begin(ov, 0, &view);
+		check_true("flush_begin for the post-merge round", rc == 0,
+			   NULL);
+		fill_pattern(blk, 1, 0, 0xE2);
+		s3_overlay_write(ov, 0, 1, blk, 31);
+		memset(image, 0, CHUNK_SIZE);
+		s3_overlay_flush_merge(ov, &view, image);
+		check_true("the merge copies seq 31",
+			   check_pattern(image, 1, 0, 0xE2), NULL);
+
+		/* The upload is in flight with seq 31; 32 is written and a
+		 * waiter targets it, then 33 lands before the upload ends. */
+		fill_pattern(blk, 1, 0, 0xE3);
+		s3_overlay_write(ov, 0, 1, blk, 32);
+		check_true("prepare reports a target",
+			   s3_overlay_flush_chunk_prepare(ov, 0, &target),
+			   NULL);
+		check_u64("the waiter targets seq 32", target, 32);
+		fill_pattern(blk, 1, 0, 0xE4);
+		s3_overlay_write(ov, 0, 1, blk, 33);
+		s3_overlay_flush_end(ov, 0, true);
+		check_true("seq 30, which the round claimed, is uploaded",
+			   s3_overlay_chunk_flushed_through(ov, 0, 30), NULL);
+		check_true("seq 32 is not reported as uploaded",
+			   !s3_overlay_chunk_flushed_through(ov, 0, target),
+			   "(S3 holds seq 31)");
+
+		s3_overlay_next_dirty(ov, true, &idx);
+		rc = s3_overlay_flush_begin(ov, 0, &view);
+		check_true("the next round claims the block", rc == 0, NULL);
+		memset(image, 0, CHUNK_SIZE);
+		s3_overlay_flush_merge(ov, &view, image);
+		s3_overlay_flush_end(ov, 0, true);
+		check_true("the waiter completes after that round",
+			   s3_overlay_chunk_flushed_through(ov, 0, target),
+			   NULL);
+	}
+
 	s3_overlay_destroy(ov);
 out:
 	free(blk);
@@ -1419,6 +1465,174 @@ out:
 	}
 }
 
+static void
+test_chunk_subset_flush(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_flusher *fl = NULL;
+	struct s3_flusher_opts fl_opts = {
+		.max_concurrent = 4,
+		.poll_period_us = 100,
+	};
+	struct fake_uploader fake = {};
+	struct drain_probe waiter1 = { .status = -1, .done = false };
+	struct drain_probe waiter2 = { .status = -1, .done = false };
+	uint64_t lvol_a_chunks[2] = { 1, 2 };
+	uint64_t clean_chunks[1] = { 9 };
+	uint8_t *blk = malloc(BLOCK_SIZE);
+	int rc;
+
+	printf("\n[14] chunk-subset flush uploads only target lvol chunks\n");
+	if (!blk) {
+		check_true("chunk-subset buffer allocates", false, NULL);
+		goto out;
+	}
+	for (uint32_t i = 0; i < TEST_CHUNKS; i++) {
+		fake.image[i] = malloc(CHUNK_SIZE);
+		if (!fake.image[i]) {
+			check_true("chunk-subset fake image allocation", false, NULL);
+			goto out;
+		}
+	}
+
+	/* Default 45s hold-back policy: partial 4 KiB writes sit in aging_q and
+	 * are NOT uploaded by an ordinary kick. */
+	rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+	check_true("chunk-subset overlay creates", rc == 0, NULL);
+	if (rc != 0) {
+		goto out;
+	}
+	fake.ov = ov;
+	rc = s3_flusher_create(ov, NULL, fake_upload, &fake, &fl_opts, &fl);
+	check_true("chunk-subset flusher creates", rc == 0, NULL);
+	if (rc != 0) {
+		goto out;
+	}
+
+	/* Dirty chunks 1 and 2 (lvol A) and chunk 5 (lvol B) with 1 block each. */
+	fill_pattern(blk, 1, 1 * BLOCKS_PER_CHUNK, 0xE1);
+	s3_overlay_write(ov, 1 * BLOCKS_PER_CHUNK, 1, blk, 100);
+	fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0xE2);
+	s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 101);
+	fill_pattern(blk, 1, 5 * BLOCKS_PER_CHUNK, 0xE5);
+	s3_overlay_write(ov, 5 * BLOCKS_PER_CHUNK, 1, blk, 102);
+
+	s3_flusher_kick(fl);
+	check_u64("partial chunks stay held back in aging_q before explicit flush",
+		  fake.started, 0);
+
+	/* Flushing clean chunks completes inline without starting uploads. */
+	s3_flusher_flush_chunks(fl, clean_chunks, 1, 0, drain_cb, &waiter1);
+	check_true("clean chunk flush completes inline",
+		   waiter1.done && waiter1.status == 0, NULL);
+	check_u64("clean chunk flush starts no uploads", fake.started, 0);
+
+	/* Flush only lvol A's chunks (1 and 2); lvol B's chunk 5 must stay held. */
+	waiter1 = (struct drain_probe){ .status = -1, .done = false };
+	s3_flusher_flush_chunks(fl, lvol_a_chunks, 2, 0, drain_cb, &waiter1);
+	check_true("subset flush waits while target uploads are in flight",
+		   !waiter1.done, NULL);
+	check_u64("only lvol A's two chunks started uploading", fake.started, 2);
+	check_u64("lvol B's chunk 5 was not started", fake.rounds[5], 0);
+
+	/* Overwrite chunk 1 mid-upload and issue a second concurrent flush on
+	 * lvol A: it must not fail with -EBUSY, and it must wait for round 2 on
+	 * chunk 1 while waiter1 finishes on round 1. */
+	fill_pattern(blk, 1, 1 * BLOCKS_PER_CHUNK, 0xE9);
+	s3_overlay_write(ov, 1 * BLOCKS_PER_CHUNK, 1, blk, 103);
+	s3_flusher_flush_chunks(fl, lvol_a_chunks, 2, 0, drain_cb, &waiter2);
+	check_true("concurrent subset flush is accepted without -EBUSY",
+		   !waiter2.done && waiter2.status != -EBUSY, NULL);
+
+	/* Complete round 1 for chunks 1 and 2. */
+	fake_complete_all(&fake, 0);
+	check_true("first waiter completes after round 1",
+		   waiter1.done && waiter1.status == 0, NULL);
+	check_true("second waiter waits for round 2 of re-dirtied chunk 1",
+		   !waiter2.done, NULL);
+	check_u64("round 2 started immediately for chunk 1", fake.rounds[1], 2);
+	check_u64("lvol B's chunk 5 is still untouched in aging_q",
+		  fake.rounds[5], 0);
+
+	/* Complete round 2 for chunk 1. */
+	fake_complete_all(&fake, 0);
+	check_true("second waiter completes after round 2",
+		   waiter2.done && waiter2.status == 0, NULL);
+	check_true("lvol B's chunk 5 still resides in the overlay",
+		   s3_overlay_covers(ov, 5 * BLOCKS_PER_CHUNK, 1), NULL);
+	check_u64("only lvol B's 1 block remains in the overlay",
+		  s3_overlay_get_bytes(ov), BLOCK_SIZE);
+
+	/* A chunk list built from a snapshot chain names a shared chunk once per
+	 * layer, and the metadata region is listed whole. Duplicates and clean
+	 * chunks must neither start extra uploads nor hold the waiter for a
+	 * round that will never come. */
+	{
+		uint64_t dup_chunks[6] = { 5, 9, 5, 5, 9, 5 };
+		uint32_t rounds_before = fake.rounds[5];
+
+		waiter1 = (struct drain_probe){ .status = -1, .done = false };
+		s3_flusher_flush_chunks(fl, dup_chunks, 6, 0, drain_cb, &waiter1);
+		check_true("a list with duplicates waits for the dirty chunk",
+			   !waiter1.done, NULL);
+		check_u64("the duplicated chunk started exactly one upload",
+			  fake.rounds[5], rounds_before + 1);
+		fake_complete_all(&fake, 0);
+		check_true("one round completes the duplicated list",
+			   waiter1.done && waiter1.status == 0, NULL);
+		check_u64("nothing is left in the overlay",
+			  s3_overlay_get_bytes(ov), 0);
+	}
+
+	/* The attach hold gates uploads for as long as the flush budget lasts.
+	 * Counting that time against a waiter meant a snapshot taken just after
+	 * an attach timed out without one upload having been allowed to start.
+	 * A 200 ms budget outslept by 300 ms shows it with a real clock. */
+	{
+		struct drain_probe susp = { .status = -1, .done = false };
+		uint64_t one_chunk[1] = { 3 };
+
+		s3_flusher_suspend(fl, S3_FLUSHER_NO_SUSPEND_TIMEOUT, drain_cb, &susp);
+		check_true("idle flusher suspends for the gate test",
+			   susp.done && susp.status == 0, NULL);
+
+		fill_pattern(blk, 1, 3 * BLOCKS_PER_CHUNK, 0xE3);
+		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, 1, blk, 104);
+		waiter1 = (struct drain_probe){ .status = -1, .done = false };
+		s3_flusher_flush_chunks(fl, one_chunk, 1, 200 * 1000, drain_cb,
+					&waiter1);
+		usleep(300 * 1000);
+		s3_flusher_kick(fl);
+		check_true("a waiter does not time out while the gate is shut",
+			   !waiter1.done, NULL);
+		check_u64("and nothing was uploaded through the gate",
+			  fake.rounds[3], 0);
+
+		s3_flusher_resume(fl);
+		check_true("resume hands the waiter its budget back",
+			   !waiter1.done, NULL);
+		check_u64("resume starts the waited-for upload", fake.rounds[3], 1);
+		fake_complete_all(&fake, 0);
+		check_true("the waiter completes once the upload lands",
+			   waiter1.done && waiter1.status == 0, NULL);
+	}
+
+out:
+	if (fl) {
+		while (fake.n_pending > 0) {
+			fake_complete_all(&fake, 0);
+		}
+		s3_flusher_destroy(fl);
+	}
+	if (ov) {
+		s3_overlay_destroy(ov);
+	}
+	free(blk);
+	for (uint32_t i = 0; i < TEST_CHUNKS; i++) {
+		free(fake.image[i]);
+	}
+}
+
 /* ==========================================================================
  * main
  * ========================================================================== */
@@ -1472,6 +1686,7 @@ main(void)
 	test_flusher();
 	test_flush_policy();
 	test_head_aware_flusher();
+	test_chunk_subset_flush();
 
 	spdk_thread_exit(thread);
 	while (!spdk_thread_is_exited(thread)) {

@@ -2344,16 +2344,14 @@ check_target "step 11d.4" || exit 1
 # --------------------------------------------------------------------------
 # 11d.5 two exports of one lvstore, back to back
 #
-# An export drains the lvstore first, and s3_flusher_drain runs one drain at a
-# time -- a second caller gets -EBUSY. Two exports started close together used to
-# have the second one fail on that, which was quiet from the caller's side: the
-# uuid was already returned, so the failure arrived asynchronously and left
-# nothing behind, and asking rcow_get_snapshot_status about that uuid answered
-# "does not exist". Observed in production with two exports 8 ms apart.
+# Each export flushes its own snapshot. A clean snapshot returns immediately
+# and does not take the single s3_flusher_drain slot. Two exports used to share
+# that slot: the second got -EBUSY after its uuid had already been returned,
+# and rcow_get_snapshot_status then answered "does not exist". Observed in
+# production with two exports 8 ms apart.
 #
 # Different snapshots on purpose: exporting the *same* snapshot twice is
-# deliberately idempotent (11d.3), which would hide the drain contention this is
-# about.
+# deliberately idempotent (11d.3).
 # --------------------------------------------------------------------------
 echo
 echo "  11d.5 two exports of one lvstore, back to back"
@@ -2387,12 +2385,12 @@ else
 	exit 1
 fi
 
-# The point of the fix: both reach DONE. Before it, the second export failed on
-# -EBUSY and its uuid became unknown to rcow_get_snapshot_status.
+# Both reach DONE. The old failure was the second export dying on -EBUSY after
+# its uuid had already been handed out.
 for _u in "${RACE_U1}" "${RACE_U2}"; do
 	wait_export_done "${_u}" "step 11d.5" || exit 1
 done
-pass "both exports completed despite contending for the drain"
+pass "both exports completed"
 
 # The failure mode this replaces, asserted directly: a uuid whose export failed
 # reads as "does not exist", so a status that answers at all proves it did not.
@@ -2404,30 +2402,20 @@ for _u in "${RACE_U1}" "${RACE_U2}"; do
 done
 pass "both uuids are known to rcow_get_snapshot_status"
 
-# The drain contention must have been retried, not merely avoided by luck: the
-# target says so when it had to wait. Not a failure if it did not happen -- the
-# two RPC launches can be far enough apart for the first drain to finish -- but
-# worth reporting either way. When it did happen, the wait has to be visible from
-# the start too: a production node needs to be able to tell an export that is
-# waiting from one that is stuck, which is what the NOTICE naming the uuid is for.
-if grep -qE "drained '${SRC_LVS}' after [0-9]+ retr" "${TGT_LOG}" 2>/dev/null; then
-	info "the drain was retried, which is the path under test"
-	if grep -qE "Export [0-9a-f-]+ of snapshot '[^']+' is waiting for another drain" \
-			"${TGT_LOG}" 2>/dev/null; then
-		pass "the wait was reported when it began, naming the export"
-	else
-		fail "an export waited for a drain without saying so"
-	fi
+# Per-snapshot flush must not fall back to the exclusive lvstore drain, and two
+# exports of one snapshot must not refuse each other. Each grep names a line the
+# target still prints, so a match is a real failure and silence means something.
+if grep -qE "Export (${RACE_U1}|${RACE_U2}) could not publish snapshot" \
+		"${TGT_LOG}" 2>/dev/null; then
+	fail "an export failed to publish its snapshot"
 else
-	info "no drain retry was needed this run (the drains did not overlap)"
+	pass "both exports published their snapshot"
 fi
-# What must not appear is the old outcome: an export giving up on -EBUSY. Any
-# such failure now names its uuid, which is what made the production report hard
-# to place: the error said only which lvstore was busy.
-if grep -qE "could not drain lvstore .* Device or resource busy" "${TGT_LOG}" 2>/dev/null; then
-	fail "an export still gave up because another drain was running"
+if grep -qE "Export (${RACE_U1}|${RACE_U2}) .*waiting for a hot prepare" \
+		"${TGT_LOG}" 2>/dev/null; then
+	fail "an export was held by a hot prepare nobody started"
 else
-	pass "no export failed because of a concurrent drain"
+	pass "no export waited on the flusher hold"
 fi
 
 for _u in "${RACE_U1}" "${RACE_U2}"; do
@@ -2446,13 +2434,10 @@ check_target "step 11d.5" || exit 1
 # --------------------------------------------------------------------------
 # 11d.6 three exports of one lvstore, back to back
 #
-# Two-way contention was the reported production incident (two exports 8 ms
-# apart, both refused by the single-slot drain). Three-way contention is the
-# generalisation: with one drain slot per lvstore, two of three concurrent
-# exports have to wait for the first. All three must still reach DONE, all
-# three uuids must stay known to rcow_get_snapshot_status, and none may give
-# up on -EBUSY. Different snapshots, as in 11d.5, so idempotence cannot mask
-# the contention.
+# The same property as 11d.5 with three snapshots. All three must reach DONE,
+# all three uuids must stay known to rcow_get_snapshot_status, and none may
+# give up on -EBUSY or take the exclusive lvstore drain. Different snapshots,
+# so idempotence cannot hide a second export of the same blob.
 # --------------------------------------------------------------------------
 echo
 echo "  11d.6 three exports of one lvstore, back to back"
@@ -2500,7 +2485,7 @@ fi
 for _u in "${TRIP_U1}" "${TRIP_U2}" "${TRIP_U3}"; do
 	wait_export_done "${_u}" "step 11d.6" || exit 1
 done
-pass "all three exports reached DONE despite contending for the drain"
+pass "all three exports reached DONE"
 
 for _u in "${TRIP_U1}" "${TRIP_U2}" "${TRIP_U3}"; do
 	if ! raw_rpc rcow_get_snapshot_status \
@@ -2510,15 +2495,17 @@ for _u in "${TRIP_U1}" "${TRIP_U2}" "${TRIP_U3}"; do
 done
 pass "all three uuids are known to rcow_get_snapshot_status"
 
-if grep -qE "drained '${SRC_LVS}' after [0-9]+ retr" "${TGT_LOG}" 2>/dev/null; then
-	info "the drain was retried during the three-way contention"
+if grep -qE "Export (${TRIP_U1}|${TRIP_U2}|${TRIP_U3}) could not publish snapshot" \
+		"${TGT_LOG}" 2>/dev/null; then
+	fail "an export failed to publish its snapshot"
 else
-	info "no drain retry was needed this run (the drains did not overlap)"
+	pass "all three exports published their snapshot"
 fi
-if grep -qE "could not drain lvstore .* Device or resource busy" "${TGT_LOG}" 2>/dev/null; then
-	fail "an export still gave up because another drain was running"
+if grep -qE "Export (${TRIP_U1}|${TRIP_U2}|${TRIP_U3}) .*waiting for a hot prepare" \
+		"${TGT_LOG}" 2>/dev/null; then
+	fail "an export was held by a hot prepare nobody started"
 else
-	pass "no export failed because of a concurrent drain"
+	pass "no export waited on the flusher hold"
 fi
 
 for _u in "${TRIP_U1}" "${TRIP_U2}" "${TRIP_U3}"; do

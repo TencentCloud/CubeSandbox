@@ -381,4 +381,24 @@ void s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index,
  */
 uint64_t s3_overlay_min_seq(const struct s3_overlay *ov);
 
+/**
+ * Mark \c chunk_index for immediate upload if it holds any overlay blocks,
+ * bypassing the hold-back policy for this chunk alone.
+ *
+ * \return true and sets \c *out_target_seq to the highest sequence currently
+ *         held by the chunk; false when the chunk holds nothing in the
+ *         overlay.
+ */
+bool s3_overlay_flush_chunk_prepare(struct s3_overlay *ov,
+				    uint64_t chunk_index,
+				    uint64_t *out_target_seq);
+
+/**
+ * True once every block written to \c chunk_index at or below \c target_seq
+ * has been uploaded to S3 (or dropped by an unmap).
+ */
+bool s3_overlay_chunk_flushed_through(struct s3_overlay *ov,
+				      uint64_t chunk_index,
+				      uint64_t target_seq);
+
 #endif /* S3LVOL_OVERLAY_H */

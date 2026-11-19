@@ -5161,6 +5161,50 @@ s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 }
 
 void
+s3_bs_dev_flush_chunks(struct spdk_bs_dev *bs_dev,
+		       const uint64_t *chunks, uint32_t num_chunks,
+		       uint64_t timeout_us,
+		       s3_bs_dev_cb cb_fn, void *cb_arg)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+	int err;
+
+	if (!ctx || !ctx->flusher) {
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+
+	assert(ctx->owner_thread == NULL || ctx->owner_thread == spdk_get_thread());
+
+	err = __atomic_load_n(&ctx->wal_writeback_error, __ATOMIC_ACQUIRE);
+	if (err != 0) {
+		if (cb_fn) {
+			cb_fn(cb_arg, err);
+		}
+		return;
+	}
+
+	/* Do not clear the post-attach grace hold. It keeps the flusher from
+	 * PUT+deleting a metadata chunk while blobstore is still reading it.
+	 * The grace timer releases the hold; a snapshot or export flush waits
+	 * for that rather than ending the protection early. */
+
+	s3_flusher_flush_chunks(ctx->flusher, chunks, num_chunks, timeout_us,
+				cb_fn, cb_arg);
+}
+
+bool
+s3_bs_dev_chunk_in_overlay(struct spdk_bs_dev *bs_dev, uint64_t chunk_index)
+{
+	struct s3_ctx *ctx = (struct s3_ctx *)bs_dev;
+
+	return ctx && ctx->overlay &&
+	       s3_overlay_chunk_is_live(ctx->overlay, chunk_index);
+}
+
+void
 s3_bs_dev_suspend_flusher(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 			  s3_bs_dev_cb cb_fn, void *cb_arg)
 {

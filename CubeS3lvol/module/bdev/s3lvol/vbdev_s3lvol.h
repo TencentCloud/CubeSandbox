@@ -169,6 +169,15 @@ void s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
 			  spdk_lvs_op_complete cb_fn, void *cb_arg);
 
 /**
+ * Push dirty overlay chunks belonging to \c lvol (and its local snapshot
+ * chain) into S3 without draining unrelated volumes in the same lvstore.
+ *
+ * Must be called on the lvstore's owner thread.
+ */
+void s3lvol_lvol_flush(struct spdk_lvol *lvol, uint64_t timeout_us,
+		       spdk_lvol_op_complete cb_fn, void *cb_arg);
+
+/**
  * Quiesce exported I/O for every loaded lvstore.
  *
  * Pause every RCOW NVMf subsystem and hold the flushers. Blobstore is left
@@ -687,8 +696,10 @@ int s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
  *
  * Blobstore allows one metadata operation on a blob at a time and answers
  * -EBUSY for a second. Concurrent snapshots of \p lvol are queued here and the
- * callback runs when that snapshot has been created, rather than failing the
- * caller with EBUSY.
+ * callback runs when that snapshot has been created and its chunks have been
+ * published into the chunk map, rather than failing the caller with EBUSY.
+ * A publish failure keeps the snapshot -- the origin is already its clone --
+ * and reports the error.
  */
 int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 				const char *snapshot_name,

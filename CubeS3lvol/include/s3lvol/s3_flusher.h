@@ -23,10 +23,12 @@
 
 /* Chunks uploaded at once. Each one is an S3 round trip measured in tens to
  * hundreds of milliseconds, so concurrency is the main lever on drain rate:
- * eight in flight at ~170 ms is only ~48 MiB/s of 1 MiB objects. Thirty-two
- * keeps the per-chunk single-flight rule and is still well inside the CRT
- * client pool. */
-#define S3_FLUSHER_DEFAULT_MAX_CONCURRENT 32
+ * eight in flight at ~170 ms is only ~48 MiB/s of 1 MiB objects. 128 is the
+ * window a 10-way snapshot of 100 MiB chunks saturated on COS (2.7 s at 32,
+ * 0.49 s at 128, after which 5-way and 10-way finished together). Still one
+ * writer per object, and inside the CRT client pool.
+ * S3LVOL_FLUSH_MAX_CONCURRENT overrides this. */
+#define S3_FLUSHER_DEFAULT_MAX_CONCURRENT 128
 
 /* Tick interval: roughly a millisecond. */
 #define S3_FLUSHER_DEFAULT_POLL_US 1000
@@ -153,6 +155,19 @@ void s3_flusher_kick(struct s3_flusher *f);
  */
 void s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 		      s3_flusher_cb cb_fn, void *cb_arg);
+
+/**
+ * Upload dirty overlay data for the given chunks and fire \c cb_fn once every
+ * write acknowledged on those chunks at the time of the call has reached S3.
+ *
+ * Unlike s3_flusher_drain(), this promotes only the named chunks out of the
+ * overlay's hold-back queue, leaves other chunks untouched, and allows
+ * multiple callers to wait concurrently without returning -EBUSY.
+ */
+void s3_flusher_flush_chunks(struct s3_flusher *f,
+			     const uint64_t *chunks, uint32_t num_chunks,
+			     uint64_t timeout_us,
+			     s3_flusher_cb cb_fn, void *cb_arg);
 
 /**
  * Stop starting uploads and complete after current uploads and WAL super
