@@ -110,8 +110,14 @@ func (l *CgPlugin) init() error {
 	}
 
 	l.config.parseAndSetDynamicConfig(dynamConf.GetConfig())
-	log.L.Infof("cgroup numa affinity: enabled=%v (enable_numa_affinity=%v, numa_nodes=%d)",
-		l.config.NumaAffinityEnabled(), l.config.EnableNumaAffinity, numa.GetNumaNodeCount())
+	if l.config.EnableNumaAffinity {
+		// NumaInfo is parsed lazily and panics when /sys/devices/system/node is
+		// unreadable, so only touch it when the switch is on.
+		log.L.Infof("cgroup numa affinity: enabled=%v (enable_numa_affinity=true, numa_nodes=%d)",
+			l.config.NumaAffinityEnabled(), numa.GetNumaNodeCount())
+	} else {
+		log.L.Infof("cgroup numa affinity: disabled (enable_numa_affinity=false)")
+	}
 
 	err = l.initPool()
 	if err != nil {
@@ -230,6 +236,7 @@ func (l *CgPlugin) initPool() error {
 		workers:             l.config.PoolWorkers,
 		triggerInterval:     time.Duration(l.config.PoolTriggerIntervalInMs) * time.Millisecond,
 		reparentFileEnabled: l.config.ShouldSetMemoryReparentFile,
+		numaAffinityInUse:   l.config.NumaAffinityEnabled,
 	}
 	if err := p.init(); err != nil {
 		return err

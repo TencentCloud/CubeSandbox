@@ -59,8 +59,13 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     pool_size = 3000
     pool_workers = 1
     # Place every sandbox cgroup under the per-NUMA subtree (numa<N>) so that it
-    # inherits that node's cpuset.cpus / cpuset.mems. Requires a host with more
-    # than one NUMA node; ignored otherwise. Off by default.
+    # inherits that node's cpuset.cpus / cpuset.mems: the node picked at create
+    # time then binds CPU cores and memory instead of only labelling the sandbox.
+    # Requires more than one NUMA node and a usable cpuset controller (mounted
+    # controllers on a cgroup v1 host, the unified hierarchy on v2); cubelet
+    # refuses to start when it is enabled and the controller is missing. Applies
+    # to sandboxes created afterwards, existing ones keep their cgroup. Off by
+    # default.
     enable_numa_affinity = false
     pool_trigger_interval_in_ms = 1000
     vm_cpu_overhead = "0"

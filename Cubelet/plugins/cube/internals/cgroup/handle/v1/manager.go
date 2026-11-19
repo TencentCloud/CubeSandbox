@@ -112,6 +112,15 @@ func (h *handler) CreateWithCpuSet(ctx context.Context, group string, cpuset str
 	return err
 }
 
+// CpusetDir resolves the cpuset controller directory from /proc/mounts, so a
+// co-mounted layout (cpu,cpuacct,cpuset) or a non-default cgroup root is
+// handled as well. An error means the controller is not mounted: nothing can
+// be bound then, and the pool bootstrap reports it instead of starting with
+// an unbound pool.
+func (h *handler) CpusetDir(group string) (string, error) {
+	return h.subsystemPath(cgroup1.Cpuset, group)
+}
+
 func SingleSubsystem(baseHierarchy cgroup1.Hierarchy, needSystemName []cgroup1.Name) cgroup1.Hierarchy {
 	return func() ([]cgroup1.Subsystem, error) {
 		subsystems, err := baseHierarchy()

@@ -14,6 +14,11 @@ type Interface interface {
 	IsExist(ctx context.Context, group string) bool
 	Create(ctx context.Context, group string) error
 	CreateWithCpuSet(ctx context.Context, group string, cpuset string, numaId int) error
+	// CpusetDir returns the directory that carries cpuset.cpus / cpuset.mems
+	// for group: the controller mount on cgroup v1, the cgroup itself on the
+	// unified hierarchy. An error means the cpuset controller is not
+	// available, so a NUMA mask cannot be applied at all.
+	CpusetDir(group string) (string, error)
 	Update(ctx context.Context, group string, cpu, mem resource.Quantity) error
 	Delete(ctx context.Context, group string) error
 	List() ([]string, error)

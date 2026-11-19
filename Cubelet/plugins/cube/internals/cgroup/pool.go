@@ -60,6 +60,9 @@ type cgPool struct {
 	// Injected closure; the dynamic config watcher can flip the value at
 	// runtime.
 	reparentFileEnabled func() bool
+	// Injected closure; reports whether the per-NUMA pool is in use, which
+	// decides how strictly the pool bootstrap treats a broken slot.
+	numaAffinityInUse func() bool
 }
 
 func (p *cgPool) addIndividualCgroup(group ...string) {
@@ -194,6 +197,11 @@ func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
 // under it inherits the binding, which is what turns the NUMA node picked for
 // the sandbox into a real CPU + memory affinity constraint.
 //
+// Inheritance is what makes that work on both backends: the unified hierarchy
+// hands a child the effective parent mask, and on cgroup v1 containerd's cpuset
+// controller copies cpuset.cpus / cpuset.mems into each new child (copyIfNeeded)
+// because the slots are created with an empty CPU spec.
+//
 // Opt-in via enable_numa_affinity. A single-NUMA host gains nothing from the
 // v2 pool, so the setting is ignored there and the v1 pool stays in use.
 func (c *Config) NumaAffinityEnabled() bool {
@@ -237,39 +245,40 @@ func (p *cgPool) initPoolV2() error {
 // every startup; this also repairs a slot whose mask drifted (CPU hot-add,
 // manual change).
 //
-// cpuset.memory_migrate is deliberately left at the kernel default of 0:
-// cpuset.mems already confines every new allocation to the node, while
-// memory_migrate=1 would also migrate the pages a sandbox has already faulted
-// in, on attach, serialised by cpuset_mutex. That cost is proportional to the
-// resident set: with it enabled, 50 concurrent 2 vCPU / 2 GB creates measured
-// P99 = 26 s against 166 ms with the default, so it is not a knob we turn on.
-func ensureNumaSlotCpuset(slot string, cpulist string, nodeID int) error {
-	base := fmt.Sprintf("%s/cpuset%s", handle.RootMountPoint, slot)
-	// On a cgroup v2 (unified) host there is no per-controller cpuset mount:
-	// the v2 handle has already written cpuset.cpus / cpuset.mems through
-	// cgroup2, so there is nothing to repair here. Returning nil keeps cubelet
-	// bootstrap alive instead of failing on a path that cannot exist.
-	if _, err := os.Stat(base); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+// The directory is resolved by the handle, so a cgroup v1 host with the cpuset
+// controller co-mounted (cpu,cpuacct,cpuset) or on a non-default root is handled
+// too, and a controller that is not available is an error instead of a silent
+// no-op. On the unified hierarchy the handle points at the cgroup itself and
+// the same re-assert doubles as a repair of a stale mask.
+func ensureNumaSlotCpuset(h handle.Interface, slot, cpulist string, nodeID int) error {
+	dir, err := h.CpusetDir(slot)
+	if err != nil {
 		return err
+	}
+	return applyCpusetFiles(dir, cpulist, nodeID)
+}
+
+// applyCpusetFiles makes dir carry exactly cpulist / nodeID, writing only the
+// files that differ so a healthy slot costs two reads.
+func applyCpusetFiles(dir, cpulist string, nodeID int) error {
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("cpuset directory %s: %w", dir, err)
 	}
 	want := []struct{ name, val string }{
 		{"cpuset.cpus", cpulist},
 		{"cpuset.mems", fmt.Sprintf("%d", nodeID)},
 	}
 	for _, w := range want {
-		file := path.Join(base, w.name)
+		file := path.Join(dir, w.name)
 		cur, err := os.ReadFile(file)
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", file, err)
 		}
 		if strings.TrimSpace(string(cur)) == w.val {
 			continue
 		}
 		if err := os.WriteFile(file, []byte(w.val), 0644); err != nil {
-			return fmt.Errorf("write %s=%s: %w", w.name, w.val, err)
+			return fmt.Errorf("write %s=%s: %w", file, w.val, err)
 		}
 	}
 	return nil
@@ -277,19 +286,32 @@ func ensureNumaSlotCpuset(slot string, cpulist string, nodeID int) error {
 
 func (p *cgPool) initPoolV2Late() error {
 	ctx := context.Background()
+	// With the switch on this pool is what Create hands out, so a slot that
+	// cannot be bootstrapped has to fail startup: the node would otherwise
+	// report ready and then place every sandbox in a pool that carries no mask.
+	// With the switch off the pool is unused and startup stays as tolerant as it
+	// was before the switch existed.
+	strict := p.numaAffinityInUse != nil && p.numaAffinityInUse()
 	for i := 0; i < len(p.poolV2.numaPools); i++ {
 		numaPool := &p.poolV2.numaPools[i]
 		numaNode := numaPool.numaNode
 		log.G(ctx).Errorf("cgroup pool v2 init: nodeId: %d, cpus: %s", numaNode.NodeId, numaNode.Cpulist)
 		slot := fmt.Sprintf("%s/numa%d", handle.DefaultPathPoolV2, numaNode.NodeId)
-		if err := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId); err != nil {
-			// Re-creating the slot of a previous run is expected to fail; the
-			// cpuset values are re-asserted below either way.
-			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, err)
+		createErr := p.poolV2.handle.CreateWithCpuSet(ctx, slot, numaNode.Cpulist, numaNode.NodeId)
+		applyErr := ensureNumaSlotCpuset(p.poolV2.handle, slot, numaNode.Cpulist, numaNode.NodeId)
+		if applyErr != nil && strict {
+			return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: apply cpuset: %w", numaNode.NodeId, slot, applyErr)
 		}
-		if err := ensureNumaSlotCpuset(slot, numaNode.Cpulist, numaNode.NodeId); err != nil {
-			log.G(ctx).Errorf("cgroup pool v2 init, failed to set cpuset for numa%d: %v", numaNode.NodeId, err)
-			return err
+		if createErr != nil {
+			// Only the slot of a previous run is worth tolerating: it exists and
+			// already carries the mask, which the re-assert above just proved.
+			if strict && applyErr != nil {
+				return fmt.Errorf("cgroup pool v2 init: numa%d slot %s: %w", numaNode.NodeId, slot, createErr)
+			}
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
+		}
+		if applyErr != nil {
+			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
 		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {
