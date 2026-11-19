@@ -367,10 +367,12 @@ impl Task for TaskService {
                 Error::Other(format!("Init sandbox config failed:{}", e))
             })?;
 
-            sb.create_sandbox(&trace).await.map_err(|e| {
-                errf!(self.log, "Create sandbox failed:{}", e.clone());
-                Error::Other(format!("Create sandbox failed:{}", e))
-            })?;
+            sb.create_sandbox(&trace, ctx.timeout_nano)
+                .await
+                .map_err(|e| {
+                    errf!(self.log, "Create sandbox failed:{}", e.clone());
+                    Error::Other(format!("Create sandbox failed:{}", e))
+                })?;
         }
 
         infof!(
