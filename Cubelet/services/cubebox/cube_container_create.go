@@ -180,6 +180,11 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// cleanup) carries this copy into Destroy, which saves it back;
 				// see restorePausedReplaceSnapshot.
 				opts.PausedReplaceSnapshot = sb.DeepCopy()
+				// The store row this attempt is responsible for: the tombstone
+				// until the flow's first Save replaces it with the new row
+				// (createContainers updates this), and the identity the
+				// rollback's restore checks before touching the store.
+				opts.PausedReplaceDebris = sb
 				if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
 					opts.RestartPrior = restartPriorFrom(sb)
 				}
@@ -580,8 +585,11 @@ func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
 		},
 		// A failed Create-from-pause rolls back to its tombstone on this path
 		// too: the cleanup ctx carries the failover marker the restore checks,
-		// but the snapshot itself has to travel on the DestroyContext.
+		// but the snapshot itself has to travel on the DestroyContext. The
+		// envd-init failure always happens after createContainers' first Save,
+		// so the debris identity is the row this attempt Saved.
 		PausedReplaceSnapshot: flowOpts.PausedReplaceSnapshot,
+		PausedReplaceDebris:   flowOpts.PausedReplaceDebris,
 	})
 }
 
@@ -706,6 +714,11 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 	if err := l.cubeboxManger.Save(ctx, sandBox, cubes.WithNoEvent); err != nil {
 		log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
 		return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
+	}
+	if flowOpts.PausedReplaceSnapshot != nil {
+		// This Save overwrote the tombstone; from now on this new row is what
+		// a rollback of this attempt owns (and may restore over).
+		flowOpts.PausedReplaceDebris = sandBox
 	}
 	return nil
 }

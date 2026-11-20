@@ -426,10 +426,11 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
+	resumeSID := resumeFromPauseSandboxID(req)
+	if resumeSID != "" {
 		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
-			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, sid)))
-		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, sid)
+			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, resumeSID)))
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, resumeSID)
 		lockSpan.End()
 		if lockErr != nil {
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
@@ -464,6 +465,17 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		ReqInfo:      req,
 		Failover:     true,
 		SnapshotMode: mode,
+	}
+	if resumeSID != "" {
+		// The async failover of a failed Create-from-pause restores the tombstone
+		// this request is replacing; hand it the same per-sandbox lock this
+		// Create holds so the restore cannot race a retried Resume or a user
+		// Delete that arrives after this RPC returned. Lock the exact key this
+		// Create locked (resumeSID), not whatever id the flow later pins, so the
+		// rollback is provably serialized against the same gate.
+		createInfo.RollbackSerialize = func(ctx context.Context, _ string) (func(), error) {
+			return s.sandboxLifecycleLocks.LockContext(ctx, resumeSID)
+		}
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 

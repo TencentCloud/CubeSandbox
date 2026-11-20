@@ -458,15 +458,30 @@ func (l *local) createRollbackKeepsPausedTombstone(ctx context.Context, opts *wo
 // RootfsWritableLayer, none of the rollback's delete marks), so the retry
 // runs exactly the first attempt's checks.
 //
-// A user Destroy never carries a snapshot — only create-rollback contexts do
-// — so this cannot resurrect a sandbox the user deleted; the failover-marker
-// check is defence in depth on top of that. A Save failure falls through to
-// the ordinary keep/delete path rather than leaving a half-restored row.
+// The rollback is serialized against retried Resume / user Delete by the
+// per-sandbox lifecycle lock the failover re-acquires (CreateContext.
+// RollbackSerialize); a user Destroy never carries a snapshot in the first
+// place. As defence in depth the restore also checks the store still holds
+// the exact row this attempt owned (PausedReplaceDebris identity): a Delete
+// or a newer attempt that slipped in while this rollback was in flight means
+// the snapshot is stale, and saving it would resurrect a sandbox whose pause
+// binding Master has already dropped, or clobber the newer attempt's row.
+// A Save failure likewise falls through to the ordinary keep/delete path
+// rather than leaving a half-restored row.
 func (l *local) restorePausedReplaceSnapshot(ctx context.Context, opts *workflow.DestroyContext, sandBoxID string) bool {
 	if opts == nil || opts.PausedReplaceSnapshot == nil {
 		return false
 	}
 	if !opts.BaseWorkflowInfo.IsRollBack && !constants.IsFailoverOperation(ctx) {
+		return false
+	}
+	if cur, getErr := l.cubeboxManger.Get(ctx, sandBoxID); getErr != nil || cur == nil ||
+		(opts.PausedReplaceDebris != nil && cur != opts.PausedReplaceDebris) {
+		if getErr != nil && !errors.Is(getErr, utils.ErrorKeyNotFound) {
+			log.G(ctx).Warnf("create rollback cannot verify the row for %s, skipping tombstone restore: %v", sandBoxID, getErr)
+		} else {
+			log.G(ctx).Warnf("create rollback skips tombstone restore for %s: the row was deleted or replaced while the attempt was in flight", sandBoxID)
+		}
 		return false
 	}
 	snap := opts.PausedReplaceSnapshot

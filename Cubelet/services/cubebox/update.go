@@ -299,8 +299,10 @@ func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resume
 // Under a release ratio r the still-paused sandbox already contributes (1-r)
 // of its quota to aggregateAllocated, so resuming it only adds the remaining
 // r fraction; the check compares that incremental demand, while the
-// reservation records the full quota (the tombstone row disappears mid-flow,
-// before the new row is saved).
+// reservation records the full quota: the tombstone row keeps contributing
+// its (1-r) fraction until the flow's Save overwrites it with the new row,
+// and reserving the full demand keeps every window of that transition
+// over-counting only (see resumeReservationLedger).
 //
 // The rejection boundary matches the scheduler's mem/cpu filters, which
 // reject when free <= need: a resume that would fill the node exactly is
