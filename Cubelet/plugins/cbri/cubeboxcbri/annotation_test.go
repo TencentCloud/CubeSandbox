@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -385,4 +386,74 @@ func TestGenVideoAnnotationOptCmdlineFormat(t *testing.T) {
 	assert.Equal(t, expectedCmdline, cmdlineArray)
 	assert.Contains(t, string(expectedJSON), expectedVideoParam)
 	assert.Contains(t, string(expectedJSON), expectedVideomemoryParam)
+}
+
+// TestGenVideoAnnotationOptSpecOutput applies the returned spec opt to a spec
+// and pins the exact annotation value the video path writes.
+//
+// genVideoAnnotationOpt used to call oci.WithAnnotations; it now unions the
+// JSON array so a template-produced DAMON params list survives. These cases
+// guard that a video-only sandbox still emits the same value, that re-applying
+// the opt does not duplicate params, and that an existing DAMON array is merged
+// instead of clobbered.
+func TestGenVideoAnnotationOptSpecOutput(t *testing.T) {
+	ctx := context.Background()
+	l := &cubeboxInstancePlugin{}
+
+	newOpts := func(extra map[string]string) *workflow.CreateContext {
+		annotations := map[string]string{
+			constants.AnnotationVideoEnable:     "true",
+			constants.AnnotationVideoResolution: "720x1280",
+		}
+		for k, v := range extra {
+			annotations[k] = v
+		}
+		return &workflow.CreateContext{
+			ReqInfo: &cubebox.RunCubeSandboxRequest{Annotations: annotations},
+		}
+	}
+
+	apply := func(t *testing.T, opts *workflow.CreateContext, s *oci.Spec) {
+		t.Helper()
+		specOpts, err := l.genVideoAnnotationOpt(ctx, opts)
+		require.NoError(t, err)
+		require.Len(t, specOpts, 1)
+		require.NoError(t, specOpts[0](ctx, nil, nil, s))
+	}
+
+	t.Run("video only", func(t *testing.T) {
+		s := &oci.Spec{}
+		apply(t, newOpts(nil), s)
+		assert.Equal(t,
+			`["video=vfb:enable,720x1280M-32@60","vfb.videomemorysize=4423680"]`,
+			s.Annotations[constants.AnnotationVMKernelCmdlineAppend])
+	})
+
+	t.Run("custom fps", func(t *testing.T) {
+		s := &oci.Spec{}
+		apply(t, newOpts(map[string]string{constants.AnnotationVideoFPS: "30"}), s)
+		assert.Equal(t,
+			`["video=vfb:enable,720x1280M-32@30","vfb.videomemorysize=4423680"]`,
+			s.Annotations[constants.AnnotationVMKernelCmdlineAppend])
+	})
+
+	t.Run("reapplying does not duplicate", func(t *testing.T) {
+		s := &oci.Spec{Annotations: map[string]string{
+			constants.AnnotationVMKernelCmdlineAppend: `["video=vfb:enable,720x1280M-32@60","vfb.videomemorysize=4423680"]`,
+		}}
+		apply(t, newOpts(nil), s)
+		assert.Equal(t,
+			`["video=vfb:enable,720x1280M-32@60","vfb.videomemorysize=4423680"]`,
+			s.Annotations[constants.AnnotationVMKernelCmdlineAppend])
+	})
+
+	t.Run("preserves an existing DAMON array", func(t *testing.T) {
+		s := &oci.Spec{Annotations: map[string]string{
+			constants.AnnotationVMKernelCmdlineAppend: `["damon_reclaim.enabled=Y"]`,
+		}}
+		apply(t, newOpts(nil), s)
+		assert.Equal(t,
+			`["damon_reclaim.enabled=Y","video=vfb:enable,720x1280M-32@60","vfb.videomemorysize=4423680"]`,
+			s.Annotations[constants.AnnotationVMKernelCmdlineAppend])
+	})
 }

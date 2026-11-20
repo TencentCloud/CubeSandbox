@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	goruntime "runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -56,6 +57,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/uid"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/kernelcmdline"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
@@ -588,7 +590,35 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate image reference for cubebox: %w", err)
 	}
+	additionalSandboxOpt = append(additionalSandboxOpt, l.genDamonMonitorRegionOpt(flowOpts))
 	return additionalSandboxOpt, nil
+}
+
+// genDamonMonitorRegionOpt fills the DAMON monitor region into the sandbox
+// kernel cmdline annotation. Cubelet runs on the worker node that boots the
+// guest, so runtime.GOARCH is the guest arch, and CgroupInfo carries the RAM
+// size handed to the VMM. This opt is appended last among the sandbox options,
+// so it runs after every annotation producer (container annotations, virtiofs,
+// video) and sees the full user-supplied list.
+func (l *local) genDamonMonitorRegionOpt(flowOpts *workflow.CreateContext) oci.SpecOpts {
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		raw := s.Annotations[constants.AnnotationVMKernelCmdlineAppend]
+		if strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		var vmRAMBytes uint64
+		if cgInfo, ok := flowOpts.CgroupInfo.(*cgroupp.Info); ok && cgInfo != nil && cgInfo.VmSnapshotSpec.Memory > 0 {
+			vmRAMBytes = uint64(cgInfo.VmSnapshotSpec.Memory) << 20
+		}
+		filled, err := kernelcmdline.FillDamonMonitorRegion(raw, goruntime.GOARCH, vmRAMBytes)
+		if err != nil {
+			return err
+		}
+		if filled != "" {
+			s.Annotations[constants.AnnotationVMKernelCmdlineAppend] = filled
+		}
+		return nil
+	}
 }
 
 func sandboxDNSLinesFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
@@ -904,7 +934,7 @@ func WithCubeFsAnnotation(ctx context.Context,
 			s.Annotations = make(map[string]string)
 		}
 		for k, v := range sandBox.FirstContainer().Annotations {
-			s.Annotations[k] = v
+			kernelcmdline.MergeAnnotation(s.Annotations, k, v)
 		}
 		return nil
 	})

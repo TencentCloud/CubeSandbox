@@ -25,6 +25,7 @@ import (
 	commands "github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemastercli/commands"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -923,6 +924,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
 		cli.BoolFlag{Name: "enable-inject-envd", Usage: "enable cubesandbox-envd injection for this template build"},
 		cli.StringFlag{Name: "envd-path", Usage: "local envd binary path to upload when --enable-inject-envd is set; defaults to the CLI-embedded envd if available"},
+		cli.StringSliceFlag{Name: "kernel-cmdline-append", Usage: "append guest kernel cmdline params; repeat for multiple params; only page_reporting.* and damon_reclaim.* are allowed, e.g. --kernel-cmdline-append page_reporting.page_reporting_order=6 --kernel-cmdline-append damon_reclaim.enabled=Y"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -1749,9 +1751,10 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
 	enableInjectEnvd := c.Bool("enable-inject-envd")
+	kernelCmdline := c.StringSlice("kernel-cmdline-append")
 	user := strings.TrimSpace(c.String("user"))
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" {
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && len(kernelCmdline) == 0 && user == "" {
 		return nil, nil
 	}
 
@@ -1819,6 +1822,22 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			overrides.Annotations = map[string]string{}
 		}
 		overrides.Annotations[constants.CubeAnnotationsInjectEnvd] = constants.CubeAnnotationsInjectEnvdOptIn
+	}
+	if len(kernelCmdline) > 0 {
+		if overrides.Annotations == nil {
+			overrides.Annotations = map[string]string{}
+		}
+		raw, err := jsoniter.Marshal(kernelCmdline)
+		if err != nil {
+			return nil, fmt.Errorf("marshal kernel cmdline append failed: %w", err)
+		}
+		// Validate the allowlist here so bad params fail at submit time, not
+		// when the template build sandbox is created.
+		filtered, err := sandbox.FilterVMKernelCmdline(string(raw))
+		if err != nil {
+			return nil, err
+		}
+		overrides.Annotations[constants.CubeAnnotationVMKernelCmdlineAppend] = filtered
 	}
 	return overrides, nil
 }
