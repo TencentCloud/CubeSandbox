@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -255,12 +257,48 @@ func TestCreateRollbackKeepsPausedTombstone(t *testing.T) {
 		assert.False(t, l.createRollbackKeepsPausedTombstone(context.Background(), opts, "sb-user-destroy"))
 	})
 
+	t.Run("the envd-init cleanup rollback also keeps the tombstone", func(t *testing.T) {
+		// cleanupAfterEnvdInitFailure builds a DestroyContext WITHOUT IsRollBack
+		// and marks only the context; the guard must key on the same condition
+		// as the restore it backstops, or a partially-failed restore on that
+		// path falls through to the deferred Delete and removes the row the
+		// restore's in-memory Add just put back.
+		sb := tombstone("sb-envd-keep")
+		l := &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}
+		opts := rollbackDestroyContext("sb-envd-keep")
+		opts.IsRollBack = false
+		ctx := constants.WithFailoverOperation(context.Background())
+
+		assert.True(t, l.createRollbackKeepsPausedTombstone(ctx, opts, "sb-envd-keep"))
+	})
+
 	t.Run("a missing or unreadable row keeps the old behaviour", func(t *testing.T) {
 		l := &local{cubeboxManger: &fakeCubeboxAPI{getErr: utils.ErrorKeyNotFound}}
 		assert.False(t, l.createRollbackKeepsPausedTombstone(
 			context.Background(), rollbackDestroyContext("sb-gone"), "sb-gone"),
 			"nothing to keep: the deferred delete proceeds exactly as before")
 	})
+}
+
+// TestCreateResolveErrorTriggersFailoverNotStrand pins the error-code choice
+// for a store read failure inside local.Create's replacement branch: the code
+// must trigger the engine failover (i.e. must NOT be PreConditionFailed, which
+// the engine returns before failover). cubebox is the create flow's last step,
+// so network/volume/storage/cgroup are already allocated at this point —
+// skipping the rollback would strand them until a user DELETE, while the
+// failover releases them and its rollback keeps the still-PAUSED tombstone.
+func TestCreateResolveErrorTriggersFailoverNotStrand(t *testing.T) {
+	l := &local{cubeboxManger: &fakeCubeboxAPI{getErr: errors.New("boltdb: i/o error")}}
+	opts := &workflow.CreateContext{ReqInfo: resumeReplaceRequest("sb-resolve-err")}
+
+	err := l.Create(context.Background(), opts)
+
+	require.Error(t, err)
+	assert.False(t, ret.IsErrorCode(err, errorcode.ErrorCode_PreConditionFailed),
+		"PreConditionFailed would skip the failover and strand the earlier steps' allocations")
+	assert.True(t, ret.IsErrorCode(err, errorcode.ErrorCode_LoadContainerFromMetaDataFailed),
+		"the store read failure must surface as a failover-triggering metadata error")
+	assert.Contains(t, err.Error(), "cannot resolve the paused sandbox to replace")
 }
 
 // TestRetryAfterFailedResumeIsStillQuotaGated is the end-to-end pin the

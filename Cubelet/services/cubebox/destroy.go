@@ -406,6 +406,14 @@ func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) e
 // must keep the store row for sandBoxID instead of deleting it, and restores
 // the row to a clean tombstone when it does.
 //
+// It keys on the same condition as the restore it backstops — the engine
+// failover (IsRollBack) OR the synchronous envd-init cleanup (failover
+// marker only) — because the restore can fail after partially landing:
+// cubes.local.Save Adds to the in-memory indexer before Sync, so a Sync
+// error leaves the restored PAUSED row visible to Get while the restore
+// reported false. Without this guard on the envd path, the deferred Delete
+// would then remove the very tombstone the restore was putting back.
+//
 // Create-from-pause no longer deletes the PAUSED row up front: the flow's Save
 // overwrites it. A create that failed before that Save therefore still finds
 // the tombstone here, and the tombstone is the user's resumable state, not
@@ -416,7 +424,7 @@ func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) e
 // recreate reached its Save and then failed: that row is debris from this
 // attempt and the deferred delete proceeds as usual.
 func (l *local) createRollbackKeepsPausedTombstone(ctx context.Context, opts *workflow.DestroyContext, sandBoxID string) bool {
-	if opts == nil || !opts.BaseWorkflowInfo.IsRollBack {
+	if opts == nil || (!opts.BaseWorkflowInfo.IsRollBack && !constants.IsFailoverOperation(ctx)) {
 		return false
 	}
 	cur, getErr := l.cubeboxManger.Get(ctx, sandBoxID)
