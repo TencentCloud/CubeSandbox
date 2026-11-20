@@ -4,7 +4,12 @@
 
 package cubebox
 
-import "sync"
+import (
+	"context"
+	"sync"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+)
 
 // resumeReservationLedger tracks the node quota held by resumes that admission
 // has approved but whose sandbox rows are not yet (or no longer) visible to
@@ -28,17 +33,22 @@ import "sync"
 // timeline for a sandbox with full demand F under release ratio r (its PAUSED
 // tombstone contributes T = (1-r)·F to the aggregate):
 //
-//	admission → tombstone Delete : store T + reserved F  (over by T, conservative)
-//	tombstone Delete → flow Save : store 0 + reserved F  (exact)
-//	flow Save → release          : store F + reserved F  (over by F, conservative)
+//	admission → flow Save : store T + reserved F  (over by T, conservative)
+//	flow Save → release   : store F + reserved F  (over by F, conservative)
 //
-// Reserving only the incremental r·F instead would make the Delete → Save
-// window under-count by T — the one direction that can admit a resume that
-// does not fit, which is exactly what this ledger exists to prevent. Every
-// skew above is therefore deliberately one-sided: the ledger can only reject
-// a resume that would have fit, never admit one that would not. At r = 1
-// (full release, the #2042 configuration) T = 0 and the reservation equals the
-// incremental demand anyway.
+// There is no window where the store shows 0 for the sandbox: the replacement
+// branch does not delete the tombstone, the flow's Save overwrites it (the
+// store keys rows by ID), and that is also what makes a failed attempt safe —
+// the rollback keeps the still-PAUSED row, so the user's retry finds it and
+// is gated again (see createRollbackKeepsPausedTombstone).
+//
+// Reserving only the incremental r·F would be exact in the first window
+// (T + r·F = F) but would depend on the tombstone staying visible until the
+// Save; reserving F keeps every skew deliberately one-sided regardless of how
+// the row's lifetime shifts: the ledger can only reject a resume that would
+// have fit, never admit one that would not. At r = 1 (full release, the
+// #2042 configuration) T = 0 and the reservation equals the incremental
+// demand anyway.
 //
 // Lifecycle of an entry: registered at admission, dropped by the release func
 // the caller defers — on success after the flow's Save has folded the demand
@@ -88,9 +98,22 @@ func (l *resumeReservationLedger) totals() (memMB, cpuMilli int64) {
 // goroutine; it compares pointer identity, so a stale release (a deferred one
 // firing late, or a double defer) can never drop a newer reservation
 // registered for the same sandbox ID.
+//
+// Precondition: admissions for one sandbox ID are serialized by the caller —
+// every path that reaches admission holds that ID's sandboxLifecycleLocks
+// entry (resumeLocked, Create-from-pause), and Restart refuses PAUSED rows —
+// so registering over a live entry for the same ID cannot happen today. It is
+// logged rather than ignored anyway: if a future caller ever reached admission
+// without the lock, the overwrite would silently degrade the ledger from
+// double-counting protection to single-counting, and the log line is the only
+// trace that the precondition broke.
 func (l *resumeReservationLedger) reserveLocked(id string, memMB, cpuMilli int64) func() {
 	if l.entries == nil {
 		l.entries = make(map[string]*resumeReservation)
+	}
+	if prev, dup := l.entries[id]; dup {
+		log.G(context.Background()).Warnf("resume reservation for %s overwrites an in-flight reservation (mem %d→%d MB, cpu %d→%d milli); admissions for one sandbox must be serialized by its lifecycle lock",
+			id, prev.memMB, memMB, prev.cpuMilli, cpuMilli)
 	}
 	r := &resumeReservation{memMB: memMB, cpuMilli: cpuMilli}
 	l.entries[id] = r

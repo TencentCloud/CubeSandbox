@@ -283,9 +283,8 @@ type local struct {
 
 	// resumeReservations is the node-level admission ledger for resumes: its
 	// mutex serializes the read-check-register step of admitResume and it
-	// tracks admitted demand that aggregateAllocated cannot see yet (or whose
-	// tombstone row the create flow has already deleted). Zero value is ready
-	// to use; see resumeReservationLedger.
+	// tracks admitted demand whose store row has not been updated yet. Zero
+	// value is ready to use; see resumeReservationLedger.
 	resumeReservations resumeReservationLedger
 }
 

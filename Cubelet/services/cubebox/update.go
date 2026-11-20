@@ -370,10 +370,11 @@ func (s *service) admitResume(
 		return noopRelease, ret
 	}
 
-	// Reserve the FULL quota, not the r fraction checked above: the flow
-	// deletes the tombstone (dropping its (1-r) contribution) before the new
-	// row is saved, and reserving less would under-count the node in that
-	// window. See resumeReservationLedger.
+	// Reserve the FULL quota, not the r fraction checked above: while the
+	// flow is running the tombstone still contributes its (1-r) fraction to
+	// the store, and after its Save the new row contributes F. Counting F in
+	// the ledger keeps every window one-sided — over-counting only, never
+	// under-counting. See resumeReservationLedger.
 	id := sb.SandboxID
 	if id == "" {
 		id = sb.ID

@@ -61,6 +61,12 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		if keepCubebox {
 			return
 		}
+		// A create-flow rollback must not consume the PAUSED tombstone the
+		// failed Create-from-pause left behind; see
+		// createRollbackKeepsPausedTombstone.
+		if l.createRollbackKeepsPausedTombstone(ctx, opts, sandBoxID) {
+			return
+		}
 		err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
 			CubeboxID: sandBoxID,
 		})
@@ -380,6 +386,50 @@ func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) e
 		})
 	}
 	return l.cubeboxManger.SyncByID(ctx, sandboxID)
+}
+
+// createRollbackKeepsPausedTombstone reports whether a create-flow rollback
+// must keep the store row for sandBoxID instead of deleting it, and restores
+// the row to a clean tombstone when it does.
+//
+// Create-from-pause no longer deletes the PAUSED row up front: the flow's Save
+// overwrites it. A create that failed before that Save therefore still finds
+// the tombstone here, and the tombstone is the user's resumable state, not
+// create debris — deleting it would leave the retried Resume (Master keeps the
+// pause binding READY after a failed resume) arriving as a thin Create with no
+// local row, which the shim and quota gates key on, admitting it with no quota
+// check at all (#2042). A rollback whose row is no longer PAUSED means the
+// recreate reached its Save and then failed: that row is debris from this
+// attempt and the deferred delete proceeds as usual.
+func (l *local) createRollbackKeepsPausedTombstone(ctx context.Context, opts *workflow.DestroyContext, sandBoxID string) bool {
+	if opts == nil || !opts.BaseWorkflowInfo.IsRollBack {
+		return false
+	}
+	cur, getErr := l.cubeboxManger.Get(ctx, sandBoxID)
+	if getErr != nil || cur == nil {
+		return false
+	}
+	st := cur.GetStatus()
+	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+		return false
+	}
+	// Undo the marks this failed attempt put on the row: the rollback Destroy
+	// and the gc plugin's create step both stamp UserMarkDeletedTime (it lets
+	// the CDP delete hooks pass), and the destroy body sets Removing. Left in
+	// place, the kept tombstone would read as user-deleted — GC's allowCleanup
+	// would proceed against it and could reclaim the pause package the retry
+	// resumes from — so clear them and persist, mirroring what the pause
+	// keep-tombstone path does after its Destroy.
+	cur.Lock()
+	cur.UserMarkDeletedTime = nil
+	cur.DeleteRequestID = ""
+	cur.Unlock()
+	if ferr := l.finalizePausedTombstone(ctx, sandBoxID); ferr != nil {
+		log.G(ctx).Warnf("create rollback keeps paused tombstone %s but could not finalize it: %v", sandBoxID, ferr)
+		return true
+	}
+	log.G(ctx).Warnf("create rollback keeps paused tombstone %s so the resume can be retried", sandBoxID)
+	return true
 }
 
 func sandboxDeletable(sb *cubeboxstore.CubeBox, filter *cubebox.CubeSandboxFilter) bool {
