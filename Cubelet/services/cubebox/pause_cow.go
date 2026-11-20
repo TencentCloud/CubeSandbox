@@ -669,6 +669,15 @@ func (s *service) updateWithPauseCow(
 		return rsp, nil
 	}
 	stageTimings.VMMPauseWriteSyncMS = durationMS(time.Since(vmmPauseStarted))
+	// The shim recreates the package metadata directory. A shim that does not
+	// share this Cubelet's mounts (started under an earlier Cubelet mount
+	// namespace) removes the mount point from under the metadata disk; the
+	// kernel then detaches the disk and everything written from here on lands
+	// beside it. Sealing that package would export a metadata disk without
+	// the restore description, so fail the pause instead.
+	if err := storage.VerifyS3MetadataMounted(backend, layout.MetaDir); err != nil {
+		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("pause package metadata disk detached: %v", err))
+	}
 	// Disk after memory freeze: live rootfs volume is still present until
 	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
 	// Pause fails and the sandbox is not Resume-able (delete only).

@@ -489,6 +489,26 @@ func rollbackMetadataMountPath(sandboxID string) string {
 	return filepath.Join(home, rollbackMetadataDirName)
 }
 
+// ErrS3MetadataMountLost reports that a package metadata directory is no
+// longer the mount of its metadata disk.
+var ErrS3MetadataMountLost = errors.New("s3 package metadata disk is no longer mounted")
+
+// VerifyS3MetadataMounted checks that mountPath, where an S3 package's
+// metadata disk was mounted for writing, is still a mount point. Writes made
+// after the disk was detached go to the parent file system instead of the
+// disk that is sealed and exported. Other backends keep metadata in plain
+// directories and always pass.
+func VerifyS3MetadataMounted(backend, mountPath string) error {
+	if !isS3CatalogBackend(backend) {
+		return nil
+	}
+	mountPath = filepath.Clean(strings.TrimSpace(mountPath))
+	if s3MetadataIsMounted(mountPath) {
+		return nil
+	}
+	return fmt.Errorf("%w at %s", ErrS3MetadataMountLost, mountPath)
+}
+
 // UnmountS3Metadata unmounts a metadata mount point if it is mounted.
 func UnmountS3Metadata(mountPath string) error {
 	mountPath = strings.TrimSpace(mountPath)
