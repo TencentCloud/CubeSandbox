@@ -117,9 +117,9 @@ func TestFailoverSerializesRollbackWithLifecycleLock(t *testing.T) {
 // owns the sandbox for longer than the rollback's wait budget), the rollback
 // must NOT run an unsynchronized teardown — that would delete the row a
 // retry's quota gate keys on (re-opening #2042) and could kill a runtime the
-// lock holder is building. It stands down entirely; the debris row keeps
-// retries failing closed as "already exists" until Master's compensation or
-// a user DELETE cleans up.
+// lock holder is building. It stands down entirely and hands the snapshot to
+// RollbackStanddown, which records the restore as pending so the next
+// lifecycle operation on the sandbox completes it.
 func TestFailoverStandsDownWhenItCannotSerialize(t *testing.T) {
 	flow := &failoverRecordingFlow{}
 	e := newFailoverTestEngine(t, flow)
@@ -128,11 +128,18 @@ func TestFailoverStandsDownWhenItCannotSerialize(t *testing.T) {
 	snap.ID = "sb-failover-busy"
 	snap.SandboxID = "sb-failover-busy"
 
+	var standdownID string
+	var standdownCalls int
 	opts := &CreateContext{}
 	opts.SandboxID = "sb-failover-busy"
 	opts.PausedReplaceSnapshot = snap
+	opts.PausedReplaceDebrisCreatedAt = 12345
 	opts.RollbackSerialize = func(context.Context, string) (func(), error) {
 		return nil, errors.New("context deadline exceeded")
+	}
+	opts.RollbackStanddown = func(_ context.Context, sandboxID string) {
+		standdownCalls++
+		standdownID = sandboxID
 	}
 
 	e.failover(failoverTestContext(), opts)
@@ -140,6 +147,8 @@ func TestFailoverStandsDownWhenItCannotSerialize(t *testing.T) {
 	order, got := flow.snapshot()
 	assert.Nil(t, got, "an unserialized rollback must not run the destroy flow at all")
 	assert.Empty(t, order)
+	assert.Equal(t, 1, standdownCalls, "the snapshot must be handed off, not discarded")
+	assert.Equal(t, "sb-failover-busy", standdownID)
 }
 
 // TestFailoverWithoutSerializeHookKeepsOrdinaryRollback pins that creates
