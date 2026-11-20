@@ -49,10 +49,7 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	keepPausedTombstone := shouldKeepPausedTombstone(opts)
 	keepCubebox := workflow.RetainFor(opts).CubeboxMeta
 	defer func() {
-		if err != nil {
-			return
-		}
-		if keepPausedTombstone {
+		if err == nil && keepPausedTombstone {
 			if ferr := l.finalizePausedTombstone(ctx, sandBoxID); ferr != nil {
 				log.G(ctx).Warnf("finalize paused tombstone %s: %v", sandBoxID, ferr)
 			}
@@ -63,7 +60,15 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		}
 		// A failed Create-from-pause must roll back to the tombstone it was
 		// replacing, whichever step failed — see
-		// restorePausedReplaceSnapshot.
+		// restorePausedReplaceSnapshot. These two guards run on the rollback's
+		// error path as well: the body above has already stamped
+		// UserMarkDeletedTime (for the CDP hooks) and set Removing before it
+		// can fail, and skipping the scrub then would leave exactly the state
+		// they exist to prevent — a row GC reads as user-deleted (it can
+		// reclaim the pause package the retry needs) while every later retry
+		// is rejected. The snapshot is the authoritative pre-attempt state;
+		// the retry's shim gate still waits out any runtime this failed
+		// teardown left behind.
 		if l.restorePausedReplaceSnapshot(ctx, opts, sandBoxID) {
 			return
 		}
@@ -71,6 +76,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		// CreateContext): a still-PAUSED row is the user's resumable state,
 		// not create debris — see createRollbackKeepsPausedTombstone.
 		if l.createRollbackKeepsPausedTombstone(ctx, opts, sandBoxID) {
+			return
+		}
+		if err != nil {
 			return
 		}
 		err = l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{
