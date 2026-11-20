@@ -1,5 +1,5 @@
 ---
-title: Go SDK Connect Stream Returns an HTML or Text Response
+title: SDK Connect Stream Returns an HTML or Text Response
 author: tokove
 date: 2026-09-24
 tags:
@@ -9,17 +9,22 @@ tags:
 lang: en-US
 ---
 
-# Go SDK Connect Stream Returns an HTML or Text Response
+# SDK Connect Stream Returns an HTML or Text Response
 
 ## Symptom
 
-Go SDK calls such as `Commands.Run`, `Files.WatchDir`, or `Pty.Create` fail with a message about an HTML/text response, an invalid Connect envelope, or a message that is too large. A browser login page, gateway error page, JSON response, or compressed response may be returned instead of a Connect stream.
+SDK calls that read a Connect stream fail with a message about an HTML/text response, an invalid Connect envelope, or a message that is too large:
 
-Known limitation: `RunCode` uses the separate Jupyter `/execute` endpoint, which is not covered by this diagnostic yet — a misrouted 200 HTML page fed to its stream parser surfaces as an empty result with no error (see [#1759](https://github.com/TencentCloud/CubeSandbox/issues/1759)). The plain-HTTP `Files.Read`/`Files.Write` paths are not covered either: a misrouted 200 HTML page is returned as the file's contents by `readFile`, and `writeFile` treats any status below 400 as success.
+- Go SDK: `Commands.Run`, `Files.WatchDir`, `Pty.Create`, `Pty.Connect`
+- Python SDK: `commands.run`, `files.watch_dir`, `pty.create`, `pty.connect`
+
+Typical messages are `received HTML instead of a Connect response`, `response is not a Connect envelope (first 5 bytes: ...)`, or an HTTP error followed by `response may be an HTML/text page instead of a Connect stream`. SDK versions without this diagnostic report `Connect stream message too large: 558124867 bytes` instead: the HTML prefix `<!DOC` read as an envelope header. A browser login page, gateway error page, JSON response, or compressed response may be returned instead of a Connect stream.
+
+Known limitations: `RunCode` uses the separate Jupyter `/execute` endpoint, which is not covered by this diagnostic yet — a misrouted 200 HTML page fed to its stream parser surfaces as an empty result with no error (see [#1759](https://github.com/TencentCloud/CubeSandbox/issues/1759)). The plain-HTTP `Files.Read`/`Files.Write` paths are not covered either: a misrouted 200 HTML page is returned as the file's contents by `readFile`, and `writeFile` treats any status below 400 as success. The same holds for the Python SDK: `files.read` and `files.write` use plain `/files` HTTP requests, so a misrouted 200 HTML page is returned as the file contents by `files.read`.
 
 ## Environment
 
-- Go SDK Connect streaming calls through CubeProxy
+- Go and Python SDK Connect streaming calls through CubeProxy
 - Data-plane settings: `CUBE_PROXY_NODE_IP`, `CUBE_PROXY_PORT_HTTP`, and `CUBE_SANDBOX_DOMAIN`
 
 ## Root Cause

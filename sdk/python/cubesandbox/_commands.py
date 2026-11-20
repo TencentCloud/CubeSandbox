@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import json
 import re
 import struct
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import httpx
 
 if TYPE_CHECKING:
     from .sandbox import Sandbox
@@ -21,6 +24,176 @@ CONNECT_END_STREAM_FLAG = 0x02
 CONNECT_COMPRESSED_FLAG = 0x01
 MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024
 DEFAULT_ENVD_USER = "root"
+_CONNECT_KNOWN_FLAGS = CONNECT_COMPRESSED_FLAG | CONNECT_END_STREAM_FLAG
+# Hints shared with the Go SDK (sdk/go/connect.go). The routing hint is for
+# HTML pages; a body that is not Connect-framed can also be a compressed
+# response, so its hint names that cause too.
+_ROUTING_HINT = (
+    "check whether CUBE_PROXY_NODE_IP is configured or if the data-plane endpoint "
+    "points to a web service"
+)
+_NOT_AN_ENVELOPE_HINT = (
+    "check whether CUBE_PROXY_NODE_IP is configured, the data-plane endpoint "
+    "points to a web service, or the response was compressed"
+)
+# Bounds for reading an HTTP error body on a Connect stream request, as in
+# the Go SDK (maxRoutingPagePeekBytes, maxDiagnosticMsgLen, maxErrorBodyBytes).
+_MAX_ROUTING_PAGE_PEEK_BYTES = 4096
+_MAX_DIAGNOSTIC_BYTES = 200
+_MAX_ERROR_BODY_BYTES = 64 * 1024
+
+
+def _connect_header_error(header: bytes | bytearray) -> str | None:
+    """Return a diagnostic when ``header`` cannot start a Connect envelope.
+
+    A misrouted request can get an HTML page, JSON or a gzip body back with
+    HTTP 200. Read as an envelope, ``<!DOCTYPE`` becomes flags ``0x3c`` and a
+    length of 558124867, which was reported as an oversized message. Reject
+    unknown flag bits before the length is interpreted, as the Go SDK does.
+    """
+    if header[0] & ~_CONNECT_KNOWN_FLAGS:
+        return (
+            f"response is not a Connect envelope (first 5 bytes: {bytes(header[:5]).hex()}); "
+            f"{_NOT_AN_ENVELOPE_HINT}"
+        )
+    return None
+
+
+def _media_type(resp: httpx.Response) -> str:
+    return str(resp.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+
+
+def _html_response_error(resp: httpx.Response) -> str | None:
+    """Return a diagnostic for an HTTP 200 ``text/html`` response.
+
+    A Connect stream is never labelled ``text/html``; such a response means
+    the request reached a Web UI or portal page instead of CubeProxy. The
+    body is not read.
+    """
+    if resp.status_code != 200 or _media_type(resp) != "text/html":
+        return None
+    content_type = resp.headers.get("content-type", "")
+    return (
+        f'received HTML instead of a Connect response (content-type "{content_type}"); '
+        f"{_ROUTING_HINT}"
+    )
+
+
+def _looks_like_json_error_document(body: bytes) -> bool:
+    """Whether ``body`` is a JSON object with a non-empty message/detail/error string."""
+    trimmed = body.strip()
+    if not trimmed.startswith(b"{"):
+        return False
+    try:
+        doc = json.loads(trimmed)
+    except ValueError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    fields = [doc.get(key) for key in ("message", "detail", "error")]
+    # Go decodes these fields as strings; any other type fails the decode.
+    if any(value is not None and not isinstance(value, str) for value in fields):
+        return False
+    return any(isinstance(value, str) and value.strip() for value in fields)
+
+
+def _is_routing_page(status_code: int, media_type: str, body: bytes) -> bool:
+    """Whether an HTTP error body looks like a Web UI or gateway page.
+
+    Mirrors ``isRoutingPage`` in the Go SDK: an HTML media type or an
+    HTML-looking body, or a 404 with a non-empty ``text/*`` body that is not
+    JSON (for example Go's ``404 page not found``). A JSON API error document
+    keeps the server's message even when it is labelled ``text/html``, and a
+    possibly truncated JSON object is left to the API error parser.
+    """
+    trimmed = body.strip()
+    if trimmed.startswith(b"{"):
+        try:
+            json.loads(trimmed)
+        except ValueError:
+            return False
+    head = trimmed[: len(b"<!doctype")].lower()
+    if media_type == "text/html" or head.startswith((b"<!doctype", b"<html")):
+        return not _looks_like_json_error_document(trimmed)
+    if status_code != 404 or not media_type.startswith("text/") or not trimmed:
+        return False
+    return not trimmed.startswith(b"{")
+
+
+def _routing_page_hint(status_code: int) -> str:
+    if status_code in (401, 403):
+        return (
+            "received an HTML/text page instead of a Connect stream; check credentials "
+            "or whether a portal is intercepting the request"
+        )
+    if status_code >= 500:
+        return (
+            "received an HTML error page instead of a Connect stream; the request may "
+            "have reached CubeProxy but the upstream envd or sandbox node is unreachable"
+        )
+    return f"response may be an HTML/text page instead of a Connect stream; {_ROUTING_HINT}"
+
+
+def _decode_prefix(raw: bytes) -> str:
+    """Decode ``raw``, dropping an incomplete trailing UTF-8 sequence."""
+    return codecs.getincrementaldecoder("utf-8")("replace").decode(raw, final=False)
+
+
+def _truncate_diagnostic(message: str) -> str:
+    """Cut ``message`` to 200 UTF-8 bytes on a character boundary, as Go does."""
+    raw = message.encode("utf-8")
+    if len(raw) <= _MAX_DIAGNOSTIC_BYTES:
+        return message
+    return _decode_prefix(raw[:_MAX_DIAGNOSTIC_BYTES]) + "..."
+
+
+def _read_error_body(resp: httpx.Response) -> bytes | None:
+    """Read at most ``_MAX_ERROR_BODY_BYTES + 1`` bytes of an error body.
+
+    Returns ``None`` if the body cannot be read; callers then report the
+    status alone.
+    """
+    raw = bytearray()
+    try:
+        for chunk in resp.iter_bytes():
+            raw.extend(chunk)
+            if len(raw) > _MAX_ERROR_BODY_BYTES:
+                break
+    except httpx.HTTPError:
+        return None
+    return bytes(raw[: _MAX_ERROR_BODY_BYTES + 1])
+
+
+def _stream_http_error_detail(resp: httpx.Response) -> str:
+    """Describe an HTTP error response to a Connect stream request.
+
+    Like the Go SDK's ``validateConnectResponse``: at most 64 KiB of the body
+    is read. A routing page (a misrouted request landing on a Web UI, gateway
+    or portal) is reported from its first 4 KiB, truncated to 200 bytes and
+    followed by a status-specific hint. Any other body longer than 64 KiB is
+    cut and marked ``[truncated]``. A body that cannot be read leaves only
+    the status in the caller's message.
+    """
+    raw = _read_error_body(resp)
+    if raw is None:
+        return ""
+    peek = raw[:_MAX_ROUTING_PAGE_PEEK_BYTES]
+    if _is_routing_page(resp.status_code, _media_type(resp), peek):
+        cut = len(raw) > len(peek)
+        text = (_decode_prefix(peek) if cut else peek.decode("utf-8", "replace")).strip()
+        hint = _routing_page_hint(resp.status_code)
+        return f"{_sanitize(_truncate_diagnostic(text))}; {hint}" if text else hint
+    if len(raw) > _MAX_ERROR_BODY_BYTES:
+        return _sanitize(_decode_prefix(raw[:_MAX_ERROR_BODY_BYTES]).strip()) + " [truncated]"
+    return _sanitize(_error_detail_from_body(raw))
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _sanitize(text: str) -> str:
+    """Replace control characters (ANSI escapes included) from server text."""
+    return _CONTROL_CHARS.sub("\ufffd", text)
 
 
 @dataclass
@@ -128,9 +301,12 @@ class Commands:
             timeout=effective_timeout,
         ) as resp:
             if resp.status_code >= 400:
-                detail = _http_error_detail(resp)
+                detail = _stream_http_error_detail(resp)
                 suffix = f": {detail}" if detail else ""
                 raise RuntimeError(f"command failed: HTTP {resp.status_code}{suffix}")
+            html_error = _html_response_error(resp)
+            if html_error:
+                raise RuntimeError(f"command failed: {html_error}")
             return _parse_process_start_stream(resp.iter_raw())
 
 
@@ -145,6 +321,9 @@ def _parse_process_start_stream(chunks) -> CommandResult:
             continue
         buffer.extend(chunk)
         while len(buffer) >= 5:
+            header_error = _connect_header_error(buffer)
+            if header_error:
+                raise RuntimeError(header_error)
             flags = buffer[0]
             size = struct.unpack(">I", buffer[1:5])[0]
             if size > MAX_CONNECT_ENVELOPE_SIZE:
@@ -213,7 +392,10 @@ def _raise_connect_end_stream(raw: bytes) -> None:
 def _http_error_detail(resp) -> str:
     # Only called on HTTP error responses. Reading the body here is safe because
     # successful command streams are parsed incrementally by iter_raw().
-    raw = resp.read()
+    return _error_detail_from_body(resp.read())
+
+
+def _error_detail_from_body(raw: bytes) -> str:
     if not raw:
         return ""
     text = raw.decode("utf-8", "replace").strip()
