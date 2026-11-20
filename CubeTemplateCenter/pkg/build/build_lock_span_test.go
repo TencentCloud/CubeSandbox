@@ -42,7 +42,7 @@ func stubBuildPreamble(t *testing.T) {
 	t.Helper()
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(image.EnsureArtifactBuildPreflight, func(context.Context) error { return nil })
+	patches.ApplyFunc(image.EnsureRootfsBuildPreflight, func(context.Context, string) error { return nil })
 	// Native export skips the pre-lock Redis flush.
 	patches.ApplyFunc(image.PrepareSource, func(context.Context, image.SourceSpec) (*image.PreparedSource, error) {
 		return &image.PreparedSource{Digest: lockTestDigest, ExportMode: image.ExportModeNative}, nil

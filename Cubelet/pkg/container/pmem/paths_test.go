@@ -29,5 +29,9 @@ func TestIndependentArtifactPaths(t *testing.T) {
 	data, err := os.ReadFile(target)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte("k"), 2048), data)
-	require.Equal(t, filepath.Join(root, "data", "rfs-test", "rfs-test.ext4"), GetRawImageFilePath("cubebox", "rfs-test"))
+	imagePath, err := GetRootfsFilePath("cubebox", "rfs-test", "ext4")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(root, "data", "rfs-test", "rfs-test.ext4"), imagePath)
+	_, err = GetRootfsFilePath("cubebox", "rfs-test", "unknown")
+	require.Error(t, err)
 }

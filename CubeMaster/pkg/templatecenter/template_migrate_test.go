@@ -31,7 +31,7 @@ func newMigrateSharedStoreTestDB(t *testing.T) *gorm.DB {
 func stubMigrateS3Unavailable(t *testing.T) {
 	t.Helper()
 	oldUpload := uploadArtifactFileToS3
-	uploadArtifactFileToS3 = func(ctx context.Context, artifactID, filePath string) error {
+	uploadArtifactFileToS3 = func(ctx context.Context, artifact *models.RootfsArtifact, filePath string) error {
 		return errS3PresignNotConfigured
 	}
 	t.Cleanup(func() { uploadArtifactFileToS3 = oldUpload })
@@ -40,7 +40,9 @@ func stubMigrateS3Unavailable(t *testing.T) {
 func stubMigrateTCUpload(t *testing.T, fn func(ctx context.Context, artifactID, filePath string) (*templateCenterUploadResult, error)) {
 	t.Helper()
 	oldUpload := uploadArtifactFileToTC
-	uploadArtifactFileToTC = fn
+	uploadArtifactFileToTC = func(ctx context.Context, artifact *models.RootfsArtifact, path string) (*templateCenterUploadResult, error) {
+		return fn(ctx, artifact.ArtifactID, path)
+	}
 	t.Cleanup(func() { uploadArtifactFileToTC = oldUpload })
 }
 
@@ -54,7 +56,7 @@ func seedMigratingTemplate(t *testing.T, db *gorm.DB, templateID, artifactID, ex
 	require.NoError(t, db.Create(&models.RootfsArtifact{
 		ArtifactID: artifactID,
 		Status:     ArtifactStatusReady,
-		Ext4Path:   ext4Path,
+		RootfsPath: ext4Path,
 	}).Error)
 }
 
@@ -77,7 +79,7 @@ func TestMigrateTemplateArtifactToTCSamePathKeepsLocalFile(t *testing.T) {
 	seedMigratingTemplate(t, db, templateID, artifactID, ext4Path)
 	stubMigrateS3Unavailable(t)
 	stubMigrateTCUpload(t, func(ctx context.Context, id, filePath string) (*templateCenterUploadResult, error) {
-		return &templateCenterUploadResult{Ext4Path: filePath}, nil
+		return &templateCenterUploadResult{RootfsPath: filePath}, nil
 	})
 
 	result, err := MigrateTemplateArtifactToTC(context.Background(), templateID)
@@ -112,7 +114,7 @@ func TestMigrateTemplateArtifactToTCSameInodeDifferentPathKeepsLocalFile(t *test
 	seedMigratingTemplate(t, db, templateID, artifactID, srcPath)
 	stubMigrateS3Unavailable(t)
 	stubMigrateTCUpload(t, func(ctx context.Context, id, filePath string) (*templateCenterUploadResult, error) {
-		return &templateCenterUploadResult{Ext4Path: dstPath}, nil
+		return &templateCenterUploadResult{RootfsPath: dstPath}, nil
 	})
 
 	result, err := MigrateTemplateArtifactToTC(context.Background(), templateID)
@@ -152,13 +154,18 @@ func TestMigrateTemplateArtifactToTCDifferentPathCleansUp(t *testing.T) {
 		if err := os.WriteFile(dstPath, data, 0o644); err != nil {
 			return nil, err
 		}
-		return &templateCenterUploadResult{Ext4Path: dstPath}, nil
+		return &templateCenterUploadResult{RootfsPath: dstPath}, nil
 	})
 
 	result, err := MigrateTemplateArtifactToTC(context.Background(), templateID)
 	require.NoError(t, err)
 	require.True(t, result.Migrated)
 	require.True(t, result.Cleaned, "different-path migration should remove the local source")
+	var artifact models.RootfsArtifact
+	require.NoError(t, db.First(&artifact, "artifact_id = ?", artifactID).Error)
+	require.Equal(t, "ext4", artifact.RootfsFormat)
+	require.Equal(t, dstPath, artifact.RootfsPath)
+	require.Equal(t, dstPath, artifact.LegacyExt4Path)
 	if _, statErr := os.Stat(srcPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected local source removed, stat err=%v", statErr)
 	}
@@ -170,7 +177,7 @@ func TestValidateTCLocalArtifactPath(t *testing.T) {
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", primary)
 
 	valid := filepath.Join(primary, "rfs-1", "rfs-1.ext4")
-	if err := validateTCLocalArtifactPath("rfs-1", valid); err != nil {
+	if err := validateTCLocalArtifactPath("rfs-1", valid, "ext4"); err != nil {
 		t.Fatalf("expected path under shared store root to pass, got %v", err)
 	}
 
@@ -181,7 +188,7 @@ func TestValidateTCLocalArtifactPath(t *testing.T) {
 		filepath.Join(fallback, "rfs-1", "rfs-1.ext4"),
 	}
 	for _, path := range badRoots {
-		if err := validateTCLocalArtifactPath("rfs-1", path); err == nil {
+		if err := validateTCLocalArtifactPath("rfs-1", path, "ext4"); err == nil {
 			t.Fatalf("expected path %q to be rejected", path)
 		}
 	}
@@ -191,7 +198,7 @@ func TestValidateTCLocalArtifactPathAllowsFallbackStoreWhenEnvUnset(t *testing.T
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", "")
 	fallbackRoot := ArtifactFallbackStoreRootDir()
 	valid := filepath.Join(fallbackRoot, "rfs-2", "rfs-2.ext4")
-	if err := validateTCLocalArtifactPath("rfs-2", valid); err != nil {
+	if err := validateTCLocalArtifactPath("rfs-2", valid, "ext4"); err != nil {
 		t.Fatalf("expected fallback store path to pass when env unset, got %v", err)
 	}
 }
@@ -242,4 +249,39 @@ func TestShouldSkipLocalCleanup(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMigrateUsesRecordedObjectKeyForUploadAndPresign(t *testing.T) {
+	db := newMigrateSharedStoreTestDB(t)
+	root := t.TempDir()
+	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", root)
+	path := filepath.Join(root, "rfs-key", "rfs-key.ext4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.WriteFile(path, []byte("rootfs"), 0644))
+	seedMigratingTemplate(t, db, "tpl-key", "rfs-key", path)
+	key := "custom-prefix/nested/published.img"
+	require.NoError(t, db.Model(&models.RootfsArtifact{}).Where("artifact_id = ?", "rfs-key").Update("object_key", key).Error)
+	uploaded, signed := false, false
+	previousUpload := uploadArtifactFileToS3
+	uploadArtifactFileToS3 = func(_ context.Context, artifact *models.RootfsArtifact, localPath string) error {
+		require.Equal(t, key, artifact.ObjectKey)
+		require.Equal(t, "ext4", artifact.RootfsFormat)
+		require.Equal(t, path, localPath)
+		uploaded = true
+		return nil
+	}
+	t.Cleanup(func() { uploadArtifactFileToS3 = previousUpload })
+	stubPresign(t, func(_ context.Context, artifact *models.RootfsArtifact) (string, error) {
+		require.Equal(t, key, artifact.ObjectKey)
+		signed = true
+		return "https://store.example/custom", nil
+	})
+	result, err := MigrateTemplateArtifactToTC(context.Background(), "tpl-key")
+	require.NoError(t, err)
+	require.True(t, result.Migrated)
+	require.True(t, uploaded)
+	require.True(t, signed)
+	var got models.RootfsArtifact
+	require.NoError(t, db.Where("artifact_id = ?", "rfs-key").First(&got).Error)
+	require.Equal(t, key, got.ObjectKey)
 }

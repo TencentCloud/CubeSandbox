@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	images "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"gorm.io/gorm"
 )
 
@@ -201,6 +202,17 @@ func (e *Executor) Submit(jobID string, req *types.CreateTemplateFromImageReq, d
 
 // SubmitContext preserves the caller trace; Shutdown controls build cancellation.
 func (e *Executor) SubmitContext(ctx context.Context, jobID string, req *types.CreateTemplateFromImageReq, downloadBaseURL, envdSHA string, envdData []byte) error {
+	if req == nil {
+		return fmt.Errorf("%w: request is required", ErrBuildJobRequestMismatch)
+	}
+	format, err := images.ResolveRootfsFormat(req.RootfsFormat)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrBuildJobRequestMismatch, err)
+	}
+	// Own the normalized request before handing it to the asynchronous build.
+	cloned := *req
+	cloned.RootfsFormat = format
+	req = &cloned
 	jobCtx := telemetry.DetachTrace(e.rootCtx, ctx)
 	if err := e.lookupJob(jobCtx, jobID, req); err != nil {
 		return err

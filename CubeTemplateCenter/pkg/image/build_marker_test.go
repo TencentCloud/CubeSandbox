@@ -31,7 +31,7 @@ func TestMarkArtifactBuildInProgressRoundTrip(t *testing.T) {
 		t.Fatalf("MarkArtifactBuildInProgress returned an error: %v", err)
 	}
 
-	// The directory is created on demand: BuildExt4 marks before it writes.
+	// The directory is created on demand: BuildRootfs marks before it writes.
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("marking must create the artifact dir: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestMarkArtifactBuildInProgressReleaseIsIdempotent(t *testing.T) {
 		t.Fatalf("MarkArtifactBuildInProgress returned an error: %v", err)
 	}
 
-	// BuildExt4 defers release(); a second call must not panic or error,
+	// BuildRootfs defers release(); a second call must not panic or error,
 	// because a failure path may release explicitly before the defer runs.
 	release()
 	release()
@@ -233,7 +233,7 @@ func TestDescribeArtifactBuildMarker(t *testing.T) {
 func TestMarkArtifactBuildInProgressRejectsUncreatableDir(t *testing.T) {
 	// A path whose parent is a regular file cannot be turned into a directory.
 	// Marking must report the error rather than panic, and the returned release
-	// must stay safe to call — BuildExt4 defers it unconditionally and treats
+	// must stay safe to call — BuildRootfs defers it unconditionally and treats
 	// the error as a warning, because losing the guard is better than failing
 	// a build.
 	base := t.TempDir()

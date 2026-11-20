@@ -57,10 +57,12 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
 构建链路大致分为：
 
 1. 拉取 / 解包源镜像
-2. 生成 ext4 rootfs
+2. 按 `rootfs_format` 构建 rootfs artifact, 当前支持 EXT4
 3. 计算模板规格指纹与 artifact 元数据
 4. 回调 CubeMaster，触发 resume 流水线
 5. 由 CubeMaster 注册 artifact、向节点分发、写最终模板 / job 状态
+
+构建入口为 `BuildRootfs`, 使用 `BuildOptions.RootfsFormat` 选择文件系统. `/cube/template/from-image` 和 `cubemastercli tpl create-from-image --rootfs-format ext4` 的缺省均为 EXT4; 产物信息返回 `rootfs_format`、`rootfs_path`、`rootfs_sha256` 和 `rootfs_size_bytes`, 构建阶段为 `BUILDING_ROOTFS`. 存量 `ext4_*` 字段和 `BUILDING_EXT4` 在升级时适配; EXT4 的旧 JSON 字段仍会输出. 模板与节点继续通过 `ImageSpec.storage_media` 传递格式, 既有文件和对象不改名, 已记录的 `object_key` 用于后续读写和删除.
 
 ### 3.3 `tpl merge` / migrate job
 

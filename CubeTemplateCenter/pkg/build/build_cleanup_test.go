@@ -70,11 +70,12 @@ func TestBuildUploadCleanup(t *testing.T) {
 			}
 			data := []byte("built rootfs")
 			result := image.BuildResult{
-				Ext4Path:  filepath.Join(storeDir, artifactID+".ext4"),
-				SHA256:    fmt.Sprintf("%x", sha256.Sum256(data)),
-				SizeBytes: int64(len(data)),
+				RootfsFormat: "ext4",
+				RootfsPath:   filepath.Join(storeDir, artifactID+".ext4"),
+				SHA256:       fmt.Sprintf("%x", sha256.Sum256(data)),
+				SizeBytes:    int64(len(data)),
 			}
-			if err := os.WriteFile(result.Ext4Path, data, 0o644); err != nil {
+			if err := os.WriteFile(result.RootfsPath, data, 0o644); err != nil {
 				t.Fatal(err)
 			}
 			neighbor := filepath.Join(filepath.Dir(storeDir), "rfs-other.ext4")
@@ -82,7 +83,7 @@ func TestBuildUploadCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			patches := gomonkey.ApplyFunc(image.BuildExt4, func(context.Context, *image.PreparedSource, image.BuildOptions) (image.BuildResult, error) {
+			patches := gomonkey.ApplyFunc(image.BuildRootfs, func(context.Context, *image.PreparedSource, image.BuildOptions) (image.BuildResult, error) {
 				return result, nil
 			})
 			defer patches.Reset()
@@ -104,7 +105,7 @@ func TestBuildUploadCleanup(t *testing.T) {
 				switch r.Method {
 				case http.MethodPut:
 					puts++
-					if _, err := os.Stat(result.Ext4Path); err != nil {
+					if _, err := os.Stat(result.RootfsPath); err != nil {
 						t.Errorf("local file removed before upload completed: %v", err)
 					}
 					_, _ = io.Copy(io.Discard, r.Body)
@@ -162,7 +163,7 @@ func TestBuildUploadCleanup(t *testing.T) {
 				reports = append(reports, payload)
 				mu.Unlock()
 				if status := payload["status"]; status == "BUILT" || status == "FAILED" {
-					_, err := os.Stat(result.Ext4Path)
+					_, err := os.Stat(result.RootfsPath)
 					if tt.uploadFails && !tt.cleanupFails {
 						if !os.IsNotExist(err) {
 							t.Errorf("failed upload retained local file: %v", err)
@@ -181,8 +182,8 @@ func TestBuildUploadCleanup(t *testing.T) {
 			var err error
 			if tt.reuse {
 				err = reportExistingArtifact(ctx, "job", &models.RootfsArtifact{
-					ArtifactID: artifactID, Ext4Path: result.Ext4Path,
-					Ext4SHA256: result.SHA256, Ext4SizeBytes: result.SizeBytes,
+					RootfsFormat: "ext4", ArtifactID: artifactID, RootfsPath: result.RootfsPath,
+					RootfsSHA256: result.SHA256, RootfsSizeBytes: result.SizeBytes,
 					StorageBackend: "s3", ObjectKey: "templates/" + artifactID + ".ext4",
 				}, "fingerprint", source, reporter, nil, "", true, client, log.G(ctx))
 			} else {
@@ -197,7 +198,7 @@ func TestBuildUploadCleanup(t *testing.T) {
 			if tt.uploadFails && !strings.Contains(err.Error(), "upload artifact to s3 store") {
 				t.Fatalf("upload error lost: %v", err)
 			}
-			if _, err := os.Stat(result.Ext4Path); wantRemoved {
+			if _, err := os.Stat(result.RootfsPath); wantRemoved {
 				if !os.IsNotExist(err) {
 					t.Fatalf("local artifact retained after completed build: %v", err)
 				}
@@ -239,7 +240,10 @@ func TestBuildUploadCleanup(t *testing.T) {
 					if (tt.headFails || tt.presignFails) && payload["artifact_url"] != "blobstore:s3:templates/"+artifactID+".ext4" {
 						t.Errorf("durable locator missing after upload: %+v", payload)
 					}
-					if payload["ext4_path"] != result.Ext4Path || payload["ext4_sha256"] != result.SHA256 || payload["ext4_size_bytes"] != float64(result.SizeBytes) {
+					if payload["rootfs_format"] != "ext4" || payload["rootfs_path"] != result.RootfsPath || payload["rootfs_sha256"] != result.SHA256 || payload["rootfs_size_bytes"] != float64(result.SizeBytes) {
+						t.Errorf("canonical rootfs metadata missing: %+v", payload)
+					}
+					if payload["ext4_path"] != result.RootfsPath || payload["ext4_sha256"] != result.SHA256 || payload["ext4_size_bytes"] != float64(result.SizeBytes) {
 						t.Errorf("artifact metadata changed: %+v", payload)
 					}
 					if tt.backend != "" && (payload["storage_backend"] != tt.backend || payload["object_key"] != "templates/"+artifactID+".ext4") {
@@ -251,7 +255,7 @@ func TestBuildUploadCleanup(t *testing.T) {
 				t.Fatal("no terminal callback")
 			}
 			if tt.backend == "fs" {
-				if exists, err := client.Stat(ctx, artifactID); err != nil || !exists {
+				if exists, err := client.Stat(ctx, "templates/"+artifactID+".ext4"); err != nil || !exists {
 					t.Fatalf("fs object missing: exists=%v err=%v", exists, err)
 				}
 			}
@@ -285,7 +289,7 @@ func TestBuildArtifactStorePreflight(t *testing.T) {
 			}
 			stopped := errors.New("stop before image pull")
 			reachedPreflight := false
-			patches := gomonkey.ApplyFunc(image.EnsureArtifactBuildPreflight, func(context.Context) error {
+			patches := gomonkey.ApplyFunc(image.EnsureRootfsBuildPreflight, func(context.Context, string) error {
 				reachedPreflight = true
 				return stopped
 			})

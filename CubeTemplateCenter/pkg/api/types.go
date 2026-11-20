@@ -6,6 +6,7 @@ package api
 
 import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
 )
 
 // BuildJobRequest is the payload sent by CubeMaster to submit a build job.
@@ -40,10 +41,4 @@ type ArtifactDeleteResponse struct {
 }
 
 // ArtifactUploadResponse is the response returned after ingesting an ext4 upload.
-type ArtifactUploadResponse struct {
-	Status        string `json:"status"`
-	ArtifactID    string `json:"artifact_id"`
-	Ext4Path      string `json:"ext4_path"`
-	Ext4SHA256    string `json:"ext4_sha256"`
-	Ext4SizeBytes int64  `json:"ext4_size_bytes"`
-}
+type ArtifactUploadResponse = tcclient.UploadArtifactResponse

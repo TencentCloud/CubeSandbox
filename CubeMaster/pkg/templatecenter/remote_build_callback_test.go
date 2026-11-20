@@ -22,9 +22,9 @@ func validRemoteBuildResultForCallbackTest(t *testing.T) *RemoteBuildResult {
 		ArtifactID:              "rfs-callback",
 		TemplateSpecFingerprint: "fingerprint-callback",
 		SourceImageDigest:       "repo/image@sha256:abc",
-		Ext4Path:                writeFakeArtifactFile(t, "callback.ext4"),
-		Ext4SHA256:              "sha256:def",
-		Ext4SizeBytes:           1024,
+		RootfsPath:              writeFakeArtifactFile(t, "callback.ext4"),
+		RootfsSHA256:            "sha256:def",
+		RootfsSizeBytes:         1024,
 		ImageConfigJSON:         `{}`,
 		MasterNodeIP:            "http://master:8080",
 	}

@@ -52,7 +52,7 @@ func reportBuiltTestServer(t *testing.T, requests *int32, failFirst bool) (*http
 }
 
 func builtReportArgs() (*image.BuildResult, *image.PreparedSource) {
-	return &image.BuildResult{Ext4Path: "/tmp/x.ext4", SHA256: "sha256:x", SizeBytes: 1},
+	return &image.BuildResult{RootfsPath: "/tmp/x.ext4", SHA256: "sha256:x", SizeBytes: 1},
 		&image.PreparedSource{Digest: "sha256:x", ExportMode: image.ExportModeDocker}
 }
 
@@ -65,7 +65,7 @@ func TestArtifactBuiltCallbackSendsItsOwnSpanAsParent(t *testing.T) {
 
 	result, source := builtReportArgs()
 	if err := reportArtifactBuilt(rootCtx, "job-cb", result, "rfs-1", "fp-1", source,
-		NewReporter(), cube_egress_ca.Result{}, "", false, nil, "", nil, log.G(rootCtx)); err != nil {
+		NewReporter(), cube_egress_ca.Result{}, artifactStoreLocation{}, nil, log.G(rootCtx)); err != nil {
 		t.Fatalf("reportArtifactBuilt: %v", err)
 	}
 	tp := <-traceparents
@@ -110,7 +110,7 @@ func TestArtifactBuiltReportTracesAttemptsAndBackoff(t *testing.T) {
 
 	result, source := builtReportArgs()
 	if err := reportArtifactBuilt(rootCtx, "job-retry", result, "rfs-2", "fp-2", source,
-		NewReporter(), cube_egress_ca.Result{}, "", false, nil, "", nil, log.G(rootCtx)); err != nil {
+		NewReporter(), cube_egress_ca.Result{}, artifactStoreLocation{}, nil, log.G(rootCtx)); err != nil {
 		t.Fatalf("reportArtifactBuilt: %v", err)
 	}
 	tp1 := <-traceparents
@@ -175,7 +175,7 @@ func TestNonTerminalReportTracesNoAttemptSpan(t *testing.T) {
 
 	if err := NewReporter().Report(ctx, "job-heartbeat", map[string]any{
 		"status":   "RUNNING",
-		"phase":    "BUILDING_EXT4",
+		"phase":    "BUILDING_ROOTFS",
 		"progress": 40,
 	}); err != nil {
 		t.Fatalf("Report: %v", err)

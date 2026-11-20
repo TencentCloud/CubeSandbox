@@ -18,13 +18,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
-// artifactPresence describes whether a rootfs artifact's ext4 file is still
+// artifactPresence describes whether a rootfs artifact's rootfs file is still
 // backing its READY database row.
 //
 // WHY THIS EXISTS
 // ---------------
 // A rootfs artifact is two things that can drift apart: a row in
-// rootfs_artifacts (status=READY, ext4_sha256, download_token) and a file on
+// rootfs_artifacts (status=READY, rootfs_sha256, download_token) and a file on
 // the node's local disk. Nothing keeps them in sync. The file disappears
 // whenever the disk backing the artifact store is not durable across restarts
 // (emptyDir instead of a PVC, a wiped host dir, an operator cleaning up by
@@ -50,7 +50,7 @@ const (
 	// not "the file is gone" (permissions, transient I/O). Callers must neither
 	// reuse the artifact nor demote its row.
 	artifactPresenceUnknown artifactPresence = iota
-	// artifactPresencePresent means a non-empty ext4 file backs the row.
+	// artifactPresencePresent means a non-empty rootfs file backs the row.
 	artifactPresencePresent
 	// artifactPresenceMissing means the row is not backed by a usable file and
 	// the artifact has to be rebuilt.
@@ -84,13 +84,13 @@ func (p artifactPresence) String() string {
 // or I/O error says nothing about whether the artifact is still there, and
 // rebuilding gigabytes of ext4 because of a transient EIO is worse than
 // surfacing the error to the caller that already has to handle it.
-func classifyArtifactPresence(ext4Path string, buildInProgress bool, size int64, statErr error) artifactPresence {
+func classifyArtifactPresence(rootfsPath string, buildInProgress bool, size int64, statErr error) artifactPresence {
 	if buildInProgress {
 		return artifactPresenceUnknown
 	}
 	// An empty path on a READY row is corrupt metadata, not a transient
 	// condition: there is no file to find, so the artifact must be rebuilt.
-	if ext4Path == "" {
+	if rootfsPath == "" {
 		return artifactPresenceMissing
 	}
 	if statErr != nil {
@@ -119,25 +119,25 @@ var statArtifactFile = func(path string) (int64, error) {
 	return st.Size(), nil
 }
 
-// probeArtifactPresence resolves the on-disk state of an artifact's ext4 file.
-func probeArtifactPresence(ext4Path string) artifactPresence {
-	if ext4Path == "" {
+// probeArtifactPresence resolves the on-disk state of an artifact's rootfs file.
+func probeArtifactPresence(rootfsPath string) artifactPresence {
+	if rootfsPath == "" {
 		return classifyArtifactPresence("", false, 0, nil)
 	}
-	buildInProgress, _ := ArtifactBuildInProgress(filepath.Dir(ext4Path))
-	size, err := statArtifactFile(ext4Path)
-	return classifyArtifactPresence(ext4Path, buildInProgress, size, err)
+	buildInProgress, _ := ArtifactBuildInProgress(filepath.Dir(rootfsPath))
+	size, err := statArtifactFile(rootfsPath)
+	return classifyArtifactPresence(rootfsPath, buildInProgress, size, err)
 }
 
 // artifactMissingFileError renders the diagnostic used when a phantom artifact
 // is refused. It names both halves of the drift (row and path) because the
 // operator has to look at the disk to understand it.
-func artifactMissingFileError(artifactID, ext4Path string) error {
+func artifactMissingFileError(artifactID, rootfsPath string) error {
 	return fmt.Errorf(
-		"rootfs artifact %s is READY in the database but its ext4 file %q is missing on disk; "+
+		"rootfs artifact %s is READY in the database but its rootfs file %q is missing on disk; "+
 			"the artifact store is not durable across restarts (expected a persistent volume) — "+
 			"the row has been demoted so the next create rebuilds it",
-		artifactID, ext4Path)
+		artifactID, rootfsPath)
 }
 
 // artifactNotServedHereError is the counterpart used when this node is simply
@@ -147,13 +147,13 @@ func artifactMissingFileError(artifactID, ext4Path string) error {
 // This is the multi-master shape of the problem (issue #1005): the artifact
 // store is node-local, so with two CubeMasters behind one address only the
 // builder has the ext4. The request landed on the wrong node.
-func artifactNotServedHereError(artifactID, ext4Path, downloadBaseURL string) error {
+func artifactNotServedHereError(artifactID, rootfsPath, downloadBaseURL string) error {
 	return fmt.Errorf(
-		"rootfs artifact %s has no ext4 file at %q on this node, and its download base URL %q does not point here; "+
+		"rootfs artifact %s has no rootfs file at %q on this node, and its download base URL %q does not point here; "+
 			"the artifact store is node-local, so a multi-CubeMaster deployment must either share it "+
 			"(one volume) or keep artifact downloads pinned to the building node — "+
 			"the database row was left untouched because another node likely still holds the file",
-		artifactID, ext4Path, downloadBaseURL)
+		artifactID, rootfsPath, downloadBaseURL)
 }
 
 // localArtifactHostsFn resolves the set of host identities that mean "this
@@ -258,12 +258,12 @@ func artifactAuthoritativeHere(record *models.RootfsArtifact) bool {
 // build path already knows how to recover from.
 //
 // Indirected through a var so tests can observe the demotion without a live DB.
-var demoteMissingRootfsArtifact = func(ctx context.Context, artifactID, ext4Path string) {
-	log.G(ctx).Errorf("rootfs artifact %s: ext4 file %q is gone while the row is READY; demoting to %s so it is rebuilt",
-		artifactID, ext4Path, ArtifactStatusFailed)
+var demoteMissingRootfsArtifact = func(ctx context.Context, artifactID, rootfsPath string) {
+	log.G(ctx).Errorf("rootfs artifact %s: rootfs file %q is gone while the row is READY; demoting to %s so it is rebuilt",
+		artifactID, rootfsPath, ArtifactStatusFailed)
 	if err := updateRootfsArtifact(ctx, artifactID, map[string]any{
 		"status":     ArtifactStatusFailed,
-		"last_error": fmt.Sprintf("ext4 file %s missing on disk; artifact must be rebuilt", ext4Path),
+		"last_error": fmt.Sprintf("rootfs file %s missing on disk; artifact must be rebuilt", rootfsPath),
 	}); err != nil {
 		// Losing the demotion only costs another failed attempt that will retry
 		// this same demotion, so it must not fail the caller.
@@ -302,7 +302,7 @@ func resolveMissingArtifact(ctx context.Context, record *models.RootfsArtifact) 
 	}
 	if artifactOwnershipOf(record) == artifactOwnershipObjectStore {
 		// S3/MinIO-backed: the durable copy is the object behind artifact_url
-		// and cubelets pull straight from it, so the local ext4 is only a
+		// and cubelets pull straight from it, so the local rootfs is only a
 		// build-time cache. Its absence (node-local disk wiped, artifact
 		// built by another replica) must neither demote the row nor block
 		// distribution -- doing so stranded perfectly usable artifacts
@@ -312,15 +312,15 @@ func resolveMissingArtifact(ctx context.Context, record *models.RootfsArtifact) 
 		// reconciler keeps the presigned URL from expiring.
 		return artifactMissingVerdictNone
 	}
-	if probeArtifactPresence(record.Ext4Path) != artifactPresenceMissing {
+	if probeArtifactPresence(record.RootfsPath) != artifactPresenceMissing {
 		return artifactMissingVerdictNone
 	}
 	if !artifactAuthoritativeHere(record) {
-		log.G(ctx).Errorf("rootfs artifact %s: ext4 file %q absent here and download base URL %q is not local; leaving the row untouched",
-			record.ArtifactID, record.Ext4Path, record.MasterNodeIP)
+		log.G(ctx).Errorf("rootfs artifact %s: rootfs file %q absent here and download base URL %q is not local; leaving the row untouched",
+			record.ArtifactID, record.RootfsPath, record.MasterNodeIP)
 		return artifactMissingVerdictForeign
 	}
-	demoteMissingRootfsArtifact(ctx, record.ArtifactID, record.Ext4Path)
+	demoteMissingRootfsArtifact(ctx, record.ArtifactID, record.RootfsPath)
 	record.Status = ArtifactStatusFailed
 	return artifactMissingVerdictDemoted
 }
@@ -329,9 +329,9 @@ func resolveMissingArtifact(ctx context.Context, record *models.RootfsArtifact) 
 func missingArtifactError(record *models.RootfsArtifact, verdict artifactMissingVerdict) error {
 	switch verdict {
 	case artifactMissingVerdictDemoted:
-		return artifactMissingFileError(record.ArtifactID, record.Ext4Path)
+		return artifactMissingFileError(record.ArtifactID, record.RootfsPath)
 	case artifactMissingVerdictForeign:
-		return artifactNotServedHereError(record.ArtifactID, record.Ext4Path, record.MasterNodeIP)
+		return artifactNotServedHereError(record.ArtifactID, record.RootfsPath, record.MasterNodeIP)
 	default:
 		return nil
 	}
@@ -379,7 +379,7 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 	}
 	if strings.TrimSpace(record.ArtifactURL) != "" {
 		// S3/MinIO-backed: the object behind artifact_url is the durable copy,
-		// so the local ext4's presence/size must not gate reuse (see
+		// so the local rootfs's presence/size must not gate reuse (see
 		// resolveMissingArtifact). Distribution/create later probe the unified
 		// download endpoint separately.
 		return nil
@@ -405,7 +405,7 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 	}
 	if !rootfsArtifactSizeMatches(record) {
 		log.G(ctx).Warnf("rootfs artifact %s: on-disk size does not match the row (path=%q recorded=%d); rebuilding",
-			record.ArtifactID, record.Ext4Path, record.Ext4SizeBytes)
+			record.ArtifactID, record.RootfsPath, record.RootfsSizeBytes)
 		return errors.New("artifact size mismatch")
 	}
 	verdict := resolveMissingArtifact(ctx, record)
@@ -420,23 +420,23 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 	// resolveMissingArtifact returns None for Unknown presence too. Probe again
 	// to distinguish "present" from "unknown": only a definite Present is safe
 	// to reuse outside the claim lock.
-	if probeArtifactPresence(record.Ext4Path) != artifactPresencePresent {
+	if probeArtifactPresence(record.RootfsPath) != artifactPresencePresent {
 		return errors.New("artifact presence unknown (build in progress elsewhere)")
 	}
 	return nil
 }
 
-// rootfsArtifactSizeMatches reports whether the on-disk ext4 size agrees with
+// rootfsArtifactSizeMatches reports whether the on-disk rootfs size agrees with
 // the row. A zero recorded size disables the check (legacy rows predate the
 // column); a missing/unreadable file does not fail here -- that is the probe's
 // job, which runs next and classifies it precisely.
 func rootfsArtifactSizeMatches(record *models.RootfsArtifact) bool {
-	if record == nil || record.Ext4SizeBytes <= 0 {
+	if record == nil || record.RootfsSizeBytes <= 0 {
 		return true
 	}
-	size, err := statArtifactFile(record.Ext4Path)
+	size, err := statArtifactFile(record.RootfsPath)
 	if err != nil {
 		return true
 	}
-	return size == record.Ext4SizeBytes
+	return size == record.RootfsSizeBytes
 }

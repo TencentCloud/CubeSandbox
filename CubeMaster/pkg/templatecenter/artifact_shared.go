@@ -24,7 +24,7 @@ import (
 // still needs after the image-building logic moved to CubeTemplateCenter.
 //
 // CubeMaster's responsibilities that require these helpers:
-//   - Validating ext4_path in TC's BUILT callback (remote_build_resume.go)
+//   - Validating rootfs_path in TC's BUILT callback (remote_build_resume.go)
 //   - Cleaning up artifact directories during template deletion (artifact_cleanup.go)
 //   - Detecting DB-row vs on-disk drift (artifact_presence.go)
 //

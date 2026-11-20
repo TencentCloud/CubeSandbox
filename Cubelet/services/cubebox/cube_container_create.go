@@ -375,7 +375,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 
 		start := time.Now()
 
-		if isImageStorageMediaType(cntrReq, cubeimages.ImageStorageMediaType_ext4) {
+		if cubeimages.IsPmemStorageMedia(cntrReq.GetImage().GetStorageMedia()) {
 
 			ctxTmp = constants.WithAppImageID(ctxTmp, cntrReq.GetImage().GetImage())
 		}
@@ -720,10 +720,13 @@ func (l *local) prepareContainerFiles(ctx context.Context, sandBox *cubeboxstore
 		ctxTmp = context.WithValue(ctxTmp, CubeLog.KeyFunctionType, constants.ContainerTypeContainer)
 	}
 
-	if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if cubeimages.IsPmemStorageMedia(containerReq.GetImage().GetStorageMedia()) {
 
-		mountsConfig.PmemFile = pmem.GetRawImageFilePath(flowOpts.ReqInfo.GetInstanceType(), containerReq.GetImage().GetImage())
-		appendExt4NetfileMounts(mountsConfig, flowOpts, containerReq.Name)
+		mountsConfig.PmemFile, err = pmem.GetRootfsFilePath(flowOpts.ReqInfo.GetInstanceType(), containerReq.GetImage().GetImage(), containerReq.GetImage().GetStorageMedia())
+		if err != nil {
+			return err
+		}
+		appendRootfsNetfileMounts(mountsConfig, flowOpts, containerReq.Name)
 	} else {
 		var ovlShare []virtiofs.ShareDirMapping
 
@@ -832,7 +835,7 @@ func hostDirRootfsMounts(ctx context.Context, flowOpts *workflow.CreateContext, 
 	return mounts, nil
 }
 
-func appendExt4NetfileMounts(
+func appendRootfsNetfileMounts(
 	mountsConfig *virtiofs.CubeRootfsInfo,
 	flowOpts *workflow.CreateContext,
 	containerName string,
@@ -865,13 +868,9 @@ func WithCubeFsAnnotation(ctx context.Context,
 	realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) ([]oci.SpecOpts, error) {
 	var opts []oci.SpecOpts
 
-	var (
-		shareDirs []string
-		rootfsC   []*virtiofs.CubeRootfsInfo
-	)
+	var shareDirs []string
 	for _, ci := range sandBox.AllContainers() {
 		shareDirs = append(shareDirs, ci.CubeRootfsInfo.ShareDirs()...)
-		rootfsC = append(rootfsC, ci.CubeRootfsInfo)
 	}
 
 	if len(shareDirs) > 0 {
@@ -929,7 +928,7 @@ func (l *local) containerOciSpec(ctx context.Context, containerReq *cubebox.Cont
 	}
 
 	imageSpecConfig := &imagespec.ImageConfig{}
-	if !isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if !cubeimages.IsPmemStorageMedia(containerReq.GetImage().GetStorageMedia()) {
 		var image cristore.Image
 		image, err = l.criImage.LocalResolve(ctx, containerReq.GetImage().GetImage())
 		if err != nil {
@@ -1016,11 +1015,11 @@ func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox
 	var extendsLabels = map[string]string{
 		constants.LabelContainerImageMedia: containerReq.GetImage().GetStorageMedia(),
 	}
-	if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if cubeimages.IsPmemStorageMedia(containerReq.GetImage().GetStorageMedia()) {
 		extendsLabels[constants.LabelContainerImagePem] = ci.Metadata.Config.GetImage().Image
 		sandBox.AddImageReference(cubeboxstore.ImageReference{
 			ID:     ci.Metadata.Config.GetImage().Image,
-			Medium: cubeimages.ImageStorageMediaType_ext4,
+			Medium: cubeimages.ImageStorageMediaType(cubeimages.ImageStorageMediaType_value[containerReq.GetImage().GetStorageMedia()]),
 		})
 	} else {
 		storedImage, err := l.criImage.LocalResolve(ctx, containerReq.GetImage().GetImage())
@@ -1188,56 +1187,6 @@ func (l *local) cubeMsgMountOpt(ctx context.Context, flowOpts *workflow.CreateCo
 	}
 
 	return append(Opts, oci.WithMounts(mounts)), nil
-}
-
-func prepareImagePmems(rootfsConfig []*virtiofs.CubeRootfsInfo) oci.SpecOpts {
-	return func(ctx context.Context, client oci.Client, ctr *containers.Container, spec *oci.Spec) error {
-		var tmpPmems []pmem.CubePmem
-		for _, r := range rootfsConfig {
-			if r.PmemFile != "" {
-				fileInfo, err := os.Stat(r.PmemFile)
-				if err != nil {
-					return fmt.Errorf("prepareImagePmems failed to stat file %s: %v", r.PmemFile, err)
-				}
-				var fileSize int64
-				if fileInfo != nil {
-					fileSize = fileInfo.Size()
-				}
-				tmpPmems = append(tmpPmems, pmem.CubePmem{
-					File:          r.PmemFile,
-					DiscardWrites: true,
-					SourceDir:     "/",
-					FsType:        "ext4",
-					Size:          fileSize,
-					ID:            fmt.Sprintf("%s-%d", constants.AnnotationPmemContainerPrefix, len(tmpPmems)),
-				})
-			}
-		}
-		if len(tmpPmems) == 0 {
-			return nil
-		}
-
-		if spec.Annotations == nil {
-			spec.Annotations = make(map[string]string)
-		}
-		oldValues, ok := spec.Annotations[constants.AnnotationPmem]
-		if ok {
-			var pmemOpts []pmem.CubePmem
-			if err := json.Unmarshal([]byte(oldValues), &pmemOpts); err != nil {
-				return fmt.Errorf("failed to unmarshal pmem config: %v", err)
-			}
-			tmpPmems = append(tmpPmems, pmemOpts...)
-		}
-
-		pmemAnno, err := json.Marshal(tmpPmems)
-		if err != nil {
-			return fmt.Errorf("failed to marshal pmem config: %v", err)
-		}
-
-		spec.Annotations[constants.AnnotationPmem] = string(pmemAnno)
-		log.G(ctx).Debugf("%s:%s", constants.AnnotationPmem, string(pmemAnno))
-		return nil
-	}
 }
 
 func prepareVolumePmems(flowOpts *workflow.CreateContext) oci.SpecOpts {

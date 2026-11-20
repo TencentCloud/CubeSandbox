@@ -13,7 +13,7 @@ import (
 
 // writeFakeArtifactFile creates an empty file under a temp store root and
 // points CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR at that root, satisfying both
-// checks remoteBuildResultFromResultJSON performs on Ext4Path: it must exist
+// checks remoteBuildResultFromResultJSON performs on RootfsPath: it must exist
 // on disk (os.Stat) AND live under one of the configured artifact store
 // roots (RemoteBuildResult.Validate).
 func writeFakeArtifactFile(t *testing.T, name string) string {
@@ -37,9 +37,9 @@ func TestRemoteBuildResultFromResultJSONPreservesArtifactURL(t *testing.T) {
 		"artifact_id": "rfs-1",
 		"template_spec_fingerprint": "fp-1",
 		"source_image_digest": "sha256:abc",
-		"ext4_path": %q,
-		"ext4_sha256": "sha256:def",
-		"ext4_size_bytes": 1024,
+		"rootfs_path": %q,
+		"rootfs_sha256": "sha256:def",
+		"rootfs_size_bytes": 1024,
 		"image_config_json": "{}",
 		"master_node_ip": "http://master:8080",
 		"artifact_url": "https://s3.example.com/bucket/rfs-1?X-Amz-Signature=abc",
@@ -66,9 +66,9 @@ func TestRemoteBuildResultFromResultJSONEmptyArtifactURL(t *testing.T) {
 		"artifact_id": "rfs-2",
 		"template_spec_fingerprint": "fp-2",
 		"source_image_digest": "sha256:abc",
-		"ext4_path": %q,
-		"ext4_sha256": "sha256:def",
-		"ext4_size_bytes": 1024,
+		"rootfs_path": %q,
+		"rootfs_sha256": "sha256:def",
+		"rootfs_size_bytes": 1024,
 		"master_node_ip": "http://master:8080"
 	}`, ext4Path)
 
@@ -96,9 +96,9 @@ func TestRemoteBuildResultFromResultJSONS3SkipsLocalStat(t *testing.T) {
 			"artifact_id": "rfs-3",
 			"template_spec_fingerprint": "fp-3",
 			"source_image_digest": "sha256:abc",
-			"ext4_path": %q,
-			"ext4_sha256": "sha256:def",
-			"ext4_size_bytes": 1024,
+			"rootfs_path": %q,
+			"rootfs_sha256": "sha256:def",
+			"rootfs_size_bytes": 1024,
 			"master_node_ip": "http://master:8080",
 			"artifact_url": %q
 		}`, missing, artifactURL)
