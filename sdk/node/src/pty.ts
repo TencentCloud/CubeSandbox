@@ -27,6 +27,7 @@ import {
   readConnectFrames,
   userHeaders,
 } from "./commands.js";
+import { htmlResponseError, streamHttpErrorDetail } from "./connect.js";
 import { ApiError, CubeSandboxError } from "./exceptions.js";
 import type { Sandbox } from "./sandbox.js";
 
@@ -471,10 +472,17 @@ export class Pty {
     }
 
     if (resp.status >= 400) {
+      // The idle timer keeps bounding the error-body read.
+      const detail = await streamHttpErrorDetail(resp);
       control.clearIdle();
-      const detail = (await resp.text().catch(() => "")).trim();
       const suffix = detail ? `: ${detail}` : "";
       throw new ApiError(`${method} failed: HTTP ${resp.status}${suffix}`, resp.status);
+    }
+    const htmlError = htmlResponseError(resp);
+    if (htmlError) {
+      control.clearIdle();
+      await resp.body?.cancel().catch(() => undefined);
+      throw new CubeSandboxError(`${method} failed: ${htmlError}`);
     }
     if (!resp.body) {
       control.clearIdle();
