@@ -198,7 +198,7 @@ with Sandbox.create(
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | `hostPath "..." is not within an allowed mount prefix` | `hostPath` is outside the configured allowed prefixes | Move data under `/data/shared/`, or update `allowed_host_mount_prefixes` as described in `docs/guide/persistent-storage.md` |
-| Sandbox creation fails with a `bind mount ... ->` error | `hostPath` does not exist on the Cubelet node (Cubelet bind-mounts the source directly and does not create it) | Create the directory on the node before creating the sandbox |
+| Sandbox creation fails with `resolve host path ...` or `bind mount ... ->` | `hostPath` does not exist on the Cubelet node, or it is a regular file instead of a directory (Cubelet resolves and opens the source before binding and does not create it) | Create the directory on the node before creating the sandbox |
 | `Read-only file system` when writing to `/mnt/ro/...` | Mounted with `readOnly: true` | Set that mount to `readOnly: false`, or write to the read-write sandbox path `/mnt/rw/...` instead |
 | `Template not found` | Wrong template ID | Run `cubemastercli tpl list` |
 | `Connection refused` | CubeAPI not reachable | Check `E2B_API_URL` and that port 3000 is open |

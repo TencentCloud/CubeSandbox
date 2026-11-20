@@ -193,20 +193,20 @@ def test_malformed_annotation_rejected(case, raw, sdk_backend, sdk_e2e_config):
 def test_nonexistent_hostpath_rejected_at_create(sdk_backend, sdk_e2e_config):
     """A hostPath under the allowed prefix that does not exist fails create.
 
-    This passes CubeMaster's lexical validation but Cubelet cannot bind-mount a
-    missing source, so ``prepareHostDirVolume`` fails the create. We assert on
-    Cubelet's own wrapper text (``bind mount ... ->``, see hostdir.go) rather
-    than the underlying mount(8) stderr, which is util-linux-version- and
-    locale-dependent. Uses a random unprovisioned subdir so it is guaranteed
-    absent.
+    This passes CubeMaster's lexical validation, but Cubelet resolves the source
+    before binding, so ``prepareHostDirVolume`` fails the create at
+    ``resolve host path ...`` when the directory is absent. We assert on
+    Cubelet's own wrapper text (see hostdir.go) rather than the underlying
+    lstat/mount(8) stderr, which is locale-dependent. Uses a random
+    unprovisioned subdir so it is guaranteed absent.
     """
     missing = under_prefix("definitely-missing", uuid.uuid4().hex)
     metadata = host_mount_metadata([mount_option(missing, "/mnt/missing")])
     message = expect_create_rejected(
         sdk_backend, sdk_e2e_config, metadata, role="reject_nonexistent_hostpath"
     )
-    assert "bind mount" in message.lower(), (
-        f"expected a bind-mount failure for the missing source {missing!r}, "
+    assert "resolve host path" in message.lower(), (
+        f"expected a host-path resolution failure for the missing source {missing!r}, "
         f"got: {message!r}"
     )
 
@@ -214,10 +214,10 @@ def test_nonexistent_hostpath_rejected_at_create(sdk_backend, sdk_e2e_config):
 def test_file_hostpath_rejected_at_create(sdk_backend, sdk_e2e_config):
     """A hostPath that is a regular file (not a directory) fails create.
 
-    Cubelet creates the bind *destination* as a directory and bind-mounts the
-    source onto it; binding a file onto a directory fails at mount time. We
-    first materialize a file on the host under the allowed prefix, then attempt
-    to mount it.
+    Cubelet creates the bind *destination* as a directory and opens the source
+    with ``O_DIRECTORY`` before binding, so a regular file fails the create at
+    ``open ... without following symlinks``. We first materialize a file on the
+    host under the allowed prefix, then attempt to mount it.
     """
     token = uuid.uuid4().hex
     rel_dir = f"filecase/{token}"
@@ -248,11 +248,12 @@ def test_file_hostpath_rejected_at_create(sdk_backend, sdk_e2e_config):
             message = expect_create_rejected(
                 sdk_backend, sdk_e2e_config, metadata, role="reject_file_hostpath"
             )
-            # Cubelet wraps every bind failure with "bind mount ... ->" (hostdir.go);
-            # assert on that stable text rather than the mount(8) "not a directory"
-            # tail, which varies by util-linux version/locale.
-            assert "bind mount" in message.lower(), (
-                f"expected a bind-mount failure for the file source {file_host_path!r}, "
+            # Cubelet rejects a file source while opening it with O_DIRECTORY
+            # (hostdir.go); assert on that stable wrapper rather than the
+            # mount(8) "not a directory" tail, which varies by util-linux
+            # version/locale.
+            assert "without following symlinks" in message.lower(), (
+                f"expected a non-directory source rejection for {file_host_path!r}, "
                 f"got: {message!r}"
             )
         finally:
@@ -401,8 +402,8 @@ def test_nested_ro_parent_rw_child_writable_when_child_listed_first(
     On a cluster with node-local disks, ``provision_host_dirs`` may create the
     source on one node while a later create is scheduled on another. When the
     scheduled node lacks the source, create fails with Cubelet's
-    ``bind mount ...: No such file or directory``. That is treated as a **pass
-    with a warning** — topology and shared-storage setup are outside this
+    ``resolve host path ...: no such file or directory``. That is treated as a
+    **pass with a warning** — topology and shared-storage setup are outside this
     regression's scope. Use shared storage at the same path on every node (see
     persistent-storage.md) if the nested assertion must run in multi-node CI.
     """

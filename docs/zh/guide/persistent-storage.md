@@ -187,6 +187,12 @@ extra_conf:
 >
 > 无论挂载请求来自 CubeAPI 传递的 annotation，还是直接指定的 volume 路径，都会执行相同的路径校验，避免通过不同入口绕过限制。
 
+### 节点要求与升级顺序
+
+Cubelet 会先解析每个 `hostPath`，再用 `O_PATH|O_NOFOLLOW` 固定目录，并通过 `mount --no-canonicalize` 绑定 `/proc/<pid>/fd/<n>`。因此每个 Cubelet 节点都需要 util-linux 2.31 或更新版本提供的 `mount`；BusyBox 的 `mount` 不支持 `--no-canonicalize`，缺少该能力的节点会拒绝所有 host mount 创建请求。
+
+升级时必须先升级 CubeMaster，再升级 Cubelet。CubeMaster 会在创建和恢复请求中把 `allowed_host_mount_prefixes` 写入内部 annotation；收不到该 annotation 的 Cubelet 会直接失败。因此在 CubeMaster 升级到该节点之前，host mount 沙箱无法创建或恢复。新版 CubeMaster 搭配旧版 Cubelet 时 annotation 仍会下发，但旧版 Cubelet 会忽略它，符号链接绕过依然存在，因此 Cubelet 也需要全部升级。
+
 ## 权限管理
 
 Host Mount 保留宿主目录原始的所有者和权限位。`readOnly` 标志只控制 Cube 是否以只读模式挂载，**不会**覆盖 Linux 文件权限。

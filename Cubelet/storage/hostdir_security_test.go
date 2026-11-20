@@ -20,7 +20,7 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
-const testHostMountAllowedPrefixesAnnotation = "cube.master.internal.host_mount.allowed_prefixes"
+const testHostMountAllowedPrefixesAnnotation = cubebox.AnnotationHostMountAllowedPrefixes
 
 func TestPrepareHostDirVolumeRejectsSymlinkEscape(t *testing.T) {
 	allowedRoot := t.TempDir()
@@ -186,6 +186,21 @@ func TestResolveHostMountAllowedPrefixesRejectsRootSymlink(t *testing.T) {
 		testHostMountAllowedPrefixesAnnotation: mustJSON(t, []string{link}),
 	})
 	require.ErrorContains(t, err, "resolves to the filesystem root")
+}
+
+func TestResolveHostMountAllowedPrefixesSkipsUnusableEntries(t *testing.T) {
+	valid := t.TempDir()
+	filePrefix := filepath.Join(t.TempDir(), "prefix-file")
+	require.NoError(t, os.WriteFile(filePrefix, []byte("x"), 0644))
+	rootLink := filepath.Join(t.TempDir(), "root")
+	require.NoError(t, os.Symlink("/", rootLink))
+
+	prefixes, err := resolveHostMountAllowedPrefixes(map[string]string{
+		testHostMountAllowedPrefixesAnnotation: mustJSON(t, []string{rootLink, filePrefix, valid}),
+	})
+	require.NoError(t, err)
+	require.Len(t, prefixes, 1, "one stale entry must not disable the valid prefix")
+	require.Equal(t, filepath.Clean(valid), prefixes[0].raw)
 }
 
 func TestResolveHostDirSourceRejectsSiblingPrefix(t *testing.T) {

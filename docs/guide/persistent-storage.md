@@ -185,6 +185,12 @@ When the list is empty or omitted, the default `["/data/shared/"]` applies. The 
 >
 > The same path validation applies whether the mount request comes from an annotation forwarded by CubeAPI or from a directly specified volume path, preventing bypass through a different entry point.
 
+### Node Requirements and Upgrade Order
+
+Cubelet resolves every `hostPath`, pins the directory with `O_PATH|O_NOFOLLOW`, and binds `/proc/<pid>/fd/<n>` using `mount --no-canonicalize`. Each Cubelet node therefore needs `mount` from util-linux 2.31 or newer; BusyBox `mount` does not support `--no-canonicalize`, and a node without it rejects every host-mount create.
+
+Upgrade CubeMaster before Cubelet. CubeMaster stamps its `allowed_host_mount_prefixes` into an internal annotation on create and resume, and a Cubelet that does not receive that annotation fails closed. Until the CubeMaster rollout reaches a node, host-mount sandboxes cannot be created or resumed there. A new CubeMaster with an old Cubelet still forwards the annotation, but the old Cubelet ignores it and remains exposed to the symlink bypass, so the Cubelet rollout must be completed as well.
+
 ## Permissions
 
 Host mounts preserve the original ownership and permission bits of the host directory. The `readOnly` flag only controls whether Cube mounts the path read-only or read-write — it does **not** override Linux file permissions.

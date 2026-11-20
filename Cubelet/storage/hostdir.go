@@ -215,27 +215,33 @@ func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]hostMount
 	}
 
 	prefixes := make([]hostMountAllowedPrefix, 0, len(rawPrefixes))
+	// A prefix that cannot be resolved authorizes nothing, so skip it instead
+	// of failing the whole node: one stale entry must not disable every host
+	// mount here. Carry the reasons so an all-invalid list still reports them.
+	var unusable []string
 	for _, raw := range rawPrefixes {
 		cleaned := filepath.Clean(raw)
 		if !filepath.IsAbs(cleaned) || cleaned == "/" {
-			return nil, fmt.Errorf("invalid allowed host mount prefix %q", raw)
+			unusable = append(unusable, fmt.Sprintf("%q is not an absolute non-root path", raw))
+			continue
 		}
 		resolved, err := filepath.EvalSymlinks(cleaned)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, fmt.Errorf("resolve allowed host mount prefix %q: %w", raw, err)
+			unusable = append(unusable, fmt.Sprintf("%q: %v", raw, err))
+			continue
 		}
 		if resolved == string(filepath.Separator) {
-			return nil, fmt.Errorf("allowed host mount prefix %q resolves to the filesystem root", raw)
+			unusable = append(unusable, fmt.Sprintf("%q resolves to the filesystem root", raw))
+			continue
 		}
 		info, err := os.Stat(resolved)
 		if err != nil {
-			return nil, fmt.Errorf("stat allowed host mount prefix %q: %w", raw, err)
+			unusable = append(unusable, fmt.Sprintf("%q: %v", raw, err))
+			continue
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("allowed host mount prefix %q is not a directory", raw)
+			unusable = append(unusable, fmt.Sprintf("%q is not a directory", raw))
+			continue
 		}
 		prefixes = append(prefixes, hostMountAllowedPrefix{
 			raw:      cleaned,
@@ -243,7 +249,8 @@ func resolveHostMountAllowedPrefixes(annotations map[string]string) ([]hostMount
 		})
 	}
 	if len(prefixes) == 0 {
-		return nil, errors.New("no allowed host mount prefix exists on this node")
+		return nil, fmt.Errorf("no usable allowed host mount prefix on this node: %s",
+			strings.Join(unusable, "; "))
 	}
 	return prefixes, nil
 }
