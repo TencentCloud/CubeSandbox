@@ -22,6 +22,7 @@
 | [OpenAI Agents SDK](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example) | 将 `E2BSandboxClient` 接入 CubeSandbox，包含 Shell Agent、暂停/恢复和 SWE-bench 流程。 |
 | [OpenAI Agents + Code Interpreter](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | 使用通用 E2B 执行或有状态 Jupyter kernel 运行数据分析 Agent。 |
 | [SWE-bench + mini-swe-agent](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/mini-rl-training) | 在隔离沙箱中自动处理 SWE-bench 编码任务，支持多模型与 RL 训练流程。 |
+| [Pydantic AI](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pydantic-ai-integration) | 为 Pydantic AI Agent 提供一个在 CubeSandbox MicroVM 中执行代码的 `run_python` 函数工具。 |
 
 ## 网络与入口
 
