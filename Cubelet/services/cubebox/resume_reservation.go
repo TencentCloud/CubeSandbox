@@ -99,14 +99,22 @@ func (l *resumeReservationLedger) totals() (memMB, cpuMilli int64) {
 // firing late, or a double defer) can never drop a newer reservation
 // registered for the same sandbox ID.
 //
-// Precondition: admissions for one sandbox ID are serialized by the caller —
-// every path that reaches admission holds that ID's sandboxLifecycleLocks
-// entry (resumeLocked, Create-from-pause), and Restart refuses PAUSED rows —
-// so registering over a live entry for the same ID cannot happen today. It is
-// logged rather than ignored anyway: if a future caller ever reached admission
-// without the lock, the overwrite would silently degrade the ledger from
-// double-counting protection to single-counting, and the log line is the only
-// trace that the precondition broke.
+// Precondition: admissions for one sandbox ID are serialized by the caller,
+// and the serialization is guaranteed by Master's request shape rather than
+// by the locking code structurally: service.Create holds that ID's
+// sandboxLifecycleLocks entry exactly when the request carries BOTH
+// cube.master.desired.sandbox.id and cube.master.pause.snapshot.id
+// (resumeFromPauseSandboxID), and Master always sends the pair together for
+// a same-node resume. The admission predicate itself (pausedReplaceTarget)
+// fires on desired-id + a local PAUSED row, so a hypothetical Create with
+// only the desired-id landing on a PAUSED row would reach admission without
+// the lock; no caller sends that shape today (restart-armed creates reuse
+// the annotation but skip the replacement branch via ReuseFor, and the
+// restart manager refuses PAUSED rows), and the Update path's resumeLocked
+// holds the same lock. Registering over a live entry is logged rather than
+// ignored anyway: if a caller ever broke the shape assumption, the
+// overwrite would silently degrade the ledger from double-counting
+// protection to single-counting, and the log line is the only trace.
 func (l *resumeReservationLedger) reserveLocked(id string, memMB, cpuMilli int64) func() {
 	if l.entries == nil {
 		l.entries = make(map[string]*resumeReservation)

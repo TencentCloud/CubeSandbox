@@ -61,9 +61,15 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		if keepCubebox {
 			return
 		}
-		// A create-flow rollback must not consume the PAUSED tombstone the
-		// failed Create-from-pause left behind; see
-		// createRollbackKeepsPausedTombstone.
+		// A failed Create-from-pause must roll back to the tombstone it was
+		// replacing, whichever step failed — see
+		// restorePausedReplaceSnapshot.
+		if l.restorePausedReplaceSnapshot(ctx, opts, sandBoxID) {
+			return
+		}
+		// Defence in depth for a rollback without a snapshot (e.g. an older
+		// CreateContext): a still-PAUSED row is the user's resumable state,
+		// not create debris — see createRollbackKeepsPausedTombstone.
 		if l.createRollbackKeepsPausedTombstone(ctx, opts, sandBoxID) {
 			return
 		}
@@ -429,6 +435,55 @@ func (l *local) createRollbackKeepsPausedTombstone(ctx context.Context, opts *wo
 		return true
 	}
 	log.G(ctx).Warnf("create rollback keeps paused tombstone %s so the resume can be retried", sandBoxID)
+	return true
+}
+
+// restorePausedReplaceSnapshot rolls a failed Create-from-pause back to the
+// tombstone it was replacing and reports whether it did.
+//
+// The replacement branch snapshots the PAUSED row before the flow touches it,
+// and both create-rollback paths carry the snapshot here: the engine failover
+// (IsRollBack) and the synchronous envd-init cleanup (failover-operation
+// context only). Saving the snapshot back is what covers EVERY failure point
+// of the attempt — keeping the current row alone cannot: createContainers
+// Saves the new row early, before runContainer, probe and envd init (the
+// common failure points), so by rollback time the tombstone is usually
+// already overwritten by this attempt's debris. Deleting that debris (the
+// ordinary rollback behaviour) would leave the node with no record of the
+// paused sandbox, while the pause package survives and CubeMaster keeps the
+// pause binding READY: the user's retried Resume would arrive as a thin
+// Create that neither the shim gate nor the quota gate recognises as a
+// replacement — the #2042 bypass. The restored row is the exact pre-attempt
+// tombstone (PAUSED with its original PausedAt, ResourceWithOverHead and
+// RootfsWritableLayer, none of the rollback's delete marks), so the retry
+// runs exactly the first attempt's checks.
+//
+// A user Destroy never carries a snapshot — only create-rollback contexts do
+// — so this cannot resurrect a sandbox the user deleted; the failover-marker
+// check is defence in depth on top of that. A Save failure falls through to
+// the ordinary keep/delete path rather than leaving a half-restored row.
+func (l *local) restorePausedReplaceSnapshot(ctx context.Context, opts *workflow.DestroyContext, sandBoxID string) bool {
+	if opts == nil || opts.PausedReplaceSnapshot == nil {
+		return false
+	}
+	if !opts.BaseWorkflowInfo.IsRollBack && !constants.IsFailoverOperation(ctx) {
+		return false
+	}
+	snap := opts.PausedReplaceSnapshot
+	// The snapshot may carry a UserMarkDeletedTime the gc plugin's create step
+	// stamped on the tombstone while the flow ran; a kept tombstone must not
+	// read as user-deleted (GC's allowCleanup would proceed against it and
+	// could reclaim the pause package the retry resumes from). This mirrors
+	// the scrub the pause keep-tombstone path does after its Destroy.
+	snap.Lock()
+	snap.UserMarkDeletedTime = nil
+	snap.DeleteRequestID = ""
+	snap.Unlock()
+	if saveErr := l.cubeboxManger.Save(ctx, snap, cubes.WithNoEvent); saveErr != nil {
+		log.G(ctx).Errorf("create rollback cannot restore paused tombstone %s: %v", sandBoxID, saveErr)
+		return false
+	}
+	log.G(ctx).Warnf("create rollback restored paused tombstone %s so the resume can be retried", sandBoxID)
 	return true
 }
 

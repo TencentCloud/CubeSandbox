@@ -91,6 +91,18 @@ func (f *fakeCubeboxAPI) Save(ctx context.Context, info *cubeboxstore.CubeBox, o
 		return f.saveErr
 	}
 	f.cb = info
+	// Mirror the real store's key-by-ID overwrite so List()-driven aggregates
+	// and Get() stay consistent with the saved row (the retry tests save a
+	// debris row then restore the tombstone over it).
+	for i, sb := range f.list {
+		if sb != nil && info != nil && (sb.ID == info.ID || sb.SandboxID == info.ID) {
+			f.list[i] = info
+			return nil
+		}
+	}
+	if f.list != nil && info != nil {
+		f.list = append(f.list, info)
+	}
 	return nil
 }
 
