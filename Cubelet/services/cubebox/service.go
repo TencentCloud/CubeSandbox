@@ -438,6 +438,12 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			return rsp, nil
 		}
 		defer unlock()
+		// A previous failed attempt's rollback may have had to defer its
+		// tombstone restore because this lock was busy. Complete it now, under
+		// the lock and before anything below reads the row, so this retry
+		// evaluates the tombstone — not the debris row — and runs the normal
+		// shim and quota gates on it.
+		s.cubeboxMgr.completePendingPausedRestore(ctx, resumeSID)
 	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
@@ -475,6 +481,15 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		// rollback is provably serialized against the same gate.
 		createInfo.RollbackSerialize = func(ctx context.Context, _ string) (func(), error) {
 			return s.sandboxLifecycleLocks.LockContext(ctx, resumeSID)
+		}
+		// If that lock cannot be taken within the failover's wait budget it
+		// stands down without touching the store; record the snapshot so the
+		// next resume Create — which does hold the lock — completes the
+		// restore before it reads the row. Read off createInfo at call time:
+		// local.Create fills the snapshot/debris fields as the flow runs.
+		createInfo.RollbackStanddown = func(_ context.Context, _ string) {
+			s.cubeboxMgr.recordPendingPausedRestore(resumeSID,
+				createInfo.PausedReplaceSnapshot, createInfo.PausedReplaceDebrisCreatedAt)
 		}
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
@@ -790,6 +805,12 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	if s.restarts != nil {
 		s.restarts.Stop(req.GetSandboxID())
 	}
+	// Drop any tombstone restore a failed create's rollback had to defer: this
+	// delete is the user's (or Master's) final word on the sandbox, and a
+	// later resume completing the deferred restore would resurrect a record
+	// whose pause binding is about to be dropped. A stand-down recorded after
+	// this point is handled by the restore's own row checks.
+	s.cubeboxMgr.pendingPausedRestores.take(req.GetSandboxID())
 	rsp := &cubebox.DestroyCubeSandboxResponse{
 		RequestID: req.RequestID,
 		SandboxID: req.SandboxID,

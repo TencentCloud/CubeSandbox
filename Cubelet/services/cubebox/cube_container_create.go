@@ -155,7 +155,8 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 			// pausing record. The code must trigger the engine failover: this
 			// is the flow's last step, so network/volume/storage/cgroup are
 			// already allocated and PreConditionFailed (which skips failover)
-			// would strand them until Master compensation or a user DELETE.
+			// would strand them with no one left to release them — the resume
+			// path has no Master-side compensation for a failed create.
 			// Failover is tombstone-safe now: its rollback keeps a still-PAUSED
 			// row (createRollbackKeepsPausedTombstone) and deletes nothing on
 			// a store error, so the retry still finds its record either way.
@@ -185,11 +186,14 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// cleanup) carries this copy into Destroy, which saves it back;
 				// see restorePausedReplaceSnapshot.
 				opts.PausedReplaceSnapshot = sb.DeepCopy()
-				// The store row this attempt is responsible for: the tombstone
+				// The identity of the store row this attempt is responsible
+				// for, by value (CreatedAt), not by pointer: the tombstone
 				// until the flow's first Save replaces it with the new row
-				// (createContainers updates this), and the identity the
-				// rollback's restore checks before touching the store.
-				opts.PausedReplaceDebris = sb
+				// (createContainers updates it). The rollback only restores
+				// over a row that still carries this value, so a store layer
+				// that copies rows on Save/Get cannot break the check, and a
+				// newer attempt's row is never clobbered.
+				opts.PausedReplaceDebrisCreatedAt = sb.CreatedAt
 				if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
 					opts.RestartPrior = restartPriorFrom(sb)
 				}
@@ -593,8 +597,8 @@ func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
 		// but the snapshot itself has to travel on the DestroyContext. The
 		// envd-init failure always happens after createContainers' first Save,
 		// so the debris identity is the row this attempt Saved.
-		PausedReplaceSnapshot: flowOpts.PausedReplaceSnapshot,
-		PausedReplaceDebris:   flowOpts.PausedReplaceDebris,
+		PausedReplaceSnapshot:        flowOpts.PausedReplaceSnapshot,
+		PausedReplaceDebrisCreatedAt: flowOpts.PausedReplaceDebrisCreatedAt,
 	})
 }
 
@@ -723,7 +727,7 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 	if flowOpts.PausedReplaceSnapshot != nil {
 		// This Save overwrote the tombstone; from now on this new row is what
 		// a rollback of this attempt owns (and may restore over).
-		flowOpts.PausedReplaceDebris = sandBox
+		flowOpts.PausedReplaceDebrisCreatedAt = sandBox.CreatedAt
 	}
 	return nil
 }

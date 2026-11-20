@@ -73,7 +73,7 @@ func TestRestorePausedReplaceSnapshotPinsPostSaveRollback(t *testing.T) {
 
 		opts := rollbackDestroyContext("sb-postsave")
 		opts.PausedReplaceSnapshot = snap
-		opts.PausedReplaceDebris = debris
+		opts.PausedReplaceDebrisCreatedAt = debris.CreatedAt
 
 		require.True(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-postsave"),
 			"a post-Save rollback must restore the snapshotted tombstone instead of deleting the debris")
@@ -142,29 +142,55 @@ func TestRestorePausedReplaceSnapshotPinsPostSaveRollback(t *testing.T) {
 		assert.Zero(t, mgr.saveCalls)
 	})
 
-	t.Run("a row replaced by a newer attempt is not clobbered", func(t *testing.T) {
+	t.Run("a row replaced by a newer attempt is neither clobbered nor deleted", func(t *testing.T) {
 		// If a newer attempt Saved its own row while this rollback was in
 		// flight, the stored row is no longer the debris this attempt owned:
-		// saving the stale snapshot over it would destroy the newer row.
+		// saving the stale snapshot over it would destroy the newer row, and
+		// falling through to the deferred Delete would remove it. The value
+		// identity (CreatedAt) catches this even when the store hands back
+		// copies rather than the saved pointers.
 		tomb := tombstone("sb-replaced")
-		staleDebris := newCubeboxWithStatusForTest("sb-replaced", cubeboxstore.Status{
-			CreatedAt: time.Now().UnixNano(),
-		})
-		staleDebris.SandboxID = "sb-replaced"
+		staleCreatedAt := time.Now().UnixNano()
 		newerRow := newCubeboxWithStatusForTest("sb-replaced", cubeboxstore.Status{
 			StartedAt: time.Now().UnixNano(),
 		})
 		newerRow.SandboxID = "sb-replaced"
+		newerRow.CreatedAt = staleCreatedAt + int64(time.Hour)
 		mgr := &fakeCubeboxAPI{cb: newerRow}
 		l := &local{cubeboxManger: mgr}
 
 		opts := rollbackDestroyContext("sb-replaced")
 		opts.PausedReplaceSnapshot = tomb.DeepCopy()
-		opts.PausedReplaceDebris = staleDebris
+		opts.PausedReplaceDebrisCreatedAt = staleCreatedAt
 
-		assert.False(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-replaced"),
-			"the restore must back off when the row belongs to a newer attempt")
-		assert.Zero(t, mgr.saveCalls)
+		assert.True(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-replaced"),
+			"the rollback must keep hands off a row that belongs to a newer attempt")
+		assert.Zero(t, mgr.saveCalls, "the stale snapshot must not be saved over the newer row")
+		assert.Zero(t, mgr.deleteCalls, "the newer attempt's row must not be deleted either")
+	})
+
+	t.Run("identity is by value, not by pointer", func(t *testing.T) {
+		// Store.Sync already deep-copies, and Get returning the live pointer is
+		// an implementation detail: the identity check must keep working when
+		// the store hands back a copy of the row this attempt Saved.
+		tomb := tombstone("sb-copyget")
+		snap := tomb.DeepCopy()
+		debris := newCubeboxWithStatusForTest("sb-copyget", cubeboxstore.Status{
+			CreatedAt: time.Now().UnixNano(),
+		})
+		debris.SandboxID = "sb-copyget"
+		mgr := &fakeCubeboxAPI{cb: debris, getReturnsCopy: true}
+		l := &local{cubeboxManger: mgr}
+
+		opts := rollbackDestroyContext("sb-copyget")
+		opts.PausedReplaceSnapshot = snap
+		opts.PausedReplaceDebrisCreatedAt = debris.CreatedAt
+
+		require.True(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-copyget"))
+		assert.Equal(t, 1, mgr.saveCalls)
+		cur, err := mgr.Get(context.Background(), "sb-copyget")
+		require.NoError(t, err)
+		assert.Equal(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, cur.GetStatus().Get().State())
 	})
 
 	t.Run("a row deleted while the attempt was in flight is not resurrected", func(t *testing.T) {
@@ -407,6 +433,7 @@ func TestRetryAfterPostSaveFailureIsStillQuotaGated(t *testing.T) {
 	// snapshot restore can put the tombstone back.
 	rollback := rollbackDestroyContext("sb-postsaveretry")
 	rollback.PausedReplaceSnapshot = snapshot
+	rollback.PausedReplaceDebrisCreatedAt = debris.CreatedAt
 	require.False(t, s.cubeboxMgr.createRollbackKeepsPausedTombstone(ctx, rollback, "sb-postsaveretry"),
 		"the debris row is not PAUSED — the keep-guard must defer to the snapshot restore")
 	require.True(t, s.cubeboxMgr.restorePausedReplaceSnapshot(ctx, rollback, "sb-postsaveretry"),

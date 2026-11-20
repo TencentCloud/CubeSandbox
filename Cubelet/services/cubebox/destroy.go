@@ -477,13 +477,15 @@ func (l *local) createRollbackKeepsPausedTombstone(ctx context.Context, opts *wo
 // The rollback is serialized against retried Resume / user Delete by the
 // per-sandbox lifecycle lock the failover re-acquires (CreateContext.
 // RollbackSerialize); a user Destroy never carries a snapshot in the first
-// place. As defence in depth the restore also checks the store still holds
-// the exact row this attempt owned (PausedReplaceDebris identity): a Delete
-// or a newer attempt that slipped in while this rollback was in flight means
-// the snapshot is stale, and saving it would resurrect a sandbox whose pause
-// binding Master has already dropped, or clobber the newer attempt's row.
-// A Save failure likewise falls through to the ordinary keep/delete path
-// rather than leaving a half-restored row.
+// place. As defence in depth the restore also checks the store row still
+// belongs to this attempt, by a value identity — PausedReplaceDebrisCreatedAt,
+// the CreatedAt of the row the attempt owned (the tombstone's before the
+// flow's first Save, the new row's after) — rather than by pointer, so it
+// survives any copy the store layer makes on Save/Get. A row deleted while
+// the attempt was in flight skips the restore (saving would resurrect a
+// sandbox whose pause binding Master has already dropped); a row with a
+// different CreatedAt belongs to a newer attempt and is left alone — neither
+// restored over nor deleted.
 func (l *local) restorePausedReplaceSnapshot(ctx context.Context, opts *workflow.DestroyContext, sandBoxID string) bool {
 	if opts == nil || opts.PausedReplaceSnapshot == nil {
 		return false
@@ -491,14 +493,22 @@ func (l *local) restorePausedReplaceSnapshot(ctx context.Context, opts *workflow
 	if !opts.BaseWorkflowInfo.IsRollBack && !constants.IsFailoverOperation(ctx) {
 		return false
 	}
-	if cur, getErr := l.cubeboxManger.Get(ctx, sandBoxID); getErr != nil || cur == nil ||
-		(opts.PausedReplaceDebris != nil && cur != opts.PausedReplaceDebris) {
+	cur, getErr := l.cubeboxManger.Get(ctx, sandBoxID)
+	if getErr != nil || cur == nil {
 		if getErr != nil && !errors.Is(getErr, utils.ErrorKeyNotFound) {
 			log.G(ctx).Warnf("create rollback cannot verify the row for %s, skipping tombstone restore: %v", sandBoxID, getErr)
 		} else {
-			log.G(ctx).Warnf("create rollback skips tombstone restore for %s: the row was deleted or replaced while the attempt was in flight", sandBoxID)
+			log.G(ctx).Warnf("create rollback skips tombstone restore for %s: the row was deleted while the attempt was in flight", sandBoxID)
 		}
 		return false
+	}
+	if owned := opts.PausedReplaceDebrisCreatedAt; owned != 0 && cur.CreatedAt != owned {
+		log.G(ctx).Warnf("create rollback skips tombstone restore for %s: the row belongs to a newer attempt (CreatedAt %d, attempt owned %d)",
+			sandBoxID, cur.CreatedAt, owned)
+		// Not this attempt's row: neither restore over it nor fall through to
+		// the deferred Delete, which would remove a row this rollback does
+		// not own.
+		return true
 	}
 	snap := opts.PausedReplaceSnapshot
 	// The snapshot may carry a UserMarkDeletedTime the gc plugin's create step

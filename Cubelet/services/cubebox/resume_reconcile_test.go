@@ -17,18 +17,19 @@ import (
 )
 
 type fakeCubeboxAPI struct {
-	cb            *cubeboxstore.CubeBox
-	list          []*cubeboxstore.CubeBox
-	getCalls      int
-	getErr        error
-	deleteCalls   int
-	listCalls     int
-	saveCalls     int
-	getHook       func(call int)
-	syncIDs       []string
-	syncSnapshots []fakeCubeboxSyncSnapshot
-	syncErr       error
-	saveErr       error
+	cb             *cubeboxstore.CubeBox
+	list           []*cubeboxstore.CubeBox
+	getCalls       int
+	getErr         error
+	getReturnsCopy bool
+	deleteCalls    int
+	listCalls      int
+	saveCalls      int
+	getHook        func(call int)
+	syncIDs        []string
+	syncSnapshots  []fakeCubeboxSyncSnapshot
+	syncErr        error
+	saveErr        error
 }
 
 type fakeCubeboxSyncSnapshot struct {
@@ -50,17 +51,29 @@ func (f *fakeCubeboxAPI) Get(ctx context.Context, id string) (*cubeboxstore.Cube
 	if f.getHook != nil {
 		f.getHook(f.getCalls)
 	}
+	found := (*cubeboxstore.CubeBox)(nil)
 	if cb != nil && cb.ID == id {
-		return cb, nil
-	}
-	// Multi-record fixtures (e.g. the concurrent-resume ledger tests) seed
-	// list; resolve by id there so several paused tombstones can coexist.
-	for _, sb := range f.list {
-		if sb != nil && (sb.ID == id || sb.SandboxID == id) {
-			return sb, nil
+		found = cb
+	} else {
+		// Multi-record fixtures (e.g. the concurrent-resume ledger tests) seed
+		// list; resolve by id there so several paused tombstones can coexist.
+		for _, sb := range f.list {
+			if sb != nil && (sb.ID == id || sb.SandboxID == id) {
+				found = sb
+				break
+			}
 		}
 	}
-	return nil, nil
+	if found == nil {
+		return nil, nil
+	}
+	// getReturnsCopy models a store implementation that hands out deep copies
+	// (Store.Sync already copies on the persistence path); identity checks in
+	// the rollback must be value-based to survive it.
+	if f.getReturnsCopy {
+		return found.DeepCopy(), nil
+	}
+	return found, nil
 }
 
 func (f *fakeCubeboxAPI) FindContainerOfCubebox(ctx context.Context, id string) (*cubeboxstore.Container, *cubeboxstore.CubeBox, error) {
