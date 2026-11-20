@@ -19,7 +19,15 @@ type logClock struct {
 	dateDay  string
 }
 
-var currClock atomic.Pointer[logClock]
+// currClock is set by its initializer, not in init(): Go initializes a
+// package-level variable before any variable whose initializer refers to
+// it and before every init(), so no code in this package can Load a nil
+// clock, whatever order the files are compiled in.
+var currClock = func() *atomic.Pointer[logClock] {
+	p := new(atomic.Pointer[logClock])
+	p.Store(newLogClock(time.Now()))
+	return p
+}()
 
 func newLogClock(now time.Time) *logClock {
 	return &logClock{
@@ -36,7 +44,6 @@ func currDateHour() string { return currClock.Load().dateHour }
 func currDateDay() string { return currClock.Load().dateDay }
 
 func init() {
-	currClock.Store(newLogClock(time.Now()))
 	go func() {
 		tm := time.NewTimer(time.Second)
 		for {
