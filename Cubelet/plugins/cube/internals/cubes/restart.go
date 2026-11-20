@@ -23,6 +23,8 @@ import (
 )
 
 func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx context.Context, cb *cubeboxstore.CubeBox) error) error {
+	l.cacheRecoveryReady.Store(false)
+	complete := true
 	start := time.Now()
 	defer func() {
 		log.G(ctx).Debugf("Recover cubebox cost %v", time.Since(start))
@@ -35,6 +37,7 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 	for id, sandboxBytes := range all {
 		var cb = new(cubeboxstore.CubeBox)
 		if err := jsoniter.Unmarshal(sandboxBytes, &cb); err != nil {
+			complete = false
 			log.G(ctx).Errorf("Unmarshal to cubebox %s from meta: %v", id, err)
 			continue
 		}
@@ -47,6 +50,7 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 		podCtx = context.WithValue(podCtx, constants.CubeboxID, cb.ID)
 
 		if err := RecoverPod(podCtx, l.client, cb); err != nil {
+			complete = false
 			log.G(podCtx).Errorf("failed to recover pod, skip this pod: %v", err)
 			continue
 		}
@@ -67,10 +71,12 @@ func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx con
 		l.cubeboxStore.Add(cb)
 		err = afterRecover(podCtx, cb)
 		if err != nil {
+			complete = false
 			log.G(podCtx).Errorf("failed to recover pod, skip this pod: %v", err)
 			continue
 		}
 	}
+	l.cacheRecoveryReady.Store(complete)
 	return nil
 }
 

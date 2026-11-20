@@ -89,7 +89,7 @@ func TestTryDownloadPmemFileResumesAfterInterruption(t *testing.T) {
 	spec := constants.GetImageSpec(makeSpec(server.URL, wantSHA))
 
 	// First attempt: server cuts the connection mid-transfer.
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err == nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err == nil {
 		t.Fatal("first attempt should fail when the connection is aborted")
 	}
 	st, err := os.Stat(imagePath + ".download")
@@ -101,7 +101,7 @@ func TestTryDownloadPmemFileResumesAfterInterruption(t *testing.T) {
 	}
 
 	// Second attempt: must resume from the partial via a Range request.
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("resumed download failed: %v", err)
 	}
 	headers := readHeaderLog(t, &mu, &ranges)
@@ -150,7 +150,7 @@ func TestTryDownloadPmemFileFallsBackWhenServerIgnoresRange(t *testing.T) {
 	}
 
 	spec := constants.GetImageSpec(makeSpec(server.URL, wantSHA))
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
 	headers := readHeaderLog(t, &mu, &ranges)
@@ -193,7 +193,7 @@ func TestTryDownloadPmemFileVerifiesCompletePartialOn416(t *testing.T) {
 	}
 
 	spec := constants.GetImageSpec(makeSpec(server.URL, wantSHA))
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("416 verify-only path failed: %v", err)
 	}
 	if transfers != 0 {
@@ -245,7 +245,7 @@ func TestTryDownloadPmemFileRejectsWrongStart206(t *testing.T) {
 	}
 
 	spec := constants.GetImageSpec(makeSpec(server.URL, wantSHA))
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("download should recover via the no-Range re-fetch: %v", err)
 	}
 	headers := readHeaderLog(t, &mu, &ranges)
@@ -296,7 +296,7 @@ func TestTryDownloadPmemFileDropsCorruptPartialOnMismatch(t *testing.T) {
 	}
 
 	spec := constants.GetImageSpec(makeSpec(server.URL, wantSHA))
-	err := tryDownloadPmemFile(ctx, imagePath, spec)
+	err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec)
 	if err == nil {
 		t.Fatal("corrupt partial must fail the SHA256 gate")
 	}
@@ -345,7 +345,7 @@ func TestTryDownloadPmemFileRejectsOversizedPartialOn416(t *testing.T) {
 	}
 
 	spec := constants.GetImageSpec(makeSpec(server.URL, wantSHA))
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("oversized partial should be dropped and re-fetched in-call: %v", err)
 	}
 	// The oversized partial must not be renamed into place...
@@ -421,7 +421,7 @@ func TestTryDownloadPmemFileResumesWithSparseHole(t *testing.T) {
 	// flushed on error, but a pending zero run is a skipped hole rather
 	// than a buffered write -- fine, because the missing region is all
 	// zeros and the retry re-fetches it.
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err == nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err == nil {
 		t.Fatal("first attempt should fail on the aborted connection")
 	}
 	st, err := os.Stat(imagePath + ".download")
@@ -430,7 +430,7 @@ func TestTryDownloadPmemFileResumesWithSparseHole(t *testing.T) {
 	}
 
 	// attempt 2: resume from the physical prefix.
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("resumed download failed: %v", err)
 	}
 	headers := readHeaderLog(t, &mu, &ranges)
@@ -526,7 +526,7 @@ func TestTryDownloadPmemFileIgnoresPartialWithoutDigest(t *testing.T) {
 	}
 
 	spec := constants.GetImageSpec(makeSpec(server.URL, ""))
-	if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+	if err := tryDownloadPmemFile(ctx, "cubebox", imagePath, spec); err != nil {
 		t.Fatalf("download without a digest should still succeed: %v", err)
 	}
 	headers := readHeaderLog(t, &mu, &ranges)
