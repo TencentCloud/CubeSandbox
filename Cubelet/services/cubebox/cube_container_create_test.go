@@ -396,7 +396,10 @@ func TestHandleEnvdInitFailureCleanupWithFailoverDisabled(t *testing.T) {
 			}}
 			opts := &workflow.CreateContext{Failover: tc.failover}
 			if tc.callback {
-				opts.ScheduleResumeRollback = func() { t.Fatal("only the outer workflow may schedule rollback") }
+				opts.RollbackCoordinator = testRollbackScheduler(func(context.Context, *workflow.CreateContext) bool {
+					t.Fatal("only the outer workflow may schedule rollback")
+					return false
+				})
 			}
 			sb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb-envd"}}
 			l.handleEnvdInitFailure(t.Context(), opts, &cubebox.RunCubeSandboxRequest{}, sb)

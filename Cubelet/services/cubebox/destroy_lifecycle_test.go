@@ -132,7 +132,9 @@ func TestDestroyReturnsRollbackPendingWhileLifecycleLockIsHeld(t *testing.T) {
 			}
 			unlock := s.sandboxLifecycleLocks.Lock(id)
 			defer unlock()
-			s.resumeRollbacks.Store(id, &resumeRollback{})
+			c := testRollbackCoordinator(t, s, t.TempDir())
+			_, err := c.Prepare(id, "default", "request")
+			require.NoError(t, err)
 			// Keep the lock held for the entire public Destroy call, as the
 			// background rollback does while waiting for the VMM to exit.
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)

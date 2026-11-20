@@ -76,8 +76,9 @@ const (
 // the shim-intent TTL may age out; everything else means we found something we
 // could not interpret, and waiting never fixes that.
 type unresolvedEvidence struct {
-	message  string
-	intentAt time.Time
+	message     string
+	intentAt    time.Time
+	spawnIntent bool
 }
 
 func (u unresolvedEvidence) ageable() bool { return !u.intentAt.IsZero() }
@@ -153,6 +154,7 @@ type sandboxRuntimeEvidence struct {
 	// Keep the source and any captured identity so rollback retries can
 	// re-check unresolved processes even after their bundle has been removed.
 	unresolvedPIDs []runtimePIDCandidate
+	spawnIntent    *time.Time
 	// intentTTL is the window the spawn-intent record may still be inside,
 	// copied from the collecting local so the pending/really-stuck decision
 	// travels with the evidence instead of being re-derived by a caller that
@@ -175,9 +177,11 @@ func (e *sandboxRuntimeEvidence) markUnresolved(format string, args ...interface
 // intent was written; a zero value means its age is unknown, and the intent
 // then never ages out.
 func (e *sandboxRuntimeEvidence) markStaleIntent(startedAt time.Time, format string, args ...interface{}) {
+	e.spawnIntent = &startedAt
 	e.unresolved = append(e.unresolved, unresolvedEvidence{
-		message:  fmt.Sprintf(format, args...),
-		intentAt: startedAt,
+		message:     fmt.Sprintf(format, args...),
+		intentAt:    startedAt,
+		spawnIntent: true,
 	})
 }
 
@@ -227,6 +231,7 @@ func (e *sandboxRuntimeEvidence) resolveStaleIntents(ctx context.Context, sandbo
 		"found for it (%s); treating the intent as stale and allowing resource cleanup",
 		sandboxID, ttl, strings.Join(e.unresolvedMessages(), "; "))
 	e.unresolved = nil
+	e.spawnIntent = nil
 }
 
 // runtimeEvidenceScope says which recorded sources of evidence a caller will

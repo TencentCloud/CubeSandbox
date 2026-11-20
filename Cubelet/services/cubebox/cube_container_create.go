@@ -514,7 +514,7 @@ func applyCgroupInfoToCubeBox(sandBox *cubeboxstore.CubeBox, info *cgroupp.Info)
 
 func (l *local) handleEnvdInitFailure(ctx context.Context, flowOpts *workflow.CreateContext,
 	realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) {
-	if flowOpts.Failover && flowOpts.ScheduleResumeRollback != nil {
+	if flowOpts.Failover && flowOpts.RollbackCoordinator != nil {
 		return
 	}
 	if err := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox); err != nil {

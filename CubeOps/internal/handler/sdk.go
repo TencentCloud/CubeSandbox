@@ -150,6 +150,8 @@ func writeCMError(c *gin.Context, err error) {
 			c.Header("Retry-After", strconv.Itoa(cmErr.RetryAfter()))
 			logging.G(ctx).Errorf("sdk: cubemaster retryable error: retryAfter=%d: %s", cmErr.RetryAfter(), cmErr.RetMsg)
 			httputil.WriteError(c, http.StatusServiceUnavailable, cmErr.RetMsg)
+		case cmErr.RetCode == http.StatusBadRequest:
+			httputil.WriteError(c, http.StatusBadRequest, cmErr.RetMsg)
 		default:
 			logging.G(ctx).Errorf("sdk: cubemaster error: %s", cmErr.RetMsg)
 			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", cmErr.RetCode, cmErr.RetMsg))
@@ -158,6 +160,15 @@ func writeCMError(c *gin.Context, err error) {
 	}
 	logging.G(ctx).Errorf("sdk: cubemaster transport error: %v", err)
 	httputil.WriteError(c, http.StatusBadGateway, "cubemaster: "+err.Error())
+}
+
+// writeSDKRetError shares the typed-error mapping across every envelope writer.
+func writeSDKRetError(c *gin.Context, status *cmRet) bool {
+	if status == nil || status.RetCode == 0 || status.RetCode == 200 {
+		return false
+	}
+	writeCMError(c, &cubemaster.CMError{RetCode: status.RetCode, RetMsg: status.RetMsg})
+	return true
 }
 
 // longOpTimeout aligns with CubeMaster's snapshotOperationTimeout (15 min) for the
@@ -185,7 +196,6 @@ func templateDeleteCtx(c *gin.Context) (context.Context, context.CancelFunc) {
 // and writes the data payload (or the raw body for action endpoints without
 // a data field) with snake_case keys converted to camelCase.
 func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
-	ctx := c.Request.Context()
 	var env cmEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// Not a standard envelope — pass through as-is.
@@ -193,36 +203,7 @@ func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
 		return
 	}
 
-	// Check ret_code for errors and map to appropriate HTTP status.
-	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
-		msg := env.Ret.RetMsg
-		ctx = updateTraceAndLogger(ctx, cubelog.GetTraceInfo(ctx), "", sdkInstanceType, env.Ret.RetCode)
-		switch env.Ret.RetCode {
-		case 130404, 404:
-			// Not found — matches old CubeAPI map_err → AppError::NotFound
-			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", msg)
-			httputil.WriteError(c, http.StatusNotFound, msg)
-		case 130409:
-			// Conflict — matches old CubeAPI map_err → AppError::Conflict
-			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
-			httputil.WriteError(c, http.StatusConflict, msg)
-		case 400:
-			logging.G(ctx).Errorf("sdk: cubemaster bad request: %s", msg)
-			httputil.WriteError(c, http.StatusBadRequest, msg)
-		case 130490, 130591:
-			// A lifecycle operation or resume rollback is pending.
-			c.Header("Retry-After", "2")
-			logging.G(ctx).Errorf("sdk: cubemaster lifecycle operation pending: %s", msg)
-			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
-		case 130589:
-			// Resume failed — retryable. R11 fix: must be 503, not 502.
-			c.Header("Retry-After", "5")
-			logging.G(ctx).Errorf("sdk: cubemaster resume failed: %s", msg)
-			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
-		default:
-			logging.G(ctx).Errorf("sdk: cubemaster error: %s", msg)
-			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
-		}
+	if writeSDKRetError(c, env.Ret) {
 		return
 	}
 
@@ -258,7 +239,6 @@ func writeSDKResponse(c *gin.Context, raw json.RawMessage) {
 // Used by rebuild/create template endpoints where the frontend expects
 // a top-level jobID field.
 func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
-	ctx := c.Request.Context()
 	var env struct {
 		Ret *cmRet          `json:"ret,omitempty"`
 		Job json.RawMessage `json:"Job,omitempty"`
@@ -267,30 +247,7 @@ func writeSDKJobResponse(c *gin.Context, raw json.RawMessage) {
 		httputil.WriteRawJSON(c, http.StatusOK, raw)
 		return
 	}
-	if env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
-		msg := env.Ret.RetMsg
-		ctx = updateTraceAndLogger(ctx, cubelog.GetTraceInfo(ctx), "", sdkInstanceType, env.Ret.RetCode)
-		switch env.Ret.RetCode {
-		case 130404, 404:
-			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", msg)
-			httputil.WriteError(c, http.StatusNotFound, msg)
-		case 130409:
-			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
-			httputil.WriteError(c, http.StatusConflict, msg)
-		case 130490, 130591:
-			// A lifecycle operation or resume rollback is pending.
-			c.Header("Retry-After", "2")
-			logging.G(ctx).Errorf("sdk: cubemaster lifecycle operation pending: %s", msg)
-			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
-		case 130589:
-			// R11 fix: resume failed → 503 + Retry-After, not 502.
-			c.Header("Retry-After", "5")
-			logging.G(ctx).Errorf("sdk: cubemaster resume failed: %s", msg)
-			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
-		default:
-			logging.G(ctx).Errorf("sdk: cubemaster error: %s", msg)
-			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
-		}
+	if writeSDKRetError(c, env.Ret) {
 		return
 	}
 	if len(env.Job) > 0 && string(env.Job) != "null" {
@@ -424,30 +381,7 @@ func (h *SDKHandler) GetSandbox(c *gin.Context) {
 	// Map ret_code to HTTP status; without it a missing sandbox would
 	// return 200 + null, violating REST and confusing SDK clients.
 	var env cmEnvelope
-	if err := json.Unmarshal(raw, &env); err == nil && env.Ret != nil && env.Ret.RetCode != 0 && env.Ret.RetCode != 200 {
-		msg := env.Ret.RetMsg
-		ctx = updateTraceAndLogger(ctx, rt, sandboxID, sdkInstanceType, env.Ret.RetCode)
-		switch env.Ret.RetCode {
-		case 130404, 404:
-			logging.G(ctx).Errorf("sdk: cubemaster not found: %s", msg)
-			httputil.WriteError(c, http.StatusNotFound, msg)
-		case 130409:
-			logging.G(ctx).Errorf("sdk: cubemaster conflict: %s", msg)
-			httputil.WriteError(c, http.StatusConflict, msg)
-		case 130490, 130591:
-			// A lifecycle operation or resume rollback is pending.
-			c.Header("Retry-After", "2")
-			logging.G(ctx).Errorf("sdk: cubemaster lifecycle operation pending: %s", msg)
-			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
-		case 130589:
-			// R11 fix: resume failed → 503 + Retry-After, not 502.
-			c.Header("Retry-After", "5")
-			logging.G(ctx).Errorf("sdk: cubemaster resume failed: %s", msg)
-			httputil.WriteError(c, http.StatusServiceUnavailable, msg)
-		default:
-			logging.G(ctx).Errorf("sdk: cubemaster error: %s", msg)
-			httputil.WriteError(c, http.StatusBadGateway, fmt.Sprintf("cubemaster error %d: %s", env.Ret.RetCode, msg))
-		}
+	if err := json.Unmarshal(raw, &env); err == nil && writeSDKRetError(c, env.Ret) {
 		return
 	}
 
