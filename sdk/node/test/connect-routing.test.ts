@@ -413,6 +413,16 @@ describe("error body reads", () => {
     const err = await errorOf(sb, target);
     expect(err.message).toMatch(/HTTP 500: \ufffd\[31mboom\ufffd$/);
   });
+
+  it.each(TARGETS)("%s: CRLF is kept as a line break and C1 controls are replaced", async (target) => {
+    const sb = await createSandbox({
+      status: 500,
+      body: "line1\r\nline2\rline3 \u009b31m\u0085end",
+      contentType: "text/plain",
+    });
+    const err = await errorOf(sb, target);
+    expect(err.message).toMatch(/HTTP 500: line1\nline2\nline3 \ufffd31m\ufffdend$/);
+  });
 });
 
 describe("connection release", () => {

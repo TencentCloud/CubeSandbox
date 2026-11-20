@@ -120,7 +120,12 @@ export function truncateDiagnostic(message: string): string {
 
 /** Replace control characters (ANSI escapes included) in server text. */
 function sanitize(text: string): string {
-  return text.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "�");
+  // Normalise CRLF/CR first so gateway pages keep their line breaks, then
+  // replace C0 (except \t and \n), DEL and C1 controls, which include the
+  // 8-bit CSI (U+009B) that terminals treat like ESC [.
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "\uFFFD");
 }
 
 /**
