@@ -794,15 +794,15 @@ var TemplateCommitCommand = cli.Command{
 		},
 		cli.BoolFlag{
 			Name:  "allow-internet-access",
-			Usage: "set allowInternetAccess on the network config for the create_request",
+			Usage: "set allowInternetAccess on the network config for the create_request (requires --file)",
 		},
 		cli.StringSliceFlag{
 			Name:  "allow-out-cidr",
-			Usage: "append an allowed egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs",
+			Usage: "append an allowed egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs (requires --file)",
 		},
 		cli.StringSliceFlag{
 			Name:  "deny-out-cidr",
-			Usage: "append a denied egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs",
+			Usage: "append a denied egress CIDR to create_request.cube_network_config; repeat the flag to specify multiple CIDRs (requires --file)",
 		},
 		cli.BoolFlag{
 			Name:  "detach, no-wait",
@@ -836,7 +836,7 @@ var TemplateCommitCommand = cli.Command{
 
 		hasNetworkOverrides := c.IsSet("allow-internet-access") || len(c.StringSlice("allow-out-cidr")) > 0 || len(c.StringSlice("deny-out-cidr")) > 0
 		if filePath == "" && hasNetworkOverrides {
-			return errors.New("network override flags require --file")
+			return errors.New("network override flags require --file <create-request.json>: --allow-internet-access/--allow-out-cidr/--deny-out-cidr apply on top of a complete create_sandbox request; pass --file, or remove these flags (see 'cubemastercli tpl commit --help')")
 		}
 
 		var createReq *types.CreateCubeSandboxReq
