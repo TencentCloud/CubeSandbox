@@ -91,7 +91,9 @@ func CleanupTemplateLocalData(ctx context.Context, templateID, snapshotPath stri
 		return true
 	})
 
-	remove(filepath.Join(localStorage.cubeboxTemplateFormatPath, templateID))
+	if localStorage.cubeboxTemplateFormatPath != "" {
+		remove(filepath.Join(localStorage.cubeboxTemplateFormatPath, templateID))
+	}
 
 	templatesRoot := filepath.Join(localStorage.config.RootPath, "base-block-storage", "templates")
 	entries, err := os.ReadDir(templatesRoot)
