@@ -600,6 +600,16 @@ func restartDestroyKeepsResources(opts ReqContext) bool {
 // not run because an earlier step used up the caller's deadline.
 const restartDestroyContinueTimeout = 60 * time.Second
 
+// failoverSerializeWait is the budget the async failover of a
+// Create-from-pause spends waiting for the per-sandbox lifecycle lock. It is
+// separate from (and runs before) the rollback destroy's CommonTimeout so the
+// wait cannot eat the destroy deadline. Sized like destroy_dead_line (60s):
+// long enough to outlast a Pause (~30s) holding the lock, short enough that a
+// rollback does not linger behind a multi-minute retry create — past the
+// budget the rollback stands down fail-closed instead of tearing down
+// unsynchronized.
+const failoverSerializeWait = 60 * time.Second
+
 // restartDestroyContinuation carries namespace, trace and the destroy value
 // onto a live context. The parent is already expired, so this cannot derive
 // from it.
@@ -748,10 +758,33 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	createCtx := ctx
 	ctx = namespaces.WithNamespace(context.Background(), namespace)
 	ctx = telemetry.DetachTrace(ctx, createCtx)
+	ctx = CubeLog.WithRequestTrace(ctx, failoverRt)
+	rOpts := opts.(*CreateContext)
+	// A Create-from-pause rollback restores the tombstone it was replacing, so
+	// it must be serialized against the lifecycle operations that own the same
+	// sandbox now that service.Create has returned and released its lock: a
+	// retried Resume, a Pause, or a user Delete. The wait gets its own budget
+	// (waiting must not eat the destroy deadline below). If the lock still
+	// cannot be taken, the rollback stands down entirely: an unsynchronized
+	// teardown would delete the very row a retry's quota gate keys on
+	// (re-opening #2042) and could kill a runtime a concurrent operation is
+	// building. The debris row then makes every retry fail closed as
+	// "already exists", and Master's create-failure compensation or a user
+	// DELETE remains the backstop for the leftovers.
+	if rOpts.RollbackSerialize != nil {
+		lockCtx, lockCancel := context.WithTimeout(context.Background(), failoverSerializeWait)
+		release, lockErr := rOpts.RollbackSerialize(lockCtx, sandboxID)
+		lockCancel()
+		if lockErr != nil {
+			log.G(ctx).Errorf("fail over for %v cannot take the sandbox lifecycle lock (%v); standing down — Master compensation or a user DELETE must clean up", sandboxID, lockErr)
+			return
+		}
+		defer release()
+	}
+	// The rollback destroy gets its own fresh deadline, after the lock wait.
 	ctx, cancel := context.WithTimeout(ctx, config.GetCommon().CommonTimeout)
 	defer cancel()
 
-	ctx = CubeLog.WithRequestTrace(ctx, failoverRt)
 	destroyOpt := &DestroyContext{
 		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
 			RequestID:   uuid.New().String(),
@@ -784,26 +817,8 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	// replacing — whichever step failed, before or after the flow's first
 	// Save overwrote the row — because the user's retried Resume is gated on
 	// that record.
-	destroyOpt.PausedReplaceSnapshot = rOpts.PausedReplaceSnapshot
-	destroyOpt.PausedReplaceDebris = rOpts.PausedReplaceDebris
-	// This rollback runs in its own goroutine, after service.Create returned and
-	// released the per-sandbox lifecycle lock. Re-acquire that lock around the
-	// teardown + tombstone restore so this goroutine is serialized against a
-	// concurrent retried Resume or user Delete on the same sandbox: without it
-	// the restore could resurrect a row the user just deleted, or land between
-	// a retry's admission (which saw the debris row and skipped the quota gate)
-	// and the retry's replacement step (which then sees PAUSED and resumes
-	// unchecked) — re-opening #2042. If the lock cannot be taken we skip the
-	// restore and fall back to plain teardown rather than race.
-	if rOpts.RollbackSerialize != nil {
-		release, lockErr := rOpts.RollbackSerialize(ctx, sandboxID)
-		if lockErr != nil {
-			log.G(ctx).Warnf("fail over cannot serialize rollback for %s: %v; skipping tombstone restore", sandboxID, lockErr)
-			destroyOpt.PausedReplaceSnapshot = nil
-		} else {
-			defer release()
-		}
-	}
+	destroyOpt.PausedReplaceSnapshot = opts.PausedReplaceSnapshot
+	destroyOpt.PausedReplaceDebris = opts.PausedReplaceDebris
 	log.G(ctx).Warnf("fail over doing SandboxID:%v", sandboxID)
 	defer func() {
 		if err != nil {

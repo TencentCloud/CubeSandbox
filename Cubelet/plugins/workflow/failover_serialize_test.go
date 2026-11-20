@@ -112,12 +112,15 @@ func TestFailoverSerializesRollbackWithLifecycleLock(t *testing.T) {
 		"the tombstone snapshot must ride along for the restore")
 }
 
-// TestFailoverSkipsRestoreWhenItCannotSerialize pins the degradation path:
+// TestFailoverStandsDownWhenItCannotSerialize pins the degradation path:
 // if the lifecycle lock cannot be acquired (a concurrent lifecycle operation
-// owns the sandbox for longer than the rollback's deadline), the rollback
-// must NOT save a stale snapshot over whatever that operation left behind —
-// it falls back to the plain teardown destroy.
-func TestFailoverSkipsRestoreWhenItCannotSerialize(t *testing.T) {
+// owns the sandbox for longer than the rollback's wait budget), the rollback
+// must NOT run an unsynchronized teardown — that would delete the row a
+// retry's quota gate keys on (re-opening #2042) and could kill a runtime the
+// lock holder is building. It stands down entirely; the debris row keeps
+// retries failing closed as "already exists" until Master's compensation or
+// a user DELETE cleans up.
+func TestFailoverStandsDownWhenItCannotSerialize(t *testing.T) {
 	flow := &failoverRecordingFlow{}
 	e := newFailoverTestEngine(t, flow)
 
@@ -134,11 +137,9 @@ func TestFailoverSkipsRestoreWhenItCannotSerialize(t *testing.T) {
 
 	e.failover(failoverTestContext(), opts)
 
-	_, got := flow.snapshot()
-	require.NotNil(t, got)
-	assert.True(t, got.IsRollBack)
-	assert.Nil(t, got.PausedReplaceSnapshot,
-		"an unserialized rollback must not resurrect the snapshot")
+	order, got := flow.snapshot()
+	assert.Nil(t, got, "an unserialized rollback must not run the destroy flow at all")
+	assert.Empty(t, order)
 }
 
 // TestFailoverWithoutSerializeHookKeepsOrdinaryRollback pins that creates
