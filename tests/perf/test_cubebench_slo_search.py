@@ -235,7 +235,7 @@ class SearchCommandTest(unittest.TestCase):
     def test_rejects_invalid_input_before_measurement(self):
         runner = self.mock_executor()
         self.env["CUBE_TEMPLATE_ID"] = "tpl-test"
-        for args in [("--typo",), ("3.3",), ("-y", "4.3"), ("-y", "--history", "missing", "3.2"),
+        for args in [("--typo",), ("3.3",), ("-y", "--history", "missing", "3.2"),
                      ("-y", "--settle", "-1"), ("-y", "--settle", "nan"), ("-y", "--settle", "inf")]:
             with self.subTest(args=args):
                 result = self.invoke(runner, *args)
@@ -280,6 +280,19 @@ class SearchCommandTest(unittest.TestCase):
         self.env["CUBE_TEMPLATE_ID"] = "tpl-test"
         self.invoke(runner, "3.2", stdin="no\n")
         self.assertFalse((self.root / "calls").exists())
+
+    def test_snapshot_only_requires_id_before_cleanup_confirmation(self):
+        runner = self.mock_executor()
+        self.env["CUBE_TEMPLATE_ID"] = "tpl-test"
+        for options in ((), ("-y",)):
+            with self.subTest(options=options):
+                result = self.invoke(runner, *options, "4.3")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CUBE_SNAPSHOT_ID", result.stderr)
+                self.assertNotIn("destroys ALL sandboxes", result.stderr)
+                self.assertFalse(list(self.root.glob("cubebench-search-*")))
+                self.assertFalse(Path(self.env["OUTPUT_MD"]).exists())
+                self.assertFalse((self.root / "calls").exists())
 
     def test_search_records_fresh_rounds_and_writes_report(self):
         runner = self.mock_executor()
@@ -348,6 +361,11 @@ class SearchCommandTest(unittest.TestCase):
                     (self.root / "4.3-c1.json").unlink()
                 result = self.invoke(runner, "-y", "--history", str(prior), "4")
                 self.assertNotEqual(result.returncode, 0)
+                if issue == "missing snapshot":
+                    notice, prompt, _ = result.stderr.partition("searching 4.6 destroys ALL sandboxes")
+                    self.assertTrue(prompt)
+                    self.assertIn("4.3 will be marked FAILED", notice)
+                    self.assertIn("CUBE_SNAPSHOT_ID", notice)
                 report = Path(self.env["OUTPUT_MD"]).read_text()
                 self.assertIn("4.3: FAILED", report)
                 self.assertIn(expected, report)

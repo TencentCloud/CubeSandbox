@@ -77,6 +77,32 @@ assert_report_line '| CPU Config | 8 logical CPUs (1 socket, 4 cores/socket, 2 t
 assert_report_line '| NUMA Nodes | 1 |' "$report"
 printf 'PASS: C locale environment report\n'
 
+# image_info is optional in the CLI's template JSON.
+(
+	cubemaster() {
+		[[ "$*" == "tpl info --template-id tpl-test --json" ]] || return 91
+		printf '%s\n' "$reply"
+		return "${cli_status:-0}"
+	}
+	reply='{"template_id":"tpl-test","image_info":"registry.example/os:v1"}'
+	[[ "$(slo_template_image tpl-test)" == "registry.example/os:v1" ]]
+	for reply in '{"template_id":"tpl-test"}' '{"template_id":"tpl-test","image_info":null}' '{"template_id":"tpl-test","image_info":""}'; do
+		[[ "$(slo_template_image tpl-test)" == unknown ]]
+	done
+	for reply in '{"template_id":"tpl-other"}' '{"template_id":"tpl-test","image_info":42}' \
+		'invalid' '' '{"template_id":"tpl-test"} {"template_id":"tpl-test"}'; do
+		if slo_template_image tpl-test >/dev/null 2>"$report"; then exit 1; fi
+		grep -q 'tpl-test' "$report"
+	done
+	# A failing CLI can still print parseable output; its exit status must win.
+	set +o pipefail
+	cli_status=1
+	reply='{"template_id":"tpl-test","image_info":"registry.example/os:v1"}'
+	if slo_template_image tpl-test >/dev/null 2>"$report"; then exit 1; fi
+	grep -q 'tpl-test' "$report"
+)
+printf 'PASS: SLO template image lookup\n'
+
 # Check search-round validation and dispatch without a cluster.
 (
 	tmp=$(mktemp -d)

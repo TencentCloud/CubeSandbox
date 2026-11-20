@@ -354,10 +354,12 @@ def publish_latest(link, work):
         staged.unlink(missing_ok=True)
 
 
-def search_sections(sections, history_root, use_latest, settle, work=None, report=None):
+def search_sections(sections, history_root, use_latest, settle, work=None, report=None, snapshot_error=None):
     failed = 0
     for section in sections:
         try:
+            if section == "4.3" and snapshot_error:
+                raise ValueError(snapshot_error)
             history = None
             path = history_root / section / "history.json" if history_root else None
             if use_latest and (path is None or not path.parent.exists()):
@@ -370,8 +372,6 @@ def search_sections(sections, history_root, use_latest, settle, work=None, repor
             if report is None:
                 print(section, json.dumps(first_plan["next_case"]))
                 continue
-            if section == "4.3" and not os.environ.get("CUBE_SNAPSHOT_ID"):
-                raise ValueError("set CUBE_SNAPSHOT_ID to a ready benchmark snapshot")
             search_section(section, history, first_plan, work, report, settle)
         except (OSError, ValueError, RuntimeError, KeyError, TypeError, OverflowError) as exc:
             failure = f"{section}: FAILED — {exc}"
@@ -397,8 +397,16 @@ def run(args):
 
     if not os.environ.get("CUBE_TEMPLATE_ID"):
         raise ValueError("set CUBE_TEMPLATE_ID to a ready benchmark source")
+    runnable = sections
+    snapshot_error = None
+    if "4.3" in sections and not os.environ.get("CUBE_SNAPSHOT_ID"):
+        snapshot_error = "set CUBE_SNAPSHOT_ID to a ready benchmark snapshot"
+        runnable = [section for section in sections if section != "4.3"]
+        if not runnable:
+            raise ValueError(f"4.3: {snapshot_error}")
+        print(f"WARNING: 4.3 will be marked FAILED: {snapshot_error}", file=sys.stderr, flush=True)
     endpoint = (os.environ.get("CUBE_MASTER_IP") or "127.0.0.1") + ":" + (os.environ.get("CUBE_MASTER_PORT") or "8089")
-    print(f"WARNING: searching {', '.join(sections)} destroys ALL sandboxes on every node of {endpoint}.",
+    print(f"WARNING: searching {', '.join(runnable)} destroys ALL sandboxes on every node of {endpoint}.",
           file=sys.stderr, flush=True)
     if not args.yes and os.environ.get("CUBE_BENCH_YES") != "1":
         if not sys.stdin.isatty():
@@ -417,7 +425,7 @@ def run(args):
                      f"Boundary confirmation uses the median P95 of {CONFIRMATIONS} rounds at each adjacent "
                      f"concurrency level.\n\nResults: {work}\n")
         try:
-            search_sections(sections, history_root, use_latest, args.settle, work, report)
+            search_sections(sections, history_root, use_latest, args.settle, work, report, snapshot_error=snapshot_error)
         except (KeyboardInterrupt, SystemExit):
             report.write("\nSearch stopped before completion. See the round logs in the results directory.\n")
             raise

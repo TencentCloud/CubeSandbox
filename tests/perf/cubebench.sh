@@ -606,6 +606,22 @@ validate_slo_round() {
 	fi
 }
 
+slo_template_image() {
+	local template_id="$1" raw
+	if ! raw="$(cubemaster tpl info --template-id "$template_id" --json)"; then
+		color_echo "ERROR: could not query template $template_id" >&2
+		return 1
+	fi
+	# The CLI omits image_info for templates without image metadata.
+	if ! jq -ers --arg id "$template_id" '
+		select(length == 1) | .[0] | objects | select(.template_id == $id) | .image_info
+		| if . == null or . == "" then "unknown" else strings end
+	' <<<"$raw"; then
+		color_echo "ERROR: invalid info for template $template_id: expected a matching template_id and optional string image_info" >&2
+		return 1
+	fi
+}
+
 run_slo_round() {
 	local section="$1" c="$CUBE_BENCH_SLO_CONCURRENCY"
 	if [ "$section" = 3.2 ]; then
@@ -803,8 +819,7 @@ cmd_run() {
 	fi
 
 	if [ -n "${CUBE_BENCH_SLO_CONCURRENCY:-}" ]; then
-		CUBE_TEMPLATE_IMAGE="$(cubemaster tpl info --template-id "$CUBE_TEMPLATE_ID" --json |
-			jq -er --arg id "$CUBE_TEMPLATE_ID" 'select(.template_id == $id) | .image_info | strings | select(length > 0)')" || exit 1
+		CUBE_TEMPLATE_IMAGE="$(slo_template_image "$CUBE_TEMPLATE_ID")" || exit 1
 	else
 		CUBE_TEMPLATE_IMAGE="${CUBE_TEMPLATE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest}"
 		CUBE_TEMPLATE_ID="$(create_tpl "${CUBE_TEMPLATE_IMAGE}")"
