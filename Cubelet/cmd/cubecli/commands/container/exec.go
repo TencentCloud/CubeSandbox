@@ -182,15 +182,19 @@ var ExecCommand = &cli.Command{
 			return nil
 		}
 		status := waitForProcessIO(statusC, process.IO().Wait)
-		code, _, err := status.Result()
-		if err != nil {
-			return fmt.Errorf("failed to get exit code: %w", err)
-		}
-		if code != 0 {
-			return fmt.Errorf("exec failed with exit code %d", code)
-		}
-		return nil
+		return execExitError(status)
 	},
+}
+
+func execExitError(status containerd.ExitStatus) error {
+	code, _, err := status.Result()
+	if err != nil {
+		return fmt.Errorf("failed to get exit code: %w", err)
+	}
+	if code != 0 {
+		return cli.Exit(fmt.Sprintf("exec failed with exit code %d", code), int(code))
+	}
+	return nil
 }
 
 // waitForProcessIO prevents process deletion from racing the final stdout and
