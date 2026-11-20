@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -17,6 +18,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
+
+// crossNodeStoreReadyWait bounds how long a cross-node restore waits for this
+// node's S3／JFS Store to finish initializing. The request context still
+// applies; this only keeps a node whose backend never comes up from holding
+// the restore for the caller's whole budget.
+const crossNodeStoreReadyWait = 90 * time.Second
+
+// waitCrossNodeStoreReadyFn is swapped in tests.
+var waitCrossNodeStoreReadyFn = storage.WaitStoreReady
 
 // isCrossNodeRestore reports Master's verdict that it placed this restore on
 // a node holding no replica of the package. Only Master can know this, so
@@ -75,6 +85,12 @@ func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxReq
 	imp := storage.CrossNodeSandboxImport(req.GetAnnotations())
 	if imp == nil {
 		return ctx, fmt.Errorf("cross-node restore of %s is incomplete", sandboxID)
+	}
+	// Master may place a restore here because this node was just added for
+	// it, and a new node is schedulable before its remote-backed Store is
+	// published. Wait out that window rather than fail the import on it.
+	if err := waitCrossNodeStoreReadyFn(ctx, backend, crossNodeStoreReadyWait); err != nil {
+		return ctx, fmt.Errorf("cross-node restore of %s: %s storage unavailable: %w", sandboxID, backend, err)
 	}
 	dir, err := imp.EnsureMetadata(ctx)
 	if err != nil {
