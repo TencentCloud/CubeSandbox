@@ -23,7 +23,7 @@ use crate::{
         ForkResult, LivenessProbe, LogLevel as ModelLogLevel, NewSandbox, RestartBackoff,
         RestartStatus, Sandbox, SandboxAutoResume, SandboxDetail, SandboxLifecycleConfig,
         SandboxLog, SandboxLogEntry, SandboxLogs, SandboxLogsV2Response, SandboxNetworkConfig,
-        SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
+        SandboxNetworkConfigEcho, SandboxOnTimeout, SandboxState, SandboxVolumeMount, SnapshotMode,
     },
 };
 
@@ -336,6 +336,8 @@ impl SandboxService {
         // no end instant) instead of collapsing it onto started_at, which
         // would read as "already expired".
         let end_at = d.end_at;
+        let (lifecycle, allow_internet_access, network) =
+            config_echo(d.auto_pause, d.auto_resume, d.cube_network_config.as_ref());
 
         let envd_version = envd_version_from_annotations(&d.annotations);
         let alias = template_alias_from_annotations(&d.annotations);
@@ -359,6 +361,10 @@ impl SandboxService {
             volume_mounts: map_volume_mounts(&d.volume_mounts),
             restart_status: map_restart_status(d.restart_status),
             configured_qos: d.configured_qos.map(Into::into),
+            lifecycle,
+            allow_internet_access,
+            network,
+            end_at_status: d.end_at_status,
         })
     }
 
@@ -1541,6 +1547,43 @@ pub(crate) fn template_alias_from_annotations(
         .map(|v| v.to_string())
 }
 
+/// Echo the persisted lifecycle/network config; `Some(auto_pause)` means the spec was read.
+fn config_echo(
+    auto_pause: Option<bool>,
+    auto_resume: Option<bool>,
+    network: Option<&CubeNetworkConfig>,
+) -> (
+    Option<SandboxLifecycleConfig>,
+    Option<bool>,
+    Option<SandboxNetworkConfigEcho>,
+) {
+    let lifecycle = auto_pause.map(|pause| SandboxLifecycleConfig {
+        on_timeout: if pause {
+            SandboxOnTimeout::Pause
+        } else {
+            SandboxOnTimeout::Kill
+        },
+        auto_resume: auto_resume.unwrap_or_default(),
+    });
+    let allow_internet_access = network.and_then(|n| n.allow_internet_access);
+    // Rules carry plaintext inject secrets and are never echoed.
+    let network = network
+        .map(|n| SandboxNetworkConfigEcho {
+            allow_public_traffic: n.allow_public_traffic,
+            allow_out: (!n.allow_out.is_empty()).then(|| n.allow_out.clone()),
+            deny_out: (!n.deny_out.is_empty()).then(|| n.deny_out.clone()),
+            mask_request_host: n.mask_request_host.clone(),
+            // Rules themselves are never echoed (inject secrets); CubeMaster
+            // sets the marker before scrubbing. The raw-rules fallback only
+            // covers hand-rolled backends that skip the scrub.
+            rules_present: n
+                .rules_present
+                .or_else(|| (!n.rules.is_empty()).then_some(true)),
+        })
+        .filter(|n| !n.is_empty());
+    (lifecycle, allow_internet_access, network)
+}
+
 pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandbox {
     use crate::models::ListedSandbox;
 
@@ -1548,6 +1591,8 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
     let envd_version = envd_version_from_annotations(&s.annotations);
     let alias = template_alias_from_annotations(&s.annotations);
+    let (lifecycle, allow_internet_access, network) =
+        config_echo(s.auto_pause, s.auto_resume, s.cube_network_config.as_ref());
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
     let started_at = s
@@ -1579,6 +1624,10 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         envd_version,
         volume_mounts: map_volume_mounts(&s.volume_mounts),
         restart_status: map_restart_status(s.restart_status),
+        lifecycle,
+        allow_internet_access,
+        network,
+        end_at_status: s.end_at_status,
     }
 }
 
@@ -2036,6 +2085,9 @@ pub(crate) fn build_cube_network_config(
         mask_request_host,
         allow_out,
         deny_out,
+        // Create carries the full rules; the marker travels with them so the
+        // echo derived from the persisted spec can report it after the scrub.
+        rules_present: (!rules.is_empty()).then_some(true),
         rules,
     }))
 }
@@ -2903,6 +2955,146 @@ mod tests {
             .await
             .expect_err("rejected refresh should not succeed");
         assert_bad_request(err, reason);
+    }
+
+    #[tokio::test]
+    async fn get_sandbox_echoes_lifecycle_and_network_config() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-1",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 1,
+                    "create_at": 1_700_000_000_000_000_000i64,
+                    "auto_pause": true,
+                    "auto_resume": true,
+                    "end_at_status": "never",
+                    "cube_network_config": {
+                        "allowInternetAccess": false,
+                        "denyOut": ["1.2.3.4/32"]
+                    }
+                }]
+            }))
+        }
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+        let detail = service
+            .get_sandbox("sb-1")
+            .await
+            .expect("detail should succeed");
+
+        let wire = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            wire["lifecycle"],
+            serde_json::json!({"onTimeout": "pause", "autoResume": true})
+        );
+        assert_eq!(wire["allowInternetAccess"], false);
+        assert_eq!(wire["endAtStatus"], "never");
+        assert_eq!(
+            wire["network"]["denyOut"],
+            serde_json::json!(["1.2.3.4/32"])
+        );
+
+        let lifecycle = detail.lifecycle.expect("lifecycle echo");
+        assert!(matches!(lifecycle.on_timeout, SandboxOnTimeout::Pause));
+        assert!(lifecycle.auto_resume);
+        assert_eq!(detail.allow_internet_access, Some(false));
+        let network = detail.network.expect("network echo");
+        assert_eq!(network.deny_out, Some(vec!["1.2.3.4/32".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn get_sandbox_omits_config_when_master_has_none() {
+        async fn info_handler() -> Json<Value> {
+            Json(serde_json::json!({
+                "requestID": "req-info",
+                "ret": { "ret_code": 0, "ret_msg": "ok" },
+                "data": [{
+                    "sandbox_id": "sb-1",
+                    "host_id": "host-1",
+                    "template_id": "tpl-1",
+                    "status": 1,
+                    "create_at": 1_700_000_000_000_000_000i64
+                }]
+            }))
+        }
+        let service =
+            spawn_fake_cubemaster(Router::new().route("/cube/sandbox/info", get(info_handler)))
+                .await;
+        let detail = service
+            .get_sandbox("sb-1")
+            .await
+            .expect("detail should succeed");
+
+        assert!(detail.lifecycle.is_none());
+        assert!(detail.allow_internet_access.is_none());
+        assert!(detail.network.is_none());
+    }
+
+    #[test]
+    fn from_cubemaster_info_maps_config_echo() {
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "auto_pause": false,
+            "cube_network_config": {
+                "allowInternetAccess": true,
+                "denyOut": ["1.2.3.4/32"],
+                "maskRequestHost": "masked.example.com"
+            }
+        }))
+        .unwrap();
+        let listed = from_cubemaster_info(info);
+
+        let lifecycle = listed.lifecycle.expect("lifecycle echo");
+        assert!(matches!(lifecycle.on_timeout, SandboxOnTimeout::Kill));
+        assert!(!lifecycle.auto_resume);
+        assert_eq!(listed.allow_internet_access, Some(true));
+        let network = listed.network.expect("network echo");
+        assert_eq!(network.deny_out, Some(vec!["1.2.3.4/32".to_string()]));
+        assert_eq!(
+            network.mask_request_host.as_deref(),
+            Some("masked.example.com")
+        );
+    }
+
+    #[test]
+    fn from_cubemaster_info_marks_rules_only_policy() {
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "end_at_status": "unknown",
+            "cube_network_config": { "rules_present": true }
+        }))
+        .unwrap();
+        let listed = from_cubemaster_info(info);
+
+        assert_eq!(listed.end_at_status.as_deref(), Some("unknown"));
+        let wire = serde_json::to_value(&listed).unwrap();
+        assert_eq!(wire["network"], serde_json::json!({"rulesPresent": true}));
+        let network = listed
+            .network
+            .expect("rules-only policy must still surface");
+        assert_eq!(network.rules_present, Some(true));
+    }
+
+    #[test]
+    fn from_cubemaster_info_omits_empty_network_echo() {
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "auto_pause": false,
+            "cube_network_config": { "allowInternetAccess": true }
+        }))
+        .unwrap();
+        let listed = from_cubemaster_info(info);
+
+        assert_eq!(listed.allow_internet_access, Some(true));
+        assert!(listed.network.is_none());
     }
 
     #[tokio::test]
@@ -4292,6 +4484,10 @@ mod tests {
             labels: HashMap::new(),
             volume_mounts: vec![],
             restart_status: None,
+            auto_pause: None,
+            auto_resume: None,
+            cube_network_config: None,
+            end_at_status: None,
         });
 
         assert_eq!(listed.cpu_count, 2);
@@ -4344,6 +4540,10 @@ mod tests {
             labels: HashMap::new(),
             volume_mounts: vec![],
             restart_status: None,
+            auto_pause: None,
+            auto_resume: None,
+            cube_network_config: None,
+            end_at_status: None,
         });
 
         assert_eq!(listed.alias.as_deref(), Some("python-runtime"));
@@ -4367,6 +4567,10 @@ mod tests {
             labels: HashMap::new(),
             volume_mounts: vec![],
             restart_status: None,
+            auto_pause: None,
+            auto_resume: None,
+            cube_network_config: None,
+            end_at_status: None,
         });
 
         assert_eq!(listed.cpu_count, 0);

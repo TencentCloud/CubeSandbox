@@ -80,7 +80,7 @@ type PutOptions struct {
 }
 
 // Put records (or refreshes) the canonical spec for sandboxID. The request
-// is canonicalized before storage to remove transient fields (Timeout, InsId,
+// is canonicalized before storage to remove transient fields (InsId,
 // nested Request envelope) so the stored value is deterministic.
 //
 // The original sandbox creation flow MUST NOT fail if Put fails - callers
@@ -408,7 +408,12 @@ func Delete(ctx context.Context, sandboxID string) error {
 }
 
 // CanonicalizeRequest strips transient fields that are not part of the
-// long-term spec (per-call timeouts, debug host pinning, request envelope).
+// long-term spec (debug host pinning, request envelope). Timeout is kept:
+// the never-timeout marker (-1) is the only signal that can distinguish a
+// true never-timeout from a failed deadline lookup on the query path, and
+// callers must treat it as create-time state - when the sandbox's timeout
+// later changes, the persisted value goes stale and degrades any derived
+// answer to the safe "unknown".
 // Annotation/label maps are forced to non-nil so JSON encoding is stable.
 //
 // SnapshotDir is preserved: it influences how cubelet persists snapshot
@@ -439,7 +444,6 @@ func CanonicalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.
 	if out.Labels == nil {
 		out.Labels = map[string]string{}
 	}
-	out.Timeout = nil
 	out.InsId = ""
 	out.InsIp = ""
 	out.Request = nil

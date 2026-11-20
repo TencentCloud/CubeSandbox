@@ -73,6 +73,57 @@ func TestApplyPauseBindingsAppendsRowMissingFromNodeScan(t *testing.T) {
 	require.Equal(t, before+1, pauseViewWithoutSpecCount("list"))
 }
 
+func TestEnrichSandboxListConfigsCoversPauseSynthesizedRows(t *testing.T) {
+	spec := specWithIdentity()
+	spec.AutoPause = true
+	spec.AutoResume = true
+	maskHost := "masked.example.com"
+	secret := "topsecret"
+	spec.CubeNetworkConfig = &types.CubeNetworkConfig{
+		MaskRequestHost: &maskHost,
+		Rules: []*types.EgressRule{{
+			Name:   "inject-cred",
+			Action: &types.EgressRuleAction{Inject: []*types.EgressRuleInject{{Header: "Authorization", Secret: secret}}},
+		}},
+	}
+
+	rows := applyPauseBindings(t.Context(), nil, []*pausesnap.Record{{
+		SandboxID:    "sb-cfg",
+		SnapshotID:   "snap-cfg",
+		Status:       pausesnap.StatusReady,
+		RemoteStatus: constants.RemoteStatusReady,
+	}}, pauseBindingMerge{
+		appendMissing: true,
+		specs:         map[string]*types.CreateCubeSandboxReq{"sb-cfg": spec},
+	})
+	require.Len(t, rows, 1)
+
+	require.NotNil(t, rows[0].AutoPause)
+	require.True(t, *rows[0].AutoPause)
+	require.NotNil(t, rows[0].AutoResume)
+	require.True(t, *rows[0].AutoResume)
+	require.NotNil(t, rows[0].CubeNetworkConfig)
+	require.Equal(t, maskHost, *rows[0].CubeNetworkConfig.MaskRequestHost)
+	require.Empty(t, rows[0].CubeNetworkConfig.Rules, "echoed config must drop rules (inject secrets)")
+	require.Len(t, spec.CubeNetworkConfig.Rules, 1, "echo must copy the config, spec rules stay untouched")
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return map[string]*types.CreateCubeSandboxReq{"sb-cfg": spec}, nil
+	})
+
+	enrichSandboxList(t.Context(), rows)
+	require.NotNil(t, rows[0].AutoPause)
+	require.True(t, *rows[0].AutoPause)
+	require.NotNil(t, rows[0].AutoResume)
+	require.True(t, *rows[0].AutoResume)
+	require.NotNil(t, rows[0].CubeNetworkConfig)
+	require.Equal(t, maskHost, *rows[0].CubeNetworkConfig.MaskRequestHost)
+	require.Empty(t, rows[0].CubeNetworkConfig.Rules, "echoed config must drop rules (inject secrets)")
+	require.Len(t, spec.CubeNetworkConfig.Rules, 1, "echo must copy the config, spec rules stay untouched")
+}
+
 func TestEnrichSandboxListEndAtsUsesOneBatchLookup(t *testing.T) {
 	provider := &mockTimeoutProvider{returnEndAts: map[string]int64{
 		"sb-node":   1234,
@@ -386,7 +437,7 @@ func TestPartialSpecReadKeepsIdentityAndBackend(t *testing.T) {
 	require.Equal(t, "demo", rsp.Data[0].Labels["app"])
 
 	items := []*types.SandboxBriefData{{SandboxID: "sb-spec"}}
-	enrichSandboxListBackends(t.Context(), items)
+	enrichSandboxList(t.Context(), items)
 	require.Equal(t, constants.SnapshotBackendXFS, items[0].Backend)
 }
 
@@ -423,4 +474,129 @@ func TestListAndInfoAgreeOnPausedSandbox(t *testing.T) {
 	require.Equal(t, infoRsp.Data[0].Annotations[constants.CubeAnnotationPauseSnapshotID], listed[0].Annotations[constants.CubeAnnotationPauseSnapshotID])
 	require.Equal(t, createdAt.UnixNano(), listed[0].CreateAt)
 	require.Equal(t, infoRsp.Data[0].CreateAt, listed[0].CreateAt)
+}
+
+func TestListEndAtStatusFollowsTheEndAtFill(t *testing.T) {
+	never := types.NeverTimeout
+	finite := 600
+	items := []*types.SandboxBriefData{
+		{SandboxID: "sb-finite"},
+		{SandboxID: "sb-never"},
+		{SandboxID: "sb-missing-meta"},
+	}
+	specs := map[string]*types.CreateCubeSandboxReq{
+		"sb-finite":       {Timeout: &finite},
+		"sb-never":        {Timeout: &never},
+		"sb-missing-meta": {Timeout: &finite},
+	}
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return specs, nil
+	})
+	patches.ApplyFunc(LookupSandboxDeadlines, func(context.Context, []string) map[string]DeadlineInfo {
+		return map[string]DeadlineInfo{
+			"sb-finite":       {EndAtMs: 1_800_000_000_000, TimeoutSeconds: &finite, Found: true},
+			"sb-never":        {TimeoutSeconds: &never, Found: true},
+			"sb-missing-meta": {},
+		}
+	})
+
+	enrichSandboxList(t.Context(), items)
+	enrichSandboxListEndAts(t.Context(), items)
+
+	if got := items[0].EndAtStatus; got != types.EndAtStatusDeadline {
+		t.Fatalf("finite: got %q, want deadline", got)
+	}
+	if got := items[1].EndAtStatus; got != types.EndAtStatusNever {
+		t.Fatalf("never: got %q, want never", got)
+	}
+	if got := items[2].EndAtStatus; got != types.EndAtStatusUnknown {
+		t.Fatalf("missing meta: got %q, want unknown", got)
+	}
+}
+
+func TestListSpecReadsStayBounded(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+
+	calls := 0
+	patches.ApplyFunc(sandboxspec.GetMany, func(_ context.Context, ids []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		calls++
+		out := make(map[string]*types.CreateCubeSandboxReq, len(ids))
+		for _, id := range ids {
+			out[id] = specWithIdentity()
+		}
+		return out, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetCreatedAtMany, func(context.Context, []string) (map[string]time.Time, error) {
+		return nil, nil
+	})
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return nil, nil
+	})
+
+	rsp := &types.ListCubeSandboxRes{Data: []*types.SandboxBriefData{{SandboxID: "sb-scan"}}}
+	enrichSandboxList(t.Context(), rsp.Data)
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Equal(t, 1, calls, "no pause rows: exactly one GetMany")
+
+	calls = 0
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return []*pausesnap.Record{readyInfoRecord("sb-paused-shimless")}, nil
+	})
+	rsp = &types.ListCubeSandboxRes{Data: []*types.SandboxBriefData{{SandboxID: "sb-scan"}}}
+	enrichSandboxList(t.Context(), rsp.Data)
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Equal(t, 2, calls, "one synthesized pause row: enrich + merge each read once")
+	require.Len(t, rsp.Data, 2)
+}
+
+func TestListSynthesizedPauseRowCarriesEndAtStatus(t *testing.T) {
+	never := types.NeverTimeout
+	spec := specWithIdentity()
+	spec.Timeout = &never
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(pausesnap.List, func(context.Context, pausesnap.ListOptions) ([]*pausesnap.Record, error) {
+		return []*pausesnap.Record{readyInfoRecord("sb-paused")}, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetMany, func(context.Context, []string) (map[string]*types.CreateCubeSandboxReq, error) {
+		return map[string]*types.CreateCubeSandboxReq{"sb-paused": spec}, nil
+	})
+	patches.ApplyFunc(sandboxspec.GetCreatedAtMany, func(context.Context, []string) (map[string]time.Time, error) {
+		return nil, nil
+	})
+
+	rsp := &types.ListCubeSandboxRes{}
+	mergePauseBindings(t.Context(), &types.ListCubeSandboxReq{}, rsp)
+	require.Len(t, rsp.Data, 1)
+	// Production order: the deadline fill runs after the pause merge, so the
+	// synthesized row gets its status there.
+	patches.ApplyFunc(LookupSandboxDeadlines, func(context.Context, []string) map[string]DeadlineInfo {
+		return map[string]DeadlineInfo{"sb-paused": {TimeoutSeconds: &never, Found: true}}
+	})
+	enrichSandboxListEndAts(t.Context(), rsp.Data)
+	require.Equal(t, types.EndAtStatusNever, rsp.Data[0].EndAtStatus)
+}
+
+func TestListStatusIsAlwaysTriState(t *testing.T) {
+	// A missing metadata row is "unknown", not an absent field: list and
+	// detail must agree on the tri-state, and the status must not depend on
+	// whether the spec row was readable.
+	items := []*types.SandboxBriefData{{SandboxID: "sb-missing"}}
+
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(LookupSandboxDeadlines, func(context.Context, []string) map[string]DeadlineInfo {
+		return map[string]DeadlineInfo{}
+	})
+
+	enrichSandboxListEndAts(t.Context(), items)
+
+	if got := items[0].EndAtStatus; got != types.EndAtStatusUnknown {
+		t.Fatalf("status: got %q, want unknown", got)
+	}
 }

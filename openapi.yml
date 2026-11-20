@@ -2217,6 +2217,7 @@ components:
       - sandboxID
       - clientID
       - startedAt
+      - endAt
       - cpuCount
       - memoryMB
       - state
@@ -2243,13 +2244,9 @@ components:
           - 'null'
           format: int32
         endAt:
-          type:
-          - string
-          - 'null'
+          type: string
           format: date-time
-          description: |-
-            Projected next-timeout instant. Omitted for never-timeout sandboxes
-            (no deadline) rather than being misreported as equal to startedAt.
+          description: Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
         envdVersion:
           type: string
         memoryMB:
@@ -2279,6 +2276,28 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Persisted internet-access flag; absent when the spec was not read.
+        endAtStatus:
+          type:
+          - string
+          - 'null'
+          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Persisted lifecycle config; absent when the spec was not read.
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
+            description: |-
+              Persisted egress config; absent when the spec was not read or when it
+              carried only egress rules (rules never appear on the wire).
     LivenessHTTPGet:
       type: object
       required:
@@ -2867,6 +2886,7 @@ components:
       - sandboxID
       - clientID
       - startedAt
+      - endAt
       - envdVersion
       - cpuCount
       - memoryMB
@@ -2901,13 +2921,9 @@ components:
           - string
           - 'null'
         endAt:
-          type:
-          - string
-          - 'null'
+          type: string
           format: date-time
-          description: |-
-            Projected next-timeout instant. Omitted for never-timeout sandboxes
-            (no deadline) rather than being misreported as equal to startedAt.
+          description: Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
         envdAccessToken:
           type:
           - string
@@ -2944,6 +2960,28 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Persisted internet-access flag; absent when the spec was not read.
+        endAtStatus:
+          type:
+          - string
+          - 'null'
+          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Persisted lifecycle config; absent when the spec was not read.
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
+            description: |-
+              Persisted egress config; absent when the spec was not read or when it
+              carried only egress rules (rules never appear on the wire).
     SandboxLifecycleConfig:
       type: object
       description: |-
@@ -3058,6 +3096,41 @@ components:
               L7 egress rules. Accepts CubeSandbox's ordered rule array and E2B's
               host-keyed transform map for compatibility. Both are normalized to the
               ordered internal rule model.
+
+    SandboxNetworkConfigEcho:
+      type: object
+      description: |-
+        Query-response form of [`SandboxNetworkConfig`]. Egress `rules` never
+        appear here — they carry plaintext inject secrets and are scrubbed before
+        a response is built — so the response schema must not declare them.
+      properties:
+        allowOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        allowPublicTraffic:
+          type:
+          - boolean
+          - 'null'
+        denyOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        maskRequestHost:
+          type:
+          - string
+          - 'null'
+        rulesPresent:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            True when the persisted config carried egress rules, which never
+            appear on the wire (plaintext inject secrets).
     SandboxNetworkRulesInput:
       oneOf:
       - type: array

@@ -50,7 +50,7 @@ func TestApplyPauseBindingToInfoIncludesLifecycleEndAt(t *testing.T) {
 	}{
 		{name: "finite timeout", endAt: 123456789, wantLookups: 1},
 		{name: "never timeout", endAt: 0, wantLookups: 1},
-		{name: "reuse cubelet deadline", endAt: 123456789, cubeletEndAt: 987654321},
+		{name: "live metadata wins over the node snapshot", endAt: 123456789, cubeletEndAt: 987654321},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := &mockTimeoutProvider{returnEndAt: tc.endAt}
@@ -68,11 +68,10 @@ func TestApplyPauseBindingToInfoIncludesLifecycleEndAt(t *testing.T) {
 
 			require.True(t, filled)
 			require.Len(t, rsp.Data, 1)
-			wantEndAt := tc.endAt
-			if tc.cubeletEndAt != 0 {
-				wantEndAt = tc.cubeletEndAt
-			}
-			require.Equal(t, wantEndAt, rsp.Data[0].EndAt)
+			// The live metadata read is authoritative, matching the list path
+			// (TestEnrichSandboxListEndAtsAppliesAuthoritativeZero); a stale
+			// node snapshot is replaced by it.
+			require.Equal(t, tc.endAt, rsp.Data[0].EndAt)
 			require.Equal(t, tc.wantLookups, provider.lookupCalls)
 		})
 	}

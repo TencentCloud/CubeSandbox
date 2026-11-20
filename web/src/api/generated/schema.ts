@@ -849,6 +849,8 @@ export interface components {
         /** @description One entry in GET /sandboxes (RunningSandbox in OpenAPI spec). */
         ListedSandbox: {
             alias?: string | null;
+            /** @description Persisted internet-access flag; absent when the spec was not read. */
+            allowInternetAccess?: boolean | null;
             clientID: string;
             /** Format: int32 */
             cpuCount: number;
@@ -861,17 +863,20 @@ export interface components {
             diskSizeMB?: number | null;
             /**
              * Format: date-time
-             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
-             *     (no deadline) rather than being misreported as equal to startedAt.
+             * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
-            endAt?: string | null;
+            endAt: string;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
             envdVersion: string;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
             /**
              * Format: int32
              * @description Historical field name; the value is memory in MiB.
              */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
             restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
@@ -1189,6 +1194,8 @@ export interface components {
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
+            /** @description Persisted internet-access flag; absent when the spec was not read. */
+            allowInternetAccess?: boolean | null;
             clientID: string;
             configuredQos?: null | components["schemas"]["QosConfig"];
             /** Format: int32 */
@@ -1203,20 +1210,23 @@ export interface components {
             domain?: string | null;
             /**
              * Format: date-time
-             * @description Projected next-timeout instant. Omitted for never-timeout sandboxes
-             *     (no deadline) rather than being misreported as equal to startedAt.
+             * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
-            endAt?: string | null;
+            endAt: string;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** @description Stored status or exit reason for the primary container. Omitted when unavailable. */
             errorReason?: string;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
             /**
              * Format: int32
              * @description Historical field name; the value is memory in MiB.
              */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
             restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
@@ -1307,6 +1317,17 @@ export interface components {
              *     attachment. Defaults to false when omitted.
              */
             readOnly?: boolean;
+        };
+        SandboxNetworkConfigEcho: {
+            allowOut?: string[] | null;
+            allowPublicTraffic?: boolean | null;
+            denyOut?: string[] | null;
+            maskRequestHost?: string | null;
+            /**
+             * @description True when the persisted config carried egress rules, which never
+             *     appear on the wire (plaintext inject secrets).
+             */
+            rulesPresent?: boolean | null;
         };
         /**
          * @description Body for PUT /templates/:id/alias (set / modify / clear alias).

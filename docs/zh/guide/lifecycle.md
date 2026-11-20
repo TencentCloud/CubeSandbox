@@ -95,12 +95,27 @@ print(info)
 #   "templateID": "rki5dems9wqfm4r03t7g",
 #   "state": "running",
 #   "startedAt": "2026-06-17T12:34:56Z",
-#   "endAt":     "2026-06-17T12:39:56Z",
+#   "endAt":       "2026-06-17T12:39:56Z",
+#   "endAtStatus": "deadline",
 #   "metadata":  {...}
 # }
 ```
 
-`endAt` 表示按当前 `timeout` 估算的下一次超时时间。每次接收到新请求或调用 `set_timeout`（若有），`endAt` 会被刷新。暂停不会取消有限的空闲截止时间，因此沙箱处于暂停状态时，详情和列表 API 仍会返回相同的 `endAt`。对于**永不超时**的沙箱没有截止时间，因此响应中会**省略** `endAt`，而不是把它渲染成等于 `startedAt`。
+`endAt` 是沙箱预计超时的时间，用最后一次设置 `timeout` 的时刻（创建、`set_timeout`、`resume`）加上 `timeout` 算出来。有流量的沙箱会被保活，实际暂停可能晚于这个时间，所以把它当作"最早可能暂停的时间"，而不是准确时刻。暂停不会取消有限的超时，因此暂停中的沙箱在详情和列表 API 里仍返回相同的 `endAt`。E2B SDK 要求每个响应都带该字段，所以它总是存在；具体含义看旁边的 `endAtStatus`：
+
+| `endAtStatus` | `endAt` | 含义 |
+|---|---|---|
+| `deadline` | 预计时刻 | 存在有限的超时。它是估算值，有流量时实际暂停会更晚。 |
+| `never` | `9999-12-31T23:59:59Z` | 沙箱永不超时。哨兵不是真实时刻。 |
+| `unknown` | `9999-12-31T23:59:59Z` | 截止时间查询失败。按未知处理，不要据此回收沙箱。 |
+
+同一响应还会回显沙箱持久化的配置：
+
+- `lifecycle`：`onTimeout`（`"pause"` / `"kill"`）与 `autoResume`。
+- `allowInternetAccess`：出网开关。
+- `network`：`allowOut`、`denyOut`、`allowPublicTraffic`、`maskRequestHost`。
+
+字段缺席是因为持久化 spec 没读到（未知），或该项从未设置、由服务端默认值生效。egress 规则永远不会出现在这些响应里，因为规则可能携带 inject 密钥；当规则是沙箱唯一的出网策略时，`network` 只带 `"rulesPresent": true`，告知"存在策略"而不暴露内容。
 
 ## 列出运行中的沙箱
 

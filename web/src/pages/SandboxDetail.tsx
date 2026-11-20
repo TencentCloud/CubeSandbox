@@ -164,7 +164,7 @@ export default function SandboxDetailPage() {
           <dl className="grid grid-cols-1 gap-4 px-6 pb-6 text-sm sm:grid-cols-3">
             <Field label={t('fields.template')} value={data.templateID} />
             <Field label={t('fields.started')} value={formatDateTime(data.startedAt)} />
-            <Field label={t('fields.ends')} value={formatDateTime(data.endAt)} />
+            <Field label={t('fields.ends')} value={formatEndAt(data.endAt)} />
           </dl>
         </Card>
 
@@ -277,7 +277,7 @@ export default function SandboxDetailPage() {
 
             <li className="flex justify-between">
               <span className="text-muted-foreground">{t('fields.ends')}</span>
-              <span>{formatDateTime(data?.endAt)}</span>
+              <span>{formatEndAt(data?.endAt)}</span>
             </li>
             <li className="flex justify-between">
               <span className="text-muted-foreground">{t('fields.state')}</span>
@@ -369,6 +369,13 @@ export default function SandboxDetailPage() {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+// The API serializes a never-timeout sandbox's endAt as the 9999-12-31
+// sentinel; render it like the previously-absent field.
+function formatEndAt(value?: string | null): string {
+  if (value && new Date(value).getUTCFullYear() >= 9999) return '—';
+  return formatDateTime(value);
+}
+
 function formatDateTime(value?: string | null): string {
   if (!value) return '—';
   const date = new Date(value);

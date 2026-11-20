@@ -19,8 +19,39 @@ type TimeoutProvider interface {
 	LookupEndAt(ctx context.Context, sandboxID string) (endAtMs int64, err error)
 }
 
-type batchTimeoutProvider interface {
-	LookupEndAts(ctx context.Context, sandboxIDs []string) (map[string]int64, error)
+// DeadlineInfo is the live timeout state of one sandbox, read from the
+// lifecycle metadata (the same source queries use), not from the create-time
+// spec: a later set-timeout changes only the metadata.
+type DeadlineInfo struct {
+	EndAtMs        int64
+	TimeoutSeconds *int
+	// Found is false when no metadata row exists, which is "unknown", not
+	// "never".
+	Found bool
+}
+
+type deadlineProvider interface {
+	LookupDeadlines(ctx context.Context, sandboxIDs []string) (map[string]DeadlineInfo, error)
+}
+
+// LookupSandboxDeadlines returns the live deadline state for the given ids
+// when the installed provider supports it. A provider without the extension
+// yields nil, which callers treat as unknown.
+func LookupSandboxDeadlines(ctx context.Context, sandboxIDs []string) map[string]DeadlineInfo {
+	p := getTimeoutProvider()
+	if p == nil || len(sandboxIDs) == 0 {
+		return nil
+	}
+	dp, ok := p.(deadlineProvider)
+	if !ok {
+		return nil
+	}
+	out, err := dp.LookupDeadlines(ctx, sandboxIDs)
+	if err != nil {
+		log.G(ctx).Warnf("lookup deadline batch failed: %v", err)
+		return nil
+	}
+	return out
 }
 
 var (
@@ -54,30 +85,4 @@ func LookupSandboxEndAt(ctx context.Context, sandboxID string) int64 {
 		return 0
 	}
 	return endAt
-}
-
-func lookupSandboxEndAts(ctx context.Context, sandboxIDs []string) map[string]int64 {
-	p := getTimeoutProvider()
-	if p == nil || len(sandboxIDs) == 0 {
-		return nil
-	}
-	if batch, ok := p.(batchTimeoutProvider); ok {
-		endAts, err := batch.LookupEndAts(ctx, sandboxIDs)
-		if err != nil {
-			log.G(ctx).Warnf("lookup endAt batch failed: %v", err)
-			return nil
-		}
-		return endAts
-	}
-	endAts := make(map[string]int64, len(sandboxIDs))
-	for _, sandboxID := range sandboxIDs {
-		if sandboxID == "" {
-			continue
-		}
-		endAt, err := p.LookupEndAt(ctx, sandboxID)
-		if err == nil {
-			endAts[sandboxID] = endAt
-		}
-	}
-	return endAts
 }

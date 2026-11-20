@@ -2,18 +2,19 @@
 // Copyright (C) 2026 Tencent. All rights reserved.
 
 import type { components } from '@/api/generated/schema';
+import type { ClusterOverview, NodeView, VersionMatrixView } from '@/api/admin-types';
 import type { TemplateCompatMatrix } from '@/api/client';
 import { resetWarehouseState } from './warehouse';
 
-type ClusterOverviewDto = components['schemas']['ClusterOverview'];
+type ClusterOverviewDto = ClusterOverview;
 type ListedSandboxDto = components['schemas']['ListedSandbox'];
 type SandboxDetailDto = components['schemas']['SandboxDetail'];
 type SandboxLogsDto = components['schemas']['SandboxLogsV2Response'];
 type SandboxSessionDto = components['schemas']['Sandbox'];
 type TemplateDetailDto = components['schemas']['TemplateDetail'];
 type TemplateSummaryDto = components['schemas']['TemplateSummary'];
-type NodeDto = components['schemas']['NodeView'];
-type VersionMatrixDto = components['schemas']['VersionMatrixView'];
+type NodeDto = NodeView;
+type VersionMatrixDto = VersionMatrixView;
 
 const ago = (secs: number) => new Date(Date.now() - secs * 1000).toISOString();
 const later = (secs: number) => new Date(Date.now() + secs * 1000).toISOString();
