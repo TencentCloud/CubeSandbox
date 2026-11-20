@@ -3,8 +3,7 @@ title: "Building an Agent Code Execution Layer on Cube Sandbox: Session Isolatio
 date: 2026-11-06
 author: Lu Haoyang (AI R&D Engineer, OUC Online)
 description: "OUC Online is building an Agent platform for education and office scenarios, supporting user-defined Agents, Skills, Tools, knowledge bases, and MCP. The platform is still in evaluation, and this record preserves plenty of first-hand process detail: how the execution boundary was designed, how the sandbox lifecycle is managed, and the server resource problem hit when deploying by the docs."
-featured: true
-weight: 2
+featured: false
 ---
 
 # Building an Agent Code Execution Layer on Cube Sandbox: Session Isolation, a Three-Stage Lifecycle, and Deployment Troubleshooting

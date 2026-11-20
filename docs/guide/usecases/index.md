@@ -63,3 +63,5 @@ lang: en-US
 | [OUC Online: Session Isolation and Lifecycle Practices for an Agent Code Execution Layer](./ouc-online.md) | Lu Haoyang | 2026-11-06 | agent, session-isolation, lifecycle, pause-resume |
 | [KakuriZai: Lightweight Isolated Workspaces for Parallel Multi-Agent Editing](./kakurizai.md) | Ryo Sato (mizuame) | 2026-11-06 | agent, overlayfs, snapshot, host-mount |
 | [OMA: Architecture and Secure Execution Plane of a Cloud Managed Agents Platform](./oma.md) | Master Zhang's Blog | 2026-11-06 | agent, managed-agents, security, architecture |
+| [Yuxi: Sandbox Resource Management for a Multi-Tenant Agent Platform](./yuxi.md) | Zhang Wenjie | 2026-11-20 | agent, multi-tenant, pause-resume, density |
+| [AnyDev: Gateway, Network, Storage, and Blue-Green Upgrades for a Multi-Tenant Sandbox Platform](./anydev.md) | Liao Xiyou, Chang Zhenhua | 2026-11-20 | agent, multi-tenant, gateway, blue-green-deployment |

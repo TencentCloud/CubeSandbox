@@ -3,8 +3,7 @@ title: "用 CubeSandbox 打造轻量隔离工作区：多 Agent 并行编辑的�
 date: 2026-11-06
 author: 佐藤 良（mizuamedesu，日本筑波大学 · KakuriZai 项目负责人）
 description: "多个 Agent 在同一个大项目上并行工作，文件变更会相互冲突；为每个 Agent 复制一份完整环境，对 UE 这种连源码带二进制的巨型项目也不现实。筑波大学 IPA-CyberLab 的 KakuriZai 项目给出了一套完整解法：宿主源码作为只读 lower 层被所有工作环境共享，每个 Agent 只持有自己的可写 upper 层，执行环境交给 CubeSandbox。"
-featured: true
-weight: 1
+featured: false
 ---
 
 # 用 CubeSandbox 打造轻量隔离工作区：多 Agent 并行编辑的分层实践
