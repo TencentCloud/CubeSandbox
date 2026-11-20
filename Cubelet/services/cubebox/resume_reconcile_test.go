@@ -21,6 +21,7 @@ type fakeCubeboxAPI struct {
 	list          []*cubeboxstore.CubeBox
 	getCalls      int
 	getErr        error
+	deleteCalls   int
 	listCalls     int
 	saveCalls     int
 	getHook       func(call int)
@@ -107,6 +108,7 @@ func (f *fakeCubeboxAPI) SyncByID(ctx context.Context, id string, opts ...cubes.
 }
 
 func (f *fakeCubeboxAPI) Delete(ctx context.Context, opt *cubes.DeleteOption) error {
+	f.deleteCalls++
 	return nil
 }
 

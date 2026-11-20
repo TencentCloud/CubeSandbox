@@ -159,14 +159,15 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		}
 		if sb != nil {
 			if paused {
-				// Everything below deletes the old sandbox's records, and this
-				// row is the last place its shim identity survives: once it is
-				// gone nothing on the host can match a still-running shim back
-				// to the sandbox, and this attempt is handed a tap the old one
-				// may still hold. So the eligibility wait runs before any of
-				// this, at the create entry point — see gatePausedReplace in
-				// service.go — and is deliberately not repeated here, where it
-				// would run after the records it protects are already gone.
+				// Everything below clears the old sandbox's host-side records,
+				// and the store row is the last place its shim identity
+				// survives: once it is gone nothing on the host can match a
+				// still-running shim back to the sandbox, and this attempt is
+				// handed a tap the old one may still hold. So the eligibility
+				// wait runs before any of this, at the create entry point — see
+				// gatePausedReplace in service.go — and is deliberately not
+				// repeated here, where it would run after the records it
+				// protects are already gone.
 				// Resume replaces the paused row. Keep the restart bookkeeping
 				// so the next report is newer than the one CubeMaster already has.
 				desired := sb.SandboxID
@@ -174,12 +175,6 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 					opts.RestartPrior = restartPriorFrom(sb)
 				}
 				opts.PriorWritableLayer = strings.TrimSpace(sb.RootfsWritableLayer)
-				// CDP user-delete hook requires UserMarkDeletedTime before store delete.
-				if sb.UserMarkDeletedTime == nil {
-					now := time.Now()
-					sb.UserMarkDeletedTime = &now
-					_ = l.cubeboxManger.SyncByID(ctx, desired)
-				}
 				// Pause post-cleanup may leave containerd metadata; wipe before recreate.
 				_ = runc.Clean(ctx, desired)
 				for _, id := range pausedTombstoneContainerIDs(sb) {
@@ -187,10 +182,27 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 						log.G(ctx).Warnf("replace paused sandbox: delete containerd %s: %v", id, err)
 					}
 				}
-				if delErr := l.cubeboxManger.Delete(ctx, &cubes.DeleteOption{CubeboxID: desired}); delErr != nil {
-					return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
-						"failed to replace paused sandbox %s: %v", desired, delErr)
-				}
+				// The PAUSED row is deliberately NOT deleted here: createContainers
+				// Saves a fresh row under the same sandbox ID (createid pins
+				// opts.SandboxID to the desired id, and the store keys rows by
+				// ID), so the Save overwrites the tombstone — the same contract
+				// the restart path relies on ("Save overwrites it").
+				//
+				// Deleting the row up front instead meant a create that failed
+				// afterwards left no trace of the paused sandbox: failover found
+				// nothing to roll back, the pause package survived (its GC is
+				// keyed on the row being readable) and CubeMaster kept the pause
+				// binding READY, so the user's retried Resume arrived as a thin
+				// Create with no local row to key on — and was admitted with no
+				// quota check at all (#2042). Keeping the row until the Save
+				// means a failed attempt rolls back to a tombstone the retry can
+				// gate on; see the rollback guard in Destroy.
+				//
+				// The UserMarkDeletedTime stamp that used to precede the delete is
+				// gone with it: it existed only to satisfy the CDP user-delete
+				// protection hook, which no longer runs on this path. Stamping a
+				// row that then survives a failed create would leave the tombstone
+				// looking user-deleted to the restart manager and to GC.
 			} else {
 				return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 			}
