@@ -29,6 +29,9 @@ spec:
         # that happened to restart, leaving CubeMaster and CubeProxy disagreeing.
         checksum/admin-token: {{ include "cube.adminToken" . | sha256sum | quote }}
     spec:
+      {{- with include "cube.masterServiceAccountName" . }}
+      serviceAccountName: {{ . }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
