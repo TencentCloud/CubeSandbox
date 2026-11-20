@@ -173,7 +173,8 @@ export default withMermaid(defineConfig({
               text: 'Getting Started',
               items: [
                 { text: 'Introduction', link: '/guide/introduction' },
-                { text: 'Quick Start', link: '/guide/quickstart' }
+                { text: 'Quick Start', link: '/guide/quickstart' },
+                { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' }
               ]
             },
             {
@@ -228,7 +229,6 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
-                    { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' },
                     { text: 'Python', link: '/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/guide/tutorials/sdk/nodejs' }
@@ -422,7 +422,8 @@ export default withMermaid(defineConfig({
               text: '入门',
               items: [
                 { text: '产品简介', link: '/zh/guide/introduction' },
-                { text: '快速开始', link: '/zh/guide/quickstart' }
+                { text: '快速开始', link: '/zh/guide/quickstart' },
+                { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' }
               ]
             },
             {
@@ -477,7 +478,6 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
-                    { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' },
                     { text: 'Python', link: '/zh/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/zh/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/zh/guide/tutorials/sdk/nodejs' }
