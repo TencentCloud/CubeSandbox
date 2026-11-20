@@ -194,3 +194,31 @@ func TestCleanupTemplateExcludesS3WritersUntilCleanupReturns(t *testing.T) {
 	require.Equal(t, 1, localCalls)
 	require.False(t, storage.S3PackageOperationInProgress(id))
 }
+
+func TestCleanupTemplateBusyPreservesPackageForRetry(t *testing.T) {
+	installCleanupTemplateTestHooks(t)
+	cleanupIsCowBackend = func() bool { return true }
+	getLocalSnapshotForFn = func(context.Context, string, string) (*storage.SnapshotCatalogEntry, error) {
+		return &storage.SnapshotCatalogEntry{Kind: storage.CatalogKindPauseSnapshot}, nil
+	}
+	listCubeboxesForTest = func() []*cubeboxstore.CubeBox { return nil }
+	calls, removed := 0, 0
+	cleanupObjectsFor = func(context.Context, string, []storage.CowObjectRef) error {
+		calls++
+		if calls == 1 {
+			return errors.New("snapshot export still busy")
+		}
+		return nil
+	}
+	cleanupTemplateLocalDataFn = func(context.Context, string, string) error { removed++; return nil }
+	req := &cubebox.CleanupTemplateRequest{TemplateID: "snap-busy-retry", Backend: "s3", Objects: []*cubebox.CowObjectRef{{Name: "rootfs", Kind: "snapshot", Role: "rootfs"}}}
+	s := &service{}
+	rsp, err := s.cleanupTemplate(context.Background(), req, true)
+	require.NoError(t, err)
+	require.NotEqual(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
+	require.Zero(t, removed)
+	rsp, err = s.cleanupTemplate(context.Background(), req, true)
+	require.NoError(t, err)
+	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
+	require.Equal(t, 1, removed)
+}

@@ -95,3 +95,5 @@ func (e *Engine) ImportLvol(string, string) (string, error) {
 func (e *Engine) GetMetrics() (map[string]uint64, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
 }
+
+func (e *Engine) MaterialiseExport(string) error { return fmt.Errorf(nativeBuildHint) }

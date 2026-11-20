@@ -345,8 +345,50 @@ func (m *S3Cow) ensureSnapshotOrigin(sourceName, snapshotName string) error {
 // DeleteByKind accepts only successful deletion (including an explicitly
 // accepted deferred delete) or not-found. A bare busy error is not proof that
 // s3lvol recorded a durable delete intent; callers must retain their retry plan.
+//
+// A snapshot kept busy only by a completed export is the exception: its export
+// is materialised first (a copy; readers keep their UUID), then the delete is
+// retried once.
 func (m *S3Cow) DeleteByKind(ctx context.Context, name, kind string) error {
+	err := m.deleteByKind(ctx, name, kind)
+	if err == nil || !isS3DeleteBusy(err) {
+		return err
+	}
+	normalized, kindErr := normalizeCowKind(kind)
+	if kindErr != nil || normalized != cowKindSnapshot {
+		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	info, infoErr := m.GetVolumeInfo(ctx, name)
+	if infoErr != nil {
+		return infoErr
+	}
+	if info == nil || info.ExportUUID == "" || info.ExportStatus != cow.ExportStatusDone {
+		return err // clone/activation/in-progress export is not this remedy
+	}
+	copier, ok := m.engine.(interface{ MaterialiseExport(string) error })
+	if !ok {
+		return err
+	}
+	if copyErr := copier.MaterialiseExport(info.ExportUUID); copyErr != nil {
+		return fmt.Errorf("preserve snapshot %s export before delete: %w", name, copyErr)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	// Success of materialisation alone is not proof of object absence.
 	return m.deleteByKind(ctx, name, kind)
+}
+
+// Busy may represent live readers, clone dependencies or an ongoing action.
+// Only a completed export can be materialised; other blockers remain errors.
+func isS3DeleteBusy(err error) bool {
+	if !isCowSemantic(err, cubecow.SemPreconditionFailed) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "busy")
 }
 
 func (m *S3Cow) deleteByKind(ctx context.Context, name, kind string) error {

@@ -64,24 +64,85 @@ func TestCleanupObjectsStopsWhenRootfsSurvives(t *testing.T) {
 	assert.Empty(t, engine.deletedVolumes, "memory must survive a rootfs that refused to go")
 }
 
-func TestCleanupObjectsKeepsPackageOnUnacceptedBusySnapshot(t *testing.T) {
-	engine := &fakeCowEngine{
-		deleteErrByName: map[string]error{
-			"tpl-3-rootfs": s3BusyDeleteError(),
-		},
-	}
+func TestCleanupObjectsRetainsBusySnapshotForRetry(t *testing.T) {
+	engine := &fakeCowEngine{deleteErrByName: map[string]error{"tpl-3-rootfs": s3BusyDeleteError()}}
 	useTestCowStorage(t, engine)
+	refs := []CowObjectRef{{Name: "tpl-3-memory", Kind: CowKindVolume, Role: "memory"}, {Name: "tpl-3-rootfs", Kind: CowKindSnapshot, Role: "rootfs"}, {Name: "s3-meta-tpl-3-snap", Kind: CowKindSnapshot, Role: "metadata"}}
+	require.Error(t, CleanupObjectsFor(context.Background(), "s3", refs))
+	require.Equal(t, []string{"tpl-3-rootfs"}, engine.deletedSnapshots)
+	require.Empty(t, engine.deletedVolumes, "busy rootfs must retain the rest of the package")
+	// A later backend completion is retried through the same cleanup owner.
+	delete(engine.deleteErrByName, "tpl-3-rootfs")
+	require.NoError(t, CleanupObjectsFor(context.Background(), "s3", refs))
+	require.Equal(t, []string{"tpl-3-memory"}, engine.deletedVolumes)
+}
 
-	// Only a successful deferred response proves that the backend accepted
-	// cleanup. A plain busy error must preserve the package for retry.
-	err := CleanupObjectsFor(context.Background(), "s3", []CowObjectRef{
-		{Name: "tpl-3-memory", Kind: CowKindVolume, Role: "memory"},
-		{Name: "tpl-3-rootfs", Kind: CowKindSnapshot, Role: "rootfs"},
-		{Name: "s3-meta-tpl-3-snap", Kind: CowKindSnapshot, Role: "metadata"},
-	})
-	require.Error(t, err)
-	assert.Empty(t, engine.deletedVolumes)
-	assert.Equal(t, []string{"tpl-3-rootfs"}, engine.deletedSnapshots)
+type materialisingCowEngine struct {
+	*fakeCowEngine
+	copied        []string
+	copyErr       error
+	remainsBusy   bool
+	copyCompleted bool
+}
+
+func (e *materialisingCowEngine) MaterialiseExport(uuid string) error {
+	e.copied = append(e.copied, uuid)
+	if e.copyErr != nil {
+		if e.copyCompleted {
+			delete(e.deleteErrByName, "rootfs")
+		}
+		return e.copyErr
+	}
+	if !e.remainsBusy {
+		delete(e.deleteErrByName, "rootfs")
+	}
+	return nil
+}
+
+func TestS3BusyDeletePreservesExportBeforeRetry(t *testing.T) {
+	for _, mode := range []string{"copied", "copy-failed", "still-busy", "in-progress", "no-export", "cancelled", "copy-reply-lost"} {
+		t.Run(mode, func(t *testing.T) {
+			engine := &materialisingCowEngine{fakeCowEngine: &fakeCowEngine{deleteErrByName: map[string]error{"rootfs": s3BusyDeleteError()}, volumeInfos: map[string]*cubecow.Volume{"rootfs": {ExportUUID: "original-uuid", ExportStatus: "DONE"}}}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch mode {
+			case "copy-failed":
+				engine.copyErr = errors.New("copy unknown")
+			case "copy-reply-lost":
+				engine.copyCompleted = true
+				engine.copyErr = errors.New("reply lost after copy")
+			case "still-busy":
+				engine.remainsBusy = true
+			case "in-progress":
+				engine.volumeInfos["rootfs"].ExportStatus = "INPROGRESS"
+			case "no-export":
+				engine.volumeInfos["rootfs"].ExportUUID = ""
+			case "cancelled":
+				cancel()
+			}
+			err := (&S3Cow{engine: engine}).DeleteByKind(ctx, "rootfs", CowKindSnapshot)
+			if mode == "copied" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			if mode == "copy-reply-lost" {
+				require.NoError(t, (&S3Cow{engine: engine}).DeleteByKind(ctx, "rootfs", CowKindSnapshot))
+				require.Equal(t, []string{"original-uuid"}, engine.copied, "retry must observe completed deletion eligibility")
+				return
+			}
+			if mode == "copied" || mode == "copy-failed" || mode == "still-busy" {
+				require.Equal(t, []string{"original-uuid"}, engine.copied)
+			} else {
+				require.Empty(t, engine.copied)
+			}
+			if mode == "copied" || mode == "still-busy" {
+				require.Len(t, engine.deletedSnapshots, 2)
+			} else {
+				require.Len(t, engine.deletedSnapshots, 1)
+			}
+		})
+	}
 }
 
 func TestCleanupObjectsKeepsPackageOnBusyRootfsVolume(t *testing.T) {

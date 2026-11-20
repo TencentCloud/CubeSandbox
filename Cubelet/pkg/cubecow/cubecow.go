@@ -464,6 +464,23 @@ func (e *Engine) ExportSnapshot(snapshotName string) (string, error) {
 	return takeCString(cUUID), nil
 }
 
+// MaterialiseExport retains the export UUID while copying its backing data.
+func (e *Engine) MaterialiseExport(exportUUID string) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	ptr, err := e.openHandle()
+	if err != nil {
+		return err
+	}
+	defer e.mu.RUnlock()
+	uuid := C.CString(exportUUID)
+	defer C.free(unsafe.Pointer(uuid))
+	if rc := C.cubecow_materialise_export(C.CubecowEngineHandle(ptr), uuid); rc != 0 {
+		return makeError(rc)
+	}
+	return nil
+}
+
 func (e *Engine) ImportLvol(lvolName, exportUUID string) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
