@@ -180,6 +180,24 @@ type CreateContext struct {
 	// the record its gates key on; nil for every other create. See
 	// restorePausedReplaceSnapshot in the cubebox destroy flow.
 	PausedReplaceSnapshot *cubeboxstore.CubeBox
+
+	// PausedReplaceDebris is the row object this attempt's createContainers
+	// Saved over the tombstone, captured at Save time. The rollback restores
+	// the snapshot only while the store still holds this exact pointer: if a
+	// newer attempt has Saved its own row in the meantime, restoring the stale
+	// tombstone would clobber it. Nil when the attempt failed before its first
+	// Save (the row is then still the tombstone and needs no restore).
+	PausedReplaceDebris *cubeboxstore.CubeBox
+
+	// RollbackSerialize, when set, is invoked by the async failover to acquire
+	// the per-sandbox lifecycle lock around the rollback Destroy. service.Create
+	// holds that lock for the whole create and releases it on return, but the
+	// failover runs afterwards in its own goroutine; without re-acquiring, its
+	// teardown and tombstone restore would race a concurrent retried Resume or
+	// user Delete on the same sandbox. Only set for Create-from-pause (the path
+	// that carries PausedReplaceSnapshot); nil elsewhere, so ordinary creates
+	// roll back exactly as before.
+	RollbackSerialize func(ctx context.Context, sandboxID string) (release func(), err error)
 }
 
 func (b *CreateContext) GetInstanceType() string {
@@ -373,10 +391,13 @@ type DestroyContext struct {
 	VolumeRefEvents []VolumeRefEvent
 
 	// PausedReplaceSnapshot carries the tombstone a failed Create-from-pause
-	// was replacing; the rollback restores it instead of deleting the row,
-	// whichever step of the create failed. Only set by create-rollback paths
-	// (engine failover, envd-init cleanup), never by a user Destroy.
+	// was replacing, and PausedReplaceDebris the row that attempt Saved over
+	// it; the rollback restores the snapshot instead of deleting the row,
+	// whichever step of the create failed, as long as the store still holds
+	// that same debris row. Only set by create-rollback paths (engine
+	// failover, envd-init cleanup), never by a user Destroy.
 	PausedReplaceSnapshot *cubeboxstore.CubeBox
+	PausedReplaceDebris   *cubeboxstore.CubeBox
 }
 
 func (b *DestroyContext) GetInstanceType() string {
@@ -764,6 +785,25 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	// Save overwrote the row — because the user's retried Resume is gated on
 	// that record.
 	destroyOpt.PausedReplaceSnapshot = rOpts.PausedReplaceSnapshot
+	destroyOpt.PausedReplaceDebris = rOpts.PausedReplaceDebris
+	// This rollback runs in its own goroutine, after service.Create returned and
+	// released the per-sandbox lifecycle lock. Re-acquire that lock around the
+	// teardown + tombstone restore so this goroutine is serialized against a
+	// concurrent retried Resume or user Delete on the same sandbox: without it
+	// the restore could resurrect a row the user just deleted, or land between
+	// a retry's admission (which saw the debris row and skipped the quota gate)
+	// and the retry's replacement step (which then sees PAUSED and resumes
+	// unchecked) — re-opening #2042. If the lock cannot be taken we skip the
+	// restore and fall back to plain teardown rather than race.
+	if rOpts.RollbackSerialize != nil {
+		release, lockErr := rOpts.RollbackSerialize(ctx, sandboxID)
+		if lockErr != nil {
+			log.G(ctx).Warnf("fail over cannot serialize rollback for %s: %v; skipping tombstone restore", sandboxID, lockErr)
+			destroyOpt.PausedReplaceSnapshot = nil
+		} else {
+			defer release()
+		}
+	}
 	log.G(ctx).Warnf("fail over doing SandboxID:%v", sandboxID)
 	defer func() {
 		if err != nil {

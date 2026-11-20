@@ -71,6 +71,7 @@ func TestRestorePausedReplaceSnapshotPinsPostSaveRollback(t *testing.T) {
 
 		opts := rollbackDestroyContext("sb-postsave")
 		opts.PausedReplaceSnapshot = snap
+		opts.PausedReplaceDebris = debris
 
 		require.True(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-postsave"),
 			"a post-Save rollback must restore the snapshotted tombstone instead of deleting the debris")
@@ -136,6 +137,48 @@ func TestRestorePausedReplaceSnapshotPinsPostSaveRollback(t *testing.T) {
 
 		assert.False(t, l.restorePausedReplaceSnapshot(
 			context.Background(), rollbackDestroyContext("sb-plain"), "sb-plain"))
+		assert.Zero(t, mgr.saveCalls)
+	})
+
+	t.Run("a row replaced by a newer attempt is not clobbered", func(t *testing.T) {
+		// If a newer attempt Saved its own row while this rollback was in
+		// flight, the stored row is no longer the debris this attempt owned:
+		// saving the stale snapshot over it would destroy the newer row.
+		tomb := tombstone("sb-replaced")
+		staleDebris := newCubeboxWithStatusForTest("sb-replaced", cubeboxstore.Status{
+			CreatedAt: time.Now().UnixNano(),
+		})
+		staleDebris.SandboxID = "sb-replaced"
+		newerRow := newCubeboxWithStatusForTest("sb-replaced", cubeboxstore.Status{
+			StartedAt: time.Now().UnixNano(),
+		})
+		newerRow.SandboxID = "sb-replaced"
+		mgr := &fakeCubeboxAPI{cb: newerRow}
+		l := &local{cubeboxManger: mgr}
+
+		opts := rollbackDestroyContext("sb-replaced")
+		opts.PausedReplaceSnapshot = tomb.DeepCopy()
+		opts.PausedReplaceDebris = staleDebris
+
+		assert.False(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-replaced"),
+			"the restore must back off when the row belongs to a newer attempt")
+		assert.Zero(t, mgr.saveCalls)
+	})
+
+	t.Run("a row deleted while the attempt was in flight is not resurrected", func(t *testing.T) {
+		// A user Delete (or Master's tombstone drop) that won the lifecycle
+		// lock before the async rollback removes the row and the pause
+		// binding; saving the stale snapshot back would leave a phantom PAUSED
+		// row counting against the node quota forever.
+		tomb := tombstone("sb-deleted-midway")
+		mgr := &fakeCubeboxAPI{getErr: utils.ErrorKeyNotFound}
+		l := &local{cubeboxManger: mgr}
+
+		opts := rollbackDestroyContext("sb-deleted-midway")
+		opts.PausedReplaceSnapshot = tomb.DeepCopy()
+
+		assert.False(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-deleted-midway"),
+			"the restore must back off when the row is gone")
 		assert.Zero(t, mgr.saveCalls)
 	})
 }

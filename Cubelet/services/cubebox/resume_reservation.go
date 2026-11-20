@@ -39,8 +39,10 @@ import (
 // There is no window where the store shows 0 for the sandbox: the replacement
 // branch does not delete the tombstone, the flow's Save overwrites it (the
 // store keys rows by ID), and that is also what makes a failed attempt safe —
-// the rollback keeps the still-PAUSED row, so the user's retry finds it and
-// is gated again (see createRollbackKeepsPausedTombstone).
+// the rollback either keeps the still-PAUSED row (failure before the Save) or
+// restores the snapshotted tombstone over this attempt's debris (failure
+// after it), so the user's retry finds the record and is gated again (see
+// restorePausedReplaceSnapshot).
 //
 // Reserving only the incremental r·F would be exact in the first window
 // (T + r·F = F) but would depend on the tombstone staying visible until the
