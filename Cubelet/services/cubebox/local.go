@@ -671,6 +671,7 @@ func makeContainerConfigToSave(cfg *cubebox.ContainerConfig) *cubebox.ContainerC
 		RLimit:          cfg.GetRLimit(),
 		Probe:           cfg.GetProbe(),
 		LivenessProbe:   cfg.GetLivenessProbe(),
+		Lifecycle:       cfg.GetLifecycle(),
 		SecurityContext: cfg.GetSecurityContext(),
 		Resources: &cubebox.Resource{
 			Cpu:      cfg.GetResources().GetCpu(),

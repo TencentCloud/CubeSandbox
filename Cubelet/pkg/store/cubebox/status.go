@@ -32,6 +32,7 @@ type Status struct {
 
 	Removing               bool `json:"-"`
 	PostStop               bool `json:"-"`
+	TemplatePreStopStarted bool `json:",omitempty"`
 	LifeTimeMetricReported bool `json:"-"`
 
 	// RollingBack signals that a snapshot rollback is in flight against this

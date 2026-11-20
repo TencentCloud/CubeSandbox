@@ -405,6 +405,78 @@ func TestBuildTemplateSpecFingerprintUsesExposedPorts(t *testing.T) {
 	}
 }
 
+func TestNormalizeTemplateImageRequestLifecycleJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lifecycle string
+		wantError string
+	}{
+		{name: "absent hooks", lifecycle: `null`},
+		{name: "empty lifecycle", lifecycle: `{}`},
+		{name: "postStart only", lifecycle: `{"post_start":["/bin/init",""]}`},
+		{name: "preStop only", lifecycle: `{"pre_stop":["/bin/flush"]}`},
+		{name: "both hooks", lifecycle: `{"post_start":["/bin/init"],"pre_stop":["/bin/flush"]}`},
+		{name: "empty postStart", lifecycle: `{"post_start":[]}`, wantError: "lifecycle.post_start"},
+		{name: "empty preStop", lifecycle: `{"pre_stop":[]}`, wantError: "lifecycle.pre_stop"},
+		{name: "both empty", lifecycle: `{"post_start":[],"pre_stop":[]}`, wantError: "lifecycle.post_start"},
+		{name: "empty postStart with preStop", lifecycle: `{"post_start":[],"pre_stop":["/bin/flush"]}`, wantError: "lifecycle.post_start"},
+		{name: "empty preStop with postStart", lifecycle: `{"post_start":["/bin/init"],"pre_stop":[]}`, wantError: "lifecycle.pre_stop"},
+		{name: "blank executable", lifecycle: `{"post_start":["  "]}`, wantError: "non-blank executable"},
+		{name: "NUL argument", lifecycle: `{"pre_stop":["/bin/flush","bad\u0000arg"]}`, wantError: "must not contain NUL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &types.CreateTemplateFromImageReq{
+				Request:           &types.Request{RequestID: "req-hooks-validation"},
+				SourceImageRef:    "docker.io/library/nginx:latest",
+				WritableLayerSize: "1Gi",
+			}
+			require.NoError(t, json.Unmarshal([]byte(`{"lifecycle":`+tc.lifecycle+`}`), req))
+			normalized, err := normalizeTemplateImageRequest(req)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			if tc.lifecycle == `null` || tc.lifecycle == `{}` {
+				require.Nil(t, normalized.Lifecycle)
+			} else {
+				require.Equal(t, req.Lifecycle.GetPostStart(), normalized.Lifecycle.GetPostStart())
+				require.Equal(t, req.Lifecycle.GetPreStop(), normalized.Lifecycle.GetPreStop())
+			}
+		})
+	}
+}
+
+func TestTemplateLifecycleCommandsReachStoredCreateRequest(t *testing.T) {
+	req := &types.CreateTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-1"},
+		TemplateID:        "tpl-hooks",
+		WritableLayerSize: "1Gi",
+	}
+	withoutHooks := buildTemplateSpecFingerprint(req, "sha256:image")
+	req.Lifecycle = &cubeboxv1.TemplateLifecycleCommands{
+		PostStart: []string{"/bin/init"},
+		PreStop:   []string{"/bin/flush"},
+	}
+	withHooks := buildTemplateSpecFingerprint(req, "sha256:image")
+	if withoutHooks == withHooks {
+		t.Fatal("artifact requests with different lifecycle commands must not share a fingerprint")
+	}
+	generated, err := generateTemplateCreateRequest(context.Background(), req, &models.RootfsArtifact{}, DockerImageConfig{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := normalizeStoredTemplateRequest(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := stored.Containers[0].Lifecycle
+	if !reflect.DeepEqual(hooks.GetPostStart(), req.Lifecycle.GetPostStart()) ||
+		!reflect.DeepEqual(hooks.GetPreStop(), req.Lifecycle.GetPreStop()) {
+		t.Fatalf("stored lifecycle commands = %v, want %v", hooks, req.Lifecycle)
+	}
+}
+
 func TestBuildTemplateSpecFingerprintUsesDNSConfig(t *testing.T) {
 	reqA := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},

@@ -177,7 +177,7 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 				return status, nil
 			})
 
-			if er := l.destroyContainer(tmpCtx, cntr); er != nil {
+			if er := l.destroyContainer(tmpCtx, sb, cntr, opts); er != nil {
 				if strings.Contains(er.Error(), "closed") {
 					continue
 				}
@@ -401,7 +401,7 @@ func sandboxDeletable(sb *cubeboxstore.CubeBox, filter *cubebox.CubeSandboxFilte
 	return true
 }
 
-func (l *local) destroyContainer(ctx context.Context, c *cubeboxstore.Container) error {
+func (l *local) destroyContainer(ctx context.Context, sb *cubeboxstore.CubeBox, c *cubeboxstore.Container, opts *workflow.DestroyContext) error {
 	if c == nil {
 		return nil
 	}
@@ -421,6 +421,7 @@ func (l *local) destroyContainer(ctx context.Context, c *cubeboxstore.Container)
 
 		doPreStop(ctx, c)
 		doPostStop(ctx, c)
+		l.runTemplatePreStop(ctx, sb, c, opts)
 	} else {
 		log.G(ctx).Infof("skip preStop for failover operation")
 	}

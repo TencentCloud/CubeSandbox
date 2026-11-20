@@ -70,6 +70,8 @@ func (rr *ociRuntime) Destroy(ctx context.Context, opts *workflow.DestroyContext
 		return err
 	}
 	ctx = namespaces.WithNamespace(ctx, sb.Namespace)
+	sb.Lock()
+	defer sb.Unlock()
 
 	sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Removing = true
@@ -94,7 +96,7 @@ func (rr *ociRuntime) Destroy(ctx context.Context, opts *workflow.DestroyContext
 			return status, nil
 		})
 
-		if er := l.destroyContainer(tmpCtx, cntr); er != nil {
+		if er := l.destroyContainer(tmpCtx, sb, cntr, opts); er != nil {
 			result = multierror.Append(result, fmt.Errorf("destroy container [%s] fail: %w", cntr.ID, er))
 			log.G(tmpCtx).Warnf("Destroy container [%s] fail: %s", cntr.ID, er)
 			continue
@@ -184,6 +186,9 @@ func (rr *ociRuntime) Create(ctx context.Context, flowOpts *workflow.CreateConte
 		if err := l.cubeboxManger.Save(ctxTmp, sandBox); err != nil {
 			log.Warnf("saveSandBoxInfo failed.%s", err.Error())
 			return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
+		}
+		if err := runTemplatePostStart(ctxTmp, flowOpts, ci); err != nil {
+			return err
 		}
 		if err := l.doProbe(ctxTmp, realC, ci); err != nil {
 			return err
