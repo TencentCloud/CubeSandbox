@@ -171,6 +171,15 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// Resume replaces the paused row. Keep the restart bookkeeping
 				// so the next report is newer than the one CubeMaster already has.
 				desired := sb.SandboxID
+				// Deep-copy the tombstone before anything else happens: the
+				// store hands out live pointers, this flow's first Save
+				// overwrites the row (mid-flow, well before runContainer /
+				// probe / envd init), and a failed attempt must roll back to
+				// the tombstone the user's retry is gated on — whichever step
+				// failed. The rollback (engine failover or the envd-init
+				// cleanup) carries this copy into Destroy, which saves it back;
+				// see restorePausedReplaceSnapshot.
+				opts.PausedReplaceSnapshot = sb.DeepCopy()
 				if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
 					opts.RestartPrior = restartPriorFrom(sb)
 				}
@@ -194,9 +203,15 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// keyed on the row being readable) and CubeMaster kept the pause
 				// binding READY, so the user's retried Resume arrived as a thin
 				// Create with no local row to key on — and was admitted with no
-				// quota check at all (#2042). Keeping the row until the Save
-				// means a failed attempt rolls back to a tombstone the retry can
-				// gate on; see the rollback guard in Destroy.
+				// quota check at all (#2042).
+				//
+				// The same bypass would survive on the snapshot alone if the
+				// failure happened after that first Save — runContainer, probe
+				// and envd init all run after it — because the rollback would
+				// then find this attempt's debris row, not a PAUSED one, and
+				// delete it. So the tombstone is snapshotted above and the
+				// rollback saves the snapshot back whichever step failed; see
+				// restorePausedReplaceSnapshot in destroy.go.
 				//
 				// The UserMarkDeletedTime stamp that used to precede the delete is
 				// gone with it: it existed only to satisfy the CDP user-delete
@@ -563,6 +578,10 @@ func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
 			RequestID: realReq.RequestID,
 			SandboxID: sandBox.ID,
 		},
+		// A failed Create-from-pause rolls back to its tombstone on this path
+		// too: the cleanup ctx carries the failover marker the restore checks,
+		// but the snapshot itself has to travel on the DestroyContext.
+		PausedReplaceSnapshot: flowOpts.PausedReplaceSnapshot,
 	})
 }
 

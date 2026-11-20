@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -30,6 +31,113 @@ func rollbackDestroyContext(id string) *workflow.DestroyContext {
 	opts.SandboxID = id
 	opts.IsRollBack = true
 	return opts
+}
+
+// TestRestorePausedReplaceSnapshotPinsPostSaveRollback covers the failure
+// window the keep-the-row guard alone cannot: createContainers Saves the new
+// row early, before runContainer/probe/envd init, so a rollback after that
+// point finds this attempt's debris (state CREATED/RUNNING), not the PAUSED
+// tombstone. The snapshot carried from the replacement branch must be saved
+// back so the retry is gated on the original tombstone again.
+func TestRestorePausedReplaceSnapshotPinsPostSaveRollback(t *testing.T) {
+	tombstone := func(id string) *cubeboxstore.CubeBox {
+		sb := sandboxWithResourceForTest(id, cubeboxstore.Status{
+			StartedAt: 1,
+			PausedAt:  time.Now().UnixNano(),
+		}, "0m", "4Gi", 0, 0, 0)
+		sb.SandboxID = id
+		sb.RootfsWritableLayer = "disk/" + id
+		return sb
+	}
+
+	t.Run("engine failover after the flow's Save restores the tombstone", func(t *testing.T) {
+		tomb := tombstone("sb-postsave")
+		// The gc plugin's create step may have stamped the tombstone while the
+		// flow ran; the restored row must not read as user-deleted.
+		now := time.Now()
+		tomb.UserMarkDeletedTime = &now
+		snap := tomb.DeepCopy()
+		tomb.UserMarkDeletedTime = nil
+
+		// By rollback time the store holds this attempt's debris row: same ID,
+		// fresh CreatedAt-only status, no resource metadata yet — exactly what
+		// createContainers Saves before runContainer.
+		debris := newCubeboxWithStatusForTest("sb-postsave", cubeboxstore.Status{
+			CreatedAt: time.Now().UnixNano(),
+		})
+		debris.SandboxID = "sb-postsave"
+		mgr := &fakeCubeboxAPI{cb: debris}
+		l := &local{cubeboxManger: mgr}
+
+		opts := rollbackDestroyContext("sb-postsave")
+		opts.PausedReplaceSnapshot = snap
+
+		require.True(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-postsave"),
+			"a post-Save rollback must restore the snapshotted tombstone instead of deleting the debris")
+		assert.Equal(t, 1, mgr.saveCalls, "the restore is exactly one Save over the debris row")
+		assert.Zero(t, mgr.deleteCalls, "the restored tombstone must not be deleted")
+
+		cur, err := mgr.Get(context.Background(), "sb-postsave")
+		require.NoError(t, err)
+		require.NotNil(t, cur)
+		assert.Equal(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, cur.GetStatus().Get().State(),
+			"the retry's gates key on the PAUSED state")
+		assert.Nil(t, cur.UserMarkDeletedTime,
+			"the restored tombstone must not read as user-deleted to GC")
+		assert.NotNil(t, cur.ResourceWithOverHead, "quota sizing survives the rollback")
+		assert.Equal(t, "disk/sb-postsave", cur.RootfsWritableLayer)
+	})
+
+	t.Run("envd-init cleanup path restores without IsRollBack", func(t *testing.T) {
+		// cleanupAfterEnvdInitFailure marks the failover operation on the
+		// context but builds a DestroyContext without IsRollBack; the restore
+		// must trigger on either marker.
+		tomb := tombstone("sb-envd")
+		snap := tomb.DeepCopy()
+		mgr := &fakeCubeboxAPI{cb: newCubeboxWithStatusForTest("sb-envd", cubeboxstore.Status{
+			StartedAt: time.Now().UnixNano(),
+		})}
+		l := &local{cubeboxManger: mgr}
+
+		opts := rollbackDestroyContext("sb-envd")
+		opts.IsRollBack = false
+		opts.PausedReplaceSnapshot = snap
+		ctx := constants.WithFailoverOperation(context.Background())
+
+		require.True(t, l.restorePausedReplaceSnapshot(ctx, opts, "sb-envd"))
+		cur, err := mgr.Get(context.Background(), "sb-envd")
+		require.NoError(t, err)
+		assert.Equal(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, cur.GetStatus().Get().State())
+	})
+
+	t.Run("a user destroy never restores", func(t *testing.T) {
+		// User deletes carry no snapshot (only create-rollback paths set it);
+		// even a stale one must not fire without a rollback/failover marker.
+		tomb := tombstone("sb-userdel")
+		mgr := &fakeCubeboxAPI{cb: newCubeboxWithStatusForTest("sb-userdel", cubeboxstore.Status{
+			StartedAt: time.Now().UnixNano(),
+		})}
+		l := &local{cubeboxManger: mgr}
+
+		opts := rollbackDestroyContext("sb-userdel")
+		opts.IsRollBack = false
+		opts.PausedReplaceSnapshot = tomb.DeepCopy()
+
+		assert.False(t, l.restorePausedReplaceSnapshot(context.Background(), opts, "sb-userdel"),
+			"an ordinary destroy must not resurrect a snapshot it was not rolled back from")
+		assert.Zero(t, mgr.saveCalls)
+	})
+
+	t.Run("no snapshot falls through to the existing guards", func(t *testing.T) {
+		mgr := &fakeCubeboxAPI{cb: newCubeboxWithStatusForTest("sb-plain", cubeboxstore.Status{
+			StartedAt: time.Now().UnixNano(),
+		})}
+		l := &local{cubeboxManger: mgr}
+
+		assert.False(t, l.restorePausedReplaceSnapshot(
+			context.Background(), rollbackDestroyContext("sb-plain"), "sb-plain"))
+		assert.Zero(t, mgr.saveCalls)
+	})
 }
 
 // TestCreateRollbackKeepsPausedTombstone pins the delete-timing fix for the
@@ -170,4 +278,70 @@ func TestRetryAfterFailedResumeIsStillQuotaGated(t *testing.T) {
 
 	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
 	assert.Zero(t, memMB, "a rejected retry must not leave a reservation behind")
+}
+
+// TestRetryAfterPostSaveFailureIsStillQuotaGated is the end-to-end pin for the
+// window the tombstone-keep guard alone cannot cover: createContainers Saves
+// the new row early — before runContainer, probe and envd init, the common
+// failure points — so by rollback time the PAUSED tombstone is already
+// overwritten by this attempt's debris. Without the snapshot restore, the
+// rollback would delete that debris and the retry would arrive with no local
+// row, bypassing the quota gate again.
+func TestRetryAfterPostSaveFailureIsStillQuotaGated(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 0 // isolate the memory dimension
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	tomb := sandboxWithResourceForTest("sb-postsaveretry", cubeboxstore.Status{
+		StartedAt: 1,
+		PausedAt:  time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tomb.SandboxID = "sb-postsaveretry"
+	mgr := &fakeCubeboxAPI{list: []*cubeboxstore.CubeBox{tomb}}
+	s := &service{cubeboxMgr: &local{cubeboxManger: mgr}}
+	ctx := context.Background()
+
+	// Attempt 1: admitted, then the replacement branch snapshots the tombstone
+	// and the flow's early Save overwrites the row with a fresh CREATED-only
+	// record before the step that fails (runContainer / probe / envd init).
+	release, rejected := s.admitPausedReplace(ctx, pausedReplaceRequest("sb-postsaveretry"))
+	require.Nil(t, rejected, "the first attempt must be admitted while the node has room")
+	snapshot := tomb.DeepCopy()
+	debris := newCubeboxWithStatusForTest("sb-postsaveretry", cubeboxstore.Status{
+		CreatedAt: time.Now().UnixNano(),
+	})
+	debris.SandboxID = "sb-postsaveretry"
+	require.NoError(t, mgr.Save(ctx, debris), "the flow's early Save overwrites the tombstone by ID")
+	release()
+
+	// The failover rollback finds the debris row, not a PAUSED one: only the
+	// snapshot restore can put the tombstone back.
+	rollback := rollbackDestroyContext("sb-postsaveretry")
+	rollback.PausedReplaceSnapshot = snapshot
+	require.False(t, s.cubeboxMgr.createRollbackKeepsPausedTombstone(ctx, rollback, "sb-postsaveretry"),
+		"the debris row is not PAUSED — the keep-guard must defer to the snapshot restore")
+	require.True(t, s.cubeboxMgr.restorePausedReplaceSnapshot(ctx, rollback, "sb-postsaveretry"),
+		"the rollback must restore the snapshotted tombstone instead of deleting the debris")
+
+	// Before the retry, the node fills up.
+	other := sandboxWithResourceForTest("sb-other2", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	}, "0m", "6Gi", 0, 0, 0)
+	other.SandboxID = "sb-other2"
+	mgr.list = append(mgr.list, other)
+
+	// Attempt 2: the same thin Create, gated on the restored tombstone.
+	release2, rejected2 := s.admitPausedReplace(ctx, pausedReplaceRequest("sb-postsaveretry"))
+	require.NotNil(t, rejected2, "the post-Save-failure retry must be gated on the restored tombstone")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected2.RetCode)
+	assert.Contains(t, rejected2.RetMsg, "mem quota")
+	release2()
 }

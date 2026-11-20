@@ -173,6 +173,13 @@ type CreateContext struct {
 	IsRestart         bool
 	SavedContainerIDs map[int]string
 	RestartPrior      *RestartPrior
+
+	// PausedReplaceSnapshot is the PAUSED tombstone a Create-from-pause is
+	// replacing, deep-copied before the flow's first Save overwrites it. The
+	// rollback of a failed attempt saves it back so the user's retry finds
+	// the record its gates key on; nil for every other create. See
+	// restorePausedReplaceSnapshot in the cubebox destroy flow.
+	PausedReplaceSnapshot *cubeboxstore.CubeBox
 }
 
 func (b *CreateContext) GetInstanceType() string {
@@ -364,6 +371,12 @@ type DestroyContext struct {
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
 	// destroy response ext_info.
 	VolumeRefEvents []VolumeRefEvent
+
+	// PausedReplaceSnapshot carries the tombstone a failed Create-from-pause
+	// was replacing; the rollback restores it instead of deleting the row,
+	// whichever step of the create failed. Only set by create-rollback paths
+	// (engine failover, envd-init cleanup), never by a user Destroy.
+	PausedReplaceSnapshot *cubeboxstore.CubeBox
 }
 
 func (b *DestroyContext) GetInstanceType() string {
@@ -746,6 +759,11 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	if opts.IsRestart {
 		destroyOpt.IsRestartDestroy = true
 	}
+	// A failed Create-from-pause must roll back to the tombstone it was
+	// replacing — whichever step failed, before or after the flow's first
+	// Save overwrote the row — because the user's retried Resume is gated on
+	// that record.
+	destroyOpt.PausedReplaceSnapshot = rOpts.PausedReplaceSnapshot
 	log.G(ctx).Warnf("fail over doing SandboxID:%v", sandboxID)
 	defer func() {
 		if err != nil {
