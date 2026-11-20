@@ -286,9 +286,10 @@ func TestDeleteTemplateWithTargetsForceStillHonoursInUse(t *testing.T) {
 	}
 }
 
-// A FAILED definition already skips the in-use check today; force must not
-// change that pre-existing behaviour.
-func TestDeleteTemplateWithTargetsForceOnFailedDefinitionSkipsInUse(t *testing.T) {
+// A FAILED definition with no READY replica row skips the in-use check; force
+// must not change that. With a READY replica the check still runs (see the
+// ...WithReadyReplicaChecksInUse test below).
+func TestDeleteTemplateWithTargetsForceOnFailedDefinitionSkipsInUseWithoutReadyReplica(t *testing.T) {
 	rec := stubDeleteFlow(t, true)
 
 	err := deleteTemplateWithTargets(context.Background(), "tpl-failed", &templateCleanupTargets{

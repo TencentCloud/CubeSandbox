@@ -71,22 +71,21 @@ DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 `t_cube_template_definition.status` tracks the user-visible template
 lifecycle, independently of the build job row above.
 
-Initial state depends on the definition kind
-(`ensureTemplateDefinitionWithOptions`):
-
-- `kind=template` (image build / redo) starts at **PENDING**.
-- `kind=snapshot` (created from a sandbox snapshot) starts at **CREATING**.
+The definition table currently carries `kind=template` only, always starting
+at **PENDING** (`ensureTemplateDefinitionWithOptions`); the snapshot lifecycle
+is tracked in `t_cube_snapshot`. Legacy `kind='snapshot'` rows may still exist:
+migration `20260824120000_backfill_snapshot_tables.sql` copies them into the
+new table but does not delete them. A leftover row stuck at CREATING counts as
+an in-progress build for `hasActiveDefinitionBuild`, so a normal delete of it
+is always rejected; only a force delete removes it.
 
 ```
 PENDING  ─┬─→ READY             every replica READY
-(template)├─→ PARTIALLY_READY   at least one replica READY, at least one not
+          ├─→ PARTIALLY_READY   at least one replica READY, at least one not
           └─→ FAILED            the aggregate says no replica READY, or
                                 replica persistence failed on create
                                 (persistErr, see caveat below), or a force
                                 delete interrupted the build
-
-CREATING ─┬─→ READY             snapshot committed
-(snapshot)└─→ FAILED            snapshot commit failed
 
 any state ──→ (row removed)     delete hard-deletes the definition and its
                                 replica rows; there is no DELETED state for
@@ -112,26 +111,36 @@ cleanup fails, READY rows of the nodes that did persist can remain next to the
 FAILED definition. A FAILED definition therefore does not guarantee that no
 usable replica exists. To keep deletes safe, `shouldCheckInUse` still runs
 the in-use check for a FAILED definition while any READY replica row remains;
-a FAILED definition with no READY row skips it, as before.
+a FAILED definition with no READY row skips it, as before. This guard covers
+the delete path only. The re-submit branch over a FAILED definition in
+`submitTemplateFromImage` / `SubmitTemplateCommit` cleans up replicas without
+an in-use check, but it is not reachable through the normal API: request
+validation always generates a new template ID (`request_validation.go`).
 
 Invariants:
 
-- PENDING and CREATING are treated as an in-progress build by
+- PENDING (and CREATING, on legacy rows) is treated as an in-progress build by
   `hasActiveDefinitionBuild`; a normal (non-force) delete is rejected with
   `ErrTemplateAttemptInProgress`. A force delete first marks the definition FAILED
   (`UpdateDefinitionStatus`) and then removes the row.
 - Writing only the job row's `template_status` does not update the
   definition. The create persistErr path publishes FAILED through
-  `publishCreateFailedIfJobActive`. Failures that still write only the job
-  row can leave a PENDING definition stuck in PENDING: redo persistErr, and
-  `prepareRedoTemplateReplicas`, `refreshTemplateReplicaSummary` or
-  `GetTemplateInfo` errors after the definition row exists. These are not
-  covered yet.
-- A definition row already marked DELETING suppresses the publish path
-  (`publishTemplateStatusWithAlias` on finalize / redo, and
-  `publishCreateFailedIfJobActive` on the create persistErr path, both return
-  `ErrTemplateNotFound`), so a concurrent delete is never turned into a second
-  failure.
+  `publishCreateFailedIfJobActive`. Other failures still write only the job
+  row, and are not covered yet. Redo persistErr and redo
+  `refreshTemplateReplicaSummary` / `GetTemplateInfo` errors leave the
+  definition at whatever status it had, so the outcome depends on it:
+  - definition PENDING + job FAILED, if the definition was still PENDING
+    (the same shape as a create whose finalize publish fails);
+  - definition READY + job FAILED, if the template was READY. This is worse
+    than a stuck PENDING: the template still looks usable and can still
+    schedule sandboxes;
+  - definition untouched: `prepareRedoTemplateReplicas` fails before the
+    definition is written at all.
+- A concurrent delete hard-deletes the definition row, so both writers
+  (`publishTemplateStatusWithAlias` and `publishCreateFailedIfJobActive`) get
+  `ErrTemplateNotFound` and the delete is not turned into a second failure.
+  Both also reject a DELETING definition, but that check is defensive: no
+  current writer sets a definition to DELETING.
 - Alias claim on publish is gated on `status != FAILED`: READY and
   PARTIALLY_READY claim the requested alias, FAILED skips the claim. Skipping
   the claim does not release an alias the template already holds. A manual
@@ -140,12 +149,14 @@ Invariants:
   READY replica on a healthy node (`EnsureTemplateLocalityReady`), so the
   definition status is a user-visible summary and not a scheduling gate.
 - `last_error` (definition) and `error_message` (job row) are both returned
-  by the API. The create persistErr path writes sanitized, user-readable text
-  to the job row, and to the definition when the publish succeeds (if the
-  publish fails, only the job row is updated, with "; template status could
-  not be updated" appended unless the definition is gone). The raw driver or DB error goes to CubeMaster logs only. Other
-  failure paths (including redo persistErr) still write the raw error to the
-  job row (follow-up).
+  by the API. Only the create persistErr path is sanitized: it writes
+  user-readable text to the job row, and to the definition when the publish
+  succeeds (if the publish fails, only the job row is updated, with
+  "; template status could not be updated" appended unless the definition is
+  gone), and its raw error goes to CubeMaster logs only. Other failure
+  branches of `finishTemplateImageJobAfterArtifact` (distribution failure,
+  job reload, redo prepare, definition registration, and redo persistErr)
+  still write the raw error to the job row (follow-up).
 
 ### 3.3 Error mapping
 

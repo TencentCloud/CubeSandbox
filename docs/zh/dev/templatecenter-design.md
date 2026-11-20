@@ -66,19 +66,13 @@ TC 不初始化 worker（cubelet）grpc 连接池，因此任何可能发起 cub
 
 `t_cube_template_definition.status` 描述用户可见的模板生命周期，与上面的构建 job 行相互独立。
 
-初始状态取决于定义的 kind（`ensureTemplateDefinitionWithOptions`）：
-
-- `kind=template`（镜像构建 / redo）从 **PENDING** 开始。
-- `kind=snapshot`（由沙箱快照创建）从 **CREATING** 开始。
+定义表目前只有 `kind=template`，一律从 **PENDING** 开始（`ensureTemplateDefinitionWithOptions`）；快照的生命周期记录在 `t_cube_snapshot` 中。历史遗留的 `kind='snapshot'` 行可能仍然存在：迁移 `20260824120000_backfill_snapshot_tables.sql` 只把它们复制到新表，并不删除。停留在 CREATING 的遗留行会被 `hasActiveDefinitionBuild` 视为构建进行中，普通删除会一直被拒绝，只能强制删除。
 
 ```
 PENDING  ─┬─→ READY             所有副本均 READY
-(template)├─→ PARTIALLY_READY   至少一个副本 READY，且至少一个不是
+          ├─→ PARTIALLY_READY   至少一个副本 READY，且至少一个不是
           └─→ FAILED            汇总结果为没有 READY 副本，或创建时副本落库失败
                                 （persistErr，见下方说明），或构建被强制删除中断
-
-CREATING ─┬─→ READY             快照提交成功
-(snapshot)└─→ FAILED            快照提交失败
 
 任意状态 ──→（行被删除）        删除操作会物理删除定义及其副本行；
                                 模板定义没有 DELETED 状态
@@ -88,16 +82,19 @@ CREATING ─┬─→ READY             快照提交成功
 
 **create** 时副本落库失败（persistErr），定义会以脱敏信息发布为 FAILED，但前提是该 job 仍是这个模板当前未结束的 CREATE（`publishCreateFailedIfJobActive` 在同一事务里检查 job 行）。如果期间模板被强制删除并以同一 ID 重新创建，新一代的定义不会被改动。如果该 job 新构建了 artifact，随后会清理该 artifact 及其副本行。redo 等其他操作不受影响：persistErr 时仍只把 job 标为失败（后续处理）。
 
-注意：副本行是逐节点写入的，persistErr 可能只是部分失败。如果 create 复用了已有 artifact（`builtFreshArtifact == false`），或者清理失败，写入成功的节点的 READY 副本行可能与 FAILED 的定义并存。因此 FAILED 的定义并不保证没有可用副本。为保证删除安全，只要还有 READY 副本行，`shouldCheckInUse` 对 FAILED 的定义仍会执行使用中检查；没有 READY 副本行的 FAILED 定义则与以前一样跳过该检查。
+注意：副本行是逐节点写入的，persistErr 可能只是部分失败。如果 create 复用了已有 artifact（`builtFreshArtifact == false`），或者清理失败，写入成功的节点的 READY 副本行可能与 FAILED 的定义并存。因此 FAILED 的定义并不保证没有可用副本。为保证删除安全，只要还有 READY 副本行，`shouldCheckInUse` 对 FAILED 的定义仍会执行使用中检查；没有 READY 副本行的 FAILED 定义则与以前一样跳过该检查。这一保护只覆盖删除路径。`submitTemplateFromImage` / `SubmitTemplateCommit` 中对 FAILED 定义重新提交的分支会在没有使用中检查的情况下清理副本，但正常 API 走不到这个分支：请求校验总会生成新的模板 ID（`request_validation.go`）。
 
 不变式：
 
-- PENDING 和 CREATING 会被 `hasActiveDefinitionBuild` 视为构建进行中，普通（非强制）删除会以 `ErrTemplateAttemptInProgress` 拒绝。强制删除会先把定义标为 FAILED（`UpdateDefinitionStatus`），再删除该行。
-- 只写 job 行的 `template_status` 不会更新定义。create 的 persistErr 路径会通过 `publishCreateFailedIfJobActive` 发布 FAILED。仍然只写 job 行的失败可能让 PENDING 的定义一直停留在 PENDING，包括：redo 的 persistErr，以及定义行存在之后 `prepareRedoTemplateReplicas`、`refreshTemplateReplicaSummary`、`GetTemplateInfo` 出错。这些目前尚未覆盖。
-- 定义行已处于 DELETING 时，发布路径会被抑制（finalize / redo 使用的 `publishTemplateStatusWithAlias` 和 create persistErr 路径使用的 `publishCreateFailedIfJobActive` 都会返回 `ErrTemplateNotFound`），因此并发删除不会被演变成第二次失败。
+- PENDING（以及遗留行上的 CREATING）会被 `hasActiveDefinitionBuild` 视为构建进行中，普通（非强制）删除会以 `ErrTemplateAttemptInProgress` 拒绝。强制删除会先把定义标为 FAILED（`UpdateDefinitionStatus`），再删除该行。
+- 只写 job 行的 `template_status` 不会更新定义。create 的 persistErr 路径会通过 `publishCreateFailedIfJobActive` 发布 FAILED。其他失败仍然只写 job 行，目前尚未覆盖。redo 的 persistErr 以及 redo 中 `refreshTemplateReplicaSummary` / `GetTemplateInfo` 出错时，定义保持原来的状态，结果取决于原状态：
+  - 定义 PENDING + job FAILED：定义原本仍是 PENDING（与 create 的 finalize 发布失败时情形相同）；
+  - 定义 READY + job FAILED：模板原本是 READY。这比卡在 PENDING 更糟：模板看起来仍然可用，也仍能调度沙箱；
+  - 定义不受影响：`prepareRedoTemplateReplicas` 在写定义之前就失败了。
+- 并发删除会物理删除定义行，因此两个写入方（`publishTemplateStatusWithAlias` 和 `publishCreateFailedIfJobActive`）都会得到 `ErrTemplateNotFound`，删除不会被演变成第二次失败。两者也会拒绝 DELETING 的定义，但这只是防御性检查：目前没有任何写入方会把定义设为 DELETING。
 - 发布时的别名认领条件是 `status != FAILED`：READY 和 PARTIALLY_READY 会认领请求的别名，FAILED 跳过认领。跳过认领不会释放模板已经持有的别名。手动设置别名（`SetTemplateAlias`）更严格，要求 READY。
 - 创建沙箱不检查定义状态，只要求某个健康节点上有 READY 副本（`EnsureTemplateLocalityReady`）。因此定义状态是面向用户的汇总信息，而不是调度闸门。
-- 定义的 `last_error` 和 job 行的 `error_message` 都会通过 API 返回。create 的 persistErr 路径向 job 行写入脱敏后、用户可读的文本；发布成功时定义也写入同样的文本（发布失败时只更新 job 行，且除定义已不存在外会追加 "; template status could not be updated"）。原始驱动 / 数据库错误只进 CubeMaster 日志。其他失败路径（包括 redo 的 persistErr）仍会把原始错误写进 job 行（后续处理）。
+- 定义的 `last_error` 和 job 行的 `error_message` 都会通过 API 返回。只有 create 的 persistErr 路径做了脱敏：它向 job 行写入用户可读的文本，发布成功时定义也写入同样的文本（发布失败时只更新 job 行，且除定义已不存在外会追加 "; template status could not be updated"），其原始错误只进 CubeMaster 日志。`finishTemplateImageJobAfterArtifact` 的其他失败分支（分发失败、重新加载 job、redo 准备、定义注册，以及 redo 的 persistErr）仍会把原始错误写进 job 行（后续处理）。
 
 ### 3.3 `tpl merge` / migrate job
 

@@ -1686,8 +1686,8 @@ func claimTemplateAliasByJobOrderTx(tx *gorm.DB, templateID string, claimantJobR
 // builds.
 //
 // published is false (with a nil error) when the job row is gone, terminal or
-// not a CREATE: the definition is left alone. A DELETING definition returns
-// ErrTemplateNotFound, as in publishTemplateStatusWithAlias. FAILED never
+// not a CREATE: the definition is left alone. A missing definition (hard
+// deleted by a concurrent delete) returns ErrTemplateNotFound. FAILED never
 // claims an alias, so no alias handling is needed here.
 func publishCreateFailedIfJobActive(ctx context.Context, templateID, jobID, lastError string) (published bool, err error) {
 	if !isReady() {
@@ -1696,11 +1696,12 @@ func publishCreateFailedIfJobActive(ctx context.Context, templateID, jobID, last
 	err = retryOnceOnDeadlock(func() error {
 		published = false
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			// Same lock order as publishTemplateStatusWithAlias: definition, then job.
 			target, err := lockTemplateDefinitionTx(tx, templateID)
 			if err != nil {
 				return err
 			}
+			// Defensive, mirroring publishTemplateStatusWithAlias: no current
+			// writer sets a definition to DELETING.
 			if target.Status == StatusDeleting {
 				return ErrTemplateNotFound
 			}

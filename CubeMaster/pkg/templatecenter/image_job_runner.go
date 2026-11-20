@@ -72,11 +72,12 @@ func distributionFailure(expected, ready int32, distErr error) error {
 // builtFreshArtifact tells the failure paths whether this call owns the
 // artifact (and may therefore delete it) or merely reused an existing one.
 // The job status is always persisted, so callers may simply log the returned
-// error. The returned error is NOT what the job row holds: the job row's
-// error_message is exposed through the build-status API and may carry a
-// sanitized message (see markDefinitionFailedOnPersistErr), while the returned
-// error can wrap the raw cause (driver errors with internal hosts, table
-// names). Callers must only log it and never surface it to users.
+// error. The returned error can wrap the raw cause (driver errors with
+// internal hosts, table names): callers must only log it and never surface it
+// to users. On the create persistErr path the job row's error_message carries
+// a sanitized message instead (see markDefinitionFailedOnPersistErr); the
+// other failure branches in this function still write the raw error to the
+// job row, which is exposed through the build-status API.
 func finishTemplateImageJobAfterArtifact(
 	ctx context.Context,
 	jobID string,
@@ -195,8 +196,8 @@ func finishTemplateImageJobAfterArtifact(
 		JobID:      jobID,
 	})
 	claimWarning := ""
-	// jobErrMsg overrides err.Error() in the job row when the raw error must
-	// not be exposed through the build-status API.
+	// Set only on the create persistErr path; markDefinitionFailedOnPersistErr
+	// always returns a non-empty message.
 	jobErrMsg := ""
 	var finalizeSpan trace.Span
 	finalizeCtx := ctx
@@ -209,9 +210,6 @@ func finishTemplateImageJobAfterArtifact(
 			jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
 		}
 	} else {
-		// finalizeTemplateReplicas claims the alias *before* publishing the
-		// READY status so a client that sees READY can always resolve the
-		// alias; claimWarning captures a non-fatal alias-transfer note.
 		finalizeCtx, finalizeSpan = telemetry.StartIfTraced(ctx, telemetry.SpanTemplateFinalize,
 			trace.WithAttributes(
 				attribute.String(telemetry.AttrJobID, jobID),
@@ -229,13 +227,18 @@ func finishTemplateImageJobAfterArtifact(
 		if jobErrMsg == "" {
 			jobErrMsg = err.Error()
 		}
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		// If this write fails the job stays RUNNING; on the create persistErr
+		// path the definition may already be FAILED, and a normal delete is
+		// then blocked by the active job until the TC reconciler times it out.
+		if writeErr := updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,
 			"template_status": StatusFailed,
 			"error_message":   jobErrMsg,
-		})
+		}); writeErr != nil {
+			logger.Errorf("record terminal job failure fail, job=%s: %v", jobID, writeErr)
+		}
 		return err
 	}
 	resultPayload, _ := json.Marshal(info)
@@ -312,7 +315,7 @@ func markDefinitionFailedOnPersistErr(
 		}
 		invalidateTemplateCaches(templateID)
 	} else if !published {
-		log.G(ctx).Warnf("job %s is no longer the active CREATE of template %s; definition status left unchanged", jobID, templateID)
+		log.G(ctx).Errorf("job %s is no longer the active CREATE of template %s; definition status left unchanged", jobID, templateID)
 	}
 	return userMsg, err
 }

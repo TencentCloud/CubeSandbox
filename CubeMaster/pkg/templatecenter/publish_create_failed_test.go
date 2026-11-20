@@ -22,9 +22,14 @@ func newPublishCreateFailedTestDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&models.TemplateDefinition{}, &models.TemplateImageJob{}))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
 	oldDB := store.db
 	store.db = db
-	t.Cleanup(func() { store.db = oldDB })
+	t.Cleanup(func() {
+		store.db = oldDB
+		_ = sqlDB.Close()
+	})
 	return db
 }
 
@@ -89,7 +94,8 @@ func TestPublishCreateFailedIfJobActive_DoesNotDemoteNewGeneration(t *testing.T)
 	}
 }
 
-// A definition being deleted is reported as not found and left untouched.
+// Defensive guard only: no current writer sets a definition to DELETING. The
+// test pins the guard's behaviour (not found, row untouched) in case one does.
 func TestPublishCreateFailedIfJobActive_DeletingDefinition(t *testing.T) {
 	db := newPublishCreateFailedTestDB(t)
 	require.NoError(t, db.Create(&models.TemplateDefinition{TemplateID: "tpl-1", Status: StatusDeleting}).Error)

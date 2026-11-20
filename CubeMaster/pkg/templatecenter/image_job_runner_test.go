@@ -269,9 +269,6 @@ func assertPersistErrOutcome(t *testing.T, rec *persistErrCallChainRecorder) {
 			t.Fatalf("definition last_error leaks %q: %q", leak, rec.publishedErrors[0])
 		}
 	}
-	if jobMsg != rec.publishedErrors[0] {
-		t.Fatalf("job error_message %q differs from definition last_error %q", jobMsg, rec.publishedErrors[0])
-	}
 }
 
 // TestFinishTemplateImageJobAfterArtifact_PersistErrMarksDefinitionFailed
