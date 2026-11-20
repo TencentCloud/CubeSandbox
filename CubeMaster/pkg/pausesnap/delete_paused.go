@@ -165,12 +165,14 @@ func checkDestroyRet(destroyRsp *cubebox.DestroyCubeSandboxResponse, sandboxID, 
 		return nil
 	}
 	msg := destroyRsp.GetRet().GetRetMsg()
+	// Existing nodes may report an already-gone sandbox as TaskStateInvalid.
+	// Keep delete idempotent before forwarding retryable lifecycle errors.
+	if strings.Contains(strings.ToLower(msg), "not found") {
+		return nil
+	}
 	switch code {
 	case cubeleterrorcode.ErrorCode_ResumeRollbackPending, cubeleterrorcode.ErrorCode_TaskStateInvalid:
 		return ret.Err(errorcode.MasterCode(code), msg)
-	}
-	if strings.Contains(strings.ToLower(msg), "not found") {
-		return nil
 	}
 	return fmt.Errorf("%s %s ret=%v msg=%s", what, sandboxID, code, msg)
 }
