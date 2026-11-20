@@ -24,7 +24,7 @@ import (
 var NodeCommand = cli.Command{
 	Name:    "node",
 	Aliases: []string{"nodes"},
-	Usage:   "list / groups / isolate / unisolate / delete / quota CubeOps nodes",
+	Usage:   "list / groups / label / machine-type / isolate / unisolate / delete / quota CubeOps nodes",
 	Subcommands: []cli.Command{
 		{
 			Name:    "list",
@@ -35,11 +35,15 @@ var NodeCommand = cli.Command{
 				cli.BoolFlag{Name: "score-only", Usage: "only query score/update timestamps"},
 				cli.BoolFlag{Name: "show-local-templates", Usage: "show local templates in table/json output"},
 				cli.BoolFlag{Name: "json", Usage: "print raw json response"},
+				cli.StringFlag{Name: "machine-type", Usage: "only nodes bound to this machine type"},
+				cli.BoolFlag{Name: "unassigned-machine-type", Usage: "only nodes with no machine type"},
 			},
 			Action: listAction,
 		},
 		groupsCommand,
 		quotaCommand,
+		labelCommand,
+		MachineTypeCommand,
 		{
 			Name:      "isolate",
 			Usage:     "cordon node(s)",
@@ -109,6 +113,10 @@ func listAction(c *cli.Context) error {
 		}
 		sort.Slice(rsp, func(i, j int) bool { return rsp[i].ID() < rsp[j].ID() })
 	}
+	if c.Bool("unassigned-machine-type") && c.String("machine-type") != "" {
+		return errors.New("use only one of --machine-type and --unassigned-machine-type")
+	}
+	rsp = filterSchedulerNodes(rsp, c.String("machine-type"), c.Bool("unassigned-machine-type"))
 	if c.Bool("json") {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -203,17 +211,17 @@ func printNodeSummary(nodes []*model.SchedulerNode, scoreOnly, showLocalTemplate
 		return
 	}
 	if showLocalTemplates {
-		fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS\tLOCAL_TEMPLATES")
+		fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tMACHINE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS\tLOCAL_TEMPLATES")
 		for _, item := range nodes {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\t%d\n",
-				item.ID(), item.HostIP(), item.InstanceType, item.Zone, item.CPUType, item.Healthy,
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\t%d\n",
+				item.ID(), item.HostIP(), item.InstanceType, machineTypeColumn(item), item.Zone, item.CPUType, item.Healthy,
 				item.SchedulingDisabled, item.HostStatus, len(item.LocalTemplates))
 		}
 	} else {
-		fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS")
+		fmt.Fprintln(w, "NODE_ID\tNODE_IP\tINSTANCE_TYPE\tMACHINE_TYPE\tZONE\tCPU_TYPE\tHEALTHY\tSCHEDULING_DISABLED\tHOST_STATUS")
 		for _, item := range nodes {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
-				item.ID(), item.HostIP(), item.InstanceType, item.Zone, item.CPUType, item.Healthy,
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
+				item.ID(), item.HostIP(), item.InstanceType, machineTypeColumn(item), item.Zone, item.CPUType, item.Healthy,
 				item.SchedulingDisabled, item.HostStatus)
 		}
 	}

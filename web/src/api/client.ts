@@ -3,6 +3,7 @@
 
 import { api, apiWithHeaders, ops, setTokens, clearTokens } from '@/lib/api';
 import type { components } from './generated/schema';
+import { MACHINE_TYPE_KEY } from '@/lib/nodeLabels';
 
 export type ClusterOverviewDto = components['schemas']['ClusterOverview'];
 export type ListedSandboxDto = components['schemas']['ListedSandbox'];
@@ -111,6 +112,15 @@ export interface ClusterNodeView {
   schedulingDisabled: boolean;
   localTemplates: string[];
   versions: ComponentVersionDto[];
+  labels: Record<string, string>;
+  machineType: string;
+  hostFacts?: {
+    cpuVendor?: string;
+    cpuModel?: string;
+    cpuidHash?: string;
+    hostKernelRelease?: string;
+    kvmModuleTaint?: string;
+  } | null;
 }
 
 export interface ClusterOverview extends ClusterOverviewDto {}
@@ -211,6 +221,9 @@ function mapNode(dto: ApiNodeView): ClusterNodeView {
       (dto as unknown as { schedulingDisabled?: boolean }).schedulingDisabled ?? false,
     localTemplates: dto.localTemplates ?? [],
     versions: dto.versions ?? [],
+    labels: dto.labels ?? {},
+    machineType: dto.machineType || dto.labels?.[MACHINE_TYPE_KEY] || '',
+    hostFacts: dto.hostFacts ?? null,
   };
 }
 
@@ -518,6 +531,77 @@ export interface QuotaHistoryEntryDto {
   created_at: string;
 }
 
+export interface MachineTypeNode {
+  nodeID: string;
+  hostIP: string;
+  healthy: boolean;
+  schedulingDisabled: boolean;
+  cpuVendor: string;
+  cpuModel: string;
+  cpuidHash: string;
+  hostKernelRelease: string;
+}
+
+export interface MachineTypeCPUIDGroup {
+  cpuidHash: string;
+  unknown: boolean;
+  cpuVendor: string;
+  cpuModel: string;
+  nodeCount: number;
+  nodeIDs: string[];
+}
+
+export interface MachineTypeKernelGroup {
+  release: string;
+  nodeCount: number;
+}
+
+export interface MachineTypeView {
+  name: string;
+  displayName: string;
+  description: string;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  nodeCount: number;
+  healthyNodeCount: number;
+  nodes: MachineTypeNode[];
+  cpuidGroups: MachineTypeCPUIDGroup[];
+  kernelReleases: MachineTypeKernelGroup[];
+  warnings: string[];
+}
+
+export interface MachineTypeBindResult {
+  name: string;
+  results: Array<{ nodeID: string; ok: boolean; error?: string }>;
+}
+
+export const machineTypeApi = {
+  list: () => ops<MachineTypeView[]>('/machine-types'),
+  get: (name: string) => ops<MachineTypeView>(`/machine-types/${encodeURIComponent(name)}`),
+  create: (body: {
+    name: string;
+    displayName?: string;
+    description?: string;
+    nodeIDs?: string[];
+  }) => ops<MachineTypeView>('/machine-types', { method: 'POST', body: JSON.stringify(body) }),
+  update: (name: string, body: { displayName?: string; description?: string }) =>
+    ops<MachineTypeView>(`/machine-types/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  remove: (name: string, unbind: boolean) =>
+    ops<void>(`/machine-types/${encodeURIComponent(name)}?unbind=${unbind ? 'true' : 'false'}`, {
+      method: 'DELETE',
+    }),
+  replaceNodes: (name: string, nodeIDs: string[]) =>
+    ops<MachineTypeBindResult>(`/machine-types/${encodeURIComponent(name)}/nodes`, {
+      method: 'PUT',
+      body: JSON.stringify({ nodeIDs }),
+    }),
+};
+
 export const clusterApi = {
   overview: () => ops<ClusterOverviewDto>('/cluster/overview'),
   nodes: () => ops<ApiNodeView[]>('/nodes').then((items) => items.map(mapNode)),
@@ -533,6 +617,21 @@ export const clusterApi = {
       body: detail ? JSON.stringify({ detail }) : undefined,
     }),
   nodeOperations: (id: string) => ops<NodeOperationDto[]>(`/nodes/${id}/operations`),
+  // Labels: PATCH merges, PUT replaces the full user-label set, DELETE removes
+  // one key. The key travels as a query parameter (keys contain '/').
+  setNodeLabel: (id: string, labels: Record<string, string>) =>
+    ops<void>(`/nodes/${id}/labels`, { method: 'PATCH', body: JSON.stringify({ labels }) }),
+  replaceNodeLabels: (id: string, labels: Record<string, string>) =>
+    ops<void>(`/nodes/${id}/labels`, { method: 'PUT', body: JSON.stringify({ labels }) }),
+  deleteNodeLabel: (id: string, key: string) =>
+    ops<void>(`/nodes/${id}/labels?key=${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  setNodeMachineType: (id: string, machineType: string) =>
+    ops<void>(`/nodes/${encodeURIComponent(id)}/machine-type`, {
+      method: 'PUT',
+      body: JSON.stringify({ machineType }),
+    }),
+  clearNodeMachineType: (id: string) =>
+    ops<void>(`/nodes/${encodeURIComponent(id)}/machine-type`, { method: 'DELETE' }),
   nodeQuota: (id: string) => ops<QuotaViewDto>(`/nodes/${id}/config/quota`),
   setNodeQuota: (id: string, spec: QuotaSpecDto) =>
     ops<{ view: QuotaViewDto; push: { applied: boolean; skip_reason?: string } }>(

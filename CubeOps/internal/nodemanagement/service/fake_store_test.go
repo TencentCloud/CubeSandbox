@@ -5,6 +5,8 @@ package service_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/model"
@@ -22,6 +24,12 @@ type fakeNodeStore struct {
 	failOnGetRegistration error
 	failOnUpdateLabels    error
 	failOnUpdateQuota     error
+	// failMutateFor fails MutateLabels only for the listed node IDs, so a
+	// multi-node operation can fail part-way and exercise rollback.
+	failMutateFor map[string]error
+	// failOnDeleteMachineType makes the catalog row delete fail after the
+	// membership writes already ran.
+	failOnDeleteMachineType error
 
 	updateQuotaCalls     int
 	updateHostFactsCalls int
@@ -30,14 +38,17 @@ type fakeNodeStore struct {
 	specs                 map[string]*store.NodeQuotaSpec
 	failOnGetQuotaSpec    error
 	failOnUpsertQuotaSpec error
+
+	machineTypes map[string]*store.MachineType
 }
 
 func newFakeNodeStore() *fakeNodeStore {
 	return &fakeNodeStore{
-		regs:     map[string]*store.NodeRegistration{},
-		statuses: map[string]*store.NodeStatus{},
-		versions: map[string][]store.NodeComponentVersion{},
-		specs:    map[string]*store.NodeQuotaSpec{},
+		regs:         map[string]*store.NodeRegistration{},
+		statuses:     map[string]*store.NodeStatus{},
+		versions:     map[string][]store.NodeComponentVersion{},
+		specs:        map[string]*store.NodeQuotaSpec{},
+		machineTypes: map[string]*store.MachineType{},
 	}
 }
 
@@ -104,6 +115,47 @@ func (f *fakeNodeStore) UpdateLabels(_ context.Context, nodeID string, labels ma
 	}
 	reg.LabelsJSON = model.MustJSON(labels)
 	return nil
+}
+
+func (f *fakeNodeStore) MutateLabels(_ context.Context, nodeID string, fn func(current map[string]string) (map[string]string, bool, error)) (map[string]string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOnGetRegistration != nil {
+		return nil, false, f.failOnGetRegistration
+	}
+	if err := f.failMutateFor[nodeID]; err != nil {
+		return nil, false, err
+	}
+	reg, ok := f.regs[nodeID]
+	if !ok {
+		return nil, false, store.ErrNotFound
+	}
+	current, err := store.ParseLabelsJSON(reg.LabelsJSON)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", store.ErrCorruptLabelsJSON, err)
+	}
+	cp := make(map[string]string, len(current))
+	for k, v := range current {
+		cp[k] = v
+	}
+	next, changed, err := fn(cp)
+	if err != nil {
+		return nil, false, err
+	}
+	if next == nil {
+		next = map[string]string{}
+	}
+	if changed {
+		if f.failOnUpdateLabels != nil {
+			return nil, false, f.failOnUpdateLabels
+		}
+		reg.LabelsJSON = model.MustJSON(next)
+	}
+	out := make(map[string]string, len(next))
+	for k, v := range next {
+		out[k] = v
+	}
+	return out, changed, nil
 }
 
 func (f *fakeNodeStore) UpdateHostFacts(_ context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string, cpuCount, memTotalMB int64) error {
@@ -381,5 +433,67 @@ func (f *fakeNodeStore) DeleteNode(_ context.Context, nodeID string) error {
 	delete(f.regs, nodeID)
 	delete(f.statuses, nodeID)
 	delete(f.versions, nodeID)
+	return nil
+}
+
+func (f *fakeNodeStore) CreateMachineType(_ context.Context, mt *store.MachineType) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if mt == nil || mt.Name == "" {
+		return errors.New("machine type name is required")
+	}
+	if _, ok := f.machineTypes[mt.Name]; ok {
+		return store.ErrMachineTypeExists
+	}
+	cp := *mt
+	f.machineTypes[mt.Name] = &cp
+	return nil
+}
+
+func (f *fakeNodeStore) GetMachineType(_ context.Context, name string) (*store.MachineType, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mt, ok := f.machineTypes[name]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *mt
+	return &cp, nil
+}
+
+func (f *fakeNodeStore) ListMachineTypes(_ context.Context) ([]store.MachineType, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.MachineType, 0, len(f.machineTypes))
+	for _, mt := range f.machineTypes {
+		out = append(out, *mt)
+	}
+	return out, nil
+}
+
+func (f *fakeNodeStore) UpdateMachineType(_ context.Context, mt *store.MachineType) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	existing, ok := f.machineTypes[mt.Name]
+	if !ok {
+		return store.ErrNotFound
+	}
+	existing.DisplayName = mt.DisplayName
+	existing.Description = mt.Description
+	existing.UpdatedBy = mt.UpdatedBy
+	existing.UpdatedAt = mt.UpdatedAt
+	return nil
+}
+
+func (f *fakeNodeStore) DeleteMachineType(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.machineTypes[name]; !ok {
+		return store.ErrNotFound
+	}
+	if f.failOnDeleteMachineType != nil {
+		return f.failOnDeleteMachineType
+	}
+	delete(f.machineTypes, name)
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -18,14 +19,24 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// ErrCorruptLabelsJSON is returned when a locked label row cannot be parsed.
+var ErrCorruptLabelsJSON = errors.New("labels_json corrupt")
+
 // ErrQuotaSpecExists is returned by CreateQuotaSpecIfAbsent when a row already exists.
 var ErrQuotaSpecExists = errors.New("quota spec already exists")
+
+// ErrMachineTypeExists is returned when a machine type name is already taken.
+var ErrMachineTypeExists = errors.New("machine type already exists")
 
 type NodeStore interface {
 	UpsertRegistration(ctx context.Context, reg *NodeRegistration) error
 	GetRegistration(ctx context.Context, nodeID string) (*NodeRegistration, error)
 	ListRegistrations(ctx context.Context) ([]NodeRegistration, error)
 	UpdateLabels(ctx context.Context, nodeID string, labels map[string]string) error
+	// MutateLabels locks the registration row, then applies fn to a copy of
+	// the current labels; the write happens in the same transaction only when
+	// fn reports a change.
+	MutateLabels(ctx context.Context, nodeID string, fn func(current map[string]string) (next map[string]string, changed bool, err error)) (final map[string]string, changed bool, err error)
 	UpdateHostFacts(ctx context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string, cpuCount, memTotalMB int64) error
 	// UpdateQuota persists the effective quota reported by a cubelet
 	// heartbeat, mirroring it into capacity_json/allocatable_json too.
@@ -64,6 +75,12 @@ type NodeStore interface {
 	// DeleteNode removes the registration/status/version rows in one
 	// transaction, keeping operations rows as an audit trail.
 	DeleteNode(ctx context.Context, nodeID string) error
+
+	CreateMachineType(ctx context.Context, mt *MachineType) error
+	GetMachineType(ctx context.Context, name string) (*MachineType, error)
+	ListMachineTypes(ctx context.Context) ([]MachineType, error)
+	UpdateMachineType(ctx context.Context, mt *MachineType) error
+	DeleteMachineType(ctx context.Context, name string) error
 }
 
 type gormNodeStore struct {
@@ -113,6 +130,51 @@ func (s *gormNodeStore) UpdateLabels(ctx context.Context, nodeID string, labels 
 			"updated_at":  time.Now(),
 		})
 	return res.Error
+}
+
+func (s *gormNodeStore) MutateLabels(ctx context.Context, nodeID string, fn func(current map[string]string) (map[string]string, bool, error)) (map[string]string, bool, error) {
+	var final map[string]string
+	var changed bool
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var reg NodeRegistration
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("node_id = ?", nodeID).Take(&reg).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		current, err := ParseLabelsJSON(reg.LabelsJSON)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrCorruptLabelsJSON, err)
+		}
+		next, didChange, err := fn(cloneLabels(current))
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			next = map[string]string{}
+		}
+		final = cloneLabels(next)
+		changed = didChange
+		if !didChange {
+			return nil
+		}
+		return tx.Table(model.NodeMetaRegistrationTable).Where("node_id = ?", nodeID).
+			Updates(map[string]any{
+				"labels_json": model.MustJSON(next),
+				"updated_at":  time.Now(),
+			}).Error
+	})
+	return final, changed, err
+}
+
+func cloneLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *gormNodeStore) UpdateHostFacts(ctx context.Context, nodeID string, factsJSON, cpuidHash, kernelRelease string, cpuCount, memTotalMB int64) error {
@@ -461,6 +523,84 @@ func (s *gormNodeStore) DeleteNode(ctx context.Context, nodeID string) error {
 		}
 		return tx.Unscoped().Where("node_id = ?", nodeID).Delete(&NodeRegistration{}).Error
 	})
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") || strings.Contains(msg, "unique constraint")
+}
+
+func (s *gormNodeStore) CreateMachineType(ctx context.Context, mt *MachineType) error {
+	if mt == nil {
+		return errors.New("machine type is nil")
+	}
+	now := time.Now()
+	if mt.CreatedAt.IsZero() {
+		mt.CreatedAt = now
+	}
+	mt.UpdatedAt = now
+	if err := s.db.WithContext(ctx).Create(mt).Error; err != nil {
+		if isUniqueViolation(err) {
+			return ErrMachineTypeExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *gormNodeStore) GetMachineType(ctx context.Context, name string) (*MachineType, error) {
+	var mt MachineType
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&mt).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &mt, nil
+}
+
+func (s *gormNodeStore) ListMachineTypes(ctx context.Context) ([]MachineType, error) {
+	var rows []MachineType
+	if err := s.db.WithContext(ctx).Order("name ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *gormNodeStore) UpdateMachineType(ctx context.Context, mt *MachineType) error {
+	if mt == nil || mt.Name == "" {
+		return errors.New("machine type name is required")
+	}
+	res := s.db.WithContext(ctx).Model(&MachineType{}).Where("name = ?", mt.Name).Updates(map[string]any{
+		"display_name": mt.DisplayName,
+		"description":  mt.Description,
+		"updated_by":   mt.UpdatedBy,
+		"updated_at":   time.Now(),
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *gormNodeStore) DeleteMachineType(ctx context.Context, name string) error {
+	res := s.db.WithContext(ctx).Where("name = ?", name).Delete(&MachineType{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func ParseLabelsJSON(raw string) (map[string]string, error) {

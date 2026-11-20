@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b --noEmit && vite build",
@@ -12,7 +15,8 @@
     "fmt": "prettier --write .",
     "api:export": "cargo run --manifest-path ../CubeAPI/Cargo.toml -- --export-openapi ../openapi.yml",
     "api:generate": "openapi-typescript ../openapi.yml -o src/api/generated/schema.ts",
-    "api:sync": "npm run api:export && npm run api:generate"
+    "api:sync": "npm run api:export && npm run api:generate",
+    "test": "node --test --experimental-strip-types --import ./scripts/ts-alias-register.mjs src/lib/*.test.ts src/mocks/*.test.ts"
   },
   "dependencies": {
     "@dicebear/collection": "^9.4.2",
