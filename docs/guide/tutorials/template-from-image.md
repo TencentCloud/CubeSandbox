@@ -63,6 +63,61 @@ cubemastercli tpl create-from-image \
 
 The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
 
+### Guest Kernel Command Line Parameters
+
+`create-from-image` can append extra parameters to the guest kernel command line. This is intended for memory-overcommit tuning, where the setup relies on DAMON-based reclaim (`damon_reclaim.*`) and free page reporting (`page_reporting.*`).
+
+Use `--kernel-cmdline-append` to pass parameters directly. The flag is repeatable, and each value is a single `module.param` or `module.param=value` entry:
+
+```bash
+cubemastercli tpl create-from-image \
+  --image  ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --memory 4096 \
+  --kernel-cmdline-append damon_reclaim.enabled=Y \
+  --kernel-cmdline-append damon_reclaim.min_age=1000000 \
+  --kernel-cmdline-append page_reporting.page_reporting_order=6
+```
+
+Use `--kernel-cmdline-file` to load the same list from a YAML or JSON file. Both `{cmdline: [...]}` and a top-level list are accepted:
+
+```yaml
+cmdline:
+  - damon_reclaim.enabled=Y
+  - damon_reclaim.min_age=1000000
+  - page_reporting.page_reporting_order=6
+```
+
+```bash
+cubemastercli tpl create-from-image \
+  --image  ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --memory 4096 \
+  --kernel-cmdline-file damon.yaml
+```
+
+When both are given, the file is loaded first and `--kernel-cmdline-append` wins on duplicate keys (the text before `=`).
+
+Only `page_reporting.*` and `damon_reclaim.*` are accepted. Each entry must match `^(page_reporting|damon_reclaim)\.[A-Za-z0-9_.]+(=[A-Za-z0-9_,.:/-]*)?$`. Whitespace, control characters and shell metacharacters are rejected, so a value cannot smuggle extra tokens into the guest command line. The user-supplied list is capped at 1024 bytes, well below the 2048-byte guest cmdline buffer on aarch64. Invalid parameters fail at `create-from-image` time, before the template build starts.
+
+DAMON needs a physical address range to monitor. The kernel's default picks only a single memory block, which misses RAM above the PCI hole, so Cubelet fills two parameters automatically after placement when at least one `damon_reclaim.*` entry is present:
+
+| Parameter | Value (amd64) |
+|-----------|-------|
+| `damon_reclaim.monitor_region_start` | `4096` (first page; `0` is treated as unset) |
+| `damon_reclaim.monitor_region_end` | The guest RAM size plus the arch-specific PCI hole |
+
+The end value is derived from the guest RAM size of the finalized VM spec, so on amd64 `--memory 4096` (4 GiB) produces `monitor_region_end=5368709120` (5 GiB). On arm64 the guest RAM starts at `1073741824` (1 GiB) and the end is the guest RAM plus 1 GiB, or plus 1.0625 GiB once the guest crosses the VMM's 64 MiB hole at 3.9375 GiB, so the same `--memory 4096` produces `monitor_region_end=5435817984` (5.0625 GiB). Cubelet computes the region after placement, using the worker node's architecture and the finalized VM RAM, so it applies to every instance type. Explicit non-zero `monitor_region_start` / `monitor_region_end` values are preserved and validated (`start < end`). When the region cannot be derived (non-amd64 / non-arm64 host, or zero guest RAM), pass both bounds explicitly; the request is rejected otherwise.
+
+The guest kernel command line is sandbox-wide: every container in the sandbox shares the same VM. When calling the REST API directly, the equivalent annotation is `containers[0].annotations["cube.vm.kernel.cmdline.append"]`, a JSON array of strings. Setting it on any other container, or on the sandbox request itself, is rejected. When creating a sandbox from a template that sets these params, the annotation is inherited only if the request omits `containers[]`. If you supply containers explicitly, the template's container annotations are not copied, so re-send `containers[0].annotations["cube.vm.kernel.cmdline.append"]` in the request.
+
+The parameters take effect only if the guest kernel is built with DAMON support (`CONFIG_DAMON_RECLAIM=y`). `damon_reclaim.enabled` defaults to `false`, so a guest that does not pass `damon_reclaim.enabled=Y` behaves exactly as before. To confirm the parameters reached the guest:
+
+```bash
+cat /proc/cmdline
+cat /sys/module/damon_reclaim/parameters/enabled   # expects Y
+```
+
 ## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.
