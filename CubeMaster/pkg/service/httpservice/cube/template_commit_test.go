@@ -91,6 +91,23 @@ func TestHandleSandboxCommitActionRejectsEmptyRequestID(t *testing.T) {
 	assert.True(t, strings.HasPrefix(got.TemplateID, "tpl-"), got.TemplateID)
 }
 
+func TestHandleSandboxCommitPreservesLookupErrors(t *testing.T) {
+	for _, code := range []errorcode.ErrorCode{errorcode.ErrorCode_CubeletUnHealthy, errorcode.ErrorCode_MasterInternalError, errorcode.ErrorCode_NotFound} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			patches := gomonkey.NewPatches()
+			defer patches.Reset()
+			patches.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache { return nil })
+			patches.ApplyFunc(sandbox.SandboxInfo, func(context.Context, *types.GetCubeSandboxReq) *types.GetCubeSandboxRes {
+				return &types.GetCubeSandboxRes{Ret: &types.Ret{RetCode: int(code), RetMsg: "lookup failed"}}
+			})
+			body := `{"requestID":"req-1","sandbox_id":"` + knownSandboxTestID + `"}`
+			got := invokeCommitHandler(t, httptest.NewRequest("POST", "/cube/sandbox/commit", strings.NewReader(body)), &CubeLog.RequestTrace{})
+			require.Equal(t, int(code), got.Res.Ret.RetCode)
+			require.Equal(t, "lookup failed", got.Res.Ret.RetMsg)
+		})
+	}
+}
+
 func TestHandleSandboxCommitActionRejectsMissingFields(t *testing.T) {
 	body := `{"requestID":"req-1"}`
 	req := httptest.NewRequest("POST", "/cube/sandbox/commit", strings.NewReader(body))

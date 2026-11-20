@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
@@ -43,6 +44,16 @@ func ResolveSandboxID(ctx context.Context, input string) (string, error) {
 	// both missing and ambiguous prefixes so a unique live match can win.
 	if !cacheResolveNeedsClusterFallback(err) {
 		return "", err
+	}
+
+	// A cold Master cache or an unhealthy worker is not proof of deletion.
+	// Full IDs can be resolved from the durable routing record without scanning
+	// only healthy workers; the actual lookup then reports worker availability.
+	if sandboxid.IsFullID(input) {
+		canonical := strings.ToLower(input)
+		if proxy, ok := localcache.GetSandboxProxyMap(ctx, canonical); ok && proxy != nil && proxy.HostIP != "" {
+			return canonical, nil
+		}
 	}
 
 	entries := append(collectClusterSandboxIDs(ctx), collectPausedSandboxIDs(ctx)...)

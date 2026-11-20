@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/queueworker"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
@@ -266,7 +267,7 @@ func TestDestroyBoundary(t *testing.T) {
 		return
 	}
 	for _, async := range []bool{false, true} {
-		for _, scenario := range []string{"success", "rpc-fail", "nil", "node-missing", "cleanup-fail", "internal", "unknown", "timeout", "oversize"} {
+		for _, scenario := range []string{"success", "rpc-fail", "nil", "node-missing", "hook-fail", "cleanup-fail", "internal", "unknown", "timeout", "oversize"} {
 			t.Run(scenario+map[bool]string{true: "/async", false: "/sync"}[async], func(t *testing.T) {
 				f := setupDestroyFixture(t)
 				p := lifecycleBuffer(t)
@@ -281,6 +282,12 @@ func TestDestroyBoundary(t *testing.T) {
 					f.nilReply = true
 				case "node-missing":
 					f.node = false
+				case "hook-fail":
+					hook := func(context.Context, string) error { return errors.New("metadata cleanup failed") }
+					RegisterAfterDestroySandboxSuccessHook(hook)
+					task.RegisterAfterDestroyTaskSuccessHook(hook)
+					defer ResetAfterDestroySandboxSuccessHooks()
+					defer task.ResetAfterDestroyTaskSuccessHooks()
 				case "cleanup-fail":
 					f.proxyErr = errors.New("proxy")
 				case "internal":
@@ -308,7 +315,18 @@ func TestDestroyBoundary(t *testing.T) {
 						require.Equal(t, 2, f.nodeCalls, "cleanup retry must repeat the node operation")
 					}
 				}
-				want := scenario == "success" || scenario == "unknown" || scenario == "timeout" || scenario == "nil" || scenario == "node-missing" || (async && scenario == "cleanup-fail")
+				if scenario == "node-missing" || scenario == "hook-fail" {
+					if async {
+						require.Error(t, err)
+					} else {
+						require.Equal(t, int(errorcode.ErrorCode_MasterInternalError), rsp.Ret.RetCode)
+					}
+					require.NotContains(t, f.order, "proxy-delete", "failed cleanup must preserve the route for retry")
+					if scenario == "node-missing" {
+						require.Zero(t, f.nodeCalls)
+					}
+				}
+				want := scenario == "success" || scenario == "unknown" || scenario == "timeout" || scenario == "nil" || (async && scenario == "cleanup-fail")
 				if want {
 					body := readUpdateDestroyEvent(t, p)
 					data := body["event_data"].(map[string]any)
@@ -436,7 +454,7 @@ func TestProducerFailureBoundaries(t *testing.T) {
 	if webhooktest.Isolated(t) {
 		return
 	}
-	for _, scenario := range []string{"lock", "enqueue", "node-code", "paused-unproven", "paused-error", "paused-binding-failed", "paused-complete", "hook-warning", "pause-origin", "resume-origin"} {
+	for _, scenario := range []string{"lock", "enqueue", "node-code", "paused-unproven", "paused-error", "paused-binding-failed", "paused-complete", "hook-failure", "pause-origin", "resume-origin"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := setupDestroyFixture(t)
 			p := lifecycleBuffer(t)
@@ -464,8 +482,8 @@ func TestProducerFailureBoundaries(t *testing.T) {
 					}
 					return true, nil
 				})
-			case "hook-warning":
-				RegisterAfterDestroySandboxSuccessHook(func(context.Context, string) error { return errors.New("warn-only") })
+			case "hook-failure":
+				RegisterAfterDestroySandboxSuccessHook(func(context.Context, string) error { return errors.New("metadata cleanup failed") })
 				defer ResetAfterDestroySandboxSuccessHooks()
 			case "pause-origin":
 				ctx = webhook.WithOrigin(ctx, webhook.OriginPauseTeardown)
@@ -480,7 +498,11 @@ func TestProducerFailureBoundaries(t *testing.T) {
 			if scenario == "paused-binding-failed" {
 				require.Equal(t, 200, rsp.Ret.RetCode, "binding cleanup remains warn-only")
 			}
-			if scenario == "paused-complete" || scenario == "paused-unproven" || scenario == "paused-binding-failed" || scenario == "hook-warning" {
+			if scenario == "hook-failure" {
+				require.Equal(t, int(errorcode.ErrorCode_MasterInternalError), rsp.Ret.RetCode)
+				require.NotContains(t, f.order, "proxy-delete")
+			}
+			if scenario == "paused-complete" || scenario == "paused-unproven" || scenario == "paused-binding-failed" {
 				require.Equal(t, 200, rsp.Ret.RetCode)
 				readUpdateDestroyEvent(t, p)
 			}

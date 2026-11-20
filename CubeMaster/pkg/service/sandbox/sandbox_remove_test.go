@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
@@ -43,6 +44,9 @@ func TestDestroySandboxMissingSandboxReturnsNotFound(t *testing.T) {
 	patches.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
 		return nil, false
 	})
+	patches.ApplyFunc(sandboxspec.GetHostIP, func(context.Context, string) (string, error) {
+		return "", sandboxspec.ErrSandboxSpecNotFound
+	})
 
 	got := DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{
 		RequestID:    "req-missing-delete",
@@ -56,6 +60,41 @@ func TestDestroySandboxMissingSandboxReturnsNotFound(t *testing.T) {
 	assert.Equal(t, int(errorcode.ErrorCode_NotFound), got.Ret.RetCode)
 	assert.Equal(t, "no such sandbox", got.Ret.RetMsg)
 	assert.False(t, hookCalled, "after-destroy success hook should not run for missing sandbox")
+}
+
+func TestDestroySandboxRouteFailureResponse(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(config.GetConfig, func() *config.Config {
+		return &config.Config{Common: &config.CommonConf{}}
+	})
+	patches.ApplyFunc(stampDestroyStorageBackend, func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) {})
+	patches.ApplyFunc(task.AddAsyncTask, func(*task.Task) error {
+		t.Fatal("a failed route lookup must not enqueue destruction")
+		return nil
+	})
+	for _, sync := range []bool{false, true} {
+		for _, routeErr := range []error{
+			ret.Err(errorcode.ErrorCode_CubeletUnHealthy, "sandbox route is unavailable"),
+			errors.New("database unavailable"),
+		} {
+			p := gomonkey.ApplyFunc(dealScfSandbox, func(context.Context, *types.DeleteCubeSandboxReq, *task.Task) (bool, error) {
+				return false, routeErr
+			})
+			rsp := DestroySandbox(context.Background(), &types.DeleteCubeSandboxReq{
+				SandboxID: "abcdef0123456789abcdef0123456789", InstanceType: "cubebox", Sync: sync,
+			})
+			p.Reset()
+			want := int(errorcode.ErrorCode_MasterInternalError)
+			if status, ok := ret.FromError(routeErr); !sync && ok {
+				want = int(status.Code())
+				assert.Equal(t, status.Message(), rsp.Ret.RetMsg)
+			} else {
+				assert.Equal(t, routeErr.Error(), rsp.Ret.RetMsg)
+			}
+			assert.Equal(t, want, rsp.Ret.RetCode, "sync=%t err=%v", sync, routeErr)
+		}
+	}
 }
 
 func TestSetSyncDestroyFailurePreservesDeleteAutoResumeBusinessCodes(t *testing.T) {
