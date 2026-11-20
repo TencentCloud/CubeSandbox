@@ -222,3 +222,90 @@ func TestMergeCubeNetworkConfigsClonesTemplateRulesWhenRequestRulesEmpty(t *test
 func strPtr(s string) *string {
 	return &s
 }
+
+// A caller that asks for a non-privileged container must not get the
+// template's privileged security context back.
+func TestApplyTemplateToContainerKeepsRequestSecurityContext(t *testing.T) {
+	templateCtr := &types.Container{
+		Name: "cubebox-default",
+		SecurityContext: &types.ContainerSecurityContext{
+			Privileged:     true,
+			ReadonlyRootfs: false,
+			NoNewPrivs:     false,
+		},
+	}
+	requestCtr := &types.Container{
+		Name: "cubebox-default",
+		SecurityContext: &types.ContainerSecurityContext{
+			NoNewPrivs:     true,
+			ReadonlyRootfs: true,
+			Capabilities:   &types.Capability{DropCapabilities: []string{"ALL"}},
+		},
+	}
+	if err := applyTemplateToContainer(requestCtr, templateCtr, 0); err != nil {
+		t.Fatalf("applyTemplateToContainer: %v", err)
+	}
+	sc := requestCtr.SecurityContext
+	if sc == nil {
+		t.Fatal("security context is nil")
+	}
+	if sc.Privileged {
+		t.Error("privileged came from the template; the request must win")
+	}
+	if !sc.NoNewPrivs {
+		t.Error("no_new_privs was dropped")
+	}
+	if !sc.ReadonlyRootfs {
+		t.Error("readonly_rootfs was dropped")
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.DropCapabilities) != 1 {
+		t.Errorf("capabilities were dropped: %+v", sc.Capabilities)
+	}
+}
+
+// A request that says nothing about the security context keeps the
+// template's, so existing callers are unaffected.
+func TestApplyTemplateToContainerInheritsTemplateSecurityContext(t *testing.T) {
+	templateCtr := &types.Container{
+		Name:            "cubebox-default",
+		SecurityContext: &types.ContainerSecurityContext{Privileged: true},
+	}
+	requestCtr := &types.Container{Name: "cubebox-default"}
+	if err := applyTemplateToContainer(requestCtr, templateCtr, 0); err != nil {
+		t.Fatalf("applyTemplateToContainer: %v", err)
+	}
+	if requestCtr.SecurityContext == nil {
+		t.Fatal("security context is nil")
+	}
+	if !requestCtr.SecurityContext.Privileged {
+		t.Error("template's privileged flag was not inherited")
+	}
+}
+
+// A partial request keeps the template's capability set rather than
+// silently dropping it.
+func TestApplyTemplateToContainerKeepsTemplateCapabilities(t *testing.T) {
+	templateCtr := &types.Container{
+		Name: "cubebox-default",
+		SecurityContext: &types.ContainerSecurityContext{
+			Capabilities: &types.Capability{DropCapabilities: []string{"ALL"}},
+		},
+	}
+	requestCtr := &types.Container{
+		Name:            "cubebox-default",
+		SecurityContext: &types.ContainerSecurityContext{NoNewPrivs: true},
+	}
+	if err := applyTemplateToContainer(requestCtr, templateCtr, 0); err != nil {
+		t.Fatalf("applyTemplateToContainer: %v", err)
+	}
+	sc := requestCtr.SecurityContext
+	if sc == nil {
+		t.Fatal("security context is nil")
+	}
+	if !sc.NoNewPrivs {
+		t.Error("no_new_privs was dropped")
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.DropCapabilities) != 1 {
+		t.Errorf("template's capabilities were dropped: %+v", sc.Capabilities)
+	}
+}
