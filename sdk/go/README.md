@@ -525,8 +525,7 @@ client := cubesandbox.NewClient(cfg)
 If one of the covered Go SDK calls (`Commands.Run`, `Files.WatchDir`,
 `Pty.Create`/`Connect`, `Pty.Kill`/`Resize`/`SendStdin`,
 `Files.List`/`Stat`/`Exists`/`Remove`/`Rename`/`MakeDir`) returns an HTML/text
-page or invalid envelope, check
-the proxy settings using the [Connect stream routing guide](../../docs/guide/troubleshooting/sdk-connect-stream-routing.md).
+page or invalid envelope, check the proxy settings.
 Connect streams and unary PTY calls reject HTTP 200 responses labeled
 `text/html`. On HTTP 200, filesystem RPCs recognize `text/html` or a
 case-insensitive `<!doctype` / `<html` body prefix after leading whitespace.
