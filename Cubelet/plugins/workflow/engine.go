@@ -168,6 +168,12 @@ type CreateContext struct {
 	IsRestart         bool
 	SavedContainerIDs map[int]string
 	RestartPrior      *RestartPrior
+
+	// ReclaimStaleRootfs permits storage to discard a sandbox-owned runtime
+	// rootfs left behind by an earlier failed pause resume. The paused-replace
+	// gate sets it only for a pause resume whose old shim/VM is provably gone,
+	// so the disk cannot belong to a live sandbox.
+	ReclaimStaleRootfs bool
 }
 
 func (b *CreateContext) GetInstanceType() string {

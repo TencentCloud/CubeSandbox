@@ -107,9 +107,10 @@ func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl ti
 func TestGatePausedReplaceRefusesWhileTheOldRuntimeMayLive(t *testing.T) {
 	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()})
 
-	err := gateOnlyService(sb, 10*time.Minute).
+	reclaim, err := gateOnlyService(sb, 10*time.Minute).
 		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
 	require.Error(t, err, "a paused sandbox whose shim may still hold the tap must not be replaced")
+	assert.False(t, reclaim, "a refused replacement must not authorize stale-rootfs cleanup")
 	assert.True(t, pendingIntentOnlyError(t, err),
 		"the refusal has to be the deferrable kind, or the retry budget would quarantine a healthy resume")
 }
@@ -121,8 +122,58 @@ func TestGatePausedReplaceAllowsWhenTheOldRuntimeIsGone(t *testing.T) {
 		ShimSpawned:   true,
 		ShimSpawnedAt: time.Now().Add(-time.Hour),
 	})
-	require.NoError(t, gateOnlyService(sb, 10*time.Minute).
-		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume")))
+	reclaim, err := gateOnlyService(sb, 10*time.Minute).
+		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.False(t, reclaim, "a replacement without a pause snapshot is not a resume")
+}
+
+// A pause resume whose old runtime is gone owns the stale rootfs name: the
+// sandbox is paused, no shim/VM can hold the disk, and the next derive must
+// start clean instead of colliding with a half-written object.
+func TestGatePausedReplaceAuthorizesReclaimForPauseResume(t *testing.T) {
+	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{
+		ShimSpawned:   true,
+		ShimSpawnedAt: time.Now().Add(-time.Hour),
+	})
+	req := resumeReplaceRequest("sb-resume")
+	req.Annotations[constants.MasterAnnotationPauseSnapshotID] = "snap-pause"
+
+	reclaim, err := gateOnlyService(sb, 10*time.Minute).
+		gatePausedReplace(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, reclaim, "a pause resume with no live runtime may reclaim its stale rootfs")
+}
+
+// A failed resume can delete the paused tombstone before the final create step
+// fails. The retry must still be able to reclaim the stale rootfs; the host
+// check by sandbox id is what replaces the missing row.
+func TestGatePausedReplaceAuthorizesReclaimWithoutLocalRecord(t *testing.T) {
+	req := resumeReplaceRequest("sb-resume")
+	req.Annotations[constants.MasterAnnotationPauseSnapshotID] = "snap-pause"
+
+	reclaim, err := gateOnlyService(nil, time.Minute).
+		gatePausedReplace(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, reclaim, "a pause resume with no local row and no live runtime may reclaim its stale rootfs")
+}
+
+// The no-row probe must still fail closed while a shim/VMM from the failed
+// attempt is alive; the missing store row is not proof that the disk is free.
+func TestGatePausedReplaceRefusesWithoutLocalRecordWhileRuntimeLives(t *testing.T) {
+	live := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, live.Pid)
+	withShimBundles(t, bundle)
+
+	req := resumeReplaceRequest("sb-resume")
+	req.Annotations[constants.MasterAnnotationPauseSnapshotID] = "snap-pause"
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	reclaim, err := gateOnlyService(nil, time.Minute).gatePausedReplace(ctx, req)
+	require.Error(t, err)
+	assert.False(t, reclaim, "a live runtime must keep the stale rootfs protected even without a row")
 }
 
 // The gate only owns the PAUSED-replacement case. Everything else has to fall
@@ -133,12 +184,17 @@ func TestGatePausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) {
 	running.SandboxID = "sb-run"
 	s := gateOnlyService(running, time.Minute)
 
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("")),
-		"a create without the desired-id annotation is not a replacement")
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-run")),
-		"a live sandbox is rejected downstream as already exists, never waited on")
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-elsewhere")),
-		"a desired id this node does not hold is an ordinary create")
+	reclaim, err := s.gatePausedReplace(context.Background(), resumeReplaceRequest(""))
+	assert.NoError(t, err, "a create without the desired-id annotation is not a replacement")
+	assert.False(t, reclaim)
+
+	reclaim, err = s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-run"))
+	assert.NoError(t, err, "a live sandbox is rejected downstream as already exists, never waited on")
+	assert.False(t, reclaim)
+
+	reclaim, err = s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-elsewhere"))
+	assert.NoError(t, err, "a desired id this node does not hold is an ordinary create")
+	assert.False(t, reclaim)
 }
 
 // A refusal has to happen before the create flow runs. That is the whole point

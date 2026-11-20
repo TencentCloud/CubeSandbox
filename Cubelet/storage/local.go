@@ -1451,11 +1451,38 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 		}
 		return newCowVolume(name, cowKindVolume, 0, dev), nil
 	}
+	// A resume that failed after deriving the runtime rootfs leaves
+	// sb-<id>-rootfs-gen0 behind. The retry must not reuse that possibly
+	// half-written object, and the backend cannot validate it either: its
+	// source is a snapshot, while list_snapshots only resolves volumes. The
+	// paused-replace gate has proved no live shim/VM owns the disk, so discard
+	// it and derive a clean one from the intact pause snapshot.
+	if opts.IsPauseResume() && opts.ReclaimStaleRootfs {
+		if err := discardStaleSandboxRootfs(ctx, store, backend, sandboxID, 0); err != nil {
+			return nil, err
+		}
+	}
 	// Cold start and same-node Pause Resume: always clone the package rootfs
 	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
 	// attach the package snap as the live disk — S3 snaps are RO and Commit
 	// requires a volume source (volume follows sandbox lifecycle).
 	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+// discardStaleSandboxRootfs deletes the runtime rootfs an interrupted pause
+// resume left behind. Callers must have proved that no live shim/VM owns it.
+// The object kind follows how each backend mints it: reflink creates a
+// snapshot, S3 clones a writable volume.
+func discardStaleSandboxRootfs(ctx context.Context, store cow.Store, backend, sandboxID string, gen uint32) error {
+	name := SandboxRootfsName(sandboxID, gen)
+	kind := cowKindSnapshot
+	if backend == cow.BackendS3 {
+		kind = cowKindVolume
+	}
+	if err := store.DeleteByKind(ctx, name, kind); err != nil {
+		return fmt.Errorf("discard stale sandbox rootfs %s: %w", name, err)
+	}
+	return nil
 }
 
 func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {

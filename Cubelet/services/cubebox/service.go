@@ -310,25 +310,64 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // The check runs here, before the create flow allocates network and volume:
 // failing later would strand those allocations and, via failover, destroy the
 // paused sandbox the user asked to resume.
-func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+//
+// It also reports whether storage may discard a stale runtime rootfs. That is
+// true only for a pause resume whose replacement passed the wait above: the
+// wait proves no shim/VM still owns the disk, while the pause-snapshot
+// annotation proves this is the resume path rather than an ordinary create.
+func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (bool, error) {
 	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
 	if desired == "" {
-		return nil
+		return false, nil
 	}
 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
-		// No local record to replace: an ordinary create that happens to
-		// carry the annotation.
-		return nil
+	hasRow := err == nil && sb != nil && sb.SandboxID == desired
+	noRow := (err == nil && sb == nil) || errors.Is(err, utils.ErrorKeyNotFound)
+	if !hasRow {
+		if !noRow {
+			// The record exists but cannot be read. Do not turn a store error
+			// into permission to delete a rootfs.
+			return false, nil
+		}
+		// No local record to replace. An ordinary create that happens to
+		// carry the annotation has nothing to reclaim. A pause resume can
+		// still reach here: createContainers deletes the paused tombstone
+		// before the final create step, so an attempt that fails there
+		// removes the very row a retry would use to prove the old runtime is
+		// gone. The shim registry and bundle pid files are keyed by the
+		// sandbox id and survive that row, so check them directly before
+		// authorizing the reclaim.
+		if resumeFromPauseSandboxID(req) == "" {
+			return false, nil
+		}
+		probe := &cubeboxstore.CubeBox{
+			ContainersMap: &cubeboxstore.ContainersMap{
+				ContainerMap: map[string]*cubeboxstore.Container{
+					desired: {
+						Metadata: cubeboxstore.Metadata{ID: desired},
+						Status:   cubeboxstore.StoreStatus(cubeboxstore.Status{}),
+					},
+				},
+			},
+		}
+		probe.ID = desired
+		probe.SandboxID = desired
+		if err := s.cubeboxMgr.waitReplacedSandboxGone(ctx, probe); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	st := sb.GetStatus()
 	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
 		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
 		// lifecycle lock and its cleanup, and a live sandbox must not be
 		// touched; the create step rejects both as already exists.
-		return nil
+		return false, nil
 	}
-	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
+	if err := s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb); err != nil {
+		return false, err
+	}
+	return resumeFromPauseSandboxID(req) != "", nil
 }
 
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
@@ -496,12 +535,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	// The gate has to run before the create flow allocates anything, and it
 	// needs the same namespace the flow would have used to resolve the old
 	// sandbox's shim.
-	if err := s.gatePausedReplace(ctx, req); err != nil {
+	reclaimStaleRootfs, gateErr := s.gatePausedReplace(ctx, req)
+	if gateErr != nil {
 		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
-			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), gateErr)
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		return rsp, nil
 	}
+	createInfo.ReclaimStaleRootfs = reclaimStaleRootfs
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
