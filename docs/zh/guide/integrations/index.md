@@ -53,3 +53,4 @@ lang: zh-CN
 | [OpenAI Agents SDK 集成指南](./openai-agents-sdk.md) | ZedingZhang | 2026-08-19 | integration, openai-agents-sdk, agent |
 | [Ubuntu 桌面沙箱指南](./ubuntu-desktop.md) | jinlong | 2026-09-15 | integration, ubuntu-desktop, novnc, gui-automation |
 | [OpenCode 集成指南（插件钩子方案）](./opencode-plugin.md) | Tantanovo | 2026-07-31 | integration, opencode, coding-agent, plugin |
+| [browser-use 集成指南](./browser-use.md) | tunsuy | 2026-10-19 | integration, browser-use, agent, browser-automation |
