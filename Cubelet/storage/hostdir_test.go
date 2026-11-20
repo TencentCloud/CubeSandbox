@@ -17,8 +17,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestBindHostDirRW(t *testing.T) {
@@ -239,4 +242,193 @@ func TestValidateHostDirSourceName(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestRemoveEmptyHostDirTreeRefusesNonDirectoryEntries(t *testing.T) {
+	base := t.TempDir()
+	sandboxDir := filepath.Join(base, "sb-nonempty")
+	volDir := filepath.Join(sandboxDir, "rw", "vol-0")
+	require.NoError(t, os.MkdirAll(volDir, 0755))
+
+	userFile := filepath.Join(volDir, "user-data.txt")
+	require.NoError(t, os.WriteFile(userFile, []byte("precious"), 0644))
+
+	err := removeEmptyHostDirTree(sandboxDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unexpected non-directory entry")
+	require.FileExists(t, userFile)
+}
+
+func TestCleanupHostDirVolumesUnmountsBindAndPreservesSourceData(t *testing.T) {
+	utils.SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	oldHostDirBasePath := hostDirBasePath
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	require.NoError(t, os.MkdirAll(hostDirBasePath, 0755))
+	t.Cleanup(func() { hostDirBasePath = oldHostDirBasePath })
+
+	srcDir := filepath.Join(tmp, "user-source")
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "sub"), 0755))
+	srcFile := filepath.Join(srcDir, "sub", "important.txt")
+	require.NoError(t, os.WriteFile(srcFile, []byte("do-not-delete"), 0644))
+
+	sandboxID := "bind-mount-sb"
+	bindDest := filepath.Join(hostDirBasePath, sandboxID, "rw", "vol 0")
+	require.NoError(t, os.MkdirAll(bindDest, 0755))
+
+	require.NoError(t, unix.Mount(srcDir, bindDest, "", unix.MS_BIND|unix.MS_REC, ""))
+	t.Cleanup(func() {
+		_ = unix.Unmount(bindDest, unix.MNT_DETACH)
+	})
+
+	// Stack a second bind mount on the same target to verify stacked-mount cleanup.
+	require.NoError(t, unix.Mount(srcDir, bindDest, "", unix.MS_BIND, ""))
+	t.Cleanup(func() {
+		_ = unix.Unmount(bindDest, unix.MNT_DETACH)
+	})
+
+	s := &local{}
+	info := &StorageInfo{
+		SandboxID: sandboxID,
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"vol/vol 0": {
+				VolumeName: "vol",
+				ShareDir:   filepath.Dir(bindDest),
+				BindPath:   bindDest,
+			},
+		},
+	}
+
+	require.NoError(t, s.cleanupHostDirVolumes(context.Background(), info))
+	require.NoDirExists(t, filepath.Join(hostDirBasePath, sandboxID))
+	require.FileExists(t, srcFile)
+
+	// Calling cleanup a second time must be idempotent.
+	require.NoError(t, s.cleanupHostDirVolumes(context.Background(), info))
+}
+
+func TestRemoveEmptyHostDirTreeRefusesActiveMountPoint(t *testing.T) {
+	utils.SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "source")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+	srcFile := filepath.Join(srcDir, "keep.txt")
+	require.NoError(t, os.WriteFile(srcFile, []byte("keep"), 0644))
+
+	sandboxDir := filepath.Join(tmp, "hostdir", "sb-active-mnt")
+	bindDest := filepath.Join(sandboxDir, "rw", "vol")
+	require.NoError(t, os.MkdirAll(bindDest, 0755))
+
+	require.NoError(t, unix.Mount(srcDir, bindDest, "", unix.MS_BIND, ""))
+	t.Cleanup(func() {
+		_ = unix.Unmount(bindDest, unix.MNT_DETACH)
+	})
+
+	// Even if removeEmptyHostDirTree is called while a mount is still active,
+	// it must refuse to traverse/delete the mount and leave source data intact.
+	err := removeEmptyHostDirTree(sandboxDir)
+	require.Error(t, err)
+	require.FileExists(t, srcFile)
+}
+
+func TestMatchesSandboxMountPrefixRequiresPathBoundary(t *testing.T) {
+	t.Parallel()
+
+	sandboxDir := "/data/cubelet/hostdir/test"
+	require.True(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test", sandboxDir))
+	require.True(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test/rw/vol", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test0/rw/vol", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix("/data/cubelet/hostdir/test0", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix("", sandboxDir))
+	require.False(t, matchesSandboxMountPrefix(sandboxDir, ""))
+}
+
+func TestPrepareHostDirVolumeRefusesExistingMountPoint(t *testing.T) {
+	tmp := t.TempDir()
+	origBase := hostDirBasePath
+	origRun := runHostDirCommand
+	origIsMount := isHostDirMountPoint
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	t.Cleanup(func() {
+		hostDirBasePath = origBase
+		runHostDirCommand = origRun
+		isHostDirMountPoint = origIsMount
+	})
+
+	runCalled := 0
+	runHostDirCommand = func(ctx context.Context, name string, args ...string) error {
+		runCalled++
+		return nil
+	}
+	isHostDirMountPoint = func(dst string) (bool, error) {
+		return true, nil
+	}
+
+	s := &local{}
+	opts := &workflow.CreateContext{
+		BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sb-dup"},
+		ReqInfo:          &cubebox.RunCubeSandboxRequest{},
+	}
+	vol := &cubebox.Volume{
+		Name: "vol-dup",
+		VolumeSource: &cubebox.VolumeSource{
+			HostDirVolumes: &cubebox.HostDirVolumeSources{
+				VolumeSources: []*cubebox.HostDirSource{{
+					Name:     "dup",
+					HostPath: "/data/shared/upper",
+				}},
+			},
+		},
+	}
+	result := &StorageInfo{SandboxID: "sb-dup"}
+
+	err := s.prepareHostDirVolume(context.Background(), opts, vol, result)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "already a mount point")
+	require.Equal(t, 0, runCalled)
+	require.Empty(t, result.HostDirBackendInfos)
+}
+
+func TestCleanupHostDirVolumesDoesNotUnmountSiblingPrefix(t *testing.T) {
+	utils.SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	origBase := hostDirBasePath
+	hostDirBasePath = filepath.Join(tmp, "hostdir")
+	require.NoError(t, os.MkdirAll(hostDirBasePath, 0755))
+	t.Cleanup(func() { hostDirBasePath = origBase })
+
+	srcA := filepath.Join(tmp, "src-a")
+	srcB := filepath.Join(tmp, "src-b")
+	require.NoError(t, os.MkdirAll(srcA, 0755))
+	require.NoError(t, os.MkdirAll(srcB, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcA, "a.txt"), []byte("a"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcB, "b.txt"), []byte("b"), 0644))
+
+	// Sibling sandbox IDs where "test" is a string prefix of "test0".
+	bindA := filepath.Join(hostDirBasePath, "test", "rw", "vol")
+	bindB := filepath.Join(hostDirBasePath, "test0", "rw", "vol")
+	require.NoError(t, os.MkdirAll(bindA, 0755))
+	require.NoError(t, os.MkdirAll(bindB, 0755))
+
+	require.NoError(t, unix.Mount(srcA, bindA, "", unix.MS_BIND, ""))
+	t.Cleanup(func() { _ = unix.Unmount(bindA, unix.MNT_DETACH) })
+	require.NoError(t, unix.Mount(srcB, bindB, "", unix.MS_BIND, ""))
+	t.Cleanup(func() { _ = unix.Unmount(bindB, unix.MNT_DETACH) })
+
+	s := &local{}
+	require.NoError(t, s.cleanupHostDirVolumes(context.Background(), &StorageInfo{
+		SandboxID: "test",
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"vol/vol": {VolumeName: "vol", BindPath: bindA},
+		},
+	}))
+
+	require.NoDirExists(t, filepath.Join(hostDirBasePath, "test"))
+	mounted, err := utils.IsMountPoint(bindB)
+	require.NoError(t, err)
+	require.True(t, mounted, "destroying sandbox 'test' must not unmount sibling 'test0'")
+	require.FileExists(t, filepath.Join(bindB, "b.txt"))
 }

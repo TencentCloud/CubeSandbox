@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 )
 
@@ -30,14 +31,26 @@ func IsLikelyNotMountPoint(file string) (bool, error) {
 }
 
 func IsMountPoint(dst string) (bool, error) {
-	if mntInfo, err := mount.Lookup(dst); err == nil {
-		if mntInfo.Mountpoint == dst {
-			return true, nil
-		}
-		return false, nil
-	} else {
+	resolved, err := mount.CanonicalizePath(dst)
+	if err != nil {
 		return false, err
 	}
+
+	if mounted, sure, err := mountinfo.MountedFast(resolved); err == nil && sure {
+		return mounted, nil
+	} else if err != nil && os.IsNotExist(err) {
+		return false, err
+	}
+
+	if likelyNot, err := IsLikelyNotMountPoint(resolved); err == nil && !likelyNot {
+		return true, nil
+	}
+
+	mntInfo, err := mount.Lookup(resolved)
+	if err != nil {
+		return false, err
+	}
+	return mntInfo.Mountpoint == resolved, nil
 }
 
 func isLikelyNotMountPointStatx(file string) (bool, error) {

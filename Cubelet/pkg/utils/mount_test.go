@@ -5,7 +5,11 @@
 package utils
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestIsMountPoint(t *testing.T) {
@@ -55,5 +59,44 @@ func TestIsMountPoint(t *testing.T) {
 				t.Errorf("IsMountPoint() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsMountPointViaSymlinkedAncestorAndTrailingSlash(t *testing.T) {
+	SkipUnlessRootWithSysAdmin(t)
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	realTarget := filepath.Join(tmp, "real", "mnt")
+	if err := os.MkdirAll(realTarget, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkBase := filepath.Join(tmp, "link")
+	if err := os.Symlink(filepath.Join(tmp, "real"), linkBase); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unix.Mount(srcDir, realTarget, "", unix.MS_BIND, ""); err != nil {
+		t.Fatalf("bind mount: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Unmount(realTarget, unix.MNT_DETACH)
+	})
+
+	for _, candidate := range []string{
+		realTarget,
+		realTarget + "/",
+		filepath.Join(linkBase, "mnt"),
+	} {
+		got, err := IsMountPoint(candidate)
+		if err != nil {
+			t.Fatalf("IsMountPoint(%q) error = %v", candidate, err)
+		}
+		if !got {
+			t.Fatalf("IsMountPoint(%q) = false, want true", candidate)
+		}
 	}
 }
