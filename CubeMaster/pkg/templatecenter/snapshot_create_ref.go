@@ -31,7 +31,7 @@ func ReserveSnapshotCreate(ctx context.Context, snapshotID, sandboxID, nodeID, n
 		return errors.New("snapshot create reservation requires snapshot, sandbox and node identities")
 	}
 	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		rec, err := lockSnapshotRecordTx(tx, snapshotID)
+		rec, err := lockSnapshotRecordWithStrengthTx(tx, snapshotID, "SHARE")
 		if err != nil {
 			return err
 		}
@@ -51,8 +51,12 @@ func ReserveSnapshotCreate(ctx context.Context, snapshotID, sandboxID, nodeID, n
 }
 
 func lockSnapshotRecordTx(tx *gorm.DB, snapshotID string) (*models.SnapshotRecord, error) {
+	return lockSnapshotRecordWithStrengthTx(tx, snapshotID, "UPDATE")
+}
+
+func lockSnapshotRecordWithStrengthTx(tx *gorm.DB, snapshotID, strength string) (*models.SnapshotRecord, error) {
 	var rec models.SnapshotRecord
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+	if err := tx.Clauses(clause.Locking{Strength: strength}).
 		Where("snapshot_id = ?", snapshotID).First(&rec).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, wrapSnapshotNotFound(snapshotID)
