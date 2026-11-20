@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	// glebarez/sqlite is a pure-Go (CGO-free) SQLite driver, used here as an
@@ -48,7 +49,7 @@ type fakeControllerPlugin struct {
 	// handler's DB-row rollback path.
 	createErr  error
 	destroyErr error
-	onDestroy  func()
+	onDestroy  func(context.Context) error
 	// privateData is the Create response; inputs are recorded independently.
 	privateData string
 
@@ -91,9 +92,11 @@ func (f *fakeControllerPlugin) Create(_ context.Context, volumeID, name, private
 	}, nil
 }
 
-func (f *fakeControllerPlugin) Destroy(_ context.Context, volumeID, privateData string) error {
+func (f *fakeControllerPlugin) Destroy(ctx context.Context, volumeID, privateData string) error {
 	if f.onDestroy != nil {
-		f.onDestroy()
+		if err := f.onDestroy(ctx); err != nil {
+			return err
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -129,6 +132,9 @@ func newVolumeTestEngine(t *testing.T) (*gin.Engine, *gorm.DB, *fakeControllerPl
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	require.NoError(t, db.AutoMigrate(&models.VolumeRecord{}))
 
 	origDB := volumeDB
@@ -400,11 +406,12 @@ func TestVolumeHTTP_CreateAndDeleteShareAdmission(t *testing.T) {
 	require.Zero(t, fake.destroyCalls)
 
 	require.NoError(t, db.Model(&models.VolumeRecord{}).Where("volume_id = ?", id).Update("refcount", 0).Error)
-	fake.onDestroy = func() {
+	fake.onDestroy = func(context.Context) error {
 		// Backend Destroy has started but not yet returned: reverse the order.
 		_, _, err := admission.BeginCreate(ctx, db, []string{id})
 		require.ErrorIs(t, err, admission.ErrBusy)
 		del(conflict)
+		return nil
 	}
 	del(0)
 	require.Equal(t, 1, fake.destroyCalls)
@@ -575,6 +582,93 @@ func TestVolumeHTTP_PrivateDataDestroyErrorPreservesRecord(t *testing.T) {
 	_, retry := doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+volumeID, "")
 	assert.Equal(t, int(errorcode.ErrorCode_Conflict), retry.Ret.RetCode)
 	assert.Equal(t, 1, fake.destroyCalls)
+}
+
+func TestVolumeHTTP_DeleteCancellationAndClaim(t *testing.T) {
+	type traceKey struct{}
+	for _, tc := range []struct {
+		name        string
+		beforeClaim bool
+		destroyErr  error
+		wantCode    int
+	}{
+		{"success after disconnect", false, nil, 0},
+		{"unknown after disconnect", false, errors.New("backend outcome unknown"), int(errorcode.ErrorCode_MasterInternalError)},
+		{"canceled before claim", true, nil, int(errorcode.ErrorCode_DBError)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db, fake := newVolumeTestEngine(t)
+			record := models.VolumeRecord{VolumeID: "vol-delete-cancel", Name: "vol-delete-cancel", Driver: fake.Name()}
+			require.NoError(t, db.Create(&record).Error)
+			fake.destroyErr = tc.destroyErr
+
+			ctx, cancel := context.WithCancel(context.WithValue(t.Context(), traceKey{}, record.VolumeID))
+			defer cancel()
+			req := httptest.NewRequestWithContext(ctx, http.MethodDelete, "/cube/volume/"+record.VolumeID, nil)
+			w := httptest.NewRecorder()
+			if tc.beforeClaim {
+				cancel()
+				r.ServeHTTP(w, req)
+			} else {
+				entered := make(chan context.Context, 1)
+				release := make(chan struct{})
+				done := make(chan struct{})
+				fake.onDestroy = func(pluginCtx context.Context) error {
+					entered <- pluginCtx
+					<-release
+					return pluginCtx.Err()
+				}
+				go func() {
+					defer close(done)
+					r.ServeHTTP(w, req)
+				}()
+				defer func() {
+					close(release)
+					<-done
+				}()
+
+				select {
+				case pluginCtx := <-entered:
+					require.NoError(t, db.First(&record, record.ID).Error)
+					require.True(t, record.Deleting)
+					cancel()
+					require.NoError(t, pluginCtx.Err())
+					require.Equal(t, record.VolumeID, pluginCtx.Value(traceKey{}))
+					deadline, ok := pluginCtx.Deadline()
+					require.True(t, ok)
+					require.True(t, time.Until(deadline) > 0)
+				case <-done:
+					t.Fatal("Delete returned before calling the plugin")
+				case <-time.After(5 * time.Second):
+					t.Fatal("Delete did not call the plugin")
+				}
+
+				// Release the plugin before inspecting the SQL settlement.
+				release <- struct{}{}
+				<-done
+			}
+
+			require.Equal(t, http.StatusOK, w.Code)
+			var res volumeRetEnvelope
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &res))
+			require.NotNil(t, res.Ret)
+			require.Equal(t, tc.wantCode, res.Ret.RetCode)
+			err := db.First(&record, record.ID).Error
+			switch {
+			case tc.beforeClaim:
+				require.NoError(t, err)
+				require.False(t, record.Deleting)
+				require.Zero(t, fake.destroyCalls)
+			case tc.destroyErr != nil:
+				require.NoError(t, err)
+				require.True(t, record.Deleting)
+				require.Equal(t, 1, fake.destroyCalls)
+			default:
+				require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+				require.Equal(t, 1, fake.destroyCalls)
+			}
+		})
+	}
 }
 
 func TestVolumeHTTP_DeleteCanRetryAfterPluginFailsToStart(t *testing.T) {

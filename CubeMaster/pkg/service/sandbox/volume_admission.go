@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -25,13 +27,43 @@ type volumeSource struct {
 	PrivateData string `json:"private_data,omitempty"`
 }
 
+type volumeCreateResult struct {
+	rsp              *cubebox.RunCubeSandboxResponse
+	guarded          bool
+	retryCode        bool
+	createdSandboxID string
+}
+
+func matchesCreateResponse(req *cubebox.RunCubeSandboxRequest, rsp *cubebox.RunCubeSandboxResponse) bool {
+	desired := req.GetAnnotations()[constants.CubeAnnotationDesiredSandboxID]
+	got := rsp.GetSandboxID()
+	return rsp.GetRequestID() == req.GetRequestID() && (desired == "" || got == "" || desired == got)
+}
+
+func volumeCreateReportFailed(rsp *cubebox.RunCubeSandboxResponse) bool {
+	return rsp.GetRet() != nil && rsp.GetRet().GetRetCode() == codes.ErrorCode_Unknown &&
+		string(rsp.GetExtInfo()[cubebox.ExtVolumeCreateReportFailed]) == "true"
+}
+
+func createResultFromRPC(req *cubebox.RunCubeSandboxRequest, rsp *cubebox.RunCubeSandboxResponse, rpcErr error) volumeCreateResult {
+	if rpcErr != nil {
+		return volumeCreateResult{}
+	}
+	result := volumeCreateResult{rsp: rsp}
+	if rsp.GetRet() != nil && matchesCreateResponse(req, rsp) && strings.TrimSpace(rsp.GetSandboxID()) != "" &&
+		(rsp.GetRet().GetRetCode() == codes.ErrorCode_Success || volumeCreateReportFailed(rsp)) {
+		result.createdSandboxID = rsp.GetSandboxID()
+	}
+	return result
+}
+
 // createWithVolumeAdmission covers both normal create and thin Pause Resume
 // (whose volume IDs are saved in the pause binding rather than the request).
-func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebox.RunCubeSandboxRequest, savedIDs []string) (*cubebox.RunCubeSandboxResponse, bool, error) {
+func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebox.RunCubeSandboxRequest, savedIDs []string) (volumeCreateResult, error) {
 	var sources []volumeSource
 	if raw := req.GetAnnotations()[AnnotationPluginVolumeSources]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &sources); err != nil {
-			return nil, true, ret.Err(errorcode.ErrorCode_MasterParamsError, "invalid resolved plugin volumes")
+			return volumeCreateResult{guarded: true}, ret.Err(errorcode.ErrorCode_MasterParamsError, "invalid resolved plugin volumes")
 		}
 	}
 	ids := append([]string(nil), savedIDs...)
@@ -45,7 +77,7 @@ func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebo
 	}
 	if len(ids) == 0 {
 		rsp, err := cubelet.Create(ctx, endpoint, req)
-		return rsp, false, err
+		return createResultFromRPC(req, rsp, err), err
 	}
 
 	var guard *admission.CreateGuard
@@ -74,19 +106,23 @@ func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebo
 		req.Annotations[AnnotationPluginVolumeSources] = string(data)
 		return nil
 	})
-	if err != nil {
-		// A connection failure before the admission hook leaves nothing to
-		// settle and can follow the ordinary scheduler retry path.
-		return rsp, admissionAttempted, err
+	result := createResultFromRPC(req, rsp, err)
+	result.guarded = admissionAttempted
+	// A connection failure before the admission hook leaves nothing to settle
+	// and can follow the ordinary scheduler retry path.
+	if err != nil || rsp.GetRet() == nil || volumeCreateReportFailed(rsp) {
+		return result, err
 	}
-	if rsp.GetRet() == nil {
-		return rsp, true, nil
-	}
-	success := rsp.GetRet().GetRetCode() == codes.ErrorCode_Success
+	code := rsp.GetRet().GetRetCode()
+	success := code == codes.ErrorCode_Success
 	ext := rsp.GetExtInfo()
 	rolledBack := !success && string(ext[cubebox.ExtVolumeCreateRolledBack]) == "true"
-	if !success && !rolledBack && string(ext[cubebox.ExtVolumeAttachNotStarted]) != "true" {
-		return rsp, true, nil
+	notStarted := !success && string(ext[cubebox.ExtVolumeAttachNotStarted]) == "true"
+	if !success && !rolledBack && !notStarted {
+		return result, nil
+	}
+	if !matchesCreateResponse(req, rsp) || (success && result.createdSandboxID == "") {
+		return result, ret.Err(errorcode.ErrorCode_Unknown, "plugin volume Create response identity mismatch")
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
@@ -95,7 +131,9 @@ func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebo
 		events = ext
 	}
 	if err := guard.Finish(ctx, events, rolledBack); err != nil {
-		return rsp, true, ret.Err(errorcode.ErrorCode_DBError, "could not settle plugin volume reservation")
+		return result, ret.Err(errorcode.ErrorCode_DBError, "could not settle plugin volume reservation")
 	}
-	return rsp, true, nil
+	// Only the workflow limiter rejects Create before running any step.
+	result.retryCode = code == codes.ErrorCode_ConcurrentFailed && notStarted && !rolledBack
+	return result, nil
 }

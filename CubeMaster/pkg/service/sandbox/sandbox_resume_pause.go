@@ -556,7 +556,16 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		s.annotate(resumeAttrs...)
 		ctx = s.enter(ctx, s.runtime, resumeAttrs...)
 	}
-	cubeRsp, guarded, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs)
+	result, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs)
+	cubeRsp, guarded := result.rsp, result.guarded
+	if result.createdSandboxID != "" {
+		switch {
+		case err != nil:
+			log.G(ctx).Errorf("pause resume volume settlement failed sandbox=%s target=%s", result.createdSandboxID, targetIP)
+		case volumeCreateReportFailed(cubeRsp):
+			log.G(ctx).Errorf("pause resume volume report failed sandbox=%s target=%s", result.createdSandboxID, targetIP)
+		}
+	}
 	if err != nil || cubeRsp == nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
 		if err != nil {

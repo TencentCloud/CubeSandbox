@@ -349,7 +349,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	var createInfo *workflow.CreateContext
 	defer func() {
-		if ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
+		if ret.IsSuccessCode(rsp.GetRet().GetRetCode()) || string(rsp.ExtInfo[cubebox.ExtVolumeCreateReportFailed]) == "true" {
 			return
 		}
 		if createInfo != nil && createInfo.PluginVolumeRollback != nil {
@@ -555,6 +555,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			log.G(ctx).Errorf("create volume reference report: %v", err)
 			rsp.Ret.RetMsg = "could not confirm plugin volume reference report"
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.ExtInfo[cubebox.ExtVolumeCreateReportFailed] = []byte("true")
 		}
 	}
 	if strings.Contains(rsp.Ret.RetMsg, "no space left") ||

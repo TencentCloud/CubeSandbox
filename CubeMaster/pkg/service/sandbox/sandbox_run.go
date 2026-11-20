@@ -70,6 +70,7 @@ const (
 type createSandboxContext struct {
 	volumeGuarded         bool
 	volumeAdmissionFailed bool
+	failoverTask          *task.Task
 	dispatchState         atomic.Int32
 	selctx                *selctx.SelectorCtx
 	directHost            bool
@@ -433,9 +434,14 @@ func (c *createSandboxContext) callCubelet() bool {
 			attribute.String(telemetry.AttrNodeID, c.selectHost.ID()),
 		))
 	c.cubeletStartTime = time.Now()
-	var err error
-	c.cubeletRsp, c.volumeGuarded, err = createWithVolumeAdmission(rpcCtx, calleeEndpoint, c.cubeletReq, nil)
-	if c.volumeGuarded && (err != nil || c.cubeletRsp.GetRet() == nil || c.cubeletRsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_Success) {
+	result, err := createWithVolumeAdmission(rpcCtx, calleeEndpoint, c.cubeletReq, nil)
+	c.cubeletRsp, c.volumeGuarded = result.rsp, result.guarded
+	reportFailed := volumeCreateReportFailed(c.cubeletRsp)
+	if result.createdSandboxID != "" && (err != nil || reportFailed) {
+		c.failoverTask = c.newCreateFailoverTask(calleeEndpoint, result.createdSandboxID)
+	}
+	if reportFailed || (c.volumeGuarded && !result.retryCode &&
+		(err != nil || c.cubeletRsp.GetRet() == nil || c.cubeletRsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_Success)) {
 		c.volumeAdmissionFailed = true
 		switch {
 		case err != nil:
@@ -549,37 +555,51 @@ func (c *createSandboxContext) persistSandboxSpec() {
 	}
 }
 
-func (c *createSandboxContext) failover() {
-
-	if c.masterRsp.Ret.RetCode != int(errorcode.ErrorCode_Success) && c.masterRsp.SandboxID != "" {
-		rt := CubeLog.GetTraceInfo(c.ctx).DeepCopy()
-		rt.Action = string(task.DestroySandbox)
-		rt.CalleeAction = string(task.DestroySandbox)
-		rt.CalleeEndpoint = cubelet.GetCubeletAddr(c.selectHost.HostIP())
-		t := &task.Task{
-			BaseInfo: task.BaseInfo{
+func (c *createSandboxContext) newCreateFailoverTask(endpoint, sandboxID string) *task.Task {
+	return &task.Task{
+		BaseInfo: task.BaseInfo{
+			InstanceType: c.cubeletReq.GetInstanceType(),
+			SandboxID:    sandboxID,
+		},
+		RequestId: c.masterRsp.RequestID,
+		Request: &cubebox.DestroyCubeSandboxRequest{
+			RequestID: c.cubeletReq.GetRequestID(),
+			SandboxID: sandboxID,
+			Filter: &cubebox.CubeSandboxFilter{
 				InstanceType: c.cubeletReq.GetInstanceType(),
-				SandboxID:    c.cubeletRsp.GetSandboxID(),
 			},
-			Ctx:       CubeLog.WithRequestTrace(c.ctx, rt),
-			RequestId: c.masterRsp.RequestID,
-			Request: &cubebox.DestroyCubeSandboxRequest{
-				RequestID: c.cubeletRsp.GetRequestID(),
-				SandboxID: c.cubeletRsp.GetSandboxID(),
-				Filter: &cubebox.CubeSandboxFilter{
-					InstanceType: c.cubeletReq.GetInstanceType(),
-				},
-			},
-			TaskType: task.DestroySandbox,
-			CallEp:   rt.CalleeEndpoint,
-		}
+		},
+		TaskType:       task.DestroySandbox,
+		CallEp:         endpoint,
+		CreateFailover: true,
+	}
+}
 
-		if lifecyclePublisher.Enabled() {
-			t.Ctx = webhook.WithOrigin(t.Ctx, webhook.OriginCreateFailover)
+func (c *createSandboxContext) failover() {
+	if c.masterRsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {
+		return
+	}
+	t := c.failoverTask
+	if t == nil {
+		sandboxID := c.masterRsp.SandboxID
+		if sandboxID == "" || sandboxID != c.cubeletRsp.GetSandboxID() ||
+			c.cubeletRsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_Success ||
+			!matchesCreateResponse(c.cubeletReq, c.cubeletRsp) {
+			return
 		}
-		if err := task.AddAsyncTask(t); err != nil {
-			log.G(c.ctx).Fatalf("failover_DestroySandbox error:%+v", err.Error())
-		}
+		t = c.newCreateFailoverTask(cubelet.GetCubeletAddr(c.selectHost.HostIP()), sandboxID)
+	}
+
+	rt := CubeLog.GetTraceInfo(c.ctx).DeepCopy()
+	rt.Action = string(task.DestroySandbox)
+	rt.CalleeAction = string(task.DestroySandbox)
+	rt.CalleeEndpoint = t.CallEp
+	t.Ctx = CubeLog.WithRequestTrace(context.WithoutCancel(c.ctx), rt)
+	if lifecyclePublisher.Enabled() {
+		t.Ctx = webhook.WithOrigin(t.Ctx, webhook.OriginCreateFailover)
+	}
+	if err := task.AddAsyncTask(t); err != nil {
+		log.G(c.ctx).Fatalf("failover_DestroySandbox error:%+v", err.Error())
 	}
 }
 

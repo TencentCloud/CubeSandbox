@@ -18,3 +18,7 @@ const ExtVolumeAttachNotStarted = "cube-volume-attach-not-started"
 // ExtVolumeCreateRolledBack confirms that failed Create released all of its
 // plugin volume holds. The same response can carry node last-detach events.
 const ExtVolumeCreateRolledBack = "cube-volume-create-rolled-back"
+
+// ExtVolumeCreateReportFailed confirms Create completed before Cubelet
+// failed to collect the volume reference report.
+const ExtVolumeCreateReportFailed = "cube-volume-create-report-failed"

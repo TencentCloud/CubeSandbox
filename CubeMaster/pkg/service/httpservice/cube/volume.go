@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -352,12 +353,21 @@ func handleDeleteVolume(c *gin.Context) {
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_NotFound, "volume not found: "+volumeID)})
 		return
 	case err != nil:
+		log.G(c.Request.Context()).Errorf("volume delete claim failed volume_id=%s", volumeID)
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db error: "+err.Error())})
 		return
 	}
 
-	destroyErr := p.Destroy(c.Request.Context(), volumeID, record.PrivateData)
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 2*time.Second)
+	serverCtx := context.WithoutCancel(c.Request.Context())
+	pluginBudget := 360 * time.Second
+	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil && cfg.Common.WriteTimeout > 0 {
+		pluginBudget = time.Duration(cfg.Common.WriteTimeout) * time.Second
+	}
+	pluginCtx, cancelPlugin := context.WithTimeout(serverCtx, pluginBudget)
+	destroyErr := p.Destroy(pluginCtx, volumeID, record.PrivateData)
+	cancelPlugin()
+
+	ctx, cancel := context.WithTimeout(serverCtx, 2*time.Second)
 	defer cancel()
 	if destroyErr != nil {
 		var notStarted *plugin.NotStartedError
@@ -365,9 +375,12 @@ func handleDeleteVolume(c *gin.Context) {
 			dbErr := volumeDB().WithContext(ctx).Model(&record).
 				Where("deleting = ?", true).UpdateColumn("deleting", false).Error
 			if dbErr != nil {
+				log.G(ctx).Errorf("volume delete claim release failed volume_id=%s", volumeID)
 				common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "release volume delete claim: "+dbErr.Error())})
 				return
 			}
+		} else {
+			log.G(ctx).Errorf("volume plugin destroy outcome unknown volume_id=%s", volumeID)
 		}
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, "plugin destroy error: "+destroyErr.Error())})
 		return
@@ -388,6 +401,7 @@ func handleDeleteVolume(c *gin.Context) {
 		}
 	}
 	if dbErr != nil {
+		log.G(ctx).Errorf("volume delete row settlement failed volume_id=%s", volumeID)
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db delete error: "+dbErr.Error())})
 		return
 	}
