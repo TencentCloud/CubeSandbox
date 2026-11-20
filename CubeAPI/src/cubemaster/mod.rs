@@ -587,6 +587,26 @@ impl CubeMasterClient {
         parse_response(resp).await
     }
 
+    /// POST /cube/volume/{volume_id}/content-token — issue direct-storage credentials.
+    pub async fn issue_volume_content_credentials(
+        &self,
+        volume_id: &str,
+    ) -> Result<IssueVolumeContentCredentialsResponse, CubeMasterError> {
+        validate_volume_id(volume_id)?;
+        let url = format!(
+            "{}/cube/volume/{}/content-token",
+            self.base_url,
+            volume_id
+        );
+        let resp = self
+            .inner
+            .post(&url)
+            .send()
+            .await
+            .map_err(CubeMasterError::Http)?;
+        parse_response(resp).await
+    }
+
     /// DELETE /cube/volume/{volume_id} — delete a volume.
     pub async fn delete_volume(
         &self,
@@ -3199,7 +3219,7 @@ pub struct CubeMasterVolume {
     pub volume_id: String,
     #[serde(default)]
     pub name: String,
-    /// Auth token used by volume-content service; present on create/get.
+    /// Legacy Create-hook token retained in the volume response for compatibility.
     #[serde(default)]
     pub token: String,
 }
@@ -3251,6 +3271,25 @@ pub struct GetVolumeResponse {
     pub request_id: String,
     pub ret: RetCode,
     pub volume: CubeMasterVolume,
+}
+
+/// POST /cube/volume/{volume_id}/content-token — response.
+#[derive(Debug, Deserialize)]
+pub struct IssueVolumeContentCredentialsResponse {
+    #[serde(rename = "RequestID", alias = "requestID", default)]
+    pub request_id: String,
+    pub ret: RetCode,
+    pub provider: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: String,
+    #[serde(default)]
+    pub addressing_style: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expires_at: i64,
 }
 
 /// DELETE /cube/volume/{volume_id} — response.

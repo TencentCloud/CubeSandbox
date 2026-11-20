@@ -105,7 +105,8 @@ message CreateRequest {
 }
 
 message CreateResponse {
-  // token is an optional credential for volume-content access.
+  // token is a legacy credential retained for API compatibility. Direct
+  // content access uses VolumeContentService.IssueToken instead.
   // volume_id and name come from the CreateRequest; plugins must not echo them.
   string token = 1;
   // private_data is opaque plugin state persisted in t_cube_volume and
@@ -125,3 +126,36 @@ message DestroyRequest {
 }
 
 message DestroyResponse {}
+
+// VolumeContentService is the optional control-plane credential vending hook
+// for direct SDK access. File bytes never pass through this service: after
+// credentials are issued, the SDK accesses the storage provider directly.
+service VolumeContentService {
+  rpc IssueCredentials(IssueVolumeCredentialsRequest) returns (IssueVolumeCredentialsResponse);
+}
+
+message IssueVolumeCredentialsRequest {
+  string volume_id = 1;
+  string private_data = 2;
+  // subject is the authenticated API caller, when CubeMaster has one.
+  string subject = 3;
+}
+
+// Short-lived credentials for direct access to an S3-compatible object store,
+// plus the server-selected volume scope. provider is "s3" for the generic S3 API;
+// "cos" remains accepted as a legacy provider value.
+// These secrets are returned only to an authenticated SDK caller.
+message IssueVolumeCredentialsResponse {
+  string provider = 1;
+  string endpoint = 2;
+  string bucket = 3;
+  string region = 4;
+  string prefix = 5;
+  string access_key_id = 6;
+  string secret_access_key = 7;
+  string session_token = 8;
+  // Unix timestamp in seconds; must be in the future.
+  int64 expires_at_unix = 9;
+  // S3 bucket addressing mode: auto, path, or virtual. Empty means auto.
+  string addressing_style = 10;
+}

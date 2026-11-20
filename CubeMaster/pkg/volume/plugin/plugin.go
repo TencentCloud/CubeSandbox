@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package plugin defines the Controller Hook Plugin interface for Volume
-// lifecycle management (create / destroy / get-info / exists).
+// Package plugin defines Controller hooks for volume lifecycle and separate
+// Content hooks for direct file access.
 //
 // Three implementation styles are supported (mirroring the design doc):
 //   - built-in:    compiled directly into CubeMaster (this package)
@@ -54,6 +54,10 @@ type Config struct {
 	// SocketPath is the Unix socket or TCP address for the gRPC server.
 	// Required when Type == PluginTypeRPC.
 	SocketPath string `toml:"socket_path" yaml:"socket_path"`
+	// ContentEnabled registers the optional VolumeContentService on this RPC driver.
+	ContentEnabled bool `toml:"content_enabled" yaml:"content_enabled"`
+	// ContentSocketPath optionally overrides SocketPath for the separate content hook process.
+	ContentSocketPath string `toml:"content_socket_path" yaml:"content_socket_path"`
 }
 
 // ValidateConfigs checks volume_plugins for duplicate driver names and empty names.
@@ -62,6 +66,12 @@ func ValidateConfigs(configs []Config) error {
 	for _, cfg := range configs {
 		if cfg.Name == "" {
 			return fmt.Errorf("volume plugin: name is empty")
+		}
+		if cfg.ContentEnabled && cfg.Type != PluginTypeRPC {
+			return fmt.Errorf("volume plugin %q: content_enabled requires type rpc", cfg.Name)
+		}
+		if cfg.ContentSocketPath != "" && !cfg.ContentEnabled {
+			return fmt.Errorf("volume plugin %q: content_socket_path requires content_enabled", cfg.Name)
 		}
 		if prev, dup := seen[cfg.Name]; dup {
 			return fmt.Errorf(
@@ -78,6 +88,9 @@ func ValidateConfigs(configs []Config) error {
 // LoadBinary creates and registers a binary ControllerPlugin from cfg.
 // Returns an error if the config is invalid or the name is already registered.
 func LoadBinary(cfg Config) error {
+	if cfg.ContentEnabled {
+		return fmt.Errorf("volume plugin %q: content_enabled requires type rpc", cfg.Name)
+	}
 	if cfg.Name == "" {
 		return fmt.Errorf("volume plugin config: name is empty")
 	}
@@ -95,7 +108,7 @@ func LoadBinary(cfg Config) error {
 	return nil
 }
 
-// LoadRPC creates and registers an RPC ControllerPlugin from cfg.
+// LoadRPC creates and registers the Controller and optional Content hooks.
 func LoadRPC(cfg Config) error {
 	if cfg.Name == "" {
 		return fmt.Errorf("volume plugin config: name is empty")
@@ -106,14 +119,36 @@ func LoadRPC(cfg Config) error {
 	if _, dup := registry[cfg.Name]; dup {
 		return fmt.Errorf("volume plugin %q already registered", cfg.Name)
 	}
+	if cfg.ContentEnabled {
+		if _, dup := contentRegistry[cfg.Name]; dup {
+			return fmt.Errorf("volume content plugin %q already registered", cfg.Name)
+		}
+	}
 	if rpcFactory == nil {
 		return fmt.Errorf("rpc volume plugin support not linked in (import _ \"…/plugin/rpc\")")
 	}
-	p, err := rpcFactory(cfg.Name, cfg.SocketPath)
+	controller, err := rpcFactory(cfg.Name, cfg.SocketPath)
 	if err != nil {
 		return err
 	}
-	Register(p)
+	var content ContentPlugin
+	if cfg.ContentEnabled {
+		if rpcContentFactory == nil {
+			return fmt.Errorf("rpc volume content plugin support not linked in (import _ \"…/plugin/rpc\")")
+		}
+		contentSocketPath := cfg.ContentSocketPath
+		if contentSocketPath == "" {
+			contentSocketPath = cfg.SocketPath
+		}
+		content, err = rpcContentFactory(cfg.Name, contentSocketPath)
+		if err != nil {
+			return err
+		}
+	}
+	Register(controller)
+	if content != nil {
+		RegisterContent(content)
+	}
 	return nil
 }
 
@@ -129,6 +164,14 @@ func SetBinaryFactory(f func(name, binaryPath string) ControllerPlugin) {
 
 // rpcFactory is set by the rpc sub-package via SetRPCFactory.
 var rpcFactory func(name, socketPath string) (ControllerPlugin, error)
+
+var rpcContentFactory func(name, socketPath string) (ContentPlugin, error)
+
+// SetRPCContentFactory registers a constructor for an independently hosted
+// gRPC content hook process.
+func SetRPCContentFactory(f func(name, socketPath string) (ContentPlugin, error)) {
+	rpcContentFactory = f
+}
 
 // SetRPCFactory is called from plugin/rpc's init() to register the
 // constructor without creating an import cycle.
@@ -149,8 +192,8 @@ type VolumeInfo struct {
 	// Name is the human-readable label.
 	Name string `json:"name"`
 
-	// Token is the auth credential used by the volume-content service.
-	// May be empty for backends that do not require per-volume tokens.
+	// Token is the legacy Create-hook credential retained for API compatibility.
+	// Direct content access obtains a separate short-lived token via ContentPlugin.IssueToken.
 	Token string `json:"token"`
 
 	// PrivateData is opaque plugin state persisted in t_cube_volume and
@@ -214,6 +257,7 @@ func Get(name string) (ControllerPlugin, bool) {
 // Intended for tests that register ephemeral fake ControllerPlugins.
 func UnregisterForTest(name string) {
 	delete(registry, name)
+	delete(contentRegistry, name)
 	kept := registryOrder[:0]
 	for _, n := range registryOrder {
 		if n != name {

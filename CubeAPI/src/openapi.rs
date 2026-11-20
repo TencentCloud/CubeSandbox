@@ -21,7 +21,7 @@ use crate::{
         TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
         TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
-        UpdateSandboxNetworkRequest, Volume, VolumeAndToken,
+        UpdateSandboxNetworkRequest, Volume, VolumeAndToken, VolumeContentCredentials,
     },
 };
 
@@ -96,6 +96,7 @@ impl Modify for SecurityAddon {
         handlers::volumes::create_volume,
         handlers::volumes::create_volume_v2,
         handlers::volumes::get_volume,
+        handlers::volumes::issue_content_credentials,
         handlers::volumes::delete_volume
     ),
     components(schemas(
@@ -149,7 +150,8 @@ impl Modify for SecurityAddon {
         NewVolume,
         NewVolumeV2,
         Volume,
-        VolumeAndToken
+        VolumeAndToken,
+        VolumeContentCredentials
     )),
     modifiers(&SecurityAddon),
     tags(

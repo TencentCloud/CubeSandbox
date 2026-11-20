@@ -16,10 +16,16 @@ import (
 	"github.com/tencentyun/cos-go-sdk-v5"
 )
 
-// Client wraps cos-go-sdk-v5 for volume lifecycle operations.
+// Client wraps cos-go-sdk-v5 for volume lifecycle operations and the COS STS
+// API for direct-access content credentials.
 type Client struct {
-	bucket string
-	inner  *cos.Client
+	bucket     string
+	region     string
+	secretID   string
+	secretKey  string
+	appID      string
+	inner      *cos.Client
+	stsHTTPCli *http.Client // nil in production; overridden by tests to stub STS.
 }
 
 // New builds a COS client from plugin config.
@@ -36,7 +42,13 @@ func New(cfg *config.Config) (*Client, error) {
 			SecretKey: cfg.SecretKey,
 		},
 	})
-	return &Client{bucket: cfg.Bucket, inner: c}, nil
+	// AppID is only required for IssueContentCredentials (STS resource ARNs);
+	// a bad/missing APPID must not break Create/Destroy/Attach/Detach.
+	appID, _ := cfg.ResolveAppID()
+	return &Client{
+		bucket: cfg.Bucket, region: cfg.Region, secretID: cfg.SecretID, secretKey: cfg.SecretKey,
+		appID: appID, inner: c,
+	}, nil
 }
 
 // CreateVolume uploads a zero-byte .keep object to provision the volume prefix.

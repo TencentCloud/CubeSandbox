@@ -7,6 +7,7 @@
 |------|-------|-------------------|
 | CubeMaster (Controller) | Create / Destroy | [COS Go SDK](https://cloud.tencent.com/document/product/436/31215) |
 | Cubelet (Node) | Attach / Detach | [cosfs](https://cloud.tencent.com/document/product/436/6883) |
+| CubeMaster (Content, optional) | IssueCredentials | [COS STS `GetFederationToken`](https://cloud.tencent.com/document/product/436/14048) |
 
 Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd**; Node still uses **cosfs**.
 
@@ -32,6 +33,24 @@ Compared to [binary](../binary/): Controller uses **Go SDK** instead of **coscmd
 | 5 | SDK: `Volume.create(..., driver="cos-rpc")` |
 
 **No coscmd** in this example; Create/Destroy use the COS Go SDK (`go mod`, [31215](https://cloud.tencent.com/document/product/436/31215)).
+
+---
+
+### 2.1 COS STS (optional: direct SDK-to-COS access)
+
+`IssueCredentials` (`internal/cosapi/content.go`) calls the COS STS [`GetFederationToken`](https://cloud.tencent.com/document/product/436/14048)
+API to mint credentials scoped to a single volume's object prefix
+(`volumes/<id>/*`), capped at CubeMaster's 15-minute TTL ceiling. It needs:
+
+- **APPID**: either set explicitly in `volume-cos.conf`, or auto-derived from
+  `BUCKET`'s `-<digits>` suffix (e.g. `1250000000` in `mybucket-1250000000`).
+- **CAM permission**: `SECRET_ID`/`SECRET_KEY` must be allowed to call
+  `sts:GetFederationToken` (granted by default to the account root/admin
+  identity; use a scoped sub-account in production — see
+  [子账号密钥](https://cloud.tencent.com/document/product/598/37140)).
+
+Without `content_enabled: true` on the CubeMaster side (§4), this Hook is
+simply never called — Create/Destroy/Attach/Detach are unaffected either way.
 
 ---
 
@@ -125,6 +144,11 @@ volume_plugins:
   - name: cos-rpc
     type: rpc
     socket_path: /run/cube-volume-cos-rpc.sock
+    # Optional: expose VolumeContentService (POST /volumes/{id}/content-token)
+    # so the Python SDK can access COS directly without a sandbox. Requires
+    # APPID (or a numeric BUCKET suffix) and sts:GetFederationToken CAM
+    # permission on SECRET_ID/SECRET_KEY — see §2.1.
+    content_enabled: true
 ```
 
 **Cubelet** `config.toml`:
@@ -181,6 +205,24 @@ finally:
 
 Volume.destroy(vol.volume_id)
 ```
+
+### Direct S3-style access smoke test (no sandbox)
+
+Requires `content_enabled: true` (§4) and a working STS setup (§2.1):
+
+```python
+from cubesandbox import Volume
+
+vol = Volume.create("my-data", driver="cos-rpc")
+try:
+    vol.write_file("hello.txt", "via cos-rpc content-token")
+    print(vol.read_file("hello.txt"))
+    print([entry.name for entry in vol.list("/")])
+finally:
+    Volume.destroy(vol.volume_id)
+```
+
+Requires the SDK's optional S3 extra: `pip install "cubesandbox[s3]"`.
 
 ---
 

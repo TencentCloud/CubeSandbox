@@ -1,26 +1,30 @@
-# 持久化卷（Persistent Volumes）
+# 持久化卷：同步管理与无沙箱直通访问
 
-> 英文版见 [`volume.md`](./volume.md)。本文为中文版，内容对齐英文版。
+英文参考见 [volume.md](volume.md)。固定 E2B 版本（`e2b-dev/E2B@8cc9ed1e`，核对于
+2026-11-02）、HTTP 协议和兼容边界以本文件「直通内容 API」章节为准。
 
-`Volume` 是管理 CubeSandbox **持久化卷**的类级别工具类——卷是与 e2b 兼容的存储，
-底层由卷插件（COS、NFS…）支撑。创建卷后通过
-`Sandbox.create(volume_mounts={...})`（e2b 兼容的 mapping 形式）挂载进沙箱，其数据可跨沙箱重启保留，也可在多个
-沙箱之间共享。
+Python SDK 的普通 Volume 文件操作通过管理 API 获取短时、单卷范围凭证，再使用 `boto3` 直连 S3-compatible endpoint；不会创建辅助沙箱，也不会让文件字节经过 CubeAPI/CubeMaster。安装 `.[s3]` extra 后可访问已实现凭证 Hook 的 S3-compatible 后端（AWS S3、COS、R2、MinIO 等）。凭证 Hook 尚未在仓库自带的 S3/COS 示例插件中实现，因此部署端需先配置能签发符合 TTL 和 prefix 限制的 Hook。显式传入内容 `token` 时仍保留旧 HTTP 内容网关路径。
 
-```python
-from cubesandbox import Sandbox, Volume, VolumeMount
-```
+## 配置与鉴权
 
-`Volume` 的方法均为**类方法**——无需手动实例化即可调用。对齐 e2b：`create` 与
-`connect` 返回一个 **`Volume` 实例**（携带 `volume_id` / `name` / `token`），而
-`list` / `get_info` 返回纯数据 `VolumeInfo`，`destroy` 返回 `bool`。
+| 配置 | 用途 |
+|---|---|
+| `CUBE_API_URL` / `E2B_API_URL` 或 `Config.api_url` | 管理 API：CRUD 与申请对象存储凭证 |
+| `CUBE_API_KEY` / `E2B_API_KEY` 或 `Config.api_key` | 仅发给管理 API；不会发给 S3 endpoint |
+| 安装 `.[s3]` extra | 提供通用 S3 客户端依赖 `boto3` |
+| `CUBE_VOLUME_API_URL` / `E2B_VOLUME_API_URL` | 仅用于旧 HTTP 内容网关模式 |
+| 显式内容 `token` | 选择旧 HTTP 网关模式；不是 Volume CRUD 返回的旧 token |
+| `request_timeout`、`headers`、`proxy`、`http_version`、`logger` | 管理 API/旧网关逐次请求选项；S3 SDK 使用其自身传输配置 |
 
----
+`Volume.create/connect(config=...)` 句柄首次执行文件操作时，会用管理 API key 请求
+`POST /volumes/{id}/content-token`，缓存 S3 凭证并在剩余有效期不超过 2 分钟时刷新；对象请求直接发给凭证中的 endpoint，使用 `addressing_style`、region 和 session token。管理 key 和管理自定义 headers 不会发给对象存储。endpoint 必须是 HTTPS（仅 loopback 开发地址允许 HTTP）。直连不需要模板、`CUBE_PROXY_NODE_IP` 或沙箱 access token。
 
-## 配置
+普通请求默认 60 秒，绑定 Cube Config 时保留其预算；缓冲文件操作默认一小时。
+`request_timeout=0` 禁用超时。同步流默认 read 空闲限制为 60 秒；和所核对的 E2B
+同步实现一样，`stream_idle_timeout` 参数不单独生效。HTTPX 超时是阶段/空闲限制，
+尚不是与 E2B 原生传输完全相同的 wall-clock 总期限。
 
-卷管理类调用只走管控面（`CUBE_API_URL`）。而对已挂载卷的**文件读写**走数据面，
-因此在 CubeProxy 节点之外运行时还需要配置 `CUBE_PROXY_NODE_IP`。
+## 已有管理 API
 
 | 环境变量 | 是否必填 | 默认值 | 使用方 |
 |---|:---:|---|---|
@@ -99,138 +103,80 @@ SDK 不会自动检测这种混合版本部署。回退版本时，依赖 A/B �
 | `.name` | `str` | 显示名称。 |
 | `.token` | `str` | 插件签发的 token。`create` / `get_info` 时填充；**`list` 时恒为空串**。 |
 
-### 挂载与按沙箱访问模式
+## 直连 S3 文件操作
 
-传入一个 mount 路径到卷的映射（e2b 兼容）：
+未显式传入内容 `token` 时，实例级文件操作使用短时凭证直接访问 S3-compatible endpoint；文件 key 固定映射为服务端凭证 `prefix` + 去掉开头 `/` 的卷内路径。S3 目录是 prefix/marker 的近似表示，不等同于 POSIX 文件系统。
 
-```python
-Sandbox.create(volume_mounts={"/workspace": vol})
-Sandbox.create(volume_mounts={"/workspace": "vol-xxx"})
-```
-
-每个值可以是 `Volume`、`VolumeInfo` 或 `volume_id` 字符串，且必须能解析为已存在的卷。原有 e2b 风格写法继续保持读写挂载。
-
-若只想把某次沙箱挂载设为只读，用 `VolumeMount` 包装对应值：
-
-```python
-from cubesandbox import Sandbox, VolumeMount
-
-Sandbox.create(
-    volume_mounts={
-        "/dataset": VolumeMount(vol, read_only=True),
-        "/workspace": workspace_vol,
-    }
-)
-```
-
-`read_only` 仅表示该挂载点以只读方式挂载。只会禁止当前沙箱经由该挂载点写入或修改文件，不会生成不可变快照。同一个 Volume 可以同时在不同沙箱中以不同权限挂载，例如在沙箱 A 中读写，在沙箱 B 中只读。
-
----
-
-## 示例
-
-### 1. 创建
-
-```python
-from cubesandbox import Volume
-
-vol = Volume.create("my-data")     # 指定名称
-print(vol.volume_id, vol.name, vol.token)
-
-vol = Volume.create()              # 省略 name，服务端生成 UUID
-print(vol.volume_id)               # 自动生成的 UUID
-```
-
-### 2. 挂载进沙箱
-
-```python
-from cubesandbox import Sandbox, Volume
-
-vol = Volume.create("my-data", driver="cos")
-
-with Sandbox.create(
-    volume_mounts={"/workspace": vol},
-) as sb:
-    sb.files.write("/workspace/note.txt", "已持久化！")
-    print(sb.files.read("/workspace/note.txt"))   # "已持久化！"
-```
-
-### 3. 查询与销毁
-
-```python
-for v in Volume.list():            # 注意：此处 v.token 为 ""
-    print(v.volume_id, v.name)
-
-one = Volume.get_info(vol.volume_id)  # one.token 已填充
-vol = Volume.connect(vol.volume_id)   # -> 返回可用的 Volume 实例
-Volume.destroy(vol.volume_id)         # 删除前须先 kill 所有挂载它的沙箱（见注意事项）
-```
-
-### 4. 跨沙箱数据共享
-
-多个沙箱可同时挂载同一个卷，数据对所有挂载者实时可见。
-
-```python
-from cubesandbox import Sandbox, Volume
-
-vol = Volume.create("shared", driver="cos")
-mount = {"/workspace": vol}
-
-# 沙箱 A 写入数据。
-a = Sandbox.create(volume_mounts=mount)
-a.files.write("/workspace/probe.txt", "hello from A")
-
-# 沙箱 B 挂载同一卷，立即可读。
-with Sandbox.create(volume_mounts=mount) as b:
-    print(b.files.read("/workspace/probe.txt"))   # "hello from A"
-
-# ⚠️ 删除卷前，必须 kill 所有挂载它的沙箱。
-a.kill()
-b.kill()  # 上下文管理器退出时已自动 kill，此处仅为说明
-Volume.destroy(vol.volume_id)
-```
-
----
-
-## 错误与状态码
-
-`Volume` 的每个方法都会把非 2xx 响应经过同一套映射：
-
-| HTTP 状态码 | 抛出的异常 | 含义 |
+| Python 方法 | S3 操作 | 返回/边界 |
 |---|---|---|
-| 2xx | —（正常返回） | 成功 |
-| 401 / 403 | `AuthenticationError` | 未认证 / 无权限 |
-| 404 | `VolumeNotFoundError` | 卷不存在（`get_info` / `connect` / `destroy`） |
-| 其余非 2xx（400 / 405 / 409 / 500 …） | `ApiError` | 参数非法、重名冲突、后端错误 |
+| `vol.read_file(path, format="text")` | `GetObject` | UTF-8 `str`；仅对象存在时可读 |
+| `vol.read_file(path, format="bytes")` | `GetObject` | `bytes` |
+| `vol.read_file(path, format="stream")` | 流式 `GetObject` | 惰性同步迭代器；用完后关闭迭代器 |
+| `vol.write_file(path, data, force=None)` | `PutObject` | `VolumeEntryStat`；str/bytes/file-like 支持 |
+| `vol.list(path)` | `ListObjectsV2` | 当前层对象和公共前缀 |
+| `vol.get_info(path)` / `vol.exists(path)` | `HeadObject` / prefix 检查 | 对象存储元数据是近似值 |
+| `vol.make_dir(path)` | 写入 0 字节目录 marker | 仅用于兼容目录 API |
+| `vol.remove(path)` | `DeleteObject` | 删除对象；不支持递归删除目录 |
+| `vol.update_metadata(...)` | — | 当前直连模式不支持，抛出 `VolumeContentUnavailableError` |
 
-客户端预校验会在**任何网络请求之前**就抛异常：
+类级 `Volume.list/get_info` 仍是管理 API；实例级方法处理对象内容。path 必须是卷内绝对 POSIX 路径；NUL、反斜线和点穿越段被拒绝，不能通过传入路径离开凭证 prefix。`mode/uid/gid` 仅作为对象自定义元数据，不构成 POSIX 权限保证。
 
-| 条件 | 异常 |
-|---|---|
-| `name` 不满足 `^[a-zA-Z0-9_-]+$` 或超过 128 字符 | `ValueError` |
-| 挂载 dict 缺少 `name` / `path` | `ValueError` |
-
-所有 API 异常都派生自 `CubeSandboxError`，并暴露 `.status_code`：
+显式传入内容 `token` 会保留旧 HTTP 内容网关模式；此时需配置 `CUBE_VOLUME_API_URL`。
 
 ```python
-from cubesandbox import Volume, VolumeNotFoundError, ApiError
+import os
+from contextlib import closing
+from cubesandbox import Config, Volume
 
-try:
-    Volume.get_info("does-not-exist")
-except VolumeNotFoundError:
-    ...                       # 404
-except ApiError as e:
-    print(e.status_code)      # 500
+config = Config(api_url=os.environ["CUBE_API_URL"], api_key=os.environ["CUBE_API_KEY"])
+vol = Volume.connect(os.environ["CUBE_VOLUME_ID"], config=config)
+path = "/docs/example.txt"
+vol.write_file(path, "hello S3", force=True)
+assert vol.read_file(path) == "hello S3"
+assert vol.read_file(path, format="bytes") == b"hello S3"
+with closing(vol.read_file(path, format="stream")) as chunks:
+    assert b"".join(chunks) == b"hello S3"
+vol.remove(path)
 ```
 
----
+## 无沙箱 E2E
 
-## 注意事项
+在 `sdk/python` 执行；完整变量表和清理说明见
+[中文 README](../README.zh.md#直通卷-e2e-测试)。
 
-- **删除卷前必须 kill 所有挂载方。** 一个卷可以被多个沙箱同时挂载。`Volume.destroy()` 不会
-  自动 detach——若仍有运行中的沙箱持有该卷，删除操作可能失败或导致后端挂载泄漏。务必先对所有
-  挂载它的沙箱执行 `sb.kill()`，再调用 `Volume.destroy(volume_id)`。
-- **`list` 不返回 token。** token 仅在 `create` 和 `get_info` 时暴露；需要 token 时请调用
-  `Volume.get_info(volume_id)`。
-- **`name` 可选。** 省略时服务端分配一个 UUID，该 UUID 同时用作 `volume_id` 和 `name`。
-- **只读是单次挂载属性。** 在创建沙箱时使用 `VolumeMount(volume, read_only=True)`；创建 `Volume` 本身的接口不变。
+```sh
+python3 -m pip install -e '.[dev,s3]'
+python3 -m pytest -q tests/test_volume.py tests/test_volume_content.py tests/test_volume_s3.py
+python3 -m pytest -q tests/test_volume_direct_harness.py
+```
+
+旧 HTTP 网关兼容 E2E 保留在 `test_volume_direct_e2e.py`。新的直连 S3 E2E 在仓库根目录执行：
+
+```sh
+SDK_E2E_DIRECT_S3_VOLUME_ID=<existing-volume> python3 -m pytest \
+  tests/e2e/sdk_compat/cases/volume/test_s3_direct_python.py --run-e2e --sdk-e2e-backends=cubesandbox
+```
+
+需提供管理 API 的 `CUBE_API_URL`、`CUBE_API_KEY`，并指定一个已配置凭证 Hook 的现有卷 ID；测试只写唯一对象并删除它，不创建/连接沙箱，也不销毁卷。`e2b` backend 不支持 CubeSandbox Volume Plugin，该测试按 capability 自动跳过。
+
+## 异常
+
+| HTTP | Python 行为 |
+|---|---|
+| 内容 404 | `VolumePathNotFoundException`；exists 返回 False |
+| 管理详情/连接 404 | `VolumeNotFoundException` |
+| 管理 destroy 404 | False |
+| 401 | `AuthenticationException`，兼容别名 `AuthenticationError` |
+| 429 | `RateLimitException` |
+| 503 | `ServiceBusyException` |
+| 其他非 2xx（含 403） | `VolumeException`，同时兼容 Cube `ApiError` 捕获 |
+
+鉴权和服务错误不变成空列表或 False。内容任何 404 都按 E2B 视为路径不存在，
+因此不能用 exists 判断路由是否部署。所有认证请求禁止自动重定向。
+
+## 沙箱挂载是另一条已有链路
+
+原有 `Sandbox.create(volume_mounts={path: vol})` 保留。映射值可为 Volume、
+VolumeInfo 或 ID 字符串；`VolumeMount(vol, read_only=True)` 仅控制本次沙箱挂载，
+不生成不可变快照。这条链路不是直通读取前置条件，不会在上述 E2E 中调用。
+删除卷应先释放所有真实挂载/读取引用，SDK 不自动 detach。

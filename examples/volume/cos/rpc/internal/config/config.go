@@ -21,6 +21,7 @@ type Config struct {
 	SecretKey  string
 	Bucket     string
 	Region     string
+	AppID      string
 	PasswdFile string
 	SocketPath string
 	Listen     string
@@ -83,6 +84,8 @@ func Load(path string) (*Config, error) {
 			cfg.Bucket = val
 		case "REGION":
 			cfg.Region = val
+		case "APPID":
+			cfg.AppID = val
 		case "PASSWD_FILE":
 			if val != "" {
 				cfg.PasswdFile = val
@@ -121,6 +124,27 @@ func (c *Config) validate() error {
 // VolumePrefix returns the COS key prefix for a volume (trailing slash).
 func VolumePrefix(volumeID string) string {
 	return "volumes/" + volumeID + "/"
+}
+
+// ResolveAppID returns the Tencent Cloud APPID used to build CAM resource
+// identifiers for STS GetFederationToken. It prefers the explicit APPID
+// config key; otherwise it derives it from the trailing "-<digits>" suffix of
+// Bucket, which is how Tencent Cloud names COS buckets (e.g. "my-bucket-1250000000").
+func (c *Config) ResolveAppID() (string, error) {
+	if c.AppID != "" {
+		return c.AppID, nil
+	}
+	idx := strings.LastIndex(c.Bucket, "-")
+	if idx < 0 || idx == len(c.Bucket)-1 {
+		return "", fmt.Errorf("config: cannot derive APPID from BUCKET %q; set APPID explicitly", c.Bucket)
+	}
+	suffix := c.Bucket[idx+1:]
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("config: cannot derive APPID from BUCKET %q; set APPID explicitly", c.Bucket)
+		}
+	}
+	return suffix, nil
 }
 
 // CosFSSubdir returns the path segment passed to cosfs (no trailing slash).

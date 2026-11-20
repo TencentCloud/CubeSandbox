@@ -2611,17 +2611,32 @@ pub struct Volume {
     pub name: String,
 }
 
-/// Volume descriptor with auth token — returned on create / get-single.
-/// E2B SDK requires `token` to always be present (non-optional); use empty
-/// string when the plugin does not return a token.
+/// Volume descriptor with legacy Create-hook token — returned on create / get-single.
+/// Direct content access obtains a separate short-lived token from the content hook.
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
 pub struct VolumeAndToken {
     #[serde(rename = "volumeID")]
     pub volume_id: String,
     pub name: String,
-    /// Auth token returned by the volume plugin. Empty string when not applicable.
+    /// Legacy Create-hook token; direct access uses a separately issued token.
     #[serde(default)]
     pub token: String,
+}
+
+/// Short-lived, volume-scoped object-storage credentials issued by the driver hook.
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct VolumeContentCredentials {
+    pub provider: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: String,
+    pub addressing_style: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    /// Unix timestamp in seconds.
+    pub expires_at: i64,
 }
 
 /// Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.

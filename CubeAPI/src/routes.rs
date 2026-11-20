@@ -231,9 +231,13 @@ fn build_volume_routes(state: &AppState, auth_configured: bool) -> Router<AppSta
         .route(
             "/volumes/:volumeID",
             get(volumes::get_volume).delete(volumes::delete_volume),
+        )
+        .route(
+            "/volumes/:volumeID/content-token",
+            post(volumes::issue_content_credentials),
         );
 
-    with_auth(routes, state, auth_configured)
+    with_auth_and_rate_limit(routes, state, auth_configured)
 }
 
 fn with_auth(

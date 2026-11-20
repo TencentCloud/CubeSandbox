@@ -14,7 +14,7 @@ use axum::{
 use crate::{
     error::{AppError, AppResult},
     models::{
-        ApiError, NewVolume, NewVolumeV2, Volume, VolumeAndToken, MAX_VOLUME_NAME_LEN,
+        ApiError, NewVolume, NewVolumeV2, Volume, VolumeAndToken, VolumeContentCredentials, MAX_VOLUME_NAME_LEN,
         MAX_VOLUME_PRIVATE_DATA_LEN,
     },
     state::AppState,
@@ -150,7 +150,7 @@ fn validate_volume_name(body: &NewVolume) -> AppResult<()> {
 
 // ── GET /volumes/{volumeID} ───────────────────────────────────────────────
 
-/// Get info for a single volume (includes auth token).
+/// Get info for a single volume (includes the legacy Create-hook token).
 ///
 /// Returns `200 OK` with `VolumeAndToken` on success.
 #[utoipa::path(
@@ -174,6 +174,37 @@ pub async fn get_volume(
     tracing::debug!(volume_id = %volume_id, "get_volume");
     let vol = state.services.volumes.get(&volume_id).await?;
     Ok((StatusCode::OK, Json(vol)))
+}
+
+// ── POST /volumes/{volumeID}/content-token ────────────────────────────────
+
+/// Issue fresh, short-lived storage credentials through the volume driver's hook.
+#[utoipa::path(
+    post,
+    path = "/volumes/{volumeID}/content-token",
+    params(("volumeID" = String, Path, description = "Identifier of the volume")),
+    responses(
+        (status = 200, description = "Issued volume-scoped storage credentials", body = VolumeContentCredentials),
+        (status = 401, description = "Authentication error", body = ApiError),
+        (status = 404, description = "Volume not found", body = ApiError),
+        (status = 501, description = "Driver has no content hook", body = ApiError),
+        (status = 500, description = "Server error", body = ApiError),
+    ),
+    security(("apiKeyAuth" = []))
+)]
+pub async fn issue_content_credentials(
+    State(state): State<AppState>,
+    Path(volume_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let credentials = state.services.volumes.issue_content_credentials(&volume_id).await?;
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::PRAGMA, "no-cache"),
+        ],
+        Json(credentials),
+    ))
 }
 
 // ── DELETE /volumes/{volumeID} ────────────────────────────────────────────

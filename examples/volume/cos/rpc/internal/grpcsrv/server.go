@@ -12,20 +12,22 @@ import (
 	"os"
 	"path/filepath"
 
-	vpb "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
-	"github.com/tencentcloud/CubeSandbox/pkgs/proto/volumeplugin/grpctarget"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc/internal/config"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc/internal/cosapi"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/cos/rpc/internal/cosfs"
+	vpb "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/volumeplugin/grpctarget"
 	"google.golang.org/grpc"
 )
 
 const driverName = "cos-rpc"
 
-// Server implements VolumeControllerService and VolumePluginService.
+// Server implements VolumeControllerService, VolumePluginService and
+// VolumeContentService.
 type Server struct {
 	vpb.UnimplementedVolumeControllerServiceServer
 	vpb.UnimplementedVolumePluginServiceServer
+	vpb.UnimplementedVolumeContentServiceServer
 
 	cos *cosapi.Client
 	fs  *cosfs.Manager
@@ -51,7 +53,7 @@ func (s *Server) Create(ctx context.Context, req *vpb.CreateRequest) (*vpb.Creat
 	}
 	// private_data carries the COS key prefix for Attach (max 1024 bytes).
 	privateData := fmt.Sprintf("volumes/%s/", volumeID)
-	log.Printf("[cos-rpc] create volumeID=%s name=%s private_data=%s", volumeID, name, privateData)
+	log.Printf("[cos-rpc] create volumeID=%s name=%s", volumeID, name)
 	return &vpb.CreateResponse{Token: "", PrivateData: privateData}, nil
 }
 
@@ -67,7 +69,6 @@ func (s *Server) Destroy(ctx context.Context, req *vpb.DestroyRequest) (*vpb.Des
 func (s *Server) Attach(_ context.Context, req *vpb.AttachRequest) (*vpb.AttachResponse, error) {
 	volumeID := req.GetVolumeId()
 	baseDir := req.GetVolumeBaseDir()
-	privateData := req.GetPrivateData()
 	if req.GetRefCount() > 0 {
 		mnt := s.fs.MountPoint(baseDir, volumeID)
 		return &vpb.AttachResponse{
@@ -83,8 +84,8 @@ func (s *Server) Attach(_ context.Context, req *vpb.AttachRequest) (*vpb.AttachR
 	if err != nil {
 		return nil, fmt.Errorf("attach volume %q: %w", volumeID, err)
 	}
-	log.Printf("[cos-rpc] attach sandbox=%s volume=%s host_path=%s private_data=%s",
-		req.GetSandboxId(), volumeID, hostPath, privateData)
+	log.Printf("[cos-rpc] attach sandbox=%s volume=%s host_path=%s",
+		req.GetSandboxId(), volumeID, hostPath)
 
 	return &vpb.AttachResponse{
 		HostPath: hostPath,
@@ -114,6 +115,25 @@ func (s *Server) Detach(_ context.Context, req *vpb.DetachRequest) (*vpb.DetachR
 	return &vpb.DetachResponse{}, nil
 }
 
+// IssueCredentials implements VolumeContentService for direct SDK-to-COS
+// access. It issues COS STS temporary credentials scoped to the volume's
+// own object prefix via cosapi.Client.IssueContentCredentials; file bytes
+// never pass through this RPC or through CubeMaster/CubeAPI.
+func (s *Server) IssueCredentials(_ context.Context, req *vpb.IssueVolumeCredentialsRequest) (*vpb.IssueVolumeCredentialsResponse, error) {
+	volumeID := req.GetVolumeId()
+	issued, err := s.cos.IssueContentCredentials(volumeID)
+	if err != nil {
+		return nil, fmt.Errorf("issue content credentials for volume %q: %w", volumeID, err)
+	}
+	log.Printf("[cos-rpc] issue-credentials volume=%s subject=%s", volumeID, req.GetSubject())
+	return &vpb.IssueVolumeCredentialsResponse{
+		Provider: "s3", Endpoint: issued.Endpoint, Bucket: issued.Bucket, Region: issued.Region,
+		Prefix: issued.Prefix, AddressingStyle: issued.AddressingStyle,
+		AccessKeyId: issued.AccessKeyID, SecretAccessKey: issued.SecretAccessKey,
+		SessionToken: issued.SessionToken, ExpiresAtUnix: issued.ExpiresAt.Unix(),
+	}, nil
+}
+
 // Serve listens on cfg.ListenAddr and serves gRPC until ctx is cancelled.
 func Serve(ctx context.Context, cfg *config.Config) error {
 	network, addr := grpctarget.ParseListen(cfg.ListenAddr())
@@ -138,6 +158,7 @@ func Serve(ctx context.Context, cfg *config.Config) error {
 	grpcSrv := grpc.NewServer()
 	vpb.RegisterVolumeControllerServiceServer(grpcSrv, srv)
 	vpb.RegisterVolumePluginServiceServer(grpcSrv, srv)
+	vpb.RegisterVolumeContentServiceServer(grpcSrv, srv)
 
 	go func() {
 		<-ctx.Done()
