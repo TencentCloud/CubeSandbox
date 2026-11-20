@@ -150,11 +150,16 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	if !workflow.ReuseFor(opts).CubeboxMeta {
 		sb, paused, resolveErr := pausedReplaceTarget(ctx, l.cubeboxManger, realReq)
 		if resolveErr != nil {
-			// Local state unknown: fail closed rather than guess. Treating a
+			// Local state unknown: fail closed rather than guess — treating a
 			// store error as "no tombstone" would recreate over a live or
-			// pausing record; PreConditionFailed is checked by the engine
-			// before failover, so the paused tombstone survives for a retry.
-			return ret.Errorf(errorcode.ErrorCode_PreConditionFailed,
+			// pausing record. The code must trigger the engine failover: this
+			// is the flow's last step, so network/volume/storage/cgroup are
+			// already allocated and PreConditionFailed (which skips failover)
+			// would strand them until Master compensation or a user DELETE.
+			// Failover is tombstone-safe now: its rollback keeps a still-PAUSED
+			// row (createRollbackKeepsPausedTombstone) and deletes nothing on
+			// a store error, so the retry still finds its record either way.
+			return ret.Errorf(errorcode.ErrorCode_LoadContainerFromMetaDataFailed,
 				"cannot resolve the paused sandbox to replace: %v", resolveErr)
 		}
 		if sb != nil {
