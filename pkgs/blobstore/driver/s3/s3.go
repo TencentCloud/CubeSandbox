@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -137,6 +138,14 @@ func open(cfg blobstore.Config) (*store, error) {
 	if pathStyle {
 		lookup = minio.BucketLookupPath
 	}
+	if isHuaweiCloudEndpoint(extra(cfg, extraEndpoint), extra(cfg, extraUseSSL)) {
+		// Huawei Cloud rejects path-style requests to OBS buckets (the bucket
+		// must be part of the host); minio-go's Auto lookup only enables
+		// virtual-hosted style for AWS/GCS/Aliyun endpoints, so force the
+		// DNS (virtual-hosted) lookup style for Huawei Cloud.
+		lookup = minio.BucketLookupDNS
+	}
+
 	client, err := newMinioClient(endpoint, ak, sk, region, lookup, extra(cfg, extraUseSSL))
 	if err != nil {
 		return nil, err
@@ -655,4 +664,32 @@ func bucketCreateRegion(region string) string {
 	default:
 		return region
 	}
+}
+
+// huaweiCloudEndpointSuffixes are the Huawei Cloud endpoint domains (public,
+// Europe and the legacy myhwclouds.com domain). Huawei Cloud OBS requires
+// virtual-hosted style URLs — the bucket name must be part of the host;
+// path-style requests are rejected.
+var huaweiCloudEndpointSuffixes = []string{
+	".myhuaweicloud.com",
+	".myhuaweicloud.eu",
+	".myhwclouds.com",
+}
+
+// isHuaweiCloudEndpoint reports whether endpoint points at Huawei Cloud OBS.
+func isHuaweiCloudEndpoint(endpoint, useSSL string) bool {
+	host, _, err := parseEndpoint(endpoint, useSSL)
+	if err != nil {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(host)
+	for _, suffix := range huaweiCloudEndpointSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
