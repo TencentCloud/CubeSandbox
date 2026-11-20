@@ -1,0 +1,35 @@
+{
+  "title": "新建沙箱",
+  "subtitle": "選擇範本與資源規格，建立一個新的微虛擬機器沙箱。",
+  "section": {
+    "template": "選擇範本",
+    "templateDesc": "僅顯示狀態為 ready 的範本可供選擇。",
+    "config": "配置",
+    "configDesc": "設定沙箱的超時時長。",
+    "metadata": "元資料",
+    "metadataDesc": "附加到沙箱的自訂鍵值對，可用於識別和篩選。"
+  },
+  "form": {
+    "timeout": "超時時長（秒）",
+    "timeoutPlaceholder": "如 300",
+    "timeoutHint": "沙箱存活時長，到期後將被銷燬或暫停。留空則使用服務端預設值。",
+    "templateRequired": "請選擇一個範本以繼續。",
+    "alias": "別名（可選）",
+    "aliasPlaceholder": "如 my-dev-sandbox",
+    "autoPause": "閒置自動暫停",
+    "autoPauseHint": "無活動連線時自動暫停沙箱以節省資源。",
+    "metaKey": "鍵",
+    "metaValue": "值",
+    "addMeta": "新增鍵值對"
+  },
+  "compat": {
+    "unpinned": "需重建",
+    "unpinnedHelp": "節點升級後，用這個範本新建沙箱可能失敗。請先開啟範本，點選「重建範本」。",
+    "openTemplate": "開啟範本"
+  },
+  "actions": {
+    "cancel": "取消",
+    "create": "建立沙箱",
+    "creating": "建立中…"
+  }
+}

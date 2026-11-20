@@ -1,0 +1,52 @@
+{
+  "title": "設定",
+  "subtitle": "外觀、叢集連線與快捷鍵配置。",
+  "nav": {
+    "appearance": "外觀",
+    "cluster": "叢集連線",
+    "account": "帳號",
+    "shortcuts": "快捷鍵",
+    "about": "關於"
+  },
+  "appearance": {
+    "title": "外觀",
+    "desc": "自訂介面主題與語言。",
+    "theme": "主題",
+    "themeDesc": "選擇介面配色，跟隨系統會自動匹配作業系統的深淺色設定。",
+    "language": "語言",
+    "languageDesc": "切換介面顯示語言。"
+  },
+  "cluster": {
+    "title": "叢集連線",
+    "desc": "檢視當前連線的 CubeOps 執行個體資訊。",
+    "endpoint": "API 端點",
+    "endpointDesc": "CubeOps 的對外存取位址。啟動時透過 CUBE_OPS_PUBLIC_HOST 環境變數配置。",
+    "test": "測試連線",
+    "connected": "連線正常"
+  },
+  "shortcuts": {
+    "title": "快捷鍵",
+    "desc": "Dashboard 內建的鍵盤快捷鍵一覽。",
+    "commandPalette": "開啟命令面板",
+    "newSandbox": "新建沙箱",
+    "search": "搜尋",
+    "escape": "關閉彈窗 / 取消"
+  },
+  "shortcut": {
+    "commandPalette": "開啟命令面板",
+    "escape": "關閉彈窗 / 取消",
+    "refresh": "重新整理當前頁資料",
+    "helpShortcuts": "檢視快捷鍵幫助",
+    "goOverview": "跳轉 總覽",
+    "goSandboxes": "跳轉 沙箱列表",
+    "goTemplates": "跳轉 範本列表",
+    "goNodes": "跳轉 節點列表"
+  },
+  "about": {
+    "title": "關於",
+    "desc": "版本資訊與相關連結。",
+    "version": "版本",
+    "cubeApi": "CubeOps 位址",
+    "docs": "文件"
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "backToNodes": "返回節點列表",
+  "notFound": "節點不存在或已下線。",
+  "section": {
+    "resources": "資源總覽",
+    "conditions": "狀態條件",
+    "versions": "元件版本",
+    "localTemplates": "本地範本",
+    "localTemplatesDesc": "已快取到該節點的範本副本，點選可檢視範本詳細資料。",
+    "sandboxes": "執行中沙箱",
+    "sandboxesDesc": "當前排程到該節點的沙箱執行個體。"
+  },
+  "fields": {
+    "cpu": "CPU",
+    "memory": "記憶體",
+    "totalCpu": "總 CPU",
+    "allocCpu": "可分配 CPU",
+    "totalMem": "總記憶體",
+    "allocMem": "可分配記憶體",
+    "maxMvmSlots": "最大 MVM 槽位",
+    "address": "位址",
+    "heartbeat": "最近心跳"
+  },
+  "status": {
+    "notIsolated": "未隔離",
+    "isolated": "已隔離"
+  },
+  "actions": {
+    "isolate": "隔離",
+    "unisolate": "解除隔離"
+  },
+  "dialog": {
+    "isolateDesc": "隔離後，該節點將不再接收新的沙箱排程。已有沙箱不受影響。",
+    "unisolateDesc": "解除隔離後，該節點將恢復接收新的沙箱排程。",
+    "detailLabel": "備註（可選）",
+    "detailPlaceholder": "請輸入操作原因，如：磁碟滿，維護隔離",
+    "cancel": "取消"
+  },
+  "toast": {
+    "isolated": "節點已隔離。",
+    "unisolated": "節點已解除隔離。",
+    "isolationFailed": "操作失敗。"
+  },
+  "empty": {
+    "sandboxes": "該節點上暫無執行中的沙箱。"
+  },
+  "operations": {
+    "title": "最近操作記錄",
+    "typeIsolate": "隔離",
+    "typeUnisolate": "解除隔離",
+    "empty": "暫無操作記錄。"
+  },
+  "quota": {
+    "title": "配額設定",
+    "cpu": "CPU 配額（m 核）",
+    "mem": "記憶體配額",
+    "mvm": "MVM 數上限",
+    "concurrent": "建立併發數",
+    "save": "儲存",
+    "saving": "儲存中…",
+    "history": "配額變更歷史",
+    "historyTitle": "配額變更歷史",
+    "historyEmpty": "暫無配額變更記錄。",
+    "unset": "未設定——該節點按 cubelet 預設超賣執行。",
+    "unsetRef": "當前生效：CPU {{cpu}}m / 記憶體 {{mem}}Mi。",
+    "driftSynced": "已同步",
+    "driftDetected": "配置漂移：{{message}}",
+    "driftRatioOnly": "僅納管比例（ratio）；超賣欄位為節點本地值",
+    "driftUnmanaged": "未納管——執行在 cubelet 預設值",
+    "savedApplied": "配額已儲存，正在下發到節點。",
+    "savedSkipped": "配額已儲存。下發未達：{{reason}}，將自動重試。",
+    "saveFailed": "儲存失敗。",
+    "saveFailedWithReason": "修改失敗：{{message}}",
+    "conflictStale": "配置已被他人修改，請重新整理頁面後重試。",
+    "conflictOnSave": "配置已被他人修改，請重新整理後重試。",
+    "hint": "留空回退為 cubelet 預設超賣（CPU ×2、記憶體 ×1.25）；數字欄位也可填 0。",
+    "firstManagedHint": "首次納管：未編輯的欄位將保留節點當前實際值，不會被重置；僅對已編輯並留空（或填 0）的欄位回退為 cubelet 預設值。",
+    "firstManagedConfirm": "首次納管：未編輯的欄位將保留節點當前實際值，不會被重置；僅對已編輯並留空（或填 0）的欄位回退為 cubelet 預設值。",
+    "ratio": "暫停釋放比例",
+    "managedLabel": "管理方式",
+    "managedNode": "節點管理",
+    "managedCluster": "叢集管理",
+    "revisionLabel": "版本號",
+    "valueUnset": "（預設）",
+    "valueNotSet": "（未設定）",
+    "valueInherit": "（繼承）",
+    "clusterDefault": "叢集預設比例",
+    "propagation": "扇出：更新 {{bumped}} · 推送 {{pushed}} · 失敗 {{failed}}",
+    "confirmTitle": "確認修改配額",
+    "confirmDesc": "以下變更將下發到節點 {{node}}：",
+    "confirmNoChange": "沒有檢測到變更。",
+    "confirm": "確認修改",
+    "invalidInteger": "{{field}}必須是非負整數。",
+    "invalidMem": "記憶體配額格式錯誤：需為數字（可帶小數）+ Ki/Mi/Gi/Ti 單位，如 262144Mi。"
+  }
+}

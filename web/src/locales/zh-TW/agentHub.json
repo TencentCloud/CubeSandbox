@@ -1,0 +1,410 @@
+{
+  "title": "數位助手",
+  "subtitle": "招募並管理基於 CubeSandbox 執行的 AI Agent 執行個體",
+  "preview": {
+    "badge": "Preview",
+    "title": "數位助手預覽版",
+    "description": "當前功能主要用於演示和早期試用，API、部署配置和互動細節後續可能調整。",
+    "close": "關閉預覽版提示"
+  },
+  "env": {
+    "linux": "Linux",
+    "mac": "個人 Mac 裝置"
+  },
+  "settings": {
+    "openAction": "模型服務設定",
+    "title": "數位助手設定",
+    "description": "配置建立 OpenClaw 數位助手所需的預設 LLM 服務。API Key 會加密存入資料庫，推薦透過 CubeEgress 憑證託管在出站請求時注入，避免進入助手沙箱。",
+    "loading": "讀取設定中...",
+    "provider": {
+      "label": "Provider",
+      "deepseek": "DeepSeek",
+      "openaiCompatible": "OpenAI Compatible",
+      "custom": "自訂"
+    },
+    "baseUrl": {
+      "label": "LLM Base URL",
+      "hint": "OpenAI-compatible API 位址，例如 https://api.deepseek.com 或內部閘道。"
+    },
+    "model": {
+      "label": "模型 ID",
+      "hint": "注入到 OpenClaw 的預設模型，例如 deepseek/deepseek-v4-flash。自訂上游時會按 {Provider}/{模型ID} 正規化注入，斜槓後的部分作為真實模型名發往上游。"
+    },
+    "apiKey": {
+      "label": "LLM API Key",
+      "hint": "與當前 Provider / Base URL 繫結；儲存後頁面不再回顯完整 Key，只展示掩碼。"
+    },
+    "credentialMode": {
+      "label": "憑證交付方式",
+      "egress": "憑證託管（推薦）",
+      "env": "環境變數注入（相容舊版）",
+      "egressHint": "建立助手時自動生成 CubeEgress 規則，僅對該 LLM Base URL 注入 Authorization 頭；OpenClaw 配置裡只儲存託管佔位 Key。",
+      "envHint": "沿用舊方式把真實 API Key 寫入 OpenClaw 環境和配置，僅建議在未啟用 CubeEgress 的環境使用。"
+    },
+    "gatewayDomain": {
+      "label": "閘道域名",
+      "hint": "可選。配置後助手閘道將透過 埠-沙箱ID.域名（如 cube.app）以獨立子域存取，可徹底避免多個助手 WebSocket 串臺；留空則繼續使用同源代理路徑。需要為該域名配置泛域名解析與證書。"
+    },
+    "persistenceDisabled": "未配置資料庫，無法儲存模型服務配置。請先為 CubeOps 配置 DATABASE_URL 後再試。",
+    "status": {
+      "configured": "已配置 {{provider}} / {{model}}（Key：{{masked}}，來源：{{source}}，方式：{{mode}}）",
+      "missing": "尚未配置 LLM API Key，暫時無法建立數位助手。"
+    },
+    "source": {
+      "database": "資料庫",
+      "none": "未配置"
+    },
+    "errors": {
+      "required": "請填寫或修改至少一項模型服務配置"
+    },
+    "actions": {
+      "close": "關閉",
+      "save": "儲存",
+      "saved": "已儲存"
+    }
+  },
+  "onboarding": {
+    "title": "開始使用數位助手",
+    "description": "完成以下準備步驟後即可建立你的第一個數位助手。",
+    "steps": {
+      "apiKey": {
+        "title": "配置 LLM 模型服務",
+        "desc": "用於驅動 OpenClaw 助手的大型語言模型呼叫，Provider / Base URL / Model / API Key 儲存後全域生效。",
+        "action": "去設定",
+        "doneAction": "已配置 · 修改"
+      },
+      "template": {
+        "title": "準備龍蝦助手範本",
+        "desc": "在應用市場安裝輕量版或 all-in-one 龍蝦助手映像，作為建立助手的系統範本。",
+        "action": "去應用市場",
+        "doneAction": "已就緒 · 檢視"
+      }
+    }
+  },
+  "tabs": {
+    "personal": "個人助手",
+    "team": "團隊共享",
+    "comingSoonBadge": "敬請期待"
+  },
+  "teamPlaceholder": {
+    "title": "團隊共享 · 敬請期待",
+    "description": "團隊成員之間共享、移交與協作的數位助手，正在路上。"
+  },
+  "templates": {
+    "title": "助手範本列表",
+    "description": "檢視已釋出的助手範本，可在建立新助手時選擇使用。",
+    "emptyTitle": "暫無已釋出範本",
+    "emptyDescription": "在助手的狀態管理詳細資料中釋出助手範本後，會顯示在這裡。",
+    "actions": {
+      "open": "助手範本",
+      "refresh": "重新整理",
+      "loading": "載入中...",
+      "close": "關閉",
+      "copyId": "複製 ID",
+      "useTemplate": "用此範本建立",
+      "rename": "重新命名",
+      "recommend": "標記推薦",
+      "unrecommend": "取消推薦",
+      "delete": "下架",
+      "saving": "儲存中..."
+    },
+    "badges": {
+      "recommended": "推薦"
+    },
+    "prompts": {
+      "rename": "請輸入新的助手範本名稱",
+      "delete": "確定要下架這個助手範本嗎？"
+    },
+    "dialogs": {
+      "renameTitle": "重新命名助手範本",
+      "deleteTitle": "下架助手範本"
+    },
+    "fields": {
+      "sourceAgent": "來源助手",
+      "sourceSnapshot": "來源存檔",
+      "sourceSandbox": "來源 Sandbox",
+      "createdAt": "釋出時間"
+    }
+  },
+  "card": {
+    "status": {
+      "running": "執行中",
+      "starting": "啟動中",
+      "stopped": "已停止",
+      "error": "異常"
+    },
+    "actions": {
+      "restart": "重新啟動",
+      "restartEnv": "重新啟動環境",
+      "restarting": "重新啟動中...",
+      "pause": "Pause",
+      "pausing": "暫停中…",
+      "resume": "Resume",
+      "resuming": "Resume 中...",
+      "upgrading": "升級中...",
+      "gatewayManage": "Gateway 管理",
+      "loginEnv": "登入環境",
+      "more": "更多",
+      "delete": "刪除",
+      "deleting": "刪除中...",
+      "deleteConfirm": "確定要刪除這個數位助手嗎？"
+    },
+    "dialogs": {
+      "pauseTitle": "確認暫停助手"
+    },
+    "prompts": {
+      "pause": "暫停後助手將停止響應，可隨時 Resume 恢復。確定暫停？"
+    },
+    "pending": {
+      "incubating": "孵化中…",
+      "incubatingHint": "正在從範本孵化新助手，預計數秒",
+      "cloning": "分身中…",
+      "cloningHint": "正在從存檔建立獨立分身，預計數秒"
+    },
+    "fields": {
+      "model": "模型",
+      "version": "版本",
+      "sandboxId": "sandbox",
+      "robot": "機器人",
+      "modifyModel": "修改",
+      "upgrade": "更新升級",
+      "robotHint": "可繫結的對話入口"
+    }
+  },
+  "state": {
+    "title": "狀態管理",
+    "description": "基於 Sandbox 存檔、回檔、建立分身能力管理助手狀態",
+    "detailTitle": "{{name}} · 狀態管理",
+    "cardSummary": "已有 {{count}} 個存檔（{{healthy}} 個健康），進入詳細資料檢視時間線、回檔、建立分身和助手範本",
+    "confirmRollback": "確定要將該數位助手回檔到選中的存檔嗎？當前未儲存的狀態可能會被覆蓋。",
+    "publishResult": "已釋出助手範本：{{templateId}}",
+    "recover": {
+      "action": "一鍵自愈",
+      "recovering": "自愈中...",
+      "hint": "重新啟動助手；若仍異常則自動回檔到最近的健康存檔",
+      "panelHint": "當前有 {{count}} 個健康存檔可用於自愈",
+      "resultRestart": "已透過重新啟動恢復正常。",
+      "resultRollback": "已回檔到最近的健康存檔並恢復正常。"
+    },
+    "placeholders": {
+      "snapshotName": "存檔名稱（可選）",
+      "selectSnapshot": "請選擇存檔",
+      "cloneName": "分身名稱（可選）",
+      "cloneCount": "分身個數（1-10）",
+      "templateName": "範本名稱（可選）"
+    },
+    "defaults": {
+      "cloneName": "{{name}} · 分身"
+    },
+    "actions": {
+      "refresh": "重新整理",
+      "loading": "載入中...",
+      "createSnapshot": "建立存檔",
+      "snapshotting": "存檔中...",
+      "rollback": "回檔",
+      "rollbacking": "回檔中…",
+      "clone": "建立分身",
+      "cloneN": "建立 {{count}} 個分身",
+      "cloning": "建立分身中...",
+      "publish": "釋出",
+      "publishAssistantTemplate": "釋出助手範本",
+      "publishing": "釋出中...",
+      "manage": "管理",
+      "deleteSnapshot": "刪除存檔",
+      "deleting": "刪除中...",
+      "renameSnapshot": "重新命名",
+      "markHealthy": "標記健康",
+      "unmarkHealthy": "取消健康",
+      "processing": "處理中..."
+    },
+    "dialogs": {
+      "rollbackTitle": "確認回檔",
+      "deleteSnapshotTitle": "刪除存檔",
+      "renameSnapshotTitle": "重新命名存檔",
+      "renameSnapshotDescription": "為這個存檔起一個便於識別的名稱，用於版本時間線展示。",
+      "markHealthyTitle": "標記為健康存檔",
+      "unmarkHealthyTitle": "取消健康標記",
+      "recoverTitle": "確認一鍵自愈",
+      "cloneTitle": "確認建立分身",
+      "publishTitle": "確認釋出助手範本"
+    },
+    "prompts": {
+      "markHealthy": "將該存檔標記為「健康」？崩潰自愈時會優先回滾到健康存檔。",
+      "unmarkHealthy": "取消該存檔的健康標記？取消後它將不再作為自愈回滾錨點。",
+      "recover": "將先嚐試重新啟動助手；若仍異常會自動回檔到最近的健康存檔，期間助手會短暫中斷。確定繼續？",
+      "clone": "將基於選中存檔建立 {{count}} 個獨立分身助手（約數秒）。分身與原助手相互獨立。確定繼續？",
+      "publish": "將當前選中存檔釋出為助手範本，供團隊複用、批次孵化。確定繼續？"
+    },
+    "archives": {
+      "title": "存檔時間線",
+      "description": "按時間線展示助手的版本演化；選中存檔後可回檔、建立分身或釋出為助手範本。",
+      "empty": "暫無存檔，請先建立存檔。",
+      "createdAt": "建立時間",
+      "updatedAt": "更新時間",
+      "originSandbox": "來源 Sandbox",
+      "publishStatus": "釋出狀態",
+      "referenceStatus": "範本引用",
+      "notPublished": "未釋出",
+      "referenced": "已被引用",
+      "notReferenced": "未被引用",
+      "healthyBadge": "健康",
+      "publishedBadge": "已釋出範本",
+      "referencedBadge": "範本引用中",
+      "basedOn": "基於：{{name}}",
+      "creatingBadge": "存檔中…",
+      "creatingDefault": "存檔中…",
+      "confirmDelete": "確定要刪除這個存檔嗎？已被助手範本引用的存檔不能刪除。"
+    },
+    "actionsPanel": {
+      "title": "存檔操作"
+    },
+    "operations": {
+      "title": "最近操作",
+      "empty": "暫無操作記錄",
+      "types": {
+        "snapshot": "建立存檔",
+        "rollback": "回檔",
+        "clone": "建立分身",
+        "publish_template": "釋出範本",
+        "recover": "自愈"
+      },
+      "status": {
+        "running": "進行中",
+        "succeeded": "成功",
+        "failed": "失敗"
+      }
+    },
+    "errors": {
+      "snapshotFailed": "存檔失敗"
+    }
+  },
+  "newCard": {
+    "title": "建立個人助手",
+    "subtitle": "支援多種 Agent 引擎",
+    "engines": {
+      "openclaw": "OpenClaw 開源版",
+      "hermes": "Hermes 開源版"
+    }
+  },
+  "dialog": {
+    "title": "建立個人助手",
+    "sections": {
+      "info": "助手資訊",
+      "engine": "工作引擎",
+      "template": "助手範本",
+      "persistence": "狀態管理模式",
+      "model": "模型",
+      "botConfig": "填入配置"
+    },
+    "namePlaceholder": "給新助手起個名字",
+    "engineOptions": {
+      "openclaw": {
+        "title": "OpenClaw 開源版",
+        "description": "開源版 OpenClaw，支援多工排程與工具整合"
+      },
+      "hermes": {
+        "title": "Hermes 開源版",
+        "description": "開源版 Hermes，支援自主規劃與持續進化",
+        "comingSoon": "建設中"
+      }
+    },
+    "templateHint": "可選擇已釋出的數位助手範本；不選擇時使用系統預設範本",
+    "templateLoading": "範本載入中...",
+    "templateSelected": "將使用助手範本：{{templateId}}",
+    "templateFields": {
+      "model": "模型",
+      "version": "版本",
+      "persistence": "狀態管理模式",
+      "sourceAgent": "來源助手",
+      "createdAt": "釋出時間"
+    },
+    "templateOptions": {
+      "default": "系統預設範本"
+    },
+    "persistenceHint": "完整快照型支援整個 Sandbox 製作快照；檔案共享型會把 OpenClaw 檔案持久化到 host，快照/分身只複製共享檔案狀態。",
+    "persistenceInheritedHint": "已選擇數位助手範本，狀態管理模式將直接繼承範本釋出時的設定。",
+    "persistenceOptions": {
+      "sharedFiles": {
+        "title": "檔案共享型",
+        "description": "OpenClaw 檔案掛載到 host，適合長期儲存會話、配置和憑證託管狀態。"
+      },
+      "fullSnapshot": {
+        "title": "完整快照型",
+        "description": "不使用 host mount，快照/回檔提交整個 Sandbox rootfs。"
+      }
+    },
+    "modelHint": "使用「模型服務設定」中的預設模型",
+    "botConfigHint": "貼上智慧機器人「API配置-長連線」中的 Bot ID 與 Secret 資訊；填寫後會自動安裝企業微信外掛並繫結機器人",
+    "fields": {
+      "botId": "Bot ID",
+      "botIdPlaceholder": "請輸入 Bot ID",
+      "secret": "Secret",
+      "secretPlaceholder": "請輸入 Secret"
+    },
+    "apiKeyRequired": {
+      "title": "尚未配置 LLM API Key",
+      "description": "建立數位助手前需要先在「模型服務設定」中配置可用的 LLM API Key。",
+      "action": "去設定"
+    },
+    "actions": {
+      "cancel": "取消",
+      "submit": "建立",
+      "submitting": "孵化中…"
+    },
+    "errors": {
+      "nameRequired": "請填寫助手名稱",
+      "apiKeyRequired": "請先配置 LLM API Key 再建立助手"
+    }
+  },
+  "wecomDialog": {
+    "title": "企業微信配置",
+    "description": "檢視或修改當前數位助手繫結的企業微信 Bot ID 與 Secret。",
+    "fields": {
+      "botId": "Bot ID",
+      "botSecret": "Secret"
+    },
+    "placeholders": {
+      "botId": "請輸入 Bot ID",
+      "botSecret": "請輸入 Secret"
+    },
+    "actions": {
+      "cancel": "取消",
+      "save": "儲存",
+      "saving": "裝配中…",
+      "showSecret": "顯示",
+      "hideSecret": "隱藏"
+    },
+    "errors": {
+      "required": "請同時填寫 Bot ID 和 Secret"
+    }
+  },
+  "modelDialog": {
+    "title": "修改模型",
+    "label": "模型",
+    "help": "如何使用自己的模型",
+    "warning": "修改預設模型將自動重新啟動 Agent 服務（資料不會丟失），以使配置生效",
+    "actions": {
+      "cancel": "取消",
+      "save": "儲存並重新啟動",
+      "saving": "儲存中..."
+    },
+    "options": {
+      "deepseekV4Flash": "DeepSeek V4 Flash",
+      "deepseekV4Pro": "DeepSeek V4 Pro"
+    }
+  },
+  "errorDialog": {
+    "title": "操作失敗",
+    "description": "請檢視具體錯誤資訊。",
+    "actions": {
+      "close": "關閉"
+    }
+  },
+  "deleteDialog": {
+    "title": "刪除數位助手",
+    "actions": {
+      "cancel": "取消",
+      "confirm": "刪除"
+    }
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "title": "範本詳細資料",
+  "backToTemplates": "返回範本列表",
+  "notFound": "範本不存在或已被刪除。",
+  "section": {
+    "info": "基礎資訊",
+    "infoDesc": "範本的基本屬性與當前狀態。",
+    "network": "網路策略",
+    "networkDesc": "範本的網路型別與出站流量規則。",
+    "replicas": "Replicas",
+    "replicasDesc": "該範本在各節點上的快照副本狀態。",
+    "compat": "相容性",
+    "compatDesc": "節點升級後，這個範本還能不能直接用來建沙箱。需要重建時，點「重建範本」。",
+    "danger": "刪除範本",
+    "dangerDesc": "刪除後無法恢復，該範本下所有 replica 將一併刪除。"
+  },
+  "fields": {
+    "templateID": "範本 ID",
+    "alias": "別名",
+    "backend": "儲存後端",
+    "status": "狀態",
+    "instanceType": "執行個體型別",
+    "version": "版本",
+    "spec": "規格",
+    "node": "節點",
+    "phase": "階段",
+    "compat": "相容性",
+    "artifactID": "Artifact ID",
+    "snapshotPath": "快照路徑",
+    "lastJob": "最近任務",
+    "lastError": "錯誤資訊",
+    "env": "環境變數",
+    "networkType": "網路型別",
+    "internetAccess": "公網存取",
+    "dns": "DNS 伺服器",
+    "allowOut": "允許出站",
+    "denyOut": "拒絕出站",
+    "memory": "記憶體",
+    "writableLayerSize": "可寫層大小"
+  },
+  "status": {
+    "ready": "就緒",
+    "building": "建置中",
+    "failed": "失敗",
+    "unknown": "未知"
+  },
+  "rebuild": {
+    "button": "重建範本",
+    "confirm": "確認重建",
+    "confirmDesc": "這將觸發範本重新建置，過程中範本不可用於建立新沙箱。確認繼續？",
+    "cancel": "取消",
+    "building": "建置中…",
+    "success": "重建已觸發",
+    "progress": "進度 {{progress}}%",
+    "viewLogs": "檢視建置日誌",
+    "hideLogs": "隱藏日誌"
+  },
+  "delete": {
+    "button": "刪除範本",
+    "confirm": "確認刪除",
+    "confirmDesc": "刪除後無法恢復，該範本下所有 replica 將一併刪除。確認繼續？",
+    "cancel": "取消",
+    "deleting": "刪除中…"
+  },
+  "empty": {
+    "replicas": "暫無副本資訊。",
+    "noNetworkPolicy": "使用預設網路配置"
+  },
+  "building": "範本正在建置中，請稍後重新整理。",
+  "buildFailed": "範本建置失敗。",
+  "buildFailedDeleteHint": "該範本建置失敗，無法檢視詳細資料，但你可以將其刪除。",
+  "network": {
+    "allowed": "允許",
+    "blocked": "禁止"
+  },
+  "compat": {
+    "staleTitle": "需要重建此範本",
+    "staleDesc": "{{count}} 個副本在節點升級後可能無法正常建立沙箱。請點選「重建範本」，按當前節點重新制作。",
+    "driftTitle": "節點環境已更新",
+    "driftDesc": "仍可直接建立沙箱。如果想用節點上的新環境，再點「重建範本」。",
+    "loading": "正在讀取相容性資訊…",
+    "empty": "暫無相容性資訊。",
+    "status": {
+      "OK": "可用",
+      "STALE": "可用",
+      "UNKNOWN": "需重建",
+      "MISSING": "此節點沒有副本"
+    },
+    "components": {
+      "guestImage": "guest-image",
+      "agent": "cube-agent",
+      "kernel": "kernel"
+    }
+  },
+  "specs": "規格",
+  "attributes": "屬性",
+  "copy": "複製",
+  "copied": "已複製",
+  "clickToCopy": "點選複製: {{text}}",
+  "refresh": "重新整理",
+  "templateId": "範本 ID",
+  "createdAt": "建立於",
+  "imageCopied": "映像位址已複製",
+  "exposedPorts": "暴露埠",
+  "probePath": "探針路徑和埠",
+  "errors": {
+    "templateInUse": "該範本當前有沙箱執行個體正在使用，請先銷燬所有關聯沙箱後再刪除。",
+    "buildInProgress": "範本正在建置中，請等待建置完成後再刪除。",
+    "cleanupMissing": "範本清理資訊不完整，無法自動刪除，請聯絡管理員。"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "title": "沙箱",
+  "subtitle": "所有執行中微虛擬機器的即時檢視，無需離開鍵盤即可管理生命週期。",
+  "newSandbox": "新建沙箱",
+  "filterPlaceholder": "按 ID、範本、使用者端篩選…",
+  "status": "狀態",
+  "filter": {
+    "all": "全部",
+    "running": "執行中",
+    "paused": "已暫停"
+  },
+  "col": {
+    "state": "狀態",
+    "sandboxId": "沙箱 ID",
+    "template": "範本",
+    "cpu": "CPU",
+    "memory": "記憶體",
+    "started": "啟動時間",
+    "actions": "操作",
+    "node": "節點"
+  },
+  "noMatch": "沒有沙箱匹配當前篩選條件。",
+  "alias": "別名: {{alias}}",
+  "vcpu": "{{count}} vCPU",
+  "actions": {
+    "resume": "恢復",
+    "pause": "暫停",
+    "kill": "終止"
+  },
+  "errors": {
+    "unknown": "未知錯誤",
+    "actionFailed": "操作失敗: {{message}}",
+    "conflict": "{{message}}",
+    "resumeCapacity": "節點資源不足, 無法恢復該沙箱, 請先釋放其他執行個體容量",
+    "resumeCapacityDetail": "節點記憶體不足, 無法恢復 (還需 {{need}}, 已用 {{used}}, 配額 {{quota}})",
+    "resumeCapacityDetailCpu": "節點 CPU 不足, 無法恢復 (還需 {{need}}, 已用 {{used}}, 配額 {{quota}})"
+  }
+}

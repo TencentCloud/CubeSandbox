@@ -1,0 +1,51 @@
+{
+  "title": "可觀測性",
+  "description": "叢集執行時狀態、節點健康與範本建置總覽",
+  "sandboxes": {
+    "title": "沙箱健康總覽",
+    "desc": "當前叢集中沙箱的執行狀態分佈",
+    "total": "沙箱總數",
+    "running": "執行中",
+    "paused": "已暫停",
+    "distribution": "狀態分佈",
+    "recent": "最近建立",
+    "empty": "暫無沙箱",
+    "colId": "沙箱 ID",
+    "colTemplate": "範本",
+    "colState": "狀態",
+    "colCreated": "建立時間"
+  },
+  "nodes": {
+    "title": "節點健康狀態",
+    "desc": "各節點資源使用率與健康狀況",
+    "healthy": "健康",
+    "degraded": "異常",
+    "healthyCount": "健康節點",
+    "totalCount": "總節點數",
+    "cpu": "CPU",
+    "memory": "記憶體",
+    "empty": "暫無節點資料"
+  },
+  "api": {
+    "title": "API 請求監控",
+    "desc": "CubeOps 閘道連通性檢查",
+    "latency": "延遲",
+    "test": "測試連通性",
+    "testing": "測試中…",
+    "connected": "連線正常",
+    "failed": "連線失敗"
+  },
+  "templates": {
+    "title": "範本建置狀態",
+    "desc": "各範本當前狀態與異常情況",
+    "ready": "正常",
+    "building": "建置中",
+    "failed": "失敗",
+    "failedList": "失敗範本",
+    "noFailed": "無失敗範本",
+    "colId": "範本 ID",
+    "colStatus": "狀態",
+    "colVersion": "版本",
+    "colError": "錯誤資訊"
+  }
+}

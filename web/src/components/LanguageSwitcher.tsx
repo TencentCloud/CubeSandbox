@@ -9,11 +9,12 @@ import { cn } from '@/lib/utils';
 const LANGS = [
   { code: 'en', label: 'English' },
   { code: 'zh', label: '简体中文' },
+  { code: 'zh-TW', label: '繁體中文（台灣）' },
 ] as const;
 
 export function LanguageSwitcher() {
   const { i18n } = useTranslation('topbar');
-  const current = i18n.language as 'en' | 'zh';
+  const current = i18n.language as 'en' | 'zh' | 'zh-TW';
 
   return (
     <DropdownMenu.Root>

@@ -1,0 +1,14 @@
+{
+  "breadcrumb": "控制台",
+  "searchPlaceholder": "搜尋沙箱、範本、節點…",
+  "mockOn": "模擬開啟",
+  "mockOff": "模擬",
+  "mockOnTitle": "模擬資料已開啟 — 點擊停用",
+  "mockOffTitle": "模擬資料已關閉 — 點選啟用",
+  "notifications": "通知",
+  "language": "語言",
+  "english": "English",
+  "chinese": "簡體中文",
+  "github": "GitHub",
+  "docs": "文件"
+}

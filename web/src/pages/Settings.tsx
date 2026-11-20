@@ -73,6 +73,7 @@ const THEME_OPTIONS: { value: ThemeMode; icon: typeof Sun; labelKey: string }[] 
 
 const LANGS = [
   { code: 'zh', label: '简体中文' },
+  { code: 'zh-TW', label: '繁體中文（台灣）' },
   { code: 'en', label: 'English' },
 ] as const;
 
@@ -82,7 +83,7 @@ function AppearanceSection() {
   const { i18n } = useTranslation();
   const mode = useThemeStore((s) => s.mode);
   const setMode = useThemeStore((s) => s.setMode);
-  const currentLang = i18n.language.startsWith('zh') ? 'zh' : 'en';
+  const currentLang = (['zh', 'zh-TW'] as string[]).includes(i18n.language) ? i18n.language : 'en';
 
   return (
     <div className="space-y-8">
