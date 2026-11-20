@@ -58,11 +58,18 @@ struct s3_flusher {
 	uint32_t                    max_concurrent;
 	uint32_t                    in_flight;
 	uint32_t                    head_in_flight;
+	uint64_t                    failures_since_success;
+	uint64_t                    last_failure_log;
+	uint64_t                    last_resume_log;
+	int                         last_failure_status;
+	bool                        urgent_retry;
 
 	struct spdk_poller *poller;
 
 	/* Set only by destroy so no new upload is started. */
 	bool                        stopping;
+	/* Synchronous completions leave scheduling to the active outer loop. */
+	bool                        scheduling;
 
 	/* Reversible scheduling gate used by attach and hot prepare. */
 	bool                        suspended;
@@ -223,6 +230,13 @@ flusher_advance_wal(struct s3_flusher *f)
  * Upload scheduling
  * ========================================================================== */
 
+static bool
+flusher_needs_urgent_retry(const struct s3_flusher *f)
+{
+	return f->drain_cb != NULL || s3_wal_should_force_flush(f->wal) ||
+	       s3_writeback_should_force_flush(f->writeback);
+}
+
 static void
 flusher_upload_done(void *cb_arg, int status)
 {
@@ -241,15 +255,56 @@ flusher_upload_done(void *cb_arg, int status)
 		f->stats.chunks_flushed++;
 		f->stats.blocks_flushed += req->view.nblocks;
 	} else {
+		uint64_t now = spdk_get_ticks();
+		uint64_t hz = spdk_get_ticks_hz();
+		uint64_t max_delay_us = flusher_needs_urgent_retry(f) ?
+			S3_FLUSHER_URGENT_RETRY_MAX_US : S3_OVERLAY_RETRY_MAX_US;
+		uint64_t delay_us = s3_overlay_backoff_flush(f->overlay, chunk_index,
+				req->view.epoch, max_delay_us);
+
 		f->stats.failures++;
-		SPDK_ERRLOG("Failed to flush chunk %" PRIu64 " to S3: %d "
-			    "(kept dirty, will retry)\n", chunk_index, status);
+		f->failures_since_success++;
+		/* One summary per lvstore keeps multi-chunk outages from flooding
+		 * the log. A changed error status is reported immediately. The
+		 * count covers every chunk, not just the named one. */
+		if (!f->last_failure_log || status != f->last_failure_status ||
+		    now - f->last_failure_log >= S3_FLUSHER_FAILURE_LOG_INTERVAL_SEC * hz) {
+			char retry_backoff[96];
+			const char *retry_detail = "round invalidated by unmap; no cooldown applied";
+
+			if (delay_us != 0) {
+				snprintf(retry_backoff, sizeof(retry_backoff),
+					 "chunk kept dirty; retry backoff %" PRIu64 " us", delay_us);
+				retry_detail = retry_backoff;
+			}
+			SPDK_ERRLOG("Failed to flush chunk %" PRIu64 " to S3: %d "
+				    "(%" PRIu64 " failures across this lvstore since last "
+				    "successful upload; %s)\n",
+				    chunk_index, status, f->failures_since_success,
+				    retry_detail);
+			f->last_failure_log = now;
+			f->last_failure_status = status;
+		}
 	}
 
 	/* Releases the claimed blocks on success, or re-dirties and re-queues
 	 * them on failure. Either way it must happen before truncation, which
 	 * reads the overlay's oldest seq. */
 	s3_overlay_flush_end(f->overlay, chunk_index, status == 0);
+	/* Success resets the failure count, not either log deadline. Otherwise
+	 * alternating successes and failures bypass both log rate limits. */
+	if (status == 0) {
+		uint64_t now = spdk_get_ticks();
+
+		if (f->failures_since_success &&
+		    (!f->last_resume_log || now - f->last_resume_log >=
+		     S3_FLUSHER_FAILURE_LOG_INTERVAL_SEC * spdk_get_ticks_hz())) {
+			SPDK_NOTICELOG("S3 uploads resumed after %" PRIu64
+				       " failed uploads\n", f->failures_since_success);
+			f->last_resume_log = now;
+		}
+		f->failures_since_success = 0;
+	}
 
 	free(req);
 
@@ -273,9 +328,10 @@ flusher_submit_req(struct s3_flusher *f, struct flush_req *req,
 	rc = s3_overlay_flush_begin(f->overlay, chunk_index, &req->view);
 	if (rc != 0) {
 		/* -ENOENT: the chunk was unmapped or already flushed between
-		 * being queued and now. -EBUSY cannot happen -- a chunk with a
+		 * being queued and now. -EAGAIN: durability or retry cooldown.
+		 * -EBUSY cannot happen -- a chunk with a
 		 * live flush is never on the queue. */
-		if (rc != -ENOENT) {
+		if (rc != -ENOENT && rc != -EAGAIN) {
 			SPDK_ERRLOG("Unexpected %s flush_begin(%" PRIu64
 				    ") result: %d\n",
 				    ring_head ? "ring-head" : "queued",
@@ -377,9 +433,11 @@ s3_flusher_kick(struct s3_flusher *f)
 {
 	bool force_all, force_head;
 
-	if (!f) {
+	if (!f || f->scheduling) {
 		return;
 	}
+
+	f->scheduling = true;
 
 	/* Two reasons to set the overlay's hold-back policy aside.
 	 *
@@ -397,6 +455,13 @@ s3_flusher_kick(struct s3_flusher *f)
 	force_all = (f->drain_cb != NULL) || s3_wal_should_force_flush(f->wal);
 	force_head = !force_all &&
 		s3_writeback_should_force_flush(f->writeback);
+
+	/* Shorten cooldowns already armed before pressure arrived. Scan once on
+	 * entry, not on every poller tick, and retain the failure history. */
+	if ((force_all || force_head) && !f->urgent_retry) {
+		s3_overlay_limit_flush_backoff(f->overlay, S3_FLUSHER_URGENT_RETRY_MAX_US);
+	}
+	f->urgent_retry = force_all || force_head;
 
 	/* Fill the default upload window from exact ring-head blockers. A caller
 	 * configured above that default leaves its remaining slots to full/aged
@@ -416,6 +481,7 @@ s3_flusher_kick(struct s3_flusher *f)
 		}
 	}
 
+	f->scheduling = false;
 	flusher_check_drain(f);
 }
 
@@ -425,6 +491,7 @@ flusher_poll(void *arg)
 	struct s3_flusher *f = arg;
 
 	if (f->in_flight == 0 && !s3_overlay_has_dirty(f->overlay)) {
+		f->failures_since_success = 0;
 		flusher_check_drain(f);
 		flusher_check_suspend(f);
 		return SPDK_POLLER_IDLE;
@@ -561,6 +628,10 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	f->drain_cb      = cb_fn;
 	f->drain_arg     = cb_arg;
 	f->drain_expired = false;
+	/* Give this bounded drain one immediate probe. A synchronous failure
+	 * re-arms the cooldown before the scheduling loop can retry again.
+	 * Preserve escalation across drains; only the wait is capped. */
+	s3_overlay_reset_flush_backoff(f->overlay);
 
 	/* Push everything through rather than waiting for the poller tick. */
 	s3_flusher_kick(f);
