@@ -5,6 +5,8 @@
 package container
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync/atomic"
@@ -14,7 +16,36 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v2"
 )
+
+func TestExecExitErrorPreservesExitCode(t *testing.T) {
+	for _, code := range []uint32{0, 7, 127, 137} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			status := containerd.NewExitStatus(code, time.Now(), nil)
+			err := execExitError(*status)
+			if code == 0 {
+				require.NoError(t, err)
+				return
+			}
+
+			var exitErr cli.ExitCoder
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, int(code), exitErr.ExitCode())
+		})
+	}
+}
+
+func TestExecExitErrorKeepsStatusFailure(t *testing.T) {
+	waitErr := errors.New("wait failed")
+	status := containerd.NewExitStatus(7, time.Now(), waitErr)
+
+	err := execExitError(*status)
+
+	require.ErrorIs(t, err, waitErr)
+	var exitErr cli.ExitCoder
+	assert.False(t, errors.As(err, &exitErr))
+}
 
 func TestStdinCloserClosesOnceOnEOF(t *testing.T) {
 	reader, writer, err := os.Pipe()
