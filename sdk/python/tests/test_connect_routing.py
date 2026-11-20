@@ -372,3 +372,75 @@ def test_control_characters_are_replaced(target):
         message = _call(sb, target)
     assert "\x1b" not in message and "\x07" not in message
     assert message.endswith("HTTP 500: \ufffd[31mboom\ufffd")
+
+
+class _StallingStream(httpx.SyncByteStream):
+    """Send ``first`` and then never send anything again."""
+
+    def __init__(self, first: bytes) -> None:
+        self.first = first
+        self.waited = False
+
+    def __iter__(self):
+        yield self.first
+        self.waited = True
+        raise AssertionError("the error body was read past a recognised routing page")
+
+
+@pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.parametrize(
+    "status,first,content_type",
+    [
+        (502, b"<html><body>Bad gateway</body>", "text/html"),
+        (502, b"<!DOCTYPE html><title>portal</title>", "text/plain"),
+        (404, b"404 page not found\n", "text/plain; charset=utf-8"),
+    ],
+    ids=["html", "doctype-as-text", "404-text"],
+)
+def test_routing_page_is_reported_without_waiting_for_the_rest(target, status, first, content_type):
+    sb = make_sandbox()
+    stream = _StallingStream(first)
+    page = httpx.Response(status, headers={"content-type": content_type}, stream=stream)
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert not stream.waited
+    assert first.decode().strip()[:20] in message
+    assert "Connect stream" in message
+
+
+def test_routing_prefix_never_disagrees_with_the_full_body():
+    from cubesandbox._commands import _is_routing_page, _is_routing_page_prefix
+
+    bodies = [
+        b"<html>x</html>",
+        b"  <!doctype html>",
+        b"404 page not found",
+        b'{"message": "boom"}',
+        b"{not json",
+        b"plain text",
+        b"",
+    ]
+    for status in (200, 404, 502):
+        for media_type in ("text/html", "text/plain", "application/json", ""):
+            for body in bodies:
+                for n in range(1, len(body) + 1):
+                    if _is_routing_page_prefix(status, media_type, body[:n]):
+                        assert _is_routing_page(status, media_type, body), (status, media_type, body, n)
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_crlf_is_kept_and_c1_controls_are_replaced(target):
+    sb = make_sandbox()
+    body = "line1\r\nline2\rline3 \u009b31m\u0085end".encode()
+    page = _error_page(500, body, "text/plain")
+    with patch.object(sb, "_build_data_client", return_value=_client(page)):
+        message = _call(sb, target)
+    assert message.endswith("HTTP 500: line1\nline2\nline3 �31m�end")
+
+
+def test_html_content_type_is_sanitized():
+    from cubesandbox._commands import _html_response_error
+
+    resp = httpx.Response(200, headers={"content-type": "text/html; x=\x1b[31m"})
+    message = _html_response_error(resp)
+    assert message is not None and "\x1b" not in message

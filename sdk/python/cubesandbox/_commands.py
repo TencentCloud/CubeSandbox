@@ -72,7 +72,7 @@ def _html_response_error(resp: httpx.Response) -> str | None:
     """
     if resp.status_code != 200 or _media_type(resp) != "text/html":
         return None
-    content_type = resp.headers.get("content-type", "")
+    content_type = _sanitize(resp.headers.get("content-type", ""))
     return (
         f'received HTML instead of a Connect response (content-type "{content_type}"); '
         f"{_ROUTING_HINT}"
@@ -120,6 +120,23 @@ def _is_routing_page(status_code: int, media_type: str, body: bytes) -> bool:
     return not trimmed.startswith(b"{")
 
 
+def _is_routing_page_prefix(status_code: int, media_type: str, prefix: bytes) -> bool:
+    """Whether the first bytes of a body already make it a routing page.
+
+    True only when the rest of the body cannot change what
+    ``_is_routing_page`` decides: a body that may be JSON needs to be read
+    in full, everything else is decided by its media type or first bytes.
+    """
+    trimmed = prefix.lstrip()
+    if not trimmed or trimmed.startswith(b"{"):
+        return False
+    if media_type == "text/html":
+        return True
+    if trimmed[: len(b"<!doctype")].lower().startswith((b"<!doctype", b"<html")):
+        return True
+    return status_code == 404 and media_type.startswith("text/")
+
+
 def _routing_page_hint(status_code: int) -> str:
     if status_code in (401, 403):
         return (
@@ -147,21 +164,27 @@ def _truncate_diagnostic(message: str) -> str:
     return _decode_prefix(raw[:_MAX_DIAGNOSTIC_BYTES]) + "..."
 
 
-def _read_error_body(resp: httpx.Response) -> bytes | None:
+def _read_error_body(resp: httpx.Response) -> tuple[bytes, bool] | None:
     """Read at most ``_MAX_ERROR_BODY_BYTES + 1`` bytes of an error body.
 
-    Returns ``None`` if the body cannot be read; callers then report the
-    status alone.
+    Stops as soon as the bytes read so far identify a routing page, so a
+    gateway that sends a short page and keeps the connection open does not
+    block the caller (the data client has no read timeout). Returns the
+    bytes and whether the whole body was read, or ``None`` if the body
+    cannot be read; callers then report the status alone.
     """
+    media_type = _media_type(resp)
     raw = bytearray()
     try:
         for chunk in resp.iter_bytes():
             raw.extend(chunk)
             if len(raw) > _MAX_ERROR_BODY_BYTES:
-                break
+                return bytes(raw[: _MAX_ERROR_BODY_BYTES + 1]), False
+            if _is_routing_page_prefix(resp.status_code, media_type, bytes(raw[:_MAX_ROUTING_PAGE_PEEK_BYTES])):
+                return bytes(raw), False
     except httpx.HTTPError:
         return None
-    return bytes(raw[: _MAX_ERROR_BODY_BYTES + 1])
+    return bytes(raw), True
 
 
 def _stream_http_error_detail(resp: httpx.Response) -> str:
@@ -169,17 +192,19 @@ def _stream_http_error_detail(resp: httpx.Response) -> str:
 
     Like the Go SDK's ``validateConnectResponse``: at most 64 KiB of the body
     is read. A routing page (a misrouted request landing on a Web UI, gateway
-    or portal) is reported from its first 4 KiB, truncated to 200 bytes and
-    followed by a status-specific hint. Any other body longer than 64 KiB is
+    or portal) is recognised from its first bytes, reported from at most its
+    first 4 KiB, truncated to 200 bytes and followed by a status-specific
+    hint; the rest of it is not read. Any other body longer than 64 KiB is
     cut and marked ``[truncated]``. A body that cannot be read leaves only
     the status in the caller's message.
     """
-    raw = _read_error_body(resp)
-    if raw is None:
+    body = _read_error_body(resp)
+    if body is None:
         return ""
+    raw, complete = body
     peek = raw[:_MAX_ROUTING_PAGE_PEEK_BYTES]
     if _is_routing_page(resp.status_code, _media_type(resp), peek):
-        cut = len(raw) > len(peek)
+        cut = not complete or len(raw) > len(peek)
         text = (_decode_prefix(peek) if cut else peek.decode("utf-8", "replace")).strip()
         hint = _routing_page_hint(resp.status_code)
         return f"{_sanitize(_truncate_diagnostic(text))}; {hint}" if text else hint
@@ -188,12 +213,17 @@ def _stream_http_error_detail(resp: httpx.Response) -> str:
     return _sanitize(_error_detail_from_body(raw))
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _sanitize(text: str) -> str:
-    """Replace control characters (ANSI escapes included) from server text."""
-    return _CONTROL_CHARS.sub("\ufffd", text)
+    """Replace control characters in server text.
+
+    CRLF and CR become a line break first. C0 controls (except tab and line
+    feed), DEL and C1 controls, which include the 8-bit CSI that terminals
+    treat like ``ESC [``, become U+FFFD.
+    """
+    return _CONTROL_CHARS.sub("\ufffd", re.sub(r"\r\n?", "\n", text))
 
 
 @dataclass
