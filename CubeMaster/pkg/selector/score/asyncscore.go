@@ -67,7 +67,7 @@ func loopAsyncScore(ctx context.Context) {
 					n, ok := v.Object.(*node.Node)
 					if ok {
 
-						n.Score = getMultiFactorWeightedAverageScore(n) / totalWeight
+						n.SetScore(getMultiFactorWeightedAverageScore(n) / totalWeight)
 					}
 				}
 				if config.GetConfig().Common.MockDebug {
@@ -97,7 +97,7 @@ func printAsyncScores(w *tabwriter.Writer) {
 	for _, n := range localcache.GetHealthyNodes(-1) {
 		nodes.Append(&node.NodeScore{
 			InsID:    n.ID(),
-			Score:    n.Score,
+			Score:    n.GetScore(),
 			MvmNum:   n.MvmNum,
 			OrigNode: n,
 		})
