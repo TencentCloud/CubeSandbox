@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 	api "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/urfave/cli"
+	"gopkg.in/yaml.v3"
 )
 
 type templateReplicaStatus struct {
@@ -925,6 +926,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.BoolFlag{Name: "enable-inject-envd", Usage: "enable cubesandbox-envd injection for this template build"},
 		cli.StringFlag{Name: "envd-path", Usage: "local envd binary path to upload when --enable-inject-envd is set; defaults to the CLI-embedded envd if available"},
 		cli.StringSliceFlag{Name: "kernel-cmdline-append", Usage: "append guest kernel cmdline params; repeat for multiple params; only page_reporting.* and damon_reclaim.* are allowed, e.g. --kernel-cmdline-append page_reporting.page_reporting_order=6 --kernel-cmdline-append damon_reclaim.enabled=Y"},
+		cli.StringFlag{Name: "kernel-cmdline-file", Usage: "YAML/JSON file holding guest kernel cmdline params; accepts either {cmdline: [...]} or a top-level list; merged with --kernel-cmdline-append, which takes precedence on duplicate keys"},
 		cli.BoolFlag{Name: "detach, no-wait", Usage: "submit and exit immediately instead of watching the job to completion"},
 		cli.DurationFlag{Name: "interval", Value: defaultWatchInterval, Usage: "poll interval while watching the job"},
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
@@ -1742,6 +1744,76 @@ func parseCreateFromImageQos(c *cli.Context) (*qos.Config, error) {
 	return configured, nil
 }
 
+// loadKernelCmdlineFile parses a YAML/JSON file holding guest kernel cmdline
+// params. Both {cmdline: [...]} and a top-level list are accepted.
+func loadKernelCmdlineFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read kernel cmdline file %q: %w", path, err)
+	}
+	// Try a top-level list first; a mapping cannot decode into a slice.
+	var list []string
+	if err := yaml.Unmarshal(data, &list); err == nil && list != nil {
+		return list, nil
+	}
+	// Otherwise accept {cmdline: [...]}. Reject unknown keys so a typo such as
+	// "kernel_cmdline:" fails instead of silently submitting no params.
+	var wrapper struct {
+		Cmdline []string `yaml:"cmdline"`
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&wrapper); err != nil {
+		// An empty file has no params rather than an error.
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("parse kernel cmdline file %q: expected {cmdline: [...]} or a top-level list: %w", path, err)
+	}
+	// An explicit empty or null cmdline yields no params rather than an error.
+	return wrapper.Cmdline, nil
+}
+
+// mergeKernelCmdline merges file and CLI params, keyed by the text before the
+// first '='. CLI values win on duplicate keys.
+func mergeKernelCmdline(fromFile, fromCLI []string) []string {
+	paramKey := func(p string) string {
+		if idx := strings.IndexByte(p, '='); idx >= 0 {
+			return p[:idx]
+		}
+		return p
+	}
+	merged := make([]string, 0, len(fromFile)+len(fromCLI))
+	index := make(map[string]int, len(fromFile)+len(fromCLI))
+	for _, p := range fromFile {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		k := paramKey(p)
+		if i, ok := index[k]; ok {
+			merged[i] = p
+			continue
+		}
+		index[k] = len(merged)
+		merged = append(merged, p)
+	}
+	for _, p := range fromCLI {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		k := paramKey(p)
+		if i, ok := index[k]; ok {
+			merged[i] = p
+			continue
+		}
+		index[k] = len(merged)
+		merged = append(merged, p)
+	}
+	return merged
+}
+
 func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) {
 	cmds := c.StringSlice("cmd")
 	args := c.StringSlice("arg")
@@ -1752,6 +1824,13 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	memoryMB := c.Int("memory")
 	enableInjectEnvd := c.Bool("enable-inject-envd")
 	kernelCmdline := c.StringSlice("kernel-cmdline-append")
+	if path := c.String("kernel-cmdline-file"); path != "" {
+		fromFile, err := loadKernelCmdlineFile(path)
+		if err != nil {
+			return nil, err
+		}
+		kernelCmdline = mergeKernelCmdline(fromFile, kernelCmdline)
+	}
 	user := strings.TrimSpace(c.String("user"))
 
 	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && len(kernelCmdline) == 0 && user == "" {
