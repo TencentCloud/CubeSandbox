@@ -124,6 +124,13 @@ pub trait Engine: Send + Sync {
         ))
     }
 
+    /// Preserve an export independently of its source snapshot before retirement.
+    fn materialise_export(&self, _export_uuid: &str) -> CubecowResult<()> {
+        Err(CubecowError::PreconditionFailed(
+            "materialise_export is not implemented by this backend".to_string(),
+        ))
+    }
+
     /// Import a writable volume from an `export_uuid` produced by a remote node.
     fn import_lvol(&self, _lvol_name: &str, _export_uuid: &str) -> CubecowResult<Volume> {
         Err(CubecowError::PreconditionFailed(

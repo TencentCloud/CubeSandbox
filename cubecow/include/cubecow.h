@@ -305,6 +305,13 @@ int32_t cubecow_export_snapshot(
     const char* snapshot_name,
     char** out_export_uuid);
 
+/* Copy an existing export's data while retaining its UUID for live readers.
+ * Success means the independent manifest is published; failure must block
+ * source retirement. Does not release/revoke the export. */
+int32_t cubecow_materialise_export(
+    CubecowEngineHandle engine,
+    const char* export_uuid);
+
 /*
  * Instantiate a writable volume from an export_uuid produced by a
  * remote node's cubecow_export_snapshot().

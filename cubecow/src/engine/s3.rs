@@ -1099,6 +1099,28 @@ impl Engine for S3Engine {
         Ok(export_uuid)
     }
 
+    fn materialise_export(&self, export_uuid: &str) -> CubecowResult<()> {
+        if export_uuid.is_empty() {
+            return Err(CubecowError::InvalidArg(
+                "export_uuid must not be empty".to_string(),
+            ));
+        }
+        // The server answers only after the copied manifest is published. A
+        // timeout is unknown, never permission to delete the source forcibly.
+        let reply = self.rpc.call_typed(
+            "rcow_materialise_export",
+            &serde_json::json!({ "export_uuid": export_uuid }),
+        )?;
+        if reply.get("bool_value").and_then(|v| v.as_bool()) != Some(true)
+            || reply.get("string_value").and_then(|v| v.as_str()) != Some(export_uuid)
+        {
+            return Err(CubecowError::PreconditionFailed(
+                "materialise_export acknowledgement incomplete or mismatched".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn import_lvol(&self, lvol_name: &str, export_uuid: &str) -> CubecowResult<Volume> {
         Self::validate_name(lvol_name, "volume")?;
         if export_uuid.is_empty() {
@@ -1641,6 +1663,67 @@ fn persist_index(state_dir: &Path, idx: &HashMap<String, NameKind>) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialise_export_uses_existing_rpc_and_preserves_errors() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        for mode in ["success", "busy", "incomplete", "wrong-uuid"] {
+            let path = std::env::temp_dir().join(format!(
+                "cbc-materialise-{}-{mode}.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["method"], "rcow_materialise_export");
+                assert_eq!(req["params"]["export_uuid"], "original-uuid");
+                let result = match mode {
+                    "success" => {
+                        serde_json::json!({"bool_value": true, "string_value": "original-uuid"})
+                    }
+                    "busy" => {
+                        serde_json::json!({"bool_value": false, "string_value": "Device or resource busy"})
+                    }
+                    "wrong-uuid" => {
+                        serde_json::json!({"bool_value": true, "string_value": "another-uuid"})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let response = serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":result});
+                writeln!(stream, "{response}").unwrap();
+            });
+            let cfg = S3Config {
+                socket_path: path.clone(),
+                state_dir: PathBuf::from("/tmp"),
+                rpc_timeout_ms: 1000,
+                rpc_connect_budget_ms: 1000,
+                size_policy: "round_up".to_string(),
+            };
+            let engine = S3Engine {
+                cfg: cfg.clone(),
+                rpc: Arc::new(JsonRpcClient::new(
+                    path.clone(),
+                    Duration::from_millis(1000),
+                    Duration::from_millis(1000),
+                )),
+                name_index: RwLock::new(HashMap::new()),
+                metrics: Arc::new(MetricsCollector::new()),
+            };
+            assert_eq!(
+                engine.materialise_export("original-uuid").is_ok(),
+                mode == "success"
+            );
+            server.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 
     #[test]
     fn validate_name_rejects_reserved_prefix() {

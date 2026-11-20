@@ -1153,6 +1153,29 @@ pub extern "C" fn cubecow_import_lvol(
     }
 }
 
+/// Preserve an existing export independently of its source snapshot.
+#[no_mangle]
+pub extern "C" fn cubecow_materialise_export(
+    engine: *mut std::ffi::c_void,
+    export_uuid: *const c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let eng = unsafe { engine_ref(engine) }?;
+        let uuid = unsafe { c_str_to_str(export_uuid) }?;
+        eng.materialise_export(uuid)
+            .map_err(|e| handle_cow_error(&e))?;
+        Ok(COW_OK)
+    }));
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_materialise_export");
+            COW_ERR_PANIC
+        }
+    }
+}
+
 /// Derive a writable, data-independent volume from an existing snapshot.
 ///
 /// The resulting volume is auto-activated (mirroring
