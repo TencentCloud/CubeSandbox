@@ -51,25 +51,64 @@ func stubCrossNodeStoreReady(t *testing.T, result error) *[]storeReadyCall {
 // that stays uninitialized must fail with the backend's own not-ready error,
 // not a metadata import error.
 func TestPrepareCrossNodeRestoreWaitsForBackendBeforeImport(t *testing.T) {
-	for _, backend := range []string{"s3"} {
-		calls := stubCrossNodeStoreReady(t, storage.ErrS3NotReady)
+	calls := stubCrossNodeStoreReady(t, storage.ErrS3NotReady)
 
-		_, err := prepareCrossNodeRestore(context.Background(), crossNodeRestoreRequest(backend))
-		require.ErrorIs(t, err, storage.ErrS3NotReady)
-		require.NotContains(t, err.Error(), "import metadata")
-		require.Equal(t, []storeReadyCall{{backend: backend, limit: crossNodeStoreReadyWait}}, *calls)
+	_, _, err := prepareCrossNodeRestore(context.Background(), crossNodeRestoreRequest("s3"))
+	require.ErrorIs(t, err, storage.ErrS3NotReady)
+	require.NotContains(t, err.Error(), "import metadata")
+	require.Equal(t, []storeReadyCall{{backend: "s3", limit: crossNodeStoreReadyWait}}, *calls)
+}
+
+func stubClaimSandboxImport(t *testing.T) *[]string {
+	t.Helper()
+	claimed := &[]string{}
+	prev := claimSandboxImportFn
+	claimSandboxImportFn = func(id, backend string) (*storage.SandboxImportClaim, error) {
+		*claimed = append(*claimed, backend+":"+id)
+		return &storage.SandboxImportClaim{SandboxID: id, Backend: backend}, nil
 	}
+	t.Cleanup(func() { claimSandboxImportFn = prev })
+	return claimed
 }
 
 func TestPrepareCrossNodeRestoreProceedsToImportOnceBackendReady(t *testing.T) {
 	calls := stubCrossNodeStoreReady(t, nil)
+	claimed := stubClaimSandboxImport(t)
 
-	_, err := prepareCrossNodeRestore(context.Background(), crossNodeRestoreRequest("s3"))
+	_, _, err := prepareCrossNodeRestore(context.Background(), crossNodeRestoreRequest("s3"))
 	require.Len(t, *calls, 1)
+	require.Len(t, *claimed, 1)
 	// No storage is initialized in this unit test, so the import itself
 	// fails; reaching it is what proves the wait let the restore through.
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "import metadata for cross-node restore of sb-1")
+}
+
+// The metadata disk is imported before any sandbox record can own it, so the
+// import is claimed first, and a failed import still hands the claim back
+// for the Create to settle.
+func TestPrepareCrossNodeRestoreClaimsBeforeImport(t *testing.T) {
+	stubCrossNodeStoreReady(t, nil)
+	claimed := stubClaimSandboxImport(t)
+
+	_, claim, err := prepareCrossNodeRestore(context.Background(), crossNodeRestoreRequest("s3"))
+	require.Error(t, err)
+	require.Equal(t, []string{"s3:sb-1"}, *claimed)
+	require.NotNil(t, claim)
+	require.Equal(t, "sb-1", claim.SandboxID)
+}
+
+// Without a claim nothing is imported.
+func TestPrepareCrossNodeRestoreRefusesUnclaimedImport(t *testing.T) {
+	stubCrossNodeStoreReady(t, nil)
+	prev := claimSandboxImportFn
+	claimSandboxImportFn = func(string, string) (*storage.SandboxImportClaim, error) { return nil, errors.New("db down") }
+	t.Cleanup(func() { claimSandboxImportFn = prev })
+
+	_, claim, err := prepareCrossNodeRestore(context.Background(), crossNodeRestoreRequest("s3"))
+	require.ErrorContains(t, err, "db down")
+	require.NotContains(t, err.Error(), "import metadata")
+	require.Nil(t, claim)
 }
 
 func TestPrepareCrossNodeRestoreSkipsWaitForSameNodeRestore(t *testing.T) {
@@ -77,7 +116,7 @@ func TestPrepareCrossNodeRestoreSkipsWaitForSameNodeRestore(t *testing.T) {
 	req := crossNodeRestoreRequest("s3")
 	delete(req.Annotations, constants.MasterAnnotationSnapshotCrossNode)
 
-	_, err := prepareCrossNodeRestore(context.Background(), req)
+	_, _, err := prepareCrossNodeRestore(context.Background(), req)
 	require.NoError(t, err)
 	require.Empty(t, *calls)
 }
