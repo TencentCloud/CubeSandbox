@@ -17,6 +17,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 )
 
 func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
@@ -27,13 +28,15 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 		return nil, err
 	}
 	if nativeRootfsExportEnabled() {
-		return prepareNativeSource(ctx, spec)
+		source, err := prepareNativeSource(ctx, spec)
+		return withLocalDockerFallback(ctx, spec, source, err)
 	}
-	// In dockerless mode there is no local docker daemon to hold the image, so a
-	// redo re-resolves the source from the registry via skopeo. This intentionally
-	// relaxes the docker-path requirement that the image still exist locally.
+	// In dockerless mode a redo re-resolves the source from the registry via
+	// skopeo. This intentionally relaxes the docker-path requirement that the
+	// image still exist locally.
 	if hasDockerlessRootfsExportTools() {
-		return prepareDockerlessSource(ctx, spec)
+		source, err := prepareDockerlessSource(ctx, spec)
+		return withLocalDockerFallback(ctx, spec, source, err)
 	}
 	inspectOutput, err := dockerOutput(ctx, "", "image", "inspect", "--", spec.ImageRef)
 	if err != nil {
@@ -63,12 +66,60 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 
 func PrepareSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
 	if nativeRootfsExportEnabled() {
-		return prepareNativeSource(ctx, spec)
+		source, err := prepareNativeSource(ctx, spec)
+		return withLocalDockerFallback(ctx, spec, source, err)
 	}
 	if hasDockerlessRootfsExportTools() {
-		return prepareDockerlessSource(ctx, spec)
+		source, err := prepareDockerlessSource(ctx, spec)
+		return withLocalDockerFallback(ctx, spec, source, err)
 	}
 	return prepareDockerSource(ctx, spec)
+}
+
+// withLocalDockerFallback returns the registry-resolved source unchanged. Only
+// when the registry lookup failed and the docker daemon already holds the image
+// (built or loaded locally, never pushed) does it switch to that local copy.
+// The local image is never pulled and is not removed after the build.
+func withLocalDockerFallback(ctx context.Context, spec SourceSpec, source *PreparedSource, err error) (*PreparedSource, error) {
+	if err == nil {
+		return source, nil
+	}
+	if ValidateImageRef(spec.ImageRef) != nil {
+		return nil, err
+	}
+	local, localErr := prepareExistingDockerSource(ctx, spec)
+	if localErr != nil {
+		return nil, err
+	}
+	log.G(ctx).Warnf("image %s could not be resolved from its registry (%v); using the copy in the local docker daemon", spec.ImageRef, err)
+	return local, nil
+}
+
+// prepareExistingDockerSource inspects an image already present in the local
+// docker daemon. It fails instead of pulling when the image is absent, and when
+// tar is missing, since the docker export path pipes `docker export` into tar
+// and the native-mode preflight does not check for it.
+func prepareExistingDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
+	if _, err := executableLookPath("tar"); err != nil {
+		return nil, err
+	}
+	if cli, err := newEngineClient(); err == nil {
+		if info, err := engineImageInspectWithClient(ctx, cli, spec.ImageRef); err == nil {
+			return dockerInspectToPreparedSource(spec, *info, true, "")
+		}
+	}
+	inspectOutput, err := dockerOutput(ctx, "", "image", "inspect", "--", spec.ImageRef)
+	if err != nil {
+		return nil, err
+	}
+	var inspectList []dockerInspectImage
+	if err := json.Unmarshal(inspectOutput, &inspectList); err != nil {
+		return nil, fmt.Errorf("unmarshal local docker inspect output: %w", err)
+	}
+	if len(inspectList) == 0 {
+		return nil, fmt.Errorf("docker image inspect returned empty result for %s", spec.ImageRef)
+	}
+	return dockerInspectToPreparedSource(spec, inspectList[0], true, "")
 }
 
 func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
