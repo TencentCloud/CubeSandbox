@@ -63,6 +63,12 @@ spec:
             {{- include "cube.nodeComponentCommonEnv" . | nindent 12 }}
             - name: CUBE_COMPONENT
               value: cubelet
+            # Lets a restarted cubelet container re-enter the mount namespace
+            # its running sandboxes use, only within this same pod.
+            - name: CUBELET_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: CUBE_ROLE
               value: run
             {{- with .Values.cubeNode.env }}
