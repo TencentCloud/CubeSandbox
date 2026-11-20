@@ -72,6 +72,16 @@ CUBE_PROXY_NODE_IP=21.130.247.183 \
 
 同一章节的两轮之间默认等待 5 秒。可用 `--settle` 指定秒数，也可通过 `CUBE_BENCH_SLO_SETTLE` 设置默认值。集群实际补池所需的时间取决于负载。
 
+搜索 4.3 或 4.6 时，默认每轮都会创建 Python 虚拟环境并安装 SDK。可在运行压测的机器上一次性准备环境，供各轮复用。
+
+```bash
+export CUBE_BENCH_SDK_VENV="$HOME/.venvs/cubebench"
+python3 -m venv "$CUBE_BENCH_SDK_VENV"
+"$CUBE_BENCH_SDK_VENV/bin/python" -m pip install -r examples/snapshot-rollback-clone/requirements.txt
+```
+
+如果已有装好这些依赖的虚拟环境，只需将 `CUBE_BENCH_SDK_VENV` 指向该环境的目录。这样离线运行时各轮也能直接加载 SDK。
+
 #### 常用命令
 
 ```bash

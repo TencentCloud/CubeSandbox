@@ -432,7 +432,8 @@ def run_search(argv):
     )
     prior = parser.add_mutually_exclusive_group()
     prior.add_argument("--history", type=Path, metavar="DIR",
-                       help="override the latest completed search with prior rounds in DIR/<section>/history.json")
+                       help="read prior rounds from DIR/<section>/history.json. Omit this option or use the "
+                            "reserved value 'latest' to use the most recent successful search")
     prior.add_argument("--no-history", action="store_true", help="ignore previous searches and start at concurrency 16")
     parser.add_argument("--settle", type=float, default=os.environ.get("CUBE_BENCH_SLO_SETTLE", "5"), metavar="SEC",
                         help="seconds between rounds of a section (CUBE_BENCH_SLO_SETTLE, default 5, use 0 to skip)")
