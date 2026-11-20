@@ -10,6 +10,8 @@
 !pkgs
 !pkgs/CubeLog
 !pkgs/CubeLog/**
+!pkgs/artifactsource
+!pkgs/artifactsource/**
 !pkgs/sandboxrestart
 !pkgs/sandboxrestart/**
 !cubecow

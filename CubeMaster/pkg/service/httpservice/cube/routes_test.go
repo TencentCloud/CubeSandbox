@@ -52,6 +52,21 @@ func newRouteInspectEngine(t *testing.T, register func(g *gin.RouterGroup)) *gin
 // CubeMaster, a TC-served GET kept answering from its stale in-memory cache
 // for up to the 1-minute TTL because invalidateTemplateCaches only clears
 // the writing process's caches.
+func TestInternalArtifactDownloadRoutesRegisterOutsideTemplateAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterInternalArtifactDownloadRoutes(r.Group(""))
+	for method, wantHandler := range map[string]string{
+		"GET":  "downloadTemplateArtifactGinHandler",
+		"HEAD": "headTemplateArtifactGinHandler",
+	} {
+		path := "/cube" + TemplateArtifactDirectDownloadAction
+		if got := routeHandlerName(r, method, path); !strings.HasSuffix(got, "."+wantHandler) {
+			t.Errorf("%s %s handler = %q, want %s", method, path, got, wantHandler)
+		}
+	}
+}
+
 func TestCubeRoutesTemplateWritesStayOnCubeMaster(t *testing.T) {
 	r := newRouteInspectEngine(t, RegisterCubeRoutes)
 

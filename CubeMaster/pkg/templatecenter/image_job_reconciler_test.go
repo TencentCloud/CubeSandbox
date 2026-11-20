@@ -5,10 +5,14 @@
 package templatecenter
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
 
 // writeFakeArtifactFile creates an empty file under a temp store root and
@@ -31,6 +35,45 @@ func writeFakeArtifactFile(t *testing.T, name string) string {
 // from the decoded payload, so replaying a stuck BUILT job via the
 // reconciler silently zeroed out (or overwrote) the S3/MinIO presigned URL
 // that TC had reported in the original terminal callback.
+func TestRootfsArtifactDownloadTokenRejectsEmptyLegacyToken(t *testing.T) {
+	if validRootfsArtifactDownloadToken(&models.RootfsArtifact{ArtifactID: "rfs-1"}, "") {
+		t.Fatal("empty stored token must not authorize an anonymous download")
+	}
+}
+
+func TestNormalizeRemoteBuildArtifactStore(t *testing.T) {
+	t.Setenv("CUBE_S3_ENDPOINT", "minio.example")
+	t.Setenv("CUBE_S3_BUCKET", "test-artifacts")
+	t.Setenv("CUBE_S3_ACCESS_KEY_ID", "test-key")
+	t.Setenv("CUBE_S3_SECRET_ACCESS_KEY", "test-secret")
+	cases := []struct {
+		name    string
+		input   RemoteBuildResult
+		want    string
+		wantErr bool
+	}{
+		{"new s3 metadata", RemoteBuildResult{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "rfs-1.ext4", Bucket: "test-artifacts"}, "blobstore:s3:rfs-1.ext4", false},
+		{"legacy s3 metadata without bucket", RemoteBuildResult{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "rfs-1.ext4"}, "blobstore:s3:rfs-1.ext4", false},
+		{"new tc fs metadata", RemoteBuildResult{ArtifactID: "rfs-1", StorageBackend: "fs", ObjectKey: "rfs-1.ext4"}, "blobstore:fs:rfs-1.ext4", false},
+		{"locator without columns", RemoteBuildResult{ArtifactID: "rfs-1", ArtifactURL: "blobstore:s3:rfs-1.ext4"}, "blobstore:s3:rfs-1.ext4", false},
+		{"old tc with columns", RemoteBuildResult{ArtifactID: "rfs-1", ArtifactURL: "https://minio.example/test-artifacts/rfs-1.ext4?X-Amz-Signature=old", StorageBackend: "s3", ObjectKey: "rfs-1.ext4"}, "blobstore:s3:rfs-1.ext4", false},
+		{"old tc different bucket", RemoteBuildResult{ArtifactID: "rfs-1", ArtifactURL: "https://minio.example/other-artifacts/rfs-1.ext4?X-Amz-Signature=old", StorageBackend: "s3", ObjectKey: "rfs-1.ext4"}, "", true},
+		{"new tc different bucket", RemoteBuildResult{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "rfs-1.ext4", Bucket: "other-artifacts"}, "", true},
+		{"local disk", RemoteBuildResult{ArtifactID: "rfs-1"}, "", false},
+		{"conflicting locator", RemoteBuildResult{ArtifactID: "rfs-1", ArtifactURL: "blobstore:fs:rfs-1.ext4", StorageBackend: "s3", ObjectKey: "rfs-1.ext4"}, "", true},
+		{"invalid key", RemoteBuildResult{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "../other"}, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := tc.input
+			err := NormalizeRemoteBuildArtifactStore(context.Background(), &result)
+			if (err != nil) != tc.wantErr || (!tc.wantErr && result.ArtifactURL != tc.want) {
+				t.Fatalf("normalized artifact_url=%q error=%v, want %q err=%v", result.ArtifactURL, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRemoteBuildResultFromResultJSONPreservesArtifactURL(t *testing.T) {
 	ext4Path := writeFakeArtifactFile(t, "rootfs.ext4")
 	payload := fmt.Sprintf(`{
@@ -117,6 +160,11 @@ func TestRemoteBuildResultFromResultJSONS3SkipsLocalStat(t *testing.T) {
 		if result.ArtifactURL != artifactURL {
 			t.Fatalf("ArtifactURL = %q, want %q", result.ArtifactURL, artifactURL)
 		}
+	}
+	// New TC can report stable backend/key without any signed URL.
+	metadataOnly := strings.Replace(mkPayload(""), `"artifact_url": ""`, `"storage_backend": "s3", "object_key": "rfs-3.ext4"`, 1)
+	if got, err := remoteBuildResultFromResultJSON(metadataOnly); err != nil || got.StorageBackend != "s3" {
+		t.Fatalf("metadata-only S3 replay failed: result=%+v err=%v", got, err)
 	}
 
 	// Local-disk: same missing file is still an error.

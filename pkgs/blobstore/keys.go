@@ -122,6 +122,26 @@ func IsObjectLocator(raw string) bool {
 	return strings.HasPrefix(strings.TrimSpace(raw), locatorPrefix)
 }
 
+// ParseObjectLocator returns the backend driver and full object key from a
+// blobstore:<driver>:<fullKey> locator. It accepts only configured blobstore
+// drivers and validates the key before callers use it to access a store.
+func ParseObjectLocator(raw string) (driver, fullKey string, err error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, locatorPrefix) {
+		return "", "", ErrInvalidKey
+	}
+	rest := strings.TrimPrefix(raw, locatorPrefix)
+	var ok bool
+	driver, fullKey, ok = strings.Cut(rest, ":")
+	if !ok || (driver != "s3" && driver != "fs") {
+		return "", "", ErrInvalidKey
+	}
+	if err := ValidateKey(fullKey); err != nil {
+		return "", "", err
+	}
+	return driver, fullKey, nil
+}
+
 // BaseName returns the last path element of a key.
 func BaseName(key string) string {
 	return path.Base(key)

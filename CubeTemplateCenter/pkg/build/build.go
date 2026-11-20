@@ -284,7 +284,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
 			waitSpan.SetAttributes(attribute.Bool(telemetry.AttrReused, true))
 			telemetry.End(waitSpan, nil)
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3Client, logger)
 		}
 
 		select {
@@ -342,7 +342,7 @@ func runBuildLocked(
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
 			trace.SpanFromContext(ctx).SetAttributes(attribute.Bool(telemetry.AttrReused, true))
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3CfgEnabled, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3Client, logger)
 		}
 	}
 
@@ -407,15 +407,11 @@ func runBuildLocked(
 	}
 
 	// Step 8: Upload to the configured blob backend, then report BUILT.
-	// A failed Put now fails the build in every backend. The old s3 branch
-	// fell back to reporting BUILT with no storage backend, which serves the
-	// artifact from TC's disk -- and that only works when CubeMaster happens to
-	// share THIS replica's artifact directory. With a remote Master, or with a
-	// second TC replica, the row then points at a file that is not there.
-	// Failing keeps the outcome independent of topology, lets the job retry,
-	// and stops the ext4 leaking on every failed upload.
+	// Fail the build if publishing to the configured store fails. A local
+	// fallback on a remote TC replica may be unreadable from CubeMaster.
 	artifactURL := ""
 	uploaded := false
+	objectKey := ""
 	if s3CfgEnabled && s3Client != nil {
 		publishCtx, publishSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactPublish,
 			trace.WithAttributes(
@@ -423,7 +419,7 @@ func runBuildLocked(
 				attribute.String(telemetry.AttrArtifactID, artifactID),
 				attribute.String(telemetry.AttrStorageBackend, s3Client.BackendName()),
 			))
-		url, err := uploadBuiltArtifact(publishCtx, s3Client, artifactID, &result, logger)
+		_, err := uploadBuiltArtifact(publishCtx, s3Client, artifactID, &result, logger)
 		telemetry.End(publishSpan, err)
 		if err != nil {
 			logger.Errorf("%v", err)
@@ -431,17 +427,14 @@ func runBuildLocked(
 			return err
 		}
 		uploaded = true
-		artifactURL = url
-		if artifactURL == "" && s3Client.BackendName() == "s3" {
-			// PUT established the durable copy even if HEAD or presigning failed.
-			artifactURL = blobstore.ObjectLocator("s3", s3Client.FullObjectKey(artifactID))
-		}
+		objectKey = s3Client.FullObjectKey(artifactID)
+		artifactURL = blobstore.ObjectLocator(s3Client.BackendName(), objectKey)
 	}
 
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, artifactURL, uploaded, s3Client, "", resolvedUser, logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, uploaded, s3Client, objectKey, resolvedUser, logger); err != nil {
 		return err
 	}
 
@@ -460,6 +453,13 @@ func runBuildLocked(
 	return nil
 }
 
+type artifactBuildStore interface {
+	Stat(ctx context.Context, artifactID string) (bool, error)
+	BackendName() string
+	Bucket() string
+	FullObjectKey(artifactID string) string
+}
+
 func reportExistingArtifact(
 	ctx context.Context,
 	jobID string,
@@ -469,20 +469,20 @@ func reportExistingArtifact(
 	reporter *Reporter,
 	caPEM []byte,
 	caFingerprint string,
-	s3CfgEnabled bool,
-	s3Client *s3store.Client,
+	s3Client artifactBuildStore,
 	logger *cubelog.Entry,
 ) error {
 	inStore := false
 	objectKey := ""
-	if s3Client != nil {
+	if s3Client != nil && existing.StorageBackend == s3Client.BackendName() &&
+		existing.Bucket == s3Client.Bucket() &&
+		(existing.ObjectKey == "" || existing.ObjectKey == s3Client.FullObjectKey(existing.ArtifactID)) {
 		exists, err := s3Client.Stat(ctx, existing.ArtifactID)
 		if err == nil && exists {
 			inStore = true
 			objectKey = strings.TrimSpace(existing.ObjectKey)
 		}
 	}
-	artifactURL := artifactPresignedURL(ctx, s3CfgEnabled, s3Client, existing.ArtifactID, logger)
 	return reportArtifactBuilt(ctx, jobID, &image.BuildResult{
 		Ext4Path:  existing.Ext4Path,
 		SHA256:    existing.Ext4SHA256,
@@ -490,7 +490,7 @@ func reportExistingArtifact(
 	}, existing.ArtifactID, fingerprint, source, reporter, cube_egress_ca.Result{
 		Baked:       len(caPEM) > 0,
 		Fingerprint: caFingerprint,
-	}, artifactURL, inStore, s3Client, objectKey, nil, logger)
+	}, inStore, s3Client, objectKey, nil, logger)
 }
 
 // reportArtifactBuilt emits the BUILT callback to CubeMaster.
@@ -503,9 +503,8 @@ func reportArtifactBuilt(
 	source *image.PreparedSource,
 	reporter *Reporter,
 	caResult cube_egress_ca.Result,
-	artifactURL string,
 	inStore bool,
-	s3Client *s3store.Client,
+	s3Client artifactBuildStore,
 	objectKey string,
 	resolvedUser *templatecenter.ResolvedTemplateUser,
 	logger *cubelog.Entry,
@@ -540,24 +539,28 @@ func reportArtifactBuilt(
 		"cube_egress_ca_fingerprint":     caResult.Fingerprint,
 		"cube_egress_ca_targets_written": caResult.TargetsWritten,
 	}
-	if artifactURL != "" {
-		payload["artifact_url"] = artifactURL
-	}
 	if resolvedUser != nil {
 		payload["resolved_user"] = resolvedUser
 	}
-	// Only stamp backend/key after a successful upload (or reuse of an
-	// already-stored object). Local-only builds leave these fields empty.
+	// Only report stable metadata after a successful upload or verified reuse;
+	// never persist a presigned URL in the BUILT callback.
 	if inStore && s3Client != nil {
-		payload["storage_backend"] = s3Client.BackendName()
+		backend := strings.TrimSpace(s3Client.BackendName())
 		if objectKey == "" {
 			objectKey = s3Client.FullObjectKey(artifactID)
 		}
-		payload["object_key"] = objectKey
-		if s3Client.BackendName() == "s3" && strings.TrimSpace(artifactURL) == "" {
-			// Both a completed upload and a verified reused object are durable.
-			payload["artifact_url"] = blobstore.ObjectLocator("s3", objectKey)
+		objectKey = strings.TrimSpace(objectKey)
+		if backend == "" || objectKey == "" {
+			return fmt.Errorf("artifact %s was uploaded but stable backend/key metadata is empty", artifactID)
 		}
+		bucket := strings.TrimSpace(s3Client.Bucket())
+		if (backend == "s3") != (bucket != "") {
+			return fmt.Errorf("artifact %s has inconsistent backend/bucket metadata", artifactID)
+		}
+		payload["artifact_url"] = blobstore.ObjectLocator(backend, objectKey)
+		payload["storage_backend"] = backend
+		payload["object_key"] = objectKey
+		payload["bucket"] = bucket
 	}
 	callbackCtx, callbackSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateArtifactCallback,
 		trace.WithAttributes(
@@ -805,6 +808,13 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 		return nil, false
 	}
 
+	if templatecenter.ArtifactUsesObjectStore(&artifact) &&
+		(s3Client == nil || artifact.StorageBackend != s3Client.BackendName() ||
+			artifact.Bucket != s3Client.Bucket() ||
+			(strings.TrimSpace(artifact.ObjectKey) != "" && artifact.ObjectKey != s3Client.FullObjectKey(artifact.ArtifactID))) {
+		log.G(ctx).Warnf("reuse check: artifact %s belongs to a different backend/object key; refusing to select an unrelated store", artifact.ArtifactID)
+		return nil, false
+	}
 	var statS3 func() (bool, error)
 	if s3CfgEnabled && s3Client != nil {
 		statS3 = func() (bool, error) { return s3Client.Stat(ctx, artifact.ArtifactID) }

@@ -183,10 +183,19 @@ func RegisterTemplateRoutes(g *gin.RouterGroup) {
 	g.GET(RootfsArtifactAction, handleRootfsArtifactAction)
 }
 
-// RegisterInternalTemplateRoutes registers internal callbacks used by the
-// remote build mode (CubeTemplateCenter -> CubeMaster status reports).
-// Mounted on CubeMaster only — see pkg/server/server.go. These routes are
-// NOT part of the public /cube API surface.
+// RegisterInternalTemplateRoutes registers the remote-build status callback
+// and the capability-authenticated Cubelet artifact download endpoint. These
+// routes are NOT subject to user API-key auth or part of the public /cube API.
 func RegisterInternalTemplateRoutes(g *gin.RouterGroup) {
 	g.POST("/internal/template/jobs/:job_id/status", handleTemplateJobStatusCallback)
+	RegisterInternalArtifactDownloadRoutes(g)
+}
+
+// RegisterInternalArtifactDownloadRoutes mounts the short-lived-capability
+// artifact endpoint outside user API-key auth. The capability itself is
+// artifact-scoped, expires quickly, and is validated by the download handler.
+func RegisterInternalArtifactDownloadRoutes(g *gin.RouterGroup) {
+	artifactPath := CubeURI() + TemplateArtifactDirectDownloadAction
+	g.GET(artifactPath, downloadTemplateArtifactGinHandler)
+	g.HEAD(artifactPath, headTemplateArtifactGinHandler)
 }

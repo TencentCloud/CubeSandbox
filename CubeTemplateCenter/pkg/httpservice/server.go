@@ -110,20 +110,19 @@ func NewInternalHttp(ctx context.Context, cfg *config.Config) (*internalHttp, er
 //     address -- without these routes mounted here every proxied request
 //     would 404.
 //
-// The artifact download endpoint stays on CubeMaster: Cubelet pulls ext4
-// files from CubeMaster, which shares TC's artifact directory (one CBS disk /
-// PVC). See docs/dev/templatecenter-design.md §9.7.
+// The normal artifact endpoint remains behind the user-authenticated template
+// routes. A separate short-lived-capability endpoint is registered on the
+// internal group so Cubelets can download ext4 directly from TC without
+// traversing CubeMaster's streaming proxy.
 func (s *internalHttp) registerRoutes() {
-	// The internal service-to-service API sits OUTSIDE GinRequestMiddleware:
-	// that middleware's checkAuth rejects unauthenticated calls with an HTTP
-	// 200 business error and never reaches the shared-token gate, and
-	// CubeMaster's tcclient treats StatusCode == 200 as success — with
-	// AuthConf.Enable on, every auth rejection would look like an accepted
-	// build/delete. The shared-token middleware (RegisterInternalRoutes) is
-	// the only gate on these routes; gin.Recovery replaces the panic handling
-	// GinRequestMiddleware provided.
+	// Internal routes sit OUTSIDE GinRequestMiddleware so endpoint-specific
+	// credentials are authoritative: RegisterInternalRoutes validates the
+	// shared service token, while the direct artifact handler validates its
+	// short-lived artifact capability. gin.Recovery replaces the panic
+	// handling GinRequestMiddleware provided.
 	internal := s.engine.Group("", gin.Recovery())
 	api.RegisterInternalRoutes(internal)
+	cube.RegisterInternalArtifactDownloadRoutes(internal)
 
 	root := s.engine.Group("")
 	root.Use(middleware.GinRequestMiddleware())

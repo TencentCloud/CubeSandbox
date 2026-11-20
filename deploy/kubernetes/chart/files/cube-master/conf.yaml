@@ -21,6 +21,7 @@ common:
   # or overridden by the CUBE_TEMPLATE_CENTER_ADDR environment variable
   # (ad-hoc debugging). Env wins over yaml. Both empty means "not configured"
   # and all template builds will fail.
+  artifact_download_capability_ttl: {{ .Values.controlPlane.master.artifactDownloadCapabilityTTL | default "1h" | quote }}
   {{- if .Values.controlPlane.enabled }}
   template_center_addr: "{{ include "cube.templateCenterEndpoint" . }}"
   {{- end }}

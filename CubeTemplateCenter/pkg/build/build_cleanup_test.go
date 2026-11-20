@@ -183,8 +183,8 @@ func TestBuildUploadCleanup(t *testing.T) {
 				err = reportExistingArtifact(ctx, "job", &models.RootfsArtifact{
 					ArtifactID: artifactID, Ext4Path: result.Ext4Path,
 					Ext4SHA256: result.SHA256, Ext4SizeBytes: result.SizeBytes,
-					StorageBackend: "s3", ObjectKey: "templates/" + artifactID + ".ext4",
-				}, "fingerprint", source, reporter, nil, "", true, client, log.G(ctx))
+					StorageBackend: "s3", ObjectKey: "templates/" + artifactID + ".ext4", Bucket: "artifacts",
+				}, "fingerprint", source, reporter, nil, "", client, log.G(ctx))
 			} else {
 				err = runBuildLocked(ctx, "job", &types.CreateTemplateFromImageReq{}, artifactID,
 					"fingerprint", source, reporter, nil, "", nil, nil, true,

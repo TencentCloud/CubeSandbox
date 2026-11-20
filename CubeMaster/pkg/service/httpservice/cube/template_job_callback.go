@@ -138,6 +138,16 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 		return
 	}
 
+	var builtResult *templatecenter.RemoteBuildResult
+	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
+		builtResult = remoteBuildResultFromPayload(payload)
+		if err := templatecenter.NormalizeRemoteBuildArtifactStore(c.Request.Context(), builtResult); err != nil {
+			log.G(c.Request.Context()).Errorf("template job BUILT callback: normalize artifact metadata failed: job_id=%s err=%v", jobID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	values := make(map[string]any, len(payload))
 	for k, v := range payload {
 		if !templateJobStatusUpdatableColumns[k] {
@@ -151,16 +161,34 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 		values[k] = v
 	}
 
-	// The BUILT report also carries artifact details (ext4_path / sha / size /
-	// image config) that have no image_jobs column. Keep the raw payload in
-	// result_json so the state is inspectable and the resume step can be
-	// replayed from the row if needed.
-	builtReport := false
-	if status, _ := payload["status"].(string); strings.EqualFold(status, templatecenter.JobStatusBuilt) {
-		builtReport = true
-		if raw, err := json.Marshal(payload); err == nil {
-			values["result_json"] = string(raw)
+	// Keep the BUILT details for replay, but persist only normalized stable
+	// storage metadata rather than a presigned URL from an older TC.
+	builtReport := builtResult != nil
+	if builtReport {
+		persisted := make(map[string]any, len(payload))
+		for key, value := range payload {
+			persisted[key] = value
 		}
+		if builtResult.ArtifactURL != "" {
+			persisted["artifact_url"] = builtResult.ArtifactURL
+		} else {
+			delete(persisted, "artifact_url")
+		}
+		if builtResult.StorageBackend != "" {
+			persisted["storage_backend"] = builtResult.StorageBackend
+			persisted["object_key"] = builtResult.ObjectKey
+			persisted["bucket"] = builtResult.Bucket
+		} else {
+			delete(persisted, "storage_backend")
+			delete(persisted, "object_key")
+			delete(persisted, "bucket")
+		}
+		raw, err := json.Marshal(persisted)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to normalize built callback payload"})
+			return
+		}
+		values["result_json"] = string(raw)
 	}
 
 	if len(values) == 0 {
@@ -230,9 +258,8 @@ func handleTemplateJobStatusCallback(c *gin.Context) {
 	// cross-node RPCs and must not be canceled when this handler returns) but
 	// still carries a RequestTrace, like every other detached template job.
 	if builtReport {
-		result := remoteBuildResultFromPayload(payload)
-		resumeCtx := templatecenter.DetachRemoteBuildResumeContext(ctx, jobID, result.ArtifactID)
-		continuation, err := prepareTemplateImageJobAfterRemoteBuildCallback(ctx, jobID, result)
+		resumeCtx := templatecenter.DetachRemoteBuildResumeContext(ctx, jobID, builtResult.ArtifactID)
+		continuation, err := prepareTemplateImageJobAfterRemoteBuildCallback(ctx, jobID, builtResult)
 		if err != nil {
 			// Return 5xx while the job remains BUILT. TC's terminal-report retry
 			// loop will call us again while it still owns the build lock; if it
@@ -277,6 +304,7 @@ func remoteBuildResultFromPayload(payload map[string]any) *templatecenter.Remote
 		ArtifactURL:             payloadString(payload, "artifact_url"),
 		StorageBackend:          payloadString(payload, "storage_backend"),
 		ObjectKey:               payloadString(payload, "object_key"),
+		Bucket:                  payloadString(payload, "bucket"),
 		CubeEgressCABaked:       payloadBool(payload, "cube_egress_ca_baked"),
 		CubeEgressCAFingerprint: payloadString(payload, "cube_egress_ca_fingerprint"),
 		CubeEgressCATargets:     int(payloadInt64(payload, "cube_egress_ca_targets_written")),

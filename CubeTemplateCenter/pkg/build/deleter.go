@@ -132,18 +132,25 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 
 	// Delete the S3 object when the artifact was uploaded.
 	var dataErrs []error
-	if d.s3Client != nil && templatecenter.ArtifactUsesObjectStore(&artifact) {
-		if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
-			logger.Warnf("delete s3 object fail: %v", err)
-			dataErrs = append(dataErrs, fmt.Errorf("delete s3 object: %w", err))
-		} else {
-			logger.Infof("deleted s3 object for artifact")
+	if templatecenter.ArtifactUsesObjectStore(&artifact) {
+		switch {
+		case d.s3Client == nil:
+			dataErrs = append(dataErrs, fmt.Errorf("artifact store is not configured for deletion"))
+		case artifact.StorageBackend != d.s3Client.BackendName() || artifact.Bucket != d.s3Client.Bucket() ||
+			(artifact.ObjectKey != "" && artifact.ObjectKey != d.s3Client.FullObjectKey(artifact.ArtifactID)):
+			dataErrs = append(dataErrs, fmt.Errorf("artifact storage identity does not match configured store; refusing deletion"))
+		default:
+			if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
+				dataErrs = append(dataErrs, fmt.Errorf("delete artifact object: %w", err))
+			} else {
+				logger.Infof("deleted artifact object")
+			}
 		}
 	}
 
 	// Delete the local/shared ext4 file. Only when it sits inside a managed
 	// artifact root (path-traversal guard).
-	if artifact.Ext4Path != "" {
+	if len(dataErrs) == 0 && artifact.Ext4Path != "" {
 		if err := deleteLocalExt4(artifact.Ext4Path); err != nil {
 			logger.Warnf("delete local ext4 fail: %v", err)
 			dataErrs = append(dataErrs, fmt.Errorf("delete local ext4: %w", err))

@@ -21,6 +21,7 @@ WORKDIR /src
 COPY CubeTemplateCenter/go.mod CubeTemplateCenter/go.sum ./
 COPY CubeMaster/go.mod CubeMaster/go.sum /CubeMaster/
 COPY pkgs/CubeLog/go.mod pkgs/CubeLog/go.sum /pkgs/CubeLog/
+COPY pkgs/artifactsource/go.mod /pkgs/artifactsource/
 COPY pkgs/blobstore/go.mod pkgs/blobstore/go.sum /pkgs/blobstore/
 COPY pkgs/cubedb/go.mod pkgs/cubedb/go.sum /pkgs/cubedb/
 COPY Cubelet/go.mod Cubelet/go.sum /Cubelet/
@@ -33,6 +34,7 @@ RUN go mod download
 COPY CubeTemplateCenter/ ./
 COPY CubeMaster/ /CubeMaster/
 COPY pkgs/CubeLog/ /pkgs/CubeLog/
+COPY pkgs/artifactsource/ /pkgs/artifactsource/
 COPY pkgs/blobstore/ /pkgs/blobstore/
 COPY pkgs/cubedb/ /pkgs/cubedb/
 COPY Cubelet/ /Cubelet/

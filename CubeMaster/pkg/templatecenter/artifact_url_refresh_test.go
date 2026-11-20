@@ -52,6 +52,38 @@ func TestArtifactDownloadURLLocalArtifact(t *testing.T) {
 	}
 }
 
+func TestArtifactDownloadURLSignsMetadataOnlyRow(t *testing.T) {
+	stubPresign(t, func(_ context.Context, artifact *models.RootfsArtifact) (string, error) {
+		if artifact.StorageBackend != "s3" || artifact.ObjectKey != "rfs-1.ext4" {
+			t.Fatalf("metadata not passed to signer: %+v", artifact)
+		}
+		return "https://minio.example/rfs-1.ext4?X-Amz-Signature=fresh", nil
+	})
+	artifact := &models.RootfsArtifact{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "rfs-1.ext4"}
+	if got := artifactDownloadURL(context.Background(), artifact); got != "https://minio.example/rfs-1.ext4?X-Amz-Signature=fresh" {
+		t.Fatalf("metadata-only artifact failed to sign: %q", got)
+	}
+}
+
+func TestValidateArtifactStoreIdentityRejectsWrongBackendOrKey(t *testing.T) {
+	t.Setenv("CUBE_S3_ENDPOINT", "minio.example")
+	t.Setenv("CUBE_S3_BUCKET", "test-artifacts")
+	t.Setenv("CUBE_S3_ACCESS_KEY_ID", "test-key")
+	t.Setenv("CUBE_S3_SECRET_ACCESS_KEY", "test-secret")
+	st := &artifactStore{backend: "s3"}
+	for _, artifact := range []*models.RootfsArtifact{
+		{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "rfs-1.ext4", Bucket: "other-artifacts"},
+		{ArtifactID: "rfs-1", ArtifactURL: "https://minio.example/other-artifacts/rfs-1.ext4?X-Amz-Signature=stale"},
+		{ArtifactID: "rfs-1", StorageBackend: "fs", ObjectKey: "rfs-1.ext4"},
+		{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "other.ext4"},
+		{ArtifactID: "rfs-1", StorageBackend: "s3", ArtifactURL: "blobstore:s3:other.ext4"},
+	} {
+		if err := validateArtifactStoreIdentity(st, artifact); err == nil {
+			t.Fatalf("wrong store identity accepted: %+v", artifact)
+		}
+	}
+}
+
 func TestArtifactDownloadURLKeepsLocator(t *testing.T) {
 	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) {
 		t.Fatal("presign must not be called for a locator")
@@ -78,21 +110,17 @@ func TestArtifactDownloadURLResigns(t *testing.T) {
 	}
 }
 
-// When signing is unavailable (no credentials on this process, or a signing
-// error), the stored URL is the graceful fallback -- degraded, not dead.
-func TestArtifactDownloadURLFallsBackToStored(t *testing.T) {
+// A historical presigned URL is not an authentication fallback. Re-signing
+// must succeed, otherwise the handler returns an error rather than fetching
+// a potentially expired URL (or one pointing at an untrusted host).
+func TestArtifactDownloadURLRejectsStoredURLWhenSigningFails(t *testing.T) {
 	stored := "https://minio:9000/bucket/rfs-9.ext4?X-Amz-Signature=stale"
-	for _, err := range []error{errS3PresignNotConfigured, errors.New("boom")} {
-		stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", err })
+	for _, signErr := range []error{errS3PresignNotConfigured, errors.New("boom"), nil} {
+		stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", signErr })
 		got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
-		if got != stored {
-			t.Fatalf("err=%v: got %q, want stored url %q", err, got, stored)
+		if got != "" {
+			t.Fatalf("err=%v: got %q, must not use stored URL", signErr, got)
 		}
-	}
-	stubPresign(t, func(context.Context, *models.RootfsArtifact) (string, error) { return "", nil })
-	got := artifactDownloadURL(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-9", ArtifactURL: stored})
-	if got != stored {
-		t.Fatalf("empty fresh: got %q, want stored url %q", got, stored)
 	}
 }
 

@@ -80,4 +80,12 @@ func TestObjectLocator(t *testing.T) {
 	if !IsObjectLocator("blobstore:fs:k") || IsObjectLocator("https://example/k") {
 		t.Fatal("IsObjectLocator")
 	}
+	if driver, key, err := ParseObjectLocator("blobstore:s3:template-artifacts/abc.ext4"); err != nil || driver != "s3" || key != "template-artifacts/abc.ext4" {
+		t.Fatalf("ParseObjectLocator() = (%q, %q, %v)", driver, key, err)
+	}
+	for _, malformed := range []string{"https://example/k", "blobstore:unknown:k", "blobstore:s3:../escape", "blobstore:fs:"} {
+		if _, _, err := ParseObjectLocator(malformed); err == nil {
+			t.Errorf("ParseObjectLocator(%q) unexpectedly succeeded", malformed)
+		}
+	}
 }
