@@ -5,7 +5,7 @@ Description=Cube Sandbox CubeTemplateCenter
 # it over HTTP with bounded retries, so a master that is briefly down delays a
 # report instead of invalidating the build. Ordering after it also keeps the two
 # processes from racing for the schema migration lock on a cold boot.
-After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-cubemaster.service
+After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-minio.service cube-sandbox-cubemaster.service
 Wants=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service cube-sandbox-cubemaster.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 # The artifact store is SHARED with cubemaster: TC writes the ext4 and cubemaster
