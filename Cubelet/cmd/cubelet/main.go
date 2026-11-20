@@ -34,10 +34,10 @@ import (
 	"github.com/containerd/containerd/v2/pkg/sys"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/moby/sys/mountinfo"
 	"github.com/sirupsen/logrus"
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/mntanchor"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/nsenter"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/version"
@@ -77,16 +77,26 @@ func main() {
 
 	if mntPath == "" {
 		runtime.LockOSThread()
-		if needNewMnt(CubeMntNsFilePath) {
-			err := newCubeMnt()
+		// A containerized Cubelet keeps the namespace handle in the host mount
+		// namespace, so a container restart re-enters the namespace the
+		// running sandboxes' shims live in (see package mntanchor).
+		anchor := mntanchor.Choose(cubeMntPaths, mntanchor.DefaultDeps())
+		if !anchor.Reusable(mntanchor.IsMntNsHandle, os.ReadFile) {
+			err := newCubeMnt(anchor)
+			if err == nil {
+				err = anchor.RecordOwner(os.WriteFile)
+			}
 			if err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "newCubeMnt fail,%v\n", err)
 				time.Sleep(time.Second)
 				os.Exit(1)
 			}
+			stdlog.Printf("created cubelet mount namespace, handle %s (host-pinned=%t)", anchor.OpenPath(), anchor.Host)
+		} else {
+			stdlog.Printf("re-entering cubelet mount namespace, handle %s (host-pinned=%t)", anchor.OpenPath(), anchor.Host)
 		}
 
-		err := startSelf(os.Args[1:], []string{fmt.Sprintf("NEED_SET_MNT=%s", CubeMntNsFilePath)})
+		err := startSelf(os.Args[1:], []string{fmt.Sprintf("NEED_SET_MNT=%s", anchor.OpenPath())})
 		if err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "startSelf fail,%v\n", err)
 			time.Sleep(time.Second)
@@ -103,18 +113,6 @@ func main() {
 		}
 	}
 
-}
-
-func needNewMnt(path string) bool {
-
-	exist, _ := utils.DenExist(path)
-	if !exist {
-		return true
-	}
-
-	exist, _ = mountinfo.Mounted(path)
-
-	return !exist
 }
 
 func parentExit() {
@@ -142,7 +140,14 @@ func startSelf(args []string, env []string) error {
 	return nil
 }
 
-func newCubeMnt() error {
+var cubeMntPaths = mntanchor.Paths{
+	ShimTopdir:    CubeShimTopdir,
+	ShimSandboxes: CubeShimSandboxes,
+	HandleDir:     CubeMntNsDirPath,
+	HandleFile:    CubeMntNsFilePath,
+}
+
+func newCubeMnt(anchor mntanchor.Anchor) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	newMntPID := 0
@@ -186,30 +191,30 @@ func newCubeMnt() error {
 	_ = unix.Unmount(CubeShimTopdir, 0)
 	_ = unix.Unmount(CubeMntNsDirPath, 0)
 	_ = unix.Unmount(CubeMntNsFilePath, 0)
-
-	cmds := [][]string{
-		{"mkdir", "-p", CubeShimTopdir},
-		{"mkdir", "-p", CubeShimSandboxes},
-		// Re-slave the root of cubelet's new mount namespace so that mount
-		// events happening in the host (init) namespace — e.g. operators
-		// mounting a new network storage volume after cubelet has started —
-		// propagate into this ns and become visible to prepareHostDirVolume.
-		// Without this, a freshly-added host mount is invisible here and
-		// any sandbox requesting a hostPath under it fails with ENOENT.
-		// Propagation is one-way (slave): mounts performed inside this ns
-		// (shim bind-mounts etc.) do not flow back to the host ns.
-		// Prerequisite: the host's "/" must be shared (true on systemd-based
-		// distros by default; our compute nodes confirm shared:1).
-		{"nsenter", "-t", fmt.Sprintf("%d", newMntPID), "-m", "mount", "--make-rslave", "/"},
-		{"nsenter", "-t", fmt.Sprintf("%d", newMntPID), "-m", "mount", "--bind", "--make-shared", CubeShimTopdir, CubeShimTopdir},
-		{"mkdir", "-p", CubeMntNsDirPath},
-		{"touch", CubeMntNsFilePath},
-		{"mount", "--bind", "--make-private", CubeMntNsDirPath, CubeMntNsDirPath},
-		{"mount", "--bind", fmt.Sprintf("/proc/%d/ns/mnt", newMntPID), CubeMntNsFilePath},
-		{"kill", "-9", fmt.Sprintf("%d", newMntPID)},
+	// A dead host-pinned handle, if any; failures mean nothing was mounted.
+	for _, cmd := range anchor.StaleHandleCommands() {
+		_, _, _ = utils.ExecV(cmd, utils.DefaultTimeout)
 	}
 
-	for _, cmd := range cmds {
+	// anchor.SetupCommands(newMntPID) runs, in order:
+	//   mkdir CubeShimTopdir and CubeShimSandboxes;
+	//   nsenter <pid> mount --make-rslave / ;
+	//   nsenter <pid> mount --bind --make-shared CubeShimTopdir;
+	//   create, privatize and bind the namespace handle (in the host mount
+	//   namespace when anchor.Host is set);
+	//   kill the placeholder process.
+	//
+	// Re-slave the root of cubelet's new mount namespace so that mount
+	// events happening in the host (init) namespace — e.g. operators
+	// mounting a new network storage volume after cubelet has started —
+	// propagate into this ns and become visible to prepareHostDirVolume.
+	// Without this, a freshly-added host mount is invisible here and
+	// any sandbox requesting a hostPath under it fails with ENOENT.
+	// Propagation is one-way (slave): mounts performed inside this ns
+	// (shim bind-mounts etc.) do not flow back to the host ns.
+	// Prerequisite: the host's "/" must be shared (true on systemd-based
+	// distros by default; our compute nodes confirm shared:1).
+	for _, cmd := range anchor.SetupCommands(newMntPID) {
 		if _, stderr, err := utils.ExecV(cmd, utils.DefaultTimeout); err != nil {
 			return fmt.Errorf("stable mnt mountpoint err:%v,%v:%v", cmd, stderr, err)
 		}
