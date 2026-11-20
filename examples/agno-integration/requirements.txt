@@ -1,0 +1,5 @@
+# Verified with Python 3.12, agno 3.0.11, and cubesandbox 0.7.0.
+agno>=3.0,<4
+openai>=2.0,<3
+cubesandbox>=0.7,<0.8
+python-dotenv>=1.0,<2

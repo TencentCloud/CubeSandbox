@@ -18,6 +18,7 @@
 | [Claude Code](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/claude-code-integration) | 将 Claude Code 的 Bash 工具调用转发到隔离的 CubeSandbox MicroVM 中执行。 |
 | [LangChain](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/langchain-integration) | 在 LangChain 0.x 和 1.x Agent 中将 CubeSandbox 用作命令执行工具。 |
 | [Pi Agent](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pi-agent-integration) | 将 Pi Agent 的工具执行接入 CubeSandbox 环境。 |
+| [Agno](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/agno-integration) | 在隔离的 CubeSandbox MicroVM 中运行 Agno 自定义 Python 工具。 |
 | [OpenClaw](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration) | 配置 OpenClaw Skill，让 Agent 在隔离的 MicroVM 中执行代码。 |
 | [OpenAI Agents SDK](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example) | 将 `E2BSandboxClient` 接入 CubeSandbox，包含 Shell Agent、暂停/恢复和 SWE-bench 流程。 |
 | [OpenAI Agents + Code Interpreter](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-code-interpreter) | 使用通用 E2B 执行或有状态 Jupyter kernel 运行数据分析 Agent。 |
