@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/rollback"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
@@ -125,6 +126,12 @@ type VolumeRefEvent struct {
 	Referenced int    `json:"referenced"`
 }
 
+// RollbackScheduler returns false when it declines ownership, allowing the
+// engine to retain generic failover for other create paths.
+type RollbackScheduler interface {
+	Schedule(context.Context, *CreateContext) bool
+}
+
 type CreateContext struct {
 	BaseWorkflowInfo
 
@@ -138,7 +145,8 @@ type CreateContext struct {
 
 	VolumeInfo interface{}
 
-	Failover bool
+	Failover            bool
+	RollbackCoordinator RollbackScheduler
 
 	UserData *cubeboxstore.UserData
 
@@ -350,6 +358,8 @@ type DestroyContext struct {
 	// and cubebox row. The VM, shim and cgroup are still torn down.
 	// What is kept is decided only by Retain.
 	IsRestartDestroy bool
+	// Rollback owns durable evidence and retries for a same-ID resume cleanup.
+	Rollback *rollback.Task
 
 	// VolumeRefEvents collects node-level plugin_volume ref-count transitions
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
@@ -508,11 +518,11 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 				if flow_create == do {
 					rOpts := opts.(*CreateContext)
 					if rOpts.Failover {
-						go e.failover(ctx, opts)
+						e.scheduleFailover(ctx, rOpts)
 					}
 				}
 
-				if flow_destroy == do && !restartDestroyKeepsResources(opts) {
+				if flow_destroy == do && !restartDestroyKeepsResources(opts) && opts.(*DestroyContext).Rollback == nil {
 					e.cleanUp(ctx, opts)
 				}
 
@@ -525,7 +535,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 					if flow_create == do {
 						rOpts := opts.(*CreateContext)
 						if rOpts.Failover {
-							go e.failover(ctx, opts)
+							e.scheduleFailover(ctx, rOpts)
 						}
 					}
 					// A restart destroy that spent its deadline inside an earlier
@@ -674,6 +684,13 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 	}
 	telemetry.End(stepSpan, nil)
 	return nil
+}
+
+func (e *Engine) scheduleFailover(ctx context.Context, opts *CreateContext) {
+	if opts.RollbackCoordinator != nil && opts.RollbackCoordinator.Schedule(ctx, opts) {
+		return
+	}
+	go e.failover(ctx, opts)
 }
 
 func (e *Engine) failover(ctx context.Context, opts ReqContext) {

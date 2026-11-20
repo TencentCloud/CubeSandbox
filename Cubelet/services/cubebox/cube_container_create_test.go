@@ -375,6 +375,41 @@ func TestCleanupAfterEnvdInitFailureReturnsDestroyError(t *testing.T) {
 	require.EqualError(t, err, "destroy failed")
 }
 
+func TestHandleEnvdInitFailureCleanupWithFailoverDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		failover   bool
+		callback   bool
+		destroyErr error
+		wantCalls  int
+	}{
+		{name: "disabled failover with resume callback", callback: true, wantCalls: 1},
+		{name: "enabled resume rollback", failover: true, callback: true},
+		{name: "ordinary create", failover: true, wantCalls: 1},
+		{name: "synchronous failure preserves failover", failover: true, destroyErr: errors.New("destroy failed"), wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			l := &local{destroyFn: func(context.Context, *workflow.DestroyContext) error {
+				calls++
+				return tc.destroyErr
+			}}
+			opts := &workflow.CreateContext{Failover: tc.failover}
+			if tc.callback {
+				opts.RollbackCoordinator = testRollbackScheduler(func(context.Context, *workflow.CreateContext) bool {
+					t.Fatal("only the outer workflow may schedule rollback")
+					return false
+				})
+			}
+			sb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb-envd"}}
+			l.handleEnvdInitFailure(t.Context(), opts, &cubebox.RunCubeSandboxRequest{}, sb)
+			require.Equal(t, tc.wantCalls, calls)
+			wantFailover := tc.failover && (tc.wantCalls == 0 || tc.destroyErr != nil)
+			require.Equal(t, wantFailover, opts.Failover)
+		})
+	}
+}
+
 func TestAppendExt4NetfileMountsNoopWithoutNetfile(t *testing.T) {
 	mountsConfig := &virtiofs.CubeRootfsInfo{
 		PmemFile: "/pmem/rootfs.ext4",

@@ -155,7 +155,8 @@ func isDeleteAutoResumeBusinessCode(code errorcode.ErrorCode) bool {
 	switch code {
 	case errorcode.ErrorCode_Conflict,
 		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskStateInvalid),
-		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskResumeFailed):
+		errorcode.MasterCode(cubeleterrorcode.ErrorCode_TaskResumeFailed),
+		errorcode.MasterCode(cubeleterrorcode.ErrorCode_ResumeRollbackPending):
 		return true
 	default:
 		return false

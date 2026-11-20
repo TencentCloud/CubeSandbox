@@ -111,6 +111,11 @@ func (e *CMError) IsResumeFailed() bool {
 	return e.RetCode == 130589
 }
 
+// IsResumeRollbackPending reports cleanup of a previous failed resume.
+func (e *CMError) IsResumeRollbackPending() bool {
+	return e.RetCode == 130591
+}
+
 // IsCapacity returns true for "resume rejected by capacity policy".
 // Used by DELETE /sandboxes/:id to return 409 Conflict.
 func (e *CMError) IsCapacity() bool {
@@ -121,7 +126,7 @@ func (e *CMError) IsCapacity() bool {
 // or 0 if the error is not retryable.
 func (e *CMError) RetryAfter() int {
 	switch {
-	case e.IsPausing():
+	case e.IsPausing(), e.IsResumeRollbackPending():
 		return 2
 	case e.IsResumeFailed():
 		return 5

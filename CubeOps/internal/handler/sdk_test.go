@@ -1052,6 +1052,53 @@ func TestSDK_CMRetCodePausing_MapsToHTTP503(t *testing.T) {
 	}
 }
 
+func TestSDK_ResumeRollbackPending_MapsToHTTP503(t *testing.T) {
+	for _, typed := range []bool{false, true} {
+		for _, endpoint := range []struct{ method, path string }{
+			{"DELETE", "/api/v1/sdk/sandboxes/sb-1"},
+			{"POST", "/api/v1/sdk/sandboxes/sb-1/resume"},
+			{"POST", "/api/v1/sdk/sandboxes/sb-1/connect"},
+			{"GET", "/api/v1/sdk/sandboxes/sb-1"},
+		} {
+			name := "envelope/"
+			if typed {
+				name = "typed/"
+			}
+			t.Run(name+endpoint.method+endpoint.path, func(t *testing.T) {
+				pending := func(_ context.Context, _ interface{}) (json.RawMessage, error) {
+					if typed {
+						return nil, &cubemaster.CMError{RetCode: 130591, RetMsg: "resume rollback pending"}
+					}
+					return raw(`{"ret":{"ret_code":130591,"ret_msg":"resume rollback pending"}}`), nil
+				}
+				cm := &fakeCM{
+					deleteSandbox: pending, updateSandbox: pending, connectSandboxWithBody: pending,
+					getSandbox: func(ctx context.Context, _, _ string) (json.RawMessage, error) {
+						return pending(ctx, nil)
+					},
+				}
+				w := httptestRecorder(t, newSDKRouter(t, cm), endpoint.method, endpoint.path)
+				if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") != "2" {
+					t.Fatalf("status=%d Retry-After=%q body=%s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
+				}
+				if !strings.Contains(w.Body.String(), "resume rollback pending") {
+					t.Fatalf("error message lost: %s", w.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestSDK_JobResumeRollbackPending_MapsToHTTP503(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	writeSDKJobResponse(c, raw(`{"ret":{"ret_code":130591,"ret_msg":"resume rollback pending"}}`))
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") != "2" {
+		t.Fatalf("status=%d Retry-After=%q body=%s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
+	}
+}
+
 // TestSDK_CMRetCodeResumeFailed_MapsToHTTP503 verifies that ret_code 130589
 // (resume failed) maps to 503 + Retry-After=5, NOT 502. See R11.
 func TestSDK_CMRetCodeResumeFailed_MapsToHTTP503(t *testing.T) {

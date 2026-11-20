@@ -69,6 +69,13 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	if err != nil {
 
 		if errors.Is(err, utils.ErrorKeyNotFound) {
+			if opts.Rollback != nil {
+				ev, evidenceErr := l.collectRollbackEvidence(ctx, nil, opts.Rollback)
+				if evidenceErr != nil {
+					return evidenceErr
+				}
+				return waitSandboxRuntimeGone(ctx, sandBoxID, ev)
+			}
 			return nil
 		}
 		return err
@@ -115,7 +122,15 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	// Snapshot pids before Kill/DeleteTask. TaskExit and ttrpc close return
 	// while the shim process may still hold the guest disks; storage Destroy
 	// is the next workflow step and must not delete those volumes yet.
-	runtimeEvidence := l.collectSandboxRuntimeEvidence(ctx, sb)
+	var runtimeEvidence sandboxRuntimeEvidence
+	if opts.Rollback != nil {
+		runtimeEvidence, err = l.collectRollbackEvidence(ctx, sb, opts.Rollback)
+		if err != nil {
+			return err
+		}
+	} else {
+		runtimeEvidence = l.collectSandboxRuntimeEvidence(ctx, sb)
+	}
 	err = l.cbriManager.DestroySandbox(ctx, sb.SandboxID)
 	if err != nil {
 		log.G(ctx).Errorf("faild to destroy cbri sandbox %s", err.Error())
@@ -212,6 +227,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		}
 	}
 	if er := result.ErrorOrNil(); er != nil {
+		if opts.Rollback != nil {
+			return statusErr(errorcode.ErrorCode_RemoveContainerFailed, er)
+		}
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
 	return nil
