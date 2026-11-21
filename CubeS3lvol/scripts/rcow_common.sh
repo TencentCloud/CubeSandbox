@@ -889,34 +889,104 @@ print(
 PY
 }
 
+# Echo every write-back ring file that exists for this lvstore, one per line:
+# the per-uid directory the target uses now, and the flat /dev/shm name older
+# builds used.
+rcow_writeback_shm_paths()
+{
+	local leaf path
+
+	leaf="$(rcow_writeback_shm_leaf "${1:-${RCOW_LVS_NAME}}")" || return 1
+	for path in "/dev/shm/${leaf}" "/dev/shm/s3lvol-wb-$(id -u)/${leaf}"; do
+		[ -e "${path}" ] && printf '%s\n' "${path}"
+	done
+	return 0
+}
+
+# Take the flock s3_writeback_open() holds on one ring file, leaving the
+# descriptor open in RCOW_WB_FD so the caller acts under the lock and closes it
+# when done. 0: the lock is ours. 2: nothing here this may treat as a ring.
+# 1: held by someone, or it could not be opened.
+#
+# Opened read-only rather than with bash's <> redirection: <> carries O_CREAT
+# just like flock(1)'s path form does, so a ring removed between the listing
+# and this call would be re-created here as a zero-length 0644 file -- which
+# the next s3lvol_lvstore_create() refuses (st_size < S3_WB_HEADER_SIZE and a
+# group/other mode both read as -EACCES in writeback_unlink()), turning a clean
+# host into the start loop this is meant to clear. flock(LOCK_EX) is fine on a
+# read-only descriptor, and nothing is written through it anyway.
+#
+# A symlink is refused, not followed. /dev/shm is mode 1777 and the legacy flat
+# leaf is derivable from the lvstore name, so any local user can plant one
+# there, and opening it would have root hold an fd on a file of their choosing.
+# writeback_unlink() uses O_NOFOLLOW for the same reason; the shell cannot ask
+# for that, so this is a check before the open, with the race that implies.
+rcow_open_locked_writeback_shm()
+{
+	local path="$1" fd
+
+	[ -f "${path}" ] && [ ! -L "${path}" ] || return 2
+	exec {fd}<"${path}" || return 1
+	if ! flock -n "${fd}"; then
+		exec {fd}>&-
+		return 1
+	fi
+	RCOW_WB_FD="${fd}"
+}
+
+# Remove this lvstore's write-back ring unless a process holds it.
+#
+# Safe while some *other* target is running, which is what rcow_purge.sh needs:
+# each lvstore has its own ring file, and the flock is the one
+# s3_writeback_open() takes, so a ring that is in use refuses here. Holding the
+# lock across the unlink closes the check/remove race: an existing target makes
+# flock fail, while a target starting afterwards cannot claim this inode before
+# it has been removed.
+#
+# This throws away writes that were acknowledged and not yet in S3. Only for a
+# lvstore that is being discarded as a whole; a ring left by a crash or a hot
+# upgrade is what the next attach recovers from.
+rcow_remove_unheld_writeback_shm()
+{
+	local paths path rc
+
+	# Taken first, not read from a process substitution: a name that cannot be
+	# derived has to fail the removal, and a substitution's status is lost.
+	paths="$(rcow_writeback_shm_paths "${1:-${RCOW_LVS_NAME}}")" || return 1
+	while IFS= read -r path; do
+		[ -n "${path}" ] || continue
+		RCOW_WB_FD=""
+		rcow_open_locked_writeback_shm "${path}"
+		rc=$?
+		if [ "${rc}" -eq 2 ]; then
+			# A symlink or some other non-regular file standing at
+			# the derived name. There is no ring under it to keep,
+			# and leaving it would fail the next create anyway
+			# (openat() with O_NOFOLLOW gives ELOOP), so it is
+			# unlinked -- which for a symlink is the link itself,
+			# never what it points at.
+			rm -f -- "${path}" || return 1
+			continue
+		fi
+		if [ "${rc}" -ne 0 ]; then
+			rcow_err "refusing to discard live write-back shm ${path}"
+			return 1
+		fi
+		rm -f -- "${path}" || {
+			exec {RCOW_WB_FD}>&-
+			return 1
+		}
+		exec {RCOW_WB_FD}>&-
+	done <<<"${paths}"
+}
+
 rcow_discard_writeback_shm()
 {
-	local leaf path fd
-
 	[ -z "$(rcow_target_instances)" ] || {
 		rcow_err "refusing to discard write-back shm while a target is running"
 		return 1
 	}
-	leaf="$(rcow_writeback_shm_leaf "${1:-${RCOW_LVS_NAME}}")" || return 1
-	for path in "/dev/shm/${leaf}" "/dev/shm/s3lvol-wb-$(id -u)/${leaf}"; do
-		[ -e "${path}" ] || continue
-
-		# Use the same advisory lock as s3_writeback_open(). Holding it
-		# across unlink closes the check/remove race: an existing target
-		# makes flock fail, while a target starting afterward cannot claim
-		# this inode before it has been removed.
-		exec {fd}<>"${path}" || return 1
-		if ! flock -n "${fd}"; then
-			rcow_err "refusing to discard live write-back shm ${path}"
-			exec {fd}>&-
-			return 1
-		fi
-		rm -f -- "${path}" || {
-			exec {fd}>&-
-			return 1
-		}
-		exec {fd}>&-
-	done
+	rcow_remove_unheld_writeback_shm "$@"
 }
 
 # Echo the pid of the running target, or nothing. The identity check is not

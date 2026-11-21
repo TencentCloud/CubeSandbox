@@ -429,6 +429,58 @@ still in S3: ${OWNER_REASON}. Retrying with force=true"
 				>/dev/null || bail "rcow_create_lvstore failed even with force"
 		else
 			rcow_err "rcow_create_lvstore failed: ${CREATE_OUT}"
+			# The one refusal no retry, restart or force gets past, so it
+			# gets named: create never formats over a same-name write-back
+			# ring that still holds records. With no bstore.json entry
+			# those records belong to nothing -- typically the ring of an
+			# lvstore whose node state was wiped (uninstall, a removed
+			# /data/cubelet) without a reboot to clear /dev/shm.
+			#
+			# Keyed off the target's own refusal, read only from the bytes
+			# this attempt appended, so a create that failed for another
+			# reason (S3 unreachable, a prefix that already holds a
+			# blobstore) is not blamed on a ring that happens to exist.
+			#
+			# The target prints that one line for every non-ENOENT return
+			# from s3_writeback_cleanup(), so the strerror it carries is
+			# what separates the remedies: ENOTEMPTY ("Directory not
+			# empty") is a ring full of records nothing can attach, which
+			# rcow_purge.sh removes, while EBUSY ("Device or resource
+			# busy") means a process still holds it -- and the purge's
+			# preflight refuses a held ring, so sending the operator there
+			# would be a dead end.
+			WB_LINE="$(tail -c "+$((LOG_MARK + 1))" "${RCOW_LOG}" 2>/dev/null |
+				grep 'write-back ring still contains recovery data' |
+				tail -1)"
+			if [ -n "${WB_LINE}" ]; then
+				WB_LEFT="$(rcow_writeback_shm_paths "${RCOW_LVS_NAME}" \
+					2>/dev/null | tr '\n' ' ' || true)"
+				WB_LEFT="${WB_LEFT% }"
+				case "${WB_LINE}" in
+				*"Device or resource busy"*)
+					rcow_err "the write-back ring for \
+'${RCOW_LVS_NAME}' (${WB_LEFT:-in /dev/shm}) is held by another process, so \
+this lvstore is already in use by a target this script did not find -- one \
+started by hand from another build tree would not be. Stop that target; \
+rcow_purge.sh will refuse a held ring too"
+					;;
+				*"Directory not empty"*)
+					rcow_err "the write-back ring for \
+'${RCOW_LVS_NAME}' (${WB_LEFT:-in /dev/shm}) still holds records, and there is \
+no ${RCOW_BSTORE_FILE} entry to attach it to. Every start will fail the same \
+way. If this lvstore is meant to be discarded, run rcow_purge.sh, which removes \
+the ring with the rest of it; if not, restore its bstore.json entry so the next \
+start attaches and replays the ring instead"
+					;;
+				*)
+					rcow_err "the write-back ring for \
+'${RCOW_LVS_NAME}' (${WB_LEFT:-in /dev/shm}) could not be cleared, so every \
+start will fail the same way. See the target's own line above for the reason; \
+rcow_purge.sh discards the ring with the lvstore once whatever holds it back is \
+resolved"
+					;;
+				esac
+			fi
 			bail "the lvstore could not be created"
 		fi
 	fi

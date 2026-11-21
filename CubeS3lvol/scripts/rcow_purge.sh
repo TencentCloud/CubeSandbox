@@ -5,12 +5,26 @@
 #  rcow_purge.sh -- throw an lvstore away and leave a clean slate
 #
 #  This deletes data irreversibly. It exists because getting back to a clean
-#  environment otherwise means four separate steps, each of which is easy to get
+#  environment otherwise means five separate steps, each of which is easy to get
 #  half-right: delete the objects under the lvstore's prefix in the bucket, drop the
-#  entry from bstore.json, drop the host-side activation registry, and re-create the
-#  WAL image. Miss the bstore.json entry and the next start tries to attach a prefix
-#  that is no longer there; miss the WAL image and it attaches a journal describing
-#  objects that have been deleted.
+#  entry from bstore.json, drop the host-side activation registry, re-create the
+#  WAL image, and remove the lvstore's write-back ring from /dev/shm. Miss the
+#  bstore.json entry and the next start tries to attach a prefix that is no longer
+#  there; miss the WAL image and it attaches a journal describing objects that have
+#  been deleted; miss the ring and the next start can never create the lvstore
+#  again (see below).
+#
+#  === Why the write-back ring has to go too ===
+#
+#  The ring lives in /dev/shm, a tmpfs, so it outlives the target, an uninstall and
+#  anything short of a reboot. That is its purpose: after a crash or a hot upgrade
+#  it holds the acknowledged writes that were not yet in S3, and the next attach
+#  replays them. Without a bstore.json entry, though, the next start creates
+#  instead of attaching, and create refuses a same-name ring that still holds
+#  records -- formatting first would destroy the only copy of them. force=true
+#  does not get past that check. The target then exits at every start and systemd
+#  restarts it forever. Once the lvstore is purged those records belong to nothing,
+#  so the ring is removed with it.
 #
 #  === Why an lvstore ever needs throwing away ===
 #
@@ -78,7 +92,8 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h|--help)
-		sed -n '5,50p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,2\} \{0,1\}//'
+		awk 'NR < 5 { next } /^#/ { print; next } { exit }' \
+			"${BASH_SOURCE[0]}" | sed 's/^#\{0,2\} \{0,1\}//'
 		exit 0
 		;;
 	*) rcow_die "unknown argument '$1' (see --help)" ;;
@@ -118,6 +133,9 @@ rcow_log "S3 prefix:      ${S3_PREFIX}"
 rcow_log "bstore entry:   ${RCOW_BSTORE_FILE}"
 rcow_log "activation reg: ${RCOW_ACTIVE_FILE}"
 rcow_log "WAL image:      ${RCOW_WAL_IMG}"
+# The ring is deliberately not listed here: its path depends on a leaf that can
+# fail to derive, and the listing below reports it as present (with its size),
+# absent, or unknown once that has actually been established.
 
 # --------------------------------------------------------------------------
 # Refuse while a target has it loaded.
@@ -238,9 +256,80 @@ else
 	rcow_log "WAL image:      absent"
 fi
 
+# Status kept, not discarded with `|| true`: a leaf that cannot be derived (a
+# broken python3) would otherwise be indistinguishable from "no ring", and the
+# removal below would be skipped while the purge still exited 0 -- reporting an
+# lvstore as gone with its ring still in place, which is exactly what the next
+# create refuses. --keep-s3 with no bstore.json entry needs python3 nowhere else,
+# so this is reachable without anything else failing first.
+WB_STATUS=0
+WB_PATHS="$(rcow_writeback_shm_paths "${RCOW_LVS_NAME}" 2>/dev/null)" || WB_STATUS=$?
+if [ "${WB_STATUS}" -ne 0 ]; then
+	rcow_log "write-back shm: unknown"
+elif [ -n "${WB_PATHS}" ]; then
+	while IFS= read -r p; do
+		rcow_log "write-back shm: ${p} ($(du -h "${p}" 2>/dev/null | cut -f1) used)"
+	done <<<"${WB_PATHS}"
+else
+	rcow_log "write-back shm: absent"
+fi
+
 if [ "${DRY_RUN}" -eq 1 ]; then
 	rcow_step "dry run: nothing was deleted"
 	exit 0
+fi
+
+# --------------------------------------------------------------------------
+# Is anything holding the ring? Asked before a single object is deleted.
+#
+# The guard above asks rcow_target_instances(), which finds a target by its
+# RCOW_TGT_BIN path, by the basename s3lvol_tgt, or by a cmdline naming
+# RCOW_RPC_SOCK -- so a target started by hand from another build tree with its
+# own -r is invisible to it. The flock around the removal catches that, but it
+# runs last, after the objects, the bstore entry and the WAL are already gone:
+# the purge would then fail having left a live target serving an lvstore whose
+# S3 objects no longer exist.
+#
+# Advisory only, and deliberately so. It cannot prove the lvstore is unused (a
+# target with the ring disabled holds no lock at all), and a lock can still be
+# taken in the window after this check -- which is why the removal keeps its own
+# flock rather than trusting this. What it buys is that the common case of a
+# live holder refuses with nothing destroyed.
+if [ "${WB_STATUS}" -eq 0 ] && [ -n "${WB_PATHS}" ]; then
+	# A refusal, not a skip. Without flock the removal below cannot run
+	# either: its `flock -n` would exit 127, read as "held", and report a
+	# ring nobody holds as live -- after the objects, the bstore entry and
+	# the WAL are already gone, which is the ordering this check exists to
+	# prevent. Asked only once there is a ring to lock: flock is genuinely
+	# unnecessary without one. uninstall.sh refuses on the same grounds.
+	rcow_need_cmd flock "the write-back ring cannot be checked or removed \
+without it, and this purge has a ring to remove; nothing was deleted"
+	rcow_step "checking that nothing holds its write-back ring"
+	while IFS= read -r p; do
+		[ -n "${p}" ] || continue
+		# Not `flock -n "${p}" true`: the path form opens with O_CREAT,
+		# so a ring that went away between the listing above and this
+		# line would be re-created here as a zero-length file that the
+		# next create refuses with -EACCES. The helper opens read-only,
+		# refuses a symlink, and reports 2 for a path that holds no
+		# ring -- the removal step deals with those.
+		RCOW_WB_FD=""
+		rcow_open_locked_writeback_shm "${p}"
+		case $? in
+		0)
+			exec {RCOW_WB_FD}>&-
+			;;
+		2)
+			;;
+		*)
+			rcow_die "a process holds the write-back ring ${p}, so \
+'${RCOW_LVS_NAME}' is in use by a target this script cannot see (one started by \
+hand from another build tree would not be found by the check above). Nothing was \
+deleted. Stop that target first"
+			;;
+		esac
+	done <<<"${WB_PATHS}"
+	rcow_log "nothing holds it"
 fi
 
 # --------------------------------------------------------------------------
@@ -353,6 +442,42 @@ sparse and unformatted"
 	fi
 else
 	rcow_log "WAL image: nothing to re-create"
+fi
+
+# Last, and only if everything else went: this is the one step a re-run cannot
+# undo. Every other artefact here is either re-creatable (the WAL image) or
+# already gone; the records in the ring exist nowhere else.
+#
+# What a FAILED earlier on means for it. If the bstore.json rewrite did not go
+# through, the entry still names this lvstore, so the next rcow_start.sh
+# *attaches* -- and removing the ring now would silently drop the acknowledged
+# writes that attach was going to replay, on an lvstore that is otherwise
+# intact. If the S3 delete did not finish, the documented way out is to restore
+# the bstore entry and let the next start attach and replay, which needs the
+# ring. Either way the ring is what makes recovery possible, so it stays, and
+# the operator is told it is still there. A re-run removes it once the step that
+# failed has succeeded.
+#
+# Not guarded by TARGET_PIDS like the shared files above: the ring is per
+# lvstore, the preflight and the guard have already established that this one is
+# not loaded, and the flock refuses a ring some process still has open.
+if [ "${WB_STATUS}" -ne 0 ]; then
+	rcow_err "the write-back ring of '${RCOW_LVS_NAME}' could not be located, \
+so it was left in place; the next create will refuse it"
+	FAILED=1
+elif [ "${FAILED}" -ne 0 ]; then
+	if [ -n "${WB_PATHS}" ]; then
+		rcow_warn "leaving the write-back ring in place \
+($(printf '%s' "${WB_PATHS}" | tr '\n' ' ')): a step above failed, and the \
+records in it are what a recovery would replay. Re-run once that is fixed"
+	fi
+elif [ -n "${WB_PATHS}" ]; then
+	if rcow_remove_unheld_writeback_shm "${RCOW_LVS_NAME}"; then
+		rcow_log "removed the write-back ring ($(printf '%s' "${WB_PATHS}" | tr '\n' ' '))"
+	else
+		rcow_err "could not remove the write-back ring; the next create will refuse it"
+		FAILED=1
+	fi
 fi
 
 # --------------------------------------------------------------------------
