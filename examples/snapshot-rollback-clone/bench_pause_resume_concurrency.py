@@ -93,32 +93,34 @@ def run_round(concurrency: int) -> dict:
       3. Concurrent resume → record wall time
       4. Kill & clean up
     """
-    sandboxes = [Sandbox.create(template=TEMPLATE_ID) for _ in range(concurrency)]
+    sandboxes = []
+    try:
+        for _ in range(concurrency):
+            sandboxes.append(Sandbox.create(template=TEMPLATE_ID))
 
-    # ── Pause ────────────────────────────────────────────────────────────────
-    t0 = time.monotonic()
-    if concurrency == 1:
-        sandboxes[0].pause()
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(_pause_one, sb) for sb in sandboxes]
-            for fut in as_completed(futures):
-                fut.result()
-    pause_wall_ms = (time.monotonic() - t0) * 1000
+        # ── Pause ────────────────────────────────────────────────────────────────
+        t0 = time.monotonic()
+        if concurrency == 1:
+            sandboxes[0].pause()
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_pause_one, sb) for sb in sandboxes]
+                for fut in as_completed(futures):
+                    fut.result()
+        pause_wall_ms = (time.monotonic() - t0) * 1000
 
-    # ── Resume ───────────────────────────────────────────────────────────────
-    t1 = time.monotonic()
-    if concurrency == 1:
-        sandboxes[0].resume()
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(_resume_one, sb) for sb in sandboxes]
-            for fut in as_completed(futures):
-                fut.result()
-    resume_wall_ms = (time.monotonic() - t1) * 1000
-
-    # ── Cleanup ──────────────────────────────────────────────────────────────
-    cleanup_sandboxes(sandboxes)
+        # ── Resume ───────────────────────────────────────────────────────────────
+        t1 = time.monotonic()
+        if concurrency == 1:
+            sandboxes[0].resume()
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_resume_one, sb) for sb in sandboxes]
+                for fut in as_completed(futures):
+                    fut.result()
+        resume_wall_ms = (time.monotonic() - t1) * 1000
+    finally:
+        cleanup_sandboxes(sandboxes)
 
     return {
         "pause_wall_ms":  pause_wall_ms,
