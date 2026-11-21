@@ -124,6 +124,9 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 		if template == nil {
 			continue
 		}
+		if storage.S3PackageOperationInProgress(template.TemplateID) {
+			continue
+		}
 		templateMap[template.TemplateID] = template.Clone()
 	}
 	return templateMap, nil
@@ -351,7 +354,7 @@ func mountS3PackageMetadataForRecovery(ctx context.Context, templateID string) {
 			return
 		}
 		metaDir := filepath.Join(home, storage.SnapshotMetadataDir)
-		if err := storage.MountS3MetadataAt(ctx, cow.BackendS3, id, metaDir); err != nil {
+		if err := storage.MountS3MetadataForRecovery(ctx, cow.BackendS3, id, metaDir); err != nil {
 			log.G(ctx).WithFields(CubeLog.Fields{
 				"template_id": id,
 				"meta_dir":    metaDir,
@@ -393,6 +396,9 @@ func (h *localCubeRunTemplateManager) recoverMetadataHomes(ctx context.Context, 
 	for _, configPath := range configPaths {
 		metaDir := filepath.Dir(filepath.Dir(configPath))
 		home := filepath.Dir(metaDir)
+		if media == cow.BackendS3 && storage.S3PackageOperationInProgress(filepath.Base(home)) {
+			continue
+		}
 		template := recoveredS3LocalTemplate(home, metaDir)
 		if template == nil {
 			continue

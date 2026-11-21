@@ -14,6 +14,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 func TestRecoveredLocalTemplateFromSnapshotPath(t *testing.T) {
@@ -321,6 +322,59 @@ func TestRecoveredMetadataHome(t *testing.T) {
 	}
 	if template.Snapshot.Snapshot.Path != metaDir {
 		t.Fatalf("path=%q", template.Snapshot.Snapshot.Path)
+	}
+}
+
+func TestS3RecoveryDoesNotPublishActiveWriter(t *testing.T) {
+	manager := newReadyTemplateManager(t)
+	root := t.TempDir()
+	id := "tpl-building"
+	home := filepath.Join(root, id)
+	configPath := metadataHomeConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := storage.BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	if err := manager.recoverMetadataHomes(context.Background(), root, "s3", id); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := manager.store.ListGeneric()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatal("heartbeat published a package while its writer was active")
+	}
+	release()
+	if err := manager.recoverMetadataHomes(context.Background(), root, "s3", id); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = manager.store.ListGeneric()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("published package missing after writer completed: %d", len(rows))
+	}
+	// A rebuild must also hide the previous cached inventory entry.
+	_, release, err = storage.BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	listed, err := manager.ListLocalTemplates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := listed[id]; exists {
+		t.Fatal("heartbeat reported a cached entry during its rebuild")
 	}
 }
 
