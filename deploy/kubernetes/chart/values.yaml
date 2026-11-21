@@ -1506,6 +1506,24 @@ hostPaths:
   # remain on a filesystem that is not torn down with the Pod overlay.
   runVc: /data/cubelet/run/vc
 
+# Third-party volume plugins registered on both sides of Cube's volume plugin
+# framework: appended to CubeMaster conf.yaml volume_plugins (after s3 and cos,
+# so never the default driver) and to Cubelet config.toml. Install the plugin
+# itself (its node socket or binary on every Cube node, and its controller
+# endpoint reachable from CubeMaster) outside this chart, outside the
+# cubetoolbox tree so upgrades do not reset it. Example:
+#
+#   volumePlugins:
+#     extra:
+#       - name: myfs            # [A-Za-z0-9_-]+
+#         type: rpc             # rpc | binary
+#         master:
+#           socketPath: myfs-controller.myfs.svc:9200   # binaryPath for binary
+#         node:
+#           socketPath: /data/cube-shared/run/myfs/node.sock
+volumePlugins:
+  extra: []
+
 # COS volume plugin credentials (volume-cos.conf). Plugin binaries ship in
 # cube-master / cubelet images; this Secret mounts the conf next to them.
 # Leave enabled=false to install a cluster without COS volume support.
