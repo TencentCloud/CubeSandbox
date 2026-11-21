@@ -189,9 +189,10 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 		log.G(ctx).Warnf("force-deleting template %s with no node locator; cubelet-side cleanup is skipped", templateID)
 	}
 	// The in-use check MUST run before any status is rewritten. shouldCheckInUse
-	// returns false once the definition reads FAILED, so failing the in-flight
-	// work first would silently skip this check and let a force delete pull the
-	// artifact out from under a running sandbox.
+	// returns false once the definition reads FAILED and no READY replica
+	// remains, so failing the in-flight work first would silently skip this
+	// check and let a force delete pull the artifact out from under a running
+	// sandbox.
 	if targets.shouldCheckInUse() {
 		inUse, err := runInUseCheck(ctx, templateID, targets.InstanceType)
 		if err != nil {
@@ -420,7 +421,20 @@ func (t *templateCleanupTargets) shouldCheckInUse() bool {
 	if t.Definition == nil {
 		return false
 	}
-	return !strings.EqualFold(t.Definition.Status, StatusFailed)
+	if !strings.EqualFold(t.Definition.Status, StatusFailed) {
+		return true
+	}
+	// FAILED normally means no replica is usable, so the in-use check is
+	// skipped. A partial replica persistence failure on create can leave
+	// READY rows behind a FAILED definition (e.g. an adopted artifact is not
+	// cleaned up), and sandbox scheduling only needs a READY replica, so keep
+	// the check while any READY row remains.
+	for _, replica := range t.Replicas {
+		if replica.Status == ReplicaStatusReady {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanupTemplateMetadata(ctx context.Context, templateID string) error {
