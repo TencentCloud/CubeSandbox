@@ -252,6 +252,24 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 INSTALL_MODE="$(resolve_install_mode "${ONE_CLICK_MODE}" "${INSTALL_PREFIX}" "${ONE_CLICK_ASSUME_YES}")"
 log "install mode: ${INSTALL_MODE}"
 
+# .env has been sourced. Save explicit S3 settings (including empty values)
+# before the old runtime is loaded. Save companions from the same assignment
+# row as well, so the KV merge can update each independently on later upgrades.
+S3_OVERRIDES="${WORK_DIR}/s3-addressing.env"
+s3_input=""
+[[ ! -f "${ENV_FILE}" ]] || s3_input="${ENV_FILE}"
+if [[ -n "${s3_input}" ]] && grep -Eq '^[[:space:]]*[^#[:space:]].*S3_ADDRESSING_STYLE=' "${s3_input}"; then
+  require_cmd python3
+  python3 "${SCRIPT_DIR}/lib/s3_addressing_env.py" keys "${s3_input}" > "${WORK_DIR}/s3-keys"
+else
+  printf '%s\n' CUBE_S3_ADDRESSING_STYLE CUBE_OPS_S3_ADDRESSING_STYLE > "${WORK_DIR}/s3-keys"
+fi
+while IFS= read -r s3_key; do
+  if [[ -v ${s3_key} ]]; then
+    s3_value="$(render_env_assignment_value "${s3_key}" "${!s3_key}")"
+    printf '%s=%s\n' "${s3_key}" "${s3_value}"
+  fi
+done < "${WORK_DIR}/s3-keys" > "${S3_OVERRIDES}"
 MERGED_ENV=""
 ENV_DIFF_FILE=""
 UPGRADE_BACKUP_DIR=""
@@ -277,13 +295,29 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   MERGE_OLD_BASELINE=""
   [[ -f "${INSTALL_PREFIX}/env.example" ]] && MERGE_OLD_BASELINE="${INSTALL_PREFIX}/env.example"
 
+  require_cmd python3
+  # Older runtimes can have multiple assignments on an S3 addressing row.
+  python3 "${SCRIPT_DIR}/lib/s3_addressing_env.py" stored "${RUNTIME_ENV_OLD}" "${SCRIPT_DIR}/env.example" > "${WORK_DIR}/s3-merge-input.env"
+  if [[ -s "${S3_OVERRIDES}" ]]; then
+    # Old-only keys come from the runtime input; template keys can come from
+    # .env. Supply the same explicit values to both sides of the existing merge.
+    cat "${S3_OVERRIDES}" >> "${WORK_DIR}/s3-merge-input.env"
+    {
+      if [[ -n "${MERGE_NEW_DOTENV}" ]]; then cat "${MERGE_NEW_DOTENV}"; fi
+      printf '\n'
+      cat "${S3_OVERRIDES}"
+    } > "${WORK_DIR}/s3-dotenv.env"
+    MERGE_NEW_DOTENV="${WORK_DIR}/s3-dotenv.env"
+  fi
   merge_env_three_way \
     "${SCRIPT_DIR}/env.example" \
-    "${RUNTIME_ENV_OLD}" \
+    "${WORK_DIR}/s3-merge-input.env" \
     "${MERGE_OLD_BASELINE}" \
     "${MERGE_NEW_DOTENV}" \
     "${MERGED_ENV}" \
     "${ENV_DIFF_FILE}"
+  python3 "${SCRIPT_DIR}/lib/s3_addressing_env.py" order "${RUNTIME_ENV_OLD}" \
+    "${SCRIPT_DIR}/env.example" "${MERGED_ENV}" "${WORK_DIR}/s3-expanded-keys"
   if [[ -z "${MERGE_OLD_BASELINE}" ]]; then
     log "note: no env.example baseline from the previous install; used two-way merge. Future upgrades will use a full three-way merge."
   fi
@@ -291,6 +325,11 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   # Override bundle/default values with the merged (old-priority) env so the
   # rest of the installer keeps the user's existing configuration.
   load_env_file "${MERGED_ENV}"
+  # Persist the resolved template values so the next upgrade can use its
+  # normal template order again. Bash has loaded these expressions once.
+  while IFS= read -r s3_key; do
+    upsert_env_kv "${MERGED_ENV}" "${s3_key}" "${!s3_key}"
+  done < "${WORK_DIR}/s3-expanded-keys"
   apply_cli_overrides
   DEPLOY_ROLE="$(one_click_deploy_role)"
 fi
@@ -305,6 +344,22 @@ apply_one_click_rcow_log_intent
 # Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
+
+# Check the effective values before stopping services or replacing files.
+validate_s3_addressing_styles() {
+  local key style
+  local LC_ALL=C
+  for key in CUBE_S3_ADDRESSING_STYLE CUBE_OPS_S3_ADDRESSING_STYLE; do
+    style="${!key-}"
+    style="${style#"${style%%[![:space:]]*}"}"
+    style="${style%"${style##*[![:space:]]}"}"
+    case "${style,,}" in
+      ""|auto|path|virtual) ;;
+      *) die "invalid ${key}. Use auto, path, virtual, or an empty value." ;;
+    esac
+  done
+}
+validate_s3_addressing_styles
 
 # Old packages had no unified knob. Preserve a previous non-zero Master /
 # per-component DB instead of silently resetting all consumers to DB 0.
@@ -2331,6 +2386,10 @@ fi
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
 # mode is preserved across every later upsert rather than reverting to 0644.
 chmod 600 "${RUNTIME_ENV_FILE}"
+if [[ "${INSTALL_MODE}" != "upgrade" && -s "${S3_OVERRIDES}" ]]; then
+  printf '\n' >> "${RUNTIME_ENV_FILE}"
+  cat "${S3_OVERRIDES}" >> "${RUNTIME_ENV_FILE}"
+fi
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then

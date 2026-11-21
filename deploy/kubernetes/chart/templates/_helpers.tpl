@@ -768,13 +768,23 @@ cannot feed env injection -- combine it with global.env instead.
 {{- if and (ne (include "cube.volumeS3EffectiveEndpoint" .) "") (or $hasPlainCreds (eq (include "cube.minioBuiltinEnabled" .) "true")) -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{/* Apply the last pod env override. A valueFrom reference is unknown at render time. */}}
+{{- define "cube.effectiveEnvValue" -}}
+{{- $value := .default -}}
+{{- range .env -}}
+{{- if eq .name $.name -}}{{- $value = .value | default "" -}}{{- end -}}
+{{- end -}}
+{{- $value | default "" | toString -}}
+{{- end -}}
+
 {{/*
 Path style for the artifact store S3 client (CUBE_S3_USE_PATH_STYLE). The
 builtin MinIO is only reachable path-style: virtual-host addressing would
 resolve <bucket>.cube-minio.<ns>.svc..., which cluster DNS cannot resolve
 (the chart already writes -ouse_path_request_style into volume-s3.conf for
 the same reason). An external volumeS3 endpoint keeps the binary default
-(false = virtual-host, AWS-style) unless the operator sets volumeS3.pathStyle.
+(false = SDK automatic selection) unless the operator sets volumeS3.pathStyle.
+An explicit artifactStore.s3AddressingStyle takes precedence in the binaries.
 */}}
 {{- define "cube.artifactS3PathStyle" -}}
 {{- $volumeS3 := default dict .Values.volumeS3 -}}
@@ -791,10 +801,8 @@ true
 
 {{/*
 The CUBE_S3_* env block rendered into BOTH the cube-master and
-cube-templatecenter Deployments. Emitted only when s3Backed=true and
-global.env does not already carry the set; placed BEFORE the global.env block
-so an operator entry with the same name still wins (on duplicate env names
-kubelet keeps the last one).
+cube-templatecenter Deployments. Credentials are injected only when
+s3Backed=true and global.env does not already carry the set. An operator-supplied addressing style in global.env is emitted only once.
 */}}
 {{- define "cube.artifactS3Env" -}}
 {{- if and (((.Values.controlPlane.artifactStore).s3Backed) | default false) (eq (include "cube.globalEnvS3State" .) "absent") (eq (include "cube.artifactS3Injectable" .) "true") }}
@@ -814,6 +822,16 @@ kubelet keeps the last one).
     secretKeyRef:
       name: {{ include "cube.secretName" . }}
       key: s3-artifact-secret-access-key
+{{- end }}
+{{- if ((.Values.controlPlane.artifactStore).s3Backed) | default false }}
+{{- $style := (.Values.controlPlane.artifactStore).s3AddressingStyle }}
+{{- range .Values.global.env }}
+{{- if eq .name "CUBE_S3_ADDRESSING_STYLE" }}{{- $style = "" }}{{- end }}
+{{- end }}
+{{- with $style }}
+- name: CUBE_S3_ADDRESSING_STYLE
+  value: {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- end -}}
 

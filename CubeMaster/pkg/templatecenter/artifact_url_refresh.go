@@ -108,6 +108,7 @@ func loadArtifactStore() *artifactStore {
 		Bucket:             s3.Bucket,
 		Region:             s3.Region,
 		PathStyle:          s3.UsePathStyle,
+		AddressingStyle:    s3.AddressingStyle,
 		UseSSL:             &useSSL,
 		PresignExpiry:      s3PresignExpiry,
 		AttachmentBasename: true,

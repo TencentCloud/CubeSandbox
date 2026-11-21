@@ -149,6 +149,7 @@ type S3Config struct {
 	Bucket          string `yaml:"bucket"`
 	Region          string `yaml:"region"`
 	PathStyle       *bool  `yaml:"path_style"`
+	AddressingStyle string `yaml:"addressing_style"`
 	CreateBucket    *bool  `yaml:"create_bucket"`
 }
 
@@ -601,6 +602,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("CUBE_OPS_S3_REGION"); v != "" {
 		cfg.S3.Region = v
+	}
+	if v := os.Getenv("CUBE_OPS_S3_ADDRESSING_STYLE"); v != "" {
+		cfg.S3.AddressingStyle = v
 	}
 	if v := os.Getenv("CUBE_OPS_S3_PATH_STYLE"); v != "" {
 		if p := parseEnvBool(v); p != nil {

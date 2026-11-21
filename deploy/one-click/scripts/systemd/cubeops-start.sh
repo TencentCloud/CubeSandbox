@@ -53,6 +53,9 @@ export CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
 if [[ -z "${CUBE_OPS_S3_REGION:-}" && -n "${CUBE_S3_REGION:-}" ]]; then
   export CUBE_OPS_S3_REGION="${CUBE_S3_REGION}"
 fi
+if [[ -z "${CUBE_OPS_S3_ADDRESSING_STYLE:-}" && -n "${CUBE_S3_ADDRESSING_STYLE:-}" ]]; then
+  export CUBE_OPS_S3_ADDRESSING_STYLE="${CUBE_S3_ADDRESSING_STYLE}"
+fi
 if [[ -z "${CUBE_OPS_S3_PATH_STYLE:-}" && -n "${CUBE_S3_S3FS_EXTRA_OPTS:-}" ]]; then
   if [[ "${CUBE_S3_S3FS_EXTRA_OPTS}" == *use_path_request_style* ]]; then
     export CUBE_OPS_S3_PATH_STYLE=true

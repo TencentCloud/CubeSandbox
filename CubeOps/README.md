@@ -135,6 +135,7 @@ defaults.
 | `CUBE_OPS_S3_NODE_ENDPOINT` | same as endpoint | Host signed into presigned GET URLs |
 | `CUBE_OPS_S3_ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` | empty | Object-store credentials (never given to nodes) |
 | `CUBE_OPS_S3_BUCKET` | `cube-ops` | CubeOps dedicated bucket, separate from `cube-volumes` / `cube-s3lvol` |
+| `CUBE_OPS_S3_ADDRESSING_STYLE` | empty | Optional S3 addressing mode: `auto`, `path`, or `virtual`. A nonempty style overrides the legacy `s3.path_style` / `CUBE_OPS_S3_PATH_STYLE` boolean; leaving the style unset preserves that boolean's behavior (default: path style). See [S3 bucket addressing](../pkgs/blobstore/README.md#s3-bucket-addressing). |
 | `CUBE_OPS_WAREHOUSE_PRESIGN_TTL` | `5m` | Presigned GET TTL (clamped 1m–15m) |
 | `CUBE_OPS_WAREHOUSE_GITHUB_REPOS` | `TencentCloud/CubeSandbox` | Comma-separated GitHub owner/repo allow-list (`warehouse.github_repos`) |
 | `CUBE_OPS_WAREHOUSE_CNB_REPOS` | `CubeSandbox/CubeSandbox` | Comma-separated CNB owner/repo allow-list (`warehouse.cnb_repos`) |

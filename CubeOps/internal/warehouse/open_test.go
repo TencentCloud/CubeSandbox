@@ -8,11 +8,67 @@ import (
 	"context"
 	"encoding/hex"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 )
+
+func TestOpenS3AddressingStyle(t *testing.T) {
+	legacyFalse := false
+	for _, tc := range []struct {
+		name, style, nodeEndpoint, host, path string
+		legacyPathStyle                       *bool
+	}{
+		{name: "legacy default", nodeEndpoint: "https://downloads.example.test", host: "downloads.example.test", path: "/artifacts/nested/a.ext4"},
+		{name: "legacy false", legacyPathStyle: &legacyFalse, nodeEndpoint: "https://downloads.example.test", host: "downloads.example.test", path: "/artifacts/nested/a.ext4"},
+		{name: "auto overrides default", style: "auto", nodeEndpoint: "https://s3.dualstack.us-east-1.amazonaws.com", host: "artifacts.s3.dualstack.us-east-1.amazonaws.com", path: "/nested/a.ext4"},
+		{name: "path overrides false", style: "path", legacyPathStyle: &legacyFalse, nodeEndpoint: "https://s3.dualstack.us-east-1.amazonaws.com", host: "s3.dualstack.us-east-1.amazonaws.com", path: "/artifacts/nested/a.ext4"},
+		{name: "virtual overrides default", style: "virtual", nodeEndpoint: "https://downloads.example.test", host: "artifacts.downloads.example.test", path: "/nested/a.ext4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := OpenS3(config.S3Config{
+				Endpoint:        "https://storage.example.test",
+				NodeEndpoint:    tc.nodeEndpoint,
+				AccessKeyID:     "test-access-key",
+				SecretAccessKey: "test-secret-key",
+				Bucket:          "artifacts",
+				Region:          "us-east-1",
+				PathStyle:       tc.legacyPathStyle,
+				AddressingStyle: tc.style,
+			}, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.(*Adapter).Store.Close()
+			raw, err := st.PresignGet(t.Context(), "nested/a.ext4", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.Host != tc.host || u.Path != tc.path {
+				t.Fatalf("signed URL host=%q path=%q, want %q/%q", u.Host, u.Path, tc.host, tc.path)
+			}
+		})
+	}
+}
+
+func TestOpenS3RejectsInvalidAddressingStyle(t *testing.T) {
+	_, err := OpenS3(config.S3Config{
+		Endpoint:        "https://storage.example.test",
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+		Bucket:          "artifacts",
+		AddressingStyle: "invalid",
+	}, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "addressing_style") {
+		t.Fatalf("invalid style must fail at OpenS3, got %v", err)
+	}
+}
 
 func TestOpenFSSignedURLUsesObjectMountPath(t *testing.T) {
 	key := hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))

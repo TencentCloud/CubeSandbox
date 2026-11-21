@@ -79,6 +79,14 @@ spec:
               value: {{ include "cube.opsS3Region" . | quote }}
             - name: CUBE_OPS_S3_PATH_STYLE
               value: {{ include "cube.boolEnvDefaultTrue" $opsS3.pathStyle | quote }}
+            {{- $style := $opsS3.addressingStyle }}
+            {{- range .Values.cubeOps.env }}
+            {{- if eq .name "CUBE_OPS_S3_ADDRESSING_STYLE" }}{{- $style = "" }}{{- end }}
+            {{- end }}
+            {{- with $style }}
+            - name: CUBE_OPS_S3_ADDRESSING_STYLE
+              value: {{ . | quote }}
+            {{- end }}
             - name: CUBE_OPS_S3_CREATE_BUCKET
               value: {{ include "cube.boolEnvDefaultTrue" $opsS3.createBucket | quote }}
             - name: CUBE_OPS_WAREHOUSE_PRESIGN_TTL
