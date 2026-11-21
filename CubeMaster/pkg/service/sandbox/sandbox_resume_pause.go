@@ -6,8 +6,10 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
@@ -145,7 +148,10 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		return rsp
 	}
 
-	released := volrefcount.ReleasedVolumeIDs(cubeRsp.GetExtInfo())
+	var volumeIDs []string
+	if raw := cubeRsp.GetExtInfo()[cubebox.ExtPausePluginVolumeIDs]; len(raw) == 0 || json.Unmarshal(raw, &volumeIDs) != nil {
+		volumeIDs = volrefcount.ReleasedVolumeIDs(cubeRsp.GetExtInfo())
+	}
 	exportUUIDs := ""
 	if constants.IsRemoteTrackedBackend(req.Backend) {
 		exportUUIDs = strings.TrimSpace(cubeRsp.GetRemoteUuids())
@@ -159,7 +165,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	if s := updateStagesFrom(ctx); s != nil {
 		ctx = s.enter(ctx, s.finalize, pauseAttrs...)
 	}
-	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released, exportUUIDs); err != nil {
+	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, volumeIDs, exportUUIDs); err != nil {
 		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, err.Error())
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
 		rsp.Ret.RetMsg = fmt.Sprintf("pause ok on cubelet but master meta failed: %v", err)
@@ -449,10 +455,12 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	}
 	snapID := rec.SnapshotID
 
-	// Pause Detach released these plugin volumes (node 1→0). If the user
-	// deleted any meanwhile, refuse Resume — Attach would otherwise recreate
-	// orphan hostdirs (localdir) or bind missing backends.
-	if err := validatePauseResumeVolumes(rec.PluginVolumeIDs); err != nil {
+	createReq := loadResumeSandboxSpec(ctx, req.SandboxID)
+	volumeIDs, err := resumePluginVolumeIDs(rec.PluginVolumeIDs, createReq)
+	if err == nil {
+		err = validatePauseResumeVolumes(volumeIDs)
+	}
+	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = err.Error()
 		return rsp
@@ -466,7 +474,6 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		instanceType = cubebox.InstanceType_cubebox.String()
 	}
 
-	createReq := loadResumeSandboxSpec(ctx, req.SandboxID)
 	placement, err := resumePlacement(ctx, rec, instanceType, createReq)
 	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
@@ -549,11 +556,23 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		s.annotate(resumeAttrs...)
 		ctx = s.enter(ctx, s.runtime, resumeAttrs...)
 	}
-	cubeRsp, err := cubelet.Create(ctx, calleeEndpoint, cubeletReq)
+	result, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs)
+	cubeRsp, guarded := result.rsp, result.guarded
+	if result.createdSandboxID != "" {
+		switch {
+		case err != nil:
+			log.G(ctx).Errorf("pause resume volume settlement failed sandbox=%s target=%s", result.createdSandboxID, targetIP)
+		case volumeCreateReportFailed(cubeRsp):
+			log.G(ctx).Errorf("pause resume volume report failed sandbox=%s target=%s", result.createdSandboxID, targetIP)
+		}
+	}
 	if err != nil || cubeRsp == nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
 		if err != nil {
 			rsp.Ret.RetMsg = err.Error()
+			if status, ok := ret.FromError(err); guarded && ok {
+				rsp.Ret.RetCode = int(status.Code())
+			}
 		} else {
 			rsp.Ret.RetMsg = "cubelet create response is nil"
 		}
@@ -578,7 +597,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		ctx = s.enter(ctx, s.finalize, resumeAttrs...)
 	}
 	// Same as normal Create: apply node 0→1 (and only those) to Master.
-	volrefcount.ApplyFromExtInfo(ctx, cubeRsp.GetExtInfo())
+	if !guarded {
+		volrefcount.ApplyFromExtInfo(ctx, cubeRsp.GetExtInfo())
+	}
 
 	// Resume recreates the guest NIC / host ports. Normal Create writes Redis
 	// proxy metadata in dealSuccResult; thin resume Create must rewrite it or
@@ -756,6 +777,30 @@ func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostIP string, c
 
 // validatePauseResumeVolumes ensures plugin volumes released at Pause still
 // exist before Resume Create/Attach.
+// Older and timed-out Pause bindings can be missing shared volumes.
+func resumePluginVolumeIDs(savedIDs []string, spec *types.CreateCubeSandboxReq) ([]string, error) {
+	if spec == nil {
+		return savedIDs, nil
+	}
+	var mounts []pluginVolumeMountEntry
+	if raw := spec.Annotations[AnnotationPluginVolumeMounts]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &mounts); err != nil {
+			return nil, fmt.Errorf("cannot resume: invalid stored plugin volume mounts: %w", err)
+		}
+	}
+	ids := append([]string(nil), savedIDs...)
+	for _, mount := range mounts {
+		ids = append(ids, strings.TrimSpace(mount.Name))
+	}
+	for _, v := range spec.Volumes {
+		if v != nil && (v.VolumeSource == nil || v.VolumeSource.PluginVolume != nil) {
+			ids = append(ids, v.Name)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
+}
+
 func validatePauseResumeVolumes(volumeIDs []string) error {
 	for _, vid := range volumeIDs {
 		vid = strings.TrimSpace(vid)

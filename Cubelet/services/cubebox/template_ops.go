@@ -791,7 +791,7 @@ func declaredPluginVolumes(annotations map[string]string) (map[string]string, er
 	if annotations == nil {
 		return result, nil
 	}
-	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
+	raw := strings.TrimSpace(annotations[cubebox.AnnotationPluginVolumeSources])
 	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
 		return result, nil
 	}

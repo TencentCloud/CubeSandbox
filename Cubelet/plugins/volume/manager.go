@@ -6,9 +6,11 @@ package volume
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 // Manager is the process-wide registry that routes Attach / Detach calls to
@@ -121,7 +123,7 @@ func (m *Manager) InitAll(ctx context.Context, configs map[string]PluginConfig) 
 func (m *Manager) Attach(ctx context.Context, req *AttachRequest) (*AttachResult, error) {
 	p, err := m.lookup(req.Driver)
 	if err != nil {
-		return nil, err
+		return nil, &AttachNotStartedError{Cause: err}
 	}
 
 	// Serialise Attach/Detach for the same volumeID to prevent concurrent
@@ -132,29 +134,52 @@ func (m *Manager) Attach(ctx context.Context, req *AttachRequest) (*AttachResult
 
 	// Acquire ref-count and pass the BEFORE value to the plugin.
 	// before == 0 means this is the first sandbox to attach the volume.
-	if rc := m.rcStore; rc != nil {
+	var acquired bool
+	rc := m.rcStore
+	if rc != nil {
 		ar, err := rc.Acquire(req.Namespace, volID, req.SandboxID, req.Driver)
 		if err != nil {
-			return nil, fmt.Errorf("plugin_volume %q: acquire refcount: %w", req.VolumeID, err)
+			cause := fmt.Errorf("plugin_volume %q: acquire refcount: %w", req.VolumeID, err)
+			// bbolt returns this sentinel from Begin before opening the write transaction.
+			if err == bolterrors.ErrDatabaseNotOpen {
+				return nil, &AttachNotStartedError{Cause: cause}
+			}
+			return nil, cause
 		}
+		acquired = !ar.AlreadyHeld
 		req.RefCount = ar.Before // 0 = first attach
-		// 0 → 1 on this node: first sandbox here to reference the volume.
-		req.NodeRefFirstAttach = ar.Before == 0 && !ar.AlreadyHeld
 	}
 
 	res, pluginErr := p.Attach(ctx, req)
 	if pluginErr != nil {
 		// Roll back the ref-count on plugin failure. The transition is undone,
 		// so the caller must not report a 0→1 event to CubeMaster.
-		req.NodeRefFirstAttach = false
-		if rc := m.rcStore; rc != nil {
+		if acquired {
 			if _, rbErr := rc.Release(req.Namespace, volID, req.SandboxID); rbErr != nil {
-				_ = rbErr
+				return nil, fmt.Errorf("plugin_volume %q: %v (release after attach failure: %w)", volID, pluginErr, rbErr)
 			}
 		}
 		return nil, pluginErr
 	}
 	return res, nil
+}
+
+// TakeCreateReports transfers the first-attach report to a successful Create,
+// even if another Create originally established the shared mount.
+func (m *Manager) TakeCreateReports(namespace, sandboxID string, volumeIDs []string) ([]string, error) {
+	if len(volumeIDs) == 0 {
+		return nil, nil
+	}
+	if m.rcStore == nil {
+		return nil, fmt.Errorf("plugin volume reference store unavailable")
+	}
+	ids := slices.Clone(volumeIDs)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	for _, id := range ids {
+		defer m.lockVolume(id)()
+	}
+	return m.rcStore.TakeCreateReports(namespace, sandboxID, ids)
 }
 
 // Detach decrements the ref-count for (namespace, volumeName), fills in
@@ -166,46 +191,57 @@ func (m *Manager) Attach(ctx context.Context, req *AttachRequest) (*AttachResult
 // and NodeRefLastDetach is cleared so callers must NOT report a 1→0 event to
 // CubeMaster. A later successful Detach retry can then emit the transition.
 func (m *Manager) Detach(ctx context.Context, req *DetachRequest) error {
-	p, err := m.lookup(req.Driver)
-	if err != nil {
-		// Unknown driver during Detach: release ref-count and continue.
-		if rc := m.rcStore; rc != nil {
-			rr, _ := rc.Release(req.Namespace, req.VolumeID, req.SandboxID)
-			req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
-		}
-		return nil
-	}
-
-	// Serialise Attach/Detach for the same volumeID.
 	volID := req.VolumeID
 	unlock := m.lockVolume(volID)
 	defer unlock()
 
+	p, err := m.lookup(req.Driver)
+	if err != nil {
+		if req.RequireRecordedHolder {
+			return err
+		}
+		// Unknown driver during Detach: release ref-count and continue.
+		if rc := m.rcStore; rc != nil {
+			rr, _ := rc.Release(req.Namespace, req.VolumeID, req.SandboxID)
+			req.NodeRefLastDetach = rr.LastReportedDetach()
+		}
+		return nil
+	}
+
 	// Release ref-count and pass the AFTER value to the plugin.
 	// after == 0 means this was the last sandbox; host cleanup is appropriate.
 	released := false
+	var reportPending *bool
 	if rc := m.rcStore; rc != nil {
 		rr, err := rc.Release(req.Namespace, volID, req.SandboxID)
 		if err != nil {
-			_ = err // non-fatal; don't block Destroy
+			return fmt.Errorf("plugin_volume %q: release refcount: %w", volID, err)
+		}
+		if rr.NotHeld && req.RequireRecordedHolder {
+			return fmt.Errorf("plugin_volume %q: sandbox %q does not hold volume", volID, req.SandboxID)
 		} else if !rr.NotHeld {
 			released = true
+			reportPending = rr.ReportPending
 		}
 		req.RefCount = rr.After // 0 = last detach
 		// 1 → 0 on this node: last sandbox here stopped referencing the volume.
-		req.NodeRefLastDetach = rr.After == 0 && !rr.NotHeld
+		req.NodeRefLastDetach = rr.LastReportedDetach()
+		req.CreateReportClaimed = req.NodeRefLastDetach && reportPending != nil
+	} else if req.RequireRecordedHolder {
+		return fmt.Errorf("plugin_volume %q: reference store unavailable", volID)
 	}
 
 	if pluginErr := p.Detach(ctx, req); pluginErr != nil {
 		// Plugin failed: restore the local reference and suppress 1→0 reporting.
 		if released {
 			if rc := m.rcStore; rc != nil {
-				if _, rbErr := rc.Acquire(req.Namespace, volID, req.SandboxID, req.Driver); rbErr != nil {
+				if rbErr := rc.Restore(req.Namespace, volID, req.SandboxID, req.Driver, reportPending); rbErr != nil {
 					_ = rbErr
 				}
 			}
 		}
 		req.NodeRefLastDetach = false
+		req.CreateReportClaimed = false
 		return pluginErr
 	}
 	return nil

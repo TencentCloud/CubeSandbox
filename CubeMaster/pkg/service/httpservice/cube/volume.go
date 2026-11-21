@@ -9,15 +9,18 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/admission"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
@@ -97,7 +100,7 @@ func volumeItemFromRecord(r *models.VolumeRecord) VolumeItem {
 		Name:      r.Name,
 		Driver:    r.Driver,
 		Token:     r.Token,
-		RefCount:  r.RefCount,
+		RefCount:  max(r.RefCount, 0),
 		CreatedAt: r.CreatedAt.Unix(),
 	}
 }
@@ -335,30 +338,70 @@ func handleDeleteVolume(c *gin.Context) {
 		return
 	}
 
-	// Refuse to delete a volume that is still attached on one or more nodes.
-	// RefCount is maintained from the node-level transitions Cubelet reports on
-	// sandbox create/destroy; a non-zero value means live sandboxes still use it.
-	if record.RefCount != 0 {
-		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_Conflict, fmt.Sprintf(
-			"volume %s is in use by %d node(s); destroy the sandboxes using it before deleting",
-			volumeID, record.RefCount,
-		))})
-		return
-	}
-
+	// Validate the driver before taking ownership of the destructive operation.
 	p, ok := plugin.Get(record.Driver)
 	if !ok {
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "unknown driver: "+record.Driver)})
 		return
 	}
+	record, err = admission.BeginDelete(c.Request.Context(), volumeDB(), record.ID)
+	switch {
+	case errors.Is(err, admission.ErrBusy):
+		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_Conflict, err.Error())})
+		return
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_NotFound, "volume not found: "+volumeID)})
+		return
+	case err != nil:
+		log.G(c.Request.Context()).Errorf("volume delete claim failed volume_id=%s", volumeID)
+		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db error: "+err.Error())})
+		return
+	}
 
-	if destroyErr := p.Destroy(c.Request.Context(), volumeID, record.PrivateData); destroyErr != nil {
+	serverCtx := context.WithoutCancel(c.Request.Context())
+	pluginBudget := 360 * time.Second
+	if cfg := config.GetConfig(); cfg != nil && cfg.Common != nil && cfg.Common.WriteTimeout > 0 {
+		pluginBudget = time.Duration(cfg.Common.WriteTimeout) * time.Second
+	}
+	pluginCtx, cancelPlugin := context.WithTimeout(serverCtx, pluginBudget)
+	destroyErr := p.Destroy(pluginCtx, volumeID, record.PrivateData)
+	cancelPlugin()
+
+	ctx, cancel := context.WithTimeout(serverCtx, 2*time.Second)
+	defer cancel()
+	if destroyErr != nil {
+		var notStarted *plugin.NotStartedError
+		if errors.As(destroyErr, &notStarted) {
+			dbErr := volumeDB().WithContext(ctx).Model(&record).
+				Where("deleting = ?", true).UpdateColumn("deleting", false).Error
+			if dbErr != nil {
+				log.G(ctx).Errorf("volume delete claim release failed volume_id=%s", volumeID)
+				common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "release volume delete claim: "+dbErr.Error())})
+				return
+			}
+		} else {
+			log.G(ctx).Errorf("volume plugin destroy outcome unknown volume_id=%s", volumeID)
+		}
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterInternalError, "plugin destroy error: "+destroyErr.Error())})
 		return
 	}
 
-	// Hard-delete: remove the row so volume_id / name can be reused.
-	if dbErr := volumeDB().WithContext(c.Request.Context()).Delete(&record).Error; dbErr != nil {
+	// The backend succeeded. Retrying the delete of this exact SQL row is safe.
+	db := volumeDB().WithContext(ctx)
+	deleteRow := func() error { return db.Where("deleting = ?", true).Delete(&record).Error }
+	dbErr := deleteRow()
+	for range 2 {
+		if dbErr == nil || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(25 * time.Millisecond):
+			dbErr = deleteRow()
+		}
+	}
+	if dbErr != nil {
+		log.G(ctx).Errorf("volume delete row settlement failed volume_id=%s", volumeID)
 		common.WriteAPI(c, &deleteVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db delete error: "+dbErr.Error())})
 		return
 	}

@@ -33,13 +33,13 @@ const ExtInfoKey = "cube-volume-refcount-events"
 // Referenced is 1 when the node started referencing the volume (0→1) and 0
 // when it stopped (1→0). Repeat references on the same node produce no event.
 type Event struct {
-	VolumeID   string `json:"volume_id"`
-	Referenced int    `json:"referenced"`
+	VolumeID            string `json:"volume_id"`
+	Referenced          int    `json:"referenced"`
+	CreateReportClaimed bool   `json:"create_report_claimed,omitempty"`
 }
 
 // ReleasedVolumeIDs returns volume IDs for which the node stopped referencing
-// the volume (referenced=0 / 1→0). Used by Pause to remember which plugin
-// volumes a sandbox had so Resume can refuse to start if they were deleted.
+// the volume (referenced=0 / 1→0). Used as a fallback for older Pause replies.
 func ReleasedVolumeIDs(extInfo map[string][]byte) []string {
 	if len(extInfo) == 0 {
 		return nil
@@ -91,40 +91,31 @@ func ApplyFromExtInfo(ctx context.Context, extInfo map[string][]byte) {
 		if e.VolumeID == "" {
 			continue
 		}
-		switch e.Referenced {
-		case 1:
-			Apply(ctx, e.VolumeID, 1)
-		case 0:
-			Apply(ctx, e.VolumeID, -1)
-		default:
+		if e.Referenced != 0 && e.Referenced != 1 {
 			log.G(ctx).Warnf("volume refcount: ignoring event with invalid referenced=%d volume=%s",
 				e.Referenced, e.VolumeID)
+			continue
 		}
+		apply(ctx, dao.Default(), e)
 	}
 }
 
-// Apply atomically adds delta to the ref-count of the given volume. The value
-// is clamped at zero so it can never go negative even if a stray decrement
-// arrives (e.g. after a manual DB reset).
-func Apply(ctx context.Context, volumeID string, delta int) {
-	if delta == 0 {
-		return
+func apply(ctx context.Context, db *gorm.DB, event Event) {
+	expr := gorm.Expr("refcount + 1")
+	if event.Referenced == 0 {
+		// Only a proven +1 claim can make a last detach precede its +1.
+		// Legacy last detaches must also leave any early -1 balance intact.
+		expr = gorm.Expr("CASE WHEN refcount > 0 OR (? AND in_flight_creates > 0) THEN refcount - 1 ELSE refcount END", event.CreateReportClaimed)
 	}
-	var expr interface{}
-	if delta > 0 {
-		expr = gorm.Expr("refcount + ?", delta)
-	} else {
-		expr = gorm.Expr("GREATEST(refcount - ?, 0)", -delta)
-	}
-	res := dao.Default().WithContext(ctx).
+	res := db.WithContext(ctx).
 		Model(&models.VolumeRecord{}).
-		Where("volume_id = ?", volumeID).
+		Where("volume_id = ?", event.VolumeID).
 		Update("refcount", expr)
 	if res.Error != nil {
-		log.G(ctx).Warnf("volume refcount: apply delta=%d volume=%s: %v", delta, volumeID, res.Error)
+		log.G(ctx).Warnf("volume refcount: apply referenced=%d volume=%s: %v", event.Referenced, event.VolumeID, res.Error)
 		return
 	}
 	if res.RowsAffected == 0 {
-		log.G(ctx).Warnf("volume refcount: volume %s not found while applying delta=%d", volumeID, delta)
+		log.G(ctx).Warnf("volume refcount: no update for volume %s while applying referenced=%d", event.VolumeID, event.Referenced)
 	}
 }
