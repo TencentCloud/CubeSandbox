@@ -52,7 +52,7 @@ containerd 插桩还会记录 Task、RPC 和传输等 span，并使用调用方�
 
 配置走环境变量，随安装方式而异：
 
-- **裸金属 / one-click**：安装前设置该变量，参见[裸金属部署](./bare-metal-deploy.md)中的「OpenTelemetry 链路追踪（可选）」。
+- **裸金属 / one-click**：安装或升级前，在 `install.sh` 同级 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT=http://<receiver-host>:<OTLP-gRPC-port>`（关闭时置空 `OTEL_EXPORTER_OTLP_ENDPOINT=` 并重跑安装脚本），详见 [one-click README · OpenTelemetry tracing](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md#opentelemetry-tracing-optional)。
 - **Kubernetes**：加到各组件的 `env` 数组中，参见 [Helm 安装 · 链路追踪配置](./kubernetes/install.md)中的「8.4 链路追踪配置」。
 
 Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启动时继承 Cubelet 的环境变量，因此已在运行的 shim 会保留旧设置。
