@@ -632,4 +632,10 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 		"result_json":     string(resultPayload),
 		"error_message":   errorMessage,
 	})
+	// A redo IS the migrate/redistribute flow: the template now serves from its
+	// new node set. Publish only on the READY outcome so subscribers never see
+	// a migration that the redo then rolled back.
+	if finalStatus == JobStatusReady {
+		PublishTemplateMigrated(ctx, req.TemplateID, jobID, generatedReq.InstanceType, int32(len(readyTargets)))
+	}
 }

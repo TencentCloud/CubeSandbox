@@ -32,11 +32,13 @@ func SnapshotDB(t *testing.T) *gorm.DB {
 }
 
 // ReconcileUpload exercises the real upload completion path (polling, not a
-// callback). The caller has already executed the local lifecycle success.
+// callback). The caller has already executed the local lifecycle success, which
+// publishes at least one event; a snapshot resource publishes two, the sandbox
+// event and its companion snapshot event.
 func ReconcileUpload(t *testing.T, db *gorm.DB, table, snapshotID, terminal string, p *webhook.BufferedPublisher) {
 	t.Helper()
 	before := len(p.Events())
-	require.Equal(t, 1, before, "local success must already have published")
+	require.NotZero(t, before, "local success must already have published")
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(ip string) string { return ip })

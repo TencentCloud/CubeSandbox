@@ -23,7 +23,7 @@ func NewStaticSubscriptionProvider(subscriptions []Subscription) (*StaticSubscri
 	}
 	seen := make(map[string]bool)
 	for _, s := range subscriptions {
-		if !validSubscriptionText(s.ID, MaxSubscriptionIDBytes) || !validSubscriptionText(s.Target, MaxDeliveryTargetBytes) || seen[s.ID] || len(s.Events) == 0 || len(s.Events) > 6 {
+		if !validSubscriptionText(s.ID, MaxSubscriptionIDBytes) || !validSubscriptionText(s.Target, MaxDeliveryTargetBytes) || seen[s.ID] || len(s.Events) == 0 || len(s.Events) > MaxEventsPerSubscription {
 			return nil, ErrInvalidDelivery
 		}
 		seen[s.ID] = true

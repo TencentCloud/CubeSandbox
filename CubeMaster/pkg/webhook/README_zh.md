@@ -2,7 +2,7 @@
 
 [English](README.md) · [用户指南](../../../docs/zh/guide/webhooks.md)
 
-CubeMaster 观察六类生命周期成功点，向静态集群级订阅发送 JSON POST。通知默认关闭，
+CubeMaster 观察十六类生命周期成功点，向静态集群级订阅发送 JSON POST。通知默认关闭，
 使用进程内有界内存和有限重试。重启/崩溃可丢失剩余任务；不提供持久化、接管、顺序或
 恰好一次保证。平台业务 Redis 仍是依赖。
 

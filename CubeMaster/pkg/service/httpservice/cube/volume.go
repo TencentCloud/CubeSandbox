@@ -19,10 +19,24 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	"gorm.io/gorm"
 )
+
+var volumePublisher webhook.PublisherHolder
+
+// SetVolumeWebhookPublisher installs the publisher the volume handlers use.
+func SetVolumeWebhookPublisher(p webhook.Publisher) { volumePublisher.Set(p) }
+
+// publishVolumeLifecycle is best effort: a webhook never changes the API result.
+func publishVolumeLifecycle(ctx context.Context, kind, volumeID, driver string) {
+	if !volumePublisher.Enabled() {
+		return
+	}
+	volumePublisher.PublishVolumeContext(ctx, kind, volumeID, webhook.PrepareVolumeLifecycle(driver))
+}
 
 // volumeDB returns the GORM handle used by volume handlers.
 // Tests override this to inject an in-memory database without touching the
@@ -280,6 +294,7 @@ func handleCreateVolume(c *gin.Context) {
 	}
 
 	item := volumeItemFromRecord(record)
+	publishVolumeLifecycle(c.Request.Context(), webhook.TypeVolumeCreated, volumeID, req.Driver)
 	rt.RetCode = 0
 	common.WriteAPI(c, &singleVolumeRes{Ret: retOK(), Volume: &item})
 }
@@ -363,6 +378,7 @@ func handleDeleteVolume(c *gin.Context) {
 		return
 	}
 
+	publishVolumeLifecycle(c.Request.Context(), webhook.TypeVolumeDeleted, volumeID, record.Driver)
 	rt.RetCode = 0
 	common.WriteAPI(c, &deleteVolumeRes{Ret: retOK(), VolumeID: volumeID})
 }
