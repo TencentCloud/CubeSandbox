@@ -107,6 +107,10 @@ pub trait PciDevice: BusDevice {
     fn move_bar(&mut self, _old_base: u64, _new_base: u64) -> result::Result<(), io::Error> {
         Ok(())
     }
+    /// Restore BAR address in config space after a failed move_bar.
+    /// This rolls back the address update made by detect_bar_reprogramming()
+    /// so that the config register stays consistent with the MMIO bus mapping.
+    fn restore_bar_addr(&mut self, _params: &BarReprogrammingParams) {}
     /// Provides a mutable reference to the Any trait. This is useful to let
     /// the caller have access to the underlying type behind the trait.
     fn as_any(&mut self) -> &mut dyn Any;
