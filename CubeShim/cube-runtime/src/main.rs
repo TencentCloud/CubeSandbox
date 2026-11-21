@@ -35,6 +35,10 @@ async fn execute(args: CliArgs) -> Result<()> {
             snapshot::cmd::execute(snapshot_args).await?;
         }
 
+        SubCommands::VerifyRestore(verify_args) => {
+            snapshot::verify::execute(verify_args).await?;
+        }
+
         SubCommands::Login(login_args) => {
             login::execute(login_args).await?;
         }

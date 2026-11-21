@@ -368,6 +368,37 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			req.Annotations[constants.MasterAnnotationStorageBackend] = b
 		}
 	}
+	// An xfs-s3 Resume takes the lifecycle lock before it downloads a
+	// checkpoint: a retried attempt then waits for the one in flight and
+	// finds the sandbox it started, instead of downloading the checkpoint a
+	// second time.
+	xfss3Locked := false
+	if sid := resumeFromPauseSandboxID(req); sid != "" && isXFSS3Request(req) {
+		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
+			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, sid)))
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, sid)
+		lockSpan.End()
+		if lockErr != nil {
+			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		defer unlock()
+		xfss3Locked = true
+		switch sb, retry := existingXFSS3Sandbox(s.listCubeboxes(), req, sid); retry {
+		case xfss3ResumeReplay:
+			log.G(ctx).Infof("resume %s: already running here; answering the retried attempt of pause package %s",
+				sid, req.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID])
+			rsp.SandboxID = sb.ID
+			rsp.SandboxIP = sb.IP
+			rsp.PortMappings = sb.PortMappings
+			return rsp, nil
+		case xfss3ResumeBusy:
+			rsp.Ret.RetMsg = fmt.Sprintf("sandbox %s already exists here and is not running; it must be destroyed or settle before Resume", sid)
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+	}
 	// Cross-node restore: the disk describing what to run is not on this
 	// node yet, and the reads below expect it.
 	preparedCtx, prepareErr := prepareCrossNodeRestore(ctx, req)
@@ -385,7 +416,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
+	if sid := resumeFromPauseSandboxID(req); sid != "" && !xfss3Locked {
 		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
 			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, sid)))
 		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, sid)

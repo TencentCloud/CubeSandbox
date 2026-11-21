@@ -25,6 +25,7 @@ var Command = cli.Command{
 		OperationCommand,
 		TemplateCommand,
 		VolumeCommand,
+		ReleaseResumePinCommand,
 	},
 }
 

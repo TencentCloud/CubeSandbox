@@ -54,10 +54,14 @@ type pauseStageTimings struct {
 	SpecWriteMS         float64 `json:"spec_write_ms"`
 	RootfsSpecWallMS    float64 `json:"rootfs_spec_wall_ms"`
 	PackageFinalizeMS   float64 `json:"package_finalize_ms"`
+	CheckpointSealMS    float64 `json:"checkpoint_seal_ms,omitempty"`
 	DestroyLiveMS       float64 `json:"destroy_live_ms"`
 	CubeletTotalMS      float64 `json:"cubelet_total_ms"`
 	RecordedAt          string  `json:"recorded_at"`
 }
+
+// xfss3Ready is a test hook.
+var xfss3Ready = storage.XFSS3Ready
 
 func durationMS(d time.Duration) float64 {
 	return float64(d.Microseconds()) / 1000
@@ -435,6 +439,26 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	if cow.IsXFSS3Backend(req.GetAnnotations()[constants.MasterAnnotationStorageBackend]) {
+		// Checked before the guest is frozen: a sandbox a checkpoint cannot
+		// carry, or a node without a usable store, refuses the pause and the
+		// sandbox keeps running. Like a busy reject, the refusal rolls the
+		// stamp back and carries a fixed prefix, so Master drops the binding
+		// instead of failing it and a later Pause can try again.
+		refuse := func(reason string) *cubebox.UpdateCubeSandboxResponse {
+			restorePauseSnapshotStamp(sb, prevLiveSnap)
+			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			rsp.Ret.RetMsg = xfss3PauseRefusedPrefix + ": " + reason
+			return rsp
+		}
+		if err := validateXFSS3PauseResources(sb); err != nil {
+			return refuse(err.Error()), nil
+		}
+		if err := xfss3Ready(); err != nil {
+			return refuse(fmt.Sprintf("checkpoint store is not usable on this node: %v", err)), nil
+		}
+	}
 	// Probes would see a frozen guest as dead and restart it mid-pause.
 	// A failed pause resumes them; a successful pause leaves them stopped
 	// until Resume creates the sandbox again.
@@ -753,6 +777,21 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to seal s3 pause package snapshots for %s: %v", snapID, err))
 	}
+	// xfs-s3: make the package durable and record its export job before
+	// PAUSED is reported, so a returned Pause survives a host crash and the
+	// upload resumes after a Cubelet restart. The upload itself runs in the
+	// background; an unreachable store does not fail the Pause.
+	checkpointLocator := ""
+	if cow.IsXFSS3Backend(req.GetAnnotations()[constants.MasterAnnotationStorageBackend]) {
+		sealStarted := time.Now()
+		loc, err := storage.StartXFSS3PauseExport(workCtx, snapID, sb.ID, sb.LaunchAncestorID())
+		stageTimings.CheckpointSealMS = durationMS(time.Since(sealStarted))
+		if err != nil {
+			return failPause(errorcode.ErrorCode_Unknown,
+				fmt.Sprintf("failed to seal xfs-s3 pause checkpoint %s: %v", snapID, err))
+		}
+		checkpointLocator = loc
+	}
 
 	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the
 	// IsPaused branch (task Delete reaps the still-living shim). Pause catalog
@@ -777,7 +816,10 @@ func (s *service) updateWithPauseCow(
 		stepLog.Warnf("persist combined PAUSED and destroy marker failed; retrying before Destroy: %v", pauseStateSyncErr)
 	}
 
-	remoteUUIDsJSON := uploadRemoteUUIDs(workCtx, backend, snapID)
+	remoteUUIDsJSON := checkpointLocator
+	if remoteUUIDsJSON == "" {
+		remoteUUIDsJSON = uploadRemoteUUIDs(workCtx, backend, snapID)
+	}
 	stageTimings.PackageFinalizeMS = durationMS(time.Since(packageFinalizeStarted))
 
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)

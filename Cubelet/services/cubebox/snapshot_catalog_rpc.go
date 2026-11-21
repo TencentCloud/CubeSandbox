@@ -47,6 +47,11 @@ func (s *service) ListLocalSnapshots(ctx context.Context, req *cubebox.ListLocal
 		for _, e := range entries {
 			info := localSnapshotEntryToProto(e)
 			info.Backend = backend
+			// An xfs package that is part of an xfs-s3 checkpoint says so:
+			// Master reconciles those against its pause bindings.
+			if backend == cow.BackendXFS && isXFSS3Package(ctx, e.SnapshotID) {
+				info.Backend = cow.BackendXFSS3
+			}
 			rsp.Snapshots = append(rsp.Snapshots, info)
 		}
 	}

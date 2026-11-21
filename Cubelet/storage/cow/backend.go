@@ -20,13 +20,19 @@ const (
 	BackendXFS = "xfs"
 	BackendS3  = "s3"
 	BackendJFS = "jfs"
+	// BackendXFSS3 runs on the XFS data plane and additionally publishes
+	// every pause package to S3 as a self-contained checkpoint, so another
+	// node can resume it after a full download. Everything that picks a
+	// Store treats it as xfs; only pause, status, cross-node resume and
+	// package cleanup look at the raw value (see [IsXFSS3Backend]).
+	BackendXFSS3 = "xfs-s3"
 )
 
 // NormalizeBackend maps request/config aliases onto BackendXFS, BackendS3 or
 // BackendJFS. Empty input defaults to BackendXFS for backward compatibility.
 func NormalizeBackend(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", BackendXFS, NameXfsCow, "cow", "cubecow", "reflink":
+	case "", BackendXFS, NameXfsCow, "cow", "cubecow", "reflink", BackendXFSS3:
 		return BackendXFS, nil
 	case BackendS3: // same literal as NameS3 ("s3")
 		return BackendS3, nil
@@ -35,6 +41,12 @@ func NormalizeBackend(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported cow backend %q (want %q, %q or %q)", raw, BackendXFS, BackendS3, BackendJFS)
 	}
+}
+
+// IsXFSS3Backend reports whether raw (before [NormalizeBackend]) asks for
+// the xfs data plane with S3 pause checkpoints.
+func IsXFSS3Backend(raw string) bool {
+	return strings.EqualFold(strings.TrimSpace(raw), BackendXFSS3)
 }
 
 // IsReflinkBackend reports whether backend runs on the file-clone Store

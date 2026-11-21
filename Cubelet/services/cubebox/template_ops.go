@@ -952,10 +952,21 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 	if entry == nil && backend == cow.BackendJFS && !cleanupJFSConfigured() {
 		return rsp, nil
 	}
+	// The backend alone also names ordinary templates. Retire only a
+	// confirmed pause package, even when a live sandbox keeps it mapped.
+	// Cubelet's own GC retires it with the package below.
+	retireCheckpoint := cow.IsXFSS3Backend(req.GetBackend()) &&
+		((entry != nil && entry.Kind == storage.CatalogKindPauseSnapshot) || isXFSS3Package(ctx, rsp.TemplateID))
+	if retireCheckpoint {
+		retireXFSS3Checkpoint(ctx, rsp.TemplateID)
+	}
 	if shouldKeepLivePausePackage(honorLivePauseKeep, s.listCubeboxes(), rsp.TemplateID, catalogKindForKeep(entry)) {
 		log.G(ctx).Infof("CleanupTemplate %s: keeping pause package; a live sandbox still restores from it",
 			rsp.TemplateID)
 		return rsp, nil
+	}
+	if !retireCheckpoint && isXFSS3Package(ctx, rsp.TemplateID) {
+		retireXFSS3Checkpoint(ctx, rsp.TemplateID)
 	}
 	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
 	if err != nil {
@@ -993,6 +1004,17 @@ func (s *service) cleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 	storage.DeleteSnapshotCatalogFor(backend, rsp.TemplateID)
 	return rsp, nil
 }
+
+var (
+	isXFSS3Package        = storage.IsXFSS3Package
+	retireXFSS3Checkpoint = func(ctx context.Context, snapshotID string) {
+		// A checkpoint that outlives its package only costs space; never
+		// hold the local cleanup on the object store.
+		if err := storage.RetireXFSS3Checkpoint(ctx, snapshotID); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: retire xfs-s3 checkpoint: %v", snapshotID, err)
+		}
+	}
+)
 
 // resolveCleanupRefs is the v4 catalog-first resolution for CleanupTemplate.
 // Priority:

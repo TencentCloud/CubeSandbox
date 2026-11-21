@@ -57,6 +57,31 @@ func TestFinalizePauseCubeletFailureBusyAborts(t *testing.T) {
 	require.Empty(t, failed)
 }
 
+func TestFinalizePauseCubeletFailureXFSS3RefusalAborts(t *testing.T) {
+	var aborted, failed []string
+	patches := gomonkey.ApplyFunc(pausesnap.Abort, func(_ context.Context, sandboxID, snapshotID string) {
+		aborted = append(aborted, sandboxID+"/"+snapshotID)
+	})
+	defer patches.Reset()
+	patches.ApplyFunc(pausesnap.MarkFailed, func(_ context.Context, sandboxID, snapshotID, _ string) {
+		failed = append(failed, sandboxID+"/"+snapshotID)
+	})
+
+	finalizePauseCubeletFailure(context.Background(), "sb-3", "snap-3",
+		"xfs-s3 pause refused before freezing: checkpoint store is not usable on this node: no credentials")
+	finalizePauseCubeletFailure(context.Background(), "sb-4", "snap-4",
+		"xfs-s3 pause refused before freezing: the sandbox uses a plugin volume")
+	require.Equal(t, []string{"sb-3/snap-3", "sb-4/snap-4"}, aborted)
+	require.Empty(t, failed)
+}
+
+func TestIsPauseRefusedBeforeFreeze(t *testing.T) {
+	t.Parallel()
+	require.True(t, isPauseRefusedBeforeFreeze("xfs-s3 pause refused before freezing: no store"))
+	require.False(t, isPauseRefusedBeforeFreeze("xfs-s3 export failed"))
+	require.False(t, isPauseRefusedBeforeFreeze("rootfs commit failed"))
+}
+
 func TestFinalizePauseCubeletFailureOtherMarksFailed(t *testing.T) {
 	var aborted, failed []string
 	patches := gomonkey.ApplyFunc(pausesnap.Abort, func(_ context.Context, sandboxID, snapshotID string) {

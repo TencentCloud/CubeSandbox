@@ -796,6 +796,9 @@ func (c *createSandboxContext) newContext(ctx context.Context, req *types.Create
 	if err != nil {
 		return err
 	}
+	if err := rejectUnsupportedXFSS3Resources(req, cubeletReq); err != nil {
+		return err
+	}
 	c.cubeletReq = cubeletReq
 
 	reqResource, err := checkAndGetReqResource(req)

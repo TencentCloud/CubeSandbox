@@ -6,8 +6,9 @@ The default `xfs` backend keeps rootfs, memory, and metadata on the origin. Migr
 
 - `jfs` stores files on one JuiceFS mounted by every eligible node.
 - `s3` publishes pause packages and snapshots to shared S3 through CubeS3lvol.
+- `xfs-s3` runs on local XFS like `xfs` and publishes pause packages, not snapshots, to S3 as self-contained checkpoints.
 
-See [JuiceFS service configuration](./juicefs.md), [CubeS3lvol service configuration](./cubes3lvol.md), and [Snapshot, Rollback & Clone](../snapshot-rollback-clone.md).
+See [JuiceFS service configuration](./juicefs.md), [CubeS3lvol service configuration](./cubes3lvol.md), [xfs-s3 backend](./xfs-s3.md), and [Snapshot, Rollback & Clone](../snapshot-rollback-clone.md).
 
 ## Requirements
 
@@ -15,7 +16,7 @@ Cross-node Resume / FromSnap requires all conditions below.
 
 ### Use a shared backend
 
-Select `--backend jfs|s3` when building the template. Templates, sandboxes, pause packages, and snapshots inherit that choice; a derived chain cannot change backend. Omitting the flag selects `xfs`.
+Select `--backend jfs|s3|xfs-s3` when building the template. Templates, sandboxes, pause packages, and snapshots inherit that choice; a derived chain cannot change backend. Omitting the flag selects `xfs`. With `xfs-s3` only Resume of a pause package can cross nodes; its templates and snapshots stay on local `xfs`.
 
 ```bash
 cubemastercli tpl create-from-image \
@@ -27,7 +28,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Check `BACKEND` with `cubemastercli cubebox template list`. The current release cannot convert existing objects between `xfs`, `jfs`, and `s3`.
+Check `BACKEND` with `cubemastercli cubebox template list`. The current release cannot convert existing objects between `xfs`, `jfs`, `s3`, and `xfs-s3`.
 
 ### The origin cannot schedule
 
@@ -47,9 +48,9 @@ External storage adds placement constraints:
 
 Master evaluates persisted database state:
 
-> `CanCrossNode(backend, remote_status)` is true only when `backend` is `jfs` or `s3` and `remote_status == ready`.
+> `CanCrossNode(backend, remote_status)` is true only when `backend` is `jfs`, `s3` or `xfs-s3` and `remote_status == ready`.
 
-The state machine is `pending → inprogress → ready / failed`. `ready` means rootfs, memory, and metadata are complete on the shared backend. Data that is not ready remains usable on the origin but cannot migrate. `xfs` leaves the status empty and therefore restores only on the origin.
+The state machine is `pending → inprogress → ready / failed`. `ready` means rootfs, memory, and metadata are complete on the shared backend; for `xfs-s3` it also means a node other than the origin has verified the checkpoint. Data that is not ready remains usable on the origin but cannot migrate. `xfs` leaves the status empty and therefore restores only on the origin.
 
 ### CPU and kernel compatibility
 

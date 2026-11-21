@@ -947,6 +947,14 @@ type UpdateRequest struct {
 	Backend string `json:"backend,omitempty"`
 }
 
+// ReleaseResumePinRequest is the wire shape for POST
+// /cube/sandbox/resume-pin/release: an operator confirms that the node an
+// xfs-s3 sandbox's last Resume was sent to is down for good.
+type ReleaseResumePinRequest struct {
+	RequestID string `json:"requestID"`
+	SandboxID string `json:"sandbox_id"`
+}
+
 // UpdateNetworkRequest is the wire shape for POST /cube/sandbox/network. The
 // config is the complete desired egress policy, not a patch: an omitted or
 // empty field clears whatever the sandbox currently has.

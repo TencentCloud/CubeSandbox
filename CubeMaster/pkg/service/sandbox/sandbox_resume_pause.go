@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
@@ -44,7 +45,38 @@ const (
 	pauseCubeletRPCTimeout = 120 * time.Second
 )
 
-var decidePauseResumePlacementFn = restoreplace.Decide
+var (
+	decidePauseResumePlacementFn = restoreplace.Decide
+	beginResumeAttemptFn         = pausesnap.BeginResumeAttempt
+	failResumeAttemptFn          = pausesnap.FailResumeAttempt
+	createOnCubeletFn            = cubelet.Create
+	targetHoldsLiveSandboxFn     = cubeletHoldsLiveSandbox
+)
+
+// holdsSandboxTimeout bounds asking a node whether it holds a sandbox: a
+// node that does not answer in time cannot say.
+const holdsSandboxTimeout = 15 * time.Second
+
+// cubeletHoldsLiveSandbox reports whether hostIP has a record of sandboxID in
+// any state but PAUSED. The origin of a pause always keeps a PAUSED
+// tombstone, which runs nothing; any other state may be an instance an
+// earlier attempt started, or one that comes back. Cubelet looks the id up
+// in its store directly, so the answer is not subject to List's size cap.
+// An error means the node could not say.
+func cubeletHoldsLiveSandbox(ctx context.Context, hostIP, sandboxID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, holdsSandboxTimeout)
+	defer cancel()
+	listRsp, err := cubelet.List(ctx, cubelet.GetCubeletAddr(hostIP), &cubebox.ListCubeSandboxRequest{
+		Id: &sandboxID,
+	})
+	if err != nil {
+		return false, err
+	}
+	if listRsp == nil {
+		return false, errors.New("cubelet list response is nil")
+	}
+	return pausesnap.HoldsLiveSandbox(listRsp, sandboxID), nil
+}
 
 // pauseSandbox:
 //  1. allocate snap-* and record CREATING binding
@@ -192,12 +224,24 @@ func isPauseBusyReject(msg string) bool {
 		strings.Contains(lower, "terminate exec tasks first")
 }
 
+// xfss3PauseRefusedPrefix starts Cubelet's message for an xfs-s3 pause it
+// refused before freezing the guest (a sandbox the checkpoint cannot carry,
+// or no usable checkpoint store); Cubelet uses the same text.
+const xfss3PauseRefusedPrefix = "xfs-s3 pause refused before freezing"
+
+// isPauseRefusedBeforeFreeze reports an xfs-s3 pause Cubelet refused while
+// the sandbox kept running.
+func isPauseRefusedBeforeFreeze(msg string) bool {
+	return strings.Contains(msg, xfss3PauseRefusedPrefix)
+}
+
 // finalizePauseCubeletFailure records a definitive Cubelet Pause failure.
-// Busy rejects are retryable (VM still running): drop the CREATING binding so
-// CLM/auto-pause can try again. Any other failure stays terminal FAILED.
+// Busy rejects and xfs-s3 refusals before the freeze are retryable (VM still
+// running): drop the CREATING binding so CLM/auto-pause can try again. Any
+// other failure stays terminal FAILED.
 func finalizePauseCubeletFailure(ctx context.Context, sandboxID, snapID, msg string) {
-	if isPauseBusyReject(msg) {
-		log.G(ctx).Infof("pause busy reject; aborting binding sandbox=%s snap=%s: %s",
+	if isPauseBusyReject(msg) || isPauseRefusedBeforeFreeze(msg) {
+		log.G(ctx).Infof("pause refused while the sandbox runs; aborting binding sandbox=%s snap=%s: %s",
 			sandboxID, snapID, strings.TrimSpace(msg))
 		pausesnap.Abort(ctx, sandboxID, snapID)
 		return
@@ -467,11 +511,21 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	}
 
 	createReq := loadResumeSandboxSpec(ctx, req.SandboxID)
-	placement, err := resumePlacement(ctx, rec, instanceType, createReq)
-	if err != nil {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
-		rsp.Ret.RetMsg = err.Error()
-		return rsp
+	// An xfs-s3 binding whose last Resume has an unknown outcome stays on
+	// that node: the sandbox may already be starting there, and a second
+	// node would run it twice. Placement is not consulted at all then.
+	pinned := ""
+	if constants.IsXFSS3Backend(rec.Backend) {
+		pinned = pausesnap.PinnedResumeTarget(rec)
+	}
+	var placement *restoreplace.Placement
+	if pinned == "" {
+		placement, err = resumePlacement(ctx, rec, instanceType, createReq)
+		if err != nil {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
+			rsp.Ret.RetMsg = err.Error()
+			return rsp
+		}
 	}
 	targetIP := strings.TrimSpace(hostIP)
 	if rec.NodeIP != "" {
@@ -486,10 +540,28 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 			}
 		}
 	}
+	if pinned != "" {
+		if pinned != targetIP {
+			log.G(ctx).Warnf("resume: sandbox=%s snap=%s stays on %s, where its previous resume attempt has no known outcome (placement would pick %s)",
+				req.SandboxID, snapID, pinned, targetIP)
+		}
+		targetIP = pinned
+	}
 	if targetIP == "" {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
 		rsp.Ret.RetMsg = "resume placement returned no host IP"
 		return rsp
+	}
+	crossNode := placement != nil && placement.CrossNode
+	var attempt *pausesnap.ResumeAttempt
+	if constants.IsXFSS3Backend(rec.Backend) {
+		crossNode = targetIP != strings.TrimSpace(rec.NodeIP)
+		attempt, err = beginResumeAttemptFn(ctx, snapID, targetIP)
+		if err != nil {
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
+			rsp.Ret.RetMsg = fmt.Sprintf("cannot resume %s on %s: %v", req.SandboxID, targetIP, err)
+			return rsp
+		}
 	}
 
 	// Thin Create: identity + snapshot binding. Containers/volumes come from
@@ -511,17 +583,17 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		cubeletReq.Backend = b
 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	if constants.IsS3Backend(rec.Backend) {
+	if constants.IsS3Backend(rec.Backend) || constants.IsXFSS3Backend(rec.Backend) {
 		if raw := strings.TrimSpace(rec.ExportUUIDs); raw != "" {
 			cubeletReq.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
 	}
-	crossNode := placement != nil && placement.CrossNode
 	if crossNode {
 		// Only Master knows the target holds no replica. Saying so lets
 		// Cubelet import the package up front instead of inferring it from a
-		// catalog miss, and lets it reject a restore it cannot serve.
-		if constants.IsS3Backend(rec.Backend) {
+		// catalog miss, and lets it reject a restore it cannot serve. An
+		// xfs-s3 target downloads the verified checkpoint in full first.
+		if constants.IsS3Backend(rec.Backend) || constants.IsXFSS3Backend(rec.Backend) {
 			cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
 		}
 	}
@@ -549,8 +621,17 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		s.annotate(resumeAttrs...)
 		ctx = s.enter(ctx, s.runtime, resumeAttrs...)
 	}
-	cubeRsp, err := cubelet.Create(ctx, calleeEndpoint, cubeletReq)
+	cubeRsp, err := createOnCubeletFn(ctx, calleeEndpoint, cubeletReq)
 	if err != nil || cubeRsp == nil {
+		// No answer: the attempt keeps its pin. The node may have started
+		// the sandbox; only it can say otherwise. The one exception is a
+		// request that never left Master and whose pin exists only because
+		// of it: nothing can run there on its account.
+		if attempt != nil && attempt.Fresh && resumeNotSent(err) {
+			if ferr := failResumeAttemptFn(ctx, snapID, attempt); ferr != nil {
+				log.G(ctx).Warnf("resume: release undelivered attempt of %s on %s: %v", snapID, targetIP, ferr)
+			}
+		}
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
 		if err != nil {
 			rsp.Ret.RetMsg = err.Error()
@@ -567,6 +648,10 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	rsp.Ret.RetCode = int(cubeRsp.GetRet().GetRetCode())
 	rsp.Ret.RetMsg = cubeRsp.GetRet().GetRetMsg()
 	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
+		if constants.IsXFSS3Backend(rec.Backend) &&
+			cubeRsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_TaskStateInvalid {
+			releaseFailedResumeAttempt(ctx, req.SandboxID, snapID, attempt)
+		}
 		return rsp
 	}
 	if got := strings.TrimSpace(cubeRsp.GetSandboxID()); got != "" && got != req.SandboxID {
@@ -608,7 +693,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 				req.SandboxID, targetIP, origin, err)
 		}
 	}
-	cleanupPausePackageAfterResume(ctx, req.RequestID, req.SandboxID, packageNode, rec.SnapshotID, rec.Backend)
+	for _, node := range packageCleanupNodes(packageNode, targetIP, rec.Backend) {
+		cleanupPausePackageAfterResume(ctx, req.RequestID, req.SandboxID, node, rec.SnapshotID, rec.Backend)
+	}
 
 	// Binding must go so the next Pause can allocate a new id.
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
@@ -630,6 +717,49 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	return rsp
 }
 
+// resumeNotSent reports whether a Create error proves the request never
+// reached Cubelet: no connection to the node could be made at all.
+func resumeNotSent(err error) bool {
+	if err == nil {
+		return false
+	}
+	if st, ok := ret.FromError(err); ok && st.Code() == errorcode.ErrorCode_ConnHostFailed {
+		return true
+	}
+	if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable &&
+		strings.Contains(strings.ToLower(st.Message()), "error while dialing") {
+		return true
+	}
+	return false
+}
+
+// releaseFailedResumeAttempt lets the binding leave targetIP after it answered
+// that its Resume failed. The answer alone is not enough: an earlier attempt
+// whose reply was lost may have started the sandbox there, and this one then
+// fails on finding it. Only a node that holds no live instance releases the
+// pin: no record of the sandbox, or only the PAUSED tombstone, which a failed
+// Resume on the origin leaves as it was. "lifecycle operation in progress"
+// never reaches here.
+func releaseFailedResumeAttempt(ctx context.Context, sandboxID, snapID string, attempt *pausesnap.ResumeAttempt) {
+	if attempt == nil {
+		return
+	}
+	targetIP := attempt.Target
+	holds, err := targetHoldsLiveSandboxFn(ctx, targetIP, sandboxID)
+	switch {
+	case err != nil:
+		log.G(ctx).Warnf("resume: %s keeps its attempt on %s: cannot confirm the node holds no instance: %v",
+			snapID, targetIP, err)
+	case holds:
+		log.G(ctx).Warnf("resume: %s keeps its attempt on %s: the node holds sandbox %s in a state other than PAUSED",
+			snapID, targetIP, sandboxID)
+	default:
+		if ferr := failResumeAttemptFn(ctx, snapID, attempt); ferr != nil {
+			log.G(ctx).Warnf("resume: release attempt of %s on %s: %v", snapID, targetIP, ferr)
+		}
+	}
+}
+
 // pausePackageNodes returns the origin to drop a PAUSED tombstone on (empty
 // for same-node) and the node that should evaluate pause-package cleanup.
 // Cross-node JFS cleanup goes to the target so its live-sandbox keep gate
@@ -643,6 +773,20 @@ func pausePackageNodes(recordNodeIP, targetIP, backend string) (origin, packageN
 		return origin, targetIP
 	}
 	return origin, origin
+}
+
+// packageCleanupNodes returns the nodes asked to clean up the pause package
+// after a Resume. A cross-node xfs-s3 Resume asks the target as well: it
+// holds a store client and the copy it downloaded, and its CleanupTemplate
+// retires the remote checkpoint before the live-sandbox keep gate. The
+// origin is often the very reason the sandbox moved, and the checkpoint must
+// not wait for it to come back.
+func packageCleanupNodes(packageNode, targetIP, backend string) []string {
+	nodes := []string{packageNode}
+	if constants.IsXFSS3Backend(backend) && strings.TrimSpace(targetIP) != "" && targetIP != packageNode {
+		nodes = append(nodes, targetIP)
+	}
+	return nodes
 }
 
 const resumePackageCleanupTimeout = 2 * time.Minute

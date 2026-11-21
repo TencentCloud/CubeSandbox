@@ -18,6 +18,12 @@ const (
 	// volume every node mounts. Another node restores a package straight
 	// from the origin's tree once JuiceFS has uploaded its blocks.
 	SnapshotBackendJFS = "jfs"
+	// SnapshotBackendXFSS3 runs sandboxes on local XFS and publishes every
+	// pause package to S3 as a self-contained checkpoint. A pause row turns
+	// remote ready only after a node other than the origin read the whole
+	// checkpoint back; a cross-node Resume then downloads it in full before
+	// restoring. Templates and user snapshots behave exactly like xfs.
+	SnapshotBackendXFSS3 = "xfs-s3"
 
 	// RemoteStatus* are remote publish states on snapshot / pause-snapshot
 	// rows (s3 upload, jfs). Empty on xfs. Create starts pending;
@@ -30,7 +36,7 @@ const (
 	RemoteStatusFailed     = "failed"
 )
 
-// NormalizeSnapshotBackend maps create/pause backend input onto xfs | s3 | jfs.
+// NormalizeSnapshotBackend maps create/pause backend input onto xfs | s3 | jfs | xfs-s3.
 // Empty and historical cubecow aliases become xfs.
 func NormalizeSnapshotBackend(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -40,9 +46,11 @@ func NormalizeSnapshotBackend(raw string) (string, error) {
 		return SnapshotBackendS3, nil
 	case SnapshotBackendJFS, "juicefs":
 		return SnapshotBackendJFS, nil
+	case SnapshotBackendXFSS3:
+		return SnapshotBackendXFSS3, nil
 	default:
-		return "", fmt.Errorf("unsupported backend %q (want %q, %q or %q)", raw,
-			SnapshotBackendXFS, SnapshotBackendS3, SnapshotBackendJFS)
+		return "", fmt.Errorf("unsupported backend %q (want %q, %q, %q or %q)", raw,
+			SnapshotBackendXFS, SnapshotBackendS3, SnapshotBackendJFS, SnapshotBackendXFSS3)
 	}
 }
 
@@ -85,15 +93,33 @@ func IsJFSBackend(backend string) bool {
 	return err == nil && normalized == SnapshotBackendJFS
 }
 
+// IsXFSS3Backend reports whether backend is local XFS with S3 pause
+// checkpoints.
+func IsXFSS3Backend(backend string) bool {
+	normalized, err := NormalizeSnapshotBackend(backend)
+	return err == nil && normalized == SnapshotBackendXFSS3
+}
+
 // IsRemoteTrackedBackend reports whether rows of backend carry
-// remote_status / export_uuids (s3 export, jfs shared volume).
+// remote_status / export_uuids (s3 export, jfs shared volume, xfs-s3
+// pause checkpoint).
 func IsRemoteTrackedBackend(backend string) bool {
-	return IsS3Backend(backend) || IsJFSBackend(backend)
+	return IsS3Backend(backend) || IsJFSBackend(backend) || IsXFSS3Backend(backend)
 }
 
 // RemoteTrackedBackends lists the backends the remote_status poller scans.
 func RemoteTrackedBackends() []string {
-	return []string{SnapshotBackendS3, SnapshotBackendJFS}
+	return []string{SnapshotBackendS3, SnapshotBackendJFS, SnapshotBackendXFSS3}
+}
+
+// SnapshotCommitBackend is the backend a user snapshot of a sandbox on
+// backend is committed with. xfs-s3 publishes pause packages only, so its
+// user snapshots stay plain local xfs.
+func SnapshotCommitBackend(backend string) string {
+	if IsXFSS3Backend(backend) {
+		return SnapshotBackendXFS
+	}
+	return backend
 }
 
 // SnapshotRemoteStatus returns the default remote_status for a normalized

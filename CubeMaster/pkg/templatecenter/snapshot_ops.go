@@ -276,6 +276,7 @@ func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID,
 	if err != nil {
 		return "", false, nil, err
 	}
+	normalizedBackend = constants.SnapshotCommitBackend(normalizedBackend)
 	span.SetAttributes(attribute.String(telemetry.AttrBackend, normalizedBackend))
 	if client := strings.TrimSpace(backend); client != "" && !strings.EqualFold(client, normalizedBackend) {
 		log.G(ctx).Infof("snapshot create ignores client backend=%s; using persisted backend=%s sandbox=%s", client, normalizedBackend, sandboxID)

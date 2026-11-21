@@ -13,8 +13,9 @@ import (
 )
 
 type fakeRedis struct {
-	mu    sync.Mutex
-	store map[string]string
+	mu     sync.Mutex
+	store  map[string]string
+	renews int
 }
 
 func newFakeRedis() *fakeRedis {
@@ -48,11 +49,15 @@ func (f *fakeRedis) Do(cmd string, args ...interface{}) (interface{}, error) {
 		}
 		key := args[2].(string)
 		token := args[3].(string)
-		if f.store[key] == token {
-			delete(f.store, key)
+		if f.store[key] != token {
+			return int64(0), nil
+		}
+		if args[0].(string) == renewScript {
+			f.renews++
 			return int64(1), nil
 		}
-		return int64(0), nil
+		delete(f.store, key)
+		return int64(1), nil
 	case "DEL":
 		return nil, errors.New("sandboxlock must unlock via EVAL, not DEL")
 	default:
@@ -147,5 +152,57 @@ func TestLockTokenIncludesDebugPrefix(t *testing.T) {
 	tok := lockToken("pause")
 	if len(tok) < len("pause:")+10 || tok[:6] != "pause:" {
 		t.Fatalf("token=%q want pause:<uuid>", tok)
+	}
+}
+
+func TestWithLockRenewKeepsTheLockWhileFnRuns(t *testing.T) {
+	r := newFakeRedis()
+	err := withLock(context.Background(), r, "k", "tok", Options{TTL: 30 * time.Millisecond, RetryInterval: time.Millisecond, Renew: true}, func(context.Context) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.renews < 2 {
+		t.Fatalf("renewed %d times over three TTL periods", r.renews)
+	}
+	if _, held := r.store["k"]; held {
+		t.Fatal("lock still held after fn returned")
+	}
+}
+
+func TestWithLockRenewStopsWhenOwnershipIsLost(t *testing.T) {
+	r := newFakeRedis()
+	err := withLock(context.Background(), r, "k", "tok", Options{TTL: 30 * time.Millisecond, RetryInterval: time.Millisecond, Renew: true}, func(context.Context) error {
+		r.mu.Lock()
+		r.store["k"] = "someone-else"
+		r.mu.Unlock()
+		time.Sleep(80 * time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.renews != 0 {
+		t.Fatalf("renewed a lock held by someone else %d times", r.renews)
+	}
+	if r.store["k"] != "someone-else" {
+		t.Fatal("unlock removed a lock this holder no longer owns")
+	}
+}
+
+func TestWithLockWithoutRenewNeverExtends(t *testing.T) {
+	r := newFakeRedis()
+	_ = withLock(context.Background(), r, "k", "tok", Options{TTL: 30 * time.Millisecond, RetryInterval: time.Millisecond}, func(context.Context) error {
+		time.Sleep(80 * time.Millisecond)
+		return nil
+	})
+	if r.renews != 0 {
+		t.Fatalf("renewed %d times without Renew", r.renews)
 	}
 }

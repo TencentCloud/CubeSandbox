@@ -899,7 +899,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringFlag{Name: "writable-layer-size", Usage: "immutable writable layer size, e.g. 20Gi"},
 		cli.StringSliceFlag{Name: "expose-port", Usage: "container port to expose for the template; repeat the flag to specify multiple ports"},
 		cli.StringFlag{Name: "instance-type", Value: "cubebox", Usage: "instance type"},
-		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3|jfs; jfs keeps volumes and snapshots on the JuiceFS mount); omit to keep the historical xfs path"},
+		cli.StringFlag{Name: "backend", Usage: "CoW backend for this template and its sandboxes/snapshots (xfs|s3|jfs|xfs-s3; jfs keeps volumes and snapshots on the JuiceFS mount; xfs-s3 runs on local xfs and publishes pause packages to S3); omit to keep the historical xfs path"},
 		cli.StringFlag{Name: "network-type", Value: "tap", Usage: "network type"},
 		cli.StringSliceFlag{Name: "node", Usage: "create template only on the specified node id or host ip; repeat to specify multiple nodes"},
 		cli.BoolFlag{Name: "allow-internet-access", Usage: "set allowInternetAccess on the network config for the generated template request"},

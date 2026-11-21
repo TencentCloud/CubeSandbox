@@ -82,6 +82,7 @@ func Start(ctx context.Context, db *gorm.DB) {
 	}
 	startOnce.Do(func() {
 		watchDB.Store(db)
+		startOrphanReconciler(ctx)
 		go func() {
 			for {
 				ReconcileOnce(ctx, db)
@@ -196,6 +197,9 @@ func listInProgress(ctx context.Context, db *gorm.DB) ([]workItem, error) {
 func settleItem(ctx context.Context, db *gorm.DB, item workItem, wait time.Duration) bool {
 	hostIP := strings.TrimSpace(item.hostIP)
 	snapshotID := strings.TrimSpace(item.snapshotID)
+	if constants.IsXFSS3Backend(item.backend) {
+		return settleXFSS3(ctx, db, item, wait)
+	}
 	if hostIP == "" || snapshotID == "" {
 		return true
 	}

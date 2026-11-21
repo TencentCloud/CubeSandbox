@@ -188,7 +188,7 @@ sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 | `N > 0` | 从恢复时刻起重新开 N 秒窗口 |
 | `N < -1` | 拒绝请求并返回 HTTP 400 |
 
-可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（`jfs` 或 `s3`，且 `remote_status=ready`）见[跨机迁移](./cross-node-snapshot/requirements.md)。
+可参考示例：[`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py)。跨机 Resume（`jfs`、`s3` 或 `xfs-s3`，且 `remote_status=ready`）见[跨机迁移](./cross-node-snapshot/requirements.md)。
 
 ### Resume 后的 CubeProxy 缓存
 
