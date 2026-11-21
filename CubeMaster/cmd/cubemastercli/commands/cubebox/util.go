@@ -333,6 +333,10 @@ func doHttpReqWithContentType(c *cli.Context, url, method, requestID string, bod
 		ctx, cancel = context.WithCancel(ctx)
 	}
 	defer cancel()
+	return doHttpReqContext(ctx, c, url, method, requestID, body, contentType, rsp)
+}
+
+func doHttpReqContext(ctx context.Context, c *cli.Context, url, method, requestID string, body io.Reader, contentType string, rsp interface{}) error {
 	body = normalizeReader(body)
 
 	httpReq, err := http.NewRequestWithContext(ctx, method, url, body)
