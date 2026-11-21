@@ -220,6 +220,13 @@
   font: 400 12.5px/1.75 var(--e2b-mono);
 }
 
+.e2b-page .e2b-quickstart p.e2b-quickstart-note {
+  margin: 10px 0 0;
+  color: var(--e2b-ink-faint);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
 .e2b-shell code {
   padding: 0;
   background: transparent;
