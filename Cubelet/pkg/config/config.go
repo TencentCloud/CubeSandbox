@@ -211,8 +211,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.HostConf != nil {
 		if cfg.HostConf.Quota.Mem != "" {
-			if _, err := resource.ParseQuantity(cfg.HostConf.Quota.Mem); err != nil {
+			quantity, err := resource.ParseQuantity(cfg.HostConf.Quota.Mem)
+			if err != nil {
 				return fmt.Errorf("invalid host.quota.mem_limit: %w", err)
+			}
+			if quantity.Value() < 1024*1024 {
+				return fmt.Errorf("invalid host.quota.mem_limit: explicit limit must be at least 1 MiB")
 			}
 		}
 		if cfg.HostConf.Quota.CreationConcurrentNum < 0 {
