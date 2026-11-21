@@ -213,7 +213,7 @@ for its arguments and expected flow.
   needs the Code Interpreter service on `49999` in the template image.
 - **Network and storage controls:** configure Cube-specific policies through
   [network policy](/guide/network-policy), [security proxy](/guide/security-proxy),
-  and [persistent storage](/guide/persistent-storage). Features not represented
+  and [Volumes](/guide/volume). Features not represented
   by the E2B compatibility surface can be prepared in the template or managed
   through CubeSandbox's native APIs.
 
