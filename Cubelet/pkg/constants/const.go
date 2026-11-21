@@ -251,6 +251,8 @@ const (
 	MasterAnnotationRootfsArtifactJobID     = "cube.master.rootfs.artifact.job_id"
 	MasterAnnotationRootfsArtifactURL       = "cube.master.rootfs.artifact.url"
 	MasterAnnotationRootfsArtifactToken     = "cube.master.rootfs.artifact.token"
+	MasterAnnotationRootfsArtifactSource    = "cube.master.rootfs.artifact.source"
+	MasterAnnotationRootfsArtifactExpiresAt = "cube.master.rootfs.artifact.expires_at"
 	MasterAnnotationRootfsArtifactSHA256    = "cube.master.rootfs.artifact.sha256"
 	MasterAnnotationRootfsArtifactSizeBytes = "cube.master.rootfs.artifact.size_bytes"
 	MasterAnnotationWritableLayerSize       = "cube.master.rootfs.writable_layer_size"
@@ -263,6 +265,11 @@ const (
 	// v2 hierarchy; "legacy" lets the guest mount cgroup v1 controllers itself
 	// (required by Android init).
 	MasterAnnotationCgroupMode = "cube.master.cgroup_mode"
+)
+
+const (
+	MasterAnnotationRootfsArtifactDirectURL   = "cube.master.rootfs.artifact.direct_url"
+	MasterAnnotationRootfsArtifactDirectToken = "cube.master.rootfs.artifact.direct_token"
 )
 
 // GuestAffectingMasterAnnotations lists the cube.master.* request-level

@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/tcclient"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 )
 
 // TemplateArtifactMigrationResult is the outcome of migrating one template's
@@ -103,11 +104,13 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	result := &TemplateArtifactMigrationResult{TemplateID: templateID}
 
 	type artifactSnapshot struct {
-		artifactID  string
-		objectKey   string
-		status      string
-		artifactURL string
-		ext4Path    string
+		artifactID     string
+		storageBackend string
+		objectKey      string
+		bucket         string
+		status         string
+		artifactURL    string
+		ext4Path       string
 	}
 	snapshot := artifactSnapshot{}
 	if err := withTemplateWriteLock(templateID, func() error {
@@ -130,11 +133,13 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 			return err
 		}
 		snapshot = artifactSnapshot{
-			artifactID:  artifactID,
-			objectKey:   strings.TrimSpace(artifact.ObjectKey),
-			status:      strings.TrimSpace(artifact.Status),
-			artifactURL: strings.TrimSpace(artifact.ArtifactURL),
-			ext4Path:    strings.TrimSpace(artifact.Ext4Path),
+			artifactID:     artifactID,
+			storageBackend: strings.TrimSpace(artifact.StorageBackend),
+			objectKey:      strings.TrimSpace(artifact.ObjectKey),
+			bucket:         strings.TrimSpace(artifact.Bucket),
+			status:         strings.TrimSpace(artifact.Status),
+			artifactURL:    strings.TrimSpace(artifact.ArtifactURL),
+			ext4Path:       strings.TrimSpace(artifact.Ext4Path),
 		}
 		return nil
 	}); err != nil {
@@ -142,11 +147,16 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	}
 	result.ArtifactID = snapshot.artifactID
 
-	// Already S3-backed: verify object existence, then clean local residue.
-	if snapshot.artifactURL != "" {
+	// Already in blobstore: verify the configured object before cleaning the
+	// local residue. Stable backend/key (or locator) is authoritative; an old
+	// presigned URL is a legacy hint, never a long-lived access method.
+	if ArtifactUsesObjectStore(&models.RootfsArtifact{StorageBackend: snapshot.storageBackend, ObjectKey: snapshot.objectKey, ArtifactURL: snapshot.artifactURL}) {
 		exists, statErr := statArtifactObjectInS3(ctx, &models.RootfsArtifact{
-			ArtifactID: snapshot.artifactID,
-			ObjectKey:  snapshot.objectKey,
+			ArtifactID:     snapshot.artifactID,
+			StorageBackend: snapshot.storageBackend,
+			ObjectKey:      snapshot.objectKey,
+			Bucket:         snapshot.bucket,
+			ArtifactURL:    snapshot.artifactURL,
 		})
 		if statErr != nil {
 			return nil, fmt.Errorf("check s3 object for artifact %s: %w", snapshot.artifactID, statErr)
@@ -209,22 +219,18 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 	uploadedToS3 := false
 	targetExt4Path := ext4Path
 	if err := uploadArtifactFileToS3(ctx, snapshot.artifactID, ext4Path); err == nil {
-		presignedURL, presignErr := presignArtifactGetURL(ctx, &models.RootfsArtifact{
-			ArtifactID: snapshot.artifactID,
-			ObjectKey:  snapshot.objectKey,
-		})
-		if presignErr != nil {
-			return nil, fmt.Errorf("presign migrated artifact %s: %w", snapshot.artifactID, presignErr)
-		}
 		uploadedToS3 = true
-		updates = map[string]any{
-			"artifact_url": presignedURL,
-			"status":       ArtifactStatusReady,
-			"last_error":   "",
+		backend, objectKey := artifactStoreColumns(snapshot.artifactID)
+		if (backend != "s3" && backend != "fs") || blobstore.ValidateKey(objectKey) != nil {
+			return nil, fmt.Errorf("migrated artifact %s has no valid stable backend/object key", snapshot.artifactID)
 		}
-		if backend, objectKey := artifactStoreColumns(snapshot.artifactID); backend != "" {
-			updates["storage_backend"] = backend
-			updates["object_key"] = objectKey
+		updates = map[string]any{
+			"artifact_url":    blobstore.ObjectLocator(backend, objectKey),
+			"storage_backend": backend,
+			"object_key":      objectKey,
+			"bucket":          artifactStoreBucket(),
+			"status":          ArtifactStatusReady,
+			"last_error":      "",
 		}
 	} else {
 		if !errors.Is(err, errS3PresignNotConfigured) {
@@ -239,10 +245,13 @@ func MigrateTemplateArtifactToTC(ctx context.Context, templateID string) (*Templ
 		}
 		targetExt4Path = uploadRes.Ext4Path
 		updates = map[string]any{
-			"artifact_url": "",
-			"ext4_path":    uploadRes.Ext4Path,
-			"status":       ArtifactStatusReady,
-			"last_error":   "",
+			"artifact_url":    "",
+			"storage_backend": "",
+			"object_key":      "",
+			"bucket":          "",
+			"ext4_path":       uploadRes.Ext4Path,
+			"status":          ArtifactStatusReady,
+			"last_error":      "",
 		}
 		if strings.TrimSpace(uploadRes.Ext4SHA256) != "" {
 			updates["ext4_sha256"] = uploadRes.Ext4SHA256

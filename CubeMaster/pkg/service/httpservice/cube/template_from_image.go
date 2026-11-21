@@ -220,14 +220,21 @@ func templateImageJobErrorCode(err error) int {
 	}
 }
 
+func artifactDownloadTokenFromRequest(c *gin.Context) string {
+	if token := strings.TrimSpace(c.GetHeader("X-Cube-Artifact-Token")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(c.Query("token"))
+}
+
 // openTemplateArtifactForDownload resolves, opens, and stats the template
-// rootfs artifact identified by the artifact_id/token query params and writes
+// rootfs artifact identified by the artifact_id/token query params or header and writes
 // the common response headers (Content-Type/Length, ETag, X-Cube-Artifact-Id).
 // On error it writes the API error response and returns ok=false. On success
 // the caller owns file (must Close).
 func openTemplateArtifactForDownload(c *gin.Context) (name string, file *os.File, stat os.FileInfo, ok bool) {
 	artifactID := strings.TrimSpace(c.Query("artifact_id"))
-	token := strings.TrimSpace(c.Query("token"))
+	token := artifactDownloadTokenFromRequest(c)
 	record, f, err := templatecenter.OpenRootfsArtifact(c.Request.Context(), artifactID, token)
 	if err != nil {
 		common.WriteAPI(c, &types.Res{
@@ -272,11 +279,12 @@ var artifactProxyHTTPClient = &http.Client{
 func downloadTemplateArtifactGinHandler(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 
-	// S3-backed artifacts are proxied through this endpoint rather than 302
-	// redirected to the object store. Nodes therefore only need reachability to
-	// CubeMaster's public address; Master/TC absorb any S3 endpoint topology.
+	// The ordinary route proxies object storage. The direct-capability route
+	// may also land here on TC when its storage backend is not URL-signable.
 	if handled, ok := proxyS3Artifact(c); handled {
-		rt.RetCode = artifactProxyRetCode(c, ok)
+		if rt != nil {
+			rt.RetCode = artifactProxyRetCode(c, ok)
+		}
 		return
 	}
 
@@ -286,7 +294,9 @@ func downloadTemplateArtifactGinHandler(c *gin.Context) {
 	}
 	defer file.Close()
 	http.ServeContent(c.Writer, c.Request, name, stat.ModTime(), file)
-	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	if rt != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	}
 }
 
 func headTemplateArtifactGinHandler(c *gin.Context) {
@@ -295,7 +305,9 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 	// HEAD follows the same S3 proxy-vs-local split as GET so servability probes
 	// exercise the exact node-facing download path.
 	if handled, ok := proxyS3Artifact(c); handled {
-		rt.RetCode = artifactProxyRetCode(c, ok)
+		if rt != nil {
+			rt.RetCode = artifactProxyRetCode(c, ok)
+		}
 		return
 	}
 
@@ -304,7 +316,9 @@ func headTemplateArtifactGinHandler(c *gin.Context) {
 		return
 	}
 	file.Close()
-	rt.RetCode = int64(errorcode.ErrorCode_Success)
+	if rt != nil {
+		rt.RetCode = int64(errorcode.ErrorCode_Success)
+	}
 }
 
 // artifactProxyRetCode keeps the request log honest: an upstream proxy failure
@@ -319,6 +333,10 @@ func artifactProxyRetCode(c *gin.Context, ok bool) int64 {
 	return int64(errorcode.ErrorCode_MasterInternalError)
 }
 
+// artifactDownloadURLForProxy is replaceable by HTTP handler tests; production
+// always uses the configured store to sign a fresh URL, never a URL from DB.
+var artifactDownloadURLForProxy = templatecenter.ArtifactDownloadURL
+
 // proxyS3Artifact streams an S3-backed artifact through the current handler
 // instead of redirecting the caller to the presigned URL. handled=false means
 // the artifact is local-disk or the row/token lookup failed, so the caller
@@ -328,7 +346,7 @@ func artifactProxyRetCode(c *gin.Context, ok bool) int64 {
 // broke mid-flight).
 func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	artifactID := strings.TrimSpace(c.Query("artifact_id"))
-	token := strings.TrimSpace(c.Query("token"))
+	token := artifactDownloadTokenFromRequest(c)
 	if artifactID == "" {
 		return false, false
 	}
@@ -342,7 +360,7 @@ func proxyS3Artifact(c *gin.Context) (handled bool, ok bool) {
 	if artifactStreamsFromStore(record) {
 		return streamArtifactFromStore(c, record)
 	}
-	downloadURL := templatecenter.ArtifactDownloadURL(c.Request.Context(), record)
+	downloadURL := artifactDownloadURLForProxy(c.Request.Context(), record)
 	if downloadURL == "" {
 		log.G(c.Request.Context()).Warnf("artifact proxy: empty download url for s3-backed artifact %s", record.ArtifactID)
 		c.AbortWithStatus(http.StatusBadGateway)

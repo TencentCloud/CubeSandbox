@@ -256,6 +256,9 @@ controlPlane:
     # for higher API throughput and availability. Also feeds CubeMaster's
     # cluster-wide concurrency estimate.
     replicas: 1
+    # Short-lived artifact download URL/capability TTL. The CubeMaster default
+    # is one hour; accepted range is up to 24h.
+    artifactDownloadCapabilityTTL: 1h
     # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
     # templates or slow networks/disks.
     appSnapshotTimeoutSeconds: 300

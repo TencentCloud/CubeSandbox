@@ -39,6 +39,7 @@ const (
 	TemplateBuildStatusAction              = "/template/build"
 	TemplateFromImageAction                = "/template/from-image"
 	TemplateArtifactDownloadAction         = "/template/artifact/download"
+	TemplateArtifactDirectDownloadAction   = "/template/artifact/direct-download"
 	RootfsArtifactAction                   = "/rootfs-artifact"
 	CADownloadActionPrefix                 = "/ca/"
 	ListInventoryAction                    = "/listinventory"

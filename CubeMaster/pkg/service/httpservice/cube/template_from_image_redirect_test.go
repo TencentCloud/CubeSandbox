@@ -25,6 +25,13 @@ func stubRedirectLookup(t *testing.T, fn func(ctx context.Context, artifactID, t
 	t.Cleanup(func() { getRootfsArtifactForRedirectFn = old })
 }
 
+func stubProxySignedURL(t *testing.T, signedURL string) {
+	t.Helper()
+	old := artifactDownloadURLForProxy
+	artifactDownloadURLForProxy = func(_ context.Context, _ *models.RootfsArtifact) string { return signedURL }
+	t.Cleanup(func() { artifactDownloadURLForProxy = old })
+}
+
 func newArtifactProxyContext(method, query string) (*gin.Context, *httptest.ResponseRecorder) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -32,6 +39,21 @@ func newArtifactProxyContext(method, query string) (*gin.Context, *httptest.Resp
 	req := httptest.NewRequest(method, "/cube/template/artifact/download?"+query, nil)
 	c.Request = req
 	return c, w
+}
+
+func TestArtifactDownloadTokenFromRequestPrefersCapabilityHeader(t *testing.T) {
+	c, _ := newArtifactProxyContext(http.MethodGet, "token=query-token")
+	c.Request.Header.Set("X-Cube-Artifact-Token", "short-capability")
+	if got := artifactDownloadTokenFromRequest(c); got != "short-capability" {
+		t.Fatalf("download token = %q, want capability header", got)
+	}
+}
+
+func TestArtifactDownloadTokenFromRequestFallsBackToLegacyQuery(t *testing.T) {
+	c, _ := newArtifactProxyContext(http.MethodGet, "token=legacy-token")
+	if got := artifactDownloadTokenFromRequest(c); got != "legacy-token" {
+		t.Fatalf("download token = %q, want legacy query token", got)
+	}
 }
 
 func TestProxyS3ArtifactMissingArtifactID(t *testing.T) {
@@ -102,6 +124,7 @@ func TestProxyS3ArtifactSuccessGET(t *testing.T) {
 		_, _ = w.Write([]byte("x"))
 	}))
 	defer upstream.Close()
+	stubProxySignedURL(t, upstream.URL+"/bucket/object.ext4?X-Amz-Signature=fresh")
 
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
@@ -154,6 +177,7 @@ func TestProxyS3ArtifactSuccessHEAD(t *testing.T) {
 		_, _ = w.Write([]byte("x"))
 	}))
 	defer upstream.Close()
+	stubProxySignedURL(t, upstream.URL+"/bucket/object.ext4?X-Amz-Signature=fresh")
 
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{
@@ -198,6 +222,7 @@ func TestProxyS3ArtifactHEADClientRange(t *testing.T) {
 		_, _ = w.Write([]byte("0123456789"))
 	}))
 	defer upstream.Close()
+	stubProxySignedURL(t, upstream.URL+"/bucket/object.ext4?X-Amz-Signature=fresh")
 
 	stubRedirectLookup(t, func(ctx context.Context, artifactID, token string) (*models.RootfsArtifact, error) {
 		return &models.RootfsArtifact{

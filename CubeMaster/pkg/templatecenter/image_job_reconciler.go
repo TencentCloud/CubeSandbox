@@ -290,14 +290,13 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		Ext4SizeBytes           int64  `json:"ext4_size_bytes"`
 		ImageConfigJSON         string `json:"image_config_json"`
 		MasterNodeIP            string `json:"master_node_ip"`
-		// ArtifactURL (S3/MinIO presigned URL) MUST be decoded here too: it is
-		// part of the same terminal callback payload TC stored in result_json.
-		// Omitting it used to make replay silently zero out ArtifactURL on
-		// finalizeRemoteArtifact, losing/overwriting the S3 URL for any job
-		// that got stuck and had to be resumed via reconciler replay.
+		// Keep the stored locator and backend/key for replay. Older BUILT
+		// results may still carry an expiring URL; registration normalizes it
+		// before updating the artifact row.
 		ArtifactURL             string `json:"artifact_url"`
 		StorageBackend          string `json:"storage_backend"`
 		ObjectKey               string `json:"object_key"`
+		Bucket                  string `json:"bucket"`
 		CubeEgressCABaked       bool   `json:"cube_egress_ca_baked"`
 		CubeEgressCAFingerprint string `json:"cube_egress_ca_fingerprint"`
 		CubeEgressCATargets     int    `json:"cube_egress_ca_targets_written"`
@@ -318,6 +317,7 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 		ArtifactURL:             raw.ArtifactURL,
 		StorageBackend:          raw.StorageBackend,
 		ObjectKey:               raw.ObjectKey,
+		Bucket:                  raw.Bucket,
 		CubeEgressCABaked:       raw.CubeEgressCABaked,
 		CubeEgressCAFingerprint: raw.CubeEgressCAFingerprint,
 		CubeEgressCATargets:     raw.CubeEgressCATargets,
@@ -332,12 +332,11 @@ func remoteBuildResultFromResultJSON(payload string) (*RemoteBuildResult, error)
 	// holds even if TC has since been shut down -- but not if GC already
 	// reclaimed the artifact.
 	//
-	// S3-backed results (ArtifactURL set) skip the probe: the durable copy is
-	// the bucket object and cubelets pull from the presigned URL, so the local
-	// file is a cache that may legitimately be absent -- on a multi-replica /
-	// un-colocated deployment the resume replay can land on a master that
-	// never shared TC's disk at all.
-	if result.ArtifactURL == "" {
+	// Blobstore results need not have a local ext4: new reports contain a
+	// stable backend/key, while historical reports may only carry artifact_url.
+	// Replays on another Master replica must not mistake either for a missing
+	// local file.
+	if result.ArtifactURL == "" && result.StorageBackend == "" && result.ObjectKey == "" {
 		if _, err := os.Stat(result.Ext4Path); err != nil {
 			return nil, fmt.Errorf("artifact file %s is gone: %w", result.Ext4Path, err)
 		}

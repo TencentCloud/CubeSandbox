@@ -170,7 +170,8 @@ chart 会拒绝以下组合：
 | GET | `/cube/template/from-image?job_id=...` | CubeMaster（本地） | 查询 `from-image` job 状态 |
 | POST | `/cube/template/migrate` | CubeMaster（本地） | 提交 artifact migrate job（CLI 命令：`tpl merge`） |
 | GET | `/cube/template/migrate?job_id=...` | CubeMaster（本地） | 查询 migrate job 状态 |
-| GET / HEAD | `/cube/template/artifact/download` | TC（经 CubeMaster 反代） | 下载 artifact；S3-backed 时 302 到 presigned URL |
+| GET / HEAD | `/cube/template/artifact/download` | TC（经 CubeMaster 反代） | 用户侧 artifact 下载；本地存储流式返回，S3 由 TC 代理 |
+| GET / HEAD | `/cube/template/artifact/direct-download` | TC 直连 | Cubelet 使用绑定 artifact 的短期 capability 拉取 ext4；有效期由 CubeMaster `artifact_download_capability_ttl` 控制（默认 1 小时、上限 24 小时）；路由不走用户 API Key middleware |
 | GET / POST | `/cube/template/compat` | TC（经 CubeMaster 反代） | 读写模板 compat 矩阵 |
 
 另外，`/cube/template/build/:build_id/status` 仍由 CubeMaster 本地服务，用于 `tpl commit` 的 build-status / build-watch。

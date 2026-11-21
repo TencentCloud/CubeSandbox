@@ -121,6 +121,7 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a // indirect
+	github.com/tencentcloud/CubeSandbox/pkgs/artifactsource v0.0.0 // indirect
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0 // indirect
 	github.com/tencentcloud/CubeSandbox/pkgs/redisx v0.0.0 // indirect
 	github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart v0.0.0-00010101000000-000000000000 // indirect
@@ -170,6 +171,8 @@ require (
 )
 
 replace github.com/tencentcloud/CubeSandbox/CubeMaster => ../CubeMaster
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/artifactsource => ../pkgs/artifactsource
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/cubedb => ../pkgs/cubedb
 

@@ -232,7 +232,7 @@ func artifactOwnershipOf(record *models.RootfsArtifact) artifactOwnership {
 	if record == nil {
 		return artifactOwnershipUnknown
 	}
-	if strings.TrimSpace(record.ArtifactURL) != "" {
+	if ArtifactUsesObjectStore(record) {
 		return artifactOwnershipObjectStore
 	}
 	if artifactServedLocally(record.MasterNodeIP, localArtifactHostsFn()) {
@@ -377,11 +377,10 @@ func rootfsArtifactReuseVerdict(ctx context.Context, record *models.RootfsArtifa
 	if record == nil {
 		return errors.New("no artifact record")
 	}
-	if strings.TrimSpace(record.ArtifactURL) != "" {
-		// S3/MinIO-backed: the object behind artifact_url is the durable copy,
-		// so the local ext4's presence/size must not gate reuse (see
-		// resolveMissingArtifact). Distribution/create later probe the unified
-		// download endpoint separately.
+	if ArtifactUsesObjectStore(record) {
+		// Blobstore-backed artifacts are identified by stable backend/key or
+		// legacy artifact_url. The local ext4 can be absent on another replica;
+		// distribution/create probe the download endpoint separately.
 		return nil
 	}
 	if artifactServedByRemoteTier() {

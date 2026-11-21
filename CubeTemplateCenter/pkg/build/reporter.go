@@ -86,7 +86,8 @@ func (r *Reporter) Report(ctx context.Context, jobID string, fields map[string]a
 	}
 	url := fmt.Sprintf("%s/internal/template/jobs/%s/status", r.masterURL, jobID)
 
-	log.G(ctx).Infof("report status to master: job_id=%s url=%s fields=%+v", jobID, url, fields)
+	log.G(ctx).Infof("report status to master: job_id=%s url=%s status=%v phase=%v artifact_id=%v storage_backend=%v",
+		jobID, url, fields["status"], fields["phase"], fields["artifact_id"], fields["storage_backend"])
 
 	backoff := reportBaseBackoff
 	var lastErr error

@@ -334,6 +334,15 @@ RPC defaults to a 300-second deadline. Increase
 `controlPlane.master.appSnapshotTimeoutSeconds` for large templates or slow
 networks/disks. Non-positive values fall back to 300 seconds.
 
+Direct artifact distribution requires no DB migration.
+`artifactDownloadCapabilityTTL` defaults to `1h` (maximum `24h`). When the TC
+node-facing address is configured and the artifact is eligible, CubeMaster adds
+a TC direct-download endpoint; otherwise it uses S3 presign or the Master
+fallback. `CreateImage` retains the stable CubeMaster artifact URL for older Cubelets and
+adds the selected direct endpoint in a separate annotation; new Cubelets use the
+direct endpoint, while older Cubelets ignore it and continue through CubeMaster.
+No Cubelet version threshold or DB migration is needed.
+
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive
 rescheduling across dedicated control nodes:

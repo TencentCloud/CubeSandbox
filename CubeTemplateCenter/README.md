@@ -84,7 +84,8 @@ Public routes reverse-proxied from CubeMaster (actually served by TC):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / HEAD | `/cube/template/artifact/download` | artifact download (streams from local disk; 302 to the presigned URL for S3 artifacts) |
+| GET / HEAD | `/cube/template/artifact/download` | user-facing artifact download (streams from local disk or proxies S3) |
+| GET / HEAD | `/cube/template/artifact/direct-download` | Cubelet ext4 pull authenticated by a short-lived artifact capability; registered outside user API-key auth |
 | GET / POST | `/cube/template/compat` | template compat matrix read/write |
 
 Build-status polls (`/cube/template/build/:build_id/status`, `/cube/template/from-image?job_id=`) stay local on CubeMaster (they read the job rows Master writes); TC registers them too for direct-to-TC access.
