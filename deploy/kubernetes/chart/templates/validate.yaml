@@ -129,8 +129,28 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if ne ($gate.taintKey | default "") "cube.tencent.com/pvm-not-ready" }}
 {{- fail "bootstrap.pvmHostKernel.startupGate.taintKey is a fixed cluster-wide contract and must be cube.tencent.com/pvm-not-ready" }}
 {{- end }}
+{{- $pvmNodeList := (lookup "v1" "Node" "" "") -}}
+{{- $pvmNodesExist := false -}}
+{{- if $pvmNodeList -}}
+{{- range $node := $pvmNodeList.items -}}
+{{- $nodeLabels := $node.metadata.labels | default dict -}}
+{{- $matchesAll := true -}}
+{{- range $lk := keys $.Values.placement.pvm.nodeSelector -}}
+{{- $expectedVal := (index $.Values.placement.pvm.nodeSelector $lk) | toString -}}
+{{- $actualVal := (index $nodeLabels $lk) | default "" | toString -}}
+{{- if ne $actualVal $expectedVal -}}
+{{- $matchesAll = false -}}
+{{- end -}}
+{{- end -}}
+{{- if $matchesAll -}}
+{{- $pvmNodesExist = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $pvmNodesExist }}
 {{- if not $gate.requirePreflight }}
 {{- fail "startupGate.enabled=true requires startupGate.requirePreflight=true; the Helm hook closes the first-install scheduling window" }}
+{{- end }}
 {{- end }}
 {{- if and (not $gate.priorityClassCreate) (not ($gate.priorityClassName | default "")) }}
 {{- fail "startupGate.priorityClassCreate=false requires startupGate.priorityClassName to reference an existing PriorityClass" }}
