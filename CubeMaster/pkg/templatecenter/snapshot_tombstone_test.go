@@ -378,6 +378,75 @@ func TestRegisterSnapshotRuntimeRefWithForeignReadyReplicaProtectsGlobalSnapshot
 	}
 }
 
+func TestConcurrentSnapshotRefRegistrationsDoNotBlockEachOther(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: "snap-parallel", Status: StatusReady}, nil
+	})
+	origAcquire := acquireSnapshotRuntimeRefFn
+	defer func() { acquireSnapshotRuntimeRefFn = origAcquire }()
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	acquireSnapshotRuntimeRefFn = func(context.Context, SnapshotRuntimeRefInfo) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	}
+	replica := ReplicaStatus{NodeID: "node-a", Status: ReplicaStatusReady}
+	done := make(chan error, 2)
+	for _, sandboxID := range []string{"sb-1", "sb-2"} {
+		go func(id string) {
+			done <- RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica(
+				context.Background(), "snap-parallel", id, "node-a", "", replica)
+		}(sandboxID)
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("registrations for different sandboxes serialized on one snapshot")
+		}
+	}
+	deleteStarted := make(chan struct{})
+	deleteEntered := make(chan struct{})
+	go func() {
+		close(deleteStarted)
+		_ = withTemplateWriteLock(snapshotResourceLockKey("snap-parallel"), func() error {
+			close(deleteEntered)
+			return nil
+		})
+	}()
+	<-deleteStarted
+	select {
+	case <-deleteEntered:
+		t.Fatal("snapshot delete entered while registrations held the shared lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	released = true
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-deleteEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot delete remained blocked after registrations finished")
+	}
+}
+
 func TestFailSnapshotDeleteJobReturnsTombstone(t *testing.T) {
 	oldDB := store.db
 	store.db = &gorm.DB{}

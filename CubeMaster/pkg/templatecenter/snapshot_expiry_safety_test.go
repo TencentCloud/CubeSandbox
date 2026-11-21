@@ -99,6 +99,29 @@ func TestSnapshotCreateReservationFencesCleanup(t *testing.T) {
 	require.ErrorIs(t, ReserveSnapshotCreate(ctx, "snap-pin", "too-late", "node", ""), ErrSnapshotNotFound)
 }
 
+func TestPromoteReservedSnapshotCreate(t *testing.T) {
+	db := snapshotReservationTestDB(t)
+	ctx := context.Background()
+	require.NoError(t, db.Create(&models.SnapshotRecord{SnapshotID: "snap-promote", Status: StatusReady}).Error)
+	require.NoError(t, ReserveSnapshotCreate(ctx, "snap-promote", "sb-promote", "node-a", ""))
+	require.NoError(t, PromoteReservedSnapshotCreate(ctx, "snap-promote", "sb-promote", "node-a", "10.0.0.1"))
+	var active []models.SnapshotRuntimeActive
+	require.NoError(t, db.Find(&active).Error)
+	require.Len(t, active, 1)
+	require.Equal(t, SnapshotRuntimeBindingMemoryBacking, active[0].BindingType)
+	require.Equal(t, "10.0.0.1", active[0].NodeIP)
+	var history []models.SnapshotRuntimeRef
+	require.NoError(t, db.Find(&history).Error)
+	require.Len(t, history, 1)
+	require.Equal(t, SnapshotRuntimeRefStatusActive, history[0].Status)
+	require.NoError(t, PromoteReservedSnapshotCreate(ctx, "snap-promote", "sb-promote", "node-a", "10.0.0.1"))
+	require.NoError(t, db.Find(&history).Error)
+	require.Len(t, history, 1)
+	require.Error(t, PromoteReservedSnapshotCreate(ctx, "snap-promote", "missing", "node-a", ""))
+	require.NoError(t, db.Find(&active).Error)
+	require.Len(t, active, 1)
+}
+
 func TestSnapshotPendingCreateSurvivesIncompleteObservation(t *testing.T) {
 	db := snapshotReservationTestDB(t)
 	ctx := context.Background()

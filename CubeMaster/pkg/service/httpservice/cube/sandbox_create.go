@@ -48,6 +48,7 @@ var (
 	createSandboxGetTemplateKindFn                  = templatecenter.GetTemplateKind
 	createSandboxRegisterRuntimeRefFn               = templatecenter.RegisterSnapshotRuntimeRefForCreatedSandbox
 	createSandboxRegisterRuntimeRefWithReplicaFn    = templatecenter.RegisterSnapshotRuntimeRefForCreatedSandboxWithReplica
+	createSandboxPromoteReservedSnapshotRefFn       = templatecenter.PromoteReservedSnapshotCreate
 )
 
 func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
@@ -189,6 +190,10 @@ func registerCreatedSandboxRuntimeRef(ctx context.Context, req *types.CreateCube
 	defer func() {
 		telemetry.End(span, err)
 	}()
+	if strings.TrimSpace(req.Annotations[constants.CubeAnnotationRuntimeSnapshotID]) == templateID &&
+		strings.TrimSpace(req.Annotations[constants.CubeAnnotationDesiredSandboxID]) == ret.SandboxID {
+		return createSandboxPromoteReservedSnapshotRefFn(ctx, templateID, ret.SandboxID, ret.HostID, ret.HostIP)
+	}
 	if resolved != nil && resolved.HasChosenReplica &&
 		strings.EqualFold(strings.TrimSpace(resolved.TemplateID), templateID) {
 		return createSandboxRegisterRuntimeRefWithReplicaFn(
