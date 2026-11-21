@@ -567,7 +567,7 @@ shim-test: builder-image
 # container is faster.
 .PHONY: cubelog-test
 cubelog-test:
-	cd pkgs/CubeLog && go test -short ./...
+	cd pkgs/CubeLog && CGO_ENABLED=1 go test -short -race ./...
 
 .PHONY: cubedb-test
 cubedb-test:
