@@ -62,11 +62,10 @@ delete the temporary sandbox when the tool call finishes.
 ## Notes
 
 - Use a template that supports the E2B code interpreter `run_code` path.
-- The E2B packages are pinned to a pair that plain `pip` can install and that is
-  listed in the repository's SDK compatibility notes. This example's offline
-  smoke test does not validate the live `run_code` path against that exact pair,
-  so revalidate against a real CubeSandbox deployment before changing package
-  versions or using this as a production baseline.
+- The E2B packages are pinned to a plain-`pip`-installable pair (`e2b==2.26.0`
+  and `e2b-code-interpreter==2.8.1`). Revalidate the live `run_code` path
+  against a real CubeSandbox deployment before changing package versions or
+  using this as a production baseline.
 - `CUBE_SANDBOX_TIMEOUT` controls the temporary sandbox lifetime.
   `CUBE_RUN_CODE_TIMEOUT` controls each `run_code` execution.
 - For local development without wildcard DNS, set `CUBE_USE_DEV_SIDECAR=true`

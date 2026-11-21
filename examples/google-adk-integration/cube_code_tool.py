@@ -63,6 +63,8 @@ def _read_required_env(name: str) -> str:
 
 
 def _stringify_log_item(item: Any) -> str:
+    if isinstance(item, dict) and "line" in item:
+        return str(item["line"])
     line = getattr(item, "line", None)
     if line is not None:
         return str(line)

@@ -33,11 +33,11 @@ tool's code execution crosses into CubeSandbox.
 | SDK path | `e2b==2.26.0` and `e2b-code-interpreter==2.8.1`, pointed at CubeAPI through `E2B_API_URL` |
 
 Google ADK is evolving quickly, so the runnable example pins the ADK package.
-The E2B packages are pinned to a pair that plain `pip` can install and that is
-recorded in the repository's SDK compatibility notes. This PR does not include
-a live `run_code` validation against that exact pair and a real CubeSandbox
-deployment, so revalidate the live path before changing package versions or
-using this example as a production baseline.
+The E2B packages are pinned to a pair (`e2b==2.26.0` and
+`e2b-code-interpreter==2.8.1`) that plain `pip` can install and that has been
+verified against a live CubeSandbox deployment using the `sandbox-code:latest`
+template. Revalidate the live `run_code` path before changing package versions
+or using this example as a production baseline.
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ using this example as a production baseline.
 - Data-plane reachability for the official E2B SDK. A one-click local
   deployment includes CoreDNS; production deployments should configure wildcard
   DNS, and local setups without wildcard DNS can use the
-  [E2B development sidecar](/guide/connect-existing-cluster).
+  [E2B development sidecar](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar).
 - A CubeSandbox template ID. Use a template that supports the E2B code
   interpreter `run_code` path.
 - Python 3.10+ on the machine running the ADK agent.
@@ -56,8 +56,8 @@ using this example as a production baseline.
 `E2B_API_URL` selects the CubeAPI control-plane endpoint. The official E2B SDK
 also connects to per-sandbox data-plane hostnames when `run_code` executes.
 Configure wildcard DNS for production deployments, or use the
-[E2B development sidecar](/guide/connect-existing-cluster) for local
-development without wildcard DNS. If your deployment uses TLS with a self-signed
+[E2B development sidecar](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
+for local development without wildcard DNS. If your deployment uses TLS with a self-signed
 certificate, set `CUBE_SSL_CERT_FILE` so the example can export `SSL_CERT_FILE`
 before opening the sandbox. `SSL_CERT_FILE` is process-global; use a CA bundle
 that also preserves model-provider TLS trust, or leave it unset when CubeAPI is
@@ -206,8 +206,9 @@ and deletes the temporary sandbox when the tool call finishes.
   generated code must only reach approved hosts. See
   [network policy](/guide/network-policy).
 - **Credential handling:** keep model provider keys on the host. If sandboxed
-  code must call an external API, prefer Cube's security proxy and credential
-  injection flow instead of placing raw secrets in the VM.
+  code must call an external API, prefer Cube's
+  [Egress Proxy](/guide/security-proxy) and credential injection flow instead of
+  placing raw secrets in the VM.
 - **Templates:** preinstall heavy dependencies in the template image so each ADK
   tool call starts quickly from a ready snapshot.
 
@@ -215,9 +216,8 @@ and deletes the temporary sandbox when the tool call finishes.
 
 - The example validates imports and wiring offline. A full live run requires a
   reachable CubeSandbox deployment and a `run_code`-capable template.
-- The E2B package pair is selected for plain-pip install compatibility recorded
-  in the repository. This PR does not verify `run_code` against a live
-  CubeSandbox deployment for that exact pair.
+- If you upgrade `e2b` or `e2b-code-interpreter` beyond the pinned versions,
+  revalidate the live `run_code` path against your CubeSandbox deployment.
 - Google ADK's native Agent Runtime Code Execution tool targets Google Cloud
   Agent Runtime. This guide uses a custom ADK function tool so CubeSandbox can
   provide the execution backend.

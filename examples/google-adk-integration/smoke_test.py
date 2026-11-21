@@ -41,7 +41,7 @@ def main() -> None:
         line = "hello\n"
 
     class Logs:
-        stdout = [LogItem(), "world\n"]
+        stdout = [LogItem(), {"line": "world\n"}]
         stderr = ["warning\n"]
 
     class Execution:
