@@ -74,6 +74,14 @@
 #  again is reported and does not stop the others. Exit status is 0 only if
 #  every marked-and-deletable snapshot went.
 #
+#  "Went" is read off the reply, not off ok: rcow_delete_lvol answers a
+#  deferral as a success envelope carrying "deferred": true, meaning the
+#  request was accepted as an intent and the poller will finish it. deletable
+#  is the cached lease verdict while the destroy path also wants a recent one,
+#  so a target picked on YES can still come back deferred. Those are printed as
+#  "deferred <name>" and do not count towards the exit status -- the snapshot is
+#  still there, and the next run confirms it went.
+#
 #  A ~60s poller already completes leased exports, extra clones, and finished
 #  decouples. This command is for lease-less exports, failed destroys, and not
 #  waiting out the poller. Marks are persisted to
@@ -138,9 +146,11 @@ def fmt_ls_table(result):
 def _send(sock_path, timeout, method, params=None, raw=False):
     """One JSON-RPC request.
 
-    Returns (True, value, envelope) where value is the result with a
+    Returns (True, value, envelope, deferred) where value is the result with a
     {bool_value, string_value} envelope unwrapped (string_value, verbatim), or
-    (False, text, False) where text says what went wrong.
+    (False, text, False, False) where text says what went wrong. deferred is
+    the envelope's "deferred" field: the request was accepted as an intent
+    rather than carried out.
     """
     req = {"jsonrpc": "2.0", "id": 1, "method": method}
     if params is not None:
@@ -151,7 +161,7 @@ def _send(sock_path, timeout, method, params=None, raw=False):
     try:
         s.connect(sock_path)
     except OSError as e:
-        return False, "cannot connect to %s: %s" % (sock_path, e), False
+        return False, "cannot connect to %s: %s" % (sock_path, e), False, False
     s.sendall(json.dumps(req).encode())
 
     # The reply can arrive in pieces, and its length is not announced, so the
@@ -164,7 +174,7 @@ def _send(sock_path, timeout, method, params=None, raw=False):
         except socket.timeout:
             s.close()
             return False, "no reply within %gs; %d bytes received" % (
-                timeout, len(buf)), False
+                timeout, len(buf)), False, False
         if not chunk:
             break
         buf += chunk
@@ -181,10 +191,10 @@ def _send(sock_path, timeout, method, params=None, raw=False):
     # for what was actually a segfault on the other end.
     if resp is None:
         return False, ("target closed the connection without replying (it "
-                       "probably died); %d bytes received" % len(buf)), False
+                       "probably died); %d bytes received" % len(buf)), False, False
 
     if "error" in resp:
-        return False, json.dumps(resp["error"]), False
+        return False, json.dumps(resp["error"]), False, False
 
     result = resp.get("result")
 
@@ -208,18 +218,19 @@ def _send(sock_path, timeout, method, params=None, raw=False):
             and isinstance(result["bool_value"], bool)
             and isinstance(result["string_value"], str)):
         text = result["string_value"]
+        deferred = result.get("deferred") is True
         if result["bool_value"]:
-            return True, text, True
-        return False, text, True
+            return True, text, True, deferred
+        return False, text, True, deferred
 
-    return True, result, False
+    return True, result, False, False
 
 
 def retry_pending_deletes(args):
     """Delete every snapshot that carries a pending-delete mark and is
     deletable now. See the header for what the mark means and why it is
     trusted as the record of a user-asked delete."""
-    ok, result, _ = _send(args.sock, args.timeout, "rcow_get_lvstores")
+    ok, result, _, _ = _send(args.sock, args.timeout, "rcow_get_lvstores")
     if not ok:
         print("rcow_get_lvstores failed: %s" % result, file=sys.stderr)
         return 1
@@ -253,6 +264,7 @@ def retry_pending_deletes(args):
         return 0
 
     done = 0
+    deferred = 0
     for name, lvol_uuid, lvs_uuid, lvs_name in targets:
         # lvs_name drives the lookup, the uuids verify it. Without lvs_name the
         # target resolves by name across every loaded lvstore and answers "not
@@ -268,14 +280,28 @@ def retry_pending_deletes(args):
             params["lvol_uuid"] = lvol_uuid
         if lvs_uuid:
             params["lvs_uuid"] = lvs_uuid
-        ok, text, _ = _send(args.sock, args.timeout, "rcow_delete_lvol",
-                            params)
-        if ok:
+        ok, text, _, was_deferred = _send(args.sock, args.timeout,
+                                          "rcow_delete_lvol", params)
+        # A deferral is a *success* envelope -- the request was accepted as an
+        # intent, not carried out -- so ok alone does not mean the snapshot is
+        # gone. It is reachable even for a target we picked on deletable=YES:
+        # that answer is the cached lease verdict, while the destroy path also
+        # requires a recent one, and the backoff of an idle export's lease
+        # check can leave the cached answer too old to act on. Counting it as
+        # deleted would print "deleted <name>" for a snapshot still there and
+        # exit 0, which is the one thing a retry tool must not do.
+        if ok and was_deferred:
+            deferred += 1
+            print("deferred %s: accepted as an intent, not yet carried out; "
+                  "the poller completes it (retry to confirm)" % name)
+        elif ok:
             done += 1
             print("deleted %s" % name)
         else:
             print("failed to delete %s: %s" % (name, text), file=sys.stderr)
-    print("%d of %d pending snapshot delete(s) completed" % (done, len(targets)))
+    print("%d of %d pending snapshot delete(s) completed"
+          "%s" % (done, len(targets),
+                  ", %d deferred" % deferred if deferred else ""))
     return 0 if done == len(targets) else 1
 
 
@@ -326,8 +352,8 @@ def main():
     else:
         params = None
 
-    ok, result, envelope = _send(args.sock, args.timeout, args.method,
-                                 params, args.raw)
+    ok, result, envelope, _ = _send(args.sock, args.timeout, args.method,
+                                    params, args.raw)
     if not ok:
         print(result, file=sys.stderr)
         return 1

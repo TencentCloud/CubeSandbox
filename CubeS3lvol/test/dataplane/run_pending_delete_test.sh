@@ -1666,3 +1666,75 @@ rpc rcow_delete_lvol '{"lvol_name":"racebase"}' >/dev/null 2>&1 || true
 rpc rcow_delete_lvol '{"lvol_name":"peerbase"}' >/dev/null 2>&1 || true
 rpc rcow_delete_lvstore \
 	"$(printf '{"lvs_name":"%s"}' "${PEER_LVS}")" >/dev/null 2>&1 || true
+
+# ==========================================================================
+echo ""
+echo "=== [16] a pending delete held by its clones does not undo the lease backoff"
+#
+# The pending-delete poller asks every marked snapshot whether it can go, once
+# a minute, for as long as the mark exists. The lease question is the one with
+# a side effect: an answer older than S3LVOL_LEASE_FRESH_SEC (40s) starts a
+# check and pins the export to the 20s cadence for another backoff period. Asked
+# before the clone count, it re-kicked the export of a snapshot that two clones
+# hold on every round, and the interval never got past 40s -- the same HEAD per
+# 20-40s, and the same 404 ERROR line, that the backoff exists to remove (#2289).
+#
+# 160s is the discriminating value. Reaching it needs an 80s interval to elapse
+# with no kick, and a poller tick every 60s that kicked whenever the answer was
+# over 40s old could never allow that. Without the kicks the export goes quiet
+# at its first 404, backs off 180s after the delete asked about it, and is at
+# 160s some 300s after that. Nothing here waits on the snapshot going; the
+# lvstore teardown removes it.
+
+BO_WAIT=480
+rpc rcow_create_snapshot \
+	"$(printf '{"lvol_name":"%s","snapshot_name":"bosnap"}' "${VOL}")" \
+	>/dev/null && pass "bosnap taken" || fail "could not take bosnap"
+BO_UU="$(rpc rcow_export_snapshot '{"snapshot_name":"bosnap"}' \
+	2>/dev/null | tr -d ' \t\r\n"')"
+[ -n "${BO_UU}" ] && pass "bosnap exported (${BO_UU}), never imported" \
+	|| fail "export of bosnap failed"
+EXPORT_UUIDS_SEEN="${EXPORT_UUIDS_SEEN:-} ${BO_UU}"
+for _ in $(seq 60); do
+	[ "$(rpc rcow_get_snapshot_status '{"snapshot_name":"bosnap"}' 2>/dev/null |
+		python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("export_status",""))
+except Exception:
+    print("")')" = "DONE" ] && break
+	sleep 1
+done
+
+# ${VOL} is already one clone of it; this makes two.
+rpc rcow_create_clone '{"snapshot_name":"bosnap","clone_name":"boclone"}' \
+	>/dev/null && pass "boclone created (bosnap now has two clones)" \
+	|| fail "could not clone bosnap"
+
+BO_RAW="$(python3 "${RPC_PY}" --sock "${RCOW_RPC_SOCK}" --raw \
+	rcow_delete_lvol '{"lvol_name":"bosnap"}' 2>&1)"
+echo "${BO_RAW}" | grep -q '"deferred": *true' \
+	&& pass "the delete of bosnap was deferred" \
+	|| fail "the delete of bosnap was not deferred: ${BO_RAW}"
+
+info "waiting for the export's lease check to back off to 160s (up to ${BO_WAIT}s)"
+BO_IV=""
+BO_MAX=0
+for _ in $(seq "$((BO_WAIT / 5))"); do
+	BO_IV="$(export_field "${BO_UU}" lease_interval_s 2>/dev/null)"
+	case "${BO_IV}" in
+	''|*[!0-9]*) ;;
+	*) [ "${BO_IV}" -gt "${BO_MAX}" ] && BO_MAX="${BO_IV}" ;;
+	esac
+	[ "${BO_MAX}" -ge 160 ] && break
+	sleep 5
+done
+[ "${BO_MAX}" -ge 160 ] \
+	&& pass "the lease check backed off to ${BO_MAX}s while the clones held the delete" \
+	|| fail "the lease check never got past ${BO_MAX}s; the pending-delete poller keeps kicking it"
+
+# The backoff must not have let the delete through: two clones still hold it.
+lvol_exists bosnap && pass "bosnap is still there (two clones hold it)" \
+	|| fail "bosnap was deleted while it still had two clones"
+[ "$(lvol_field bosnap delete_pending)" = "true" ] \
+	&& pass "bosnap still carries its pending-delete mark" \
+	|| fail "bosnap lost its pending-delete mark"

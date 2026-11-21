@@ -2120,6 +2120,17 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		}
 		spdk_json_write_object_end(w);
 
+		/* Every registered export costs a lease watch; there is no cap, so
+		 * report the population (and how much of it is backed off). */
+		{
+			uint32_t backed_off = 0;
+			uint32_t n = s3lvol_export_count(lvs, &backed_off);
+
+			spdk_json_write_named_uint32(w, "num_exports", n);
+			spdk_json_write_named_uint32(w, "num_exports_lease_backed_off",
+						     backed_off);
+		}
+
 		rpc_write_lvol_open_failures(w, lvs);
 		spdk_json_write_named_array_begin(w, "lvols");
 		TAILQ_FOREACH(lvol, &store->lvols, link) {
@@ -3028,6 +3039,10 @@ rpc_rcow_get_exports(struct spdk_jsonrpc_request *request,
 			spdk_json_write_named_uint64(w, "lease_updated_at",
 						     e.lease_updated_at);
 			spdk_json_write_named_uint32(w, "lease_renew_s", e.lease_renew_s);
+			spdk_json_write_named_uint64(w, "lease_checked_at",
+						     e.lease_checked_at);
+			spdk_json_write_named_uint32(w, "lease_interval_s",
+						     e.lease_interval_s);
 			spdk_json_write_named_string(w, "pin",
 						     s3lvol_export_pin_str(e.pin));
 			spdk_json_write_named_bool(w, "snapshot_alive", e.snapshot_alive);

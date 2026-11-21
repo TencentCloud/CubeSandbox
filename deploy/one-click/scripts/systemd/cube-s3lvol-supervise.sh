@@ -94,4 +94,11 @@ while :; do
     log "CubeS3lvol: target exited; triggering systemd restart"
     exit 1
   fi
+  # Re-login any subsystem whose controller the kernel has deleted (see the
+  # patrol section of rcow_common.sh). Never fails; pauses itself during a
+  # planned stop. Guarded because a rolled-back CubeS3lvol release may ship an
+  # rcow_common.sh without it.
+  if declare -F rcow_patrol_controllers >/dev/null; then
+    rcow_patrol_controllers
+  fi
 done
