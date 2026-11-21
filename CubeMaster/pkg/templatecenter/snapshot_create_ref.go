@@ -18,6 +18,52 @@ import (
 
 const SnapshotRuntimeBindingCreatePending = "create_pending"
 
+// PromoteReservedSnapshotCreate publishes the already durable create pin as a
+// runtime binding. The reservation was validated before the Cubelet RPC, and
+// its row keeps deletion fenced throughout this transaction.
+func PromoteReservedSnapshotCreate(ctx context.Context, snapshotID, sandboxID, nodeID, nodeIP string) error {
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	if strings.TrimSpace(snapshotID) == "" || strings.TrimSpace(sandboxID) == "" {
+		return errors.New("snapshot create promotion requires snapshot and sandbox identities")
+	}
+	now := time.Now()
+	return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Table(constants.SnapshotRuntimeActiveTableName).
+			Where("snapshot_id = ? AND sandbox_id = ? AND binding_type = ?", snapshotID, sandboxID, SnapshotRuntimeBindingCreatePending).
+			Updates(map[string]any{
+				"binding_type": SnapshotRuntimeBindingMemoryBacking,
+				"node_id":      nodeID, "node_ip": nodeIP,
+				"attached_at": now, "last_seen_at": now, "updated_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			// Node reconciliation may have observed the VM and converted the
+			// reservation before this create response reached Master.
+			var existing models.SnapshotRuntimeActive
+			err := tx.Table(constants.SnapshotRuntimeActiveTableName).
+				Where("sandbox_id = ? AND binding_type = ? AND snapshot_id = ?", sandboxID, SnapshotRuntimeBindingMemoryBacking, snapshotID).
+				First(&existing).Error
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			return fmt.Errorf("snapshot %s sandbox %s has no create reservation", snapshotID, sandboxID)
+		}
+		history := newActiveSnapshotRuntimeRefModel(SnapshotRuntimeRefInfo{
+			SnapshotID: snapshotID, SandboxID: sandboxID, NodeID: nodeID, NodeIP: nodeIP,
+			BindingType: SnapshotRuntimeBindingMemoryBacking,
+		}, now, &now)
+		history.LastError = "attached runtime ref"
+		return tx.Table(constants.SnapshotRuntimeRefTableName).Create(history).Error
+	})
+}
+
 // ReserveSnapshotCreate pins the source before issuing a create RPC. The caller
 // gives Cubelet this exact sandbox ID. Unlike a process-local lock, the pin
 // survives a lost response or a Master restart. Registration or authoritative
