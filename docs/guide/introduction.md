@@ -55,4 +55,4 @@ Cube Sandbox is a **purpose-built infrastructure for AI Agents** — a productio
 * [Kubernetes Deployment](./kubernetes/) — install with Helm on an existing K8s cluster.
 * [Creating Templates from OCI Images](./tutorials/template-from-image.md) — step-by-step template guide.
 * [WebUI Console](./webui.md) — visual management right after install.
-* [Security Proxy & Credential Vault](./security-proxy.md) — CubeEgress domain filtering and auditing.
+* [Egress Proxy (Filtering & Secrets)](./security-proxy.md) — CubeEgress domain filtering and auditing.

@@ -127,7 +127,7 @@ public URL. It is orthogonal to:
 - [Network Policy](/guide/network-policy) — outbound CIDR
   allow/deny lists (`allow_out` / `deny_out`,
   `allow_internet_access`).
-- [Security Proxy](/guide/security-proxy) — L7 rule list applied to
+- [Egress Proxy (Filtering & Secrets)](/guide/security-proxy) — L7 rule list applied to
   outbound HTTP/HTTPS.
 
 A typical "private agent" deployment combines all three: deny most

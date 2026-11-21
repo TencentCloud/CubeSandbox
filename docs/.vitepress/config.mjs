@@ -254,7 +254,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Network Policy', link: '/guide/network-policy' },
                 { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
-                { text: 'Security Proxy', link: '/guide/security-proxy' },
+                { text: 'Egress Proxy (Filtering & Secrets)', link: '/guide/security-proxy' },
                 { text: 'Sandbox-to-Sandbox Access', link: '/guide/sandbox-to-sandbox' },
                 { text: 'Restrict Public Access', link: '/guide/restrict-public-access' },
                 { text: 'Authentication', link: '/guide/authentication' },
@@ -501,7 +501,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '网络策略', link: '/zh/guide/network-policy' },
                 { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
-                { text: '安全代理', link: '/zh/guide/security-proxy' },
+                { text: '出网安全代理（过滤与凭证注入）', link: '/zh/guide/security-proxy' },
                 { text: '沙箱间互访', link: '/zh/guide/sandbox-to-sandbox' },
                 { text: '限制公开访问', link: '/zh/guide/restrict-public-access' },
                 { text: 'API 鉴权', link: '/zh/guide/authentication' },

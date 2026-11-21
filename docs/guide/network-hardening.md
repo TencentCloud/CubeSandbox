@@ -321,6 +321,6 @@ response reference, see [Authentication](/guide/authentication).
 ## Related
 
 - [Network Policy](/guide/network-policy) — sandbox outbound CIDR allow/deny.
-- [Security Proxy](/guide/security-proxy) — L7 rules on sandbox outbound HTTP/HTTPS.
+- [Egress Proxy (Filtering & Secrets)](/guide/security-proxy) — L7 rules on sandbox outbound HTTP/HTTPS.
 - [Restrict Public Access](/guide/restrict-public-access) — per-sandbox inbound token.
 - [Multi-Node Cluster Deployment](/guide/multi-node-deploy) — adding compute nodes.
