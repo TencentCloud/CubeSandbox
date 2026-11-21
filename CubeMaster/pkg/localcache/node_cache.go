@@ -42,8 +42,10 @@ type local struct {
 	emptySyncStreak atomic.Int32
 
 	// synced is set once any node-view sync succeeded (an empty view is valid).
-	synced  atomic.Bool
-	absence absenceTracker
+	synced atomic.Bool
+	// syncedAt is the last successful sync in UnixNano; stored before synced.
+	syncedAt atomic.Int64
+	absence  absenceTracker
 }
 
 // The node and template-locality stores exist from package load so nodemeta
@@ -364,6 +366,7 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CreateConcurrentNum = n.CreateConcurrentNum
 		old.MaxMvmLimit = n.MaxMvmLimit
 		old.MetaDataUpdateAt = n.MetaDataUpdateAt
+		old.HeartbeatReceivedAt = n.HeartbeatReceivedAt
 		old.DeviceClass = n.DeviceClass
 		old.DeviceID = n.DeviceID
 		old.MachineHostIP = n.MachineHostIP

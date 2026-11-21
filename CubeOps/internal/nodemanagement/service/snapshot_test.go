@@ -13,6 +13,32 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/nodemanagement/store"
 )
 
+func TestBuildSnapshotHeartbeatReceivedAt(t *testing.T) {
+	receivedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	reportedAt := receivedAt.Add(-24 * time.Hour)
+	reg := &store.NodeRegistration{NodeID: "node-1"}
+	reg.UpdatedAt = receivedAt.Add(time.Hour)
+
+	for _, st := range []*store.NodeStatus{nil, {NodeID: "node-1"}} {
+		snap := buildSnapshotFromStore(reg, st, nil)
+		if !snap.HeartbeatReceivedAt.IsZero() {
+			t.Fatalf("unknown receive time must stay zero, got %s", snap.HeartbeatReceivedAt)
+		}
+	}
+
+	st := &store.NodeStatus{
+		NodeID: "node-1", HeartbeatUnix: reportedAt.Unix(),
+		HeartbeatReceivedUnix: receivedAt.Unix(), Healthy: true,
+	}
+	snap := buildSnapshotFromStore(reg, st, nil)
+	if !snap.HeartbeatReceivedAt.Equal(receivedAt) || !snap.HeartbeatTime.Equal(reportedAt) {
+		t.Fatalf("status snapshot reported=%s received=%s", snap.HeartbeatTime, snap.HeartbeatReceivedAt)
+	}
+	if got := ToSchedulerNode(snap).HeartbeatReceivedAt; !got.Equal(receivedAt) {
+		t.Fatalf("scheduler node received at %s, want %s", got, receivedAt)
+	}
+}
+
 func TestToSchedulerNode_LocalTemplatesIncluded(t *testing.T) {
 	snap := &model.NodeSnapshot{
 		NodeID:         "node-1",

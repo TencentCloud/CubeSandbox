@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -33,7 +34,7 @@ var (
 	deleteImageOnCubelet     = cubelet.DeleteImage
 	getCubeletAddrForDelete  = cubelet.GetCubeletAddr
 	listTemplateSandboxes    = sandbox.ListSandbox
-	runReplicaCleanup        = cleanupTemplateReplicasWithLocators
+	runReplicaCleanup        = cleanupTemplateReplicasDeferringUnreachable
 	runArtifactCleanup       = cleanupTemplateArtifact
 	runMetadataCleanup       = cleanupTemplateMetadata
 	runTemplateJobCleanup    = cleanupTemplateJobs
@@ -425,8 +426,9 @@ func (t *templateCleanupTargets) shouldCheckInUse() bool {
 
 func cleanupTemplateMetadata(ctx context.Context, templateID string) error {
 	var cleanupErr error
+	// cleanup_required rows are tombstones the orphan sweep still has to finish.
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateReplicaTableName).
-		Where("template_id = ?", templateID).Delete(&models.TemplateReplica{}).Error; err != nil {
+		Where("template_id = ? AND cleanup_required = ?", templateID, false).Delete(&models.TemplateReplica{}).Error; err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateDefinitionTableName).
@@ -478,6 +480,67 @@ func cleanupTemplateReplicas(ctx context.Context, templateID string) error {
 		return err
 	}
 	return cleanupTemplateReplicasWithLocators(ctx, templateID, targets.Locators, cleanupBackendFromTargets(targets))
+}
+
+// markReplicaCleanupRequired flags the replica row behind a locator as a cleanup
+// tombstone; it reports false when no such row exists, so nothing is recorded.
+var markReplicaCleanupRequired = func(ctx context.Context, templateID string, locator templateCleanupLocator) (bool, error) {
+	var ids []uint
+	if err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ? AND template_variant_id = ?",
+			templateID, locator.NodeID, strings.TrimSpace(locator.TemplateVariantID)).
+		Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+		return false, err
+	}
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("id IN ?", ids).
+		Updates(map[string]any{"cleanup_required": true, "updated_at": time.Now()}).Error
+	return err == nil, err
+}
+
+// clearReplicaCleanupRequired drops a redo flag once the node confirmed cleanup,
+// so metadata cleanup deletes the row instead of leaving it to the orphan sweep.
+var clearReplicaCleanupRequired = func(ctx context.Context, templateID string, locator templateCleanupLocator) error {
+	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ? AND template_variant_id = ? AND cleanup_required = ?",
+			templateID, locator.NodeID, strings.TrimSpace(locator.TemplateVariantID), true).
+		Updates(map[string]any{"cleanup_required": false, "updated_at": time.Now()}).Error
+}
+
+// cleanupTemplateReplicasDeferringUnreachable tombstones replica rows on nodes
+// unreachable past grace; locators without such a row still fail closed.
+func cleanupTemplateReplicasDeferringUnreachable(ctx context.Context, templateID string, locators []templateCleanupLocator, backend string) error {
+	now := time.Now()
+	live := make([]templateCleanupLocator, 0, len(locators))
+	for _, locator := range locators {
+		since, unreachable := nodeUnreachableLongEnough(locator.NodeID, now)
+		if !unreachable {
+			live = append(live, locator)
+			continue
+		}
+		marked, err := markReplicaCleanupRequired(ctx, templateID, locator)
+		if err != nil {
+			return fmt.Errorf("record cleanup tombstone for template %s on node %s: %w", templateID, locator.NodeID, err)
+		}
+		if !marked {
+			live = append(live, locator)
+			continue
+		}
+		log.G(ctx).Warnf("cleanup template %s: node %s unreachable past grace since %s; replica kept as cleanup tombstone, cubelet RPC skipped",
+			templateID, locator.NodeID, since.UTC().Format(time.RFC3339))
+	}
+	// One locator per call tells which nodes confirmed; the shared helper is serial anyway.
+	var cleanupErr error
+	for _, locator := range live {
+		if err := cleanupTemplateReplicasWithLocators(ctx, templateID, []templateCleanupLocator{locator}, backend); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			continue
+		}
+		if err := clearReplicaCleanupRequired(ctx, templateID, locator); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("clear cleanup flag for template %s on node %s: %w", templateID, locator.NodeID, err))
+		}
+	}
+	return cleanupErr
 }
 
 func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string, locators []templateCleanupLocator, backend string) error {

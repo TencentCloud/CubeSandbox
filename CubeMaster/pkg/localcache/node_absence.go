@@ -61,3 +61,29 @@ func AbsentSince(nodeID string) (since time.Time, ok bool) {
 	})
 	return since, ok
 }
+
+// viewStaleAfter exceeds the worst-case sync (6 x 10s timeouts + 31s backoff);
+// an older view cannot prove a registered node stopped sending heartbeats.
+const viewStaleAfter = 3 * time.Minute
+
+// UnreachableSince returns when a registered node's last heartbeat reached
+// CubeOps, ignoring Healthy; an unknown receive time or stale view fails closed.
+func UnreachableSince(nodeID string) (time.Time, bool) {
+	if nodeID == "" || !l.synced.Load() {
+		return time.Time{}, false
+	}
+	n, present := GetNode(nodeID)
+	if !present {
+		return AbsentSince(nodeID)
+	}
+	now := time.Now()
+	if n == nil || n.HeartbeatReceivedAt.IsZero() ||
+		now.Sub(time.Unix(0, l.syncedAt.Load())) > viewStaleAfter {
+		return time.Time{}, false
+	}
+	// A future control-plane timestamp must not shorten the grace period.
+	if n.HeartbeatReceivedAt.After(now) {
+		return now, true
+	}
+	return n.HeartbeatReceivedAt, true
+}

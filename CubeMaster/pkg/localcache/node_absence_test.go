@@ -13,6 +13,7 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/nodehealth"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 )
 
@@ -28,6 +29,109 @@ func useTestLocal(t *testing.T) *local {
 	patches.ApplyFunc(grpcconn.CloseWorkerConn, func(string) {})
 	t.Cleanup(patches.Reset)
 	return loc
+}
+
+// markSynced marks the node view as freshly synced, as a successful sync does.
+func markSynced(loc *local) {
+	loc.syncedAt.Store(time.Now().UnixNano())
+	loc.synced.Store(true)
+}
+
+// Healthy and UnhealthyReason come from the cubelet clock and must not decide
+// reachability: a stopped cubelet with a clock ahead still reports Healthy.
+func TestUnreachableSinceDependsOnReceiveTimeOnly(t *testing.T) {
+	receivedAt := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name    string
+		healthy bool
+		reason  string
+	}{
+		{"healthy", true, ""},
+		{"reported not ready", false, nodehealth.ReasonReportedNotReady},
+		{"heartbeat expired", false, nodehealth.ReasonHeartbeatExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loc := useTestLocal(t)
+			markSynced(loc)
+			loc.addNodeCache(&node.Node{
+				InsID: "node-1", Healthy: tc.healthy, UnhealthyReason: tc.reason,
+				MetaDataUpdateAt: time.Now().Add(2 * time.Hour), HeartbeatReceivedAt: receivedAt,
+			})
+			if since, ok := UnreachableSince("node-1"); !ok || !since.Equal(receivedAt) {
+				t.Fatalf("got (%s, %v), want (%s, true)", since, ok, receivedAt)
+			}
+		})
+	}
+}
+
+func TestUnreachableSinceStaleViewFailsClosed(t *testing.T) {
+	loc := useTestLocal(t)
+	loc.addNodeCache(&node.Node{InsID: "node-1", HeartbeatReceivedAt: time.Now().Add(-time.Hour)})
+	loc.synced.Store(true)
+
+	loc.syncedAt.Store(time.Now().Add(-viewStaleAfter - time.Second).UnixNano())
+	if _, ok := UnreachableSince("node-1"); ok {
+		t.Fatal("a view older than viewStaleAfter must not conclude unreachability")
+	}
+	loc.syncedAt.Store(time.Now().Add(-viewStaleAfter + time.Minute).UnixNano())
+	if _, ok := UnreachableSince("node-1"); !ok {
+		t.Fatal("a view within viewStaleAfter must still conclude unreachability")
+	}
+}
+
+func TestUnreachableSinceIgnoresCubeletClockSkew(t *testing.T) {
+	loc := useTestLocal(t)
+	markSynced(loc)
+	loc.addNodeCache(&node.Node{
+		InsID: "node-1", Healthy: false, UnhealthyReason: nodehealth.ReasonHeartbeatExpired,
+		MetaDataUpdateAt: time.Now().Add(-time.Hour), HeartbeatReceivedAt: time.Now(),
+	})
+	since, ok := UnreachableSince("node-1")
+	if !ok || time.Since(since) > time.Minute {
+		t.Fatalf("CubeOps receive time must stay fresh despite the skewed cubelet clock: since=%s ok=%v", since, ok)
+	}
+}
+
+func TestUnreachableSinceFailsClosed(t *testing.T) {
+	loc := useTestLocal(t)
+	if _, ok := UnreachableSince("node-1"); ok {
+		t.Fatal("an unsuccessful initial sync must not conclude unreachability")
+	}
+	loc.synced.Store(true)
+	loc.syncedAt.Store(time.Now().UnixNano())
+	loc.addNodeCache(&node.Node{
+		InsID: "node-1", Healthy: false, UnhealthyReason: nodehealth.ReasonHeartbeatExpired,
+	})
+	if _, ok := UnreachableSince("node-1"); ok {
+		t.Fatal("a zero heartbeat timestamp must fail closed")
+	}
+	if _, ok := UnreachableSince(""); ok {
+		t.Fatal("an empty node id must fail closed")
+	}
+}
+
+func TestUnreachableSinceClampsFutureHeartbeat(t *testing.T) {
+	loc := useTestLocal(t)
+	markSynced(loc)
+	loc.addNodeCache(&node.Node{
+		InsID: "node-1", Healthy: false, UnhealthyReason: nodehealth.ReasonHeartbeatExpired,
+		HeartbeatReceivedAt: time.Now().Add(time.Hour),
+	})
+	since, ok := UnreachableSince("node-1")
+	if !ok || since.After(time.Now()) {
+		t.Fatalf("a future heartbeat must be clamped to now, got (%s, %v)", since, ok)
+	}
+}
+
+// A cache entry that is not a *node.Node must not fall back to view absence:
+// the node is still registered, so its own heartbeat decides reachability.
+func TestUnreachableSinceCacheEntryDoesNotFallBackToAbsence(t *testing.T) {
+	loc := useTestLocal(t)
+	markSynced(loc)
+	loc.cache.SetDefault("node-1", "not-a-node")
+	if _, ok := UnreachableSince("node-1"); ok {
+		t.Fatal("a malformed cache entry must fail closed")
+	}
 }
 
 func TestAbsentSince_NotSyncedConcludesNothing(t *testing.T) {
@@ -116,6 +220,17 @@ func TestAbsentSince_LoadFailureDoesNotMarkSynced(t *testing.T) {
 	}
 	_, ok := AbsentSince("node-1")
 	assert.False(t, ok, "a failed sync must not make absence conclusions possible")
+	assert.Zero(t, loc.syncedAt.Load(), "a failed sync must not refresh the view time")
+}
+
+func TestSyncAllFromDB_SuccessRefreshesViewTime(t *testing.T) {
+	loc := useTestLocal(t)
+	withExternalNodeLoader(t, emptyLoader())
+	before := time.Now().UnixNano()
+	if err := loc.syncAllFromDB(context.Background(), true); err != nil {
+		t.Fatalf("syncAllFromDB: %v", err)
+	}
+	assert.GreaterOrEqual(t, loc.syncedAt.Load(), before, "an empty view is still a successful sync")
 }
 
 func TestAbsentSince_EmptyViewIsValidAfterSync(t *testing.T) {
