@@ -52,7 +52,7 @@ LangGraph 的 checkpoint 机制与 Cube 的 `pause()` / `connect()` 对接。
 
 - 已部署 CubeSandbox，CubeAPI 可从 `http://<node>:3000` 访问。
 - 已构建并注册一个含 Python 栈（pandas / numpy / matplotlib / scikit-learn）的模板镜像。可参考
-  LangChain 指南的[模板镜像](../integrations/langchain.md)步骤，或直接复用同一个 template id。
+  LangChain 指南的[模板镜像](./langchain.md)步骤，或直接复用同一个 template id。
 - `cubesandbox` SDK 环境变量：`CUBE_TEMPLATE_ID`（必填），以及 `CUBE_API_URL`、`CUBE_PROXY_NODE_IP`
   （仅远程 / 直连 IP 部署时需要——未设置时 SDK 回退到 `http://127.0.0.1:3000` / wildcard-DNS 主机）；
   CubeAPI 后端启用鉴权时还需 `CUBE_API_KEY`（未设置时 SDK 不发送鉴权头）。
@@ -446,7 +446,18 @@ try:
     # 因此需要重新绑定工具并在新实例上重建图，同时保留同一个 checkpointer 以恢复同一 checkpoint 线程。
     sandbox = Sandbox.connect(sandbox.sandbox_id)     # 恢复后 /workspace 保持不变
     graph = build_graph(make_run_python(sandbox), checkpointer=checkpointer)
-    graph.invoke(stage_input([{"role": "user", "content": "Read /workspace/monthly_revenue.csv and /workspace/stage1_marker.txt (both written by stage 1) and report the marker's exact text and which month had the highest revenue. Use only those two files — do not recompute from sales.csv."}]), config=config)
+    result = graph.invoke(stage_input([{"role": "user", "content": "Read /workspace/monthly_revenue.csv and /workspace/stage1_marker.txt (both written by stage 1) and report the marker's exact text and which month had the highest revenue. Use only those two files — do not recompute from sales.csv."}]), config=config)
+    for msg in reversed(result["messages"]):
+        content = str(msg.content)
+        idx = content.rfind("[code output]")
+        if idx == -1:
+            continue
+        print(content[idx:])
+        break
+    else:
+        print("(no code output)")
+    if not result["done"]:
+        print("\n(not verified: reviewer never returned DONE)")
 finally:
     if sandbox is not None:
         try:

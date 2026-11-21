@@ -56,7 +56,7 @@ The prerequisites are identical to the LangChain guide — the same sandbox temp
 - CubeSandbox deployed, CubeAPI reachable at `http://<node>:3000`.
 - A template image with the Python stack (pandas / numpy / matplotlib / scikit-learn) built and
   registered. Follow the LangChain guide's
-  [template image](../integrations/langchain.md) steps, or reuse the same template id.
+  [template image](./langchain.md) steps, or reuse the same template id.
 - `cubesandbox` SDK env vars: `CUBE_TEMPLATE_ID` (required), plus `CUBE_API_URL` and
   `CUBE_PROXY_NODE_IP` (required only for remote / direct-IP deployments — the SDK falls back to
   `http://127.0.0.1:3000` / the wildcard-DNS host when unset), and `CUBE_API_KEY` when the CubeAPI
@@ -480,7 +480,18 @@ try:
     # instance, keeping the same checkpointer so the same checkpoint thread resumes.
     sandbox = Sandbox.connect(sandbox.sandbox_id)     # /workspace intact after resume
     graph = build_graph(make_run_python(sandbox), checkpointer=checkpointer)
-    graph.invoke(stage_input([{"role": "user", "content": "Read /workspace/monthly_revenue.csv and /workspace/stage1_marker.txt (both written by stage 1) and report the marker's exact text and which month had the highest revenue. Use only those two files — do not recompute from sales.csv."}]), config=config)
+    result = graph.invoke(stage_input([{"role": "user", "content": "Read /workspace/monthly_revenue.csv and /workspace/stage1_marker.txt (both written by stage 1) and report the marker's exact text and which month had the highest revenue. Use only those two files — do not recompute from sales.csv."}]), config=config)
+    for msg in reversed(result["messages"]):
+        content = str(msg.content)
+        idx = content.rfind("[code output]")
+        if idx == -1:
+            continue
+        print(content[idx:])
+        break
+    else:
+        print("(no code output)")
+    if not result["done"]:
+        print("\n(not verified: reviewer never returned DONE)")
 finally:
     if sandbox is not None:
         try:
