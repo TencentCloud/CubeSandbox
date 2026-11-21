@@ -187,6 +187,12 @@ extra_conf:
 >
 > 无论挂载请求来自 CubeAPI 传递的 annotation，还是直接指定的 volume 路径，都会执行相同的路径校验，避免通过不同入口绕过限制。
 
+### 节点要求与升级顺序
+
+Cubelet 会先解析每个 `hostPath`，再用 `O_PATH|O_NOFOLLOW` 固定目录，并通过 `mount --no-canonicalize` 绑定 `/proc/<pid>/fd/<n>`。因此每个 Cubelet 节点都需要 util-linux 2.31 或更新版本提供的 `mount`；BusyBox 的 `mount` 不支持 `--no-canonicalize`，缺少该能力的节点会拒绝所有 host mount 创建请求。
+
+升级时必须先升级 CubeMaster，再升级 Cubelet。CubeMaster 会在创建和恢复请求中把 `allowed_host_mount_prefixes` 写入内部 annotation；收不到该 annotation 的 Cubelet 会直接失败。因此在 CubeMaster 升级到该节点之前，host mount 沙箱无法创建或恢复。新版 CubeMaster 搭配旧版 Cubelet 时 annotation 仍会下发，但旧版 Cubelet 会忽略它，符号链接绕过依然存在，因此 Cubelet 也需要全部升级。
+
 ## 权限管理
 
 Host Mount 保留宿主目录原始的所有者和权限位。`readOnly` 标志只控制 Cube 是否以只读模式挂载，**不会**覆盖 Linux 文件权限。
@@ -298,7 +304,7 @@ with Sandbox.create(
     sandbox.commands.run("ls /datasets /output")
 ```
 
-租户 A 的沙箱只能看到 `/data/shared/tenant-a/` 下的内容，无法访问 `tenant-b` 或 `tenant-c` 的目录。
+在服务端拼接路径的前提下，租户 A 的沙箱只会拿到 `/data/shared/tenant-a/`。允许前缀是共享边界，不是按租户划分的边界：能自行传入任意 `hostPath` 的调用方仍可指向同一前缀下的其他租户目录。
 
 ### 应用层强制隔离
 
@@ -331,14 +337,15 @@ sudo chmod 0700 /data/shared/tenant-a
 sudo chmod 0700 /data/shared/tenant-b
 ```
 
-这样即使某个沙箱尝试越权访问（通过路径穿越等方式），也会被 CubeMaster 的路径校验和操作系统权限双重拦截。
+通过符号链接的跳转会在宿主机侧被拦截：CubeMaster 拒绝 `hostPath` 中的路径穿越，Cubelet 在挂载前拒绝允许前缀之下的任何符号链接，即使该链接最终解析到前缀内的另一个目录。对于直接指定兄弟目录的调用方，仍需依赖目录权限隔离。
 
 ### 隔离层次总结
 
 | 层次     | 机制                                               | 作用                           |
 | -------- | -------------------------------------------------- | ------------------------------ |
-| 目录规划 | 按租户 ID 划分独立子目录，每个沙箱只挂载本租户路径 | 结构上隔离数据，租户间互不可见 |
+| 目录规划 | 按租户 ID 划分独立子目录，每个沙箱只挂载本租户路径 | 由平台拼接路径时实现结构隔离 |
 | 应用层   | 平台代码拼接路径，不信任用户输入                   | 正常场景下的租户隔离           |
+| 路径解析 | Cubelet 拒绝配置前缀之下的符号链接，并拒绝落在前缀之外的最终目标 | 防止预置链接把挂载重定向到前缀之外或其他租户目录 |
 | 操作系统 | 目录 owner/mode 权限                               | 兜底防护，防止任何绕过         |
 
 ## 嵌套挂载：共享可读、写入范围独立

@@ -1044,6 +1044,8 @@ func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 			out.Annotations[k] = v
 		}
 	}
+	out.Annotations[cubebox.AnnotationHostMountAllowedPrefixes] =
+		cubebox.EncodeHostMountAllowedPrefixes(config.GetAllowedHostMountPrefixes())
 
 	out.Annotations[constants.CubeAnnotationsUseNetFileCache] = "true"
 
@@ -1090,7 +1092,8 @@ func rejectUserCubeMasterAnnotation(key string) bool {
 		constants.CubeAnnotationPauseAbortedSnapshotID,
 		constants.CubeAnnotationLaunchMemorySnapshotID,
 		constants.CubeAnnotationRuntimeRestoreSnapshotID,
-		constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt:
+		constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt,
+		cubebox.AnnotationHostMountAllowedPrefixes:
 		return true
 	default:
 		return false

@@ -676,7 +676,15 @@ func loadResumeSandboxSpec(ctx context.Context, sandboxID string) *types.CreateC
 }
 
 func fillResumeRecreateFields(ctx context.Context, sandboxID string, out *cubebox.RunCubeSandboxRequest, createReq *types.CreateCubeSandboxReq) {
-	if out == nil || createReq == nil {
+	if out == nil {
+		return
+	}
+	if out.Annotations == nil {
+		out.Annotations = map[string]string{}
+	}
+	out.Annotations[cubebox.AnnotationHostMountAllowedPrefixes] =
+		cubebox.EncodeHostMountAllowedPrefixes(config.GetAllowedHostMountPrefixes())
+	if createReq == nil {
 		return
 	}
 	out.CubeNetworkConfig = mapCubeNetworkConfig(createReq.CubeNetworkConfig)

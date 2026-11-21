@@ -107,14 +107,16 @@ def under_prefix(*parts: str) -> str:
 def is_missing_hostpath_source_error(exc: BaseException | str) -> bool:
     """Whether ``exc`` looks like Cubelet failing because hostPath is absent.
 
-    Cubelet wraps mount(8) failures as ``bind mount <src> -> <dst>: ...``
-    (see ``hostdir.go``). A missing source typically surfaces ``No such file
-    or directory`` / ``ENOENT`` in that chain. Used by cases that assume a
-    single-node host after ``provision_host_dirs``: on multi-node local-disk
+    Cubelet now resolves the source first: a missing path fails at
+    ``resolve host path <src>: lstat ...: no such file or directory``
+    (see ``hostdir.go``). Older builds wrapped the same failure at bind time
+    as ``bind mount <src> -> <dst>: ...``. A missing source surfaces ``No such
+    file or directory`` / ``ENOENT`` in either chain. Used by cases that assume
+    a single-node host after ``provision_host_dirs``: on multi-node local-disk
     clusters the create may land where the source was never prepared.
     """
     text = str(exc).lower()
-    if "bind mount" not in text:
+    if "bind mount" not in text and "resolve host path" not in text:
         return False
     return (
         "no such file" in text
