@@ -321,6 +321,12 @@ write_otel_config() {
           metrics_path: /v1/metrics/resource
           static_configs:
             - targets: ["127.0.0.1:9998"]
+        - job_name: cubesandbox-network
+          scrape_interval: 5s
+          scrape_timeout: 3s
+          metrics_path: /v1/metrics/network
+          static_configs:
+            - targets: ["127.0.0.1:9998"]
 EOF
     fi
     if [[ "${logs_enabled}" == "true" ]]; then

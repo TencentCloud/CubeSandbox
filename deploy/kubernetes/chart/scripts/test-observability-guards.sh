@@ -27,7 +27,10 @@ grep -Fq 'path: /ready' "$TMP_DIR/default.yaml"
 grep -Fq 'app.kubernetes.io/component: grafana-admin' "$TMP_DIR/default.yaml"
 grep -Fq 'key: "admin-password"' "$TMP_DIR/default.yaml"
 grep -Fq 'checksum/grafana-admin-secret:' "$TMP_DIR/default.yaml"
-echo "OK default probes, generated Grafana secret, and component-log opt-in"
+grep -Fq 'job_name: cubesandbox-resource' "$TMP_DIR/default.yaml"
+grep -Fq 'job_name: cubesandbox-network' "$TMP_DIR/default.yaml"
+grep -Fq 'metrics_path: /v1/metrics/network' "$TMP_DIR/default.yaml"
+echo "OK default probes, generated Grafana secret, component-log opt-in, and network-metrics scrape"
 
 if render --set-string observability.backend.grafana.adminPassword=short \
   > "$TMP_DIR/short-grafana-password.yaml" 2> "$TMP_DIR/short-grafana-password.err"; then

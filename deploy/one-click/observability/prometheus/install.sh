@@ -333,9 +333,60 @@ uninstall_service() {
 }
 
 # Emit a scrape job for an already running, externally managed Prometheus that
-# pulls Cubelet /v1/metrics/resource directly. This installs nothing: it is the
-# "bring your own Prometheus" path, as opposed to 'render', which renders the
-# configuration of the Prometheus server installed by this script.
+# pulls Cubelet /v1/metrics/resource and /v1/metrics/network directly. This
+# installs nothing: it is the "bring your own Prometheus" path, as opposed to
+# 'render', which renders the configuration of the Prometheus server installed
+# by this script.
+emit_cubelet_scrape_job() {
+  local node="$1"
+  cat <<EOF
+scrape_configs:
+  - job_name: cubesandbox-resource
+    scrape_interval: 5s
+    scrape_timeout: 3s
+    metrics_path: /v1/metrics/resource
+    static_configs:
+      - targets: ["${node}:9998"]
+        labels:
+          cluster: $(yaml_dquote "${cluster}")
+          node: $(yaml_dquote "${node}")
+  - job_name: cubesandbox-network
+    scrape_interval: 5s
+    scrape_timeout: 3s
+    metrics_path: /v1/metrics/network
+    static_configs:
+      - targets: ["${node}:9998"]
+        labels:
+          cluster: $(yaml_dquote "${cluster}")
+          node: $(yaml_dquote "${node}")
+EOF
+}
+
+# Same job pair for a node list read from a file (read per pass: a single
+# stdin stream cannot feed both jobs' target lists).
+emit_cubelet_scrape_jobs() {
+  local list_file="$1" path node
+  for path in /v1/metrics/resource /v1/metrics/network; do
+    cat <<EOF
+  - job_name: cubesandbox-${path##*/metrics/}
+    scrape_interval: 5s
+    scrape_timeout: 3s
+    metrics_path: ${path}
+    static_configs:
+EOF
+    while IFS= read -r node || [[ -n "${node}" ]]; do
+      [[ -z "${node}" || "${node}" == \#* ]] && continue
+      require_safe_label "node" "${node}"
+      cat <<EOF
+      - targets: ["${node}:9998"]
+        labels:
+          cluster: $(yaml_dquote "${cluster}")
+          node: $(yaml_dquote "${node}")
+EOF
+    done < "${list_file}"
+  done
+}
+
 render_scrape_job() {
   local output="${CUBE_METRICS_PROM_CONFIG:-${PWD}/cubesandbox-prometheus-scrape.yml}"
   local cluster="${CUBE_OBSERVABILITY_CLUSTER_ID:-${CUBE_METRICS_CLUSTER_ID:-cubesandbox}}"
@@ -343,24 +394,8 @@ render_scrape_job() {
   if [[ -n "${CUBE_METRICS_NODE_LIST:-}" ]]; then
     [[ -f "${CUBE_METRICS_NODE_LIST}" ]] || die "node list not found: ${CUBE_METRICS_NODE_LIST}"
     {
-      cat <<EOF
-scrape_configs:
-  - job_name: cubesandbox-resource
-    scrape_interval: 5s
-    scrape_timeout: 3s
-    metrics_path: /v1/metrics/resource
-    static_configs:
-EOF
-      while IFS= read -r node || [[ -n "${node}" ]]; do
-        [[ -z "${node}" || "${node}" == \#* ]] && continue
-        require_safe_label "node" "${node}"
-        cat <<EOF
-      - targets: ["${node}:9998"]
-        labels:
-          cluster: $(yaml_dquote "${cluster}")
-          node: $(yaml_dquote "${node}")
-EOF
-      done < "${CUBE_METRICS_NODE_LIST}"
+      printf 'scrape_configs:\n'
+      emit_cubelet_scrape_jobs "${CUBE_METRICS_NODE_LIST}"
     } > "${output}.tmp"
   else
     load_one_click_env
@@ -368,22 +403,11 @@ EOF
     node="$(node_ip)"
     [[ -n "${node}" ]] || die "set CUBE_METRICS_NODE_LIST or CUBE_SANDBOX_NODE_IP"
     require_safe_label "node" "${node}"
-    cat > "${output}.tmp" <<EOF
-scrape_configs:
-  - job_name: cubesandbox-resource
-    scrape_interval: 5s
-    scrape_timeout: 3s
-    metrics_path: /v1/metrics/resource
-    static_configs:
-      - targets: ["${node}:9998"]
-        labels:
-          cluster: $(yaml_dquote "${cluster}")
-          node: $(yaml_dquote "${node}")
-EOF
+    emit_cubelet_scrape_job "${node}" > "${output}.tmp"
   fi
   mv "${output}.tmp" "${output}"
   log "wrote ${output}"
-  log "merge this job into the existing Prometheus"
+  log "merge these jobs into the existing Prometheus"
   log "Cubelet listens on all addresses. Allow only the Prometheus server to reach port 9998"
 }
 
