@@ -88,7 +88,13 @@ SPDK_ISAL_LIB  = $(if $(wildcard $(ISAL_LIB_DIR)/libisal.a),-lisal)
 
 # (b) real thread library path: let pkg-config expand it, rather than hand-
 #     maintaining the DPDK dependency order
-REAL_PC= $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
+#
+# The *_PC lists below are := on purpose. With = every reference re-ran
+# pkg-config, and dpdk_link_args/spdk_only_libs reference their argument
+# several times, once per word of the filters -- 2720 pkg-config runs (each
+# also forking rpm through the distro wrapper) just to parse this file, ~57 s
+# before make did anything. Their inputs are all fixed at parse time.
+REAL_PC := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
                    pkg-config --libs spdk_thread spdk_env_dpdk 2>/dev/null)
 REAL_SPDK_LIBS = $(call spdk_only_libs,$(REAL_PC))
 REAL_DPDK_ARGS = $(call dpdk_link_args,$(REAL_PC))
@@ -96,7 +102,7 @@ REAL_DPDK_ARGS = $(call dpdk_link_args,$(REAL_PC))
 # (c) blobstore: the Step 3 acceptance test needs spdk_blob, and since s3_bs_dev
 #     now calls into the WAL (which does bdev I/O) it needs spdk_bdev as well --
 #     even in the direct-to-S3 mode this test uses, where no WAL is attached.
-BLOB_PC        = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
+BLOB_PC       := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
                    pkg-config --libs spdk_blob spdk_bdev spdk_accel spdk_thread \
                                      spdk_env_dpdk 2>/dev/null)
 BLOB_SPDK_LIBS = $(call spdk_only_libs,$(BLOB_PC))
@@ -104,7 +110,7 @@ BLOB_DPDK_ARGS = $(call dpdk_link_args,$(BLOB_PC))
 
 TEST_SYS_LIBS  = $(OPENSSL_STATIC_LIBS) -pthread -lrt -luuid -lm -ldl
 
-.PHONY: all clean check
+.PHONY: all clean check FORCE
 
 all: $(APPS)
 
@@ -223,7 +229,7 @@ s3_writeback_test: s3_writeback_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 #     (same as HANDOFF 5.15).
 JOURNAL_CFLAGS = -I$(SPDK_ROOT)/module
 
-JOURNAL_PC = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
+JOURNAL_PC := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
                       pkg-config --libs spdk_bdev_aio spdk_accel spdk_bdev \
                                         spdk_thread spdk_env_dpdk \
                       2>/dev/null)
@@ -296,7 +302,7 @@ s3_flush_test: s3_flush_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # spdk_blob_io_read() and spdk_zmalloc(). Nothing in this test reaches them --
 # the link is satisfied, not exercised. Splitting the manifest into its own
 # translation unit purely to shorten this line would be the tail wagging the dog.
-EXPORT_PC = $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
+EXPORT_PC := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
                      pkg-config --libs spdk_blob spdk_bdev spdk_accel spdk_thread \
                                        spdk_json spdk_util spdk_log \
                                        spdk_env_dpdk 2>/dev/null)
@@ -409,9 +415,16 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_owner_test
 	./s3_nvmf_state_test
 
-.PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
-$(S3BSDEV_DIR)/libs3bsdev.a:
+# The sub-make has to run every time, or an existing .a counts as up to date no
+# matter what changed under lib/. But the archive must not be .PHONY: a phony
+# prerequisite is always out of date, so every test relinked -- DPDK
+# --whole-archive and all -- even when nothing had changed. Depending on an
+# empty FORCE target runs the recipe just the same, and make then compares the
+# archive's timestamp: tests relink only if the sub-make actually rewrote it.
+$(S3BSDEV_DIR)/libs3bsdev.a: FORCE
 	$(MAKE) --directory=$(S3BSDEV_DIR) static
+
+FORCE:
 
 # Header dependencies recorded by -MMD (see mk/s3lvol.common.mk). Each test is
 # compiled and linked in one step, so the .d is named after the executable.

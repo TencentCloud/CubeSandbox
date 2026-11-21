@@ -203,6 +203,29 @@ void s3_bs_dev_drain(struct spdk_bs_dev *bs_dev, uint64_t timeout_us,
 		     s3_bs_dev_cb cb_fn, void *cb_arg);
 
 /**
+ * Upload dirty overlay data for the given chunk indices and invoke \c cb_fn
+ * once those chunks have reached S3.
+ *
+ * Must be called on the lvstore's owner thread. Without a flusher
+ * (direct-to-S3 mode), completes immediately with 0.
+ */
+void s3_bs_dev_flush_chunks(struct spdk_bs_dev *bs_dev,
+			    const uint64_t *chunks, uint32_t num_chunks,
+			    uint64_t timeout_us,
+			    s3_bs_dev_cb cb_fn, void *cb_arg);
+
+/**
+ * True when \c chunk_index has an entry in the overlay, i.e. may hold data
+ * that has not reached S3 yet. False for every chunk without an overlay.
+ *
+ * Lets a caller of s3_bs_dev_flush_chunks() name only the chunks that can
+ * need an upload. Called on the owner thread, in the same synchronous run as
+ * that flush, no write can land on a chunk in between.
+ */
+bool s3_bs_dev_chunk_in_overlay(struct spdk_bs_dev *bs_dev,
+				uint64_t chunk_index);
+
+/**
  * Make every write submitted before this call durable in the local WAL.
  *
  * Unlike s3_bs_dev_drain(), this does not wait for S3.  Blobstore's own flush

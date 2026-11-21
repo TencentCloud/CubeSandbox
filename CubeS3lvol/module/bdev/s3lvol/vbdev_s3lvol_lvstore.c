@@ -2914,6 +2914,333 @@ s3lvol_lvstore_flush(struct s3lvol_lvstore *lvs, uint64_t timeout_us,
 	s3_bs_dev_drain(lvs->bs_dev, timeout_us, (s3_bs_dev_cb)cb_fn, cb_arg);
 }
 
+static struct spdk_blob *
+lvs_blob_by_id(struct spdk_lvol_store *store, spdk_blob_id id)
+{
+	struct spdk_lvol *lvol;
+
+	TAILQ_FOREACH(lvol, &store->lvols, link) {
+		if (lvol->blob_id == id) {
+			return lvol->blob;
+		}
+	}
+	return NULL;
+}
+
+/* The chunks a flush has to wait for. Only chunks with an overlay entry are
+ * kept: one without has nothing that is not already in S3, and
+ * s3_overlay_flush_chunk_prepare() would skip it anyway. Filtering here keeps
+ * the list -- and the sort and waiter copy behind it -- bounded by what the
+ * overlay can hold (max_bytes / chunk_size) rather than by how much of the
+ * volume is allocated. Built and handed to s3_bs_dev_flush_chunks() in one
+ * run on the owner thread, so no write can dirty a dropped chunk in between. */
+struct lvol_chunk_list {
+	struct spdk_bs_dev *bs_dev;
+	uint64_t  stack[64];
+	uint64_t *chunks;
+	uint32_t  count;
+	uint32_t  cap;
+};
+
+static void
+lvol_chunk_list_init(struct lvol_chunk_list *l, struct spdk_bs_dev *bs_dev)
+{
+	l->bs_dev = bs_dev;
+	l->chunks = l->stack;
+	l->count = 0;
+	l->cap = SPDK_COUNTOF(l->stack);
+}
+
+static void
+lvol_chunk_list_free(struct lvol_chunk_list *l)
+{
+	if (l->chunks != l->stack) {
+		free(l->chunks);
+	}
+	l->chunks = l->stack;
+}
+
+/* Duplicates are fine: s3_flusher_flush_chunks() removes them. */
+static int
+lvol_chunk_list_add_range(struct lvol_chunk_list *l, uint64_t first,
+			  uint64_t last)
+{
+	for (uint64_t c = first; c <= last; c++) {
+		if (!s3_bs_dev_chunk_in_overlay(l->bs_dev, c)) {
+			continue;
+		}
+		if (l->count == l->cap) {
+			uint32_t new_cap;
+			uint64_t *grown;
+
+			if (l->cap > UINT32_MAX / 2) {
+				return -ENOMEM;
+			}
+			new_cap = l->cap * 2;
+			if (l->chunks == l->stack) {
+				grown = malloc((size_t)new_cap * sizeof(*grown));
+				if (grown) {
+					memcpy(grown, l->stack, sizeof(l->stack));
+				}
+			} else {
+				grown = realloc(l->chunks,
+						(size_t)new_cap * sizeof(*grown));
+			}
+			if (!grown) {
+				return -ENOMEM;
+			}
+			l->chunks = grown;
+			l->cap = new_cap;
+		}
+		l->chunks[l->count++] = c;
+	}
+	return 0;
+}
+
+/* Every chunk the blobstore metadata region occupies: the super block, the
+ * metadata page mask and the metadata pages themselves, which sit in the
+ * clusters ahead of the first data cluster and belong to no blob's cluster
+ * map. Only the chunks in the overlay are listed (see lvol_chunk_list), so
+ * on a quiet lvstore this costs one pointer lookup per chunk and nothing else.
+ *
+ * The region is not small. lvol sizes it at one 4 KiB page per cluster
+ * (num_md_pages_per_cluster_ratio = 100), so a 16 TiB lvstore over 1 MiB
+ * clusters carries ~64 GiB of it: ~65k lookups on the reactor per snapshot,
+ * well under a millisecond. Do not shorten the range to save them -- any page
+ * in it can hold the snapshot's blob. */
+static int
+lvol_chunk_list_add_md(struct lvol_chunk_list *l, struct spdk_blob_store *bs,
+		       struct spdk_bs_dev *bs_dev, uint32_t chunk_shift)
+{
+	uint64_t cluster_size = spdk_bs_get_cluster_size(bs);
+	uint64_t total_clusters, md_clusters, md_blocks;
+
+	if (cluster_size == 0 || bs_dev->blocklen == 0) {
+		return 0;
+	}
+	total_clusters = bs_dev->blockcnt * bs_dev->blocklen / cluster_size;
+	if (total_clusters <= spdk_bs_total_data_cluster_count(bs)) {
+		return 0;
+	}
+	md_clusters = total_clusters - spdk_bs_total_data_cluster_count(bs);
+	md_blocks = md_clusters * (cluster_size / bs_dev->blocklen);
+	return lvol_chunk_list_add_range(l, 0,
+					 s3_lba_to_chunk_index(md_blocks - 1,
+							       chunk_shift));
+}
+
+static uint32_t
+lvs_lvol_count(struct spdk_lvol_store *store)
+{
+	struct spdk_lvol *lvol;
+	uint32_t n = 0;
+
+	TAILQ_FOREACH(lvol, &store->lvols, link) {
+		n++;
+	}
+	return n;
+}
+
+/* Push dirty overlay chunks of `lvol` and its local snapshot chain to S3.
+ *
+ * The callback's status is the caller's durability answer -- 0 means every
+ * chunk the walk named is in S3 -- so a state where nothing could be walked or
+ * flushed is an error, never a quiet 0.
+ *
+ * `for_snapshot` is the create_snapshot contract, which is stricter than
+ * export's in two ways:
+ *
+ * - It adds the blobstore metadata region. What create_snapshot promises is
+ *   that the snapshot survives losing the write-back ring, and a snapshot whose
+ *   cluster list and blob pages exist only in that ring does not: the clusters
+ *   would be in S3 with nothing naming them. Export reads the metadata from
+ *   memory, and its manifest records data objects only.
+ *
+ * - It walks the whole chain and fails if it cannot. Export stops at
+ *   S3LVOL_DEFAULT_MAX_CHAIN_DEPTH and at an ancestor no lvol has open, because
+ *   export_build_chain() refuses exactly those two chains and the export then
+ *   copies -- reading through the bdev, which needs nothing published. A
+ *   snapshot has no such fallback: stopping early would report the deeper
+ *   layers' ring-only data as durable. Over-limit chains are a supported state
+ *   (deriving only warns), so the snapshot walk has no depth limit; it is
+ *   bounded by the lvol count instead, since every step reaches a distinct
+ *   open lvol. */
+static void
+lvol_flush(struct spdk_lvol *lvol, bool for_snapshot, uint64_t timeout_us,
+	   spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_store *store;
+	struct s3lvol_lvstore *lvs;
+	struct spdk_blob_store *bs;
+	struct spdk_bs_dev *bs_dev;
+	struct spdk_blob *cur;
+	struct lvol_chunk_list list;
+	uint32_t chunk_size, chunk_shift;
+	uint64_t cluster_size, io_unit_size, io_units_per_cluster;
+	uint64_t blocks_per_cluster;
+	uint32_t depth = 0, max_depth;
+	int rc;
+
+	if (!lvol || !lvol->blob || !lvol->lvol_store) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -EINVAL);
+		}
+		return;
+	}
+
+	/* Hot-upgrade prepare holds every flusher after pausing the NVMf
+	 * subsystems. Do not upload through the hold, and do not report success:
+	 * the callers are snapshot and export, which promise a chunk map. */
+	if (g_hot_prepare_active || g_hot_prepare_done) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -EBUSY);
+		}
+		return;
+	}
+
+	store = lvol->lvol_store;
+	lvs = s3lvol_lvstore_find_by_lvs(store);
+	bs_dev = lvs ? lvs->bs_dev : store->bs_dev;
+	bs = store->blobstore;
+	if (!bs_dev || !bs) {
+		SPDK_ERRLOG("lvol '%s': lvstore has no %s; nothing can be "
+			    "published\n", lvol->name,
+			    !bs_dev ? "device" : "blobstore");
+		if (cb_fn) {
+			cb_fn(cb_arg, -EINVAL);
+		}
+		return;
+	}
+
+	chunk_size = s3_bs_dev_get_chunk_size(bs_dev);
+	cluster_size = spdk_bs_get_cluster_size(bs);
+	io_unit_size = spdk_bs_get_io_unit_size(bs);
+	if (chunk_size == 0 || io_unit_size == 0 || bs_dev->blocklen == 0 ||
+	    cluster_size < io_unit_size || cluster_size < bs_dev->blocklen) {
+		SPDK_ERRLOG("lvol '%s': cannot map clusters to chunks (chunk %" PRIu32
+			    ", cluster %" PRIu64 ", io unit %" PRIu64
+			    ", device block %" PRIu32 ")\n",
+			    lvol->name, chunk_size, cluster_size, io_unit_size,
+			    bs_dev->blocklen);
+		if (cb_fn) {
+			cb_fn(cb_arg, -EINVAL);
+		}
+		return;
+	}
+	chunk_shift = spdk_u32log2(chunk_size);
+	/* Two units, kept apart: the walk steps through the blob in io units,
+	 * but spdk_blob_get_io_unit_lba() answers in device blocks, so the
+	 * cluster's extent on the device is counted in device blocks. They are
+	 * the same size today (S3LVOL_BLOCK_SIZE); the split keeps a cluster
+	 * from being under-covered if they ever differ. */
+	io_units_per_cluster = cluster_size / io_unit_size;
+	blocks_per_cluster = cluster_size / bs_dev->blocklen;
+	max_depth = for_snapshot ? lvs_lvol_count(store) :
+		    S3LVOL_DEFAULT_MAX_CHAIN_DEPTH;
+
+	lvol_chunk_list_init(&list, bs_dev);
+	rc = for_snapshot ? lvol_chunk_list_add_md(&list, bs, bs_dev, chunk_shift) : 0;
+
+	cur = lvol->blob;
+	while (rc == 0) {
+		uint64_t num_io_units = spdk_blob_get_num_io_units(cur);
+		uint64_t offset = 0;
+		spdk_blob_id pid;
+
+		if (depth == max_depth) {
+			if (for_snapshot) {
+				/* Unreachable: each step reaches a distinct open
+				 * lvol. Reported, because the alternative is a
+				 * snapshot short of its deepest layers. */
+				SPDK_ERRLOG("lvol '%s': snapshot chain is longer "
+					    "than the %" PRIu32 " lvols of its "
+					    "lvstore\n", lvol->name, max_depth);
+				rc = -ELOOP;
+			}
+			/* Export: export_build_chain() refuses this chain with
+			 * -E2BIG and copies instead. */
+			break;
+		}
+		depth++;
+		while (rc == 0 && offset < num_io_units) {
+			uint64_t lba;
+
+			offset = spdk_blob_get_next_allocated_io_unit(cur, offset);
+			if (offset == UINT64_MAX || offset >= num_io_units) {
+				break;
+			}
+			lba = spdk_blob_get_io_unit_lba(cur, offset);
+			if (lba == UINT64_MAX) {
+				/* Allocated a moment ago according to the query
+				 * above, on this thread and in this run, so not
+				 * expected. A snapshot must not skip it: reporting
+				 * 0 would call the cluster published while its data
+				 * may still be ring-only. Same answer as
+				 * s3_export_ref.c:walk_layer(). Export goes on: its
+				 * own walk refuses this layer and copies. */
+				SPDK_ERRLOG("lvol '%s': cluster at io unit %" PRIu64
+					    " of blob %" PRIu64 " reports no LBA; "
+					    "cannot publish it\n", lvol->name, offset,
+					    spdk_blob_get_id(cur));
+				if (for_snapshot) {
+					rc = -EAGAIN;
+					break;
+				}
+			} else {
+				rc = lvol_chunk_list_add_range(
+					     &list,
+					     s3_lba_to_chunk_index(lba, chunk_shift),
+					     s3_lba_to_chunk_index(
+						     lba + blocks_per_cluster - 1,
+						     chunk_shift));
+			}
+			offset += io_units_per_cluster;
+		}
+
+		if (rc != 0 || spdk_blob_is_esnap_clone(cur)) {
+			break;
+		}
+		pid = spdk_blob_get_parent_snapshot(bs, spdk_blob_get_id(cur));
+		if (pid == SPDK_BLOBID_INVALID) {
+			break;
+		}
+		cur = lvs_blob_by_id(store, pid);
+		if (!cur) {
+			/* Should not happen: every blob in an lvstore belongs to
+			 * an lvol, and the store holds them open. Export copies
+			 * instead (export_build_chain() answers -ENOENT); a
+			 * snapshot cannot, so it fails rather than leave that
+			 * layer's ring-only data out. */
+			if (for_snapshot) {
+				SPDK_ERRLOG("lvol '%s': snapshot chain names blob "
+					    "%" PRIu64 ", which no lvol has open; "
+					    "cannot publish it\n", lvol->name, pid);
+				rc = -ENOENT;
+			}
+			break;
+		}
+	}
+	if (rc != 0) {
+		lvol_chunk_list_free(&list);
+		if (cb_fn) {
+			cb_fn(cb_arg, rc);
+		}
+		return;
+	}
+
+	/* The list is copied before this returns, so it can go right after. */
+	s3_bs_dev_flush_chunks(bs_dev, list.chunks, list.count, timeout_us,
+			       (s3_bs_dev_cb)cb_fn, cb_arg);
+	lvol_chunk_list_free(&list);
+}
+
+void
+s3lvol_lvol_flush(struct spdk_lvol *lvol, uint64_t timeout_us,
+		  spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	lvol_flush(lvol, false, timeout_us, cb_fn, cb_arg);
+}
+
 void
 s3lvol_lvstore_checkpoint(struct s3lvol_lvstore *lvs, spdk_lvs_op_complete cb_fn,
 			  void *cb_arg)
@@ -3319,6 +3646,16 @@ s3lvol_lvol_create(struct s3lvol_lvstore *lvs, const char *name,
  * S3 request is stuck and never returns at that moment, the snapshot stalls
  * with it. This is not solvable here, but it should be the first thing
  * considered when diagnosing.
+ *
+ * === The snapshot's chunks are in S3 before the caller is told ===
+ *
+ * Freezing the cluster list names device LBAs. The chunk map names the S3
+ * object for each of those LBAs, and it is updated only after the PUT. A
+ * snapshot that returned first would let export record the previous uuid, or
+ * none. So once the read-only blob exists, its allocated clusters -- and the
+ * parent chain, stopping at an external snapshot -- are flushed, and the
+ * caller's callback runs only after that flush finishes. New writes to the
+ * origin allocate fresh clusters and are not part of this flush.
  * ========================================================================== */
 
 /* Completion callback for snapshot / clone.
@@ -3362,6 +3699,185 @@ static struct derive_lane *derive_lane_find(struct spdk_lvol *parent);
 static void derive_busy_again(struct derive_lane *lane, struct derive_req *req);
 static void derive_finish(struct derive_lane *lane, struct derive_req *req,
 			  struct spdk_lvol *lvol, int status);
+
+/* Held across the post-snapshot flush. derive_finish() runs on derive_thread,
+ * which is the thread that submitted the snapshot; the flush itself runs on
+ * the lvstore owner thread. */
+struct snapshot_publish_ctx {
+	struct derive_lane *lane;
+	struct derive_req  *req;
+	struct spdk_lvol   *snapshot;
+	struct spdk_thread *derive_thread;
+	int                 status;
+};
+
+static void snapshot_publish_finish(void *arg);
+
+/* Whether a create_snapshot of `origin` under a name that `existing` already
+ * holds can be answered with `existing` instead of -EEXIST.
+ *
+ * The case this is for: the first attempt did create the snapshot but its
+ * caller never heard so -- publishing its chunks failed or outlasted the
+ * caller's RPC timeout -- and the snapshot cannot be deleted, because the
+ * origin is already its clone. Without this the retry fails on the name and
+ * the snapshot is left with nobody tracking it.
+ *
+ * Answering with an older snapshot is only right if it holds exactly what a
+ * new one would. That is what the checks establish, with no state kept about
+ * earlier attempts: `existing` is the origin's direct parent, so no snapshot
+ * was taken in between, and the origin owns no cluster of its own, so nothing
+ * was written to it since -- in a thin clone, every acknowledged write
+ * allocates a cluster before it completes. A resize since would change the
+ * cluster count. Anything else keeps the old -EEXIST: the caller has to pick
+ * another name rather than receive content older than it asked for. */
+static bool
+snapshot_retry_matches(struct spdk_lvol *origin, struct spdk_lvol *existing)
+{
+	struct spdk_blob_store *bs;
+
+	if (!origin || !existing || !origin->blob || !existing->blob ||
+	    origin->lvol_store != existing->lvol_store ||
+	    !origin->lvol_store || !spdk_blob_is_read_only(existing->blob)) {
+		return false;
+	}
+	bs = origin->lvol_store->blobstore;
+	if (spdk_blob_get_parent_snapshot(bs, spdk_blob_get_id(origin->blob)) !=
+	    spdk_blob_get_id(existing->blob)) {
+		return false;
+	}
+	return spdk_blob_get_num_allocated_clusters(origin->blob) == 0 &&
+	       spdk_blob_get_num_clusters(origin->blob) ==
+	       spdk_blob_get_num_clusters(existing->blob);
+}
+
+static void
+snapshot_publish_finish(void *arg)
+{
+	struct snapshot_publish_ctx *pub = arg;
+	struct derive_lane *lane = pub->lane;
+	struct derive_req *req = pub->req;
+	struct spdk_lvol *snapshot = pub->snapshot;
+	int status = pub->status;
+
+	free(pub);
+	if (status != 0) {
+		/* Same rule as a registration failure: the origin is already this
+		 * snapshot's clone, so deleting it is not possible. The callback
+		 * still fails, because success would mean the chunk map names the
+		 * frozen bytes. A retry under the same name finishes the job, as
+		 * long as the origin has not been written since (see
+		 * snapshot_retry_matches). */
+		SPDK_ERRLOG("snapshot '%s' was created but its chunks could not be "
+			    "published (%s). The snapshot is kept; asking for it "
+			    "again under the same name publishes it\n",
+			    snapshot->name, spdk_strerror(-status));
+		derive_finish(lane, req, NULL, status);
+		return;
+	}
+	derive_finish(lane, req, snapshot, 0);
+}
+
+static void
+snapshot_publish_done(void *cb_arg, int status)
+{
+	struct snapshot_publish_ctx *pub = cb_arg;
+	int rc;
+
+	pub->status = status;
+	if (!pub->derive_thread || pub->derive_thread == spdk_get_thread()) {
+		snapshot_publish_finish(pub);
+		return;
+	}
+	rc = spdk_thread_send_msg(pub->derive_thread, snapshot_publish_finish, pub);
+	if (rc != 0) {
+		/* Not reachable with the SPDK this builds against: send_msg
+		 * abort()s on an exited thread or a full ring rather than
+		 * returning. Kept so a future SPDK that does return cannot fall
+		 * through into derive_finish() on the wrong thread -- the lane is
+		 * only ever touched on the submit thread. */
+		SPDK_ERRLOG("snapshot '%s': publish finished but the submit thread "
+			    "is gone (%s)\n",
+			    pub->snapshot->name, spdk_strerror(-rc));
+		free(pub);
+	}
+}
+
+static void
+snapshot_publish_on_owner(void *arg)
+{
+	struct snapshot_publish_ctx *pub = arg;
+
+	/* s3lvol_lvol_flush() refuses while a hot prepare holds the flusher.
+	 * Checked here as well so a prepare that starts during the blob
+	 * freeze cannot be reported as a published snapshot. */
+	if (g_hot_prepare_active || g_hot_prepare_done) {
+		snapshot_publish_done(pub, -EBUSY);
+		return;
+	}
+	/* timeout_us 0 is the flusher's S3_FLUSHER_DRAIN_TIMEOUT_US (30 s), on
+	 * purpose. What has to go is bounded by the overlay (max_bytes, 4 GiB at
+	 * most per lvstore), so a healthy S3 finishes in seconds. The tighter
+	 * bound is the caller's: cubecow gives every RPC rpc_timeout_ms (10 s by
+	 * default), and a longer deadline here would only make this reply later
+	 * than anyone waits for it. When either one trips, the snapshot is kept
+	 * and the caller is told it failed; asking again under the same name
+	 * publishes it (see snapshot_retry_matches()). A larger budget belongs
+	 * with a per-call client timeout for this RPC, not here alone. */
+	lvol_flush(pub->snapshot, true, 0, snapshot_publish_done, pub);
+}
+
+static void
+snapshot_publish_start(struct derive_lane *lane, struct derive_req *req,
+		       struct spdk_lvol *snapshot)
+{
+	struct snapshot_publish_ctx *pub;
+	struct spdk_thread *owner;
+	int rc;
+
+	if (g_hot_prepare_active || g_hot_prepare_done) {
+		SPDK_ERRLOG("snapshot '%s' was created while a hot prepare holds "
+			    "the flusher; its chunks were not published\n",
+			    snapshot->name);
+		derive_finish(lane, req, NULL, -EBUSY);
+		return;
+	}
+
+	/* The flush has to run on the lvstore's thread: the overlay and the
+	 * flusher are owned there, and s3_bs_dev_flush_chunks() asserts it.
+	 * SPDK sets the thread when it allocates the store, so a missing one is
+	 * a bug -- reported rather than run here, where a release build would
+	 * race the flusher. */
+	owner = snapshot->lvol_store ? snapshot->lvol_store->thread : NULL;
+	if (!owner) {
+		SPDK_ERRLOG("snapshot '%s': its lvstore has no owner thread; "
+			    "cannot publish its chunks\n", snapshot->name);
+		derive_finish(lane, req, NULL, -ENODEV);
+		return;
+	}
+
+	pub = calloc(1, sizeof(*pub));
+	if (!pub) {
+		derive_finish(lane, req, NULL, -ENOMEM);
+		return;
+	}
+	pub->lane = lane;
+	pub->req = req;
+	pub->snapshot = snapshot;
+	pub->derive_thread = spdk_get_thread();
+
+	if (owner == pub->derive_thread) {
+		snapshot_publish_on_owner(pub);
+		return;
+	}
+	rc = spdk_thread_send_msg(owner, snapshot_publish_on_owner, pub);
+	if (rc != 0) {
+		free(pub);
+		SPDK_ERRLOG("snapshot '%s': cannot publish its chunks on the "
+			    "lvstore thread: %s\n",
+			    snapshot->name, spdk_strerror(-rc));
+		derive_finish(lane, req, NULL, rc);
+	}
+}
 
 static void
 s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
@@ -3451,6 +3967,14 @@ s3lvol_lvol_derive_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 			    "registered (%d). The data is intact -- re-attach the "
 			    "lvstore to expose it.\n", lvol->name, rc);
 		derive_finish(lane, req, NULL, rc);
+		return;
+	}
+
+	/* Clones name clusters the parent snapshot already published. A snapshot
+	 * has to publish its own frozen clusters before the caller is told it
+	 * exists, so export can record those uuids without draining the lvstore. */
+	if (req && req->is_snapshot) {
+		snapshot_publish_start(lane, req, lvol);
 		return;
 	}
 
@@ -3647,6 +4171,37 @@ derive_issue(struct derive_lane *lane, struct derive_req *req)
 	struct lvol_create_ctx *ctx;
 
 	lane->inflight = req;
+	if (req->is_snapshot && (g_hot_prepare_active || g_hot_prepare_done)) {
+		SPDK_ERRLOG("lvol '%s': refusing snapshot '%s' while a hot prepare "
+			    "holds the flusher; nothing was created, retry once "
+			    "the prepare is resumed or the upgrade completes\n",
+			    req->parent->name, req->name);
+		derive_finish(lane, req, NULL, -EBUSY);
+		return;
+	}
+	/* Looked up here, at the head of the lane, rather than at submit: a
+	 * retry that arrives while the first attempt is still queued or still
+	 * publishing only finds the snapshot once that attempt has run. */
+	if (req->is_snapshot) {
+		struct spdk_lvol *existing = s3lvol_lvol_find(req->lvs, req->name);
+
+		if (existing) {
+			if (!snapshot_retry_matches(req->parent, existing)) {
+				SPDK_ERRLOG("lvol '%s': a snapshot or volume named "
+					    "'%s' already exists and is not an "
+					    "unchanged snapshot of it\n",
+					    req->parent->name, req->name);
+				derive_finish(lane, req, NULL, -EEXIST);
+				return;
+			}
+			SPDK_NOTICELOG("lvol '%s': snapshot '%s' already exists "
+				       "and nothing was written since; publishing "
+				       "it again instead of creating another\n",
+				       req->parent->name, req->name);
+			snapshot_publish_start(lane, req, existing);
+			return;
+		}
+	}
 	ctx = derive_ctx_alloc(req->lvs, req->cb_fn, req->cb_arg);
 	if (!ctx) {
 		derive_finish(lane, req, NULL, -ENOMEM);

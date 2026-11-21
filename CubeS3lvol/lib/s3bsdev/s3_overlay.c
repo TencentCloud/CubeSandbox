@@ -72,6 +72,13 @@ struct overlay_block {
 	/* seq of the WAL entry this content came from. */
 	uint64_t         seq;
 
+	/* Lower bound on the oldest unuploaded sequence on this block. Set
+	 * when the block transitions from absent to present, and advanced only
+	 * when an upload round covering the earlier version succeeds, never
+	 * past that round's flushing_max_seq + 1: a version written after the
+	 * round's merge was not part of the upload. */
+	uint64_t         dirty_seq;
+
 	/* Oldest WAL sequence that must remain recoverable until the current
 	 * content is durable.  A pending overwrite must not let the flusher
 	 * truncate the older, already-durable value that host-crash recovery
@@ -101,6 +108,16 @@ struct overlay_chunk {
 
 	/* Minimum seq over present blocks; UINT64_MAX when none. */
 	uint64_t         min_seq;
+
+	/* Highest seq written to this chunk while it is live. */
+	uint64_t         max_seq;
+
+	/* Highest seq claimed by the currently active flush round. */
+	uint64_t         flushing_max_seq;
+
+	/* Highest seq requested by an explicit chunk flush; non-zero bypasses
+	 * the hold-back policy for this chunk until uploaded. */
+	uint64_t         urgent_seq;
 
 	/* When this chunk first became dirty with nothing already in flight,
 	 * i.e. how long the flusher has been holding it back.
@@ -212,6 +229,7 @@ overlay_chunk_is_full(const struct s3_overlay *ov, const struct overlay_chunk *c
 static void
 overlay_chunk_enqueue(struct s3_overlay *ov, struct overlay_chunk *c)
 {
+	bool urgent;
 	bool ripe;
 
 	/* A chunk being flushed stays off the queues; flush_end re-queues it.
@@ -222,24 +240,34 @@ overlay_chunk_enqueue(struct s3_overlay *ov, struct overlay_chunk *c)
 		return;
 	}
 
-	ripe = overlay_chunk_is_full(ov, c);
+	urgent = (c->urgent_seq != 0);
+	ripe = overlay_chunk_is_full(ov, c) || urgent;
 
 	if (c->queued) {
 		/* Already waiting. The one thing that can have changed is that the
-		 * write which led here filled it up, in which case it graduates to
-		 * ripe_q -- this is the promotion that keeps a full chunk from
+		 * write which led here filled it up (or an explicit flush marked it
+		 * urgent), in which case it graduates to ripe_q -- this is the
+		 * promotion that keeps a full or explicitly flushed chunk from
 		 * waiting behind a partial one. Nothing ever moves the other way:
 		 * a chunk's dirty count only grows until it is flushed. */
 		if (ripe && !c->ripe) {
 			TAILQ_REMOVE(&ov->aging_q, c, dirty_link);
-			TAILQ_INSERT_TAIL(&ov->ripe_q, c, dirty_link);
+			if (urgent) {
+				TAILQ_INSERT_HEAD(&ov->ripe_q, c, dirty_link);
+			} else {
+				TAILQ_INSERT_TAIL(&ov->ripe_q, c, dirty_link);
+			}
 			c->ripe = true;
 		}
 		return;
 	}
 
 	if (ripe) {
-		TAILQ_INSERT_TAIL(&ov->ripe_q, c, dirty_link);
+		if (urgent) {
+			TAILQ_INSERT_HEAD(&ov->ripe_q, c, dirty_link);
+		} else {
+			TAILQ_INSERT_TAIL(&ov->ripe_q, c, dirty_link);
+		}
 	} else {
 		/* Tail, so aging_q stays ordered by the time each chunk became
 		 * dirty and its head is always the one closest to ageing out. */
@@ -369,6 +397,7 @@ overlay_block_release(struct s3_overlay *ov, struct overlay_chunk *c,
 	b->flushing = false;
 	b->durable  = false;
 	b->seq      = 0;
+	b->dirty_seq = 0;
 	b->durable_floor_seq = 0;
 }
 
@@ -563,6 +592,7 @@ overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 			if (b->state == OVERLAY_ABSENT) {
 				c->n_present++;
 				c->n_dirty++;
+				b->dirty_seq = seq;
 			} else if (b->flushing) {
 				/* Written while being flushed: it must survive
 				 * flush_end, so take it back out of the flush. */
@@ -602,6 +632,9 @@ overlay_write(struct s3_overlay *ov, uint64_t lba, uint32_t nblocks,
 			}
 
 			b->seq = seq;
+			if (seq > c->max_seq) {
+				c->max_seq = seq;
+			}
 			b->durable = durable;
 			if (durable || b->durable_floor_seq == 0) {
 				b->durable_floor_seq = seq;
@@ -889,6 +922,9 @@ s3_overlay_drop_chunk(struct s3_overlay *ov, uint64_t chunk_index)
 	}
 
 	c->min_seq = UINT64_MAX;
+	c->max_seq = 0;
+	c->flushing_max_seq = 0;
+	c->urgent_seq = 0;
 
 	/* Invalidate any flush that already collected this chunk: publishing it
 	 * afterwards would resurrect data the caller just unmapped. */
@@ -925,6 +961,9 @@ s3_overlay_drop_chunk_upto(struct s3_overlay *ov, uint64_t chunk_index,
 	/* Same reason as the full drop: a flush may already hold the bytes
 	 * this unmap just retired. Newer blocks stay and are flushed again. */
 	c->epoch++;
+	if (c->urgent_seq <= seq) {
+		c->urgent_seq = 0;
+	}
 	overlay_chunk_recalc_min_seq(ov, c);
 
 	if (c->n_dirty == 0 || c->n_pending != 0) {
@@ -1209,7 +1248,8 @@ s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
 	 * ripe_q and is already forced or expired, flush it ahead of younger
 	 * full chunks so it cannot pin the FIFO write-back ring head or WAL
 	 * truncation point behind a stream of full writes. */
-	if (aging && (!ripe || aging->min_seq < ripe->min_seq)) {
+	if (aging &&
+	    (!ripe || (ripe->urgent_seq == 0 && aging->min_seq < ripe->min_seq))) {
 		if (force) {
 			ov->stats.flushed_forced++;
 			c = aging;
@@ -1225,10 +1265,14 @@ s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
 	}
 
 	/* Ripe first otherwise. These are the chunks that upload without reading
-	 * the old object back, so they are both the cheapest work available and
-	 * the work the hold-back was waiting to get. */
+	 * the old object back (or that an explicit flush promoted), so they are
+	 * the work the caller or the hold-back was waiting to get. */
 	if (ripe) {
-		ov->stats.flushed_full++;
+		if (overlay_chunk_is_full(ov, ripe)) {
+			ov->stats.flushed_full++;
+		} else {
+			ov->stats.flushed_forced++;
+		}
 		c = ripe;
 		goto take;
 	}
@@ -1316,6 +1360,7 @@ s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 
 	c->n_flushing += claimed;
 	c->n_dirty     = 0;
+	c->flushing_max_seq = max_seq;
 	/* Nothing is dirty any more, so the hold-back clock stops. Writes
 	 * arriving during the round restart it from flush_end. */
 	c->dirty_since_tsc = 0;
@@ -1408,6 +1453,18 @@ s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index, bool success)
 		struct overlay_block *b = &c->blocks[i];
 
 		if (!b->flushing) {
+			/* The round's merge ran after flush_begin and copied
+			 * whatever this block held then, so every version up
+			 * to flushing_max_seq is in S3 (or superseded by what
+			 * is).  A version written after the merge may not be,
+			 * and b->seq can be one of them, so the oldest
+			 * unuploaded sequence is known only to be above
+			 * flushing_max_seq. */
+			if (success && b->state != OVERLAY_ABSENT &&
+			    b->dirty_seq <= c->flushing_max_seq) {
+				b->dirty_seq = spdk_min(b->seq,
+							c->flushing_max_seq + 1);
+			}
 			continue;
 		}
 		if (success) {
@@ -1425,8 +1482,12 @@ s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index, bool success)
 		ov->stats.flushes_failed++;
 	} else {
 		ov->ever_flushed[chunk_index] = 1;
+		if (c->urgent_seq <= c->flushing_max_seq) {
+			c->urgent_seq = 0;
+		}
 	}
 
+	c->flushing_max_seq = 0;
 	c->flush_active = false;
 	ov->flushes_active--;
 
@@ -1435,6 +1496,62 @@ s3_overlay_flush_end(struct s3_overlay *ov, uint64_t chunk_index, bool success)
 	/* Writes that arrived during the flush, or everything if it failed. */
 	overlay_chunk_enqueue(ov, c);
 	overlay_chunk_maybe_free(ov, c);
+}
+
+bool
+s3_overlay_flush_chunk_prepare(struct s3_overlay *ov, uint64_t chunk_index,
+			       uint64_t *out_target_seq)
+{
+	struct overlay_chunk *c;
+
+	if (out_target_seq) {
+		*out_target_seq = 0;
+	}
+	if (!ov) {
+		return false;
+	}
+
+	c = overlay_chunk_get(ov, chunk_index);
+	if (!c || c->n_present == 0 || c->max_seq == 0) {
+		return false;
+	}
+
+	if (c->max_seq > c->urgent_seq) {
+		c->urgent_seq = c->max_seq;
+	}
+	if (c->n_pending == 0) {
+		overlay_chunk_enqueue(ov, c);
+	}
+	if (out_target_seq) {
+		*out_target_seq = c->max_seq;
+	}
+	return true;
+}
+
+bool
+s3_overlay_chunk_flushed_through(struct s3_overlay *ov,
+				 uint64_t chunk_index,
+				 uint64_t target_seq)
+{
+	struct overlay_chunk *c;
+
+	if (!ov || target_seq == 0) {
+		return true;
+	}
+
+	c = overlay_chunk_get(ov, chunk_index);
+	if (!c || c->n_present == 0) {
+		return true;
+	}
+
+	for (uint32_t i = 0; i < ov->blocks_per_chunk; i++) {
+		const struct overlay_block *b = &c->blocks[i];
+
+		if (b->state != OVERLAY_ABSENT && b->dirty_seq <= target_seq) {
+			return false;
+		}
+	}
+	return true;
 }
 
 uint64_t

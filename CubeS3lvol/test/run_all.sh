@@ -341,12 +341,16 @@ echo ""
 # reported.
 # --------------------------------------------------------------------------
 echo "--- building"
-if ! make --no-print-directory >"${LOG_DIR}/build.log" 2>&1; then
+# Parallel: the 24 test programs are independent links, each pulling DPDK in
+# whole, and built one after another they dominate a run. Output goes to the
+# logs, so interleaving costs nothing.
+BUILD_JOBS="$(nproc 2>/dev/null || echo 4)"
+if ! make --no-print-directory -j"${BUILD_JOBS}" >"${LOG_DIR}/build.log" 2>&1; then
 	echo "  FAIL  build -- see ${LOG_DIR}/build.log" >&2
 	tail -20 "${LOG_DIR}/build.log" | sed 's/^/        /' >&2
 	exit 1
 fi
-if ! make --no-print-directory -C test/integration >"${LOG_DIR}/build_tests.log" 2>&1; then
+if ! make --no-print-directory -j"${BUILD_JOBS}" -C test/integration >"${LOG_DIR}/build_tests.log" 2>&1; then
 	echo "  FAIL  building the tests -- see ${LOG_DIR}/build_tests.log" >&2
 	tail -20 "${LOG_DIR}/build_tests.log" | sed 's/^/        /' >&2
 	exit 1
