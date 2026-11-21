@@ -99,7 +99,7 @@ A **Rust** library providing thin-provisioned volume management with O(1) snapsh
 - **Incremental dirty-page tracking**: snapshots only persist anonymous (dirty) memory pages that have changed since the last snapshot — unchanged pages remain shared via reflink, minimizing both write amplification and snapshot size.
 - Cubelet calls CubeCoW for all rootfs and memory volume operations (create, clone, snapshot, delete).
 
-### CubeEgress (Security Proxy)
+### CubeEgress (Egress Proxy)
 
 Per-host transparent **L7 egress proxy** (OpenResty + Lua) that intercepts every outbound HTTP/HTTPS request via TPROXY:
 
@@ -194,6 +194,6 @@ Security is enforced at multiple levels:
 - [Sandbox Lifecycle](../guide/lifecycle.md) — state model, auto-pause, and auto-resume.
 - [Snapshot, Rollback & Clone](../guide/snapshot-rollback-clone.md) — CubeCoW-powered advanced APIs.
 - [Cross-Node Migration](../guide/cross-node-snapshot/requirements.md) — Pause / Resume / FromSnap on another node with JuiceFS or CubeS3lvol.
-- [Security Proxy](../guide/security-proxy.md) — CubeEgress domain filtering and credential injection.
+- [Egress Proxy (Filtering & Secrets)](../guide/security-proxy.md) — CubeEgress domain filtering and credential injection.
 - [Performance Benchmark](../guide/performance-benchmark.md) — cold-start, snapshot, and density numbers.
 - [Templates Overview](../guide/templates.md) — the three-step template lifecycle.

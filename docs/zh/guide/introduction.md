@@ -55,4 +55,4 @@ Cube Sandbox 是一款**专为 AI Agent 打造的基础设施** —— 可托管
 * [Kubernetes 部署](./kubernetes/) — 在已有 K8s 集群上用 Helm 安装。
 * [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 模板制作分步指南。
 * [WebUI 管理控制台](./webui.md) — 安装完成即可可视化管理。
-* [安全代理与凭据保险箱](./security-proxy.md) — CubeEgress 域名过滤与审计。
+* [出网安全代理（过滤与凭证注入）](./security-proxy.md) — CubeEgress 域名过滤与审计。

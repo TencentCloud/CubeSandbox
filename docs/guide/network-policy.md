@@ -11,7 +11,7 @@ This page explains:
 - Which traffic reaches CubeEgress and which traffic does not.
 - Common configuration examples and troubleshooting steps.
 
-For request-level L7 behavior such as full HTTP/HTTPS rule matching, audit logs, header injection, and TLS CA handling, see [Security Proxy](./security-proxy.md). This page focuses on the network-layer path that makes proxy routing possible.
+For request-level L7 behavior such as full HTTP/HTTPS rule matching, audit logs, header injection, and TLS CA handling, see [Egress Proxy (Filtering & Secrets)](./security-proxy.md). This page focuses on the network-layer path that makes proxy routing possible.
 
 ## Overall architecture
 

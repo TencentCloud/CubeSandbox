@@ -241,4 +241,4 @@ ECONNREFUSED（退出码 2），`sandbox-port-mapping.py` 会打印排查清单
 
 - [网络策略](./network-policy.md) —— 沙箱出站白/黑名单与 L7 规则。
 - [限制公开访问](./restrict-public-access.md) —— CubeProxy 入口的 per-sandbox token。
-- [安全代理](./security-proxy.md) —— 出站 HTTP/HTTPS 的域名过滤与凭证注入。
+- [出网安全代理（过滤与凭证注入）](./security-proxy.md) —— 出站 HTTP/HTTPS 的域名过滤与凭证注入。
