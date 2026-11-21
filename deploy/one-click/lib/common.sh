@@ -505,6 +505,23 @@ load_env_file() {
   fi
 }
 
+# Print KEY as an env file defines it, without touching this shell. The file is
+# sourced the way load_env_file does it -- nounset off, so a reference to a
+# variable this run does not define expands empty instead of aborting -- in a
+# subshell with KEY unset first, so an absent key yields DEFAULT rather than
+# this run's value.
+env_file_value() {
+  local env_file="$1" key="$2" default="${3-}"
+  [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid env key: ${key}"
+  (
+    set +u
+    unset "${key}"
+    # shellcheck disable=SC1090
+    source "${env_file}" >/dev/null
+    printf '%s' "${!key:-${default}}"
+  )
+}
+
 # Installer desired-state keys: on/off switches and selectors whose this-run
 # value must survive the upgrade env merge. The merge treats a bundle-.env
 # value as an explicit operator override only when it differs from the new
@@ -780,6 +797,57 @@ apply_one_click_rcow_log_intent() {
     # install-logrotate.sh reads these from its environment.
     export "${key?}"
   done
+  return 0
+}
+
+# RCOW_NODE_ID is only a commented example in env.example, so on upgrade
+# merge_env_three_way re-emits the previous .one-click.env value as a
+# preserved extra, and sourcing the merge output overwrites whatever this run
+# asked for. The live-upgrade identity guard then compared the old value with
+# itself: an explicit change (inventory-7 -> inventory-8) was neither applied
+# nor refused, just dropped. Snapshot this run's intent before any file is
+# sourced and replay it after the merge, before the guard.
+#
+# Any active `RCOW_NODE_ID=` line in the bundle .env is intent, an empty one
+# included (clear it): the template only carries a commented example, so an
+# active line is never a copied default. Precedence, as for the toggles:
+# .env > process environment > merged value.
+snapshot_one_click_node_id_intent() {
+  local env_file="$1"
+  ONE_CLICK_NODE_ID_ENV_SET=0
+  ONE_CLICK_NODE_ID_ENV=""
+  ONE_CLICK_NODE_ID_DOTENV_SET=0
+  ONE_CLICK_NODE_ID_DOTENV=""
+  if [[ -n "${RCOW_NODE_ID+x}" ]]; then
+    ONE_CLICK_NODE_ID_ENV_SET=1
+    ONE_CLICK_NODE_ID_ENV="${RCOW_NODE_ID}"
+  fi
+  if [[ -f "${env_file}" ]] && grep -q '^RCOW_NODE_ID=' "${env_file}"; then
+    ONE_CLICK_NODE_ID_DOTENV_SET=1
+  fi
+  return 0
+}
+
+# Run right after load_env_file of the bundle .env, so a quoted value is
+# replayed as the shell interpreted it.
+capture_one_click_node_id_dotenv_value() {
+  [[ "${ONE_CLICK_NODE_ID_DOTENV_SET:-0}" == 1 ]] || return 0
+  ONE_CLICK_NODE_ID_DOTENV="${RCOW_NODE_ID-}"
+  return 0
+}
+
+apply_one_click_node_id_intent() {
+  if [[ "${ONE_CLICK_NODE_ID_DOTENV_SET:-0}" == 1 ]]; then
+    RCOW_NODE_ID="${ONE_CLICK_NODE_ID_DOTENV}"
+    log "RCOW_NODE_ID='${RCOW_NODE_ID}' (explicit in .env)"
+  elif [[ "${ONE_CLICK_NODE_ID_ENV_SET:-0}" == 1 ]]; then
+    RCOW_NODE_ID="${ONE_CLICK_NODE_ID_ENV}"
+    log "RCOW_NODE_ID='${RCOW_NODE_ID}' (explicit in process environment)"
+  else
+    return 0
+  fi
+  # Same visibility load_env_file (set -a) gives the merged value.
+  export RCOW_NODE_ID
   return 0
 }
 
@@ -1262,6 +1330,18 @@ one_click_deploy_role() {
 
 is_compute_role() {
   [[ "$(one_click_deploy_role)" == "compute" ]]
+}
+
+s3lvol_node_id_upgrade_allowed() {
+  local old_enabled="${1:-0}"
+  local old_id="${2:-}"
+  local new_id="${3:-}"
+
+  # A disabled installation owns no lvstore, so enabling it may choose its
+  # identity. Once enabled, changing identity requires a clean unload before
+  # the in-place upgrade starts; install.sh cannot safely manufacture that
+  # transition while preserving live NVMe devices.
+  [[ "${old_enabled}" != "1" || "${old_id}" == "${new_id}" ]]
 }
 
 env_value_is_plain_scalar() {

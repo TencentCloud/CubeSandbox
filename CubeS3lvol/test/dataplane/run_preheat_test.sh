@@ -244,29 +244,40 @@ dev_of_nsid()
 	local want="$1" base ns id want_n dev
 
 	base="$(ctrl_base)" || return 1
-	want_n="$(nsid_number "${want}")" || want_n=""
+	# The namespace just exposed may not be in sysfs yet. Returning some other
+	# block device — including the only one already present — makes the next
+	# volume's reads hit the previous volume. Wait until this nsid is visible.
+	want_n="$(nsid_number "${want}")" || return 1
+	[ -n "${want_n}" ] || return 1
 	for ns in /sys/class/nvme/"${base}"/nvme*n* \
 		/sys/class/nvme/"${base}"n* \
 		/sys/block/"${base}"n*; do
 		[ -e "${ns}" ] || continue
 		dev="/dev/$(basename "${ns}")"
 		[ -b "${dev}" ] || continue
-		if [ -n "${want_n}" ] && [ -r "${ns}/nsid" ]; then
-			id="$(nsid_number "$(cat "${ns}/nsid" 2>/dev/null)")" || id=""
-			if [ "${id}" = "${want_n}" ]; then
-				printf '%s' "${dev}"
-				return 0
-			fi
-			continue
+		[ -r "${ns}/nsid" ] || continue
+		id="$(nsid_number "$(cat "${ns}/nsid" 2>/dev/null)")" || continue
+		if [ "${id}" = "${want_n}" ]; then
+			printf '%s' "${dev}"
+			return 0
 		fi
-		printf '%s' "${dev}"
-		return 0
 	done
-	dev="$(devs_of_ctrl | head -1)"
-	if [ -n "${dev}" ] && [ -b "${dev}" ] && [ "$(devs_of_ctrl | wc -l)" = "1" ]; then
-		printf '%s' "${dev}"
-		return 0
-	fi
+	return 1
+}
+
+dev_nsid_readable()
+{
+	local name base ns
+
+	name="$(basename "$1")"
+	base="$(ctrl_base)" || return 1
+	for ns in "/sys/class/nvme/${base}/${name}" \
+		"/sys/class/nvme/${name}" \
+		"/sys/block/${name}"; do
+		if [ -r "${ns}/nsid" ]; then
+			return 0
+		fi
+	done
 	return 1
 }
 
@@ -292,12 +303,25 @@ wait_dev_nsid()
 			printf '%s' "${dev}"
 			return 0
 		fi
+		# A device that appeared since the wait started, but whose nsid
+		# dev_of_nsid() could not match. The retry loop above already
+		# covers "sysfs has not caught up yet", so the only case left for
+		# this fallback is a layout where the nsid is not readable at
+		# all. Accepting a readable-but-different nsid would hand back
+		# another volume's device -- one ns-rescan can expose several
+		# namespaces at once, and then the first name in sort order is
+		# not necessarily the one asked for.
 		now="$(devs_of_ctrl | sort)"
-		dev="$(comm -13 <(printf '%s\n' "${before}") <(printf '%s\n' "${now}") | head -1)"
-		if [ -n "${dev}" ] && [ -b "${dev}" ]; then
+		while read -r dev; do
+			[ -n "${dev}" ] || continue
+			[ -b "${dev}" ] || continue
+			if dev_nsid_readable "${dev}"; then
+				continue
+			fi
 			printf '%s' "${dev}"
 			return 0
-		fi
+		done < <(comm -13 <(printf '%s\n' "${before}") \
+			 <(printf '%s\n' "${now}"))
 		sleep 0.2
 	done
 	return 1
