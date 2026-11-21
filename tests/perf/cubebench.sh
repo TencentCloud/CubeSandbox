@@ -76,6 +76,11 @@
 #   bash cubebench.sh 4.1 4.3               # same, "run" may be omitted
 #   bash cubebench.sh run 4                 # run a whole chapter (all 4.x sections)
 #   bash cubebench.sh run -y 4.3            # skip the destructive-run confirmation prompt
+#   bash cubebench.sh search                # search all three P95 concurrency boundaries
+#   bash cubebench.sh search 4.3            # search one section, using its latest history if available
+#   bash cubebench.sh search --history DIR 4 # use prior readings for 4.3 and 4.6
+#   bash cubebench.sh search --preview      # print first probes without running measurements
+#   bash cubebench.sh search sections       # list searchable sections
 #   bash cubebench.sh sections              # list the selectable sections
 #   bash cubebench.sh help
 #
@@ -104,6 +109,12 @@
 #   CUBE_OPS_PORT         CubeOps internal API port, default 3010
 #   CUBE_PROXY_NODE_IP    CubeProxy address used to reach sandboxes, default 127.0.0.1
 #   CUBE_PROXY_PORT_HTTP  CubeProxy HTTP port, default 80
+#   CUBE_BENCH_SLO_CONCURRENCY  run one 500-request round at this concurrency (1..500)
+#                         for a single section: 3.2, 4.3 or 4.6
+#   CUBE_BENCH_SLO_OUTPUT  new JSON file for that round's raw samples
+#   CUBE_TEMPLATE_ID      ready template to reuse across SLO rounds
+#   CUBE_SNAPSHOT_ID      ready snapshot to reuse for section 4.3 SLO rounds
+#   CUBE_BENCH_SDK_VENV   optional existing venv with the SDK for 4.x SLO rounds
 #   OUTPUT_MD             report output path, default /tmp/cubebench_<timestamp>.md
 #   PYTHON_BIN            python interpreter, default python3
 #   PIP_INDEX_URL         read by pip itself; set it when the host cannot reach PyPI directly,
@@ -567,6 +578,62 @@ cmd_sections() {
 # ---------------------------------------------------------------------------
 # Subcommand: run  (drive the selected sections, write the markdown report)
 # ---------------------------------------------------------------------------
+validate_slo_round() {
+	local section="$1" c="${CUBE_BENCH_SLO_CONCURRENCY:-}"
+	case "$section" in
+	3.2 | 4.3 | 4.6) ;;
+	*) color_echo "ERROR: select exactly one of 3.2, 4.3 or 4.6 for an SLO round" >&2; return 1 ;;
+	esac
+	if ! [[ "$c" =~ ^[1-9][0-9]{0,2}$ ]] || (( c > 500 )); then
+		color_echo "ERROR: SLO concurrency must be an integer from 1 to 500" >&2
+		return 1
+	fi
+	if [[ -z "${CUBE_TEMPLATE_ID:-}" || ( "$section" == 4.3 && -z "${CUBE_SNAPSHOT_ID:-}" ) ]]; then
+		color_echo "ERROR: set CUBE_TEMPLATE_ID and, for 4.3, CUBE_SNAPSHOT_ID" >&2
+		return 1
+	fi
+	if [[ -z "${CUBE_BENCH_SLO_OUTPUT:-}" || -e "$CUBE_BENCH_SLO_OUTPUT" || -L "$CUBE_BENCH_SLO_OUTPUT" ]]; then
+		color_echo "ERROR: CUBE_BENCH_SLO_OUTPUT must name a new JSON file" >&2
+		return 1
+	fi
+	CUBE_BENCH_SLO_OUTPUT="$(abs_path "$CUBE_BENCH_SLO_OUTPUT" "$PWD")"
+	if [[ ! -w "$(dirname "$CUBE_BENCH_SLO_OUTPUT")" ]]; then
+		color_echo "ERROR: SLO output directory must exist and be writable" >&2
+		return 1
+	fi
+	if [ -n "${CUBE_BENCH_SDK_VENV:-}" ]; then
+		CUBE_BENCH_SDK_VENV="$(abs_path "$CUBE_BENCH_SDK_VENV" "$PWD")"
+	fi
+}
+
+slo_template_image() {
+	local template_id="$1" raw
+	if ! raw="$(cubemaster tpl info --template-id "$template_id" --json)"; then
+		color_echo "ERROR: could not query template $template_id" >&2
+		return 1
+	fi
+	# The CLI omits image_info for templates without image metadata.
+	if ! jq -ers --arg id "$template_id" '
+		select(length == 1) | .[0] | objects | select(.template_id == $id) | .image_info
+		| if . == null or . == "" then "unknown" else strings end
+	' <<<"$raw"; then
+		color_echo "ERROR: invalid info for template $template_id: expected a matching template_id and optional string image_info" >&2
+		return 1
+	fi
+}
+
+run_slo_round() {
+	local section="$1" c="$CUBE_BENCH_SLO_CONCURRENCY"
+	if [ "$section" = 3.2 ]; then
+		run_cube_bench -c "$c" -n 500 -w 0 -m create-only --no-tui -o "$CUBE_BENCH_SLO_OUTPUT" || return 1
+	else
+		prepare_snapshot_bench || return 1
+		python "$REPO_ROOT/tests/perf/cubebench_slo_workload.py" "$section" \
+			-c "$c" -n 1 --requests 500 --output "$CUBE_BENCH_SLO_OUTPUT" || return 1
+	fi
+	printf 'Raw samples for concurrency %s: %s\n' "$c" "$CUBE_BENCH_SLO_OUTPUT" | tee -a "$OUTPUT_MD"
+}
+
 cmd_run() {
 	local orig_pwd sections section need_examples=0 need_cube_bench=0
 	local assume_yes="${CUBE_BENCH_YES:-0}"
@@ -586,6 +653,9 @@ cmd_run() {
 	set -- "${rest[@]}"
 
 	sections="$(parse_sections "$@")" || exit 1
+	if [[ -n "${CUBE_BENCH_SLO_CONCURRENCY+x}${CUBE_BENCH_SLO_OUTPUT+x}" ]]; then
+		validate_slo_round "$sections" || exit 1
+	fi
 	case " $sections " in
 	*" 4."*) need_examples=1 ;;
 	esac
@@ -729,12 +799,13 @@ cmd_run() {
 	cd "$WORK_DIR" || exit 1
 
 	CUBE_BENCH_LOG="$WORK_DIR/cube-bench.log"
-	DATA_TXT="$WORK_DIR/data.txt"
-
-	BENCH_TABLE="$WORK_DIR/bench_table.py"
-	write_bench_table_py "$BENCH_TABLE"
-	TO_MD="$WORK_DIR/to_md.py"
-	write_to_md_py "$TO_MD"
+	if [ -z "${CUBE_BENCH_SLO_CONCURRENCY:-}" ]; then
+		DATA_TXT="$WORK_DIR/data.txt"
+		BENCH_TABLE="$WORK_DIR/bench_table.py"
+		write_bench_table_py "$BENCH_TABLE"
+		TO_MD="$WORK_DIR/to_md.py"
+		write_to_md_py "$TO_MD"
+	fi
 
 	# Reset before building the template, and honor the status like every
 	# section-level env_reset does. Ignoring it here would let a stuck destroy or
@@ -747,12 +818,16 @@ cmd_run() {
 		exit 1
 	fi
 
-	CUBE_TEMPLATE_IMAGE="${CUBE_TEMPLATE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest}"
-	CUBE_TEMPLATE_ID="$(create_tpl "${CUBE_TEMPLATE_IMAGE}")"
-	export CUBE_TEMPLATE_ID
-	if [ -z "$CUBE_TEMPLATE_ID" ] || [ "$CUBE_TEMPLATE_ID" = "null" ]; then
-		color_echo "ERROR: failed to create template from ${CUBE_TEMPLATE_IMAGE}" >&2
-		exit 1
+	if [ -n "${CUBE_BENCH_SLO_CONCURRENCY:-}" ]; then
+		CUBE_TEMPLATE_IMAGE="$(slo_template_image "$CUBE_TEMPLATE_ID")" || exit 1
+	else
+		CUBE_TEMPLATE_IMAGE="${CUBE_TEMPLATE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest}"
+		CUBE_TEMPLATE_ID="$(create_tpl "${CUBE_TEMPLATE_IMAGE}")"
+		export CUBE_TEMPLATE_ID
+		if [ -z "$CUBE_TEMPLATE_ID" ] || [ "$CUBE_TEMPLATE_ID" = "null" ]; then
+			color_echo "ERROR: failed to create template from ${CUBE_TEMPLATE_IMAGE}" >&2
+			exit 1
+		fi
 	fi
 
 	wait_status_to_ready "${CUBE_TEMPLATE_ID}" || exit 1
@@ -802,12 +877,15 @@ cmd_run() {
 		echo ""
 	} | tee -a "$OUTPUT_MD"
 
+	local slo_failed=0
 	for section in $sections; do
 		# Use ### so the "3.2 / 4.1 ..." sections nest as subsections rather than
 		# becoming siblings of the report's own "## N ..." chapters above
 		emit_heading "### $(section_title "$section")"
 		SECTION_FAIL_REASON=""
-		if ! run_section "$section"; then
+		if [ -n "${CUBE_BENCH_SLO_CONCURRENCY:-}" ]; then
+			run_slo_round "$section" || slo_failed=1
+		elif ! run_section "$section"; then
 			{
 				echo "> Section skipped: ${SECTION_FAIL_REASON:-setup failed, see the terminal output}."
 				echo ""
@@ -815,7 +893,9 @@ cmd_run() {
 		fi
 	done
 
-	env_reset
+	if ! env_reset && [ -n "${CUBE_BENCH_SLO_CONCURRENCY:-}" ]; then
+		slo_failed=1
+	fi
 
 	color_echo "report: $OUTPUT_MD"
 	cat "$OUTPUT_MD"
@@ -824,6 +904,7 @@ cmd_run() {
 	# and snapshots behind that this script does not track, so tell the operator
 	# to sweep them manually rather than silently accumulating them across runs
 	color_echo "HINT: leftover templates/snapshots (tpl/snap) created by the 4.x runs may remain; review and clean them up manually"
+	return "$slo_failed"
 }
 
 # ---------------------------------------------------------------------------
@@ -1234,7 +1315,7 @@ prepare_snapshot_bench() {
 	# Shared setup for the 4.x sections: a venv with the cubesandbox SDK plus the
 	# bench script directory as cwd. Done on first use so a 3.x-only run needs
 	# neither python3-venv nor network access.
-	local log="$WORK_DIR/venv.log"
+	local log="$WORK_DIR/venv.log" configured_venv="" venv
 	case "${SNAPSHOT_BENCH_STATE:-}" in
 	ready) ;;
 	failed)
@@ -1243,24 +1324,29 @@ prepare_snapshot_bench() {
 		;;
 	*)
 		SNAPSHOT_BENCH_STATE=failed
-		if ! "${PYTHON_BIN}" -m venv "$WORK_DIR/.venv" >"$log" 2>&1; then
+		if [ -n "${CUBE_BENCH_SLO_CONCURRENCY:-}" ]; then
+			configured_venv="${CUBE_BENCH_SDK_VENV:-}"
+		fi
+		venv="${configured_venv:-$WORK_DIR/.venv}"
+		if [ -z "$configured_venv" ] && ! "${PYTHON_BIN}" -m venv "$venv" >"$log" 2>&1; then
 			snapshot_bench_failed "cannot create a python venv with ${PYTHON_BIN}, install python3-venv" "$log"
 			return 1
 		fi
 		# shellcheck source=/dev/null
-		if ! . "$WORK_DIR/.venv/bin/activate"; then
-			snapshot_bench_failed "cannot activate the venv in ${WORK_DIR}/.venv"
+		if ! . "$venv/bin/activate"; then
+			snapshot_bench_failed "cannot activate the venv in $venv"
 			return 1
 		fi
 		# Reuse the bench scripts' own requirements so the SDK version stays in
 		# one place
-		if ! pip install -r "$EXAMPLES_DIR/requirements.txt" >"$log" 2>&1; then
+		if [ -z "$configured_venv" ] && ! pip install -r "$EXAMPLES_DIR/requirements.txt" >"$log" 2>&1; then
 			snapshot_bench_failed "pip install -r ${EXAMPLES_DIR}/requirements.txt failed, set PIP_INDEX_URL to a reachable index if this host cannot use PyPI directly" "$log"
 			return 1
 		fi
-		# Record the concrete SDK version now that it is installed, so the report
-		# reflects what actually ran rather than the version spec
-		SDK_INSTALLED_VERSION="$(read_installed_sdk_version)"
+		if ! SDK_INSTALLED_VERSION="$(python -c 'import cubesandbox; from importlib.metadata import version; print(version("cubesandbox"))' 2>"$log")"; then
+			snapshot_bench_failed "cannot load the cubesandbox SDK in $venv" "$log"
+			return 1
+		fi
 		SNAPSHOT_BENCH_STATE=ready
 		;;
 	esac
@@ -1347,13 +1433,6 @@ sdk_version() {
 			awk 'tolower($0) ~ /cubesandbox/ {gsub(/[ \t]/, ""); print; exit}')"
 	fi
 	printf '%s\n' "${spec:-unknown}"
-}
-
-read_installed_sdk_version() {
-	# Query the concrete cubesandbox version from the active venv. Called after
-	# pip install so the report can show exactly what was benchmarked.
-	pip show cubesandbox 2>/dev/null |
-		awk -F': ' '/^Version:/ {print $2; exit}'
 }
 
 repo_commit() {
@@ -1953,6 +2032,21 @@ run_mvm_bench() {
 main() {
 	local sub="${1:-run}"
 	case "$sub" in
+	search)
+		shift
+		case "${1:-}" in
+		sections)
+			if [ "$#" -ne 1 ]; then
+				color_echo "ERROR: search sections takes no arguments" >&2
+				return 2
+			fi
+			local section
+			for section in 3.2 4.3 4.6; do section_title "$section"; done
+			;;
+		help) "$PYTHON_BIN" "$REPO_ROOT/tests/perf/cubebench_slo_search.py" run --help ;;
+		*) "$PYTHON_BIN" "$REPO_ROOT/tests/perf/cubebench_slo_search.py" run "$@" ;;
+		esac
+		;;
 	sections)
 		cmd_sections
 		;;
