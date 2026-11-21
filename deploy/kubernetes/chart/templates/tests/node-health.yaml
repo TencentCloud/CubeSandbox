@@ -122,6 +122,19 @@ spec:
           echo "${container_names}" | grep -qxF 'cube-egress-net'
           {{- end }}
 
+          {{- if .Values.egressProxy.enabled }}
+          echo '[health-test] check EgressProxy DaemonSet readiness'
+          egress_ns=cube-egress
+          for egress_ds in \
+            {{ include "cube.fullname" . }}-egress-configurer \
+            {{ include "cube.fullname" . }}-egress-proxy-primary \
+            {{ include "cube.fullname" . }}-egress-proxy-standby; do
+            egress_ds_json="$(kget "/apis/apps/v1/namespaces/${egress_ns}/daemonsets/${egress_ds}")"
+            printf '%s\n' "${egress_ds_json}" | grep -Eq '"numberReady"[[:space:]]*:[[:space:]]*[1-9]'
+            printf '%s\n' "${egress_ds_json}" | grep -Eq '"desiredNumberScheduled"[[:space:]]*:[[:space:]]*[1-9]'
+          done
+          {{- end }}
+
           {{- if .Values.cubeS3lvol.enabled }}
           echo '[health-test] check CubeS3lvol container by name in CubeNode pods'
           pods_json="$(kget "/api/v1/namespaces/${ns}/pods?labelSelector=app.kubernetes.io/component%3Dcube-node")"
