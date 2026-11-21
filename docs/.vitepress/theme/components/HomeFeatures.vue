@@ -140,9 +140,9 @@ const features = computed(() => isZh.value ? [
     category: 'SYS_STORAGE // VOLUME_BUS',
     metric: 'STORAGE: DECOUPLED_MOUNT',
     title: '解耦式 Volume 存储插件框架',
-    summary: '存储生命周期与沙箱运行时彻底解耦，提供标准 S3、本地 Host Mount 等可插拔驱动插件，支持独立生命周期管理、热插拔挂载与多沙箱协同读写。',
-    link: '/zh/guide/volume-plugin',
-    action: '查看 Volume 插件开发',
+    summary: '存储生命周期与沙箱运行时彻底解耦，内置 S3、JuiceFS、NFS、COS 等可插拔驱动插件，支持独立生命周期管理、按沙箱只读挂载与多沙箱协同读写。',
+    link: '/zh/guide/volume',
+    action: '查看 Volume 使用',
     spanClass: 'grid-span-3'
   },
   {
@@ -240,9 +240,9 @@ const features = computed(() => isZh.value ? [
     category: 'SYS_STORAGE // VOLUME_BUS',
     metric: 'STORAGE: DECOUPLED_MOUNT',
     title: 'Decoupled Volume Storage Framework',
-    summary: 'Storage lifecycles operate independently from sandbox instances. Pluggable drivers support S3, host mounts, and shared block volumes with seamless hotplug.',
-    link: '/guide/volume-plugin',
-    action: 'Explore Volume Plugins',
+    summary: 'Storage lifecycles operate independently from sandbox instances. Pluggable drivers support S3, JuiceFS, NFS, and COS with per-sandbox read-only mounts and multi-sandbox sharing.',
+    link: '/guide/volume',
+    action: 'Explore Volumes',
     spanClass: 'grid-span-3'
   },
   {
@@ -524,7 +524,7 @@ const features = computed(() => isZh.value ? [
                 <!-- Pluggable Volume Entity -->
                 <rect x="130" y="15" width="75" height="50" stroke="currentColor" stroke-width="1" stroke-opacity="0.75" fill="currentColor" fill-opacity="0.06" />
                 <text x="138" y="30" fill="currentColor" font-size="7.5" font-family="monospace" font-weight="bold">PERSIST_VOL</text>
-                <text x="138" y="42" fill="currentColor" fill-opacity="0.5" font-size="6.5" font-family="monospace">BACKEND: S3/HOST</text>
+                <text x="138" y="42" fill="currentColor" fill-opacity="0.5" font-size="6.5" font-family="monospace">BACKEND: S3/JFS/NFS</text>
                 <text x="138" y="52" fill="currentColor" fill-opacity="0.5" font-size="6.5" font-family="monospace">LIFECYCLE: INDEP</text>
               </svg>
 

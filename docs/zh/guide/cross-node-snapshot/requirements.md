@@ -71,5 +71,5 @@ type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5
 
 需要注意的是，外部存储也会限制调度：
 
-- **host-mount**：如果沙箱使用了 host-mount 挂载的 Volume，则无法跨机迁移。因为需要无法保证挂载的目录在目标节点上也能访问，见 [host-mount 限制](../persistent-storage.md)。从 fs-only 快照创建的沙箱不记录挂载，需在创建时重新声明，按普通新建沙箱调度。
-- **Plugin Volume**：如果沙箱使用了 Plugin Volume，则沙箱可以跨机，但需要保证目标节点上也安装了对应的 driver 并能访问后端。Cube 不会自动检查目标节点上的 Volume 状态以及是否可用，需要 Volumn 开发者自行保证，见 [Plugin Volume 限制](../volume-plugin.md)
+- **host-mount**：如果沙箱使用了 host-mount 挂载宿主机目录，则无法跨机迁移，因为无法保证挂载的目录在目标节点上也能访问。从 fs-only 快照创建的沙箱不记录挂载，需在创建时重新声明，按普通新建沙箱调度。
+- **Plugin Volume**：如果沙箱使用了 Plugin Volume，则沙箱可以跨机，但需要保证目标节点上也安装了对应的 driver 并能访问后端。Cube 不会自动检查目标节点上的 Volume 状态以及是否可用，需要运维侧自行保证，见 [Volume 使用](../volume.md#_4-5-配合快照、回滚、克隆与跨机恢复)

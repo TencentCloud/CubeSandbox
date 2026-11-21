@@ -1,115 +1,38 @@
 # Volume Plugin Development
 
-CubeSandbox is gradually adopting e2b Volume compatibility to provide persistent storage across sandbox lifecycles. This guide starts from **architecture and core concepts**, then walks through **protocol details and plugin development**, so you can integrate any storage backend (object storage, NFS, distributed file systems, etc.) into CubeSandbox.
+If you need to connect a custom distributed filesystem, internal object store, block storage service, or other proprietary storage backend to CubeSandbox, you can extend the platform by building a **Volume Plugin**.
 
-> **Version requirement**
->
-> Basic Volume features require **Cube platform ≥ 0.6.0** (CubeMaster, CubeAPI, and Cubelet must all be upgraded) and **Python SDK `cubesandbox` ≥ 0.6.0** for the Python Volume API. Creating a volume with opaque plugin `private_data` requires **CubeAPI, CubeMaster, and Cubelet ≥ 0.8.0**, a plugin that supports this protocol, and **Python/Go/Node SDK ≥ 0.8.0** when using an SDK method. This uses `POST /v2/volumes`; it never falls back to `POST /volumes`.
+> If you only want to deploy and use the ready-made S3, JuiceFS, NFS, or COS plugins, see [Using Volumes](./volume.md).
 
-> **Current status** (API / SDK)
->
-> | Capability | Status |
-> |------------|--------|
-> | REST `GET /volumes` — list volumes | ✅ Supported (Cube ≥ 0.6.0) |
-> | REST `POST /volumes` — create volume | ✅ Supported |
-> | REST `POST /v2/volumes` — create with optional `private_data` | ✅ Cube ≥ 0.8.0; no fallback to `/volumes` |
-> | REST `GET /volumes/{volumeID}` — get volume + token | ✅ Supported |
-> | REST `DELETE /volumes/{volumeID}` — delete volume | ✅ Supported (409 when still mounted) |
-> | Python SDK `Volume.create` / `connect` / `list` / `get_info` / `destroy` | ✅ Supported (SDK ≥ 0.6.0) |
-> | Python SDK `Volume.create_with_private_data` | ✅ Cube + SDK ≥ 0.8.0; no fallback to `/volumes` |
-> | Python SDK `Sandbox.create(volume_mounts={path: volume})` | ✅ Supported (e2b dict mapping) |
-> | Go SDK `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume` | ✅ Supported |
-> | Go SDK `Client.CreateVolumeWithPrivateData` / `CreateVolumeWithPrivateDataOptions` | ✅ Cube + SDK ≥ 0.8.0; no fallback to `/volumes` |
-> | Node SDK `Volume.createWithPrivateData` | ✅ Cube + SDK ≥ 0.8.0; no fallback to `/volumes` |
-> | Go SDK `CreateOptions.VolumeMounts` (incl. `ReadOnly`) | ✅ Supported |
-> | One volume mounted by multiple sandboxes | ✅ Supported |
-> | Per-sandbox read-only attachment | ✅ Cube SDK extension (Python `VolumeMount(..., read_only=True)`, Go `VolumeMount{ReadOnly: true}`); the official e2b SDK itself has no read-only mount option |
-> | Omit `driver` on create (e2b default) | ✅ Supported |
-
-> **e2b API vs SDK**
->
-> CubeAPI exposes **e2b-protocol-compatible** `/volumes` REST endpoints. You can call them directly with HTTP clients.
->
-> The **official e2b Python SDK cannot be used** against CubeSandbox — it is hardcoded to the e2b.cloud backend. Use the **`cubesandbox` Python SDK** (`Volume`, `Sandbox.create(volume_mounts={...})`) or raw REST against your CubeAPI instance.
+This guide is organized into two parts: first, **how the Volume framework works under the hood** (architecture, mount chain, reference counting, and hook protocol); second, **a hands-on walkthrough to build, test, and deploy your first Volume plugin**.
 
 ---
 
-## Quick start: use Volume with `cubesandbox`
+## 1. How Volume Works Under the Hood
 
-Four steps from plugin to a working SDK demo. Details are in the sections linked below.
+> **Diagram legend:** blue fill = Cube platform components; orange fill = Volume Plugin (implemented by you).
 
-### Implement and deploy the plugin
+### 1.1 Dual-Role Model: Controller vs. Node
 
-Implement Create / Destroy (Controller) and Attach / Detach (Node) per the [Hook subsections under Core Concepts](#plugin-types). Deploy the Controller side to **CubeMaster** nodes and the Node side to **Cubelet** nodes (same binary or process may serve both).
+Inspired by Kubernetes CSI, CubeSandbox splits Volume plugin responsibilities into **Control Plane (Controller)** and **Data Plane (Node)** hooks invoked by separate components:
 
-Reference: [COS plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) (one-click packages the binary under `CubeMaster/plugin/` and `Cubelet/plugin/`).
-
-> **Install third-party plugins outside the cubetoolbox tree**, otherwise they are reset on Cube upgrade. See [Registration and Configuration](#registration-and-configuration) and [Plugin Development Guidelines](#plugin-development-guidelines).
-
-### Configure CubeMaster / Cubelet and restart
-
-Register the same `driver` name on both sides (`volume_plugins`), point `binary_path` / `socket_path` at the deployed plugin, then restart CubeMaster and Cubelet so the config is loaded. See [Registration and Configuration](#registration-and-configuration).
-
-### Install the SDK
-
-```bash
-pip install 'cubesandbox>=0.6.0'
-```
-
-For Go, use the `sdk/go` module:
-
-```bash
-go get github.com/tencentcloud/CubeSandbox/sdk/go
-```
-
-Use **`cubesandbox`**, not the official e2b Python SDK. Set `CUBE_API_URL`, `CUBE_TEMPLATE_ID`, and (for remote I/O) `CUBE_PROXY_NODE_IP`. See [Environment Setup](#environment-setup).
-
-### Run the demo
-
-```python
-from cubesandbox import Sandbox, Volume
-
-vol = Volume.create("my-data")  # omit driver → first volume_plugins entry
-
-with Sandbox.create(volume_mounts={"/workspace": vol}) as sb:
-    sb.files.write("/workspace/hello.txt", "from volume")
-    print(sb.files.read("/workspace/hello.txt"))
-
-Volume.destroy(vol.volume_id)
-```
-
-Full lifecycle and multi-sandbox sharing: [SDK Usage](#sdk-usage). COS end-to-end (deps + credentials): [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
-
----
-
-## Core Concepts
-
-> **Diagram legend:** blue fill = Cube platform; orange fill = Volume Plugin (your implementation).
-
-### Problem Statement
-
-Sandboxes need data that **survives restarts and new instances** (model weights, workspace files, etc.). The Cube platform handles API, orchestration, and forwarding; the **Volume Plugin** mounts the real backend (object storage, NFS, …) to a host `hostPath`, which Cubelet exposes to the microVM via virtiofs.
-
-### Dual-Role Model
-
-Inspired by Kubernetes CSI, Hooks split into **control plane** and **data plane**, triggered by different processes:
-
-| Role | Invoked by | Hooks | Responsibility |
+| Role | Invoked By | Hooks | Responsibility |
 |------|------------|-------|----------------|
-| **Controller** | CubeMaster | Create / Destroy | Allocate / delete Volume resources in the backend |
-| **Node** | Cubelet | Attach / Detach | Mount / unmount on the host; produce `hostPath` |
+| **Controller** | CubeMaster | `Create` / `Destroy` | Provision or delete backend resources; optionally issue `token` and persist opaque `private_data` |
+| **Node** | Cubelet | `Attach` / `Detach` | Mount or unmount backend storage on the compute node, returning a `hostPath` inside `volumeBaseDir` |
 
-The same Hook protocol can be implemented as **binary** or **rpc** plugins. All four Hooks may live in one plugin or be split.
+The same Hook contract can be implemented as a **binary** (executable invoked per call) or **rpc** (long-running gRPC service) plugin. All four hooks can live in a single executable/service or be split by role.
 
-#### Control plane: Create / Destroy
+#### Control Plane (Controller)
 
 ```mermaid
 flowchart LR
-    subgraph Cube["Cube platform"]
-        SDK1["SDK"]
+    subgraph Cube["Cube Platform"]
+        SDK1["SDK / REST"]
         API1["CubeAPI"]
         CM["CubeMaster"]
-        SDK1 --> API1 --> CM
+        DB[("t_cube_volume")]
+        SDK1 --> API1 --> CM --> DB
     end
 
     subgraph PluginC["Volume Plugin · Controller"]
@@ -117,9 +40,9 @@ flowchart LR
         CH2["Destroy"]
     end
 
-    BE["Storage backend"]
+    BE[("Storage Backend")]
 
-    CM -->|"POST /volumes"| CH1
+    CM -->|"POST /volumes · /v2/volumes"| CH1
     CM -->|"DELETE /volumes/:id"| CH2
     CH1 --> BE
     CH2 --> BE
@@ -128,16 +51,16 @@ flowchart LR
     style Cube fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
 ```
 
-#### Data plane: Attach / Detach
+#### Data Plane (Node)
 
 ```mermaid
 flowchart LR
-    subgraph Cube2["Cube platform"]
+    subgraph Cube2["Cube Platform"]
         CM2["CubeMaster"]
         CL["Cubelet"]
-        VF["virtiofs\nbind-mount"]
-        SB["microVM"]
-        CM2 -->|"sandbox create"| CL
+        VF["virtiofs<br/>per-sandbox bind-mount"]
+        SB["MicroVM"]
+        CM2 -->|"plugin-volume-mounts /<br/>plugin-volume-sources"| CL
         CL --> VF --> SB
     end
 
@@ -146,10 +69,10 @@ flowchart LR
         NH2["Detach"]
     end
 
-    HP["hostPath"]
+    HP["hostPath<br/>(Cubelet mntns)"]
 
-    CL -->|"sandbox create"| NH1
-    CL -->|"sandbox destroy"| NH2
+    CL -->|"Sandbox create"| NH1
+    CL -->|"Sandbox destroy / rollback"| NH2
     NH1 --> HP
     NH2 --> HP
     HP --> VF
@@ -158,100 +81,173 @@ flowchart LR
     style Cube2 fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
 ```
 
-Whether **binary** or **rpc**, every plugin must implement the **same Hook fields** below. **binary** maps them to CLI flags / stdout JSON (`snake_case`, e.g. `volume_id` → `--volume-id`, `host_path` in JSON); **rpc** uses the same names in `volumeplugin.proto`. CubeMaster / Cubelet pick the plugin by configured `driver` **before** calling a Hook — **`driver` is not a Hook parameter**.
+### 1.2 Data-Plane Mount Chain & Mount Namespace
 
-> **Errors:** **binary** uses non-zero exit and/or non-empty `"error"` in stdout JSON; **rpc** uses gRPC error status (responses have no `error` field).
+Understanding how your plugin's `hostPath` reaches the MicroVM is essential for writing reliable Node hooks. Inside Cubelet (`Cubelet/storage/pluginvolume.go`), the pipeline executes as follows:
 
-### Plugin Types
+1. **Metadata injection**: On sandbox creation, CubeAPI forwards `volumeMounts` to CubeMaster. CubeMaster looks up each Volume in `t_cube_volume` to resolve `driver` and `private_data`, and injects `plugin-volume-mounts` and `plugin-volume-sources` annotations into the Cubelet create request.
+2. **Driver routing & serialization**: Cubelet's `volume.Manager` routes by exact `driver` name and acquires a per-`volumeID` mutex (`volMu`) to serialize concurrent `Attach` / `Detach` calls on the same volume. This prevents two concurrent first-attaches from both seeing `refCount == 0` or an attach/detach race on the shared host mount.
+3. **Host path enforcement**: After `Attach` returns, Cubelet validates `hostPath` via `validateHostPathUnderBase`: it must be an absolute path strictly inside `volume_plugin_base_dir` (default `/data/cube-shared/volume`). If invalid, Cubelet immediately calls `Detach` to roll back and fails sandbox creation.
+4. **Per-sandbox bind mount → virtiofs**: Cubelet bind-mounts `hostPath` (`MS_BIND | MS_REC`) into the sandbox's virtiofs share directory `/data/cubelet/hostdir/<sandboxID>/<rw|ro>/<volumeName>`. When the sandbox requests `readOnly: true`, Cubelet performs an additional `MS_BIND | MS_REMOUNT | MS_RDONLY` remount — so **plugins do not need to enforce per-sandbox read-only mode themselves**.
+5. **Teardown**: When a sandbox is destroyed, Cubelet calls `Detach` (the plugin unmounts the shared backend only if `refCount == 0`), then calls `umount(MNT_DETACH)` on the per-sandbox bind mount.
 
-| Type | Controller | Node | Description |
-|------|------------|------|-------------|
-| **binary** | ✅ | ✅ | External executable; each Hook forks a child process; CLI + stdout JSON |
-| **rpc** | ✅ | ✅ | Long-running gRPC plugin; connect via `socket_path` (Unix socket or TCP) |
+#### Mount Namespace Isolation
 
-Config field `type` selects the plugin type; **`name` (driver) must match end-to-end** on CubeMaster and Cubelet. rpc proto definition: [rpc Plugin Proto Definition](#rpc-plugin-proto-definition).
+Cubelet runs inside an **isolated mount namespace** created via `unshare(CLONE_NEWNS)`:
 
-### Hooks
+- Any mount created by `Attach` (FUSE, NFS, bind mount, etc.) must be visible inside **Cubelet's mount namespace**; host root mntns `/proc/mounts` usually will not show it.
+- **`binary` plugins** are forked directly by Cubelet and **inherit Cubelet's mount namespace automatically** — no extra setup needed.
+- **`rpc` plugins** run as separate long-lived daemons in their own mount namespace; Node-side RPC plugins must ensure mounts appear inside Cubelet's mount namespace (e.g., via mount propagation or entering Cubelet's mntns).
 
-| Hook | Side | Trigger |
-|------|------|---------|
-| **Create** | Controller | `POST /volumes` |
-| **Destroy** | Controller | `DELETE /volumes/:id` |
-| **Attach** | Node | Sandbox create (`volumeMounts`) |
-| **Detach** | Node | Sandbox destroy or create-failure rollback |
+### 1.3 Two-Level RefCount & End-to-End Lifecycle
+
+A Volume may be shared concurrently by multiple sandboxes on the same node or across multiple nodes. CubeSandbox coordinates mounts and delete safety with two levels of reference counting:
+
+- **Node-local RefCount (managed by Cubelet)**: Cubelet persists a per-`(namespace, volumeID)` sandbox count in `refcount.Store`:
+  - Before calling `Attach`, Cubelet calls `Acquire` and passes the **pre-attach count** in `refCount`: `0` means first sandbox on this node (perform backend mount); `> 0` means already mounted (return the existing `hostPath`). If the plugin fails, Cubelet rolls back the local count.
+  - Before calling `Detach`, Cubelet calls `Release` and passes the **post-detach count** in `refCount`: `0` means last sandbox on this node (tear down host mount while **keeping persistent data**); `> 0` is a no-op. If the plugin fails, Cubelet rolls back the local count.
+- **Cluster-wide RefCount (managed by CubeMaster)**: Only when a node's local count transitions **`0 → 1`** or **`1 → 0`** does Cubelet emit an event in the create/destroy response `ext_info["cube-volume-refcount-events"]` (`referenced=1` or `referenced=0`; create-failure rollbacks never emit events). CubeMaster applies `+1` / `-1` (clamped at 0) to `t_cube_volume.refcount`. While `refcount ≠ 0`, `DELETE /volumes/:id` is rejected with HTTP **409**.
+
+```mermaid
+flowchart TD
+    A["Attach(refCount)"] --> B{"refCount == 0 ?"}
+    B -->|yes| C["First attach on this node: mount backend"]
+    B -->|no| D["Reuse existing hostPath on this node"]
+
+    E["Detach(refCount)"] --> F{"refCount == 0 ?"}
+    F -->|yes| G["Last detach on this node: umount (keep data)"]
+    F -->|no| H["Other sandboxes still attached: no-op"]
+```
+
+#### End-to-End Sequence
+
+```mermaid
+sequenceDiagram
+    box rgba(227,242,253,1) Cube Platform
+        participant U as User / SDK
+        participant API as CubeAPI
+        participant M as CubeMaster
+        participant L as Cubelet
+        participant VM as MicroVM
+    end
+    box rgba(255,243,224,1) Volume Plugin
+        participant P as Controller Plugin
+        participant N as Node Plugin
+    end
+
+    Note over U,VM: ① Create Volume (control plane)
+    U->>API: POST /volumes or POST /v2/volumes
+    API->>M: POST /cube/volume
+    M->>P: Create(volumeID, name, private_data)
+    P-->>M: {"token":"...","private_data":"...","error":""}
+    M->>M: write t_cube_volume
+    M-->>U: {volumeID, name, token}
+
+    Note over U,VM: ② Create sandbox with mount (data plane)
+    U->>API: POST /sandboxes {volumeMounts: [{name, path, readOnly}]}
+    API->>M: sandbox create + plugin-volume-mounts
+    M->>L: plugin-volume-sources (driver, private_data)
+    L->>N: Attach(refCount=0, volumeBaseDir, private_data)
+    N-->>L: {host_path, metadata, error:""}
+    L->>L: validate host_path → bind-mount (rw/ro) → virtiofs
+    L-->>M: ext_info (node refcount 0→1)
+    M->>M: t_cube_volume.refcount += 1
+    L->>VM: /workspace ready
+
+    Note over U,VM: ③ Destroy sandbox (data plane)
+    U->>API: DELETE /sandboxes/:id
+    L->>N: Detach(refCount=0, metadata)
+    N-->>L: {"error":""}
+    L->>L: unmount per-sandbox bind-mount
+    L-->>M: ext_info (node refcount 1→0)
+    M->>M: t_cube_volume.refcount -= 1
+
+    Note over U,VM: ④ Delete Volume (control plane)
+    U->>API: DELETE /volumes/:id
+    API->>M: DELETE /cube/volume/:id
+    M->>M: refcount ≠ 0 → HTTP 409
+    M->>P: Destroy(volumeID, stored private_data) (refcount == 0)
+    P-->>M: {"error":""}
+    M->>M: hard-delete DB record
+```
+
+### 1.4 Plugin Types: `binary` vs. `rpc`
+
+| Aspect | `binary` (recommended first) | `rpc` (long-running gRPC) |
+|--------|------------------------------|---------------------------|
+| Invocation | Fork subprocess per hook; CLI flags in, single JSON object on stdout | gRPC calls over `socket_path` (Unix socket or TCP) |
+| Language | Any (Go, Shell, Python, Rust, …) | Any language with gRPC support |
+| Mount namespace | Forked by Cubelet — **inherits Cubelet mntns automatically** | Separate process — must coordinate with Cubelet mntns |
+| Operations | Zero daemon management | Requires process supervision (systemd / DaemonSet) |
+| Best for | Most backends (S3, JuiceFS, NFS, COS default all use binary) | Connection pools, in-memory caches, high-frequency low-latency calls |
+
+In both modes, CubeMaster and Cubelet select the plugin by configured `name` (`driver`) **before** invoking a hook — **`driver` is not a hook argument**.
+
+> **Error reporting**: `binary` plugins signal failure via non-zero exit code and/or a non-empty `"error"` field in stdout JSON; `rpc` plugins return a gRPC error status (protobuf responses have no `error` field).
+
+### 1.5 Hook Protocol Specification
 
 #### Create
 
 | Direction | Field | Type | Description |
 |-----------|-------|------|-------------|
-| Input | `volumeID` | string | Stable ID (UUID or same as `name`) |
+| Input | `volumeID` | string | Stable ID (caller-supplied `name` or server-generated UUID) |
 | Input | `name` | string | Display name |
-| Input | `private_data` | string | Optional opaque caller input, forwarded unchanged by CubeMaster (max **1024** UTF-8 bytes). binary: `--private-data`, omitted when empty |
+| Input | `private_data` | string | Optional opaque caller input forwarded unchanged by CubeMaster (max **1024** UTF-8 bytes). binary: `--private-data`, omitted when empty |
 | Output | `token` | string | Optional auth token returned to SDK |
-| Output | `private_data` | string | Opaque plugin state (max **1024** bytes). Persisted in `t_cube_volume` and forwarded to **Attach** and **Destroy**. Omitted from successful Volume API/SDK responses. May be empty. |
+| Output | `private_data` | string | Opaque plugin state (max **1024** bytes) persisted in `t_cube_volume` and forwarded to **Attach** and **Destroy**; omitted from Volume API/SDK responses. May be empty |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
-| Output | `error_kind` | string | Optional closed-set error classification for binary Create failures; omit on success. See below. |
+| Output | `error_kind` | string | Optional closed-set error classification for binary Create failures; **must be omitted** on success |
 
-**binary example**
-
-Input (CLI):
+**binary example:**
 
 ```bash
-/path/to/my-plugin --op create --volume-id my-vol --name my-vol
-# For non-empty caller input, add one argument containing the original value:
-#   --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
+# Input (--private-data is omitted when caller input is empty)
+/opt/cube-plugins/my-plugin --op create --volume-id my-vol --name my-vol \
+  --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
+
+# Success output (stdout JSON, exit 0)
+{"token":"","private_data":"{\"v\":1,\"bucket\":\"bucket-a\",\"prefix\":\"workspaces/a/\",\"cred_ref\":\"user-a\"}","error":""}
 ```
 
-Output (stdout JSON, exit 0):
+**Typed binary Create errors (`error_kind`):**
 
-```json
-{"token":"","private_data":"","error":""}
-```
-
-**Binary Create errors.** Plugins return an error kind, not an HTTP status or a CubeMaster `ret_code`:
+Plugins return an error kind rather than an HTTP status or CubeMaster `ret_code`:
 
 ```json
 {"error":"cred_ref is required","error_kind":"invalid_argument"}
 ```
 
-`error_kind` is a closed set containing only `invalid_argument`. All other values are treated as unknown:
+`error_kind` is a closed set containing only `invalid_argument`; all other values are treated as unknown:
 
-| `error_kind` | CubeMaster `ret_code` | CubeAPI HTTP status | Behavior |
+| `error_kind` | CubeMaster `ret_code` | CubeAPI HTTP Status | Behavior |
 | --- | --- | --- | --- |
-| `invalid_argument` | 130400 | 400 | Supported for binary Create |
-| Missing, unknown or malformed kind in a failure | 130593 | 500 | Generic failure |
+| `invalid_argument` | `130400` | `400` | Caller input error on binary Create |
+| Missing, unknown, or malformed | `130593` | `500` | Generic plugin failure |
 
-The plugin must write one complete JSON response with a non-empty `error`. The Create driver recognizes the supported kind on a normal process exit, including a non-zero exit, while the command context remains active; exit 0 with a non-empty `error` also remains a failure. Process startup errors and processes interrupted by cancellation, timeouts or signals remain execution failures regardless of stdout. Malformed or incomplete responses and unsupported kinds remain generic failures. A response containing `error_kind` without a non-empty `error`, including an empty or `null` kind, is a protocol failure. The existing success form remains exit 0, an empty `error`, and no `error_kind`; unrelated extension fields are still allowed.
-
-CubeMaster keeps HTTP 200 for this plugin-error response envelope and selects the business `ret_code`; CubeAPI translates that code to the public HTTP status. This classification currently applies only to binary Create. Destroy, RPC plugins and Cubelet Attach/Detach retain their existing error handling.
-
-The JSON `error` message for a caller error must be safe to display publicly: do not include credentials, credential-file paths or raw `private_data`. The driver does not append stderr or the original execution diagnostic to a typed caller error. Stderr remains a diagnostic channel; adding an error kind does not make arbitrary plugin messages safe.
-
-Compatibility requires retaining the string `error` field and a failing exit status when emitting a typed error. New CubeMaster versions continue to accept old success responses and treat old untyped failures as generic errors. An old CubeMaster still rejects a new plugin's exit-1 error response, but normally reports 500 because it cannot read the kind. Upgrade both CubeMaster and the plugin to get the new classification; no new CLI argument is required.
+Protocol rules:
+- Emit one complete JSON object with a non-empty `error`, and exit non-zero (e.g. `exit 1`) so older CubeMasters still treat it as a failure.
+- A response containing `error_kind` (even `""` or `null`) without a non-empty `error` is a protocol failure.
+- Process startup failures and processes interrupted by cancellation, timeouts, or signals remain execution failures regardless of stdout.
+- Public `error` messages must **never** include credentials, credential-file paths, or raw `private_data`. The driver does not append stderr to typed caller errors; stderr remains a diagnostic channel.
+- Destroy, RPC plugins, and Cubelet Attach/Detach retain their existing error handling.
 
 #### Destroy
 
 | Direction | Field | Type | Description |
 |-----------|-------|------|-------------|
-| Input | `volumeID` | string | Volume to delete in backend |
-| Input | `private_data` | string | Plugin-returned state read from `t_cube_volume`; on create-failure rollback, the state returned by Create. binary: `--private-data`, omitted when empty |
+| Input | `volumeID` | string | Volume to delete in the backend |
+| Input | `private_data` | string | Plugin-returned state from `t_cube_volume` (or Create's returned state during create-failure rollback). binary: `--private-data`, omitted when empty |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
-Plugin locates backend resources using `volumeID` and the returned `private_data` (for example, its assigned bucket/prefix). Destroy must only delete resources belonging to that volume; it does **not** auto-Detach running sandboxes.
-
-**binary example**
-
-Input (CLI):
+Use `volumeID` and `private_data` to delete only resources belonging to that volume. Destroy does **not** auto-Detach running sandboxes.
 
 ```bash
-/path/to/my-plugin --op destroy --volume-id my-vol
-# For non-empty state returned by Create, add:
-#   --private-data '{"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
-```
+# Input (--private-data is omitted when stored state is empty)
+/opt/cube-plugins/my-plugin --op destroy --volume-id my-vol \
+  --private-data '{"v":1,"bucket":"bucket-a","prefix":"workspaces/a/","cred_ref":"user-a"}'
 
-Output (stdout JSON, exit 0):
-
-```json
+# Success output (stdout JSON, exit 0)
 {"error":""}
 ```
 
@@ -261,35 +257,23 @@ Output (stdout JSON, exit 0):
 |-----------|-------|------|-------------|
 | Input | `sandboxID` | string | Sandbox being created |
 | Input | `namespace` | string | containerd namespace |
-| Input | `volumeID` | string | Same as `volumeMounts[].name` |
-| Input | `refCount` | int64 | Sandbox count **on this node before** attach; `0` = first on this node |
-| Input | `volumeBaseDir` | string | Parent dir; `hostPath` **must** be inside it |
-| Input | `private_data` | string | Same opaque blob Create returned (from `t_cube_volume`); may be empty. binary: optional `--private-data` (omitted when empty) |
-| Output | `hostPath` | string | Path in Cubelet mntns for virtiofs bind |
-| Output | `metadata` | map[string]string | Opaque state; echoed back on Detach |
+| Input | `volumeID` | string | Volume ID (matches `volumeMounts[].name`) |
+| Input | `refCount` | int64 | Sandbox count **on this node before** attach; `0` = first attach on this node |
+| Input | `volumeBaseDir` | string | Required parent dir; `hostPath` **must** be strictly inside it |
+| Input | `private_data` | string | Persisted state returned by Create; omitted as `--private-data` when empty |
+| Output | `hostPath` | string | Absolute path in Cubelet mntns (recommended `<volumeBaseDir>/<driver>-<volumeID>`) |
+| Output | `metadata` | map[string]string | Opaque map persisted by Cubelet and echoed unchanged on Detach |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
-- `refCount == 0`: **first attach on this node** — perform backend mount.
-- `refCount > 0`: **another sandbox on this node** already references the volume — return existing `hostPath` (+ `metadata`); do not mount again.
-- **`hostPath`:** absolute path under `volumeBaseDir` (recommended `<volumeBaseDir>/<plugin-name>-<volumeID>`). Otherwise Cubelet rejects attach, rolls back, and fails sandbox create. Default `volumeBaseDir`: `/data/cube-shared/volume`.
-
-**binary example**
-
-Input (CLI):
-
 ```bash
-/path/to/my-plugin --op attach \
+# Input
+/opt/cube-plugins/my-plugin --op attach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
   --volume-base-dir /data/cube-shared/volume
-# optional when Create returned non-empty private_data:
-#   --private-data 'volumes/my-vol/'
-```
 
-Output (stdout JSON, exit 0):
-
-```json
-{"host_path":"/data/cube-shared/volume/my-storage-my-vol","metadata":{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"},"error":""}
+# Success output (stdout JSON, exit 0)
+{"host_path":"/data/cube-shared/volume/demo-my-vol","metadata":{"mount_dir":"/data/cube-shared/volume/demo-my-vol"},"error":""}
 ```
 
 #### Detach
@@ -299,387 +283,37 @@ Output (stdout JSON, exit 0):
 | Input | `sandboxID` | string | Same as Attach |
 | Input | `namespace` | string | Same as Attach |
 | Input | `volumeID` | string | Same as Attach |
-| Input | `refCount` | int64 | Sandbox count **on this node after** detach; `0` = last on this node |
-| Input | `metadata` | map[string]string | Exact map from Attach |
+| Input | `refCount` | int64 | Sandbox count **on this node after** detach; `0` = last sandbox on this node |
+| Input | `metadata` | map[string]string | Exact map returned by Attach (JSON object string for binary) |
 | Output | `error` | string | `""` on success (binary stdout JSON only) |
 
-- `refCount == 0`: **last sandbox on this node** — tear down shared backend mount (keep persistent data).
-- `refCount > 0`: other sandbox(es) on this node still attached — no-op.
-
-**binary example**
-
-Input (CLI):
-
 ```bash
-/path/to/my-plugin --op detach \
+# Input
+/opt/cube-plugins/my-plugin --op detach \
   --sandbox-id sb-001 --namespace default \
   --volume-id my-vol --ref-count 0 \
-  --metadata '{"mount_dir":"/data/cube-shared/volume/my-storage-my-vol"}'
-```
+  --metadata '{"mount_dir":"/data/cube-shared/volume/demo-my-vol"}'
 
-Output (stdout JSON, exit 0):
-
-```json
+# Success output (stdout JSON, exit 0)
 {"error":""}
 ```
 
-### `private_data` contract
+### 1.6 `private_data` Contract
 
-Legacy CubeAPI `POST /volumes` keeps its existing `name`/`driver` request definition. The separate `POST /v2/volumes` accepts optional `private_data` and forwards it unchanged to CubeMaster's internal `POST /cube/volume`. It returns HTTP 400 before calling CubeMaster for values over 1024 UTF-8 bytes, containing NUL, or containing characters outside the BMP. Omitted or null input omits the field in the Master request; an explicit empty string is forwarded as empty. Both APIs return the same volume response and share existing query, delete and sandbox mount APIs.
+- Legacy `POST /volumes` keeps its existing `name` / `driver` schema; `POST /v2/volumes` accepts optional `private_data` and forwards it unchanged to CubeMaster `POST /cube/volume`.
+- **Content rules**: Both caller input **A** and plugin-returned state **B** must be valid UTF-8, at most **1024 bytes** (`len`, not character count), contain no NUL bytes, and contain only BMP characters (≤ U+FFFF). CubeMaster treats the value as opaque (no JSON parsing, trimming, or normalization) and returns HTTP 400 (`ret_code = 130400`) on violation.
+- **State flow**: Create receives **A** and may return normalized state **B**. CubeMaster **persists only B** and forwards B to Attach and Destroy. Returning an empty string stores empty — CubeMaster never falls back to A.
+- **Create rollback**: If Create succeeds but validation of B or DB persistence fails, CubeMaster performs a best-effort rollback `Destroy(volumeID, B)` (logging only `volume_id`, `driver`, `phase`, and a fixed error class on failure — never the state or raw plugin error).
+- **Security rule**: `private_data` is stored in plaintext in the DB and passed via annotations/CLI args. Carry only bucket, prefix, region, or a **credential reference (`cred_ref`)** — **never plaintext secrets**. Plugins must never log `private_data` or echo it in error messages.
 
-SDKs expose the new creation path explicitly: Go `Client.CreateVolumeWithPrivateData`, Python `Volume.create_with_private_data`, and Node `Volume.createWithPrivateData`. Existing create methods continue to call `/volumes`. New methods require support in CubeAPI, every CubeMaster serving volume operations, and the selected plugin; they never fall back to the legacy route. Follow the [upgrade order](#private_data-upgrade-order) before using them: an older Master can silently discard the input even when the new API returns 201.
+### 1.7 rpc Plugin Proto Definition
 
-CubeMaster treats the value as an opaque string: it does not parse JSON, trim whitespace, or normalize storage paths. Both caller input A and Create's returned state B must be valid UTF-8, at most **1024 bytes** (Go `len`, not character count), contain no NUL, and use only characters through U+FFFF. This applies to every Controller transport because the same state may later be sent to a binary Node plugin. Validation happens after the outer JSON request has been decoded; ASCII text such as the literal characters `\uD83D\uDE00` is passed unchanged and is not parsed a second time.
+RPC plugins implement the two gRPC services in [`pkgs/proto/services/volumeplugin/v1/volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto), whose fields match the Hook specification above:
 
-CubeMaster returns **HTTP 400** with `ret.ret_code = 130400` when this content validation fails. Invalid A is rejected before reserving a database row or calling the plugin. Invalid B triggers the existing best-effort rollback and reservation cleanup before that response. CubeAPI maps this envelope to HTTP 400 and also accepts the HTTP 200 + `130400` envelope from earlier Masters. Request-decoding failures and other internal error paths retain their existing response conventions.
-
-- Create receives caller input A and may return different state B. Only B is persisted and forwarded to Attach and normal Destroy.
-- An empty return is stored as empty; CubeMaster does not fall back to A.
-- If Create succeeds but validation of B or its DB update fails, rollback Destroy receives B directly, including the full value when B exceeds the persistence limit. Cleanup is best effort; binary argument limits or plugin errors can prevent it.
-- If rollback Destroy fails, CubeMaster logs the volume ID, driver, failure phase, and a fixed error category, without the state or the raw plugin error. It still attempts to delete the reserved DB row; automatic cleanup recovery is not provided. A failed DB update does not establish whether state was committed.
-- Binary Create/Destroy and Node Attach reject NUL before starting a process. Node checks also protect against invalid legacy state. An RPC rollback may still carry the invalid returned state so that the plugin can attempt cleanup.
-
-Use bucket, prefix, endpoint/region, and a credential reference such as `cred_ref`; **never put plaintext access keys or secrets in `private_data`**. The plugin exchanges the reference for credentials outside the sandbox. The value is stored in plaintext in the DB and forwarded through annotations, and binary arguments are visible on the host. Binary arguments cannot contain NUL bytes.
-
-Plugins must not log this field or include it in error messages. Existing error paths can echo binary stderr/stdout, structured plugin errors, or gRPC status messages into API errors; HTTP debug body dumping can also log the request when enabled. The controller forwarding change does not provide comprehensive error/log redaction.
-
-### RefCount
-
-One Volume may be shared by multiple sandboxes. Cubelet maintains a **per-node** reference count and passes `refCount` into Node Hooks:
-
-| When | `refCount` | Plugin behavior |
-|------|------------|-----------------|
-| Before Attach | `0` | First sandbox on **this node**; establish backend mount |
-| Before Attach | `> 0` | Another sandbox on **this node** already attached; return existing `hostPath` |
-| After Detach | `0` | Last sandbox on **this node**; tear down shared backend mount |
-| After Detach | `> 0` | Other sandbox(es) on this node still attached; no-op |
-
-**When a node's local count flips 0→1 or 1→0, Cubelet notifies CubeMaster, which updates `t_cube_volume.refcount`; control-plane `DELETE /volumes` is rejected while that count is non-zero.**
-
-```mermaid
-flowchart TD
-    A["Attach(refCount)"] --> B{"refCount == 0 ?"}
-    B -->|yes| C["First attach on this node"]
-    B -->|no| D["Reuse hostPath on this node"]
-
-    E["Detach(refCount)"] --> F{"refCount == 0 ?"}
-    F -->|yes| G["Last detach on this node"]
-    F -->|no| H["no-op"]
-```
-
-### End-to-End Lifecycle
-
-```mermaid
-sequenceDiagram
-    box rgba(227,242,253,1) Cube platform
-        participant U as User / SDK
-        participant API as CubeAPI
-        participant M as CubeMaster
-        participant L as Cubelet
-        participant VM as microVM
-    end
-    box rgba(255,243,224,1) Volume Plugin
-        participant P as Controller Plugin
-        participant N as Node Plugin
-    end
-
-    Note over U,VM: ① Create Volume (control plane)
-    U->>API: POST /volumes {name, driver}
-    API->>M: POST /cube/volume
-    M->>P: Create(volumeID, name, private_data)
-    P-->>M: stdout JSON {"token":"...","private_data":"...","error":""}
-    M->>M: write t_cube_volume
-    M-->>U: {volumeID, name, token}
-
-    Note over U,VM: ② Create sandbox with mount (data plane)
-    U->>API: POST /sandboxes {volumeMounts: [{name, path}]}
-    API->>M: sandbox create + annotations
-    M->>L: plugin-volume-sources annotation
-    L->>N: Attach(refCount=0)
-    N-->>L: AttachResult {hostPath, metadata, ...}
-    L->>L: bind-mount → virtiofs
-    L-->>M: response ext_info (node refcount 0→1)
-    M->>M: t_cube_volume.refcount += 1
-    L->>VM: /workspace visible
-
-    Note over U,VM: ③ Destroy sandbox (data plane)
-    U->>API: DELETE /sandboxes/:id
-    L->>N: Detach(refCount=0)
-    N-->>L: ok
-    L->>L: unmount bind
-    L-->>M: response ext_info (node refcount 1→0)
-    M->>M: t_cube_volume.refcount -= 1
-
-    Note over U,VM: ④ Delete Volume (control plane)
-    U->>API: DELETE /volumes/:id
-    API->>M: DELETE /cube/volume/:id
-    M->>M: refcount ≠ 0 → reject delete
-    M->>P: Destroy(volumeID, stored private_data) (when refcount == 0)
-    P-->>M: ok
-    M->>M: hard-delete DB record
-```
-
-CubeAPI forwards `volume_mounts` for plugin volumes via the `plugin-volume-mounts` annotation; CubeMaster injects them into each container's `VolumeMounts` before calling Cubelet (see `hostdir_mount.go`).
-
----
-
-## SDK Usage
-
-Examples below use **Python SDK `cubesandbox` ≥ 0.6.0**; for Go see [Go SDK Usage](#go-sdk-usage). CubeAPI exposes e2b-compatible `/volumes` REST endpoints; applications should prefer the SDK over raw HTTP.
-
-### e2b compatibility note
-
-| Layer | e2b compatible? | Notes |
-|-------|-----------------|-------|
-| CubeAPI `/volumes` REST | ✅ Yes | `POST/GET/DELETE /volumes`, `GET /volumes/{volumeID}` |
-| Official e2b Python SDK | ❌ No | Hardcoded to e2b.cloud; **do not use** with CubeSandbox |
-| `cubesandbox` Python SDK | ✅ Yes | `Volume`, `Sandbox.create(volume_mounts={path: volume})` (e2b dict) |
-| `cubesandbox` Go SDK (`sdk/go`) | ✅ Yes | `Client.CreateVolume / ListVolumes / GetVolume / DeleteVolume`; mounts use the explicit `CreateOptions.VolumeMounts` structs (not the e2b dict) |
-| Omit `driver` on create | ✅ Yes | CubeMaster uses the **first** `volume_plugins` entry |
-| Per-sandbox read-only attachment | ❌ No | The official e2b SDK itself has no read-only Volume mount option; Cube SDK adds `VolumeMount(volume, read_only=True)` |
-| Re-send `volumeMounts` when creating from a snapshot | ✅ Yes | Accepted when identical to the snapshot's mounts; omitting them also works. Changed mounts are rejected (see [Snapshot, rollback, clone, and cross-node restore](#snapshot-rollback-clone-and-cross-node-restore)) |
-
-For a full COS plugin walkthrough, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
-
-### Environment Setup
-
-```bash
-pip install 'cubesandbox>=0.6.0'
-
-export CUBE_API_URL=http://<cubeapi-host>:3000
-export CUBE_TEMPLATE_ID=<your-template-id>
-
-# Required for remote access: data plane via CubeProxy, bypassing *.cube.app DNS
-export CUBE_PROXY_NODE_IP=<cubeproxy-node-ip>
-
-# Optional when auth is enabled
-# export CUBE_API_KEY=<key>
-```
-
-| Variable | Description |
-|----------|-------------|
-| `CUBE_API_URL` | CubeAPI control-plane address |
-| `CUBE_TEMPLATE_ID` | Template ID for sandbox creation |
-| `CUBE_PROXY_NODE_IP` | CubeProxy node IP; sandbox I/O after mount uses the data plane |
-| `CUBE_API_KEY` | Optional; maps to `X-API-Key` when auth is enabled |
-
-### Full Lifecycle (create → mount → unmount → delete)
-
-```python
-from cubesandbox import Sandbox, Volume
-
-# ① Create Volume (control plane) → live Volume instance (e2b compatible)
-# e2b compatible: omit driver — same as Volume.create("my-data")
-vol = Volume.create("my-data")
-# Or pick a specific plugin:
-# vol = Volume.create("my-data", driver="my-storage")
-print(vol.volume_id, vol.name, vol.token)  # token from plugin; may be empty
-
-# List / get_info → VolumeInfo (plain data, not a live handle)
-for v in Volume.list():
-    print(v.volume_id, v.name)              # list omits token
-info = Volume.get_info(vol.volume_id)       # get_info includes token
-
-# Reconnect to an existing volume (e2b Volume.connect)
-# vol = Volume.connect(vol.volume_id)
-
-# ② Create sandbox with Volume mount (data plane: Attach)
-with Sandbox.create(
-    volume_mounts={"/workspace": vol},
-) as sb:
-    sb.files.write("/workspace/note.txt", "persisted!")
-    print(sb.files.read("/workspace/note.txt"))
-
-# ③ Exit with / sb.kill() destroys sandbox (data plane: Detach)
-
-# ④ Delete Volume (control plane: Destroy)
-Volume.destroy(vol.volume_id)  # returns True; False when already gone (idempotent)
-```
-
-| SDK parameter | Description |
-|---------------|-------------|
-| `Volume.create(name, driver=...)` | Returns a **Volume instance**; `name` optional; server generates UUID as `volume_id` if omitted; must match `^[a-zA-Z0-9_-]+$`, max 128 chars |
-| `Volume.connect(volume_id)` | Returns a **Volume instance** (e2b compatible; wraps `get_info`) |
-| `Volume.list()` | Returns `list[VolumeInfo]` (no token) |
-| `Volume.get_info(volume_id)` | Returns **VolumeInfo**; includes `token` (empty string when the plugin returns none) |
-| `Volume.destroy(volume_id)` | e2b-compatible delete; `True` on success, `False` on 404 (idempotent) |
-| `Volume.delete(...)` | Backward-compat alias for `destroy` (prefer `destroy`) |
-| `driver` | Optional plugin name; **e2b compatible usage omits it** — SDK sends no field, CubeMaster uses the **first** entry in `volume_plugins` |
-| `volume_mounts` | e2b dict `{mount_path: Volume \| volume_id \| name}` — key is path inside sandbox, value is a `Volume` instance or volume ID string; Cube SDK can additionally wrap the value with `VolumeMount(..., read_only=True)` for a read-only attachment |
-
-`driver` is stored in `t_cube_volume` and forwarded to Cubelet via annotations — `volume_plugins[].name` must match on both CubeMaster and Cubelet.
-
-### Go SDK Usage
-
-The Go SDK (`sdk/go`) covers the same full lifecycle and uses the same environment variables as Python:
-
-```go
-import (
-	"context"
-	"errors"
-
-	cubesandbox "github.com/tencentcloud/CubeSandbox/sdk/go"
-)
-
-client := cubesandbox.NewClient(cubesandbox.NewConfigFromEnv())
-ctx := context.Background()
-
-// ① Create a volume (control plane) — omitting Driver selects the first volume_plugins entry
-volume, err := client.CreateVolume(ctx, cubesandbox.CreateVolumeOptions{Name: "my-data"})
-
-// List / get one
-volumes, err := client.ListVolumes(ctx)              // no tokens
-volume, err = client.GetVolume(ctx, volume.VolumeID) // includes token
-
-// ② Create a sandbox with the volume mounted (data plane: Attach); ReadOnly is the Cube read-only extension
-sb, err := client.Create(ctx, cubesandbox.CreateOptions{
-	TemplateID: "base",
-	VolumeMounts: []cubesandbox.VolumeMount{
-		{Name: volume.VolumeID, Path: "/workspace"},
-		// {Name: volume.VolumeID, Path: "/dataset", ReadOnly: true}
-	},
-})
-
-// ③ Destroy the sandbox (data plane: Detach)
-err = sb.Kill(ctx)
-
-// ④ Delete the volume (control plane: Destroy)
-if err := client.DeleteVolume(ctx, volume.VolumeID); err != nil {
-	switch {
-	case errors.Is(err, cubesandbox.ErrVolumeInUse):
-		// still mounted (HTTP 409) — destroy the sandboxes using it first
-	case errors.Is(err, cubesandbox.ErrVolumeNotFound):
-		// already gone — idempotent cleanup can ignore this
-	}
-}
-```
-
-Differences from the Python SDK: mounts are the explicit `[]VolumeMount{Name, Path, ReadOnly}` structs (not the e2b dict mapping), and delete outcomes are distinguished with the `ErrVolumeInUse` / `ErrVolumeNotFound` sentinel errors via `errors.Is`. Name rules, the omitted-driver behavior, and token-less list results match Python. See [`sdk/go/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/sdk/go/README.md) for more examples.
-
-### Per-sandbox access mode
-
-The e2b-compatible mapping remains the default and creates a read-write attachment. CubeSandbox extends the mapping value with `VolumeMount`, allowing each sandbox to choose its own access mode for the same persistent Volume:
-
-```python
-from cubesandbox import Sandbox, Volume, VolumeMount
-
-dataset = Volume.create("shared-dataset")
-
-# This sandbox may update the Volume.
-writer = Sandbox.create(
-    volume_mounts={"/dataset": dataset},
-)
-
-# The same Volume is protected from mutations in this sandbox.
-reader = Sandbox.create(
-    volume_mounts={"/dataset": VolumeMount(dataset, read_only=True)},
-)
-```
-
-The official e2b SDK's Volume mount API has no read-only option; this is not a CubeSandbox compatibility limitation. Cube SDK and REST clients can opt into the Cube extension `volumeMounts[].readOnly: true`, while existing e2b-shaped requests omit `readOnly` and keep their original read-write behavior.
-
-Read-only is an **attachment property**, not a property of the Volume itself. The reader cannot create, modify, rename, or delete files through its mount, but it can observe changes made through another read-write attachment. It is not an immutable snapshot. A sandbox may currently attach a given Volume only once; mounting the same Volume twice in one sandbox remains rejected.
-
-### Multiple Sandboxes Sharing One Volume
-
-```python
-# e2b compatible: omit driver (defaults to first plugin in CubeMaster config)
-vol = Volume.create("shared-data")
-# vol = Volume.create("shared-data", driver="my-storage")
-
-sb_a = Sandbox.create(volume_mounts={"/workspace": vol})
-sb_a.files.write("/workspace/shared.txt", "from A")
-
-sb_b = Sandbox.create(volume_mounts={"/workspace": vol})
-print(sb_b.files.read("/workspace/shared.txt"))  # from A
-
-sb_a.kill()
-sb_b.kill()
-Volume.destroy(vol.volume_id)
-```
-
-One Volume may be mounted by multiple sandboxes simultaneously; data written from one sandbox is visible to others. Destroy **all** sandboxes using the Volume before calling `Volume.destroy()` (see [RefCount](#refcount) for how the platform tracks shared usage).
-
-### Snapshot, rollback, clone, and cross-node restore
-
-Snapshots store the stable Volume ID, container mount path, and read-only flag. They do not copy Volume data or persist runtime `private_data`. FromSnap asks Master to resolve the current Volume record and sends that driver metadata to the target Cubelet for `Attach`. Pause/Resume validates the recorded Volume IDs and reattaches from the pause package, while in-place rollback keeps the sandbox's existing external attachment.
-
-When creating a sandbox from a snapshot, `volumeMounts` may be omitted: the snapshot's recorded mounts are reattached automatically. Re-sending them, as official e2b clients do on every create, is also accepted as long as they match the snapshot exactly (same volumes, paths, and read-only flags). Any difference is rejected with HTTP 400 (`volumeMounts must match the snapshot's volume mounts`), because the snapshot's VM memory already has its mounts in place and cannot be remounted elsewhere.
-
-**A filesystem-only snapshot records no mounts, so re-declare `volumeMounts` on
-the create request** (container paths included). Anything you leave out is not
-mounted, and no must-match check applies. A failed attach or mount (unknown
-Volume, driver error) fails the create instead of leaving an empty directory.
-
-This produces **external-reference** behavior:
-
-- FromSnap and rollback restore VM/rootfs state, but the mounted Volume exposes its current data.
-- Clones continue to share the same Volume. Writes through a read-write mount are visible to the source and other clones.
-- A plugin Volume does not pin an otherwise cross-node-capable VM snapshot to its origin. For an S3 VM snapshot with `remote_status=ready`, the target Cubelet attempts to attach the Volume before starting the VM.
-- The scheduler currently checks VM compatibility, not Volume portability, topology, multi-attach support, or target driver availability. A missing Volume, unregistered target driver, or `Attach` error fails sandbox creation. Configure every eligible node with the same driver and access to the intended backend.
-
-The Volume backend and VM snapshot backend are independent. The VM snapshot package must use the `jfs` or `s3` backend for cross-node restore; the plugin Volume may use any backend that its target-side driver can attach. Raw host mounts remain pinned to their origin node.
-
-### Common SDK Errors
-
-| Scenario | SDK exception | Typical cause |
-|----------|---------------|---------------|
-| Volume not found | `VolumeNotFoundError` (404) | Invalid ID for `Volume.get_info` / `Volume.connect` |
-| Unknown driver | `ApiError` (400, CubeMaster 130400) | No matching `volume_plugins` entry |
-| Volume still referenced | `ApiError` (409, CubeMaster 130409) | Delete while the volume is still mounted by a sandbox |
-| Invalid volume name | `ValueError` | Client-side validation; name fails `^[a-zA-Z0-9_-]+$` |
-| Mount non-existent volume | `ApiError` | Sandbox `volumeMounts[].name` was never created |
-| Changed mounts on snapshot restore | `ApiError` (400, CubeMaster 130400) | `volumeMounts` sent when creating from a snapshot differ from the snapshot's mounts |
-
-> **Note:** When a volume is still mounted by any sandbox, `Volume.destroy()` returns **409**. Destroy all sandboxes using the volume first, then delete. Delete does **not** automatically unmount running sandboxes.
-
----
-
-## Registration and Configuration
-
-### CubeMaster (conf.yaml)
-
-```yaml
-volume_plugins:
-  - name: <driver>
-    type: binary
-    binary_path: <binary_path>
-
-  - name: <driver>
-    type: rpc
-    socket_path: /run/<driver>.sock   # bare Unix path; plugin SOCKET must match
-```
-
-### Cubelet (config.toml)
-
-```toml
-[plugins."io.cubelet.internal.v1.storage"]
-  volume_plugin_base_dir = "<volume_plugin_base_dir>"
-
-[[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
-  name        = "<driver>"
-  type        = "binary"       # binary | rpc
-  binary_path = "<binary_path>"
-
-[[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
-  name        = "<driver>"
-  type        = "rpc"
-  socket_path = "/run/<driver>.sock"   # same path as plugin SOCKET
-```
-
-**`driver` name must be consistent end-to-end:** `Volume.create(..., driver=...)` (or first list entry when omitted) → DB → annotations → Cubelet routes by the same `name`. CubeMaster and Cubelet **`volume_plugins[].name` must match**.
-
-**`volume_plugin_base_dir`:** every plugin `host_path` **must** be under this directory (default `/data/cube-shared/volume` when unset). Cubelet passes it to plugins as `volumeBaseDir` (rpc) / `--volume-base-dir` (binary) and rejects attach if `host_path` is outside it.
-
-> **`binary_path` / `socket_path` location:** install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade.
-
-**`name` must be unique** within each process: no two `volume_plugins` entries with the same `name`. List order sets the default plugin when API/SDK omits `driver`.
-
----
-
-## rpc Plugin Proto Definition
-
-rpc plugins implement gRPC services in [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto). Message fields match the [Hook definitions](#hooks) above (proto uses `snake_case`).
+| Service | Caller | RPCs |
+|---------|--------|------|
+| `VolumeControllerService` | CubeMaster | `Create`, `Destroy` |
+| `VolumePluginService` | Cubelet | `Attach`, `Detach` |
 
 | File | Description |
 |------|-------------|
@@ -687,153 +321,448 @@ rpc plugins implement gRPC services in [`volumeplugin.proto`](https://github.com
 | [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.pb.go) | Generated Go messages |
 | [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | Generated gRPC stubs |
 
-| Service | Caller | RPCs |
-|---------|--------|------|
-| `VolumeControllerService` | CubeMaster | `Create`, `Destroy` |
-| `VolumePluginService` | Cubelet | `Attach`, `Detach` |
-
-Regenerate after editing proto: `cd pkgs/proto && make proto`. Reference implementation: [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md).
+Regenerate stubs after editing the proto with `cd pkgs/proto && make proto`.
 
 ---
 
-## Plugin Development Guidelines
+## 2. Build Your First Volume Plugin
 
-When implementing a custom Volume plugin, follow these platform rules:
+In this walkthrough, you will build a complete, runnable `binary` plugin named **`cube-volume-demo`** using only the Go standard library (zero external dependencies).
+
+It uses `/var/lib/cube-demo-volumes/<volumeID>` on the host as a simulated storage backend while demonstrating every production requirement:
+- All four hooks (`create`, `destroy`, `attach`, `detach`);
+- Typed caller validation errors (`error_kind: "invalid_argument"`) and `private_data` persistence in `create`;
+- `refCount` handling, `--volume-base-dir` path enforcement, idempotent `mount --bind` / `umount`, and `metadata` echo-back in `attach` / `detach`;
+- Strict separation of stdout (single JSON protocol object) and stderr (diagnostics).
+
+> For a real storage backend, replace the directory create/remove calls with your storage control-plane API calls, and replace `mount --bind` / `umount` with your FUSE client, block-device mount, or network filesystem mount command.
+
+### Step 1: Initialize the Project
+
+```bash
+mkdir -p cube-volume-demo && cd cube-volume-demo
+go mod init cube-volume-demo
+```
+
+### Step 2: Implement the Plugin (`main.go`)
+
+Create `main.go`:
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+var validVolumeID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+
+type createResp struct {
+	Token       string `json:"token"`
+	PrivateData string `json:"private_data"`
+	Error       string `json:"error"`
+	ErrorKind   string `json:"error_kind,omitempty"` // MUST be omitted on success
+}
+
+type attachResp struct {
+	HostPath string            `json:"host_path"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+	Error    string            `json:"error"`
+}
+
+type basicResp struct {
+	Error string `json:"error"`
+}
+
+func storageRoot() string {
+	if v := strings.TrimSpace(os.Getenv("CUBE_DEMO_STORAGE_ROOT")); v != "" {
+		return filepath.Clean(v)
+	}
+	return "/var/lib/cube-demo-volumes"
+}
+
+// resolveUnderRoot verifies candidate resolves strictly inside root.
+func resolveUnderRoot(root, candidate string) (string, error) {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(candidate)
+	rel, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path is outside allowed root")
+	}
+	return cleanPath, nil
+}
+
+func writeJSON(v any) {
+	_ = json.NewEncoder(os.Stdout).Encode(v)
+}
+
+func failBasic(msg string) {
+	writeJSON(basicResp{Error: msg})
+	os.Exit(1)
+}
+
+func failCreate(msg, kind string) {
+	writeJSON(createResp{Error: msg, ErrorKind: kind})
+	os.Exit(1)
+}
+
+func isMountPoint(path string) bool {
+	return exec.Command("mountpoint", "-q", path).Run() == nil
+}
+
+func handleCreate(volumeID string) {
+	if !validVolumeID.MatchString(volumeID) {
+		failCreate("volume_id has an invalid format", "invalid_argument")
+	}
+
+	root := storageRoot()
+	backingDir, err := resolveUnderRoot(root, filepath.Join(root, volumeID))
+	if err != nil {
+		failCreate("invalid volume_id", "invalid_argument")
+	}
+	if err := os.MkdirAll(backingDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", backingDir, err)
+		failCreate("failed to provision backend directory", "")
+	}
+
+	// Return resolved backend path as private_data; CubeMaster persists it
+	// and forwards it to Attach and Destroy.
+	writeJSON(createResp{
+		Token:       "",
+		PrivateData: backingDir,
+		Error:       "",
+	})
+}
+
+func handleDestroy(volumeID, privateData string) {
+	if !validVolumeID.MatchString(volumeID) {
+		failBasic("invalid volume_id")
+	}
+
+	root := storageRoot()
+	candidate := privateData
+	if candidate == "" {
+		candidate = filepath.Join(root, volumeID)
+	}
+	backingDir, err := resolveUnderRoot(root, candidate)
+	if err != nil {
+		failBasic("invalid backing path")
+	}
+	if err := os.RemoveAll(backingDir); err != nil {
+		fmt.Fprintf(os.Stderr, "remove %s: %v\n", backingDir, err)
+		failBasic("failed to remove backend directory")
+	}
+	writeJSON(basicResp{Error: ""})
+}
+
+func handleAttach(volumeID, volumeBaseDir, privateData string, refCount int64) {
+	if !validVolumeID.MatchString(volumeID) {
+		failBasic("invalid volume_id")
+	}
+	if volumeBaseDir == "" || !filepath.IsAbs(volumeBaseDir) {
+		failBasic("volume-base-dir must be an absolute path")
+	}
+
+	// hostPath MUST stay strictly under volumeBaseDir.
+	mountDir, err := resolveUnderRoot(volumeBaseDir, filepath.Join(volumeBaseDir, "demo-"+volumeID))
+	if err != nil {
+		failBasic("invalid mount_dir")
+	}
+
+	// Mount only on the first attach on this node (refCount == 0); reuse when refCount > 0.
+	if refCount == 0 {
+		root := storageRoot()
+		candidate := privateData
+		if candidate == "" {
+			candidate = filepath.Join(root, volumeID)
+		}
+		backingDir, err := resolveUnderRoot(root, candidate)
+		if err != nil {
+			failBasic("invalid backing path")
+		}
+		if _, err := os.Stat(backingDir); err != nil {
+			fmt.Fprintf(os.Stderr, "stat %s: %v\n", backingDir, err)
+			failBasic("backing storage does not exist")
+		}
+		if err := os.MkdirAll(mountDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", mountDir, err)
+			failBasic("failed to prepare mount directory")
+		}
+		if !isMountPoint(mountDir) {
+			if out, err := exec.Command("mount", "--bind", backingDir, mountDir).CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "mount --bind %s %s: %v (%s)\n", backingDir, mountDir, err, strings.TrimSpace(string(out)))
+				failBasic("failed to mount volume")
+			}
+		}
+	}
+
+	writeJSON(attachResp{
+		HostPath: mountDir,
+		Metadata: map[string]string{"mount_dir": mountDir},
+		Error:    "",
+	})
+}
+
+func handleDetach(metadataRaw string, refCount int64) {
+	// No-op while other sandboxes on this node still hold the volume.
+	if refCount > 0 {
+		writeJSON(basicResp{Error: ""})
+		return
+	}
+
+	var meta map[string]string
+	if metadataRaw != "" {
+		if err := json.Unmarshal([]byte(metadataRaw), &meta); err != nil {
+			fmt.Fprintf(os.Stderr, "parse metadata: %v\n", err)
+			failBasic("invalid metadata json")
+		}
+	}
+
+	mountDir := meta["mount_dir"]
+	if mountDir != "" && isMountPoint(mountDir) {
+		if out, err := exec.Command("umount", mountDir).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "umount %s: %v (%s)\n", mountDir, err, strings.TrimSpace(string(out)))
+			failBasic("failed to unmount volume")
+		}
+		// Remove only the empty mountpoint; keep persistent data in backingDir.
+		_ = os.Remove(mountDir)
+	}
+	writeJSON(basicResp{Error: ""})
+}
+
+func main() {
+	op := flag.String("op", "", "hook operation: create | destroy | attach | detach")
+	volumeID := flag.String("volume-id", "", "stable volume identifier")
+	_ = flag.String("name", "", "human-readable volume name")
+	_ = flag.String("sandbox-id", "", "sandbox identifier")
+	_ = flag.String("namespace", "", "containerd namespace")
+	refCount := flag.Int64("ref-count", 0, "pre-attach or post-detach ref count")
+	volumeBaseDir := flag.String("volume-base-dir", "", "required parent directory for host_path")
+	privateData := flag.String("private-data", "", "opaque plugin state")
+	metadata := flag.String("metadata", "", "JSON metadata echoed back on detach")
+	flag.Parse()
+
+	switch *op {
+	case "create":
+		handleCreate(*volumeID)
+	case "destroy":
+		handleDestroy(*volumeID, *privateData)
+	case "attach":
+		handleAttach(*volumeID, *volumeBaseDir, *privateData, *refCount)
+	case "detach":
+		handleDetach(*metadata, *refCount)
+	default:
+		failBasic(fmt.Sprintf("unsupported op: %q", *op))
+	}
+}
+```
+
+### Step 3: Build & Manually Test All Hooks
+
+Before registering the plugin with the cluster, simulate CubeMaster and Cubelet directly from the command line:
+
+```bash
+go build -o cube-volume-demo .
+
+# Install outside the cubetoolbox tree so Cube upgrades never reset it
+sudo install -d -m 0755 /opt/cube-plugins
+sudo install -m 0755 cube-volume-demo /opt/cube-plugins/cube-volume-demo
+
+P=/opt/cube-plugins/cube-volume-demo
+
+# 1. Simulate Controller Create
+sudo $P --op create --volume-id test-vol --name test-vol
+# Expected: {"token":"","private_data":"/var/lib/cube-demo-volumes/test-vol","error":""}
+
+# 2. Simulate first Attach (ref-count=0)
+sudo $P --op attach \
+  --sandbox-id sb-1 --namespace default \
+  --volume-id test-vol --ref-count 0 \
+  --volume-base-dir /data/cube-shared/volume \
+  --private-data /var/lib/cube-demo-volumes/test-vol
+# Expected: {"host_path":"/data/cube-shared/volume/demo-test-vol","metadata":{"mount_dir":"/data/cube-shared/volume/demo-test-vol"},"error":""}
+
+# 3. Write a file and simulate a second sandbox reusing the mount (ref-count=1)
+echo "hello plugin" | sudo tee /data/cube-shared/volume/demo-test-vol/msg.txt
+sudo $P --op attach \
+  --sandbox-id sb-2 --namespace default \
+  --volume-id test-vol --ref-count 1 \
+  --volume-base-dir /data/cube-shared/volume \
+  --private-data /var/lib/cube-demo-volumes/test-vol
+
+# 4. First sandbox detaches (ref-count=1 → must NOT unmount)
+sudo $P --op detach \
+  --sandbox-id sb-1 --namespace default \
+  --volume-id test-vol --ref-count 1 \
+  --metadata '{"mount_dir":"/data/cube-shared/volume/demo-test-vol"}'
+cat /data/cube-shared/volume/demo-test-vol/msg.txt   # still reads: hello plugin
+
+# 5. Last sandbox detaches (ref-count=0 → unmounts mountpoint, preserves backend data)
+sudo $P --op detach \
+  --sandbox-id sb-2 --namespace default \
+  --volume-id test-vol --ref-count 0 \
+  --metadata '{"mount_dir":"/data/cube-shared/volume/demo-test-vol"}'
+cat /var/lib/cube-demo-volumes/test-vol/msg.txt     # backend data intact: hello plugin
+
+# 6. Simulate Controller Destroy (cleans up backend data)
+sudo $P --op destroy --volume-id test-vol \
+  --private-data /var/lib/cube-demo-volumes/test-vol
+# Expected: {"error":""}
+```
+
+### Step 4: Register with CubeMaster & Cubelet and Verify End-to-End
+
+Append the driver to **CubeMaster** (`conf.yaml`), keeping your existing default driver first:
+
+```yaml
+volume_plugins:
+  # ... keep existing default driver (e.g. s3) first ...
+  - name: demo
+    type: binary
+    binary_path: /opt/cube-plugins/cube-volume-demo
+```
+
+Append the matching `name` to **Cubelet** (`config.toml`):
+
+```toml
+[[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+  name        = "demo"
+  type        = "binary"
+  binary_path = "/opt/cube-plugins/cube-volume-demo"
+```
+
+Restart CubeMaster and Cubelet, then verify end-to-end with the Python SDK:
+
+```python
+from cubesandbox import Sandbox, Volume
+
+vol = Volume.create("hello-demo", driver="demo")
+
+with Sandbox.create(volume_mounts={"/workspace": vol}) as sb:
+    sb.files.write("/workspace/test.txt", "my first volume plugin!")
+
+with Sandbox.create(volume_mounts={"/workspace": vol}) as sb:
+    print(sb.files.read("/workspace/test.txt"))  # → my first volume plugin!
+
+Volume.destroy(vol.volume_id)
+```
+
+> **Note:** This demo simulates the backend with a local host directory for single-node development and protocol testing. Production multi-node plugins should back Create/Destroy and Attach/Detach with shared storage accessible from every eligible node (object storage, distributed FS, NFS, or cloud block storage).
+
+### Step 5: When to Build an RPC Plugin Instead
+
+If your plugin needs persistent backend connection pools, in-memory caches, or lower per-call overhead than subprocess forks, implement `type: rpc`:
+
+1. Import `github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1` and implement `VolumeControllerServiceServer` (`Create` / `Destroy`) and `VolumePluginServiceServer` (`Attach` / `Detach`).
+2. Serve on a Unix socket (e.g. `/run/my-plugin.sock`) or TCP address and configure `type: rpc` with `socket_path` on both CubeMaster and Cubelet.
+3. Ensure Node-side mounts are visible in Cubelet's mount namespace.
+
+See [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md) for a complete Go gRPC reference implementation.
+
+---
+
+## 3. Plugin Development Guidelines
 
 | # | Guideline | Description |
 |---|-----------|-------------|
-| 1 | mntns | Node Hooks mount inside **Cubelet mntns**; binary plugins inherit via fork |
-| 2 | Idempotent Attach | When `refCount > 0`, another sandbox on this node already attached — return existing `hostPath` |
-| 3 | hostPath | **Must** be under `volumeBaseDir` (recommended `<volumeBaseDir>/<driver>-<volumeID>`) |
-| 4 | Detach scope | Tear down host mount only (e.g. FUSE unmount); do not delete backend data |
-| 5 | Credentials | Keys, bucket, region, etc. managed by the **plugin** (config file, env, …); the framework does not mandate layout |
-| 6 | CubeMaster / Cubelet alignment | Both must register the **same `driver` names** in `volume_plugins`; Controller hooks (Create/Destroy) and Node hooks (Attach/Detach) must refer to the **same plugin** for a given Volume |
-| 7 | Upgrade-safe path | Install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade |
-
----
-
-## Reference Implementations
-
-The repo ships a **Tencent Cloud COS** reference plugin (binary Shell + rpc Go) with end-to-end walkthrough and dependency install:
-
-| Doc | Content |
-|-----|---------|
-| [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) | Full COS walkthrough (deps, config, SDK verify) |
-| [`examples/volume/cos/binary/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/binary/README.md) | binary plugin script details |
-| [`examples/volume/cos/rpc/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.md) | rpc plugin build and deploy |
-| [`examples/volume/cos/verify_volume.py`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/verify_volume.py) | Python SDK verification script |
-| [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Generic S3-compatible walkthrough (Go binary with a built-in S3 client + s3fs; AWS S3, Tencent Cloud COS, MinIO, R2; runs on `arm64`) |
-| [`examples/volume/nfs/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/nfs/README.md) | Mount provisioned NFSv3 directories on demand with read-only or read-write access per sandbox. |
-| [`examples/volume/juicefs/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.md) | JuiceFS walkthrough (POSIX file system over object storage; one file system, `--subdir` per volume; several sandboxes share a volume and see each other's writes) |
-
-Backend-specific Hook behavior, object layout, trade-offs, and troubleshooting live in those example docs — not duplicated here.
+| 1 | **Mount namespace** | Node hooks must mount inside **Cubelet's mntns**; binary plugins inherit it automatically via fork |
+| 2 | **Idempotent Attach & RefCount** | When `refCount > 0`, return the existing `hostPath` without remounting; keep `refCount == 0` idempotent against stale mounts |
+| 3 | **Keep `hostPath` under `volumeBaseDir`** | Return an absolute path strictly inside `volumeBaseDir` (recommended `<volumeBaseDir>/<driver>-<volumeID>`), or Cubelet rejects and rolls back |
+| 4 | **Detach preserves data** | Node Detach tears down only the host mount (e.g. FUSE/NFS unmount) — **never delete backend data** |
+| 5 | **Separate stdout & stderr** | Binary plugins must write only one valid JSON object to stdout; send all logs and child-command output to stderr |
+| 6 | **Secrets & redaction** | Manage credentials via plugin-owned config/env; never place secrets in `private_data`, logs, or public `error` messages |
+| 7 | **Aligned driver name & upgrade-safe path** | Register the exact same `name` on CubeMaster and every Cubelet; install third-party plugins outside `/usr/local/services/cubetoolbox` |
 
 ---
 
 ## Debugging and Troubleshooting
 
-### Mount Namespace
+### Inspecting Cubelet's Mount Namespace
 
-Cubelet runs in an **isolated mount namespace** via `unshare(CLONE_NEWNS)`. Implementation detail, but important for debugging:
-
-- Node Hook `hostPath` (FUSE, bind, etc.) must exist in **Cubelet mntns**; host root mntns `/proc/mounts` usually won't show them.
-- **binary** plugins are forked by Cubelet and inherit mntns — no `nsenter` needed.
-- Manual `mount` on the host for debugging often **won't** appear inside sandboxes — trigger Attach via Cubelet or enter Cubelet mntns.
-
-Inspect mounts inside Cubelet mntns:
+Because Cubelet runs in an isolated mount namespace, running `mount` or `cat /proc/mounts` on the host root namespace normally won't show plugin FUSE or bind mounts. Inspect them inside Cubelet's mntns instead:
 
 ```bash
 CPID=$(pgrep -f "cubelet --config" | head -1)
 nsenter -t "$CPID" -m -- mount | grep -E 'volume|fuse'
 ```
 
-### Manual Plugin Test (binary)
+Likewise, manually mounting a path in the host root mntns will not make it visible inside sandboxes — trigger `Attach` through Cubelet or test inside Cubelet's mntns.
 
-Replace `/path/to/my-plugin` and `my-storage` with your plugin binary and configured `driver` name:
+### Common Development Pitfalls
 
-```bash
-# Simulate Controller create
-/path/to/my-plugin \
-  --op create --volume-id test-vol --name test-vol
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| `decode stdout: invalid character ...` | Binary plugin wrote logs or child stdout to stdout | Redirect all logs and child-command stdout to stderr (`>&2`) |
+| `host_path "..." must be a subdirectory of required base dir` | Returned `host_path` escapes `--volume-base-dir` | Construct `<volumeBaseDir>/<driver>-<volumeID>` and validate with `filepath.Rel` |
+| `invalid error_kind response` | Success JSON included `error_kind`, or `error_kind` was set with an empty `error` | Omit `error_kind` on success (use `omitempty` in Go) |
+| Host mount succeeds but sandbox sees an empty directory | RPC plugin or manual test mounted in host root mntns instead of Cubelet mntns | Let Cubelet fork binary plugins; ensure RPC plugins mount inside Cubelet mntns |
+| Sibling sandbox I/O fails on detach | `Detach` unmounted the shared mount when `refCount > 0` | Unmount only when `refCount == 0` |
 
-# Simulate Node attach (first mount); host_path must be under --volume-base-dir
-/path/to/my-plugin \
-  --op attach --sandbox-id sb-001 --namespace default \
-  --volume-id test-vol --ref-count 0 \
-  --volume-base-dir /data/cube-shared/volume
-```
+### Rolling Upgrade Compatibility
 
-For COS-specific manual tests, see [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md).
+Volumes require **both** CubeMaster and Cubelet to run a Volume-capable release:
 
-### Common Issues
-
-| Symptom | Likely cause | Check |
-|---------|--------------|-------|
-| `no plugin registered for driver` | Cubelet missing `volume_plugins` | `config.toml`, restart Cubelet |
-| `unknown driver` | CubeMaster not configured or name mismatch | Compare `name` on both sides |
-| `volume not found` | `volumeMounts[].name` ≠ existing `volume_id` | Use `volume_id` from `Volume.create` (or pass the `Volume` instance in `volume_mounts`) |
-| FUSE OK but invisible in sandbox | Mount in host mntns, not Cubelet mntns | Let Cubelet fork the plugin |
-| Detach leak after attach | Unmount shared FUSE when `ref_count > 0` | Follow RefCount semantics |
-
-## Compatibility Notes
-
-Volume requires **both** CubeMaster and Cubelet to be on a release that supports the Volume Plugin. During a rolling upgrade:
-
-| CubeMaster | Cubelet | Volume create / delete | Sandbox `volumeMounts` |
+| CubeMaster | Cubelet | Volume Create / Delete | Sandbox `volumeMounts` |
 |---|---|---|---|
 | New | New | Supported | Supported |
-| New | Old (e.g. v0.5.x) | Supported | No-op (create must not fail; the volume is not mounted) |
-| Old (e.g. v0.5.x) | New / old | Unsupported | Unsupported; do not send `volumeMounts` — plain create is unaffected |
-
-Do not assume mounts succeed on old nodes; schedule onto an upgraded Cubelet when you need mount behavior.
+| New | Old (e.g. v0.5.x) | Supported | No-op (create does not fail; volume is not mounted) |
+| Old (e.g. v0.5.x) | New / Old | Unsupported | Unsupported; do not send `volumeMounts` |
 
 ### `private_data` upgrade order
 
-Before creating volumes through `/v2/volumes` or the new SDK methods:
+Before calling `POST /v2/volumes` or the new SDK methods (`create_with_private_data` / `CreateVolumeWithPrivateData` / `createWithPrivateData`):
 
-1. Check or upgrade the Controller and Node plugins so Create accepts caller input A, Attach and Destroy use returned state B, and existing volumes remain usable during the transition. Check compatibility with both old and new Master callers while they coexist.
-2. Upgrade **all CubeMasters serving volume operations**, including create, delete and sandbox mount metadata resolution. Complete the Master rollout before relying on per-volume A/B; an old Master must not handle operations on volumes that require the new contract.
-3. Deploy CubeAPI with `/v2/volumes` support, then begin using the new API or SDK methods. Merely deploying the new API does not verify support in its downstream Masters.
+1. **Upgrade Controller and Node plugins first**: ensure Create accepts caller input A, Attach and Destroy consume returned state B, and existing volumes remain compatible during the transition.
+2. **Upgrade all CubeMasters serving volume operations**: complete the Master rollout before creating volumes that depend on per-volume A/B so no old Master handles those volumes.
+3. **Deploy CubeAPI with `/v2/volumes` support**, then start calling the new API or SDK methods.
 
-A new CubeAPI connected to an old Master can return **201** while the old Master ignores A. That Master also omits B on Destroy, which can fail or operate on the plugin's defaults. There is no automatic downstream capability check. If rolling back, stop new versioned creates and keep compatible Masters serving volumes that depend on A/B until those volumes are removed or a compatible migration is verified.
+Important compatibility details:
+- A new CubeAPI talking to an old Master can return **201** while the old Master silently drops A and omits B on Destroy. There is no automatic downstream capability probe.
+- Empty Create input and empty Destroy state omit `--private-data`, preserving the legacy binary CLI invocation; however, if an older plugin returns non-empty state from Create, Destroy (including rollback) will receive `--private-data`, so verify both operations.
+- CubeMaster never retries a failed Destroy without `private_data` to avoid acting on the wrong backend resource.
 
-Controller plugin compatibility also needs checking:
-
-- Empty Create input and empty Destroy state omit `--private-data`, preserving the previous binary command form.
-- An older binary plugin may reject the new flag. Even when callers omit the field, an older plugin that returns non-empty state from Create will receive that state on Destroy, including for existing volumes and create rollback. Check both operations; omitted input alone does not guarantee lifecycle compatibility.
-- Older RPC services can ignore the new request fields. That does not mean they use the supplied configuration or return empty state; their existing Create response remains authoritative.
-- CubeMaster does not retry a failed Destroy without `private_data`: the first call may have side effects, and removing the state may select different resources.
-
----
-
-## Known Limitations and Roadmap
-
-Platform behavior (independent of a specific plugin):
+### Known Platform Limitations
 
 | Item | Description |
 |------|-------------|
-| Delete guard | Reject delete when `t_cube_volume.refcount ≠ 0`; no auto-detach of running sandboxes |
-| Refcount via responses | Count updates on sandbox create/destroy **responses**; lost responses may cause brief drift |
-| FUSE POSIX semantics | Depends on backend/mount implementation (hard links, atomic rename, etc.) |
+| Delete guard | `DELETE /volumes` is rejected (409) whenever `t_cube_volume.refcount ≠ 0`; running sandboxes are never auto-detached |
+| Cross-node RefCount drift | Node `0→1` / `1→0` events ride on sandbox create/destroy **responses**; node crashes or lost responses can cause temporary drift |
+| FUSE POSIX semantics | Hard links, atomic rename, and locking semantics depend on the underlying backend and FUSE driver |
 
 ---
 
-## Source Index
+## Reference Implementations & Source Index
+
+### Official Reference Plugins
+
+| Plugin | Docs & Code | Key Takeaways |
+|--------|-------------|---------------|
+| **S3 (`s3`)** | [`examples/volume/s3/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Production Go binary plugin: built-in S3 client, dynamic `private_data`, credential refs, `error_kind`, lockfiles |
+| **NFS (`nfs`)** | [`examples/volume/nfs/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/nfs/README.md) | Static Go binary plugin: pre-provisioned directory claiming/binding, timeout contexts, retain-on-destroy |
+| **JuiceFS (`juicefs`)** | [`examples/volume/juicefs/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.md) | Shell binary plugin: persistent control-plane mount + per-volume `--subdir` isolation, timeout locks |
+| **Tencent Cloud COS (`cos` / `cos-rpc`)** | [`examples/volume/cos/README.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) | Both Shell binary (`cos/binary/`) and Go gRPC (`cos/rpc/`) reference implementations |
+
+### Platform Source Index
 
 | Module | Path | Description |
 |--------|------|-------------|
-| Node interface | `Cubelet/plugins/volume/interface.go` | `VolumePlugin` abstraction |
+| Node interface | `Cubelet/plugins/volume/interface.go` | `VolumePlugin` interface |
 | Node request types | `Cubelet/plugins/volume/context.go` | `AttachRequest` / `DetachRequest` |
-| Controller interface | `CubeMaster/pkg/volume/plugin/plugin.go` | `ControllerPlugin` abstraction |
-| Node binary driver | `Cubelet/plugins/volume/binary/driver.go` | Hook → CLI mapping |
-| Node rpc driver | `Cubelet/plugins/volume/rpc/driver.go` | Hook → gRPC client |
-| Controller binary | `CubeMaster/pkg/volume/plugin/binary/driver.go` | Hook → CLI mapping |
-| Controller rpc | `CubeMaster/pkg/volume/plugin/rpc/driver.go` | Hook → gRPC mapping |
-| Cross-node refcount | `CubeMaster/pkg/volume/refcount/refcount.go` | Parse ext_info; update `t_cube_volume.refcount` |
-| Volume DB model | `CubeMaster/pkg/base/db/models/volume.go` | `VolumeRecord` (includes `refcount`) |
-| Plugin volume mount injection | `CubeMaster/pkg/service/sandbox/hostdir_mount.go` | `injectPluginVolumeMounts` from `plugin-volume-mounts` annotation |
-| Node mount logic | `Cubelet/storage/pluginvolume.go` | bind-mount + virtiofs; node-level refcount transitions |
-| Proto | `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto` | rpc protocol |
-| Generated Go | `pkgs/proto/services/volumeplugin/v1/volumeplugin*.pb.go` | Messages / gRPC stubs |
-| COS reference (binary) | `examples/volume/cos/binary/cube-volume-cos.sh` | Example binary plugin |
-| COS reference (rpc) | `examples/volume/cos/rpc/cmd/cube-volume-cos-rpc` | Example rpc plugin |
+| Node manager & locks | `Cubelet/plugins/volume/manager.go` | Driver routing, `volMu` serialization, local RefCount |
+| Node binary driver | `Cubelet/plugins/volume/binary/driver.go` | Node Hook → CLI / JSON mapping |
+| Node rpc driver | `Cubelet/plugins/volume/rpc/driver.go` | Node Hook → gRPC client |
+| Node mount & virtiofs | `Cubelet/storage/pluginvolume.go` | `hostPath` check, bind-mount + read-only remount, RefCount event reporting |
+| Controller interface | `CubeMaster/pkg/volume/plugin/plugin.go` | `ControllerPlugin` interface & registry |
+| Controller binary driver | `CubeMaster/pkg/volume/plugin/binary/driver.go` | Controller Hook → CLI / JSON / `error_kind` handling |
+| Controller rpc driver | `CubeMaster/pkg/volume/plugin/rpc/driver.go` | Controller Hook → gRPC client |
+| Volume HTTP handlers | `CubeMaster/pkg/service/httpservice/cube/volume.go` | Volume CRUD, `private_data` validation & rollback |
+| Cross-node RefCount | `CubeMaster/pkg/volume/refcount/refcount.go` | Parse `ext_info` events and update `t_cube_volume.refcount` |
+| Volume DB model | `CubeMaster/pkg/base/db/models/volume.go` | `VolumeRecord` schema |
+| gRPC protocol | `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto` | RPC plugin protobuf contract |
