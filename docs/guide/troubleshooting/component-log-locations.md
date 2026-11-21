@@ -14,7 +14,7 @@ lang: en-US
 
 ## Symptom
 
-CubeSandbox is made up of several components (CubeAPI, CubeMaster, Cubelet, CubeShim, the Hypervisor/VMM, Cubelet embedded network runtime, cube-proxy). When troubleshooting, it's often unclear which log file a given error actually lands in, where the guest kernel boot log can be found, and how to raise Cubelet's log verbosity — its default log level (`warn`) doesn't print enough detail to reproduce most issues.
+CubeSandbox is made up of several components (CubeAPI, CubeMaster, Cubelet, CubeShim, the Hypervisor/VMM, Cubelet embedded network runtime, cube-proxy). When troubleshooting, it's often unclear which log file a given error actually lands in, where the guest kernel boot log can be found, and how to raise Cubelet's log verbosity — its default log level (`info`) doesn't print enough detail to reproduce most issues.
 
 This article lists the **exact paths** for every component's logs in a one-click (systemd-managed) deployment, explains how to use `cubecli logs` to read sandbox/template logs, shows where the guest kernel boot log lives, and covers how to turn on Cubelet debug logging.
 
@@ -35,7 +35,7 @@ CubeSandbox logs fall into three categories, each with a different source and a 
 
 The guest kernel's boot log is, at its core, just another form of "container init process output": CubeShim forwards everything the guest kernel prints over its `console=hvc0` console — including the `Linux version ...` boot banner — into the very same `cube-shim-req.log`. So **the guest kernel log is already inside the CubeShim log**; no extra tooling is needed.
 
-Cubelet defaults to a fairly quiet `warn` log level, so normal operation won't print detailed debug information. There are two ways to raise it to `debug`: edit the hot-reloaded dynamic config file, or flip it temporarily via a built-in HTTP endpoint (no restart required).
+Cubelet defaults to the `info` log level (`common.log_level` in `dynamicconf/conf.yaml`; on Kubernetes it is set from `cubeNode.cubeletLogLevel`), so normal operation won't print detailed debug information. There are two ways to raise it to `debug`: edit the hot-reloaded dynamic config file, or flip it temporarily via a built-in HTTP endpoint (no restart required).
 
 ## Resolution
 
@@ -135,16 +135,16 @@ The container uses the same `/data/log/cube-proxy/` path, backed by the host dir
 
 ### 5. Enabling Cubelet debug-level logging
 
-Cubelet's default log level is `warn`, which usually isn't verbose enough for troubleshooting. There are two ways to raise it to `debug`, neither of which requires **restarting the Cubelet process**:
+Cubelet's default log level is `info`, which usually isn't verbose enough for troubleshooting. There are two ways to raise it to `debug`, neither of which requires **restarting the Cubelet process**:
 
 #### Option 1: Edit the dynamic config file (persistent, hot-reloaded)
 
-Cubelet polls its dynamic config file `dynamicconf/conf.yaml` every 10 seconds and hot-reloads it (including re-applying the log level) whenever it changes. Add a `log_level` line under the `common:` section:
+Cubelet polls its dynamic config file `dynamicconf/conf.yaml` every 10 seconds and hot-reloads it (including re-applying the log level) whenever it changes. Change the `log_level` line under the `common:` section (shipped as `info`) to `debug`. On Kubernetes the node entrypoint rewrites this line from `cubeNode.cubeletLogLevel` every time the container starts, so set that value instead to keep a level across restarts:
 
 ```yaml
 common:
   enable_pf_mode: false
-  log_level: debug   # add this line
+  log_level: debug   # was: info
   sandbox_exec_cmd_time_out: 5s
   ...
 ```
@@ -155,7 +155,7 @@ In a one-click deployment, the default path for this file is:
 /usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml
 ```
 
-After saving, wait roughly 10 seconds (the config poll interval) for Cubelet to pick up `debug` level; `/data/log/Cubelet/Cubelet-req.log` will then start emitting much finer-grained records. Debug logging can increase per-request log volume by an order of magnitude, causing disk I/O contention and CPU overhead under high throughput — watch `/data/log/` disk usage while debug is active. Remember to remove the line or reset it back to `info`/`warn` once you're done, so you don't accumulate excessive log volume long-term.
+After saving, wait roughly 10 seconds (the config poll interval) for Cubelet to pick up `debug` level; `/data/log/Cubelet/Cubelet-req.log` will then start emitting much finer-grained records. Debug logging can increase per-request log volume by an order of magnitude, causing disk I/O contention and CPU overhead under high throughput — watch `/data/log/` disk usage while debug is active. Remember to set it back to `info` once you're done, so you don't accumulate excessive log volume long-term.
 
 #### Option 2: Flip it temporarily via the debug port (no file change, resets on restart)
 
@@ -169,7 +169,7 @@ curl -X POST 'http://127.0.0.1:9966/debug/loglevel?level=debug'
 curl -X POST 'http://127.0.0.1:9966/debug/loglevel?level=info'
 ```
 
-This takes effect immediately, with no polling delay — but it's **only valid for the lifetime of the current process**. Once Cubelet restarts, the level reverts to whatever the config file specifies (`warn` by default). This is the right choice when you want to capture a short window of detailed logs without touching the config file.
+This takes effect immediately, with no polling delay — but it's **only valid for the lifetime of the current process**. Once Cubelet restarts, the level reverts to whatever the config file specifies (`info` by default). This is the right choice when you want to capture a short window of detailed logs without touching the config file.
 
 The same debug port also hosts `pprof` profiling endpoints (`/debug/pprof/*`), which are useful when investigating performance issues. **Security note:** pprof exposes goroutine stacks, heap profiles, and source snippets — keep port `:9966` bound to localhost only; never proxy it through a reverse proxy or bind it to `0.0.0.0`.
 

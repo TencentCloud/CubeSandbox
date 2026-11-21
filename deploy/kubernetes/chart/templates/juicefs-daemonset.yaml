@@ -70,7 +70,38 @@ spec:
         - name: juicefs
           image: {{ include "cube.cubeImage" (dict "image" .Values.images.juicefs "context" $) | quote }}
           imagePullPolicy: {{ .Values.images.juicefs.pullPolicy }}
-          command: ["/usr/local/bin/juicefs"]
+          # The shell wrapper keeps page-cache headroom in this container's
+          # memory cgroup, then execs juicefs with the args below ("$@").
+          # Clean cache from the disk-cache block files otherwise fills the
+          # limit, and the next burst of cache writes is then written back
+          # synchronously (rotational cache disks stall the FUSE mount for
+          # seconds). Kernels before 5.19 have no memory.reclaim, so headroom
+          # is made by briefly lowering memory.high (the write reclaims down
+          # to it) and restoring "max" right after.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+              if [ "${JFS_HEADROOM_ENABLED:-false}" = "true" ] && [ -w "$cg/memory.high" ]; then
+                echo max > "$cg/memory.high" || true
+                (
+                  while sleep "${JFS_HEADROOM_INTERVAL_SECONDS:-5}"; do
+                    max=$(cat "$cg/memory.max" 2>/dev/null) || continue
+                    [ "$max" = "max" ] && continue
+                    cur=$(cat "$cg/memory.current" 2>/dev/null) || continue
+                    if [ "$cur" -gt $((max / 100 * ${JFS_HEADROOM_HIGH_PERCENT:-75})) ]; then
+                      echo $((max / 100 * ${JFS_HEADROOM_TARGET_PERCENT:-50})) > "$cg/memory.high" 2>/dev/null
+                      echo max > "$cg/memory.high" 2>/dev/null
+                      echo "juicefs headroom: memory.current $((cur >> 20))MiB -> $(($(cat "$cg/memory.current") >> 20))MiB (max $((max >> 20))MiB)" >&2
+                    fi
+                  done
+                ) &
+              elif [ "${JFS_HEADROOM_ENABLED:-false}" = "true" ]; then
+                echo "juicefs headroom: disabled, $cg/memory.high is not writable (cgroup v2 required)" >&2
+              fi
+              exec /usr/local/bin/juicefs "$@"
+            - juicefs-mount
           securityContext:
             privileged: {{ .Values.security.privileged }}
             capabilities:
@@ -93,6 +124,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.juicefsMetadataSecretName" . }}
                   key: {{ $meta.passwordKey | default "meta-password" }}
+            {{- with .Values.cubeJuiceFS.pageCacheHeadroom }}
+            - name: JFS_HEADROOM_ENABLED
+              value: {{ .enabled | default false | toString | quote }}
+            - name: JFS_HEADROOM_INTERVAL_SECONDS
+              value: {{ .intervalSeconds | default 5 | int | toString | quote }}
+            - name: JFS_HEADROOM_HIGH_PERCENT
+              value: {{ .highPercent | default 75 | int | toString | quote }}
+            - name: JFS_HEADROOM_TARGET_PERCENT
+              value: {{ .targetPercent | default 50 | int | toString | quote }}
+            {{- end }}
           lifecycle:
             preStop:
               exec:

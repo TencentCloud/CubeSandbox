@@ -1100,6 +1100,16 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	if err != nil {
 		return "", "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
 	}
+	if isJFSBackend(backend) {
+		// Re-assert the mount's read-ahead before the VM opens the image (a
+		// JuiceFS remount resets it); cheap when already set.
+		if err := l.config.applyJFSFuseReadAhead(); err != nil {
+			CubeLog.WithContext(ctx).Warnf("jfs: fuse read-ahead not applied: %v", err)
+		}
+		// Runs concurrently with rootfs preparation; Create waits for both
+		// before the VM maps this image.
+		l.warmJFSRestoreMemory(ctx, opts.GetSandboxID(), devPath)
+	}
 	return cowFileURLFromPath(devPath), "", nil
 }
 

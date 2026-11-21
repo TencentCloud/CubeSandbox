@@ -14,7 +14,7 @@ lang: zh-CN
 
 ## 问题现象
 
-CubeSandbox 由多个组件组成（CubeAPI、CubeMaster、Cubelet、CubeShim、Hypervisor/VMM、Cubelet 内置 network runtime、cube-proxy），排障时经常搞不清楚"这条报错该去哪个日志文件里找"，也不知道 guest kernel 的启动日志在哪里查看，以及 Cubelet 默认日志级别较低（`warn`），复现问题时看不到足够细节。
+CubeSandbox 由多个组件组成（CubeAPI、CubeMaster、Cubelet、CubeShim、Hypervisor/VMM、Cubelet 内置 network runtime、cube-proxy），排障时经常搞不清楚"这条报错该去哪个日志文件里找"，也不知道 guest kernel 的启动日志在哪里查看，以及 Cubelet 默认日志级别（`info`）下复现问题时看不到足够细节。
 
 本文汇总一键部署（systemd 托管）场景下，各组件日志的**确切路径**，并说明如何用 `cubecli logs` 查看沙箱/模板日志，如何在 guest kernel 日志里定位启动信息，以及如何给 Cubelet 开启 debug 级别日志。
 
@@ -35,7 +35,7 @@ CubeSandbox 的日志分成三类，来源和查看方式完全不同：
 
 guest kernel（虚拟机内核）的启动日志本质上也是一种"容器 init 进程输出"：CubeShim 会把 guest kernel 通过 `console=hvc0` 输出的内容（包括 `Linux version ...` 之类的启动信息）转发进同一条 `cube-shim-req.log`，因此 **guest kernel log 直接在 CubeShim 的 log 里就能看到**，不需要额外工具。
 
-Cubelet 默认日志级别较低（`warn`），常规运行时不会打印详细的调试信息；打开 debug 级别有两种方式：改动态配置文件热更新，或者用内置的 HTTP 接口临时切换（无需重启）。
+Cubelet 默认日志级别为 `info`（`dynamicconf/conf.yaml` 中的 `common.log_level`，Kubernetes 部署下由 `cubeNode.cubeletLogLevel` 设置），常规运行时不会打印详细的调试信息；打开 debug 级别有两种方式：改动态配置文件热更新，或者用内置的 HTTP 接口临时切换（无需重启）。
 
 ## 解决方案
 
@@ -135,16 +135,16 @@ tail -F /data/log/cube-proxy/access.log
 
 ### 5. 开启 Cubelet debug 级别日志
 
-Cubelet 默认日志级别是 `warn`，排障时往往需要临时调高到 `debug` 才能看到足够的调试信息。有两种方式，二者都**不需要重启 Cubelet 进程**：
+Cubelet 默认日志级别是 `info`，排障时往往需要临时调高到 `debug` 才能看到足够的调试信息。有两种方式，二者都**不需要重启 Cubelet 进程**：
 
 #### 方式一：改动态配置文件（持久生效，热加载）
 
-Cubelet 会以 10 秒为周期轮询动态配置文件 `dynamicconf/conf.yaml`，检测到变化后自动热加载并调用日志级别更新逻辑。在 `common:` 段落下加一行 `log_level`：
+Cubelet 会以 10 秒为周期轮询动态配置文件 `dynamicconf/conf.yaml`，检测到变化后自动热加载并调用日志级别更新逻辑。把 `common:` 段落下的 `log_level`（默认为 `info`）改为 `debug`。Kubernetes 部署下，节点 entrypoint 每次容器启动都会按 `cubeNode.cubeletLogLevel` 重写这一行，如需在重启后保持某个级别，请改该 Helm 值：
 
 ```yaml
 common:
   enable_pf_mode: false
-  log_level: debug   # 新增这一行
+  log_level: debug   # 原为 info
   sandbox_exec_cmd_time_out: 5s
   ...
 ```
@@ -155,7 +155,7 @@ common:
 /usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml
 ```
 
-保存后等待约 10 秒（配置轮询周期），Cubelet 会自动切到 debug 级别，此后 `/data/log/Cubelet/Cubelet-req.log` 会打出更细粒度的记录。debug 级别可能使单次请求的日志量放大一个数量级，高吞吐场景下会带来磁盘 I/O 争用和 CPU 开销——开启 debug 期间建议关注 `/data/log/` 磁盘占用。排障结束后记得把这一行删掉或改回 `info`/`warn`，避免长期产生大量日志。
+保存后等待约 10 秒（配置轮询周期），Cubelet 会自动切到 debug 级别，此后 `/data/log/Cubelet/Cubelet-req.log` 会打出更细粒度的记录。debug 级别可能使单次请求的日志量放大一个数量级，高吞吐场景下会带来磁盘 I/O 争用和 CPU 开销——开启 debug 期间建议关注 `/data/log/` 磁盘占用。排障结束后记得把它改回 `info`，避免长期产生大量日志。
 
 #### 方式二：调试端口临时切换（不改文件，进程重启后失效）
 
@@ -169,7 +169,7 @@ curl -X POST 'http://127.0.0.1:9966/debug/loglevel?level=debug'
 curl -X POST 'http://127.0.0.1:9966/debug/loglevel?level=info'
 ```
 
-这种方式立即生效、无需等待轮询周期，但**只在当前进程生命周期内有效**——Cubelet 重启后会恢复到配置文件里写的级别（默认 `warn`）。适合临时抓一段现场，而不想改配置文件的场景。
+这种方式立即生效、无需等待轮询周期，但**只在当前进程生命周期内有效**——Cubelet 重启后会恢复到配置文件里写的级别（默认 `info`）。适合临时抓一段现场，而不想改配置文件的场景。
 
 同一个 debug 端口下还挂载了 `pprof` 相关的 profiling 接口（`/debug/pprof/*`），性能问题排查时也可以使用。**安全提示：** pprof 会暴露 goroutine 栈、堆内存 profile 和源码片段等信息——请确保 `:9966` 仅监听 localhost，不要通过反向代理暴露，也不要绑定到 `0.0.0.0`。
 

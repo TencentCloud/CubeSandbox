@@ -753,6 +753,87 @@ patch_cow_jfs_opt_in() {
   log "cow.jfs enable=true mount_path=${mount_path} root=${root} cache_dir=${cache_dir}"
 }
 
+# patch_cow_jfs_setting sets `key = value` (value already TOML-rendered) in
+# an already-enabled [cow.jfs] table, replacing an existing key.
+patch_cow_jfs_setting() {
+  local cfg="$1"
+  local key="$2"
+  local value="$3"
+  local header='[plugins."io.cubelet.internal.v1.storage".cow.jfs]'
+  local tmp
+
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  awk -v header="${header}" -v key="${key}" -v value="${value}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    function flush_jfs() {
+      if (in_jfs && !found) print "    " key " = " value
+      in_jfs = 0
+    }
+    is_table($0, header) { flush_jfs(); in_jfs = 1; found = 0; print; next }
+    in_jfs && /^[[:space:]]*\[/ { flush_jfs() }
+    in_jfs && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      print "    " key " = " value; found = 1; next
+    }
+    { print }
+    END { flush_jfs() }
+  ' "${cfg}" > "${tmp}"
+  if [[ "$(grep -Ec "^[[:space:]]*${key}[[:space:]]*=" "${tmp}" || true)" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "failed to set ${header} ${key} = ${value}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+  log "cow.jfs ${key}=${value}"
+}
+
+# patch_cow_jfs_rootfs_placement sets [cow.jfs] rootfs_placement (shared|local).
+# set_cubelet_log_level <conf.yaml> <level> sets common.log_level, which
+# Cubelet applies after startup (without it Cubelet falls back to its
+# --log-level default, warn). An empty level leaves the file unchanged.
+set_cubelet_log_level() {
+  local dyn="$1"
+  local level="$2"
+
+  [[ -n "${level}" ]] || return 0
+  # StringToLevel maps unknown names to DEBUG, so reject them here.
+  case "${level}" in
+    debug|info|warn|error) ;;
+    *) fail "CUBELET_LOG_LEVEL must be debug, info, warn or error, got '${level}'" ;;
+  esac
+  local tmp
+  tmp="$(mktemp "${dyn}.XXXXXX")"
+  # Only touch log_level inside the top-level common: block; other sections
+  # may carry their own log_level keys.
+  awk -v level="${level}" '
+    function flush_common() {
+      if (in_common && !done) print "  log_level: " level
+      in_common = 0
+    }
+    /^[^[:space:]#]/ { flush_common(); if ($0 ~ /^common:[[:space:]]*$/) { in_common = 1; done = 0 } print; next }
+    in_common && /^  log_level:/ { if (!done) print "  log_level: " level; done = 1; next }
+    { print }
+    END { flush_common() }
+  ' "${dyn}" > "${tmp}"
+  if [[ "$(awk '/^[^[:space:]#]/{c = ($0 ~ /^common:/)} c && /^  log_level:/' "${tmp}")" != "  log_level: ${level}" ]]; then
+    rm -f "${tmp}"
+    fail "failed to set common.log_level in ${dyn}"
+  fi
+  cat "${tmp}" > "${dyn}"
+  rm -f "${tmp}"
+  log "cubelet log_level=${level}"
+}
+
+patch_cow_jfs_rootfs_placement() {
+  case "$2" in
+    shared|local) ;;
+    *) fail "CUBE_JFS_ROOTFS_PLACEMENT must be shared or local, got '$2'" ;;
+  esac
+  patch_cow_jfs_setting "$1" rootfs_placement "\"$2\""
+}
+
 detect_primary_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '
     {
@@ -1063,6 +1144,7 @@ run_cubelet() {
   master_http_esc="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
   sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ops_esc}\"#" "${dyn}"
   sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${master_http_esc}\"#" "${dyn}"
+  set_cubelet_log_level "${dyn}" "${CUBELET_LOG_LEVEL:-}"
   # Warehouse downloads use the same CubeOps as node register/heartbeat.
   cubeops_addr="${CUBE_OPS_ADDR:-${CUBE_OPS_ENDPOINT}}"
   if [[ "${cubeops_addr}" != http://* && "${cubeops_addr}" != https://* ]]; then
@@ -1125,6 +1207,19 @@ run_cubelet() {
       "${CUBE_JFS_MOUNT_PATH:-/data/cubelet/storage/jfs}" \
       "${CUBE_JFS_ROOT:-.}" \
       "${CUBE_JFS_CACHE_DIR:-/data/cubelet/jfs-cache}"
+    if [[ -n "${CUBE_JFS_ROOTFS_PLACEMENT:-}" ]]; then
+      patch_cow_jfs_rootfs_placement "${cfg}" "${CUBE_JFS_ROOTFS_PLACEMENT}"
+    fi
+    if [[ -n "${CUBE_JFS_MEMORY_PREFETCH:-}" ]]; then
+      case "${CUBE_JFS_MEMORY_PREFETCH}" in
+        true|false) patch_cow_jfs_setting "${cfg}" memory_prefetch "${CUBE_JFS_MEMORY_PREFETCH}" ;;
+        *) fail "CUBE_JFS_MEMORY_PREFETCH must be true or false" ;;
+      esac
+    fi
+    if [[ -n "${CUBE_JFS_FUSE_READ_AHEAD_KB:-}" ]]; then
+      [[ "${CUBE_JFS_FUSE_READ_AHEAD_KB}" =~ ^[0-9]+$ ]] || fail "CUBE_JFS_FUSE_READ_AHEAD_KB must be a non-negative integer"
+      patch_cow_jfs_setting "${cfg}" fuse_read_ahead_kb "${CUBE_JFS_FUSE_READ_AHEAD_KB}"
+    fi
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
@@ -1179,10 +1274,17 @@ run_cubelet() {
   done
 
   cleanup() { kill_pidfile cubelet; }
-  trap cleanup TERM INT HUP EXIT
+  trap cleanup EXIT
+  # Exit on a stop signal instead of resuming the wait loop, otherwise the
+  # container lingers until terminationGracePeriodSeconds expires.
+  trap 'exit 0' TERM INT HUP
 
-  while kill -0 "$(cat "${CUBE_PID_DIR}/cubelet.pid" 2>/dev/null || echo 0)" >/dev/null 2>&1; do
-    sleep 10
+  # Track the pid captured at startup: cleanup/preStop remove the pidfile, and
+  # `kill -0 0` (the old fallback) signals our own process group and always
+  # succeeds, so the loop never ended. `sleep & wait` lets a trap run at once.
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    sleep 10 &
+    wait $! || true
   done
   fail "cubelet exited"
 }

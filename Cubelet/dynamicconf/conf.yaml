@@ -1,4 +1,8 @@
 common:
+  # Log level applied after startup (debug, info, warn, error). Without it
+  # Cubelet falls back to its --log-level default (warn) and drops Infof.
+  # Hot-reloaded.
+  log_level: info
   # Administrator-owned IPv4 CIDRs; all ports. Restart Cubelet after changes.
   operator_allow_out: []
   enable_pf_mode: false

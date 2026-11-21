@@ -54,8 +54,14 @@ grep -q 'name: CUBE_JFS_ENABLED' "$TMP_DIR/on.yaml" \
   || { echo "enabled render must configure Cubelet" >&2; exit 1; }
 grep -q 'cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1' "$TMP_DIR/on.yaml" \
   || { echo "enabled render must pull JuiceFS from TCR int" >&2; exit 1; }
-grep -q 'command: \["/usr/local/bin/juicefs"\]' "$TMP_DIR/on.yaml" \
-  || { echo "mount DaemonSet must invoke JuiceFS instead of the image default command" >&2; exit 1; }
+grep -q 'exec /usr/local/bin/juicefs "\$@"' "$TMP_DIR/on.yaml" \
+  || { echo "mount DaemonSet must exec JuiceFS instead of the image default command" >&2; exit 1; }
+grep -q -- '- juicefs-mount' "$TMP_DIR/on.yaml" \
+  || { echo "mount wrapper must pass the juicefs args through as \$@" >&2; exit 1; }
+grep -A1 'name: JFS_HEADROOM_ENABLED' "$TMP_DIR/on.yaml" | grep -q 'value: "true"' \
+  || { echo "juicefs page-cache headroom must be enabled by default" >&2; exit 1; }
+grep -Eq 'memory: "?8Gi"?$' "$TMP_DIR/on.yaml" \
+  || { echo "juicefs memory limit must default to 8Gi" >&2; exit 1; }
 grep -q 'app.kubernetes.io/component: cube-juicefs-redis' "$TMP_DIR/on.yaml" \
   || { echo "enabled render must include a dedicated JuiceFS Redis" >&2; exit 1; }
 grep -q 'redis://jfs-on-cube-juicefs-redis.default.svc.cluster.local:6379/0' "$TMP_DIR/on.yaml" \
@@ -179,5 +185,11 @@ expect_fail jfs-redis-persistence-ambiguous "mutually exclusive" \
   --set cubeJuiceFS.enabled=true \
   --set-string cubeJuiceFS.metadata.redis.persistence.hostPath=/data/jfs-redis \
   --set-string cubeJuiceFS.metadata.redis.persistence.existingClaim=jfs-redis
+
+helm template jfs-no-headroom "$CHART_DIR" $COMMON_SETS \
+  --set cubeJuiceFS.enabled=true \
+  --set cubeJuiceFS.pageCacheHeadroom.enabled=false > "$TMP_DIR/no-headroom.yaml"
+grep -A1 'name: JFS_HEADROOM_ENABLED' "$TMP_DIR/no-headroom.yaml" | grep -q 'value: "false"' \
+  || { echo "pageCacheHeadroom.enabled=false must render JFS_HEADROOM_ENABLED=false" >&2; exit 1; }
 
 echo "juicefs chart guard passed"
