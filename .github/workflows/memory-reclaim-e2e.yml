@@ -1,0 +1,60 @@
+name: Memory Reclaim E2E (self-hosted)
+
+# Live, node-local E2E for the guest kernel cmdline append feature. It boots a
+# real sandbox, so it needs a self-hosted runner that can reach the cluster and
+# expose /dev/kvm. Opt-in only: it never blocks a pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: 'Self-hosted runner label that can reach the cluster and /dev/kvm'
+        default: 'cube-sandbox-e2e'
+        type: string
+      cube_master_url:
+        description: 'CubeMaster internal API base URL (annotation ingress, e.g. http://10.0.0.1:8089)'
+        required: true
+        type: string
+      cube_api_url:
+        description: 'CubeAPI base URL reachable from the runner (e.g. http://10.0.0.1:3000)'
+        required: true
+        type: string
+      cube_e2e_image:
+        description: 'OCI image used to build the temporary annotated template'
+        required: true
+        type: string
+      cube_e2e_node:
+        description: 'Cubelet node ID or host IP to pin the sandbox to'
+        required: true
+        type: string
+
+concurrency:
+  group: memory-reclaim-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cmdline-append:
+    name: Guest kernel cmdline append
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CubeSandbox SDK
+        run: python -m pip install -e sdk/python
+
+      - name: Run guest kernel cmdline append E2E
+        env:
+          CUBE_MASTER_URL: ${{ inputs.cube_master_url }}
+          CUBE_API_URL: ${{ inputs.cube_api_url }}
+          CUBE_E2E_IMAGE: ${{ inputs.cube_e2e_image }}
+          CUBE_E2E_NODE: ${{ inputs.cube_e2e_node }}
+        run: tests/e2e/memory_reclaim/cmdline_append.sh
