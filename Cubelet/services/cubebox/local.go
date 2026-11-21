@@ -280,6 +280,19 @@ type local struct {
 	// than a plain field. Zero — the value before that call, and the
 	// fail-closed one — means the intent never ages out. Nanoseconds.
 	shimIntentTTL atomic.Int64
+
+	// resumeReservations is the node-level admission ledger for resumes: its
+	// mutex serializes the read-check-register step of admitResume and it
+	// tracks admitted demand whose store row has not been updated yet. Zero
+	// value is ready to use; see resumeReservationLedger.
+	resumeReservations resumeReservationLedger
+
+	// pendingPausedRestores holds tombstone restores a create rollback had to
+	// defer because it could not take the sandbox's lifecycle lock within its
+	// wait budget; the next resume Create completes the restore under the lock
+	// before it reads the row. Zero value is ready to use; see
+	// pausedRestoreRegistry.
+	pendingPausedRestores pausedRestoreRegistry
 }
 
 const (

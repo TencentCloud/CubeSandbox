@@ -19,6 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/core/events/exchange"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	jsoniter "github.com/json-iterator/go"
@@ -299,6 +300,51 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 	return utils.InterfaceToString(tmpReq)
 }
 
+// pausedReplaceTarget resolves the local record a Create-from-pause request
+// would replace. CubeMaster sends a resume as a thin Create carrying
+// cube.master.desired.sandbox.id; when this node holds a record under that ID,
+// it is the tombstone the new sandbox replaces.
+//
+// sb is nil when the request is not a replacement or this node holds no record
+// for it (cross-node restore: Master's placement already ran the scheduler
+// filters against the target node). paused reports whether that record is a
+// fully PAUSED tombstone — the only state that may be replaced. A non-nil
+// record with paused == false is a live or pausing-in-flight collision that
+// callers must reject as already-exists rather than replace: PAUSING may still
+// own the lifecycle lock and its cleanup, and a live sandbox must not be
+// touched.
+//
+// A real store error is returned as err rather than flattened into "no local
+// record": not-found genuinely means this node holds no tombstone, but an I/O
+// or corruption error means the local state is UNKNOWN, and every caller must
+// fail closed on unknown — silently treating it as "not a replacement" would
+// skip the shim gate, the quota gate and the replacement branch at once, and
+// a resume could slip past all three without a log line.
+func pausedReplaceTarget(
+	ctx context.Context,
+	mgr cubes.CubeboxAPI,
+	req *cubebox.RunCubeSandboxRequest,
+) (sb *cubeboxstore.CubeBox, paused bool, err error) {
+	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+	if desired == "" {
+		return nil, false, nil
+	}
+	sb, getErr := mgr.Get(ctx, desired)
+	if getErr != nil {
+		if errors.Is(getErr, utils.ErrorKeyNotFound) || errdefs.IsNotFound(getErr) {
+			// No local record for the desired id: cross-node restore or a
+			// fresh create that merely pins its id. Not a replacement.
+			return nil, false, nil
+		}
+		return nil, false, getErr
+	}
+	if sb == nil || sb.SandboxID != desired {
+		return nil, false, nil
+	}
+	st := sb.GetStatus()
+	return sb, st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED, nil
+}
+
 // gatePausedReplace refuses to start a resume that would replace a PAUSED
 // sandbox whose previous runtime may still be running.
 //
@@ -311,21 +357,16 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // failing later would strand those allocations and, via failover, destroy the
 // paused sandbox the user asked to resume.
 func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
-	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
-	if desired == "" {
-		return nil
+	sb, paused, err := pausedReplaceTarget(ctx, s.cubeboxMgr.cubeboxManger, req)
+	if err != nil {
+		// Local state unknown: fail closed. Proceeding would skip the
+		// eligibility wait for a tombstone that may well exist, letting the
+		// replacement delete the row while the old runtime still lives.
+		return fmt.Errorf("cannot resolve the paused sandbox to replace: %w", err)
 	}
-	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
-		// No local record to replace: an ordinary create that happens to
-		// carry the annotation.
-		return nil
-	}
-	st := sb.GetStatus()
-	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
-		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
-		// lifecycle lock and its cleanup, and a live sandbox must not be
-		// touched; the create step rejects both as already exists.
+	if !paused {
+		// No local PAUSED tombstone to replace; live or pausing collisions are
+		// rejected by the create step as already exists.
 		return nil
 	}
 	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
@@ -385,10 +426,11 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
+	resumeSID := resumeFromPauseSandboxID(req)
+	if resumeSID != "" {
 		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
-			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, sid)))
-		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, sid)
+			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, resumeSID)))
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, resumeSID)
 		lockSpan.End()
 		if lockErr != nil {
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
@@ -396,6 +438,12 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			return rsp, nil
 		}
 		defer unlock()
+		// A previous failed attempt's rollback may have had to defer its
+		// tombstone restore because this lock was busy. Complete it now, under
+		// the lock and before anything below reads the row, so this retry
+		// evaluates the tombstone — not the debris row — and runs the normal
+		// shim and quota gates on it.
+		s.cubeboxMgr.completePendingPausedRestore(ctx, resumeSID)
 	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
@@ -423,6 +471,26 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		ReqInfo:      req,
 		Failover:     true,
 		SnapshotMode: mode,
+	}
+	if resumeSID != "" {
+		// The async failover of a failed Create-from-pause restores the tombstone
+		// this request is replacing; hand it the same per-sandbox lock this
+		// Create holds so the restore cannot race a retried Resume or a user
+		// Delete that arrives after this RPC returned. Lock the exact key this
+		// Create locked (resumeSID), not whatever id the flow later pins, so the
+		// rollback is provably serialized against the same gate.
+		createInfo.RollbackSerialize = func(ctx context.Context, _ string) (func(), error) {
+			return s.sandboxLifecycleLocks.LockContext(ctx, resumeSID)
+		}
+		// If that lock cannot be taken within the failover's wait budget it
+		// stands down without touching the store; record the snapshot so the
+		// next resume Create — which does hold the lock — completes the
+		// restore before it reads the row. Read off createInfo at call time:
+		// local.Create fills the snapshot/debris fields as the flow runs.
+		createInfo.RollbackStanddown = func(_ context.Context, _ string) {
+			s.cubeboxMgr.recordPendingPausedRestore(resumeSID,
+				createInfo.PausedReplaceSnapshot, createInfo.PausedReplaceDebrisCreatedAt)
+		}
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 
@@ -500,6 +568,20 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
 			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		return rsp, nil
+	}
+	// Same reasoning as the gate above: the resume quota admission must run
+	// before the create flow allocates network/volume/cgroup, and Conflict
+	// (not a failover-triggering code) keeps the paused tombstone intact so
+	// the user can retry after freeing capacity. The returned release func
+	// drops the node-level reservation the admission registered; deferring it
+	// here covers every exit — success (the flow's Save has folded the demand
+	// into the store aggregate), failure, panic and cancellation alike.
+	releaseReservation, rejected := s.admitPausedReplace(ctx, req)
+	defer releaseReservation()
+	if rejected != nil {
+		rsp.Ret.RetMsg = rejected.RetMsg
+		rsp.Ret.RetCode = rejected.RetCode
 		return rsp, nil
 	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
@@ -723,6 +805,12 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	if s.restarts != nil {
 		s.restarts.Stop(req.GetSandboxID())
 	}
+	// Drop any tombstone restore a failed create's rollback had to defer: this
+	// delete is the user's (or Master's) final word on the sandbox, and a
+	// later resume completing the deferred restore would resurrect a record
+	// whose pause binding is about to be dropped. A stand-down recorded after
+	// this point is handled by the restore's own row checks.
+	s.cubeboxMgr.pendingPausedRestores.take(req.GetSandboxID())
 	rsp := &cubebox.DestroyCubeSandboxResponse{
 		RequestID: req.RequestID,
 		SandboxID: req.SandboxID,

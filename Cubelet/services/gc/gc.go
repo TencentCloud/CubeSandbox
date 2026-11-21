@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
@@ -179,6 +180,18 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 
 	cb, err := l.cubeboxManger.Get(ctx, opts.SandboxID)
 	if err == nil {
+		// A create rollback that kept or restored a PAUSED tombstone must not
+		// be quarantined: this cleanup Create runs right after the rollback's
+		// scrub cleared UserMarkDeletedTime, and re-stamping it would make
+		// gcservice.allowCleanup proceed against the row — reclaiming the pause
+		// package the user's retried Resume needs. Ordinary (non-failover)
+		// destroys keep the existing quarantine stamping, and a failover over a
+		// non-paused row is genuine debris that cleanup should still own.
+		if constants.IsFailoverOperation(ctx) &&
+			cb.GetStatus() != nil &&
+			cb.GetStatus().Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
+			return nil
+		}
 		if cb.UserMarkDeletedTime == nil {
 			now := time.Now()
 			cb.UserMarkDeletedTime = &now

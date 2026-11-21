@@ -17,17 +17,19 @@ import (
 )
 
 type fakeCubeboxAPI struct {
-	cb            *cubeboxstore.CubeBox
-	list          []*cubeboxstore.CubeBox
-	getCalls      int
-	getErr        error
-	listCalls     int
-	saveCalls     int
-	getHook       func(call int)
-	syncIDs       []string
-	syncSnapshots []fakeCubeboxSyncSnapshot
-	syncErr       error
-	saveErr       error
+	cb             *cubeboxstore.CubeBox
+	list           []*cubeboxstore.CubeBox
+	getCalls       int
+	getErr         error
+	getReturnsCopy bool
+	deleteCalls    int
+	listCalls      int
+	saveCalls      int
+	getHook        func(call int)
+	syncIDs        []string
+	syncSnapshots  []fakeCubeboxSyncSnapshot
+	syncErr        error
+	saveErr        error
 }
 
 type fakeCubeboxSyncSnapshot struct {
@@ -49,10 +51,29 @@ func (f *fakeCubeboxAPI) Get(ctx context.Context, id string) (*cubeboxstore.Cube
 	if f.getHook != nil {
 		f.getHook(f.getCalls)
 	}
+	found := (*cubeboxstore.CubeBox)(nil)
 	if cb != nil && cb.ID == id {
-		return cb, nil
+		found = cb
+	} else {
+		// Multi-record fixtures (e.g. the concurrent-resume ledger tests) seed
+		// list; resolve by id there so several paused tombstones can coexist.
+		for _, sb := range f.list {
+			if sb != nil && (sb.ID == id || sb.SandboxID == id) {
+				found = sb
+				break
+			}
+		}
 	}
-	return nil, nil
+	if found == nil {
+		return nil, nil
+	}
+	// getReturnsCopy models a store implementation that hands out deep copies
+	// (Store.Sync already copies on the persistence path); identity checks in
+	// the rollback must be value-based to survive it.
+	if f.getReturnsCopy {
+		return found.DeepCopy(), nil
+	}
+	return found, nil
 }
 
 func (f *fakeCubeboxAPI) FindContainerOfCubebox(ctx context.Context, id string) (*cubeboxstore.Container, *cubeboxstore.CubeBox, error) {
@@ -83,6 +104,18 @@ func (f *fakeCubeboxAPI) Save(ctx context.Context, info *cubeboxstore.CubeBox, o
 		return f.saveErr
 	}
 	f.cb = info
+	// Mirror the real store's key-by-ID overwrite so List()-driven aggregates
+	// and Get() stay consistent with the saved row (the retry tests save a
+	// debris row then restore the tombstone over it).
+	for i, sb := range f.list {
+		if sb != nil && info != nil && (sb.ID == info.ID || sb.SandboxID == info.ID) {
+			f.list[i] = info
+			return nil
+		}
+	}
+	if f.list != nil && info != nil {
+		f.list = append(f.list, info)
+	}
 	return nil
 }
 
@@ -100,6 +133,7 @@ func (f *fakeCubeboxAPI) SyncByID(ctx context.Context, id string, opts ...cubes.
 }
 
 func (f *fakeCubeboxAPI) Delete(ctx context.Context, opt *cubes.DeleteOption) error {
+	f.deleteCalls++
 	return nil
 }
 
