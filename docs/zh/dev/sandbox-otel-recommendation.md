@@ -187,4 +187,4 @@ Loki 只索引 `service_name`、`cubesandbox_cluster_id`、`host_name`，Sandbox
 
 扩展数据源时，应同时更新 Collector 配置、字段契约、双语文档、Grafana 看板和回归
 测试；组件日志的 receiver、字段、挂载和高基数约束见
-[可观测性部署指南](../guide/observability.md#45-扩展采集其他组件日志)。
+[可观测性部署指南](../guide/observability.md#扩展采集其他组件日志)。
