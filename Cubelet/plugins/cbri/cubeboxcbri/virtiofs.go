@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/kernelcmdline"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -294,9 +296,16 @@ func (e *cubeboxInstancePlugin) genVideoAnnotationOpt(ctx context.Context, opts 
 	log.G(ctx).Debugf("%v genVideoAnnotationOpt: resolution=%s, max-resolution=%s, fps=%d, videomemorysize=%d, cmdline=%s",
 		opts.SandboxID, resolution, maxResolution, fps, videoMemorySize, string(cmdlineAppendJSON))
 
-	tmpSpecs = append(tmpSpecs, oci.WithAnnotations(map[string]string{
-		constants.AnnotationVMKernelCmdlineAppend: string(cmdlineAppendJSON),
-	}))
+	// Union instead of overwrite so that a template producer writing the same
+	// annotation keeps both the video and the DAMON params regardless of the
+	// order the spec opts are applied in.
+	tmpSpecs = append(tmpSpecs, func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		kernelcmdline.MergeAnnotation(s.Annotations, constants.AnnotationVMKernelCmdlineAppend, string(cmdlineAppendJSON))
+		return nil
+	})
 
 	return tmpSpecs, nil
 }

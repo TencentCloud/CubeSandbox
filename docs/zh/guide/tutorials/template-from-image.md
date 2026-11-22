@@ -63,6 +63,60 @@ cubemastercli tpl create-from-image \
 
 `POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
+### Guest Kernel 命令行参数
+
+`create-from-image` 可以向 guest 内核命令行追加额外参数，主要用于内存超分场景下调优基于 DAMON 的回收（`damon_reclaim.*`）和空闲页上报（`page_reporting.*`）。
+
+直接用 `--kernel-cmdline-append` 传入参数。该标志可重复，每个值是一条 `module.param` 或 `module.param=value`：
+
+```bash
+cubemastercli tpl create-from-image \
+  --image  ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --memory 4096 \
+  --kernel-cmdline-append damon_reclaim.enabled=Y \
+  --kernel-cmdline-append damon_reclaim.min_age=1000000 \
+  --kernel-cmdline-append page_reporting.page_reporting_order=6
+```
+
+也可以用 `--kernel-cmdline-file` 从 YAML 或 JSON 文件加载同一组参数。文件内容必须是顶层列表：
+
+```yaml
+- damon_reclaim.enabled=Y
+- damon_reclaim.min_age=1000000
+- page_reporting.page_reporting_order=6
+```
+
+```bash
+cubemastercli tpl create-from-image \
+  --image  ghcr.io/tencentcloud/cubesandbox-base:latest \
+  --writable-layer-size 1G \
+  --memory 4096 \
+  --kernel-cmdline-file damon.yaml
+```
+
+两者同时给出时，先加载文件，再合并命令行参数；重复 key（`=` 之前的部分）以 `--kernel-cmdline-append` 为准。
+
+只允许 `page_reporting.*` 与 `damon_reclaim.*` 两个模块，每条参数必须匹配 `^(page_reporting|damon_reclaim)\.[A-Za-z0-9_.]+(=[A-Za-z0-9_,.:/-]*)?$`。含空白、控制字符或 shell 元字符的参数会被拒绝，避免把额外 token 注入 guest 命令行。用户提供的列表上限为 1024 字节，远低于 aarch64 上 2048 字节的 guest cmdline 缓冲。非法参数在 `create-from-image` 阶段即报错，不会等到模板构建开始。
+
+DAMON 需要一个物理地址区间用于监控。内核默认只挑单个 memory block，会漏掉 PCI hole 以上的 RAM，因此只要出现任意 `damon_reclaim.*` 参数，Cubelet 会在 placement 后自动填充两个参数：
+
+| 参数 | 取值（amd64） |
+|------|------|
+| `damon_reclaim.monitor_region_start` | `4096`（首个页；`0` 会被视为未设置） |
+| `damon_reclaim.monitor_region_end` | 最终 VM 的 guest RAM 大小加上对应架构的 PCI hole |
+
+结束地址根据最终 VM 规格的 guest RAM 大小计算：amd64 上 `--memory 4096`（4 GiB）会得到 `monitor_region_end=5368709120`（5 GiB）；arm64 上 guest RAM 起点是 `1073741824`（1 GiB），结束地址是 guest RAM 加 1 GiB（当 guest 超过 VMM 在 3.9375 GiB 处的 64 MiB 洞时，加 1.0625 GiB），因此同一个 `--memory 4096` 会得到 `monitor_region_end=5435817984`（5.0625 GiB）。该区间由 Cubelet 在 placement 之后、按工作节点架构与最终 VM 内存计算，适用于所有实例类型。显式给出的非 0 `monitor_region_start` / `monitor_region_end` 会被保留并校验（`start < end`）。若无法推导区间（非 amd64、非 arm64 主机，或 guest RAM 为 0），必须显式给出两个边界，否则请求会被拒绝。
+
+guest 内核命令行是 sandbox 级别的：同一 sandbox 内的所有容器共享同一个 VM。直接调用 REST API 时，等价的注解是 `containers[0].annotations["cube.vm.kernel.cmdline.append"]`，值是 JSON 字符串数组。把该注解写在其他容器上、或写在 sandbox 请求层，都会被拒绝。从设置了这些参数的模板创建 sandbox 时，只有请求**省略** `containers[]` 才会继承该注解；如果显式提供容器，模板容器的注解不会被复制，需要在请求中重新带上 `containers[0].annotations["cube.vm.kernel.cmdline.append"]`。
+
+参数只有在 guest 内核编入 DAMON 支持（`CONFIG_DAMON_RECLAIM=y`）时才生效。`damon_reclaim.enabled` 默认是 `false`，因此没有传 `damon_reclaim.enabled=Y` 的 guest 行为保持不变。验证参数是否进入 guest：
+
+```bash
+cat /proc/cmdline
+cat /sys/module/damon_reclaim/parameters/enabled   # 期望 Y
+```
+
 ## 第三步 — 监控进度
 
 有两种方式跟踪构建任务。
