@@ -687,14 +687,16 @@ func TestNetworkRuntimeConfigFromPluginConfigMapsEmbeddedRuntimeSettings(t *test
 		MvmGwMacAddr:          "20:90:6f:cf:cf:aa",
 		MvmMask:               30,
 		MvmMtu:                1400,
-		TapInitNum:            3,
 		CubeEgressAdminURL:    "http://127.0.0.1:19090",
 		CubeEgressPushTimeout: tomlext.FromStdTime(3 * time.Second),
 		CubeRouterEnable:      true,
 		CubeRouterCIDR:        "10.254.0.0/24",
 		CubeRouterMacAddr:     "22:90:6f:cf:cf:aa",
-	})
+	}, 3)
 
+	if cfg.TapInitNum != 3 {
+		t.Fatalf("TapInitNum=%d", cfg.TapInitNum)
+	}
 	if cfg.CubeEgressAdminURL != "http://127.0.0.1:19090" {
 		t.Fatalf("CubeEgressAdminURL=%q", cfg.CubeEgressAdminURL)
 	}
@@ -707,7 +709,7 @@ func TestNetworkRuntimeConfigFromPluginConfigMapsEmbeddedRuntimeSettings(t *test
 }
 
 func TestNetworkRuntimeConfigFromPluginConfigAllowsCubeEgressDisable(t *testing.T) {
-	cfg := networkRuntimeConfigFromPluginConfig(&Config{CubeEgressAdminURL: ""})
+	cfg := networkRuntimeConfigFromPluginConfig(&Config{CubeEgressAdminURL: ""}, 0)
 	if cfg.CubeEgressAdminURL != "" {
 		t.Fatalf("CubeEgressAdminURL=%q, want disabled", cfg.CubeEgressAdminURL)
 	}

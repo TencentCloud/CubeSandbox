@@ -16,11 +16,17 @@ import (
 	dynamConf "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pooltier"
 )
 
 type Config struct {
-	RootPath                         string `toml:"root_path"`
-	PoolSize                         int    `toml:"pool_size"`
+	RootPath string `toml:"root_path"`
+	// PoolSize is the number of cgroup slots to pre-create.
+	// Nil or 0 defers to AutoPoolSize.
+	PoolSize *int `toml:"pool_size"`
+	// AutoPoolSize enables host-based sizing when PoolSize is unset or 0.
+	// Nil behaves like true.
+	AutoPoolSize                     *bool  `toml:"auto_pool_size"`
 	PoolTriggerIntervalInMs          int    `toml:"pool_trigger_interval_in_ms"`
 	VmMemoryOverheadBase             string `toml:"vm_memory_overhead_base"`
 	VmMemoryOverheadCoefficient      int64  `toml:"vm_memory_overhead_coefficient"`
@@ -66,6 +72,52 @@ func init() {
 
 func (c *Config) ShouldSetMemoryReparentFile() bool {
 	return !c.dynamicDisableMemoryReparentFile
+}
+
+// resolvePoolSize returns the cgroup pool size.
+// A positive pool_size wins; otherwise auto_pool_size selects a host tier.
+// Tiering off falls back to the built-in default. pool_size = 0 defers to
+// auto_pool_size.
+func (c *Config) resolvePoolSize(logger *log.CubeWrapperLogEntry) (int, error) {
+	if c.PoolSize != nil {
+		switch {
+		case *c.PoolSize < 0:
+			return 0, fmt.Errorf("pool_size must not be negative, got %d", *c.PoolSize)
+		case *c.PoolSize > 0:
+			if c.autoTieringEnabled() {
+				logger.Infof("cgroup pool: pool_size=%d is configured explicitly, auto_pool_size is ignored",
+					*c.PoolSize)
+			} else {
+				logger.Infof("cgroup pool: pool_size=%d is configured explicitly", *c.PoolSize)
+			}
+			return *c.PoolSize, nil
+		}
+	}
+
+	if !c.autoTieringEnabled() {
+		// Tiering off without an explicit size uses the built-in default.
+		logger.Warnf("cgroup pool: auto_pool_size is off but pool_size is unset or 0; "+
+			"falling back to the built-in default of %d slots, set pool_size explicitly",
+			defaultPoolSize)
+		return defaultPoolSize, nil
+	}
+
+	tier, spec, err := selectTierForHost()
+	if err != nil {
+		logger.Warnf("cgroup pool: host capacity detection failed (%v), "+
+			"using the %s tier: pool_size=%d", err, tier.Name, tier.CgroupPoolSize)
+		return tier.CgroupPoolSize, nil
+	}
+	logger.Infof("cgroup pool: auto_pool_size picked tier=%s (cpus=%d mem_total_mb=%d): pool_size=%d",
+		tier.Name, spec.CPUs, spec.MemTotalMB, tier.CgroupPoolSize)
+	return tier.CgroupPoolSize, nil
+}
+
+var selectTierForHost = pooltier.SelectForHost
+
+// autoTieringEnabled reports whether auto sizing is enabled; unset is enabled.
+func (c *Config) autoTieringEnabled() bool {
+	return c.AutoPoolSize == nil || *c.AutoPoolSize
 }
 
 func (c *Config) parseAndSetDynamicConfig(cfg *dynamConf.Config) {

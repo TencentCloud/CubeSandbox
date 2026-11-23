@@ -52,14 +52,15 @@ create HTTP 500: {"code":500,"message":"CubeMaster returned error code 130595: c
 
 在本地物理机或裸金属部署时，Cube 会创建大量持久化 TAP 网卡，名称类似 `z192.168.0.x` 或 `z192.168.1.x`。
 
-其默认配置位于 `Cubelet/config/config.toml`，默认创建 500 个 `192.168.0.0/18` 网段下的 TAP 网卡
+其默认配置位于 `Cubelet/config/config.toml`，会创建 `192.168.0.0/18` 网段下的 TAP 网卡。
 
 ```toml
 [plugins]
   [plugins."io.cubelet.internal.v1.network"]
     object_dir = "/usr/local/services/cubetoolbox/cube-vs/network"
     eth_name = "eth0"
-    tap_init_num = 500
+    auto_tap_init_num = true
+    # tap_init_num = 500
     cidr = "192.168.0.0/18"
 ```
 
