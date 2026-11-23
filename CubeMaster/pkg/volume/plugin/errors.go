@@ -11,3 +11,11 @@ type InvalidArgumentError struct {
 }
 
 func (e *InvalidArgumentError) Error() string { return e.Message }
+
+// NotStartedError confirms that the plugin operation was never invoked.
+type NotStartedError struct {
+	Cause error
+}
+
+func (e *NotStartedError) Error() string { return e.Cause.Error() }
+func (e *NotStartedError) Unwrap() error { return e.Cause }

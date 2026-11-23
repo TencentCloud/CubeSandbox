@@ -68,15 +68,17 @@ const (
 )
 
 type createSandboxContext struct {
-	dispatchState    atomic.Int32
-	selctx           *selctx.SelectorCtx
-	directHost       bool
-	selectHost       *node.Node
-	startTime        time.Time
-	endTime          time.Time
-	cubeletStartTime time.Time
-	cubeletEndTime   time.Time
-	startHandleTime  time.Time
+	volumeGuarded         bool
+	volumeAdmissionFailed bool
+	dispatchState         atomic.Int32
+	selctx                *selctx.SelectorCtx
+	directHost            bool
+	selectHost            *node.Node
+	startTime             time.Time
+	endTime               time.Time
+	cubeletStartTime      time.Time
+	cubeletEndTime        time.Time
+	startHandleTime       time.Time
 
 	retryCost time.Duration
 	ctx       context.Context
@@ -296,6 +298,9 @@ func (c *createSandboxContext) handleCubelet() {
 		}
 
 		retry := c.callCubelet()
+		if c.volumeAdmissionFailed {
+			return
+		}
 		if retry {
 			c.retryCost += c.cubeletEndTime.Sub(c.cubeletStartTime)
 			c.retryTimes++
@@ -421,7 +426,6 @@ func (c *createSandboxContext) callCubelet() bool {
 		c.cubeletEndTime = time.Now()
 	}()
 
-	var err error
 	calleeEndpoint := cubelet.GetCubeletAddr(c.selectHost.HostIP())
 	rpcCtx, rpcSpan := telemetry.Start(c.ctx, telemetry.SpanCreateCubelet,
 		trace.WithAttributes(
@@ -429,7 +433,28 @@ func (c *createSandboxContext) callCubelet() bool {
 			attribute.String(telemetry.AttrNodeID, c.selectHost.ID()),
 		))
 	c.cubeletStartTime = time.Now()
-	c.cubeletRsp, err = cubelet.Create(rpcCtx, calleeEndpoint, c.cubeletReq)
+	var err error
+	c.cubeletRsp, c.volumeGuarded, err = createWithVolumeAdmission(rpcCtx, calleeEndpoint, c.cubeletReq, nil)
+	if c.volumeGuarded && (err != nil || c.cubeletRsp.GetRet() == nil || c.cubeletRsp.GetRet().GetRetCode() != cubeleterrorcode.ErrorCode_Success) {
+		c.volumeAdmissionFailed = true
+		switch {
+		case err != nil:
+			telemetry.End(rpcSpan, err)
+			if status, ok := ret.FromError(err); ok {
+				c.setMasterRsp(int(status.Code()), status.Message())
+			} else {
+				c.setMasterRsp(int(errorcode.ErrorCode_ReqCubeAPIFailed), "plugin volume Create outcome unknown")
+			}
+		case c.cubeletRsp.GetRet() == nil:
+			telemetry.EndWithCode(rpcSpan, int(errorcode.ErrorCode_Unknown))
+			c.setMasterRsp(int(errorcode.ErrorCode_Unknown), "missing plugin volume Create result")
+		default:
+			status := c.cubeletRsp.GetRet()
+			telemetry.EndWithCode(rpcSpan, int(status.GetRetCode()))
+			c.setMasterRsp(int(status.GetRetCode()), status.GetRetMsg())
+		}
+		return false
+	}
 	if err != nil {
 		telemetry.End(rpcSpan, err)
 		return c.errRetry(err)
@@ -454,7 +479,9 @@ func (c *createSandboxContext) dealSuccResult() {
 		}
 		// Apply any node-level volume ref-count transitions (0→1) reported by
 		// Cubelet so the volume DB knows how many nodes reference each volume.
-		volrefcount.ApplyFromExtInfo(c.ctx, c.cubeletRsp.GetExtInfo())
+		if !c.volumeGuarded {
+			volrefcount.ApplyFromExtInfo(c.ctx, c.cubeletRsp.GetExtInfo())
+		}
 		if config.GetConfig().CubeletConf.EnableExposedPort {
 			if c.cubeletRsp.GetPortMappings() != nil {
 				c.cubeletRspPorts = make(map[string]string)

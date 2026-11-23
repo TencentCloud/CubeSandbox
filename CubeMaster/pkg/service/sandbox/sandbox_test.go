@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,15 +15,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	grpcpool "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/grpc-middleware/pool"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestVolumeCreateRetriesConnectionFailureBeforeAdmission(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(grpcconn.GetWorkerConn, func(context.Context, string) (grpcpool.Conn, error) {
+		return nil, errors.New("worker dial failed")
+	})
+	patches.ApplyFunc(localcache.IncrNodeConcurrent, func(*node.Node) error { return nil })
+	patches.ApplyFunc(localcache.DecrNodeConcurrent, func(*node.Node) error { return nil })
+	c := &createSandboxContext{
+		ctx:        t.Context(),
+		selectHost: &node.Node{IP: "127.0.0.1"},
+		masterRsp:  &types.CreateCubeSandboxRes{Ret: &types.Ret{}},
+		cubeletReq: &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{
+			AnnotationPluginVolumeSources: `[{"name":"shared","driver":"s3"}]`,
+		}},
+	}
+	require.True(t, c.callCubelet())
+	require.True(t, c.reschedule)
+	require.False(t, c.volumeAdmissionFailed)
+}
 
 func TestRunAsUser(t *testing.T) {
 	content := `{

@@ -47,11 +47,22 @@ func DestroyWithTimeout(ctx context.Context, calleeEp string,
 
 func Create(ctx context.Context, calleeEp string,
 	req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
+	return CreatePrepared(ctx, calleeEp, req, nil)
+}
+
+// CreatePrepared runs admission after connection acquisition but before the
+// RPC, so a local connection failure never strands a reservation.
+func CreatePrepared(ctx context.Context, calleeEp string, req *cubebox.RunCubeSandboxRequest, admit func() error) (*cubebox.RunCubeSandboxResponse, error) {
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
 	if err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
 	}
 	defer conn.Close()
+	if admit != nil {
+		if err := admit(); err != nil {
+			return nil, err
+		}
+	}
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
 
 	return c.Create(telemetry.InjectGRPC(ctx), req)
