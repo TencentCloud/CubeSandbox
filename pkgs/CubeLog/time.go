@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// logClock is the time snapshot shared by every log writer. A background
-// goroutine refreshes it once per second while writers read it on every
-// call, so it is published atomically: a reader sees one complete snapshot
-// and never a torn string or a time from a different tick.
+// logClock is the per-second time snapshot shared by all log writers, published
+// atomically so strings are never torn. Accessors load independently: a Write
+// can straddle a tick and land one line in the previous hour/day file, but no
+// line is lost.
 type logClock struct {
 	unixTime int64
 	dateHour string

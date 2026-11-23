@@ -544,9 +544,7 @@ cube-api-test: builder-image
 shim-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeShim && make test'
 
-# cubelog/cubedb run on the host: both are pure Go with no CGO and no
-# builder-only deps, so the host toolchain is sufficient and skipping the
-# container is faster.
+# cubelog runs on the host with -race (needs CGO + gcc); cubedb is pure Go.
 .PHONY: cubelog-test
 cubelog-test:
 	cd pkgs/CubeLog && CGO_ENABLED=1 go test -short -race ./...
