@@ -597,6 +597,15 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	createInfo.ReclaimStaleRootfs = gate.reclaimRootfs
+	// The final create step writes the new row's attempt id, but a resume that
+	// fails before it must still own the row its failover will clean.
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		if claimErr := s.cubeboxMgr.claimPausedAttempt(ctx, sid, createInfo.AttemptID); claimErr != nil {
+			rsp.Ret.RetMsg = fmt.Sprintf("claim paused sandbox %s: %v", sid, claimErr)
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+	}
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {

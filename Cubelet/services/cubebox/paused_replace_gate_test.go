@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -209,6 +210,24 @@ func TestGatePausedReplaceRefusesOnStoreReadError(t *testing.T) {
 	assert.Equal(t, errorcode.ErrorCode_TaskStateInvalid, status.Code())
 }
 
+// A row that claims a different sandbox id is a store inconsistency, not a
+// missing row; do not turn it into permission to delete another sandbox's disk.
+func TestGatePausedReplaceRejectsMismatchedRowID(t *testing.T) {
+	mismatched := newCubeboxWithStatusForTest("sb-resume", cubeboxstore.Status{
+		StartedAt: 1,
+		PausedAt:  time.Now().Unix(),
+	})
+	mismatched.SandboxID = "sb-other"
+
+	gate, err := gateOnlyService(mismatched, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs)
+	status, ok := ret.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, errorcode.ErrorCode_TaskStateInvalid, status.Code())
+}
+
 // The no-row probe must still fail closed while a shim/VMM from the failed
 // attempt is alive; the missing store row is not proof that the disk is free.
 func TestGatePausedReplaceRefusesWithoutLocalRecordWhileRuntimeLives(t *testing.T) {
@@ -250,6 +269,39 @@ func TestGatePausedReplaceChecksWorkloadContainerShimsWithoutRow(t *testing.T) {
 	defer cancel()
 
 	gate, err := gateOnlyService(nil, time.Minute).gatePausedReplace(ctx, req)
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs)
+}
+
+// A bundle with no readable pid files must age from its on-disk mtime, not
+// from time.Now(), or a retry would keep the spawn intent fresh forever.
+func TestGatePausedReplaceAgesStaleBundleWithoutPids(t *testing.T) {
+	bundle := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(bundle, old, old))
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(*local, context.Context, string) (string, bool, error) {
+		return bundle, true, nil
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+
+	gate, err := gateOnlyService(nil, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.True(t, gate.reclaimRootfs, "a stale bundle may age out and allow the retry to heal")
+}
+
+// A registered shim with no bundle path has no timestamp to age from; it must
+// fail closed instead of inventing a fresh intent.
+func TestGatePausedReplaceRejectsShimWithoutBundle(t *testing.T) {
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(*local, context.Context, string) (string, bool, error) {
+		return "", true, nil
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+
+	gate, err := gateOnlyService(nil, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
 	require.Error(t, err)
 	assert.False(t, gate.reclaimRootfs)
 }
@@ -378,6 +430,38 @@ func TestCreateReachesTheFlowOnceTheOldRuntimeIsGone(t *testing.T) {
 	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
 	assert.Equal(t, 1, flow.createCalls)
 	assert.False(t, flow.reclaimRootfs)
+}
+
+// A resume that fails before the final create step must still own the paused
+// tombstone, or its failover would mistake the old row for a newer attempt and
+// skip network/volume/storage cleanup.
+func TestCreateClaimsPausedRowBeforeTheFlowRuns(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	skipPauseExpansion(t)
+
+	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{
+		ShimSpawned:   true,
+		ShimSpawnedAt: time.Now().Add(-time.Hour),
+	})
+	sb.CreateAttemptID = "old-attempt"
+	api := &fakeCubeboxAPI{cb: sb}
+	flow := &fakeCreateFlow{}
+	s := createServiceForAPI(api, flow, 10*time.Minute)
+
+	rsp, err := s.Create(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
+	require.Equal(t, 1, flow.createCalls)
+	require.NotNil(t, api.cb)
+	assert.NotEmpty(t, api.cb.CreateAttemptID)
+	assert.NotEqual(t, "old-attempt", api.cb.CreateAttemptID,
+		"the attempt that is about to run must own the row for failover")
+
+	owned, err := (&failoverGuard{mgr: &local{cubeboxManger: api}}).
+		Owns(context.Background(), "sb-resume", api.cb.CreateAttemptID)
+	require.NoError(t, err)
+	assert.True(t, owned, "the claimed row belongs to the failing attempt's cleanup")
 }
 
 // The gate→storage assignment is the line that makes the fix work. A pause

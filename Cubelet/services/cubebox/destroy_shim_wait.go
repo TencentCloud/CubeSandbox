@@ -643,10 +643,11 @@ var lookupShimBundleByID = func(l *local, ctx context.Context, sandboxID string)
 // addressed. A workload id that the spec no longer carries is the remaining
 // blind spot: its shim is random and only the deleted row knew it.
 //
-// An unavailable shim manager, or any lookup error other than NotFound, is
-// unresolved and fails closed. A registered shim with no readable pid files
-// also fails closed through the existing spawn-intent TTL: the row that would
-// have carried the pid is exactly what the failed attempt deleted.
+// An unavailable shim manager, any lookup error other than NotFound, and a
+// registered shim with an empty bundle path all fail closed. When a bundle is
+// present but its pid files are missing, the newest bundle mtime ages the
+// spawn intent: a genuinely stale bundle can age out, while a fresh one stays
+// protected for the TTL.
 func (l *local) waitSandboxRuntimeGoneByID(ctx context.Context, sandboxID string, containerIDs []string) error {
 	ids := append([]string{sandboxID}, containerIDs...)
 	seen := map[string]struct{}{}
@@ -675,6 +676,13 @@ func (l *local) waitSandboxRuntimeGoneByID(ctx context.Context, sandboxID string
 	if !foundShim {
 		return nil
 	}
+	if len(bundles) == 0 {
+		// A shim is registered but its bundle path is empty. We cannot read
+		// the pid files, and there is no on-disk timestamp to age the intent
+		// from. Fail closed rather than invent a fresh intent that would be
+		// reset on every retry.
+		return fmt.Errorf("sandbox %s: shim registered without a readable bundle; cannot prove runtime is gone", sandboxID)
+	}
 	sb := &cubeboxstore.CubeBox{
 		ContainersMap: &cubeboxstore.ContainersMap{
 			ContainerMap: map[string]*cubeboxstore.Container{
@@ -688,11 +696,34 @@ func (l *local) waitSandboxRuntimeGoneByID(ctx context.Context, sandboxID string
 	sb.ID = sandboxID
 	sb.SandboxID = sandboxID
 	sb.Endpoint.ShimSpawned = true
-	sb.Endpoint.ShimSpawnedAt = time.Now()
+	// Age the spawn intent from a stable on-disk signal, not time.Now(): a
+	// retry must not keep a stale bundle inside the TTL forever. The newest
+	// bundle mtime is the closest available proxy for when the shim last
+	// touched its bundle.
+	sb.Endpoint.ShimSpawnedAt = newestBundleModTime(bundles)
 	evidence := l.collectRuntimeEvidenceWithBundles(ctx, sb, evidenceVerifiableOnly, bundles)
 	waitCtx, cancel := context.WithTimeout(ctx, replaceGateTimeout)
 	defer cancel()
 	return waitSandboxRuntimeGone(waitCtx, sandboxID, evidence)
+}
+
+func newestBundleModTime(bundles []string) time.Time {
+	newest := time.Time{}
+	for _, bundle := range bundles {
+		info, err := os.Stat(bundle)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if newest.IsZero() {
+		// An unstattable bundle gives us no age. Keep the intent fresh; the
+		// caller will retry, and an operator can inspect the path.
+		return time.Now()
+	}
+	return newest
 }
 
 // reapShimProcess SIGKILLs the shim and vmm recorded in the bundle.
