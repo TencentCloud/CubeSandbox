@@ -32,8 +32,9 @@ func PrepareLocalSource(ctx context.Context, spec SourceSpec) (*PreparedSource, 
 		return withLocalDockerFallback(ctx, spec, source, err)
 	}
 	// In dockerless mode a redo re-resolves the source from the registry via
-	// skopeo. This intentionally relaxes the docker-path requirement that the
-	// image still exist locally.
+	// skopeo, or from the local docker daemon when the registry cannot find it.
+	// This intentionally relaxes the docker-path requirement that the image
+	// still exist locally.
 	if hasDockerlessRootfsExportTools() {
 		source, err := prepareDockerlessSource(ctx, spec)
 		return withLocalDockerFallback(ctx, spec, source, err)
@@ -76,6 +77,14 @@ func PrepareSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error
 	return prepareDockerSource(ctx, spec)
 }
 
+// registryLookupError marks a failure to find the image in its registry.
+// Failures after the registry resolved the image are not wrapped, so they never
+// trigger the local docker fallback.
+type registryLookupError struct{ err error }
+
+func (e *registryLookupError) Error() string { return e.err.Error() }
+func (e *registryLookupError) Unwrap() error { return e.err }
+
 // withLocalDockerFallback returns the registry-resolved source unchanged. Only
 // when the registry lookup failed and the docker daemon already holds the image
 // (built or loaded locally, never pushed) does it switch to that local copy.
@@ -84,7 +93,8 @@ func withLocalDockerFallback(ctx context.Context, spec SourceSpec, source *Prepa
 	if err == nil {
 		return source, nil
 	}
-	if ValidateImageRef(spec.ImageRef) != nil {
+	var lookupErr *registryLookupError
+	if !errors.As(err, &lookupErr) || ValidateImageRef(spec.ImageRef) != nil {
 		return nil, err
 	}
 	local, localErr := prepareExistingDockerSource(ctx, spec)
@@ -97,11 +107,14 @@ func withLocalDockerFallback(ctx context.Context, spec SourceSpec, source *Prepa
 
 // prepareExistingDockerSource inspects an image already present in the local
 // docker daemon. It fails instead of pulling when the image is absent, and when
-// tar is missing, since the docker export path pipes `docker export` into tar
-// and the native-mode preflight does not check for it.
+// the docker CLI or tar is missing: the engine API can find the image without
+// the CLI, but the docker export path runs `docker export` piped into tar, and
+// the native and dockerless preflights check for neither.
 func prepareExistingDockerSource(ctx context.Context, spec SourceSpec) (*PreparedSource, error) {
-	if _, err := executableLookPath("tar"); err != nil {
-		return nil, err
+	for _, tool := range []string{"docker", "tar"} {
+		if _, err := executableLookPath(tool); err != nil {
+			return nil, err
+		}
 	}
 	if cli, err := newEngineClient(); err == nil {
 		if info, err := engineImageInspectWithClient(ctx, cli, spec.ImageRef); err == nil {
@@ -146,7 +159,7 @@ func prepareNativeSource(ctx context.Context, spec SourceSpec) (*PreparedSource,
 
 	img, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(auth), platOpt, jobsOpt)
 	if err != nil {
-		return nil, fmt.Errorf("native export failed to resolve image %q (if this is a multi-arch index, verify the requested platform exists): %w", spec.ImageRef, err)
+		return nil, &registryLookupError{fmt.Errorf("native export failed to resolve image %q (if this is a multi-arch index, verify the requested platform exists): %w", spec.ImageRef, err)}
 	}
 
 	cfgFile, err := img.ConfigFile()
@@ -220,7 +233,7 @@ func prepareDockerlessSource(ctx context.Context, spec SourceSpec) (*PreparedSou
 	inspectOutput, err := skopeoOutput(ctx, authFile, "inspect", sourceRef)
 	if err != nil {
 		cleanup()
-		return nil, fmt.Errorf("skopeo inspect %s failed: %w", spec.ImageRef, err)
+		return nil, &registryLookupError{fmt.Errorf("skopeo inspect %s failed: %w", spec.ImageRef, err)}
 	}
 	configOutput, err := skopeoOutput(ctx, authFile, "inspect", "--config", sourceRef)
 	if err != nil {
