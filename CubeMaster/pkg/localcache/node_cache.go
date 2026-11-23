@@ -289,6 +289,11 @@ func (l *local) getInstanceTypeName(n *node.Node) string {
 	return product
 }
 
+// Sorted buckets are traversed by readers after they release the lock, so
+// writers build a new slice and swap the map entry instead of editing in place.
+// Cost: every add/update copies the bucket, i.e. O(n^2) allocation per full
+// sync round (500 nodes ≈ 2 MB, 2000 nodes ≈ 33 MB at the default 1s
+// SyncMetaDataInterval). Re-evaluate before scaling the cluster much further.
 func (l *local) appendSortedNodes(n *node.Node) {
 	if n == nil || !n.Healthy {
 		return
@@ -298,12 +303,23 @@ func (l *local) appendSortedNodes(n *node.Node) {
 	defer l.lockSortedNodes.Unlock()
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
+	updated := make(node.NodeList, 0, len(ref)+1)
+	updated = append(updated, ref...)
+	updated = append(updated, n)
+	updated.AllSortByIndex()
+	l.sortedNodesByClusters[product] = updated
+}
+
+// filterOutByID returns a copy of ref without the node carrying id, so callers
+// never mutate a slice a reader may still hold after the lock is released.
+func filterOutByID(ref node.NodeList, id string) node.NodeList {
+	updated := make(node.NodeList, 0, len(ref))
+	for _, item := range ref {
+		if item.ID() != id {
+			updated = append(updated, item)
+		}
 	}
-	ref.Append(n)
-	ref.AllSortByIndex()
-	l.sortedNodesByClusters[product] = ref
+	return updated
 }
 
 func (l *local) delSortedNodes(n *node.Node) {
@@ -311,31 +327,39 @@ func (l *local) delSortedNodes(n *node.Node) {
 	defer l.lockSortedNodes.Unlock()
 
 	product := l.getInstanceTypeName(n)
-	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
-	}
-	ref.Remove(n)
-	l.sortedNodesByClusters[product] = ref
+	l.sortedNodesByClusters[product] = filterOutByID(l.sortedNodesByClusters[product], n.ID())
 }
 
+// updateSortedNodes replaces the bucket entry for n, or appends it when absent.
+// n must be the *node.Node currently held by the cache: the bucket is expected
+// to hold pointers to cached objects, and a copy would leave the old pointer
+// orphaned in the bucket.
 func (l *local) updateSortedNodes(n *node.Node) {
 	l.lockSortedNodes.Lock()
 	defer l.lockSortedNodes.Unlock()
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
-	}
+
 	if !n.Healthy {
-		ref.Remove(n)
-	} else {
-
-		ref.Add(n)
-
-		ref.AllSortByIndex()
+		l.sortedNodesByClusters[product] = filterOutByID(ref, n.ID())
+		return
 	}
-	l.sortedNodesByClusters[product] = ref
+
+	updated := make(node.NodeList, 0, len(ref))
+	exists := false
+	for _, item := range ref {
+		if item.ID() == n.ID() {
+			updated = append(updated, n)
+			exists = true
+		} else {
+			updated = append(updated, item)
+		}
+	}
+	if !exists {
+		updated = append(updated, n)
+	}
+	updated.AllSortByIndex()
+	l.sortedNodesByClusters[product] = updated
 }
 
 func (l *local) updateNodeFromMetaData(n *node.Node) error {

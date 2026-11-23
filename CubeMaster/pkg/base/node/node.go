@@ -8,6 +8,7 @@ package node
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -85,7 +86,9 @@ type Node struct {
 
 	UnhealthyReason string `json:"UnhealthyReason,omitempty"`
 
-	Score float64 `json:"Score,omitempty"`
+	// score holds the async multi-factor score as float64 bits; the async
+	// scorer writes it while scheduler readers read concurrently (atomic).
+	score atomic.Uint64
 
 	QuotaCpuUsage int64 `json:"QuotaCpuUsage,omitempty"`
 
@@ -164,24 +167,45 @@ func (n *Node) SchedulingAllowed() bool {
 	return n != nil && !n.schedulingDisabled.Load()
 }
 
-// MarshalJSON emits SchedulingDisabled from the atomic cordon flag.
+// SetScore stores the async multi-factor score.
+func (n *Node) SetScore(score float64) {
+	if n == nil {
+		return
+	}
+	n.score.Store(math.Float64bits(score))
+}
+
+// GetScore returns the async multi-factor score.
+func (n *Node) GetScore() float64 {
+	if n == nil {
+		return 0
+	}
+	return math.Float64frombits(n.score.Load())
+}
+
+// MarshalJSON emits SchedulingDisabled and Score from their atomic fields.
 func (n *Node) MarshalJSON() ([]byte, error) {
 	type Alias Node
 	return json.Marshal(&struct {
 		*Alias
-		SchedulingDisabled bool `json:"SchedulingDisabled"`
+		SchedulingDisabled bool    `json:"SchedulingDisabled"`
+		Score              float64 `json:"Score,omitempty"`
 	}{
 		Alias:              (*Alias)(n),
 		SchedulingDisabled: n.SchedulingDisabled(),
+		Score:              n.GetScore(),
 	})
 }
 
-// UnmarshalJSON loads SchedulingDisabled into the atomic cordon flag.
+// UnmarshalJSON loads SchedulingDisabled into the atomic cordon flag. Score is
+// a pointer so a JSON document without the key keeps the current value instead
+// of silently zeroing it; an explicit 0 still clears it.
 func (n *Node) UnmarshalJSON(data []byte) error {
 	type Alias Node
 	aux := &struct {
 		*Alias
-		SchedulingDisabled bool `json:"SchedulingDisabled"`
+		SchedulingDisabled bool     `json:"SchedulingDisabled"`
+		Score              *float64 `json:"Score,omitempty"`
 	}{
 		Alias: (*Alias)(n),
 	}
@@ -189,6 +213,9 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	n.SetSchedulingDisabled(aux.SchedulingDisabled)
+	if aux.Score != nil {
+		n.SetScore(*aux.Score)
+	}
 	return nil
 }
 
@@ -223,7 +250,7 @@ func (n *Node) Clone() *Node {
 		CreateConcurrentNum: n.CreateConcurrentNum, MaxMvmLimit: n.MaxMvmLimit,
 		QuotaCpu: n.QuotaCpu, QuotaMem: n.QuotaMem, MetaDataUpdateAt: n.MetaDataUpdateAt,
 		ReportedReady: n.ReportedReady, Healthy: n.Healthy, UnhealthyReason: n.UnhealthyReason,
-		Score: n.Score, QuotaCpuUsage: n.QuotaCpuUsage, QuotaMemUsage: n.QuotaMemUsage,
+		QuotaCpuUsage: n.QuotaCpuUsage, QuotaMemUsage: n.QuotaMemUsage,
 		CpuUtil: n.CpuUtil, CpuLoadUsage: n.CpuLoadUsage, MemUsage: n.MemUsage,
 		DataDiskUsagePer: n.DataDiskUsagePer, StorageDiskUsagePer: n.StorageDiskUsagePer,
 		SysDiskUsagePer: n.SysDiskUsagePer, MvmNum: n.MvmNum, MetricUpdate: n.MetricUpdate,
@@ -231,6 +258,7 @@ func (n *Node) Clone() *Node {
 		LocalCreateNum: localCreateNum, NicQueues: n.NicQueues,
 	}
 	cloned.SetSchedulingDisabled(schedulingDisabled)
+	cloned.SetScore(n.GetScore())
 	if n.VirtualNodeQuotaArray != nil {
 		cloned.VirtualNodeQuotaArray = append([]int64(nil), n.VirtualNodeQuotaArray...)
 	}
@@ -316,33 +344,6 @@ type NodeList []*Node
 
 func (l *NodeList) Append(value ...*Node) NodeList {
 	*l = append(*l, value...)
-	return *l
-}
-
-func (l *NodeList) Remove(elems ...*Node) {
-	for _, n := range elems {
-		for i, v := range *l {
-			if v.ID() == n.ID() {
-				*l = append((*l)[:i], (*l)[i+1:]...)
-			}
-		}
-	}
-}
-
-func (l *NodeList) Add(elems ...*Node) NodeList {
-	for _, n := range elems {
-		exist := false
-		for _, v := range *l {
-			if v.ID() == n.ID() {
-				exist = true
-			}
-		}
-		if exist {
-			continue
-		} else {
-			*l = append(*l, n)
-		}
-	}
 	return *l
 }
 
