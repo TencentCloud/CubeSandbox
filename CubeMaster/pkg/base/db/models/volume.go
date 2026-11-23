@@ -51,6 +51,9 @@ type VolumeRecord struct {
 	RefCount        int64 `gorm:"column:refcount;not null;default:0"`
 	InFlightCreates int64 `gorm:"column:in_flight_creates;not null;default:0"`
 	Deleting        bool  `gorm:"column:deleting;not null;default:false"`
+	// DeleteRetryable allows another Delete to claim a deleting row. A
+	// possibly partially deleted volume stays blocked from Create.
+	DeleteRetryable bool `gorm:"column:delete_retryable;not null;default:false"`
 }
 
 // TableName implements schema.Tabler so GORM uses the canonical table name.

@@ -8,6 +8,7 @@ package s3api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -21,9 +22,10 @@ import (
 
 // Client wraps minio-go for volume lifecycle operations.
 type Client struct {
-	bucket string
-	region string
-	inner  *minio.Client
+	singleAttempt bool
+	bucket        string
+	region        string
+	inner         *minio.Client
 }
 
 // Options selects the bucket and credentials for one client. Dynamic volumes
@@ -37,6 +39,7 @@ type Options struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	InstanceRole    bool
+	MaxAttempts     int
 }
 
 // imdsEndpoint is where the instance-role provider asks for credentials;
@@ -133,16 +136,25 @@ func NewFor(ctx context.Context, opts Options) (*Client, error) {
 		creds = credentials.NewStaticV4(opts.AccessKeyID, opts.SecretAccessKey, "")
 	}
 
-	inner, err := minio.New(host, &minio.Options{
+	minioOpts := &minio.Options{
 		Creds:        creds,
 		Secure:       secure,
 		Region:       opts.Region,
 		BucketLookup: lookup,
-	})
+		MaxRetries:   opts.MaxAttempts,
+	}
+	if opts.MaxAttempts == 1 {
+		transport, err := minio.DefaultTransport(secure)
+		if err != nil {
+			return nil, err
+		}
+		minioOpts.Transport = destroyTransport{RoundTripper: transport, bucket: opts.Bucket}
+	}
+	inner, err := minio.New(host, minioOpts)
 	if err != nil {
 		return nil, fmt.Errorf("s3 client for %q: %w", opts.Endpoint, err)
 	}
-	return &Client{bucket: opts.Bucket, region: opts.Region, inner: inner}, nil
+	return &Client{bucket: opts.Bucket, region: opts.Region, inner: inner, singleAttempt: opts.MaxAttempts == 1}, nil
 }
 
 // ParseEndpoint splits an endpoint URL into the host:port minio-go expects and
@@ -286,15 +298,35 @@ func (c *Client) PrefixHasData(ctx context.Context, prefix string) (bool, error)
 	return false, nil
 }
 
-// RemovePrefix recursively deletes every object under prefix.
-//
-// Only an explicitly missing bucket or key is ignored; every other failure must
-// propagate so CubeMaster does not drop the volume record while objects remain.
+var (
+	ErrDestroyNotStarted = errors.New("no S3 delete request sent")
+	ErrDestroyRetryable  = errors.New("S3 delete attempt ended and can be retried")
+)
+
+// RemovePrefix recursively deletes every object under prefix. Retry once after
+// confirmed throttling, listing the remaining objects under the same claim.
 func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
 	if err := checkPrefix(prefix); err != nil {
+		return fmt.Errorf("%w: %w", ErrDestroyNotStarted, err)
+	}
+	err := c.removePrefixOnce(ctx, prefix)
+	if !errors.Is(err, ErrDestroyRetryable) || !errors.Is(err, errSlowDown) {
 		return err
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(100 * time.Millisecond):
+	}
+	err = c.removePrefixOnce(ctx, prefix)
+	if errors.Is(err, ErrDestroyNotStarted) {
+		// An unstarted second pass cannot erase deletions from the first.
+		return fmt.Errorf("%w: %v", ErrDestroyRetryable, err)
+	}
+	return err
+}
 
+func (c *Client) removePrefixOnce(ctx context.Context, prefix string) error {
 	listCtx, cancelList := context.WithCancel(ctx)
 	defer cancelList()
 
@@ -310,15 +342,22 @@ func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
 	keys := make(chan minio.ObjectInfo)
 	go func() {
 		defer close(keys)
+		sent := false
 		for obj := range objects {
 			if obj.Err != nil {
-				if !IsNotFound(obj.Err) {
-					listErrCh <- obj.Err
+				if !errors.Is(obj.Err, errBucketAbsent) {
+					listErr := fmt.Errorf("list prefix %q: %w", prefix, obj.Err)
+					if !sent && !errors.Is(obj.Err, errUnverifiedNotFound) &&
+						!errors.Is(obj.Err, errUnverified503) && !errors.Is(obj.Err, errSlowDown) {
+						listErr = fmt.Errorf("%w: %w", ErrDestroyNotStarted, listErr)
+					}
+					listErrCh <- listErr
 				}
 				return
 			}
 			select {
 			case keys <- obj:
+				sent = true
 			case <-listCtx.Done():
 				return
 			}
@@ -327,23 +366,54 @@ func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
 
 	// Drain the whole result stream even after the first failure: abandoning it
 	// would leave the producer goroutines blocked on an unread channel.
-	var delErr error
+	var rejectedErr, throttleErr, unknownErr error
 	for rmErr := range c.inner.RemoveObjects(ctx, c.bucket, keys, minio.RemoveObjectsOptions{}) {
-		if rmErr.Err == nil || IsNotFound(rmErr.Err) || delErr != nil {
+		if rmErr.Err == nil || errors.Is(rmErr.Err, errBucketAbsent) {
 			continue
 		}
-		delErr = fmt.Errorf("delete object %q under %q: %w", rmErr.ObjectName, prefix, rmErr.Err)
+		var response minio.ErrorResponse
+		// StatusCode is unset on per-object errors from a decoded
+		// MultiDelete reply. A generic request error may hide side effects.
+		perObject := rmErr.ObjectName != "" && errors.As(rmErr.Err, &response) && response.StatusCode == 0
+		if perObject && response.Code == "NoSuchKey" {
+			continue
+		}
+		failure := fmt.Errorf("delete object %q under %q: %w", rmErr.ObjectName, prefix, rmErr.Err)
+		switch {
+		case errors.Is(rmErr.Err, errSlowDown):
+			throttleErr = failure
+		case perObject && response.Code == "AccessDenied":
+			rejectedErr = failure
+		default:
+			unknownErr = failure
+		}
 		cancelList()
 	}
-	if delErr != nil {
-		return delErr
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
+	var listErr error
 	select {
-	case listErr := <-listErrCh:
-		return fmt.Errorf("list prefix %q: %w", prefix, listErr)
+	case listErr = <-listErrCh:
 	default:
-		return nil
+	}
+	switch {
+	case unknownErr != nil:
+		return unknownErr
+	case errors.Is(listErr, errUnverifiedNotFound) || errors.Is(listErr, errUnverified503):
+		return listErr
+	case rejectedErr != nil:
+		if c.singleAttempt {
+			return fmt.Errorf("%w: %w", ErrDestroyRetryable, rejectedErr)
+		}
+		return rejectedErr
+	case throttleErr != nil:
+		return fmt.Errorf("%w: %w", ErrDestroyRetryable, throttleErr)
+	case errors.Is(listErr, errSlowDown):
+		return fmt.Errorf("%w: %w", ErrDestroyRetryable, listErr)
+	default:
+		return listErr
 	}
 }
 

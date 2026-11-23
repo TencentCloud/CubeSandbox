@@ -3,6 +3,12 @@
 
 package plugin
 
+import "errors"
+
+// ErrDestroyRetryable confirms that prior delete work has stopped and Destroy
+// can run again. Some data may already be gone.
+var ErrDestroyRetryable = errors.New("volume destroy can be retried")
+
 // InvalidArgumentError reports caller input rejected by a volume plugin.
 // Message must be safe to show to the caller and must not contain credentials
 // or internal execution diagnostics.

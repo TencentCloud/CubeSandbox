@@ -47,7 +47,7 @@ func TestVolumeAdmissionRealDatabases(t *testing.T) {
 			require.Zero(t, tables, "refusing a nonempty database")
 			require.NoError(t, migrate.Run(ctx, raw, tc.name, nil))
 
-			for _, winner := range []string{"create", "delete"} {
+			for _, winner := range []string{"create", "delete", "delete_retry"} {
 				t.Run(winner+"_locks_first", func(t *testing.T) {
 					testVolumeRowContention(t, ctx, db, winner)
 				})
@@ -85,6 +85,9 @@ func testVolumeRowContention(t *testing.T, parent context.Context, db *gorm.DB, 
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 	row := models.VolumeRecord{VolumeID: "first-" + winner, Name: "first-" + winner, Driver: "fixture"}
+	if winner == "delete_retry" {
+		row.Deleting, row.DeleteRetryable = true, true
+	}
 	require.NoError(t, db.Create(&row).Error)
 	type marker struct{}
 	firstWrite, unblock, otherQuery := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -115,8 +118,11 @@ func testVolumeRowContention(t *testing.T, parent context.Context, db *gorm.DB, 
 		return err
 	}
 	first, other := create, del
-	if winner == "delete" {
+	switch winner {
+	case "delete":
 		first, other = del, create
+	case "delete_retry":
+		first, other = del, del
 	}
 	firstResult, otherResult := make(chan error, 1), make(chan error, 1)
 	go func() { firstResult <- first(context.WithValue(ctx, marker{}, "winner")) }()
@@ -152,5 +158,6 @@ func testVolumeRowContention(t *testing.T, parent context.Context, db *gorm.DB, 
 	} else {
 		require.Zero(t, after.InFlightCreates)
 		require.True(t, after.Deleting)
+		require.False(t, after.DeleteRetryable)
 	}
 }

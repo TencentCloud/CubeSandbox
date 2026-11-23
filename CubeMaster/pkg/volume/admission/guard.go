@@ -139,17 +139,20 @@ func transactionAborted(err error) bool {
 	return errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001")
 }
 
-// BeginDelete claims the exact row before the potentially slow driver call.
+// BeginDelete claims the exact row and returns its state before this attempt.
 func BeginDelete(ctx context.Context, db *gorm.DB, id uint) (models.VolumeRecord, error) {
 	var row models.VolumeRecord
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&row, id).Error; err != nil {
 			return err
 		}
-		if row.RefCount != 0 || row.InFlightCreates != 0 || row.Deleting {
+		if row.RefCount != 0 || row.InFlightCreates != 0 || (row.Deleting && !row.DeleteRetryable) {
 			return ErrBusy
 		}
-		return tx.Model(&row).UpdateColumn("deleting", true).Error
+		return tx.Model(&models.VolumeRecord{}).Where("id = ?", row.ID).UpdateColumns(map[string]any{
+			"deleting":         true,
+			"delete_retryable": false,
+		}).Error
 	})
 	return row, err
 }

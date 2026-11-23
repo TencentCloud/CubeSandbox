@@ -122,6 +122,13 @@ func main() {
 			if errors.Is(err, s3fsmnt.ErrMountRolledBack) {
 				response.ErrorKind = "attach_rolled_back"
 			}
+		case "destroy":
+			switch {
+			case errors.Is(err, s3api.ErrDestroyNotStarted):
+				response.ErrorKind = "destroy_not_started"
+			case errors.Is(err, s3api.ErrDestroyRetryable):
+				response.ErrorKind = "destroy_retryable"
+			}
 		case "create":
 			switch {
 			case errors.Is(err, binding.ErrMissingCredRef):
@@ -208,7 +215,7 @@ func doCreate(ctx context.Context, opts *options) error {
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
-	client, err := volume.client(ctx)
+	client, err := volume.client(ctx, 0)
 	if err != nil {
 		return err
 	}
@@ -282,7 +289,14 @@ func createDynamicPrefix(ctx context.Context, store createStore, bucket, prefix 
 // ParseState and resolveVolume validate the binding before the recursive
 // delete. The platform must ensure that prefixes do not overlap and are not
 // reused until this operation completes.
-func doDestroy(ctx context.Context, opts *options) error {
+func doDestroy(ctx context.Context, opts *options) (retErr error) {
+	// Errors before RemovePrefix cannot have changed backend data.
+	started := false
+	defer func() {
+		if retErr != nil && !started {
+			retErr = fmt.Errorf("%w: %w", s3api.ErrDestroyNotStarted, retErr)
+		}
+	}()
 	if opts.volumeID == "" {
 		return fmt.Errorf("destroy: --volume-id is required")
 	}
@@ -301,11 +315,12 @@ func doDestroy(ctx context.Context, opts *options) error {
 	if err != nil {
 		return fmt.Errorf("destroy: %w", err)
 	}
-	client, err := volume.client(ctx)
+	client, err := volume.client(ctx, 1)
 	if err != nil {
 		return err
 	}
 
+	started = true
 	if err := client.RemovePrefix(ctx, volume.state.Prefix); err != nil {
 		return err
 	}
