@@ -21,9 +21,9 @@ import (
 )
 
 // loopAsyncScore periodically computes the multi-factor weighted average score
-// for every node in the local cache and writes it back to the node's Score
-// field (async scoring, read directly by the multi_factor plugin). The
-// interval is controlled by MultiFactorWeightedAverage.ScoreInterval.
+// for every node in the local cache and stores it through SetScore (async
+// scoring, read directly by the multi_factor plugin). The interval is
+// controlled by MultiFactorWeightedAverage.ScoreInterval.
 func loopAsyncScore(ctx context.Context) {
 	cfg := config.GetConfig().Scheduler.Score.ScorePluginConf.MultiFactorWeightedAverage
 	if cfg == nil {
@@ -67,7 +67,7 @@ func loopAsyncScore(ctx context.Context) {
 					n, ok := v.Object.(*node.Node)
 					if ok {
 
-						n.Score = getMultiFactorWeightedAverageScore(n) / totalWeight
+						n.SetScore(getMultiFactorWeightedAverageScore(n) / totalWeight)
 					}
 				}
 				if config.GetConfig().Common.MockDebug {
@@ -97,7 +97,7 @@ func printAsyncScores(w *tabwriter.Writer) {
 	for _, n := range localcache.GetHealthyNodes(-1) {
 		nodes.Append(&node.NodeScore{
 			InsID:    n.ID(),
-			Score:    n.Score,
+			Score:    n.GetScore(),
 			MvmNum:   n.MvmNum,
 			OrigNode: n,
 		})

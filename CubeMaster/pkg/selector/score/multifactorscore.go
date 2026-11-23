@@ -16,9 +16,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
-// multiFactorWeightedAverageScore reads the Score field that the background
-// goroutine (loopAsyncScore) computes asynchronously and writes back for every
-// node in the local cache.
+// multiFactorWeightedAverageScore reads the score that the background
+// goroutine (loopAsyncScore) computes asynchronously and stores for every node
+// in the local cache.
 type multiFactorWeightedAverageScore struct {
 	weight float64
 }
@@ -85,7 +85,7 @@ func (l *multiFactorWeightedAverageScore) Select(selCtx *selctx.SelectorCtx) (no
 	for i := range inList {
 		nodes.Append(&node.NodeScore{
 			InsID:    inList[i].ID(),
-			Score:    inList[i].Score,
+			Score:    inList[i].GetScore(),
 			MvmNum:   inList[i].MvmNum,
 			OrigNode: inList[i],
 		})
