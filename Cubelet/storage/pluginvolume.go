@@ -63,7 +63,7 @@ func lookupPluginVolumeSource(annotations map[string]string, volumeName string) 
 	if annotations == nil {
 		return "", "", false
 	}
-	raw := annotations["plugin-volume-sources"]
+	raw := annotations[cubebox.AnnotationPluginVolumeSources]
 	if raw == "" {
 		return "", "", false
 	}

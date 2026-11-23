@@ -13,6 +13,7 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	dbmodels "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
@@ -22,7 +23,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/task"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/admission"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -45,7 +48,7 @@ func TestResumeFromPauseReservesSharedPluginVolume(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
-		return &pausesnap.Record{SnapshotID: "snap-shared", Status: "READY", NodeIP: "127.0.0.1"}, nil
+		return &pausesnap.Record{SnapshotID: "snap-shared", Status: "READY", NodeIP: "127.0.0.1", Backend: "s3", RemoteStatus: "ready"}, nil
 	})
 	patches.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
 		return &types.CreateCubeSandboxReq{
@@ -53,23 +56,103 @@ func TestResumeFromPauseReservesSharedPluginVolume(t *testing.T) {
 		}, nil
 	})
 	patches.ApplyFunc(dao.Default, func() *gorm.DB { return db })
-	patches.ApplyFunc(cubelet.CreatePrepared, func(ctx context.Context, _ string, req *cubebox.RunCubeSandboxRequest, admit func() error) (*cubebox.RunCubeSandboxResponse, error) {
+	response := &cubebox.RunCubeSandboxResponse{
+		RequestID: "req-resume", SandboxID: "sb-shared",
+		Ret:     &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_InvalidParamFormat},
+		ExtInfo: map[string][]byte{cubebox.ExtVolumeAttachNotStarted: []byte("true")},
+	}
+	endpoint := cubelet.GetCubeletAddr("127.0.0.2")
+	oldPlacement := decidePauseResumePlacementFn
+	t.Cleanup(func() { decidePauseResumePlacementFn = oldPlacement })
+	decidePauseResumePlacementFn = func(context.Context, restoreplace.Input) (*restoreplace.Placement, error) {
+		return &restoreplace.Placement{NodeIP: "127.0.0.2", CrossNode: true}, nil
+	}
+	var createErr error
+	patches.ApplyFunc(cubelet.CreatePrepared, func(ctx context.Context, ep string, req *cubebox.RunCubeSandboxRequest, admit func() error) (*cubebox.RunCubeSandboxResponse, error) {
+		require.Equal(t, endpoint, ep)
 		require.NotNil(t, admit, "Resume must reserve the volume before dispatch")
 		require.NoError(t, admit())
 		require.Empty(t, req.GetVolumes(), "Resume sends a thin request")
 		require.JSONEq(t, `[{"name":"shared","driver":"s3","private_data":"current"}]`, req.GetAnnotations()[AnnotationPluginVolumeSources])
 		_, err := admission.BeginDelete(ctx, db, row.ID)
 		require.ErrorIs(t, err, admission.ErrBusy)
-		return &cubebox.RunCubeSandboxResponse{
-			Ret:     &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_InvalidParamFormat},
-			ExtInfo: map[string][]byte{cubebox.ExtVolumeAttachNotStarted: []byte("true")},
+		return response, createErr
+	})
+	patches.ApplyFunc(task.AddAsyncTask, func(*task.Task) error {
+		t.Error("thin Resume must not queue the user-Delete worker for a paused sandbox")
+		return nil
+	})
+	destroyCalls, targetDropCalls := 0, 0
+	var destroyErr error
+	patches.ApplyFunc(cubelet.Destroy, func(ctx context.Context, ep string, req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+		require.NoError(t, ctx.Err())
+		require.Equal(t, endpoint, ep, "cleanup must target the resumed guest, not the snapshot origin")
+		require.Equal(t, "req-resume", req.GetRequestID())
+		require.Equal(t, "sb-shared", req.GetSandboxID())
+		if req.GetAnnotations()[constants.CubeAnnotationPauseDeleteTombstone] == "true" {
+			targetDropCalls++
+			require.Equal(t, 1, destroyCalls, "drop the target tombstone only after confirmed cleanup")
+		} else {
+			destroyCalls++
+			require.Equal(t, "true", req.GetAnnotations()[constants.CubeAnnotationPauseKeepTombstone])
+			if destroyErr != nil {
+				return nil, destroyErr
+			}
+		}
+		return &cubebox.DestroyCubeSandboxResponse{
+			Ret:     &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_Success},
+			ExtInfo: map[string][]byte{refcount.ExtInfoKey: []byte(`[{"volume_id":"shared","referenced":0}]`)},
 		}, nil
 	})
+	patches.ApplyFunc(pausesnap.Delete, func(context.Context, string) error {
+		t.Error("thin Resume failure must retain the snapshot binding")
+		return nil
+	})
+	oldSetProxy := setSandboxProxyMapFn
+	t.Cleanup(func() { setSandboxProxyMapFn = oldSetProxy })
+	setSandboxProxyMapFn = func(context.Context, *proxytypes.SandboxProxyMap) error {
+		t.Error("thin Resume failure must retain the proxy route")
+		return nil
+	}
 
-	res := resumeFromPauseSnapshot(ctx, &types.UpdateRequest{SandboxID: "sb-shared"}, "127.0.0.1")
+	req := &types.UpdateRequest{RequestID: "req-resume", SandboxID: "sb-shared"}
+	res := resumeFromPauseSnapshot(ctx, req, "127.0.0.1")
 	require.Equal(t, int(cubeleterrorcode.ErrorCode_InvalidParamFormat), res.Ret.RetCode)
+	require.Zero(t, destroyCalls, "pre-attach failure did not start a guest")
+	require.NoError(t, db.First(&row, row.ID).Error)
+	require.Zero(t, row.InFlightCreates, "the proven pre-attach failure releases the reservation")
+	require.NoError(t, db.Model(&row).UpdateColumn("refcount", 1).Error) // another node holds the volume
+
+	response.Ret.RetCode = cubeleterrorcode.ErrorCode_Success
+	response.ExtInfo = map[string][]byte{refcount.ExtInfoKey: []byte("{")}
+	res = resumeFromPauseSnapshot(ctx, req, "127.0.0.1")
+	require.Equal(t, int(errorcode.ErrorCode_DBError), res.Ret.RetCode)
+	require.Equal(t, 1, destroyCalls, "settlement failure must clean up the confirmed guest")
+	require.Equal(t, 1, targetDropCalls)
+
+	response.Ret.RetCode = cubeleterrorcode.ErrorCode_Unknown
+	response.ExtInfo = map[string][]byte{cubebox.ExtVolumeCreateReportFailed: []byte("true")}
+	destroyErr = errors.New("lost cleanup reply")
+	res = resumeFromPauseSnapshot(ctx, req, "127.0.0.1")
+	require.Equal(t, int(cubeleterrorcode.ErrorCode_Unknown), res.Ret.RetCode)
+	require.Equal(t, 2, destroyCalls, "report failure must also clean up the confirmed guest")
+	require.Equal(t, 1, targetDropCalls, "an uncertain cleanup cannot drop the target tombstone")
+	require.NoError(t, db.First(&row, row.ID).Error)
+	require.EqualValues(t, 2, row.InFlightCreates)
+	require.EqualValues(t, 1, row.RefCount, "cleanup cannot consume another node's reference")
+
+	response.Ret.RetCode = cubeleterrorcode.ErrorCode_Success
+	response.ExtInfo = nil
+	response.RequestID = "not-this-attempt"
+	res = resumeFromPauseSnapshot(ctx, req, "127.0.0.1")
+	require.Equal(t, int(errorcode.ErrorCode_Unknown), res.Ret.RetCode)
+	response.RequestID = req.RequestID
+	createErr = errors.New("lost Create reply")
+	res = resumeFromPauseSnapshot(ctx, req, "127.0.0.1")
+	require.Equal(t, int(errorcode.ErrorCode_ReqCubeAPIFailed), res.Ret.RetCode)
+	require.Equal(t, 2, destroyCalls, "an unmatched or lost reply cannot identify a guest to destroy")
 	_, err = admission.BeginDelete(ctx, db, row.ID)
-	require.NoError(t, err, "the proven pre-attach failure releases the reservation")
+	require.ErrorIs(t, err, admission.ErrBusy)
 }
 
 func TestIsPauseBusyReject(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 // Manager is the process-wide registry that routes Attach / Detach calls to
@@ -138,7 +139,12 @@ func (m *Manager) Attach(ctx context.Context, req *AttachRequest) (*AttachResult
 	if rc != nil {
 		ar, err := rc.Acquire(req.Namespace, volID, req.SandboxID, req.Driver)
 		if err != nil {
-			return nil, fmt.Errorf("plugin_volume %q: acquire refcount: %w", req.VolumeID, err)
+			cause := fmt.Errorf("plugin_volume %q: acquire refcount: %w", req.VolumeID, err)
+			// bbolt returns this sentinel from Begin before opening the write transaction.
+			if err == bolterrors.ErrDatabaseNotOpen {
+				return nil, &AttachNotStartedError{Cause: cause}
+			}
+			return nil, cause
 		}
 		acquired = !ar.AlreadyHeld
 		req.RefCount = ar.Before // 0 = first attach

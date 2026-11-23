@@ -12,15 +12,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 type reportingDriver struct {
 	VolumePlugin
-	detachErr error
+	detachErr   error
+	attachCalls int
 }
 
 func (*reportingDriver) Name() string { return "fixture" }
-func (*reportingDriver) Attach(context.Context, *AttachRequest) (*AttachResult, error) {
+func (p *reportingDriver) Attach(context.Context, *AttachRequest) (*AttachResult, error) {
+	p.attachCalls++
 	return &AttachResult{}, nil
 }
 func (p *reportingDriver) Detach(context.Context, *DetachRequest) error {
@@ -103,4 +106,37 @@ func TestSharedFirstAttachReportFollowsSuccessfulCreate(t *testing.T) {
 			require.False(t, req.CreateReportClaimed)
 		})
 	}
+}
+
+func TestAttachClassifiesClosedHolderDatabaseBeforePlugin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "volume.db")
+	db, err := bolt.Open(path, 0600, nil)
+	require.NoError(t, err)
+	store, err := refcount.New(db)
+	require.NoError(t, err)
+	m := &Manager{byName: make(map[string]VolumePlugin)}
+	driver := &reportingDriver{}
+	m.Register(driver)
+	m.SetRefCountStore(store)
+	_, err = store.Acquire("default", "shared", "existing", driver.Name())
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	_, err = m.Attach(t.Context(), &AttachRequest{
+		Namespace: "default", VolumeID: "shared", SandboxID: "new", Driver: driver.Name(),
+	})
+	var notStarted *AttachNotStartedError
+	require.ErrorAs(t, err, &notStarted)
+	require.ErrorIs(t, err, bolterrors.ErrDatabaseNotOpen)
+	require.Zero(t, driver.attachCalls)
+
+	db, err = bolt.Open(path, 0600, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	store, err = refcount.New(db)
+	require.NoError(t, err)
+	record, found, err := store.GetRecord("default", "shared")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, map[string]struct{}{"existing": {}}, record.SandboxIDs)
 }

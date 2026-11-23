@@ -556,7 +556,17 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		s.annotate(resumeAttrs...)
 		ctx = s.enter(ctx, s.runtime, resumeAttrs...)
 	}
-	cubeRsp, guarded, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs)
+	result, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs)
+	cubeRsp, guarded := result.rsp, result.guarded
+	if guarded && result.createdSandboxID != "" && (err != nil || volumeCreateReportFailed(cubeRsp)) {
+		originIP := strings.TrimSpace(rec.NodeIP)
+		if cleanupFailedPauseResume(ctx, calleeEndpoint, cubeletReq, result.createdSandboxID) && originIP != "" && targetIP != originIP {
+			// Only the origin needs a tombstone for the retained pause binding.
+			if cleanupErr := pausesnap.DropPausedTombstone(ctx, req.RequestID, result.createdSandboxID, targetIP); cleanupErr != nil {
+				log.G(ctx).Warnf("pause resume failover: drop target tombstone sandbox=%s target=%s: %v", result.createdSandboxID, targetIP, cleanupErr)
+			}
+		}
+	}
 	if err != nil || cubeRsp == nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
 		if err != nil {
@@ -640,6 +650,28 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		lifecyclePublisher.Publish(webhook.TypeResumed, req.SandboxID, template, fields)
 	}
 	return rsp
+}
+
+func cleanupFailedPauseResume(ctx context.Context, endpoint string, create *cubebox.RunCubeSandboxRequest, sandboxID string) bool {
+	// Keep the snapshot and binding so the user can still Resume. Run on the
+	// original target before releasing the Resume lock, not via the async
+	// user-Delete worker, which can delete the snapshot on the origin.
+	rsp, err := cubelet.Destroy(context.WithoutCancel(ctx), endpoint, &cubebox.DestroyCubeSandboxRequest{
+		RequestID:   create.GetRequestID(),
+		SandboxID:   sandboxID,
+		Filter:      &cubebox.CubeSandboxFilter{InstanceType: create.GetInstanceType()},
+		Annotations: map[string]string{constants.CubeAnnotationPauseKeepTombstone: "true"},
+	})
+	if err != nil || rsp.GetRet() == nil {
+		log.G(ctx).Errorf("pause resume failover destroy outcome unknown sandbox=%s endpoint=%s: %v", sandboxID, endpoint, err)
+		return false
+	} else if code := rsp.GetRet().GetRetCode(); code != cubeleterrorcode.ErrorCode_Success && code != cubeleterrorcode.ErrorCode_OK {
+		log.G(ctx).Errorf("pause resume failover destroy failed sandbox=%s endpoint=%s code=%v", sandboxID, endpoint, code)
+		return false
+	}
+	// Create's +1 may not have been applied. Do not apply Destroy's deltas
+	// separately or release the outstanding reservation from this reply.
+	return true
 }
 
 // pausePackageNodes returns the origin to drop a PAUSED tombstone on (empty

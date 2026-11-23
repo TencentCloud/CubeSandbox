@@ -16,6 +16,7 @@ import (
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -61,12 +62,16 @@ func gateOnlyService(sb *cubeboxstore.CubeBox, ttl time.Duration) *service {
 type fakeCreateFlow struct {
 	createCalls  int
 	destroyCalls int
+	onCreate     func(*workflow.CreateContext) error
 }
 
 func (f *fakeCreateFlow) ID() string                                     { return "fake-create" }
 func (f *fakeCreateFlow) Init(context.Context, *workflow.InitInfo) error { return nil }
-func (f *fakeCreateFlow) Create(context.Context, *workflow.CreateContext) error {
+func (f *fakeCreateFlow) Create(_ context.Context, opts *workflow.CreateContext) error {
 	f.createCalls++
+	if f.onCreate != nil {
+		return f.onCreate(opts)
+	}
 	return nil
 }
 func (f *fakeCreateFlow) Destroy(context.Context, *workflow.DestroyContext) error {
@@ -178,4 +183,44 @@ func TestCreateReachesTheFlowOnceTheOldRuntimeIsGone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
 	assert.Equal(t, 1, flow.createCalls)
+}
+
+func TestCreateMarksOnlyPostWorkflowVolumeReportFailure(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	for _, failWorkflow := range []bool{false, true} {
+		name := "reference report failure"
+		if failWorkflow {
+			name = "workflow business failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			flow := &fakeCreateFlow{onCreate: func(opts *workflow.CreateContext) error {
+				opts.SandboxID = "sb"
+				if failWorkflow {
+					return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
+				}
+				// No holder was recorded for this reported volume.
+				opts.PluginVolumeIDs = []string{"missing-holder"}
+				opts.PluginVolumeAttachAttempted = true
+				return nil
+			}}
+			s := createServiceForTest(nil, flow, time.Minute)
+			req := resumeReplaceRequest("")
+			req.Annotations = map[string]string{cubeboxpb.AnnotationPluginVolumeSources: "[]"}
+			rsp, err := s.Create(t.Context(), req)
+			require.NoError(t, err)
+			require.Equal(t, 1, flow.createCalls)
+			require.Equal(t, req.GetRequestID(), rsp.GetRequestID())
+			require.Equal(t, "sb", rsp.GetSandboxID())
+			if failWorkflow {
+				require.Equal(t, errorcode.ErrorCode_PreConditionFailed, rsp.GetRet().GetRetCode())
+				require.NotContains(t, rsp.GetExtInfo(), cubeboxpb.ExtVolumeCreateReportFailed)
+				return
+			}
+			require.Equal(t, errorcode.ErrorCode_Unknown, rsp.GetRet().GetRetCode())
+			require.Equal(t, "true", string(rsp.GetExtInfo()[cubeboxpb.ExtVolumeCreateReportFailed]))
+			require.NotContains(t, rsp.GetExtInfo(), cubeboxpb.ExtVolumeAttachNotStarted)
+			require.NotContains(t, rsp.GetExtInfo(), cubeboxpb.ExtVolumeCreateRolledBack)
+		})
+	}
 }
