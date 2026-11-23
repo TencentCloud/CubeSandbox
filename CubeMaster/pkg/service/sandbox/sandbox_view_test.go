@@ -17,6 +17,14 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
+func TestPauseViewReportsRunningAfterTimedOutPauseRollsBack(t *testing.T) {
+	t.Parallel()
+	rec := &pausesnap.Record{Status: pausesnap.StatusFailed, LastError: "context deadline exceeded"}
+	view := decidePauseView(rec, int32(cubebox.ContainerState_CONTAINER_RUNNING), true)
+	require.True(t, view.stale)
+	require.False(t, view.override)
+}
+
 func TestDecidePauseViewTable(t *testing.T) {
 	var (
 		created  = int32(cubebox.ContainerState_CONTAINER_CREATED)

@@ -39,8 +39,8 @@ const (
 	// pauseCubeletRPCTimeout is the unified Pause budget (CubeAPI / SDK / Master
 	//↔Cubelet). Cubelet finishes PauseToSnapshot + keep_tombstone Destroy in
 	// one Update RPC and returns ext_info. On RPC timeout Master records FAILED;
-	// Resume may heal only for timeout + Cubelet PAUSED. Explicit Cubelet
-	// failure cannot Resume (delete only).
+	// Resume may heal when Cubelet later reports PAUSED. If Cubelet confirms
+	// that the original VM is running, Master can discard the failed binding.
 	pauseCubeletRPCTimeout = 120 * time.Second
 )
 
@@ -51,8 +51,8 @@ var decidePauseResumePlacementFn = restoreplace.Decide
 //  2. Cubelet Update(pause): PauseToSnapshot + in-process keep_tombstone Destroy
 //  3. on success: ApplyFromExtInfo + mark pause binding READY
 //
-// Called under sandboxlock. Returns only after READY or FAILED is recorded so
-// resume/delete cannot interleave. Never CleanupTemplate / delete the sandbox record.
+// Called under sandboxlock. Records the result or drops the failed binding
+// before releasing the lock for Resume/Delete.
 func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) *types.Res {
 	rsp := &types.Res{
 		Ret: &types.Ret{
@@ -141,7 +141,8 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	// (node 1→0). Timeout / nil-response paths have no ext_info (do not adjust).
 	volrefcount.ApplyFromExtInfo(ctx, cubeRsp.GetExtInfo())
 	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-		finalizePauseCubeletFailure(ctx, req.SandboxID, snapID, rsp.Ret.RetMsg)
+		vmRunning := string(cubeRsp.GetExtInfo()[extInfoPauseVMRunning]) == "true"
+		finalizePauseCubeletFailure(ctx, req.SandboxID, snapID, rsp.Ret.RetMsg, vmRunning)
 		return rsp
 	}
 
@@ -192,12 +193,11 @@ func isPauseBusyReject(msg string) bool {
 		strings.Contains(lower, "terminate exec tasks first")
 }
 
-// finalizePauseCubeletFailure records a definitive Cubelet Pause failure.
-// Busy rejects are retryable (VM still running): drop the CREATING binding so
-// CLM/auto-pause can try again. Any other failure stays terminal FAILED.
-func finalizePauseCubeletFailure(ctx context.Context, sandboxID, snapID, msg string) {
-	if isPauseBusyReject(msg) {
-		log.G(ctx).Infof("pause busy reject; aborting binding sandbox=%s snap=%s: %s",
+// Drop the CREATING binding when the node confirms the VM is running, so a
+// retry can allocate a fresh snapshot. Old Cubelets report busy via the message.
+func finalizePauseCubeletFailure(ctx context.Context, sandboxID, snapID, msg string, vmRunning bool) {
+	if vmRunning || isPauseBusyReject(msg) {
+		log.G(ctx).Infof("pause failed with VM running; aborting binding sandbox=%s snap=%s: %s",
 			sandboxID, snapID, strings.TrimSpace(msg))
 		pausesnap.Abort(ctx, sandboxID, snapID)
 		return
@@ -836,6 +836,7 @@ func pauseResumePlacementInput(rec *pausesnap.Record, instanceType string, creat
 }
 
 const extInfoRemoteUUIDs = "remote_uuids"
+const extInfoPauseVMRunning = "pause_vm_running"
 
 func remoteUUIDsFromExtInfo(extInfo map[string][]byte) string {
 	if len(extInfo) == 0 {
