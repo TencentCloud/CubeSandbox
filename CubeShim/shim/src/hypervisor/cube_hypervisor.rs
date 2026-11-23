@@ -252,6 +252,14 @@ impl CubeHypervisor {
         Ok(())
     }
 
+    pub async fn finish_pause_snapshot(&self) -> CResult<()> {
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        ch.send_request(ApiRequest::VmFinishPauseSnapshot)
+            .map_err(|e| self.status_err(format!("finish pause snapshot failed: {e}")))?
+            .map_err(|e| self.status_err(format!("finish pause snapshot failed: {e}")))?;
+        Ok(())
+    }
+
     /// Delete the current VM (cube-hypervisor `VmDelete`).
     /// The VMM shuts down the VM if still running, then destroys the VM object.
     /// After this call the hypervisor process is still alive and can host a new VM
@@ -299,37 +307,6 @@ impl CubeHypervisor {
     pub async fn join(&mut self) -> CResult<()> {
         let mut ch = self.ch.as_mut().unwrap().lock().await;
         ch.join().map_err(|e| format!("join ch failed:{}", e))
-    }
-
-    pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
-        self.pause_vm_cube_with_config(path, None, SnapshotType::Full)
-            .await
-    }
-
-    /// Pause the VM and write a snapshot. When `memory_vol_url` is set, memory
-    /// ranges are stored on that CubeCow (or other) volume while config/state
-    /// still land under `destination_url` — the same layout CommitSandbox /
-    /// cube-runtime snapshot uses. `snapshot_type` is the same Full /
-    /// Incremental / SoftDirty choice CommitSandbox sends via `--snapshot-type`.
-    pub async fn pause_vm_cube_with_config(
-        &self,
-        destination_url: &str,
-        memory_vol_url: Option<String>,
-        snapshot_type: SnapshotType,
-    ) -> CResult<()> {
-        let snap_config = Arc::new(SnapshotConfig {
-            destination_url: destination_url.to_string(),
-            snapshot_type,
-            memory_vol_url,
-            ..Default::default()
-        });
-        let ch = self.ch.as_ref().unwrap().lock().await;
-        let _ = ch
-            .send_request(ApiRequest::VmPauseToSnapshot(snap_config))
-            .map_err(|e| self.status_err(format!("pause vm to snapshot failed:{}", e)))?
-            .map_err(|e| self.status_err(format!("pause vm to snapshot failed:{}", e)))?;
-
-        Ok(())
     }
 
     pub async fn resume_vm_cube(&self, path: &str) -> CResult<()> {
