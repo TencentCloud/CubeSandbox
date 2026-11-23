@@ -50,7 +50,7 @@ const (
 	//     submit time. Fail fast so the client can retry.
 	//   - RUNNING + PULLING: image pull is network-bound and should not take
 	//     more than 30 minutes even for multi-GB images on slow links.
-	//   - RUNNING + other phases (UNPACKING / BUILDING_EXT4 / DISTRIBUTING /
+	//   - RUNNING + other phases (UNPACKING / BUILDING_ROOTFS / DISTRIBUTING /
 	//     CREATING_TEMPLATE): ext4 mkfs and distribution can legitimately take
 	//     up to an hour for very large rootfs, but not more.
 	//

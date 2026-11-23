@@ -6,7 +6,10 @@ package pmem
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+
+	images "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 const DefaultToolBaseDir = "/usr/local/services/cubetoolbox"
@@ -53,8 +56,8 @@ func InitPaths(resolved Paths) { paths = resolved }
 
 func CurrentPaths() Paths { return paths }
 
-func GetRawImageFilePath(instanceType, imageID string) string {
-	return paths.ImageFile(instanceType, imageID)
+func GetRootfsFilePath(instanceType, imageID, format string) (string, error) {
+	return paths.RootfsFile(instanceType, imageID, format)
 }
 
 func GetRawKernelFilePath(instanceType, imageID string) string {
@@ -82,8 +85,12 @@ func (p Paths) ImageDir(instanceType string) string {
 	return filepath.Join(p.ToolBaseDir, instanceType+"_os_image")
 }
 
-func (p Paths) ImageFile(instanceType, imageID string) string {
-	return filepath.Join(p.ImageDir(instanceType), imageID, imageID+".ext4")
+func (p Paths) RootfsFile(instanceType, imageID, format string) (string, error) {
+	filename, err := images.RootfsFilename(imageID, format)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(p.ImageDir(instanceType), imageID, filename), nil
 }
 
 func (p Paths) KernelFile(instanceType, imageID string) string {
@@ -97,4 +104,16 @@ type CubePmem struct {
 	FsType        string `json:"fs_type"`
 	Size          int64  `json:"size"`
 	ID            string `json:"id"`
+}
+
+// RootfsFileSize checks a materialized backing before it is exposed as a device.
+func RootfsFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("stat rootfs file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 {
+		return 0, fmt.Errorf("rootfs file %q must be a nonempty regular file", path)
+	}
+	return info.Size(), nil
 }

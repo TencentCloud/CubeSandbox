@@ -20,6 +20,7 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images/rootfsimage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
@@ -147,8 +148,8 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	realReq := flowOpts.ReqInfo
 
 	for _, c := range realReq.Containers {
-		if c.GetImage().GetStorageMedia() == cubeimages.ImageStorageMediaType_ext4.String() {
-			specOpts = append(specOpts, e.genPmemOpt(ctx, c.GetImage().GetImage()))
+		if cubeimages.IsPmemStorageMedia(c.GetImage().GetStorageMedia()) {
+			specOpts = append(specOpts, e.genPmemOpt(ctx, c.GetImage().GetImage(), c.GetImage().GetStorageMedia()))
 		}
 	}
 
@@ -493,7 +494,7 @@ func (e *cubeboxInstancePlugin) DestroySandbox(ctx context.Context, sandboxID st
 	return nil
 }
 
-func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) oci.SpecOpts {
+func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID, format string) oci.SpecOpts {
 	return func(ctx context.Context, client oci.Client, ctr *containers.Container, spec *oci.Spec) error {
 		var oldPmems []pmem.CubePmem
 
@@ -514,18 +515,24 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 			}
 		}
 
-		filePath := e.getImageFilePath(imageID)
-		var fileSize int64
-		fileInfo, _ := os.Stat(filePath)
-		if fileInfo != nil {
-			fileSize = fileInfo.Size()
+		filesystem, err := cubeimages.ResolveRootfsFormat(format)
+		if err != nil {
+			return err
+		}
+		filePath, err := e.artifactPaths.RootfsFile(e.config.instanceType, imageID, filesystem)
+		if err != nil {
+			return err
+		}
+		fileSize, err := pmem.RootfsFileSize(filePath)
+		if err != nil {
+			return err
 		}
 
 		oldPmems = append(oldPmems, pmem.CubePmem{
 			File:          filePath,
 			DiscardWrites: true,
 			SourceDir:     "/",
-			FsType:        "ext4",
+			FsType:        filesystem,
 			Size:          fileSize,
 			ID:            fmt.Sprintf("%s-%d", constants.AnnotationPmemCubeBoxImageIDPrefix, id),
 		})
@@ -540,16 +547,8 @@ func (e *cubeboxInstancePlugin) genPmemOpt(ctx context.Context, imageID string) 
 	}
 }
 
-func (e *cubeboxInstancePlugin) getImageFilePath(imageID string) string {
-	return e.artifactPaths.ImageFile(e.config.instanceType, imageID)
-}
-
 func (e *cubeboxInstancePlugin) syncLatestKernelForImage(ctx context.Context, imageID string) error {
-	return pmem.RefreshKernelFile(
-		ctx,
-		e.artifactPaths.SharedKernelPath,
-		e.getKernelFilePath(imageID),
-	)
+	return rootfsimage.RefreshArtifactKernel(ctx, e.artifactPaths, e.config.instanceType, imageID)
 }
 
 func (e *cubeboxInstancePlugin) getKernelFilePath(imageID string) string {

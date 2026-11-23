@@ -77,7 +77,7 @@ command -v mkfs.ext4 >/dev/null 2>&1 || die "templatecenter requires mkfs.ext4 i
 # native path actually needs. Mirror the same enabled-by-default semantics
 # (unset/unparsable -> enabled, matching Go's strconv.ParseBool error path) so
 # this check only fires when native export has been explicitly disabled. The
-# binary's own image.EnsureArtifactBuildPreflight (run before every build) is
+# binary's own image.EnsureRootfsBuildPreflight (run before every build) is
 # still the authoritative, finer-grained check (it also covers the
 # skopeo+umoci vs. docker+tar fallback and the loop-mount tool set) --
 # duplicating that whole matrix here would just risk drifting out of sync with

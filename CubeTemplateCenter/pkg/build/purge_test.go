@@ -17,35 +17,43 @@ import (
 // fakeArtifactStore is an in-memory artifactUploader: the post-build stage is
 // exercised end to end (upload -> reclaim) without a live bucket.
 type fakeArtifactStore struct {
-	backend    string
-	uploadErr  error
-	presignErr error
-	uploads    []string
+	backend     string
+	uploadErr   error
+	presignErr  error
+	uploads     []string
+	storedKey   string
+	statKeys    []string
+	presignKeys []string
 }
 
-func (f *fakeArtifactStore) Upload(_ context.Context, artifactID, localPath, sha256 string) (string, error) {
+func (f *fakeArtifactStore) Upload(_ context.Context, objectKey, localPath, sha256 string) (string, error) {
 	if f.uploadErr != nil {
 		return "", f.uploadErr
 	}
-	f.uploads = append(f.uploads, artifactID)
-	return "bucket/" + artifactID + ".ext4", nil
+	f.uploads = append(f.uploads, objectKey)
+	if f.storedKey != "" {
+		return f.storedKey, nil
+	}
+	return objectKey, nil
 }
 
 func (f *fakeArtifactStore) BackendName() string { return f.backend }
 
-func (f *fakeArtifactStore) Stat(_ context.Context, artifactID string) (bool, error) {
+func (f *fakeArtifactStore) Stat(_ context.Context, objectKey string) (bool, error) {
+	f.statKeys = append(f.statKeys, objectKey)
 	return true, nil
 }
 
-func (f *fakeArtifactStore) PresignedGetURL(_ context.Context, artifactID string) (string, error) {
+func (f *fakeArtifactStore) PresignedGetURL(_ context.Context, objectKey string) (string, error) {
+	f.presignKeys = append(f.presignKeys, objectKey)
 	if f.presignErr != nil {
 		return "", f.presignErr
 	}
-	return "https://s3.example.com/bucket/" + artifactID + ".ext4?sig=x", nil
+	return "https://s3.example.com/bucket/" + objectKey + "?sig=x", nil
 }
 
 // writeBuiltArtifact lays out <root>/<artifactID>/<artifactID>.ext4, the shape
-// BuildExt4 leaves behind on a successful build.
+// BuildRootfs leaves behind on a successful build.
 func writeBuiltArtifact(t *testing.T, root, artifactID string) (ext4Path, dir string) {
 	t.Helper()
 	dir = filepath.Join(root, artifactID)
@@ -80,15 +88,24 @@ func TestUploadBuiltArtifactReturnsDownloadURL(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CUBEMASTER_ROOTFS_ARTIFACT_STORE_DIR", root)
 	ext4Path, _ := writeBuiltArtifact(t, root, "rfs-upload-001")
-	store := &fakeArtifactStore{backend: "s3"}
+	const storedKey = "templates/returned-rootfs.ext4"
+	store := &fakeArtifactStore{backend: "s3", storedKey: storedKey}
 
-	url, err := uploadBuiltArtifact(t.Context(), store, "rfs-upload-001",
-		&image.BuildResult{Ext4Path: ext4Path, SHA256: "sha"}, log.G(t.Context()))
+	location, err := uploadBuiltArtifact(t.Context(), store, "templates/rfs-upload-001.ext4",
+		&image.BuildResult{RootfsPath: ext4Path, SHA256: "sha"}, log.G(t.Context()))
 	if err != nil {
 		t.Fatalf("uploadBuiltArtifact: %v", err)
 	}
-	if url == "" {
+	if location.URL == "" {
 		t.Fatal("expected a download URL for a successfully uploaded artifact")
+	}
+	if location.Backend != "s3" || location.ObjectKey != storedKey || location.URL != "https://s3.example.com/bucket/"+storedKey+"?sig=x" {
+		t.Fatalf("upload lost the returned object identity: %+v", location)
+	}
+	if len(store.uploads) != 1 || store.uploads[0] != "templates/rfs-upload-001.ext4" ||
+		len(store.statKeys) != 1 || store.statKeys[0] != storedKey ||
+		len(store.presignKeys) != 1 || store.presignKeys[0] != storedKey {
+		t.Fatalf("object operations used different keys: %+v", store)
 	}
 	mustExist(t, ext4Path)
 }
@@ -103,13 +120,13 @@ func TestUploadBuiltArtifactDiscardsLocalCopyOnFailure(t *testing.T) {
 	ext4Path, dir := writeBuiltArtifact(t, root, "rfs-upload-002")
 	store := &fakeArtifactStore{backend: "s3", uploadErr: errors.New("minio: connection refused")}
 
-	url, err := uploadBuiltArtifact(t.Context(), store, "rfs-upload-002",
-		&image.BuildResult{Ext4Path: ext4Path, SHA256: "sha"}, log.G(t.Context()))
+	location, err := uploadBuiltArtifact(t.Context(), store, "rfs-upload-002",
+		&image.BuildResult{RootfsPath: ext4Path, SHA256: "sha"}, log.G(t.Context()))
 	if err == nil {
 		t.Fatal("expected a failed upload to fail the build")
 	}
-	if url != "" {
-		t.Fatalf("expected no download URL on failure, got %q", url)
+	if location != (artifactStoreLocation{}) {
+		t.Fatalf("expected no download URL on failure, got %+v", location)
 	}
 	mustBeGone(t, ext4Path)
 	mustBeGone(t, dir)

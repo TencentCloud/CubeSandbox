@@ -340,6 +340,9 @@ func claimTemplateImageJobDistribution(ctx context.Context, jobID string, values
 // rotate the download_token of a row a peer already finalized. Returns false
 // when the row was not in fromStatus.
 func updateRootfsArtifactIfStatus(ctx context.Context, artifactID, fromStatus string, values map[string]any) (bool, error) {
+	if err := models.RootfsArtifactUpdate(values); err != nil {
+		return false, err
+	}
 	values["updated_at"] = time.Now()
 	tx := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
 		Where("artifact_id = ?", artifactID).
@@ -352,6 +355,9 @@ func updateRootfsArtifactIfStatus(ctx context.Context, artifactID, fromStatus st
 }
 
 func updateRootfsArtifact(ctx context.Context, artifactID string, values map[string]any) error {
+	if err := models.RootfsArtifactUpdate(values); err != nil {
+		return err
+	}
 	values["updated_at"] = time.Now()
 	tx := store.db.WithContext(ctx).Table(constants.RootfsArtifactTableName).
 		Where("artifact_id = ?", artifactID).Updates(values)

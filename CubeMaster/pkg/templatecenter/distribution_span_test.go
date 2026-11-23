@@ -24,12 +24,12 @@ import (
 
 func readyDistributeArtifact(id string) *models.RootfsArtifact {
 	return &models.RootfsArtifact{
-		ArtifactID:    id,
-		Status:        ArtifactStatusReady,
-		Ext4SizeBytes: 4096,
-		Ext4SHA256:    "sha",
-		DownloadToken: "tok",
-		MasterNodeIP:  "http://master-from-row:8089",
+		ArtifactID:      id,
+		Status:          ArtifactStatusReady,
+		RootfsSizeBytes: 4096,
+		RootfsSHA256:    "sha",
+		DownloadToken:   "tok",
+		MasterNodeIP:    "http://master-from-row:8089",
 	}
 }
 

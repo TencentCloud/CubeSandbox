@@ -24,25 +24,27 @@ type SourceSpec struct {
 }
 
 type BuildOptions struct {
-	ArtifactID string
+	ArtifactID   string
+	RootfsFormat string
 	// PostRootfsExport is invoked after the image rootfs has been exported to
-	// the working directory but before mkfs.ext4 runs, so callers can mutate
+	// the working directory but before filesystem creation, so callers can mutate
 	// the rootfs (e.g. bake the CubeEgress root CA into the trust store). The
-	// callback receives the rootfs directory path that mkfs.ext4 will consume.
+	// callback receives the rootfs directory consumed by the filesystem builder.
 	// A non-nil error aborts the build.
 	PostRootfsExport func(ctx context.Context, rootfsDir string) error
 }
 
 // ErrPostExportPermanent marks a PostRootfsExport failure that depends only
 // on the image content (for example an unknown template user). Rebuilding
-// through another export path cannot fix it, so BuildExt4 fails at once
+// through another export path cannot fix it, so BuildRootfs fails at once
 // instead of falling back.
 var ErrPostExportPermanent = errors.New("permanent post-export failure")
 
 type BuildResult struct {
-	Ext4Path  string
-	SHA256    string
-	SizeBytes int64
+	RootfsFormat string
+	RootfsPath   string
+	SHA256       string
+	SizeBytes    int64
 }
 
 type dockerInspectImage struct {

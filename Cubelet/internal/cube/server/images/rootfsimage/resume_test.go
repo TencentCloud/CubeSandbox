@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package ext4image
+package rootfsimage
 
 // Regression tests for tryDownloadPmemFile resume support: an interrupted
 // download must be resumed via HTTP Range instead of restarting from zero.
@@ -38,7 +38,11 @@ func setupResumeProbe(t *testing.T) (context.Context, string) {
 	previous := pmem.CurrentPaths()
 	pmem.InitPaths(paths)
 	t.Cleanup(func() { pmem.InitPaths(previous) })
-	return context.Background(), pmem.GetRawImageFilePath("cubebox", "rfs-resume")
+	imagePath, err := pmem.GetRootfsFilePath("cubebox", "rfs-resume", "ext4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return context.Background(), imagePath
 }
 
 func makeSpec(url, sha string) context.Context {

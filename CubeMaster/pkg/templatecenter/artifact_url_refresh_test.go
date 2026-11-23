@@ -7,9 +7,15 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
+	fsdriver "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/fs"
 )
 
 // stubPresign swaps the signing seam and restores it on cleanup.
@@ -98,30 +104,75 @@ func TestArtifactDownloadURLFallsBackToStored(t *testing.T) {
 
 func TestArtifactStoreKeyStripsConfiguredPrefix(t *testing.T) {
 	artifact := &models.RootfsArtifact{ArtifactID: "rfs-1", ObjectKey: "template-artifacts/rfs-1.ext4"}
-	ctx := context.Background()
-	got := artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
-	if got != "rfs-1.ext4" {
-		t.Fatalf("prefixed object_key: got %q want rfs-1.ext4", got)
+	got, err := artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if err != nil || got != "rfs-1.ext4" {
+		t.Fatalf("prefixed object_key: got %q err=%v", got, err)
 	}
 	artifact.ObjectKey = "rfs-1.ext4"
-	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
-	if got != "rfs-1.ext4" {
-		t.Fatalf("user-key object_key: got %q", got)
+	got, err = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if err != nil || got != "rfs-1.ext4" {
+		t.Fatalf("user-key object_key: got %q err=%v", got, err)
 	}
 	artifact.ObjectKey = "old-prefix/nested/rfs-1.ext4"
-	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
-	if got != "rfs-1.ext4" {
-		t.Fatalf("foreign prefix must fall back to derived key, got %q", got)
+	got, err = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if !errors.Is(err, blobstore.ErrInvalidKey) || got != "" {
+		t.Fatalf("foreign prefix must be rejected, got %q err=%v", got, err)
 	}
 	artifact.ObjectKey = ""
-	got = artifactStoreKeyWithPrefix(ctx, artifact, "template-artifacts")
-	if got != "rfs-1.ext4" {
-		t.Fatalf("empty object_key: got %q", got)
+	got, err = artifactStoreKeyWithPrefix(artifact, "template-artifacts")
+	if err != nil || got != "rfs-1.ext4" {
+		t.Fatalf("empty object_key: got %q err=%v", got, err)
 	}
-	if artifactStoreKey(ctx, nil) != "" {
-		t.Fatal("nil artifact")
+	if _, err := artifactStoreKey(nil); err == nil {
+		t.Fatal("nil artifact must be rejected")
 	}
-	if userKeyFromStoredObjectKey("/template-artifacts/rfs-1.ext4", "template-artifacts") != "rfs-1.ext4" {
-		t.Fatal("leading slash on stored key")
+}
+
+func TestArtifactStoreOperationsRejectForeignPrefix(t *testing.T) {
+	const prefix = "template-artifacts"
+	t.Setenv(configenv.EnvS3ArtifactPrefix, prefix)
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := blobstore.Open(ctx, fsdriver.Options{Root: root}.Config(root, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := sharedArtifactStore()
+	artifactStoreInst = &artifactStore{store: store, backend: "fs"}
+	t.Cleanup(func() {
+		artifactStoreInst = previous
+		_ = store.Close()
+	})
+	artifact := &models.RootfsArtifact{ArtifactID: "rfs-foreign", ObjectKey: "old-prefix/nested/image.data"}
+	source := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := os.WriteFile(source, []byte("rootfs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"presign", func() error { _, err := presignArtifactGetURL(ctx, artifact); return err }},
+		{"stat", func() error { _, err := statArtifactObjectInS3(ctx, artifact); return err }},
+		{"upload", func() error { return uploadArtifactFileToS3(ctx, artifact, source) }},
+		{"read", func() error {
+			object, err := OpenArtifactObject(ctx, artifact)
+			if object != nil {
+				_ = object.Body.Close()
+			}
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if !errors.Is(err, blobstore.ErrInvalidKey) {
+				t.Fatalf("expected invalid-key error, got %v", err)
+			}
+			for _, detail := range []string{artifact.ArtifactID, artifact.ObjectKey, prefix} {
+				if !strings.Contains(err.Error(), detail) {
+					t.Fatalf("error %q omits %q", err, detail)
+				}
+			}
+		})
 	}
 }

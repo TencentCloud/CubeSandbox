@@ -52,8 +52,8 @@ func TestArtifactPublishFailureFailsBuildAndPublish(t *testing.T) {
 
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(image.BuildExt4, func(context.Context, *image.PreparedSource, image.BuildOptions) (image.BuildResult, error) {
-		return image.BuildResult{Ext4Path: ext4Path, SHA256: "sha256:x", SizeBytes: int64(len(ext4Bytes))}, nil
+	patches.ApplyFunc(image.BuildRootfs, func(context.Context, *image.PreparedSource, image.BuildOptions) (image.BuildResult, error) {
+		return image.BuildResult{RootfsPath: ext4Path, SHA256: "sha256:x", SizeBytes: int64(len(ext4Bytes))}, nil
 	})
 
 	ctx, buildSpan := telemetry.Start(context.Background(), telemetry.SpanTemplateImageBuild)

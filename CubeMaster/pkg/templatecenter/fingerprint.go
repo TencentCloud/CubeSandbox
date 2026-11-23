@@ -71,6 +71,13 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ContainerOverrides      *types.ContainerOverrides `json:"container_overrides,omitempty"`
 		CubeEgressCAFingerprint string                    `json:"cube_egress_ca_fingerprint,omitempty"`
 		EnvdBinarySHA256        string                    `json:"envd_binary_sha256,omitempty"`
+		RootfsFormat            string                    `json:"rootfs_format,omitempty"`
+	}
+	// Omit the historical default to preserve existing EXT4 artifact identities.
+	// Every other format must participate in reuse identity before it is enabled.
+	format := req.RootfsFormat
+	if format == "ext4" {
+		format = ""
 	}
 	payload, _ := json.Marshal(fingerprintPayload{
 		SourceImageDigest:       sourceImageDigest,
@@ -81,6 +88,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ContainerOverrides:      req.ContainerOverrides,
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 		EnvdBinarySHA256:        envdSHA,
+		RootfsFormat:            format,
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
@@ -91,7 +99,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 // The ID includes a UUID suffix to avoid collisions when the same template
 // spec is rebuilt after a previous artifact was deleted. Without the UUID,
 // rebuilding the same spec would produce the same artifact ID, causing the
-// new ext4 file to overwrite (or be confused with) the old one on shared
+// new rootfs file to overwrite (or be confused with) the old one on shared
 // storage or on nodes that still have the old file cached.
 //
 // Deduplication across concurrent builds of the same spec is handled at the
@@ -123,6 +131,10 @@ func marshalTemplateImageJobRequest(req *types.CreateTemplateFromImageReq) (stri
 	}
 	cloned := *req
 	cloned.RegistryPassword = ""
+	// Keep historical EXT4 request snapshots canonical across explicit/default selection.
+	if cloned.RootfsFormat == "ext4" {
+		cloned.RootfsFormat = ""
+	}
 	cloned.Request = nil
 	payload, err := json.Marshal(&cloned)
 	if err != nil {
