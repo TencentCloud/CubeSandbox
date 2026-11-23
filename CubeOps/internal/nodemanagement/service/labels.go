@@ -176,16 +176,33 @@ func ValidateLabels(labels map[string]string) error {
 	return nil
 }
 
+// maxReservedLabelsPerNode bounds the keys the operator budget excludes:
+// machine-type, isolation, and the data-plane labels Cubelet reports. It is a
+// guard against an unbounded labels_json, not a policy knob -- the real sets are
+// a handful of fixed keys, so this leaves plenty of headroom.
+const maxReservedLabelsPerNode = 32
+
 // ValidateLabelsSkippingReserved validates user labels while exempting
 // reserved keys (data plane, isolation and machine-type) kept on the register
 // path.
 //
-// The label budget is deliberately not enforced here. Callers already check
-// CountUserLabels, the same definition the label API uses, and a total-length
-// check here would reject a node that the API legitimately filled with 64
-// operator labels plus reserved keys — its next Cubelet re-registration would
-// then fail with "register labels invalid".
+// The operator budget is enforced by the caller with CountUserLabels, the same
+// definition the label API uses, so a node filled with 64 operator labels plus
+// reserved keys still re-registers. A total bound is still applied here, with a
+// separate reserved allowance: without it a Cubelet reporting an unbounded set
+// of data-plane keys could grow labels_json (and every copy of it) without
+// limit.
 func ValidateLabelsSkippingReserved(labels map[string]string) error {
+	reserved := 0
+	for k := range labels {
+		if IsReservedLabelKey(k) {
+			reserved++
+		}
+	}
+	if reserved > maxReservedLabelsPerNode {
+		return fmt.Errorf("%w: label request cannot contain more than %d reserved labels, got %d",
+			ErrInvalidLabel, maxReservedLabelsPerNode, reserved)
+	}
 	for k, v := range labels {
 		if IsReservedLabelKey(k) {
 			continue

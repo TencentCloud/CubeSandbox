@@ -30,6 +30,9 @@ type fakeNodeStore struct {
 	// failOnDeleteMachineType makes the catalog row delete fail after the
 	// membership writes already ran.
 	failOnDeleteMachineType error
+	// listRegistrationsOverride replays a stale membership scan, so a test can
+	// model a node that moved between the scan and the locked write.
+	listRegistrationsOverride []store.NodeRegistration
 
 	updateQuotaCalls     int
 	updateHostFactsCalls int
@@ -96,6 +99,11 @@ func (f *fakeNodeStore) GetRegistration(ctx context.Context, nodeID string) (*st
 func (f *fakeNodeStore) ListRegistrations(_ context.Context) ([]store.NodeRegistration, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.listRegistrationsOverride != nil {
+		out := make([]store.NodeRegistration, len(f.listRegistrationsOverride))
+		copy(out, f.listRegistrationsOverride)
+		return out, nil
+	}
 	out := make([]store.NodeRegistration, 0, len(f.regs))
 	for _, r := range f.regs {
 		out = append(out, *r)

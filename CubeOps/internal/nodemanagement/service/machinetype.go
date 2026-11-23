@@ -118,7 +118,7 @@ func (svc *NodeService) rollbackMachineTypeCreate(ctx context.Context, name stri
 		b := applied[i]
 		var err error
 		if b.prev == "" {
-			err = svc.clearMachineTypeIfBoundTo(ctx, b.nodeID, name, false, operator)
+			_, err = svc.clearMachineTypeIfBoundTo(ctx, b.nodeID, name, false, operator)
 		} else {
 			err = svc.setMachineTypeLabel(ctx, b.nodeID, b.prev, operator)
 		}
@@ -210,11 +210,18 @@ func (svc *NodeService) DeleteMachineType(ctx context.Context, name string, unbi
 	for _, n := range members {
 		// strictMismatch is false: a node that moved to another type since the
 		// membership scan no longer occupies name.
-		if err := svc.clearMachineTypeIfBoundTo(ctx, n.NodeID, name, false, operator); err != nil {
+		changed, err := svc.clearMachineTypeIfBoundTo(ctx, n.NodeID, name, false, operator)
+		if err != nil {
 			svc.restoreMachineTypeBindings(ctx, name, cleared, operator)
 			return fmt.Errorf("unbind %s: %w", n.NodeID, err)
 		}
-		cleared = append(cleared, machineTypeBinding{nodeID: n.NodeID, prev: name})
+		// Only a node whose label was actually removed may be restored by a
+		// later rollback. Recording an untouched node would force the label
+		// back onto a node that concurrently moved to another type (or was
+		// unbound on purpose).
+		if changed {
+			cleared = append(cleared, machineTypeBinding{nodeID: n.NodeID, prev: name})
+		}
 	}
 	if err := svc.store.DeleteMachineType(ctx, name); err != nil {
 		// The row survived, so the members must come back; otherwise the type
@@ -311,7 +318,7 @@ func (svc *NodeService) UnbindMachineTypeNodes(ctx context.Context, name string,
 	}
 	result := &model.MachineTypeBindResult{Name: name, Results: make([]model.MachineTypeNodeResult, 0, len(ids))}
 	for _, id := range ids {
-		if err := svc.clearMachineTypeIfBoundTo(ctx, id, name, true, operator); err != nil {
+		if _, err := svc.clearMachineTypeIfBoundTo(ctx, id, name, true, operator); err != nil {
 			result.Results = append(result.Results, model.MachineTypeNodeResult{NodeID: id, Error: err.Error()})
 			continue
 		}
@@ -381,7 +388,7 @@ func (svc *NodeService) applyMachineTypeNodes(ctx context.Context, name string, 
 	for _, id := range nodeIDs {
 		var err error
 		if clear {
-			err = svc.clearMachineTypeIfBoundTo(ctx, id, name, false, operator)
+			_, err = svc.clearMachineTypeIfBoundTo(ctx, id, name, false, operator)
 		} else {
 			err = svc.setMachineTypeLabel(ctx, id, name, operator)
 		}
@@ -434,11 +441,16 @@ func (svc *NodeService) setMachineTypeLabel(ctx context.Context, nodeID, next, o
 // clearMachineTypeIfBoundTo deletes the machine-type label only when the locked
 // row still stores expectedName. When the node has moved to another type,
 // strictMismatch reports the conflict; otherwise the move is treated as done.
-func (svc *NodeService) clearMachineTypeIfBoundTo(ctx context.Context, nodeID, expectedName string, strictMismatch bool, operator string) error {
+//
+// The returned bool reports whether a label was actually removed. Callers that
+// need to undo their work must only record nodes for which it is true: a node
+// that had already moved away (or been unbound) must not be force-rebound by a
+// later rollback.
+func (svc *NodeService) clearMachineTypeIfBoundTo(ctx context.Context, nodeID, expectedName string, strictMismatch bool, operator string) (bool, error) {
 	nodeID = strings.TrimSpace(nodeID)
 	expectedName = strings.TrimSpace(expectedName)
 	if nodeID == "" {
-		return ErrNodeIDRequired
+		return false, ErrNodeIDRequired
 	}
 	var prev string
 	_, changed, err := svc.store.MutateLabels(ctx, nodeID, func(current map[string]string) (map[string]string, bool, error) {
@@ -453,13 +465,13 @@ func (svc *NodeService) clearMachineTypeIfBoundTo(ctx context.Context, nodeID, e
 		return current, true, nil
 	})
 	if err != nil {
-		return mapLabelMutateErr(nodeID, err)
+		return false, mapLabelMutateErr(nodeID, err)
 	}
 	if !changed {
-		return nil
+		return false, nil
 	}
 	svc.finishMachineTypeWrite(ctx, nodeID, prev, "", operator)
-	return nil
+	return true, nil
 }
 
 func (svc *NodeService) finishMachineTypeWrite(ctx context.Context, nodeID, prev, next, operator string) {

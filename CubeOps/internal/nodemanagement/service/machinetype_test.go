@@ -462,6 +462,55 @@ func TestDeleteMachineTypeRestoresLabelsOnRowFailure(t *testing.T) {
 	}
 }
 
+func TestDeleteMachineTypeDoesNotRebindConcurrentMove(t *testing.T) {
+	svc, fs := newTestService(t)
+	ctx := context.Background()
+	registerFactNode(t, svc, "n1", "cpu-a", "6.6.1")
+	registerFactNode(t, svc, "n2", "cpu-a", "6.6.1")
+	for _, name := range []string{"e2e-label-del", "e2e-label-other"} {
+		if _, err := svc.CreateMachineType(ctx, &model.CreateMachineTypeRequest{Name: name}, "admin"); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+	for _, id := range []string{"n1", "n2"} {
+		if err := svc.SetNodeMachineType(ctx, id, "e2e-label-del", "admin"); err != nil {
+			t.Fatalf("bind %s: %v", id, err)
+		}
+	}
+
+	// Reproduce the race: the membership scan still sees n2 on e2e-label-del
+	// while the stored row has already moved to e2e-label-other. The failed
+	// catalog delete then rolls back, and must not drag n2 back.
+	regs, err := fs.ListRegistrations(ctx)
+	if err != nil {
+		t.Fatalf("snapshot registrations: %v", err)
+	}
+	if err := svc.SetNodeMachineType(ctx, "n2", "e2e-label-other", "admin"); err != nil {
+		t.Fatalf("concurrent move: %v", err)
+	}
+	fs.listRegistrationsOverride = regs
+	fs.failOnDeleteMachineType = errors.New("db down during delete")
+
+	if err := svc.DeleteMachineType(ctx, "e2e-label-del", true, "admin"); err == nil {
+		t.Fatal("catalog delete failure must surface")
+	}
+
+	snap, err := svc.GetNode(ctx, "n2")
+	if err != nil {
+		t.Fatalf("get n2: %v", err)
+	}
+	if got := model.MachineTypeValue(snap.Labels); got != "e2e-label-other" {
+		t.Fatalf("n2 machine type = %q, want e2e-label-other; rollback must not revert a concurrent move", got)
+	}
+	snap, err = svc.GetNode(ctx, "n1")
+	if err != nil {
+		t.Fatalf("get n1: %v", err)
+	}
+	if got := model.MachineTypeValue(snap.Labels); got != "e2e-label-del" {
+		t.Fatalf("n1 machine type = %q, want e2e-label-del restored", got)
+	}
+}
+
 func containsWarning(warnings []string, want string) bool {
 	for _, w := range warnings {
 		if w == want {

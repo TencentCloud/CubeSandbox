@@ -1046,64 +1046,6 @@ export interface components {
             healthy: boolean;
             nodeID: string;
         };
-        NodeView: {
-            allocatable: components["schemas"]["NodeResourcesView"];
-            capacity: components["schemas"]["NodeResourcesView"];
-            conditions?: components["schemas"]["NodeConditionView"][];
-            /**
-             * Format: float
-             * @description Percentage (0-100) of CPU currently in use.
-             */
-            cpuSaturation: number;
-            /**
-             * Format: int64
-             * @description Max concurrent sandbox-create operations on this node.
-             */
-            createConcurrentNum: number;
-            healthy: boolean;
-            /** Format: date-time */
-            heartbeatTime?: string | null;
-            hostIP: string;
-            instanceType?: string;
-            /**
-             * Node labels as stored by CubeOps, including control-plane-owned
-             * keys. Hand-maintained in this generated file: the Ops node routes
-             * are served by CubeOps and are not part of openapi.yml, which only
-             * covers the CubeAPI surface. Keep it in sync with
-             * CubeOps/internal/nodemanagement/handler/common.go (NodeView).
-             */
-            labels?: { [key: string]: string };
-            /** Catalog machine type bound to this node. Empty when unassigned. */
-            machineType?: string;
-            /** Host identity used for cross-node restore. */
-            hostFacts?: {
-                cpuVendor?: string;
-                cpuModel?: string;
-                cpuidHash?: string;
-                hostKernelRelease?: string;
-                kvmModuleTaint?: string;
-            };
-            localTemplates?: string[];
-            /** Format: int64 */
-            maxMvmSlots: number;
-            /**
-             * Format: float
-             * @description Percentage (0-100) of memory currently in use.
-             */
-            memorySaturation: number;
-            nodeID: string;
-            /**
-             * Format: int64
-             * @description CPU quota in millicores assigned to this node.
-             */
-            quotaCpu: number;
-            /**
-             * Format: int64
-             * @description Memory quota in MiB assigned to this node.
-             */
-            quotaMemMB: number;
-            versions?: components["schemas"]["ComponentVersionView"][];
-        };
         QosConfig: {
             blockIo?: null | components["schemas"]["BlockIoQosConfig"];
             network?: null | components["schemas"]["NetworkQosConfig"];

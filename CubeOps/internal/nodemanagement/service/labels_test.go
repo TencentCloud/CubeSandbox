@@ -73,6 +73,36 @@ func TestValidateLabelsSkippingReserved_IgnoresReservedInBudget(t *testing.T) {
 	}
 }
 
+// The reserved allowance keeps the register path from losing its bound
+// entirely: data-plane keys are skipped by both the operator budget and key
+// validation, so without this a Cubelet could grow labels_json without limit.
+func TestValidateLabelsSkippingReserved_RejectsUnboundedReserved(t *testing.T) {
+	labels := make(map[string]string, 40)
+	for i := 0; i < 40; i++ {
+		labels[fmt.Sprintf("beta.kubernetes.io/k-%d", i)] = "v"
+	}
+	if err := service.ValidateLabelsSkippingReserved(labels); err == nil {
+		t.Fatal("an unbounded reserved set must be rejected")
+	}
+
+	// The real data-plane set is a handful of keys and stays well inside it.
+	realistic := map[string]string{
+		"kubernetes.io/arch":                        "amd64",
+		"kubernetes.io/os":                          "linux",
+		"kubernetes.io/hostname":                    "node-1",
+		"kubernetes.io/metadata.name":               "node-1",
+		"beta.kubernetes.io/arch":                   "amd64",
+		"beta.kubernetes.io/os":                     "linux",
+		"beta.kubernetes.io/instance-type":          "cubebox",
+		"cube.cloud.tencentcloud.com/instance-type": "cubebox",
+		model.LabelSchedulingDisabled:               model.LabelSchedulingDisabledValue,
+		model.LabelMachineType:                      "intel-k66",
+	}
+	if err := service.ValidateLabelsSkippingReserved(realistic); err != nil {
+		t.Fatalf("realistic reserved set must pass: %v", err)
+	}
+}
+
 func TestStripAndPreserveSchedulingLabel(t *testing.T) {
 	existing := map[string]string{"zone": "gz", model.LabelSchedulingDisabled: model.LabelSchedulingDisabledValue}
 	cubelet := map[string]string{"rack": "r1", model.LabelSchedulingDisabled: "false"}
