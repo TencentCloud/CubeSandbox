@@ -379,9 +379,22 @@ func TestVolumeHTTP_CreateAndDeleteShareAdmission(t *testing.T) {
 	ctx := t.Context()
 	r, db, fake := newVolumeTestEngine(t)
 	const id = "vol-guarded"
-	_, created := doVolumeRequest(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, id, fake.Name(), ""))
+	w, created := doVolumeRequest(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, id, fake.Name(), ""))
 	require.Zero(t, created.Ret.RetCode)
+	require.NotContains(t, w.Body.String(), `"in_flight_creates"`)
+	require.NotContains(t, w.Body.String(), `"deleting"`)
 
+	checkAdmission := func(pending, deleting string) {
+		w, got := doVolumeRequest(t, r, http.MethodGet, "/cube/volume/"+id, "")
+		require.Zero(t, got.Ret.RetCode)
+		var body struct {
+			Volume map[string]json.RawMessage `json:"volume"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		require.Equal(t, pending, string(body.Volume["in_flight_creates"]))
+		require.Equal(t, deleting, string(body.Volume["deleting"]))
+	}
+	checkAdmission("0", "false")
 	reserve := func() *admission.CreateGuard {
 		guard, rows, err := admission.BeginCreate(ctx, db, []string{id, id})
 		require.NoError(t, err)
@@ -395,6 +408,11 @@ func TestVolumeHTTP_CreateAndDeleteShareAdmission(t *testing.T) {
 	conflict := int(errorcode.ErrorCode_Conflict)
 	first := reserve()
 	second := reserve()
+	checkAdmission("2", "false")
+	w, listed := doVolumeRequest(t, r, http.MethodGet, "/cube/volume", "")
+	require.Zero(t, listed.Ret.RetCode)
+	require.NotContains(t, w.Body.String(), `"in_flight_creates"`)
+	require.NotContains(t, w.Body.String(), `"deleting"`)
 	del(conflict)
 	require.NoError(t, first.Finish(ctx, nil, false)) // proven not started
 	require.Error(t, first.Finish(ctx, nil, false))
@@ -408,6 +426,7 @@ func TestVolumeHTTP_CreateAndDeleteShareAdmission(t *testing.T) {
 	require.NoError(t, db.Model(&models.VolumeRecord{}).Where("volume_id = ?", id).Update("refcount", 0).Error)
 	fake.onDestroy = func(context.Context) error {
 		// Backend Destroy has started but not yet returned: reverse the order.
+		checkAdmission("0", "true")
 		_, _, err := admission.BeginCreate(ctx, db, []string{id})
 		require.ErrorIs(t, err, admission.ErrBusy)
 		del(conflict)

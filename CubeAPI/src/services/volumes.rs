@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     cubemaster::{CreateVolumeRequest, CubeMasterClient, CubeMasterError, ListVolumesRequest},
     error::{AppError, AppResult},
-    models::{Volume, VolumeAndToken},
+    models::{Volume, VolumeAndToken, VolumeDetails},
 };
 
 fn new_request_id() -> String {
@@ -113,7 +113,7 @@ impl VolumeService {
     // ── GET /volumes/{volumeID} ───────────────────────────────────────────
 
     /// Fetch a single volume by ID, including its auth token.
-    pub async fn get(&self, volume_id: &str) -> AppResult<VolumeAndToken> {
+    pub async fn get(&self, volume_id: &str) -> AppResult<VolumeDetails> {
         let resp = self
             .cubemaster
             .get_volume(volume_id)
@@ -122,10 +122,13 @@ impl VolumeService {
 
         resp.ret.into_result().map_err(cm_err_to_app)?;
 
-        Ok(VolumeAndToken {
-            volume_id: resp.volume.volume_id,
-            name: resp.volume.name,
-            token: resp.volume.token,
+        let details = resp.volume;
+        Ok(VolumeDetails {
+            volume_id: details.volume.volume_id,
+            name: details.volume.name,
+            token: details.volume.token,
+            in_flight_creates: details.in_flight_creates,
+            deleting: details.deleting,
         })
     }
 

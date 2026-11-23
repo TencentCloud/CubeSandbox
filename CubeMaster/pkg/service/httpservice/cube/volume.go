@@ -65,11 +65,22 @@ type listVolumesRes struct {
 	Volumes []VolumeItem `json:"volumes"`
 }
 
-// singleVolumeRes is the response body for POST /cube/volume and
-// GET /cube/volume/{id}.
+// singleVolumeRes is the response body for POST /cube/volume.
 type singleVolumeRes struct {
 	Ret    *types.Ret  `json:"ret,omitempty"`
 	Volume *VolumeItem `json:"volume,omitempty"`
+}
+
+type volumeDetail struct {
+	VolumeItem
+	InFlightCreates int64 `json:"in_flight_creates"`
+	Deleting        bool  `json:"deleting"`
+}
+
+// getVolumeRes adds admission diagnostics only to GET /cube/volume/{id}.
+type getVolumeRes struct {
+	Ret    *types.Ret    `json:"ret,omitempty"`
+	Volume *volumeDetail `json:"volume,omitempty"`
 }
 
 // deleteVolumeRes is the response body for DELETE /cube/volume/{id}.
@@ -292,7 +303,7 @@ func handleGetVolume(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
 	volumeID := c.Param("volume_id")
 	if volumeID == "" {
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "volumeID is required")})
+		common.WriteAPI(c, &getVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_MasterParamsError, "volumeID is required")})
 		return
 	}
 
@@ -303,16 +314,19 @@ func handleGetVolume(c *gin.Context) {
 		First(&record).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_NotFound, "volume not found: "+volumeID)})
+			common.WriteAPI(c, &getVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_NotFound, "volume not found: "+volumeID)})
 			return
 		}
-		common.WriteAPI(c, &singleVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db error: "+err.Error())})
+		common.WriteAPI(c, &getVolumeRes{Ret: volErr(rt, errorcode.ErrorCode_DBError, "db error: "+err.Error())})
 		return
 	}
 
-	item := volumeItemFromRecord(&record)
 	rt.RetCode = 0
-	common.WriteAPI(c, &singleVolumeRes{Ret: retOK(), Volume: &item})
+	common.WriteAPI(c, &getVolumeRes{Ret: retOK(), Volume: &volumeDetail{
+		VolumeItem:      volumeItemFromRecord(&record),
+		InFlightCreates: record.InFlightCreates,
+		Deleting:        record.Deleting,
+	}})
 }
 
 // handleDeleteVolume implements DELETE /cube/volume/{id}

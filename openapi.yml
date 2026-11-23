@@ -1501,7 +1501,7 @@ paths:
       tags:
       - handlers::volumes
       summary: Get info for a single volume (includes auth token).
-      description: Returns `200 OK` with `VolumeAndToken` on success.
+      description: Returns `200 OK` with `VolumeDetails` on success.
       operationId: get_volume
       parameters:
       - name: volumeID
@@ -1516,7 +1516,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VolumeAndToken'
+                $ref: '#/components/schemas/VolumeDetails'
         '401':
           description: Authentication error
           content:
@@ -3638,7 +3638,7 @@ components:
     VolumeAndToken:
       type: object
       description: |-
-        Volume descriptor with auth token — returned on create / get-single.
+        Volume descriptor with auth token — returned on create.
         E2B SDK requires `token` to always be present (non-optional); use empty
         string when the plugin does not return a token.
       required:
@@ -3650,6 +3650,29 @@ components:
         token:
           type: string
           description: Auth token returned by the volume plugin. Empty string when not applicable.
+        volumeID:
+          type: string
+    VolumeDetails:
+      type: object
+      description: Single-volume GET response, including admission state when supplied by CubeMaster.
+      required:
+      - volumeID
+      - name
+      - token
+      properties:
+        deleting:
+          type:
+          - boolean
+          - 'null'
+        in_flight_creates:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        name:
+          type: string
+        token:
+          type: string
         volumeID:
           type: string
   securitySchemes:

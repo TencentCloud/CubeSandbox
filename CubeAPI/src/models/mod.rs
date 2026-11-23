@@ -2611,7 +2611,7 @@ pub struct Volume {
     pub name: String,
 }
 
-/// Volume descriptor with auth token — returned on create / get-single.
+/// Volume descriptor with auth token — returned on create.
 /// E2B SDK requires `token` to always be present (non-optional); use empty
 /// string when the plugin does not return a token.
 #[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
@@ -2622,6 +2622,19 @@ pub struct VolumeAndToken {
     /// Auth token returned by the volume plugin. Empty string when not applicable.
     #[serde(default)]
     pub token: String,
+}
+
+/// Single-volume GET response, including admission state when supplied by CubeMaster.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VolumeDetails {
+    #[serde(rename = "volumeID")]
+    pub volume_id: String,
+    pub name: String,
+    pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_flight_creates: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleting: Option<bool>,
 }
 
 /// Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
