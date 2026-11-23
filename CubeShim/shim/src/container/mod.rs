@@ -145,7 +145,7 @@ impl LogForwardHandle {
 }
 
 fn exec_uses_passfd(sandbox_passfd: bool, terminal: bool, template_build: bool) -> bool {
-    sandbox_passfd || (!terminal && !template_build)
+    !template_build && (sandbox_passfd || !terminal)
 }
 
 fn validate_log_path_component(id: &str) -> CResult<()> {
@@ -1642,6 +1642,8 @@ mod exec_passfd_tests {
     #[test]
     fn template_build_exec_keeps_the_rpc_path() {
         assert!(!exec_uses_passfd(false, false, true));
+        assert!(!exec_uses_passfd(true, false, true));
+        assert!(!exec_uses_passfd(true, true, true));
     }
 
     #[test]
