@@ -57,6 +57,28 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     root_path = "/data/cubelet/cleanup"
   [plugins."io.cubelet.internal.v1.cgroup"]
     pool_size = 3000
+    # pool_size is how many slots the pool would like to keep warm. The warm
+    # pool is only a latency optimisation (Get falls back to creating a slot on
+    # demand), so it is bounded by the two settings below before it is taken
+    # literally: a slot can cost a lot of kernel memory on hosts with many CPUs.
+    #
+    # Every cgroup in a subtree whose parent enabled the cpu controller carries
+    # per-CPU accounting structures, so the cost of one slot scales with CPU
+    # count. Measured on a 384-CPU host: ~65 MiB of kernel percpu per slot,
+    # which made a 3000-slot warm pool reserve ~200 GiB. cubelet therefore
+    # measures the real cost at startup and shrinks the warm pool to fit
+    # warm_pool_mem_budget_mb. Capacity is not affected: max_mvm_num still says
+    # how many sandboxes may run, only the number kept hot changes.
+    #
+    # warm_pool_max: hard ceiling on warm slots. 0 = built-in default (256),
+    #                negative = no ceiling.
+    # warm_pool_mem_budget_mb: kernel memory the warm pool may reserve.
+    #                0 = built-in default (256 MiB), negative = no budget.
+    # warm_pool_min: floor, so a host with an alarming per-slot cost still
+    #                keeps a few slots hot. 0 = default (2), negative = no floor.
+    #warm_pool_max = 256
+    #warm_pool_mem_budget_mb = 256
+    #warm_pool_min = 2
     pool_workers = 1
     # Bind each sandbox to a per-NUMA cgroup subtree (numa<N>) so the node
     # picked at create time also pins CPU cores and memory. Off by default; it

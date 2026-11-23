@@ -23,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/numa"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/warmup"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
@@ -69,6 +70,26 @@ type cgPool struct {
 	// dynamic config watcher never looks at it. It is a closure only so tests
 	// can drive both modes.
 	numaAffinityInUse func() bool
+
+	// warmPool bounds how many cgroups are pre-created, and percpuSampler
+	// measures the kernel per-CPU footprint used to apply the memory budget.
+	// See package warmup for why a slot's cost is host dependent.
+	warmPool      warmup.Limits
+	percpuSampler func() (uint64, bool)
+	// warmCostBytes is what one slot measured at bootstrap; the per-NUMA pool
+	// reuses it instead of measuring again, so the probe runs once.
+	warmCostBytes uint64
+	warmCostKnown bool
+}
+
+// samplePercpu returns the current kernel per-CPU footprint, or ok=false when
+// the host does not report it. A nil sampler (as in hand-built test pools)
+// reports unknown so no budget-based scaling is applied.
+func (p *cgPool) samplePercpu() (uint64, bool) {
+	if p.percpuSampler == nil {
+		return 0, false
+	}
+	return p.percpuSampler()
 }
 
 func (p *cgPool) addIndividualCgroup(group ...string) {
@@ -184,9 +205,52 @@ func (p *cgPool) initPoolV1() error {
 }
 
 func (p *cgPool) initPoolV1Late(poolV1ActualSize int) error {
-
 	ctx := context.Background()
-	for cgId := 0; cgId < poolV1ActualSize; cgId++ {
+	if poolV1ActualSize <= 0 {
+		return nil
+	}
+
+	// Slot 0 also materialises the pool parent, so it is not representative of
+	// a slot's steady-state cost; it is created unconditionally and the cost is
+	// measured on slot 1, once the parent exists.
+	created := 0
+	if err := p.createCgroup(ctx, 0); err != nil {
+		log.G(ctx).Errorf("cgroup pool v1 init: %v", err)
+	} else {
+		_ = setupMemoryReparentFileFn(ctx, 0, p.reparentFileEnabled())
+		created = 1
+	}
+
+	target := poolV1ActualSize
+	bounded := !p.warmPool.Unset()
+	if bounded && created == 1 && poolV1ActualSize > 1 {
+		before, beforeOK := p.samplePercpu()
+		if err := p.createCgroup(ctx, 1); err == nil {
+			_ = setupMemoryReparentFileFn(ctx, 1, p.reparentFileEnabled())
+			created = 2
+			if after, afterOK := p.samplePercpu(); beforeOK && afterOK && after >= before {
+				p.warmCostKnown = true
+				p.warmCostBytes = after - before
+			}
+		} else {
+			log.G(ctx).Errorf("cgroup pool v1 init: %v", err)
+		}
+	}
+
+	if bounded && created > 0 {
+		// Anything above the resolved target is still served by the on-demand
+		// path in Get(), so shrinking the warm pool only moves work from
+		// startup to the first allocation.
+		resolved, reason := warmup.Resolve(p.warmPool, p.warmCostBytes, p.warmCostKnown)
+		target = resolved
+		if target != poolV1ActualSize {
+			log.G(ctx).Infof(
+				"cgroup pool v1 init: warming %d of %d slots (%s); measured %.1f MiB kernel percpu per cgroup, budget %d MiB",
+				target, poolV1ActualSize, reason, float64(p.warmCostBytes)/(1024*1024), p.warmPool.BudgetMB)
+		}
+	}
+
+	for cgId := created; cgId < target; cgId++ {
 		if err := p.createCgroup(ctx, uint32(cgId)); err != nil {
 			log.G(ctx).Errorf("cgroup pool v1 init: %v", err)
 		} else {
@@ -485,9 +549,27 @@ func (p *cgPool) initPoolV2Late() error {
 			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot apply cpuset: %v", numaNode.NodeId, applyErr)
 		}
 		cap := uint16(numaPool.cgRanger.Cap())
+		warmCap := int(cap)
+		// Same budget as the v1 pool, split across nodes: warming the full
+		// capacity on every node multiplies both the cgroup count and, on hosts
+		// where a cgroup carries per-CPU state, the memory reserved. Ids above
+		// the warm cap stay allocatable through Get()'s on-demand path.
+		if !p.warmPool.Unset() {
+			if resolved, reason := warmup.Resolve(p.warmPool, p.warmCostBytes, p.warmCostKnown); resolved > 0 {
+				perNode := resolved / len(p.poolV2.numaPools)
+				if perNode < 1 {
+					perNode = 1
+				}
+				if perNode < warmCap {
+					warmCap = perNode
+					log.G(ctx).Infof("cgroup pool v2 init: numa%d warming %d of %d slots (%s)",
+						numaNode.NodeId, warmCap, int(cap), reason)
+				}
+			}
+		}
 		var slotMaskFails int
 		var firstSlotMaskErr error
-		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {
+		for shortCgId := uint16(0); shortCgId < uint16(warmCap); shortCgId++ {
 			fullCgID := MakeFullCgID(shortCgId, true, int32(numaNode.NodeId))
 			if err := p.createCgroup(ctx, fullCgID); err != nil {
 				log.G(ctx).Errorf("cgroup pool v2 init: create fullCgID: %d failed: %v", fullCgID, err)

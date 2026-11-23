@@ -36,6 +36,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle"
 	v1 "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle/v1"
 	v2 "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle/v2"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/warmup"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -86,6 +87,17 @@ func (l *CgPlugin) init() error {
 	l.poolV2Handle = getDefaultCgroupHandle(2)
 	if l.config.PoolSize <= 0 {
 		l.config.PoolSize = defaultPoolSize
+	}
+	// 0 keeps the built-in default; a negative value disables that bound. See
+	// package warmup for why the warm pool is bounded at all.
+	if l.config.WarmPoolMax == 0 {
+		l.config.WarmPoolMax = warmup.DefaultMax
+	}
+	if l.config.WarmPoolMemBudgetMB == 0 {
+		l.config.WarmPoolMemBudgetMB = warmup.DefaultMemBudgetMB
+	}
+	if l.config.WarmPoolMin == 0 {
+		l.config.WarmPoolMin = warmup.DefaultMin
 	}
 	if l.config.PoolTriggerIntervalInMs <= 0 {
 		l.config.PoolTriggerIntervalInMs = defaultPoolTriggerIntervalInMs
@@ -232,7 +244,20 @@ func (l *CgPlugin) initPool() error {
 		l.pool.stop()
 	}
 	p := &cgPool{
-		initialSize:         dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+		initialSize: dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+		warmPool: warmup.Limits{
+			Requested: dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+			Max:       l.config.WarmPoolMax,
+			Min:       l.config.WarmPoolMin,
+			BudgetMB:  l.config.WarmPoolMemBudgetMB,
+		},
+		percpuSampler: func() (uint64, bool) {
+			b, ok, err := warmup.PercpuUsageBytes(warmup.ProcMeminfoPath)
+			if err != nil {
+				return 0, false
+			}
+			return b, ok
+		},
 		db:                  l.db,
 		poolV1Handle:        l.poolV1Handle,
 		poolV2Handle:        l.poolV2Handle,

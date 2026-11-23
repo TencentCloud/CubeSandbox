@@ -19,8 +19,21 @@ import (
 )
 
 type Config struct {
-	RootPath                         string `toml:"root_path"`
-	PoolSize                         int    `toml:"pool_size"`
+	RootPath string `toml:"root_path"`
+	PoolSize int    `toml:"pool_size"`
+	// WarmPoolMax caps how many cgroups the pool pre-creates at startup, so a
+	// large max_mvm_num cannot turn into a large warm pool. 0 keeps the
+	// built-in default (256); a negative value removes the cap.
+	WarmPoolMax int `toml:"warm_pool_max"`
+	// WarmPoolMemBudgetMB caps the kernel memory the warm pool may reserve.
+	// The per-cgroup cost is measured at startup and scales with the host's CPU
+	// count, so this budget is what keeps the pool small on many-core hosts.
+	// 0 keeps the built-in default (256 MiB); a negative value removes it.
+	WarmPoolMemBudgetMB int `toml:"warm_pool_mem_budget_mb"`
+	// WarmPoolMin is the floor for the warm pool, so a host that measures an
+	// alarming per-cgroup cost still keeps a few slots hot. 0 keeps the
+	// built-in default (2); a negative value removes the floor.
+	WarmPoolMin                      int    `toml:"warm_pool_min"`
 	PoolTriggerIntervalInMs          int    `toml:"pool_trigger_interval_in_ms"`
 	VmMemoryOverheadBase             string `toml:"vm_memory_overhead_base"`
 	VmMemoryOverheadCoefficient      int64  `toml:"vm_memory_overhead_coefficient"`
