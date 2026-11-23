@@ -1321,7 +1321,7 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflo
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
 	}
 	sizes := normalizeRootfsSizes(size)
-	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
+	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, name, uint64(sizes.backendAllocSize.Value()))
 	if err != nil {
 		log.G(ctx).Errorf("derive v2 default-medium from template fail: %v", err)
 		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "derive v2 default-medium from template fail: %v", err)
@@ -1436,7 +1436,7 @@ func optionalCreateContextBackend(opts *workflow.CreateContext) string {
 	return backend
 }
 
-func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64) (*cowVolume, error) {
+func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name string, desiredSizeBytes uint64) (*cowVolume, error) {
 	backend := createContextStorageBackend(opts)
 	store, err := l.storeForBackend(backend)
 	if err != nil {
@@ -1445,17 +1445,65 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 	// Cross-node: no package here to clone from, so the sandbox imports the
 	// rootfs straight onto the name a clone would have produced.
 	if imp := CrossNodeSandboxImport(opts.ReqInfo.GetAnnotations()); imp != nil {
-		name, dev, err := imp.Rootfs(ctx, 0)
+		imported, dev, err := imp.Rootfs(ctx, 0)
 		if err != nil {
 			return nil, err
 		}
-		return newCowVolume(name, cowKindVolume, 0, dev), nil
+		return newCowVolume(imported, cowKindVolume, 0, dev), nil
+	}
+	if opts.IsPauseResume() {
+		desired := strings.TrimSpace(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
+		if desired != "" && desired != sandboxID {
+			return nil, fmt.Errorf("pause resume sandbox id %q does not match desired id %q", sandboxID, desired)
+		}
 	}
 	// Cold start and same-node Pause Resume: always clone the package rootfs
 	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
 	// attach the package snap as the live disk — S3 snaps are RO and Commit
 	// requires a volume source (volume follows sandbox lifecycle).
+	volume, err := store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+	if err == nil {
+		return volume, nil
+	}
+	// Reclaim only the rootfs allocation, and only after the derive proved the
+	// pause source is readable. A second Default emptyDir volume can also reach
+	// this function; deleting there would remove the rootfs the first
+	// allocation just created. S3 reuses its own writable volume idempotently,
+	// so the destructive path is limited to reflink/JFS.
+	if !opts.IsPauseResume() || !opts.ReclaimStaleRootfs || backend == cow.BackendS3 ||
+		!isRootfsVolume(opts.ReqInfo, name) || !errors.Is(err, ErrCowObjectAlreadyExists) {
+		return nil, err
+	}
+	if delErr := discardStaleSandboxRootfs(ctx, store, sandboxID); delErr != nil {
+		return nil, delErr
+	}
 	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+// isRootfsVolume reports whether name is the volume mounted at "/" in this
+// create. Only that volume is derived under sb-<id>-rootfs-genN.
+func isRootfsVolume(req *cubebox.RunCubeSandboxRequest, name string) bool {
+	for _, c := range req.GetContainers() {
+		for _, m := range c.GetVolumeMounts() {
+			if m.GetContainerPath() == "/" && m.GetName() == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// discardStaleSandboxRootfs deletes the runtime rootfs an interrupted pause
+// resume left behind. Callers must have proved that no live shim/VM owns it.
+func discardStaleSandboxRootfs(ctx context.Context, store cow.Store, sandboxID string) error {
+	name := SandboxRootfsName(sandboxID, 0)
+	err := store.DeleteByKind(ctx, name, cowKindSnapshot)
+	workflow.RecordCreateMetric(ctx, err, "storage.reclaimStaleRootfs", 0)
+	if err != nil {
+		return fmt.Errorf("discard stale sandbox rootfs %s: %w", name, err)
+	}
+	log.G(ctx).Warnf("sandbox %s: discarded stale pause-resume rootfs %s", sandboxID, name)
+	return nil
 }
 
 func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
@@ -1470,7 +1518,7 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.Crea
 			return err
 		}
 		sizes := normalizeRootfsSizes(size)
-		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
+		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, name, uint64(sizes.backendAllocSize.Value()))
 		if err != nil {
 			log.G(ctx).Errorf("allocate cubebox storage fail:%v", err)
 			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubebox storage fail:%v", err)
