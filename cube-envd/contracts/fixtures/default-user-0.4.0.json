@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "feature_gate": "0.4.0",
+  "cases": [
+    {
+      "name": "existing root user is accepted",
+      "request": {
+        "defaultUser": "root"
+      },
+      "status": 204
+    },
+    {
+      "name": "default user is resolved when an operation uses it",
+      "request": {
+        "defaultUser": "cube-envd-user-that-does-not-exist"
+      },
+      "status": 204
+    }
+  ]
+}
