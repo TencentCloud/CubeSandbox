@@ -232,12 +232,23 @@ func submitTemplateFromImage(ctx context.Context, req *types.CreateTemplateFromI
 
 // RedoNeedsFullRebuild reports whether a redo job requires a full rootfs
 // rebuild (true) or can reuse the existing artifact and only redistribute it
-// (false). A rebuild is required when the artifact is missing, failed, or not
-// READY; reuse is possible only when the artifact row exists and is READY.
+// (false). A rebuild is required when the job resumes at BUILDING_EXT4 or when
+// its artifact is missing, failed, or not READY; reuse is possible only when
+// the job resumes past BUILDING_EXT4 and the artifact row exists and is READY.
 // Exported for the HTTP handler to decide whether to forward a redo to TC.
 func RedoNeedsFullRebuild(ctx context.Context, jobID string) bool {
 	job, err := getTemplateImageJobRecordByID(ctx, jobID)
-	if err != nil || job == nil {
+	if err != nil {
+		return true
+	}
+	return redoJobRecordNeedsFullRebuild(ctx, job)
+}
+
+func redoJobRecordNeedsFullRebuild(ctx context.Context, job *models.TemplateImageJob) bool {
+	if job == nil {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(job.ResumePhase), JobPhaseBuildingExt4) {
 		return true
 	}
 	if strings.TrimSpace(job.ArtifactID) == "" {
@@ -250,6 +261,78 @@ func RedoNeedsFullRebuild(ctx context.Context, jobID string) bool {
 	return !artifactStatusReusableForRedo(artifact.Status)
 }
 
+type redoSubmissionPlan struct {
+	redoJob          *models.TemplateImageJob
+	instanceType     string
+	backend          string
+	targetNodes      []*node.Node
+	needsFullRebuild bool
+}
+
+func buildRedoSubmissionPlan(ctx context.Context, db *gorm.DB, definition *models.TemplateDefinition, jobID string, normalized *types.RedoTemplateFromImageReq) (*redoSubmissionPlan, error) {
+	if _, err := getActiveTemplateImageJobByTemplateIDTx(db, normalized.TemplateID); err == nil {
+		return nil, fmt.Errorf("%w: template %s is currently running", ErrTemplateAttemptInProgress, normalized.TemplateID)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	latestJob, err := getLatestTemplateImageJobByTemplateIDTx(db, normalized.TemplateID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTemplateNotFound
+		}
+		return nil, err
+	}
+	if err := allowRedoResumePhase(latestJob); err != nil {
+		return nil, err
+	}
+	sourceJob := latestJob
+	if !isCreateRedoJobOperation(latestJob.Operation) {
+		createRedoJob, lookupErr := getLatestCreateRedoImageJobByTemplateIDTx(db, normalized.TemplateID)
+		if lookupErr == nil {
+			sourceJob = createRedoJob
+		} else if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return nil, lookupErr
+		}
+	}
+	sourceReq, err := unmarshalTemplateImageJobRequest(sourceJob.RequestJSON)
+	if err != nil {
+		return nil, fmt.Errorf("decode latest template image request fail: %w", err)
+	}
+	sourceReq.TemplateID = normalized.TemplateID
+	if strings.TrimSpace(sourceReq.Backend) == "" {
+		sourceReq.Backend = definition.StorageBackend
+	}
+	if strings.TrimSpace(sourceReq.InstanceType) == "" {
+		sourceReq.InstanceType = strings.TrimSpace(definition.InstanceType)
+	}
+	if !isCreateRedoJobOperation(sourceJob.Operation) {
+		sourceReq.Alias = ""
+	}
+	replicas, err := ListReplicas(ctx, normalized.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	targetNodes, err := resolveRedoTargets(sourceReq.InstanceType, normalized, replicas)
+	if err != nil {
+		return nil, err
+	}
+	targetScope := distributionScopeFromTargets(targetNodes)
+	sourceReq.DistributionScope = append([]string(nil), targetScope...)
+	attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
+	requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
+	if err != nil {
+		return nil, err
+	}
+	redoJob := newRedoTemplateImageJobRecord(jobID, normalized, latestJob, sourceReq, requestSnapshot, attemptNo, targetScope, replicas)
+	return &redoSubmissionPlan{
+		redoJob:          redoJob,
+		instanceType:     sourceReq.InstanceType,
+		backend:          sourceReq.Backend,
+		targetNodes:      targetNodes,
+		needsFullRebuild: redoJobRecordNeedsFullRebuild(ctx, redoJob),
+	}, nil
+}
+
 func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFromImageReq, downloadBaseURL string) (*types.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -258,94 +341,75 @@ func SubmitRedoTemplateFromImage(ctx context.Context, req *types.RedoTemplateFro
 	if err != nil {
 		return nil, err
 	}
+	jobID := uuid.NewString()
+
+	// Run the in-use Cubelet RPCs outside withTemplateWriteLock and the DB
+	// transaction so unreachable nodes cannot block concurrent readers or hold
+	// InnoDB row locks across RPC timeouts.
 	definition, err := GetDefinition(ctx, normalized.TemplateID)
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureRedoTemplateNotInUse(ctx, normalized.TemplateID, definition.InstanceType); err != nil {
+	preflightPlan, err := buildRedoSubmissionPlan(ctx, store.db.WithContext(ctx), definition, jobID, normalized)
+	if err != nil {
 		return nil, err
 	}
-	jobID := uuid.NewString()
-	var redoJob *models.TemplateImageJob
+	checkedScope, err := checkRedoTemplateInUse(
+		ctx, normalized.TemplateID, preflightPlan.instanceType, preflightPlan.backend,
+		preflightPlan.needsFullRebuild, preflightPlan.targetNodes,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		redoJob          *models.TemplateImageJob
+		needsFullRebuild bool
+	)
 	if err := withTemplateWriteLock(normalized.TemplateID, func() error {
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			definition, err := lockTemplateDefinitionTx(tx, normalized.TemplateID)
 			if err != nil {
 				return err
 			}
-			if _, err := getActiveTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID); err == nil {
-				return fmt.Errorf("%w: template %s is currently running", ErrTemplateAttemptInProgress, normalized.TemplateID)
-			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
-			}
-			latestJob, err := getLatestTemplateImageJobByTemplateIDTx(tx, normalized.TemplateID)
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return ErrTemplateNotFound
-				}
-				return err
-			}
-			if err := allowRedoResumePhase(latestJob); err != nil {
-				return err
-			}
-			sourceJob := latestJob
-			if !isCreateRedoJobOperation(latestJob.Operation) {
-				createRedoJob, lookupErr := getLatestCreateRedoImageJobByTemplateIDTx(tx, normalized.TemplateID)
-				if lookupErr == nil {
-					sourceJob = createRedoJob
-				} else if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
-					return lookupErr
-				}
-			}
-			sourceReq, err := unmarshalTemplateImageJobRequest(sourceJob.RequestJSON)
-			if err != nil {
-				return fmt.Errorf("decode latest template image request fail: %w", err)
-			}
-			sourceReq.TemplateID = normalized.TemplateID
-			if strings.TrimSpace(sourceReq.Backend) == "" {
-				sourceReq.Backend = definition.StorageBackend
-			}
-			if !isCreateRedoJobOperation(sourceJob.Operation) {
-				sourceReq.Alias = ""
-			}
-			replicas, err := ListReplicas(ctx, normalized.TemplateID)
+			plan, err := buildRedoSubmissionPlan(ctx, tx, definition, jobID, normalized)
 			if err != nil {
 				return err
 			}
-			targetNodes, err := resolveRedoTargets(sourceReq.InstanceType, normalized, replicas)
-			if err != nil {
-				return err
+			_, curScope := newRedoInUseScope(
+				normalized.TemplateID, plan.instanceType, plan.backend,
+				plan.needsFullRebuild, plan.targetNodes,
+			)
+			if !checkedScope.covers(curScope) {
+				return ErrRedoTemplateScopeChanged
 			}
-			targetScope := distributionScopeFromTargets(targetNodes)
-			sourceReq.DistributionScope = append([]string(nil), targetScope...)
-			attemptNo := nextAttemptNoFromLatest(latestJob.AttemptNo)
-			requestSnapshot, err := marshalTemplateImageJobRequest(sourceReq)
-			if err != nil {
-				return err
-			}
-			redoJob = newRedoTemplateImageJobRecord(jobID, normalized, latestJob, sourceReq, requestSnapshot, attemptNo, targetScope, replicas)
+			redoJob = plan.redoJob
+			needsFullRebuild = plan.needsFullRebuild
 			return tx.Table(constants.TemplateImageJobTableName).Create(redoJob).Error
 		})
 	}); err != nil {
 		return nil, err
 	}
+	info, err := GetTemplateImageJobInfo(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	// Carry the immutable submit-time decision back to the HTTP handler so it
+	// does not re-read DB state after runRedoTemplateImageJob starts.
+	info.NeedsFullRebuild = needsFullRebuild
 	// Redo has two paths:
 	//  1. Reuse artifact and redistribute only: no build needed, CubeMaster
 	//     handles it locally (the artifact already exists).
 	//  2. Full rebuild: the build is data-plane work owned by
 	//     CubeTemplateCenter, same as create. The HTTP handler forwards the
 	//     job to TC; CubeMaster only persists it here.
-	if RedoNeedsFullRebuild(ctx, jobID) {
-		// Full rebuild: leave the job PENDING for the HTTP handler to forward
-		// to TC. No local build goroutine.
-		return GetTemplateImageJobInfo(ctx, jobID)
+	if !needsFullRebuild {
+		go runRedoTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_redo", map[string]any{
+			"job_id":      jobID,
+			"template_id": normalized.TemplateID,
+		}), jobID, normalized, downloadBaseURL)
 	}
-	// Redistribution-only: run the local redo pipeline (no build).
-	go runRedoTemplateImageJob(detachTemplateImageJobContext(ctx, "template_image_redo", map[string]any{
-		"job_id":      jobID,
-		"template_id": normalized.TemplateID,
-	}), jobID, normalized, downloadBaseURL)
-	return GetTemplateImageJobInfo(ctx, jobID)
+	return info, nil
 }
 
 func GetTemplateImageJobInfo(ctx context.Context, jobID string) (*types.TemplateImageJobInfo, error) {

@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -30,14 +32,15 @@ var ErrTemplateCleanupLocatorMissing = errors.New("template cleanup locator is m
 var ErrSnapshotReplicaMetadataIncomplete = errors.New("snapshot replica metadata is incomplete")
 
 var (
-	cleanupTemplateOnCubelet = cubelet.CleanupTemplate
-	deleteImageOnCubelet     = cubelet.DeleteImage
-	getCubeletAddrForDelete  = cubelet.GetCubeletAddr
-	listTemplateSandboxes    = sandbox.ListSandbox
-	runReplicaCleanup        = cleanupTemplateReplicasDeferringUnreachable
-	runArtifactCleanup       = cleanupTemplateArtifact
-	runMetadataCleanup       = cleanupTemplateMetadata
-	runTemplateJobCleanup    = cleanupTemplateJobs
+	cleanupTemplateOnCubelet  = cubelet.CleanupTemplate
+	deleteImageOnCubelet      = cubelet.DeleteImage
+	getCubeletAddrForDelete   = cubelet.GetCubeletAddr
+	listTemplateSandboxes     = sandbox.ListSandbox
+	listRedoTemplateSandboxes = sandbox.ListSandboxWithFailOnError
+	runReplicaCleanup         = cleanupTemplateReplicasDeferringUnreachable
+	runArtifactCleanup        = cleanupTemplateArtifact
+	runMetadataCleanup        = cleanupTemplateMetadata
+	runTemplateJobCleanup     = cleanupTemplateJobs
 	// runInUseCheck and runFailActiveWork follow the same seam convention as the
 	// cleanup stages above so the force-delete ordering can be tested without a
 	// live node cache (isTemplateInUse short-circuits to false when no healthy
@@ -636,33 +639,141 @@ func isIgnorableArtifactDeleteMessage(msg string) bool {
 	return hasMissing && hasImage
 }
 
-func isTemplateInUse(ctx context.Context, templateID, instanceType string) (bool, error) {
-	nodeCount := localcache.GetHealthyNodesByInstanceType(-1, instanceType).Len()
-	if nodeCount == 0 {
-		return false, nil
-	}
-	rsp := listTemplateSandboxes(ctx, &sandboxtypes.ListCubeSandboxReq{
-		RequestID:    uuid.New().String(),
-		InstanceType: instanceType,
-		StartIdx:     1,
-		Size:         nodeCount,
-	})
+type sandboxListFunc func(context.Context, *sandboxtypes.ListCubeSandboxReq) *sandboxtypes.ListCubeSandboxRes
+
+func listSandboxesForTemplateCheck(ctx context.Context, listFn sandboxListFunc, req *sandboxtypes.ListCubeSandboxReq, templateID string, matchHost func(*sandboxtypes.SandboxBriefData) bool) (bool, error) {
+	rsp := listFn(ctx, req)
 	if rsp == nil || rsp.Ret == nil {
 		return false, errors.New("list sandbox returned empty response")
 	}
 	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
-		return false, fmt.Errorf("list sandbox failed: %s", rsp.Ret.RetMsg)
+		msg := strings.TrimSpace(rsp.Ret.RetMsg)
+		if strings.HasPrefix(msg, "list sandbox failed:") {
+			return false, errors.New(msg)
+		}
+		return false, fmt.Errorf("list sandbox failed: %s", msg)
 	}
 	for _, item := range rsp.Data {
 		if item == nil {
 			continue
 		}
-		if item.TemplateID == templateID {
+		if item.TemplateID != templateID && item.Labels[constants.CubeAnnotationAppSnapshotTemplateID] != templateID {
+			continue
+		}
+		if matchHost == nil || matchHost(item) {
 			return true, nil
 		}
-		if item.Labels[constants.CubeAnnotationAppSnapshotTemplateID] == templateID {
-			return true, nil
+	}
+	// doOneList/dealRspData stop draining items cleanly on ctx.Done() without
+	// marking listFailed, so verify ctx wasn't cancelled before reporting unused.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func isTemplateInUseClusterWide(ctx context.Context, listFn sandboxListFunc, templateID, instanceType string, skipEmptyTemplateID bool) (bool, error) {
+	if skipEmptyTemplateID && templateID == "" {
+		return false, nil
+	}
+	// ListSandbox rejects Size <= 0; redo submission fails earlier with
+	// ErrNoTemplateNodes when zero healthy nodes exist.
+	nodeCount := localcache.GetHealthyNodesByInstanceType(-1, instanceType).Len()
+	if nodeCount == 0 {
+		return false, nil
+	}
+	return listSandboxesForTemplateCheck(ctx, listFn, &sandboxtypes.ListCubeSandboxReq{
+		RequestID:    uuid.New().String(),
+		InstanceType: instanceType,
+		StartIdx:     1,
+		Size:         nodeCount,
+	}, templateID, nil)
+}
+
+func isTemplateInUse(ctx context.Context, templateID, instanceType string) (bool, error) {
+	return isTemplateInUseClusterWide(ctx, listTemplateSandboxes, templateID, instanceType, false)
+}
+
+func isTemplateInUseFailClosed(ctx context.Context, templateID, instanceType string) (bool, error) {
+	return isTemplateInUseClusterWide(ctx, listRedoTemplateSandboxes, templateID, instanceType, true)
+}
+
+// isTemplateInUseOnNodes reports whether templateID is referenced by any
+// sandbox on targets. An empty targets slice means no nodes are affected and
+// returns (false, nil).
+func isTemplateInUseOnNodes(ctx context.Context, templateID, instanceType string, targets []*node.Node) (bool, error) {
+	if templateID == "" || len(targets) == 0 {
+		return false, nil
+	}
+	targetIDs := make([]string, 0, len(targets))
+	checkNodeIDs := make(map[string]struct{}, len(targets))
+	checkNodeIPs := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if target == nil {
+			continue
 		}
+		if nodeID := strings.TrimSpace(target.ID()); nodeID != "" {
+			if _, exists := checkNodeIDs[nodeID]; !exists {
+				checkNodeIDs[nodeID] = struct{}{}
+				targetIDs = append(targetIDs, nodeID)
+			}
+		}
+		if nodeIP := strings.TrimSpace(target.HostIP()); nodeIP != "" {
+			checkNodeIPs[nodeIP] = struct{}{}
+		}
+	}
+	if len(targetIDs) == 0 {
+		return false, nil
+	}
+	matchHost := func(item *sandboxtypes.SandboxBriefData) bool {
+		_, idOK := checkNodeIDs[strings.TrimSpace(item.HostID)]
+		_, ipOK := checkNodeIPs[strings.TrimSpace(item.HostIP)]
+		return idOK || ipOK
+	}
+
+	checkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	const maxConcurrentNodeChecks = 16
+	sem := make(chan struct{}, maxConcurrentNodeChecks)
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstIn  bool
+		firstErr error
+	)
+	for _, hostID := range targetIDs {
+		hostID := hostID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-checkCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			inUse, err := listSandboxesForTemplateCheck(checkCtx, listRedoTemplateSandboxes, &sandboxtypes.ListCubeSandboxReq{
+				RequestID:    uuid.New().String(),
+				InstanceType: instanceType,
+				HostID:       hostID,
+			}, templateID, matchHost)
+			if err != nil || inUse {
+				once.Do(func() {
+					firstIn = inUse
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
+	}
+	wg.Wait()
+	if firstIn || firstErr != nil {
+		return firstIn, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	return false, nil
 }

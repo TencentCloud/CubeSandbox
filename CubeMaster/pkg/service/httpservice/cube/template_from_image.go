@@ -80,9 +80,10 @@ func handleRedoTemplateAction(c *gin.Context) {
 		return
 	}
 	// Redo may be a full rebuild (needs TC) or a redistribution-only (no build).
-	// SubmitRedoTemplateFromImage already decided: full-rebuild jobs stay
-	// PENDING and must be forwarded to TC; redistribution-only jobs run locally.
-	if job != nil && templatecenter.RedoNeedsFullRebuild(c.Request.Context(), job.JobID) {
+	// SubmitRedoTemplateFromImage captures this decision before launching any
+	// local goroutine; use job.NeedsFullRebuild instead of re-reading mutable
+	// DB state via RedoNeedsFullRebuild.
+	if job != nil && job.NeedsFullRebuild {
 		go forwardRedoBuildJobToTemplateCenter(job.JobID, requestBaseURL(c.Request))
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)

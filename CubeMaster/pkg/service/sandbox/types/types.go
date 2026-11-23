@@ -865,6 +865,7 @@ type TemplateImageJobInfo struct {
 	FailedNodeCount         int32               `json:"failed_node_count,omitempty"`
 	TemplateStatus          string              `json:"template_status,omitempty"`
 	ArtifactStatus          string              `json:"artifact_status,omitempty"`
+	NeedsFullRebuild        bool                `json:"-"`
 	PullTotalBytes          int64               `json:"pull_total_bytes,omitempty"`
 	PullDownloadedBytes     int64               `json:"pull_downloaded_bytes,omitempty"`
 	PullTotalLayers         int32               `json:"pull_total_layers,omitempty"`
