@@ -335,6 +335,18 @@ impl Serialize for PciDeviceInfo {
     }
 }
 
+fn guest_reset_event(
+    reset_evt: &EventFd,
+    exit_evt: &EventFd,
+    guest_reset_shutdown: bool,
+) -> io::Result<EventFd> {
+    if guest_reset_shutdown {
+        exit_evt.try_clone()
+    } else {
+        reset_evt.try_clone()
+    }
+}
+
 #[allow(unused_variables)]
 #[allow(clippy::too_many_arguments)]
 pub fn start_vmm_thread(
@@ -352,6 +364,7 @@ pub fn start_vmm_thread(
     sandbox_id: String,
     vcpu_started: Arc<AtomicBool>,
     vmm_barrier: Option<Arc<Barrier>>,
+    guest_reset_shutdown: bool,
 ) -> Result<thread::JoinHandle<Result<()>>> {
     #[cfg(feature = "guest_debug")]
     let gdb_hw_breakpoints = hypervisor.get_guest_debug_hw_bps();
@@ -399,6 +412,7 @@ pub fn start_vmm_thread(
                     exit_evt,
                     sandbox_id,
                     vcpu_started,
+                    guest_reset_shutdown,
                 )?;
 
                 vmm.setup_signal_handler()?;
@@ -467,6 +481,7 @@ pub struct Vmm {
     pinglog: u32,
     sandbox_id: String,
     vcpu_started: Arc<AtomicBool>,
+    guest_reset_shutdown: bool,
 }
 
 impl Vmm {
@@ -556,6 +571,7 @@ impl Vmm {
         exit_evt: EventFd,
         sandbox_id: String,
         vcpu_started: Arc<AtomicBool>,
+        guest_reset_shutdown: bool,
     ) -> Result<Self> {
         let mut epoll = EpollContext::new().map_err(Error::Epoll)?;
         let log_reopen_timer =
@@ -609,6 +625,7 @@ impl Vmm {
             pinglog: 3,
             sandbox_id,
             vcpu_started,
+            guest_reset_shutdown,
         })
     }
 
@@ -661,6 +678,7 @@ impl Vmm {
                         None,
                         self.sandbox_id.clone(),
                         self.vcpu_started.clone(),
+                        self.guest_reset_shutdown,
                     )?;
 
                     self.vm = Some(vm);
@@ -839,6 +857,7 @@ impl Vmm {
             self.sandbox_id.clone(),
             self.vcpu_started.clone(),
             restore_cfg.memory_vol_url.as_deref(),
+            self.guest_reset_shutdown,
         )?;
 
         // Now we can restore the rest of the VM.
@@ -927,6 +946,7 @@ impl Vmm {
             console_resize_pipe,
             self.sandbox_id.clone(),
             self.vcpu_started.clone(),
+            self.guest_reset_shutdown,
         )?;
 
         // And we boot it
@@ -1454,6 +1474,7 @@ impl Vmm {
             Some(&snapshot),
             self.sandbox_id.clone(),
             self.vcpu_started.clone(),
+            self.guest_reset_shutdown,
         )
         .map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error creating VM from snapshot: {:?}", e))
@@ -1984,9 +2005,15 @@ impl Vmm {
                         break 'outer;
                     }
                     EpollDispatch::Reset => {
-                        info!("VM reset event");
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
+                        if self.guest_reset_shutdown {
+                            warn!("VM reset event: guest reset is configured to shut down the VMM");
+                            self.vmm_shutdown().map_err(Error::VmmShutdown)?;
+
+                            break 'outer;
+                        }
+                        info!("VM reset event");
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
                     EpollDispatch::ActivateVirtioDevices => {
@@ -2337,6 +2364,26 @@ mod unit_tests {
     };
 
     #[test]
+    fn guest_reset_policy_selects_shutdown_or_reboot_event() {
+        let reset_evt = EventFd::new(EFD_NONBLOCK).unwrap();
+        let exit_evt = EventFd::new(EFD_NONBLOCK).unwrap();
+
+        guest_reset_event(&reset_evt, &exit_evt, true)
+            .unwrap()
+            .write(1)
+            .unwrap();
+        assert_eq!(exit_evt.read().unwrap(), 1);
+        assert!(reset_evt.read().is_err());
+
+        guest_reset_event(&reset_evt, &exit_evt, false)
+            .unwrap()
+            .write(1)
+            .unwrap();
+        assert_eq!(reset_evt.read().unwrap(), 1);
+        assert!(exit_evt.read().is_err());
+    }
+
+    #[test]
     fn log_reopen_timer_expires() {
         let mut timer = create_log_reopen_timer(Duration::from_millis(1)).unwrap();
         for _ in 0..100 {
@@ -2389,6 +2436,7 @@ mod unit_tests {
             EventFd::new(EFD_NONBLOCK).unwrap(),
             "dummy".to_string(),
             Arc::new(AtomicBool::new(false)),
+            false,
         )
         .unwrap()
     }
