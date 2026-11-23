@@ -58,7 +58,12 @@ func (d *driver) Open(ctx context.Context, cfg dao.Config) (*sql.DB, *gorm.DB, e
 	if cfg.MaxConnLifeTimeSeconds > 0 {
 		sqlDB.SetConnMaxLifetime(time.Duration(cfg.MaxConnLifeTimeSeconds) * time.Second)
 	}
-	gormDB, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: sqlDB}), &gorm.Config{})
+	gormDB, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: sqlDB}), &gorm.Config{
+		// Keep prepared result columns stable across ADD COLUMN when GORM has a model schema.
+		// Raw("SELECT *"), Select("*"), and Table().Scan() without a model still use SELECT *.
+		// If the model projects a column missing from the table, PostgreSQL returns 42703.
+		QueryFields: true,
+	})
 	if err != nil {
 		_ = sqlDB.Close()
 		return nil, nil, fmt.Errorf("gorm.Open: %w", err)

@@ -76,20 +76,18 @@ type InstanceInfo struct {
 	Zone    string `json:"Zone" gorm:"column:zone"`
 	Region  string `json:"Region" gorm:"column:region"`
 
-	ImageID                 string `json:"ImageID" gorm:"column:image_id"`
-	SystemDisk              string `json:"SystemDisk" gorm:"column:system_disk"`
-	DataDisks               string `json:"DataDisks" gorm:"column:data_disks"`
-	PrivateIPAddresses      string `json:"PrivateIpAddresses" gorm:"column:private_ip_addresses"`
-	PrivateIP               string `json:"PrivateIp" gorm:"column:private_ip"`
-	PrirvateIPCnt           int64  `json:"PrivateIpCnt" gorm:"column:private_ip_cnt"`
-	SecurityGroupIDS        string `json:"SecurityGroupIds" gorm:"column:security_ids"`
-	VpcID                   string `json:"VpcId" gorm:"column:vpc_id"`
-	MacAddress              string `json:"MacAddress" gorm:"column:mac_address"`
-	SubnetID                string `json:"SubnetId" gorm:"column:subnet_id"`
-	DiskState               string `json:"DiskState" gorm:"column:disk_state"`
-	FailMsg                 string `json:"FailMsg" gorm:"column:fail_msg"`
-	CamRoleName             string `json:"CamRoleName" gorm:"column:cam_role_name"`
-	DisasterRecoverGroupIds string `json:"DisasterRecoverGroupIds" gorm:"column:disaster_recover_group_ids"`
+	ImageID            string `json:"ImageID" gorm:"column:image_id"`
+	SystemDisk         string `json:"SystemDisk" gorm:"column:system_disk"`
+	DataDisks          string `json:"DataDisks" gorm:"column:data_disks"`
+	PrivateIPAddresses string `json:"PrivateIpAddresses" gorm:"column:private_ip_addresses"`
+	PrivateIP          string `json:"PrivateIp" gorm:"column:private_ip"`
+	PrirvateIPCnt      int64  `json:"PrivateIpCnt" gorm:"column:private_ip_cnt"`
+	SecurityGroupIDS   string `json:"SecurityGroupIds" gorm:"column:security_ids"`
+	VpcID              string `json:"VpcId" gorm:"column:vpc_id"`
+	MacAddress         string `json:"MacAddress" gorm:"column:mac_address"`
+	SubnetID           string `json:"SubnetId" gorm:"column:subnet_id"`
+	DiskState          string `json:"DiskState" gorm:"column:disk_state"`
+	FailMsg            string `json:"FailMsg" gorm:"column:fail_msg"`
 }
 
 func (InstanceInfo) TableName() string {
