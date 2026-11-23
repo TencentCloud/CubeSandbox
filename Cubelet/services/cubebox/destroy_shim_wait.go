@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -260,6 +261,14 @@ func (l *local) collectVerifiableRuntimeEvidence(ctx context.Context, sb *cubebo
 }
 
 func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox, scope runtimeEvidenceScope) sandboxRuntimeEvidence {
+	return l.collectRuntimeEvidenceWithBundles(ctx, sb, scope, resolveShimBundles(l, ctx, sb))
+}
+
+// collectRuntimeEvidenceWithBundles is collectRuntimeEvidence with the shim
+// bundle list supplied by the caller. The row-less resume gate already resolved
+// one bundle from the shim manager and must not resolve it a second time: a
+// second lookup failure would be swallowed and read as "no process".
+func (l *local) collectRuntimeEvidenceWithBundles(ctx context.Context, sb *cubeboxstore.CubeBox, scope runtimeEvidenceScope, bundles []string) sandboxRuntimeEvidence {
 	var ev sandboxRuntimeEvidence
 	if sb == nil {
 		return ev
@@ -285,7 +294,7 @@ func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.Cub
 	// exist.
 	trustBare := !sb.Endpoint.ShimSpawned
 	var candidates []runtimePIDCandidate
-	for _, bundle := range resolveShimBundles(l, ctx, sb) {
+	for _, bundle := range bundles {
 		candidates = append(candidates,
 			runtimePIDCandidate{
 				pid:     readPidFile(filepath.Join(bundle, shimPidFileName)),
@@ -606,6 +615,84 @@ func (l *local) waitReplacedSandboxGone(ctx context.Context, sb *cubeboxstore.Cu
 	waitCtx, cancel := context.WithTimeout(ctx, replaceGateTimeout)
 	defer cancel()
 	return waitSandboxRuntimeGone(waitCtx, sb.SandboxID, evidence)
+}
+
+// lookupShimBundleByID is the row-less gate's shim lookup. It distinguishes
+// an explicit NotFound (no shim) from a manager read error (unknown), which
+// shimBundlePaths cannot do because it returns only a path list.
+var lookupShimBundleByID = func(l *local, ctx context.Context, sandboxID string) (bundle string, found bool, err error) {
+	if l == nil || l.shims == nil {
+		return "", false, fmt.Errorf("shim manager unavailable")
+	}
+	shim, err := l.shims.Get(ctx, sandboxID)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if shim == nil {
+		return "", false, nil
+	}
+	return strings.TrimSpace(shim.Bundle()), true, nil
+}
+
+// waitSandboxRuntimeGoneByID checks a sandbox whose store row is gone. The
+// pod id is always known; the packed pause spec also carries the workload
+// container ids, so every shim the failed attempt could have started is
+// addressed. A workload id that the spec no longer carries is the remaining
+// blind spot: its shim is random and only the deleted row knew it.
+//
+// An unavailable shim manager, or any lookup error other than NotFound, is
+// unresolved and fails closed. A registered shim with no readable pid files
+// also fails closed through the existing spawn-intent TTL: the row that would
+// have carried the pid is exactly what the failed attempt deleted.
+func (l *local) waitSandboxRuntimeGoneByID(ctx context.Context, sandboxID string, containerIDs []string) error {
+	ids := append([]string{sandboxID}, containerIDs...)
+	seen := map[string]struct{}{}
+	var bundles []string
+	foundShim := false
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		bundle, found, err := lookupShimBundleByID(l, ctx, id)
+		if err != nil {
+			return fmt.Errorf("sandbox %s: resolve shim %s: %w", sandboxID, id, err)
+		}
+		if found {
+			foundShim = true
+			if bundle != "" {
+				bundles = append(bundles, bundle)
+			}
+		}
+	}
+	if !foundShim {
+		return nil
+	}
+	sb := &cubeboxstore.CubeBox{
+		ContainersMap: &cubeboxstore.ContainersMap{
+			ContainerMap: map[string]*cubeboxstore.Container{
+				sandboxID: {
+					Metadata: cubeboxstore.Metadata{ID: sandboxID},
+					Status:   cubeboxstore.StoreStatus(cubeboxstore.Status{}),
+				},
+			},
+		},
+	}
+	sb.ID = sandboxID
+	sb.SandboxID = sandboxID
+	sb.Endpoint.ShimSpawned = true
+	sb.Endpoint.ShimSpawnedAt = time.Now()
+	evidence := l.collectRuntimeEvidenceWithBundles(ctx, sb, evidenceVerifiableOnly, bundles)
+	waitCtx, cancel := context.WithTimeout(ctx, replaceGateTimeout)
+	defer cancel()
+	return waitSandboxRuntimeGone(waitCtx, sandboxID, evidence)
 }
 
 // reapShimProcess SIGKILLs the shim and vmm recorded in the bundle.

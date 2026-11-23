@@ -270,6 +270,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		OciRuntime:        &ociRuntime,
 		Version:           cubeboxstore.CurrentCubeboxVersion,
 		RequestSource:     getUserAgent(ctx),
+		CreateAttemptID:   flowOpts.AttemptID,
 		LocalRunTemplate:  flowOpts.LocalRunTemplate,
 		NetworkType:       realReq.GetNetworkType(),
 		RuntimeHandler:    realReq.GetRuntimeHandler(),

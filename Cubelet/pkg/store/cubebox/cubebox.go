@@ -251,6 +251,12 @@ type CubeBox struct {
 	Status *StatusStorage `json:"status,omitempty"`
 
 	RequestSource string `json:"source,omitempty"`
+
+	// CreateAttemptID identifies the Create that wrote this row. Async
+	// failover compares it before deleting so a newer attempt's row is never
+	// torn down by the previous attempt's cleanup.
+	CreateAttemptID string `json:"create_attempt_id,omitempty"`
+
 	UserDeleteMark
 
 	LocalRunTemplate *templatetypes.LocalRunTemplate

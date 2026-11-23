@@ -299,6 +299,49 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 	return utils.InterfaceToString(tmpReq)
 }
 
+// pausedReplaceGate is the explicit outcome of the pause-resume safety
+// check. An error means the replacement must not proceed; the struct carries
+// the separate permission to discard a stale rootfs.
+type pausedReplaceGate struct {
+	reclaimRootfs bool
+}
+
+// failoverGuard serializes async create-failure cleanup with a newer create
+// for the same sandbox and decides whether the failed attempt still owns it.
+// The row's CreateAttemptID is written by the attempt itself, so a newer
+// attempt's row can never be destroyed by the previous attempt's failover.
+type failoverGuard struct {
+	locks *utils.ResourceLocks
+	mgr   *local
+}
+
+func (g *failoverGuard) Lock(ctx context.Context, sandboxID string) (func(), error) {
+	if g == nil || g.locks == nil {
+		return func() {}, nil
+	}
+	return g.locks.LockContext(ctx, sandboxID)
+}
+
+func (g *failoverGuard) Owns(ctx context.Context, sandboxID, attemptID string) (bool, error) {
+	if g == nil || g.mgr == nil || g.mgr.cubeboxManger == nil {
+		return true, nil
+	}
+	sb, err := g.mgr.cubeboxManger.Get(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, utils.ErrorKeyNotFound) {
+			// The attempt removed its own row; cleanup still has network,
+			// volumes and storage to release.
+			return true, nil
+		}
+		return false, err
+	}
+	if sb == nil || sb.CreateAttemptID == "" || attemptID == "" {
+		// Legacy rows predate the attempt id and must keep their cleanup.
+		return true, nil
+	}
+	return sb.CreateAttemptID == attemptID, nil
+}
+
 // gatePausedReplace refuses to start a resume that would replace a PAUSED
 // sandbox whose previous runtime may still be running.
 //
@@ -310,26 +353,62 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 // The check runs here, before the create flow allocates network and volume:
 // failing later would strand those allocations and, via failover, destroy the
 // paused sandbox the user asked to resume.
-func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) error {
+//
+// A store read error is returned as a retryable TaskStateInvalid. Letting the
+// create continue would let cube_container_create replace a PAUSED row without
+// this wait.
+func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (pausedReplaceGate, error) {
 	desired := strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID])
 	if desired == "" {
-		return nil
+		return pausedReplaceGate{}, nil
 	}
 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, desired)
-	if err != nil || sb == nil || sb.SandboxID != desired {
-		// No local record to replace: an ordinary create that happens to
-		// carry the annotation.
-		return nil
+	switch {
+	case err != nil && !errors.Is(err, utils.ErrorKeyNotFound):
+		return pausedReplaceGate{}, ret.Err(errorcode.ErrorCode_TaskStateInvalid,
+			fmt.Sprintf("read sandbox %s: %v", desired, err))
+	case err == nil && sb != nil && sb.SandboxID != desired:
+		return pausedReplaceGate{}, ret.Err(errorcode.ErrorCode_TaskStateInvalid,
+			fmt.Sprintf("sandbox row %s does not match requested id %s", sb.SandboxID, desired))
+	case err == nil && sb != nil:
+		st := sb.GetStatus()
+		if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
+			// Only a fully PAUSED tombstone may be replaced. PAUSING still owns
+			// the lifecycle lock and its cleanup, and a live sandbox must not
+			// be touched; the create step rejects both as already exists.
+			return pausedReplaceGate{}, nil
+		}
+		if waitErr := s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb); waitErr != nil {
+			return pausedReplaceGate{}, waitErr
+		}
+		return pausedReplaceGate{reclaimRootfs: resumeFromPauseSandboxID(req) != ""}, nil
+	default:
+		// No local record to replace. An ordinary create has nothing to
+		// reclaim. A pause resume can still reach here: the final create step
+		// deletes the paused tombstone before it can fail, so the retry has no
+		// row from which to prove the old runtime is gone. The shim manager
+		// and bundle pid files survive that row; check them by sandbox id.
+		if resumeFromPauseSandboxID(req) == "" {
+			return pausedReplaceGate{}, nil
+		}
+		containerIDs := make([]string, 0, len(req.GetContainers()))
+		for _, c := range req.GetContainers() {
+			if id := strings.TrimSpace(c.GetId()); id != "" && id != desired {
+				containerIDs = append(containerIDs, id)
+			}
+		}
+		if waitErr := s.cubeboxMgr.waitSandboxRuntimeGoneByID(ctx, desired, containerIDs); waitErr != nil {
+			return pausedReplaceGate{}, waitErr
+		}
+		log.G(ctx).Warnf("sandbox %s: no paused row; authorizing stale rootfs reclaim after a runtime-gone check", desired)
+		return pausedReplaceGate{reclaimRootfs: true}, nil
 	}
-	st := sb.GetStatus()
-	if st == nil || st.Get().State() != cubebox.ContainerState_CONTAINER_PAUSED {
-		// Only a fully PAUSED tombstone may be replaced. PAUSING still owns the
-		// lifecycle lock and its cleanup, and a live sandbox must not be
-		// touched; the create step rejects both as already exists.
-		return nil
-	}
-	return s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb)
 }
+
+// expandPauseSnapshotPackageFn is a test seam: a pause package needs a real
+// storage catalog and mount, while the Create wiring must be testable without
+// one.
+var expandPauseSnapshotPackageFn = expandPauseSnapshotPackage
 
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 	ctx = telemetry.ExtractGRPC(ctx)
@@ -379,7 +458,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	ctx = preparedCtx
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
-	if err := expandPauseSnapshotPackage(req); err != nil {
+	if err := expandPauseSnapshotPackageFn(req); err != nil {
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
@@ -419,10 +498,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 
 	start := time.Now()
+	attemptID := utils.GenerateID()
 	createInfo := &workflow.CreateContext{
 		ReqInfo:      req,
 		Failover:     true,
 		SnapshotMode: mode,
+		AttemptID:    attemptID,
+		FailoverGuard: &failoverGuard{
+			locks: s.sandboxLifecycleLocks,
+			mgr:   s.cubeboxMgr,
+		},
 	}
 	ctx = setDefaultContext(ctx, req, createInfo)
 
@@ -496,12 +581,22 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	// The gate has to run before the create flow allocates anything, and it
 	// needs the same namespace the flow would have used to resolve the old
 	// sandbox's shim.
-	if err := s.gatePausedReplace(ctx, req); err != nil {
-		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %v",
-			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), err)
-		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+	gate, gateErr := s.gatePausedReplace(ctx, req)
+	if gateErr != nil {
+		// Runtime-gone refusals keep the historical retryable
+		// PreConditionFailed; a store read failure is TaskStateInvalid.
+		code := errorcode.ErrorCode_PreConditionFailed
+		msg := gateErr.Error()
+		if status, ok := ret.FromError(gateErr); ok {
+			code = status.Code()
+			msg = status.Message()
+		}
+		rsp.Ret.RetMsg = fmt.Sprintf("cannot replace paused sandbox %s: %s",
+			strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationDesiredSandboxID]), msg)
+		rsp.Ret.RetCode = code
 		return rsp, nil
 	}
+	createInfo.ReclaimStaleRootfs = gate.reclaimRootfs
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {

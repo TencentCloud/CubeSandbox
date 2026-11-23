@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -50,23 +52,53 @@ func resumeReplaceRequest(desired string) *cubeboxpb.RunCubeSandboxRequest {
 	return req
 }
 
+func pauseResumeRequest(desired string) *cubeboxpb.RunCubeSandboxRequest {
+	req := resumeReplaceRequest(desired)
+	req.Annotations[constants.MasterAnnotationPauseSnapshotID] = "snap-pause"
+	return req
+}
+
 func gateOnlyService(sb *cubeboxstore.CubeBox, ttl time.Duration) *service {
-	mgr := &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}
+	return gateServiceForAPI(&fakeCubeboxAPI{cb: sb}, ttl)
+}
+
+func skipPauseExpansion(t *testing.T) {
+	t.Helper()
+	previous := expandPauseSnapshotPackageFn
+	expandPauseSnapshotPackageFn = func(*cubeboxpb.RunCubeSandboxRequest) error { return nil }
+	t.Cleanup(func() { expandPauseSnapshotPackageFn = previous })
+}
+
+func gateServiceForAPI(api *fakeCubeboxAPI, ttl time.Duration) *service {
+	mgr := &local{cubeboxManger: api}
 	mgr.SetShimIntentTTL(ttl)
 	return &service{cubeboxMgr: mgr}
 }
 
+// noShimManager makes the row-less probe see an explicit "no shim" instead of
+// the test environment's missing manager.
+func noShimManager(t *testing.T) {
+	t.Helper()
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(*local, context.Context, string) (string, bool, error) {
+		return "", false, nil
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+}
+
 // fakeCreateFlow stands in for the create workflow so a test can tell whether
-// Create reached the flow at all.
+// Create reached the flow at all and what permission it carried.
 type fakeCreateFlow struct {
-	createCalls  int
-	destroyCalls int
+	createCalls   int
+	destroyCalls  int
+	reclaimRootfs bool
 }
 
 func (f *fakeCreateFlow) ID() string                                     { return "fake-create" }
 func (f *fakeCreateFlow) Init(context.Context, *workflow.InitInfo) error { return nil }
-func (f *fakeCreateFlow) Create(context.Context, *workflow.CreateContext) error {
+func (f *fakeCreateFlow) Create(_ context.Context, opts *workflow.CreateContext) error {
 	f.createCalls++
+	f.reclaimRootfs = opts.ReclaimStaleRootfs
 	return nil
 }
 func (f *fakeCreateFlow) Destroy(context.Context, *workflow.DestroyContext) error {
@@ -76,6 +108,10 @@ func (f *fakeCreateFlow) Destroy(context.Context, *workflow.DestroyContext) erro
 func (f *fakeCreateFlow) CleanUp(context.Context, *workflow.CleanContext) error { return nil }
 
 func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl time.Duration) *service {
+	return createServiceForAPI(&fakeCubeboxAPI{cb: sb}, flow, ttl)
+}
+
+func createServiceForAPI(api *fakeCubeboxAPI, flow *fakeCreateFlow, ttl time.Duration) *service {
 	engine := &workflow.Engine{}
 	engine.AddFlow("create", &workflow.Workflow{
 		Name:    "create",
@@ -92,7 +128,7 @@ func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl ti
 				"io.containerd.cube.v2.task": {Type: "io.containerd.cube.v2.task"},
 			},
 		},
-		cubeboxManger: &fakeCubeboxAPI{cb: sb},
+		cubeboxManger: api,
 	}
 	mgr.SetShimIntentTTL(ttl)
 	return &service{
@@ -107,9 +143,10 @@ func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl ti
 func TestGatePausedReplaceRefusesWhileTheOldRuntimeMayLive(t *testing.T) {
 	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()})
 
-	err := gateOnlyService(sb, 10*time.Minute).
+	gate, err := gateOnlyService(sb, 10*time.Minute).
 		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
 	require.Error(t, err, "a paused sandbox whose shim may still hold the tap must not be replaced")
+	assert.False(t, gate.reclaimRootfs, "a refused replacement must not authorize stale-rootfs cleanup")
 	assert.True(t, pendingIntentOnlyError(t, err),
 		"the refusal has to be the deferrable kind, or the retry budget would quarantine a healthy resume")
 }
@@ -121,8 +158,148 @@ func TestGatePausedReplaceAllowsWhenTheOldRuntimeIsGone(t *testing.T) {
 		ShimSpawned:   true,
 		ShimSpawnedAt: time.Now().Add(-time.Hour),
 	})
-	require.NoError(t, gateOnlyService(sb, 10*time.Minute).
-		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume")))
+	gate, err := gateOnlyService(sb, 10*time.Minute).
+		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.False(t, gate.reclaimRootfs, "a replacement without a pause snapshot is not a resume")
+}
+
+func TestGatePausedReplaceAuthorizesReclaimForPauseResume(t *testing.T) {
+	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{
+		ShimSpawned:   true,
+		ShimSpawnedAt: time.Now().Add(-time.Hour),
+	})
+	gate, err := gateOnlyService(sb, 10*time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.True(t, gate.reclaimRootfs, "a pause resume with no live runtime may reclaim its stale rootfs")
+}
+
+// A failed resume can delete the paused tombstone before the final create step
+// fails. The retry must still reclaim the stale rootfs via the host-level check.
+func TestGatePausedReplaceAuthorizesReclaimWithoutLocalRecord(t *testing.T) {
+	noShimManager(t)
+
+	gate, err := gateOnlyService(nil, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.True(t, gate.reclaimRootfs)
+}
+
+// The no-row positive case must also cover the production not-found error, not
+// only the fake's (nil, nil).
+func TestGatePausedReplaceTreatsStoreNotFoundAsNoRow(t *testing.T) {
+	noShimManager(t)
+
+	gate, err := gateServiceForAPI(&fakeCubeboxAPI{getErr: utils.ErrorKeyNotFound}, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.True(t, gate.reclaimRootfs)
+}
+
+// A store read error is retryable and must not turn into permission to delete
+// a rootfs, nor into a create that replaces a PAUSED row without the wait.
+func TestGatePausedReplaceRefusesOnStoreReadError(t *testing.T) {
+	gate, err := gateServiceForAPI(&fakeCubeboxAPI{getErr: errors.New("store closed")}, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs)
+	status, ok := ret.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, errorcode.ErrorCode_TaskStateInvalid, status.Code())
+}
+
+// The no-row probe must still fail closed while a shim/VMM from the failed
+// attempt is alive; the missing store row is not proof that the disk is free.
+func TestGatePausedReplaceRefusesWithoutLocalRecordWhileRuntimeLives(t *testing.T) {
+	live := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, live.Pid)
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(*local, context.Context, string) (string, bool, error) {
+		return bundle, true, nil
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	gate, err := gateOnlyService(nil, time.Minute).
+		gatePausedReplace(ctx, pauseResumeRequest("sb-resume"))
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs, "a live runtime must keep the stale rootfs protected even without a row")
+}
+
+// Workload container shims have random ids, but the packed pause spec still
+// carries them. The row-less gate must check those, not only the pod id.
+func TestGatePausedReplaceChecksWorkloadContainerShimsWithoutRow(t *testing.T) {
+	live := startSleeper(t)
+	bundle := t.TempDir()
+	writeBundlePidFile(t, bundle, shimPidFileName, live.Pid)
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(_ *local, _ context.Context, id string) (string, bool, error) {
+		if id == "workload-1" {
+			return bundle, true, nil
+		}
+		return "", false, nil
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+
+	req := pauseResumeRequest("sb-resume")
+	req.Containers[0].Id = "workload-1"
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	gate, err := gateOnlyService(nil, time.Minute).gatePausedReplace(ctx, req)
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs)
+}
+
+// A shim lookup error is unknown, not "not present".
+func TestGatePausedReplaceRefusesOnShimLookupError(t *testing.T) {
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(*local, context.Context, string) (string, bool, error) {
+		return "", false, errors.New("shim manager unavailable")
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+
+	gate, err := gateOnlyService(nil, time.Minute).
+		gatePausedReplace(context.Background(), pauseResumeRequest("sb-resume"))
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs)
+}
+
+// The ownership check is what stops a previous attempt's failover from
+// deleting a newer attempt's row, rootfs and shim.
+func TestFailoverGuardOwnsOnlyTheAttemptThatWroteTheRow(t *testing.T) {
+	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{})
+	sb.CreateAttemptID = "attempt-2"
+	guard := &failoverGuard{mgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	owned, err := guard.Owns(context.Background(), "sb-resume", "attempt-1")
+	require.NoError(t, err)
+	assert.False(t, owned, "a newer attempt's row must not be torn down by the old failover")
+
+	owned, err = guard.Owns(context.Background(), "sb-resume", "attempt-2")
+	require.NoError(t, err)
+	assert.True(t, owned, "the attempt that wrote the row still owns cleanup")
+}
+
+func TestFailoverGuardKeepsLegacyAndMissingRows(t *testing.T) {
+	legacy := pausedForReplace("sb-resume", sandboxstore.Endpoint{})
+	guard := &failoverGuard{mgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: legacy}}}
+	owned, err := guard.Owns(context.Background(), "sb-resume", "attempt-1")
+	require.NoError(t, err)
+	assert.True(t, owned, "rows written before the attempt id keep their cleanup")
+
+	missing := &failoverGuard{mgr: &local{cubeboxManger: &fakeCubeboxAPI{}}}
+	owned, err = missing.Owns(context.Background(), "sb-resume", "attempt-1")
+	require.NoError(t, err)
+	assert.True(t, owned, "a row the failed attempt already removed still has network/storage to release")
+
+	failing := &failoverGuard{mgr: &local{cubeboxManger: &fakeCubeboxAPI{getErr: errors.New("store closed")}}}
+	owned, err = failing.Owns(context.Background(), "sb-resume", "attempt-1")
+	require.Error(t, err)
+	assert.False(t, owned, "a store error is unknown and must fail closed")
 }
 
 // The gate only owns the PAUSED-replacement case. Everything else has to fall
@@ -133,12 +310,17 @@ func TestGatePausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) {
 	running.SandboxID = "sb-run"
 	s := gateOnlyService(running, time.Minute)
 
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("")),
-		"a create without the desired-id annotation is not a replacement")
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-run")),
-		"a live sandbox is rejected downstream as already exists, never waited on")
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-elsewhere")),
-		"a desired id this node does not hold is an ordinary create")
+	gate, err := s.gatePausedReplace(context.Background(), resumeReplaceRequest(""))
+	assert.NoError(t, err, "a create without the desired-id annotation is not a replacement")
+	assert.False(t, gate.reclaimRootfs)
+
+	gate, err = s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-run"))
+	assert.NoError(t, err, "a live sandbox is rejected downstream as already exists, never waited on")
+	assert.False(t, gate.reclaimRootfs)
+
+	gate, err = s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-elsewhere"))
+	assert.NoError(t, err, "a desired id this node does not hold is an ordinary create")
+	assert.False(t, gate.reclaimRootfs)
 }
 
 // A refusal has to happen before the create flow runs. That is the whole point
@@ -161,6 +343,23 @@ func TestCreateRefusesPausedReplacementBeforeTheFlowRuns(t *testing.T) {
 	assert.Zero(t, flow.destroyCalls, "a refused resume must not roll the sandbox back")
 }
 
+// A store read error is retryable and must stop before the flow can replace
+// the pending row or delete anything.
+func TestCreateRefusesStoreReadErrorBeforeTheFlowRuns(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	skipPauseExpansion(t)
+
+	flow := &fakeCreateFlow{}
+	s := createServiceForAPI(&fakeCubeboxAPI{getErr: errors.New("store closed")}, flow, time.Minute)
+
+	rsp, err := s.Create(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.Equal(t, errorcode.ErrorCode_TaskStateInvalid, rsp.Ret.RetCode)
+	assert.Zero(t, flow.createCalls)
+	assert.Zero(t, flow.destroyCalls)
+}
+
 // The same request with the old runtime provably gone reaches the flow
 // normally, so the gate is a gate and not a wall.
 func TestCreateReachesTheFlowOnceTheOldRuntimeIsGone(t *testing.T) {
@@ -178,4 +377,23 @@ func TestCreateReachesTheFlowOnceTheOldRuntimeIsGone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
 	assert.Equal(t, 1, flow.createCalls)
+	assert.False(t, flow.reclaimRootfs)
+}
+
+// The gate→storage assignment is the line that makes the fix work. A pause
+// resume must carry the permission into the create context.
+func TestCreatePropagatesReclaimPermission(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	noShimManager(t)
+	skipPauseExpansion(t)
+
+	flow := &fakeCreateFlow{}
+	s := createServiceForTest(nil, flow, time.Minute)
+
+	rsp, err := s.Create(context.Background(), pauseResumeRequest("sb-resume"))
+	require.NoError(t, err)
+	assert.Equal(t, errorcode.ErrorCode_Success, rsp.Ret.RetCode)
+	require.Equal(t, 1, flow.createCalls)
+	assert.True(t, flow.reclaimRootfs, "the gate's permission must reach storage")
 }

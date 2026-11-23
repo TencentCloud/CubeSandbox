@@ -168,6 +168,31 @@ type CreateContext struct {
 	IsRestart         bool
 	SavedContainerIDs map[int]string
 	RestartPrior      *RestartPrior
+
+	// AttemptID identifies this create attempt. It is persisted with the
+	// sandbox row so async failover can tell whether the row it is about to
+	// delete still belongs to the attempt that failed.
+	AttemptID string
+
+	// ReclaimStaleRootfs permits storage to discard a sandbox-owned runtime
+	// rootfs left behind by an earlier failed pause resume. The paused-replace
+	// gate sets it only for a pause resume whose old shim/VM is provably gone.
+	ReclaimStaleRootfs bool
+
+	// FailoverGuard, when set, serializes async create-failure cleanup with a
+	// newer create for the same sandbox and decides whether the failed
+	// attempt still owns the sandbox. It is set by the Cubelet service; the
+	// engine only invokes it for Failover cleanup.
+	FailoverGuard FailoverGuard
+}
+
+// FailoverGuard is the ownership boundary around async create-failure cleanup.
+// Lock must be held across the whole cleanup so a retry cannot replace the row
+// between the ownership read and the delete. Owns reports whether the failed
+// attempt still owns the sandbox; a newer attempt's row must make it false.
+type FailoverGuard interface {
+	Lock(ctx context.Context, sandboxID string) (release func(), err error)
+	Owns(ctx context.Context, sandboxID, attemptID string) (bool, error)
 }
 
 func (b *CreateContext) GetInstanceType() string {
@@ -698,12 +723,39 @@ func (e *Engine) failover(ctx context.Context, opts ReqContext) {
 
 	// Use a fresh deadline for rollback while retaining the create trace parent.
 	createCtx := ctx
-	ctx = namespaces.WithNamespace(context.Background(), namespace)
-	ctx = telemetry.DetachTrace(ctx, createCtx)
-	ctx, cancel := context.WithTimeout(ctx, config.GetCommon().CommonTimeout)
-	defer cancel()
+	baseCtx := namespaces.WithNamespace(context.Background(), namespace)
+	baseCtx = telemetry.DetachTrace(baseCtx, createCtx)
+	baseCtx = CubeLog.WithRequestTrace(baseCtx, failoverRt)
 
-	ctx = CubeLog.WithRequestTrace(ctx, failoverRt)
+	rOpts := opts.(*CreateContext)
+	// A retry that has already replaced this sandbox must not lose its row,
+	// rootfs and shim to the previous attempt's async cleanup. Serialize with
+	// the same lifecycle lock a pause resume holds, then verify the row still
+	// belongs to the attempt that failed. The lock has its own budget: waiting
+	// for a slow retry must not eat the destroy deadline below.
+	if rOpts.FailoverGuard != nil {
+		lockCtx, lockCancel := context.WithTimeout(baseCtx, config.GetCommon().CommonTimeout)
+		release, lockErr := rOpts.FailoverGuard.Lock(lockCtx, sandboxID)
+		lockCancel()
+		if lockErr != nil {
+			log.G(baseCtx).Warnf("failover sandbox %s: wait for lifecycle lock: %v; skip cleanup", sandboxID, lockErr)
+			return
+		}
+		defer release()
+		owned, ownsErr := rOpts.FailoverGuard.Owns(baseCtx, sandboxID, rOpts.AttemptID)
+		if ownsErr != nil {
+			log.G(baseCtx).Warnf("failover sandbox %s: ownership check: %v; skip cleanup", sandboxID, ownsErr)
+			return
+		}
+		if !owned {
+			log.G(baseCtx).Warnf("failover sandbox %s attempt %s: a newer attempt owns the sandbox; skip cleanup",
+				sandboxID, rOpts.AttemptID)
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(baseCtx, config.GetCommon().CommonTimeout)
+	defer cancel()
 	destroyOpt := &DestroyContext{
 		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
 			RequestID:   uuid.New().String(),
@@ -721,7 +773,6 @@ func (e *Engine) failover(ctx context.Context, opts ReqContext) {
 	}
 	ctx = context.WithValue(ctx, KDestroyContext, destroyOpt)
 	ctx = constants.WithFailoverOperation(ctx)
-	rOpts := opts.(*CreateContext)
 	if rOpts.CubeBoxCreated {
 		ctx = constants.WithCubeboxCreated(ctx)
 	}
