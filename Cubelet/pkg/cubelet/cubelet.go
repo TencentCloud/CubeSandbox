@@ -14,13 +14,11 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -107,8 +105,6 @@ type Cubelet struct {
 
 	clock clock.WithTicker
 
-	controllerMap map[string]controller.CubeMetaController
-
 	criImage *cubeimages.CubeImageService
 
 	rtManager runtemplate.RunTemplateManager
@@ -128,7 +124,6 @@ func (kl *Cubelet) StopChannel() <-chan struct{} {
 func NewCubelet(
 	mconfig *KubeletConfig,
 	client *masterclient.Client,
-	controllerMap map[string]controller.CubeMetaController,
 	criImage *cubeimages.CubeImageService,
 	rtManager runtemplate.RunTemplateManager,
 ) (*Cubelet, error) {
@@ -162,9 +157,8 @@ func NewCubelet(
 		nodeStatusUpdateFrequency: tomlext.ToStdTime(mconfig.NodeStatusUpdateFrequency),
 		nodeStatusReportFrequency: tomlext.ToStdTime(mconfig.NodeStatusUpdateFrequency),
 
-		criImage:      criImage,
-		rtManager:     rtManager,
-		controllerMap: controllerMap,
+		criImage:  criImage,
+		rtManager: rtManager,
 
 		NodeLabels: nodeLabels,
 
@@ -195,10 +189,7 @@ func NewCubelet(
 }
 
 func (kl *Cubelet) Run(readyHook func()) error {
-	var (
-		err    error
-		stopCh = kl.closeCh
-	)
+	stopCh := kl.closeCh
 	if kl.masterClient == nil {
 		klog.InfoS("No CubeMaster metadata service defined - no node status update will be sent")
 	}
@@ -214,26 +205,10 @@ func (kl *Cubelet) Run(readyHook func()) error {
 
 	}
 
-	errChan := make(chan error, len(kl.controllerMap))
-	for controllerName, c := range kl.controllerMap {
-		func(controllerName string, c controller.CubeMetaController) {
-			recov.GoWithRecover(func() {
-				err = c.Run(stopCh)
-				if err != nil {
-					errChan <- fmt.Errorf("failed to run controller %s: %w", controllerName, err)
-				}
-			})
-		}(controllerName, c)
-	}
-
 	readyHook()
 
-	select {
-	case err := <-errChan:
-		return err
-	case <-stopCh:
-		return nil
-	}
+	<-stopCh
+	return nil
 }
 
 func getMetaConfig() *config.MetaServerConfig {

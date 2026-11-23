@@ -14,21 +14,10 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	cubeletnodemeta "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
 )
-
-type MockCubeMetaController struct {
-	runCalled bool
-	runError  error
-}
-
-func (m *MockCubeMetaController) Run(stopCh <-chan struct{}) error {
-	m.runCalled = true
-	return m.runError
-}
 
 type MockRunTemplateManager struct {
 	instanceType string
@@ -90,13 +79,11 @@ func TestNewCubelet(t *testing.T) {
 				config = DefaultCubeletConfig()
 			}
 
-			controllerMap := make(map[string]controller.CubeMetaController)
 			mockRunTemplateManager := &MockRunTemplateManager{}
 
 			clet, err := NewCubelet(
 				config,
 				tt.restConfig,
-				controllerMap,
 				nil,
 				mockRunTemplateManager,
 			)
@@ -148,16 +135,11 @@ func TestCubeletRun(t *testing.T) {
 		DisableCreateNode: false,
 	}
 
-	controllerMap := make(map[string]controller.CubeMetaController)
-	mockController := &MockCubeMetaController{}
-	controllerMap["mock-controller"] = mockController
-
 	mockRunTemplateManager := &MockRunTemplateManager{}
 
 	clet, err := NewCubelet(
 		config,
 		nil,
-		controllerMap,
 		nil,
 		mockRunTemplateManager,
 	)
@@ -171,27 +153,34 @@ func TestCubeletRun(t *testing.T) {
 
 	t.Logf("Created Cubelet in standalone mode: %s", clet.hostname)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
+	readyCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- clet.Run(func() {})
+		errCh <- clet.Run(func() { close(readyCh) })
 	}()
+
+	// readyHook must be invoked before Run blocks; otherwise the containerd
+	// server readiness wait would hang forever.
+	select {
+	case <-readyCh:
+		t.Log("✓ readyHook invoked")
+	case <-time.After(5 * time.Second):
+		t.Fatal("readyHook was not invoked by Run()")
+	}
+
+	// Run must return nil once the stop channel closes.
+	if err := clet.Close(); err != nil {
+		t.Fatalf("Cubelet.Close() failed: %v", err)
+	}
 
 	select {
 	case err := <-errCh:
-		if err != nil && err != context.DeadlineExceeded {
-			t.Fatalf("Cubelet.Run() returned error: %v", err)
+		if err != nil {
+			t.Fatalf("Cubelet.Run() returned error after close: %v", err)
 		}
-		t.Log("✓ Cubelet.Run() completed successfully")
-
-	case <-ctx.Done():
-		t.Log("✓ Cubelet.Run() context timeout (expected behavior for background processes)")
-	}
-
-	if !mockController.runCalled {
-		t.Error("Expected MockCubeMetaController.Run() to be called")
+		t.Log("✓ Cubelet.Run() returned nil after stop channel closed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cubelet.Run() did not return after the stop channel closed")
 	}
 
 	t.Log("✓ Cubelet startup test passed")
@@ -200,13 +189,11 @@ func TestCubeletRun(t *testing.T) {
 func TestCubeletNodeStatusInitialization(t *testing.T) {
 	config := DefaultCubeletConfig()
 
-	controllerMap := make(map[string]controller.CubeMetaController)
 	mockRunTemplateManager := &MockRunTemplateManager{}
 
 	clet, err := NewCubelet(
 		config,
 		nil,
-		controllerMap,
 		nil,
 		mockRunTemplateManager,
 	)
@@ -233,71 +220,6 @@ func TestCubeletNodeStatusInitialization(t *testing.T) {
 	}
 
 	t.Logf("✓ Node labels initialized correctly: %d labels", len(clet.NodeLabels))
-}
-
-func TestCubeletIntegrationWithMockControllers(t *testing.T) {
-	config := &KubeletConfig{
-		Insecurity:        true,
-		ResyncInterval:    10 * time.Hour,
-		DisableCreateNode: false,
-	}
-
-	controllerMap := make(map[string]controller.CubeMetaController)
-	controllers := map[string]*MockCubeMetaController{
-		"controller-1": {},
-		"controller-2": {},
-		"controller-3": {},
-	}
-
-	for name, ctrl := range controllers {
-		controllerMap[name] = ctrl
-	}
-
-	mockRunTemplateManager := &MockRunTemplateManager{}
-
-	clet, err := NewCubelet(
-		config,
-		nil,
-		controllerMap,
-		nil,
-		mockRunTemplateManager,
-	)
-	if err != nil {
-		t.Fatalf("Failed to create Cubelet: %v", err)
-	}
-
-	if clet == nil {
-		t.Fatal("Expected Cubelet instance, got nil")
-	}
-
-	if len(clet.controllerMap) != len(controllerMap) {
-		t.Errorf("Expected %d controllers, got %d", len(controllerMap), len(clet.controllerMap))
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- clet.Run(func() {})
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil && err != context.DeadlineExceeded {
-			t.Fatalf("Cubelet.Run() failed: %v", err)
-		}
-	case <-ctx.Done():
-
-	}
-
-	for name, ctrl := range controllers {
-		if !ctrl.runCalled {
-			t.Errorf("Expected controller %s to be called", name)
-		}
-	}
-
-	t.Logf("✓ All %d controllers were executed successfully", len(controllerMap))
 }
 
 func TestApplyHostQuotaWithConfigUsesMachineDefaults(t *testing.T) {
@@ -427,13 +349,11 @@ func TestResolveHostMaxMvmNumPrefersConfiguredLimit(t *testing.T) {
 func TestCubeletNodeInformation(t *testing.T) {
 	config := DefaultCubeletConfig()
 
-	controllerMap := make(map[string]controller.CubeMetaController)
 	mockRunTemplateManager := &MockRunTemplateManager{}
 
 	clet, err := NewCubelet(
 		config,
 		nil,
-		controllerMap,
 		nil,
 		mockRunTemplateManager,
 	)
@@ -490,13 +410,11 @@ func TestCubeletStandaloneMode(t *testing.T) {
 		DisableCreateNode: true,
 	}
 
-	controllerMap := make(map[string]controller.CubeMetaController)
 	mockRunTemplateManager := &MockRunTemplateManager{}
 
 	clet, err := NewCubelet(
 		config,
 		nil,
-		controllerMap,
 		nil,
 		mockRunTemplateManager,
 	)
@@ -528,7 +446,6 @@ func TestNetworkErrorsFunc(t *testing.T) {
 
 func BenchmarkNewCubelet(b *testing.B) {
 	config := DefaultCubeletConfig()
-	controllerMap := make(map[string]controller.CubeMetaController)
 	mockRunTemplateManager := &MockRunTemplateManager{}
 
 	b.ResetTimer()
@@ -536,7 +453,6 @@ func BenchmarkNewCubelet(b *testing.B) {
 		_, err := NewCubelet(
 			config,
 			nil,
-			controllerMap,
 			nil,
 			mockRunTemplateManager,
 		)
