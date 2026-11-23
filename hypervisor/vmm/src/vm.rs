@@ -2924,11 +2924,12 @@ pub fn write_vm_config_only(
     Ok(())
 }
 
-impl Transportable for Vm {
-    fn send(
+impl Vm {
+    pub(crate) fn send_frozen_snapshot(
         &self,
         snapshot: &Snapshot,
         config: &SnapshotConfig,
+        pause: bool,
     ) -> std::result::Result<(), MigratableError> {
         let destination_url = &config.destination_url;
         let mut snapshot_config_path = url_to_path(destination_url)?;
@@ -2972,11 +2973,35 @@ impl Transportable for Vm {
             snapshot_type: config.snapshot_type,
         });
 
+        let incremental = config.snapshot_type == vm_migration::SnapshotType::Incremental;
+        let prefault = incremental && crate::snapshot_prefault::worker_count() > 0;
+        let write_resident = pause && incremental && crate::snapshot_resident::enabled();
+        // Capture directly from this frozen VM. Nothing survives this call or
+        // comes back from serialized state, even if the same VM pauses twice.
+        let captured = if prefault || write_resident {
+            self.memory_manager
+                .lock()
+                .unwrap()
+                .capture_incremental_pages(pause)
+        } else {
+            None
+        };
+        if prefault {
+            if let (Some(pages), Some(memory)) = (
+                &captured,
+                snapshot_with_meta
+                    .snapshots
+                    .get_mut(MEMORY_MANAGER_SNAPSHOT_ID),
+            ) {
+                pages.add_hints_to(memory);
+            }
+        }
+
         let vm_state = serde_json::to_vec(&snapshot_with_meta)
             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
         snapshot_state_file
-            .write(&vm_state)
+            .write_all(&vm_state)
             .map_err(|e| MigratableError::MigrateSend(e.into()))?;
         // Ensure state data is flushed to disk for cross-machine pause-snapshot.
 
@@ -2992,10 +3017,17 @@ impl Transportable for Vm {
                 memory_vol_url: config.memory_vol_url.clone(),
                 include_memory: true,
             };
-            self.memory_manager
-                .lock()
-                .unwrap()
-                .send(&memory_manager_snapshot.clone(), &mm_config)?;
+            let manager = self.memory_manager.lock().unwrap();
+            if let Some(pages) = captured.as_ref().filter(|_| pause && incremental) {
+                manager.send_pagemap_anon_memory(
+                    destination_url,
+                    &config.memory_vol_url,
+                    Some(pages),
+                    write_resident,
+                )?;
+            } else {
+                manager.send(memory_manager_snapshot, &mm_config)?;
+            }
         } else {
             return Err(MigratableError::Restore(anyhow!(
                 "Missing memory manager snapshot"
@@ -3003,6 +3035,16 @@ impl Transportable for Vm {
         }
 
         Ok(())
+    }
+}
+
+impl Transportable for Vm {
+    fn send(
+        &self,
+        snapshot: &Snapshot,
+        config: &SnapshotConfig,
+    ) -> std::result::Result<(), MigratableError> {
+        self.send_frozen_snapshot(snapshot, config, false)
     }
 }
 
