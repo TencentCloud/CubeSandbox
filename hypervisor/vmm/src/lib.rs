@@ -692,6 +692,10 @@ impl Vmm {
     ) -> result::Result<(), VmError> {
         self.vm_pause()?;
         self.vm_snapshot(snapshot_config)?;
+        self.vm_finish_pause_snapshot()
+    }
+
+    fn vm_finish_pause_snapshot(&mut self) -> result::Result<(), VmError> {
         // Stop phase, before the reply: the baseline teardown runs here
         // in full -- workers woken (the resume kick may surface pending
         // requests, as on the delete path), vcpus joined, then the drop
@@ -755,12 +759,20 @@ impl Vmm {
             return write_vm_config_only(snapshot_config, vm_config).map_err(VmError::SnapshotSend);
         }
         if let Some(ref mut vm) = self.vm {
-            vm.snapshot()
+            let result = vm
+                .snapshot()
                 .map_err(VmError::Snapshot)
                 .and_then(|snapshot| {
                     vm.send(&snapshot, snapshot_config)
                         .map_err(VmError::SnapshotSend)
-                })
+                });
+            if result.is_err() {
+                vm.memory_manager()
+                    .lock()
+                    .unwrap()
+                    .discard_snapshot_tracking();
+            }
+            result
         } else {
             Err(VmError::VmNotRunning)
         }
@@ -2096,6 +2108,13 @@ impl Vmm {
                                 ApiRequest::VmPauseToSnapshot(snapshot_data) => {
                                     let response = self
                                         .vm_pause_to_snapshot(&snapshot_data)
+                                        .map_err(ApiError::VmPauseToSnapshot)
+                                        .map(|_| ApiResponsePayload::Empty);
+                                    res_sender.send(response).map_err(Error::ApiResponseSend)?;
+                                }
+                                ApiRequest::VmFinishPauseSnapshot => {
+                                    let response = self
+                                        .vm_finish_pause_snapshot()
                                         .map_err(ApiError::VmPauseToSnapshot)
                                         .map(|_| ApiResponsePayload::Empty);
                                     res_sender.send(response).map_err(Error::ApiResponseSend)?;
