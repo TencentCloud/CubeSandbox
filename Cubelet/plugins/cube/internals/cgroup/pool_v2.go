@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/allocator"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -16,8 +17,18 @@ import (
 )
 
 type cgPoolV2 struct {
-	handle    handle.Interface
+	handle handle.Interface
+
+	// enabled records whether this process bootstrapped the per-NUMA pool. Set
+	// once by cgPool.init() and used by every "disabled" branch below.
+	enabled   bool
 	numaPools []cgPoolV2Numa
+
+	// legacyInUse tracks slots handed out by a previous run that are still in
+	// the DB while the pool is disabled. They are reported by All/AllGroups and
+	// released on destroy, and their cgroups are never touched - see cgPool.Put.
+	legacyMutex sync.Mutex
+	legacyInUse map[uint32]struct{}
 }
 
 type cgPoolV2Numa struct {
@@ -37,6 +48,35 @@ func (cgp2n *cgPoolV2Numa) All() []uint32 {
 
 func (cgp2n *cgPoolV2Numa) cgroupPath() string {
 	return fmt.Sprintf("numa%d", cgp2n.numaNode.NodeId)
+}
+
+// trackLegacy records a slot handed out by a previous run. The caller has already
+// split the DB ids by CgPoolV1IdLimit, so this is always a v2 id.
+func (p *cgPoolV2) trackLegacy(fullCgID uint32) {
+	p.legacyMutex.Lock()
+	defer p.legacyMutex.Unlock()
+	if p.legacyInUse == nil {
+		p.legacyInUse = make(map[uint32]struct{})
+	}
+	p.legacyInUse[fullCgID] = struct{}{}
+}
+
+// forgetLegacy drops a slot from the bookkeeping; a no-op if it was never tracked.
+func (p *cgPoolV2) forgetLegacy(fullCgID uint32) {
+	p.legacyMutex.Lock()
+	defer p.legacyMutex.Unlock()
+	delete(p.legacyInUse, fullCgID)
+}
+
+// legacyAll returns a copy of the tracked slots.
+func (p *cgPoolV2) legacyAll() []uint32 {
+	p.legacyMutex.Lock()
+	defer p.legacyMutex.Unlock()
+	all := make([]uint32, 0, len(p.legacyInUse))
+	for id := range p.legacyInUse {
+		all = append(all, id)
+	}
+	return all
 }
 
 func (p *cgPoolV2) initialAssign(fullCgID uint32) error {
@@ -62,6 +102,11 @@ func (p *cgPoolV2) initialAssign(fullCgID uint32) error {
 }
 
 func (p *cgPoolV2) allocatorRelease(fullCgID uint32) {
+	if !p.enabled {
+		// Nothing was bootstrapped: the slot can only be a legacy one.
+		p.forgetLegacy(fullCgID)
+		return
+	}
 	numa, err := CgroupID2NumaID(fullCgID)
 	if err != nil {
 		log.G(context.Background()).Errorf("poolv2.allocatorRelease: failed to get numa id for cgroup %d: %v", fullCgID, err)
@@ -81,10 +126,13 @@ func (p *cgPoolV2) All() []uint32 {
 	for _, numaPool := range p.numaPools {
 		ids = append(ids, numaPool.All()...)
 	}
-	return ids
+	return append(ids, p.legacyAll()...)
 }
 
 func (p *cgPoolV2) Get(ctx context.Context, sandboxID string, numaNode int32) (*uint16, error) {
+	if !p.enabled {
+		return nil, fmt.Errorf("cgroup pool v2 is not enabled")
+	}
 	if numaNode < 0 || int(numaNode) >= len(p.numaPools) {
 		return nil, fmt.Errorf("invalid numa node: %d", numaNode)
 	}
@@ -103,7 +151,13 @@ func (p *cgPoolV2) Get(ctx context.Context, sandboxID string, numaNode int32) (*
 	return &idInNuma, nil
 }
 
+// AllGroups lists the pool v2 groups this process accounts for: the node
+// directories when bootstrapped, otherwise just the legacy slots. It never walks
+// the pool root while disabled, so startup does not pay for leftover directories.
 func (p *cgPoolV2) AllGroups() ([]uint32, error) {
+	if !p.enabled {
+		return p.legacyAll(), nil
+	}
 	result := make([]uint32, 0)
 	for _, numaPool := range p.numaPools {
 		groups, err := p.handle.ListSubdir(numaPool.cgroupPath())

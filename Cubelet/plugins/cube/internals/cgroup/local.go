@@ -111,15 +111,18 @@ func (l *CgPlugin) init() error {
 
 	l.config.parseAndSetDynamicConfig(dynamConf.GetConfig())
 	if l.config.EnableNumaAffinity {
-		// One line with the effective state, including the node count the pool
-		// will see. The count is cached, and the pool bootstrap below reads the
-		// same sysfs regardless of the switch (pkg/numa panics when
-		// /sys/devices/system/node is unreadable), so this branch does not make
-		// such a host safe - it only avoids repeating the lookup just to log it.
-		log.L.Infof("cgroup numa affinity: enabled=%v (enable_numa_affinity=true, numa_nodes=%d)",
-			l.config.NumaAffinityEnabled(), numa.GetNumaNodeCount())
+		// Reading the node count panics when /sys/devices/system/node is
+		// unreadable, so only the switch-on path touches it.
+		if l.config.NumaAffinityEnabled() {
+			log.L.Infof("cgroup numa affinity: enabled (enable_numa_affinity=true, numa_nodes=%d), "+
+				"pre-provisioning the per-NUMA pool", numa.GetNumaNodeCount())
+		} else {
+			log.L.Infof("cgroup numa affinity: disabled (enable_numa_affinity=true but the host is single-NUMA), " +
+				"per-NUMA pool is not pre-provisioned")
+		}
 	} else {
-		log.L.Infof("cgroup numa affinity: disabled (enable_numa_affinity=false)")
+		log.L.Infof("cgroup numa affinity: disabled (enable_numa_affinity=false), " +
+			"per-NUMA pool is not pre-provisioned")
 	}
 
 	err = l.initPool()
@@ -504,8 +507,14 @@ func (l *CgPlugin) CollectMetric(ctx context.Context) *CgroupMetrics {
 
 	inuseCgroup := l.pool.All()
 	for _, cgID := range inuseCgroup {
-		quotaMCpuUsage += l.poolV1Handle.GetAllocatedCpuNum(MakeCgroupPathByID(cgID))
-		quotaMemUsage += l.poolV1Handle.GetAllocatedMem(MakeCgroupPathByID(cgID))
+		group := MakeCgroupPathByID(cgID)
+		if IsPoolV2ID(cgID) {
+			quotaMCpuUsage += l.poolV2Handle.GetAllocatedCpuNum(group)
+			quotaMemUsage += l.poolV2Handle.GetAllocatedMem(group)
+			continue
+		}
+		quotaMCpuUsage += l.poolV1Handle.GetAllocatedCpuNum(group)
+		quotaMemUsage += l.poolV1Handle.GetAllocatedMem(group)
 	}
 
 	quotaMemMbUsage := quotaMemUsage / 1024 / 1024
