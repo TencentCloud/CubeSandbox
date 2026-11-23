@@ -91,9 +91,8 @@ const (
 	ControllerCubeletPlugin plugin.Type = "io.cubelet.controller.cubelet.v1"
 	ControllerPlugin        plugin.Type = "io.cubelet.controller.v1"
 
-	PluginCubelet                       string   = "cubelet"
-	PluginRunTemplateManager            PluginId = "run-template-manager"
-	PluginCubeRuntimeTemplateController PluginId = "cube-runtime-template-controller"
+	PluginCubelet            string   = "cubelet"
+	PluginRunTemplateManager PluginId = "run-template-manager"
 )
 
 const (

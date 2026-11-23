@@ -14,7 +14,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -71,20 +70,6 @@ func registerCubelet() {
 				client = masterclient.New("http://"+metaCfg.MetaServerEndpoint, tomlext.ToStdTime(cfg.NodeStatusUpdateFrequency))
 			}
 
-			var controllerMap = make(map[string]controller.CubeMetaController)
-			controllerObjMap, err := ic.GetByType(constants.ControllerPlugin)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get controller map: %w", err)
-			}
-			for name, obj := range controllerObjMap {
-				c, ok := obj.(controller.CubeMetaController)
-				if ok {
-					controllerMap[name] = c
-				} else {
-					log.G(ic.Context).Fatalf("controller %s is not a valid CubeMetaController", name)
-				}
-			}
-
 			obj, err = ic.GetByID(constants.ControllerPlugin, constants.PluginRunTemplateManager.ID())
 			if err != nil {
 				return nil, fmt.Errorf("failed to get run template manager: %w", err)
@@ -94,7 +79,6 @@ func registerCubelet() {
 			cl, err := cubelet.NewCubelet(
 				cfg,
 				client,
-				controllerMap,
 				cri,
 				runtemplateManager,
 			)
