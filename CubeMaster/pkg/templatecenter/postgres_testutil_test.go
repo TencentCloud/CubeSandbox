@@ -17,6 +17,7 @@ import (
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 	"github.com/pressly/goose/v3/lock"
+	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/migrate"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -58,36 +59,50 @@ func newPGDockerEnv(t *testing.T) *pgDockerEnv {
 	if testing.Short() {
 		t.Skip("skipping Docker-backed PostgreSQL test in short mode")
 	}
-	if dsn := os.Getenv(pgTestDSNEnv); dsn != "" {
+	if externalDSN := os.Getenv(pgTestDSNEnv); externalDSN != "" {
 		t.Logf("using external PostgreSQL from %s", pgTestDSNEnv)
-		return &pgDockerEnv{dsn: dsn, teardown: func() {}}
+		return &pgDockerEnv{dsn: externalDSN, teardown: func() {}}
 	}
+	env, _ := startPGDockerContainer(t)
+	return env
+}
+
+func startPGDockerContainer(t *testing.T) (*pgDockerEnv, dao.Config) {
+	t.Helper()
 	pool, err := dockertest.NewPool("")
 	if err != nil {
-		skipOrFailPGDocker(t, "dockertest not available (%v); set %s", err, pgTestDSNEnv)
+		skipOrFailPGDocker(t, "dockertest not available (%v)", err)
 	}
 	if err := pool.Client.Ping(); err != nil {
-		skipOrFailPGDocker(t, "docker daemon not reachable (%v); set %s", err, pgTestDSNEnv)
+		skipOrFailPGDocker(t, "docker daemon not reachable (%v)", err)
 	}
+	const (
+		user     = "cube"
+		password = "cube_pass"
+		database = "cube_test"
+	)
 	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
 		Repository: pgDockerImage,
 		Tag:        pgDockerImageTag,
+		PortBindings: map[docker.Port][]docker.PortBinding{
+			"5432/tcp": {{HostIP: "127.0.0.1"}},
+		},
 		Env: []string{
-			"POSTGRES_USER=cube",
-			"POSTGRES_PASSWORD=cube_pass",
-			"POSTGRES_DB=cube_test",
+			"POSTGRES_USER=" + user,
+			"POSTGRES_PASSWORD=" + password,
+			"POSTGRES_DB=" + database,
 		},
 	}, func(hostConfig *docker.HostConfig) {
 		hostConfig.AutoRemove = true
 		hostConfig.RestartPolicy = docker.RestartPolicy{Name: "no"}
 	})
 	if err != nil {
-		skipOrFailPGDocker(t, "could not start postgres container (%v); set %s", err, pgTestDSNEnv)
+		skipOrFailPGDocker(t, "could not start postgres container (%v)", err)
 	}
 	port := resource.GetPort("5432/tcp")
 	dsn := fmt.Sprintf(
-		"host=127.0.0.1 port=%s user=cube password=cube_pass dbname=cube_test sslmode=disable",
-		port,
+		"host=127.0.0.1 port=%s user=%s password=%s dbname=%s sslmode=disable",
+		port, user, password, database,
 	)
 	pool.MaxWait = pgContainerProbeLimit
 	if err := pool.Retry(func() error {
@@ -101,12 +116,20 @@ func newPGDockerEnv(t *testing.T) *pgDockerEnv {
 		_ = pool.Purge(resource)
 		t.Fatalf("postgres container never became reachable: %v", err)
 	}
-	return &pgDockerEnv{
+	env := &pgDockerEnv{
 		dsn: dsn,
 		teardown: func() {
 			_ = pool.Purge(resource)
 		},
 	}
+	cfg := dao.Config{
+		Driver: "postgres",
+		Addr:   "127.0.0.1:" + port,
+		User:   user,
+		Pwd:    password,
+		DBName: database,
+	}
+	return env, cfg
 }
 
 type pgTestLocker struct {
@@ -148,7 +171,8 @@ func openMigratedPostgresGORM(t *testing.T, env *pgDockerEnv) *gorm.DB {
 		_ = sqlDB.Close()
 		t.Fatalf("migrate.Run: %v", err)
 	}
-	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{})
+	// Keep the GORM settings in sync with the production PostgreSQL driver.
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{QueryFields: true})
 	if err != nil {
 		_ = sqlDB.Close()
 		t.Fatalf("gorm.Open: %v", err)

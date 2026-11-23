@@ -84,6 +84,14 @@ Upgrade PVM kernel swap     →  only change images.pvmHostBootstrap.tag
 
 ## Day-to-day upgrade (recommended path)
 
+::: warning Database schema upgrades
+For MySQL and PostgreSQL, complete the required schema migrations before routing traffic to upgraded components that use the new schema. CubeMaster, CubeOps, and CubeTemplateCenter can run migrations at startup. With `CUBE_AUTO_MIGRATION=false`, apply the migrations out of band before starting upgraded components that use the new schema.
+
+When upgrading from v0.8.0 or earlier, a PostgreSQL migration that adds a column to an existing table (`ADD COLUMN`) can cause a cached read on an older component's connection to fail with `SQLSTATE 0A000`. Drain traffic to every old instance that reads the affected tables, wait for in-flight requests to finish, and stop those instances. Then start the upgraded CubeOps, CubeMaster, or CubeTemplateCenter instances that run migrations automatically, or start the out-of-band migration. Resume traffic after the migration succeeds and the replacement instances establish fresh database connections. [Issue #2380](https://github.com/TencentCloud/CubeSandbox/issues/2380)
+
+CubeOps defaults to `RollingUpdate` with `maxSurge: 1`. Even with one CubeOps replica, its new Pod can start migrations while old CubeOps or CubeMaster Pods are still running. CubeMaster's default `Recreate` strategy orders Pod replacement within its own Deployment. With `controlPlane.master.deploymentStrategy.type: RollingUpdate` (for ReadWriteMany or S3-only artifact storage), old and new CubeMaster Pods can overlap. If `controlPlane.master.replicas` is greater than one, verify that every old replica has stopped after draining before starting migrations.
+:::
+
 1. In your local `runtime-values.yaml` (the same values file used at first install), update the image **tags** you want to bump, for example:
 
 ```yaml
@@ -126,13 +134,15 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 Expect:
 
-- Control-plane Pods finished rolling per Deployment strategy (`cube-master` uses Recreate; other CP Deployments use RollingUpdate)
+- Control-plane Pods completed the upgrade according to each Deployment's configured strategy
 - Compute: matching DaemonSet Pods run the new images and are Ready
 - If you bumped Big Pod runtime on a **Pod-network** node: existing sandboxes there were interrupted; new sandboxes can be created; the node has re-registered with CubeOps
 
 ---
 
 ## Upgrade order
+
+When upgrading from v0.8.0 or earlier with a PostgreSQL migration that adds columns, [drain and stop the affected old instances](#day-to-day-upgrade-recommended-path) before starting any component that can run the migration or running it out of band.
 
 During the cube-master → cube-ops migration, components target different endpoints. Apply upgrades in this order to keep the cluster healthy during the cutover:
 

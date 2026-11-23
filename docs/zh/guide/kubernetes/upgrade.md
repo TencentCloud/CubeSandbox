@@ -83,6 +83,14 @@ revision。执行这两类操作前都必须 drain 所有计算节点；修改�
 
 ## 日常升级（推荐路径）
 
+::: warning 数据库表结构升级
+MySQL 和 PostgreSQL 都应先完成所需的数据库迁移，再将流量切到依赖新表结构的组件版本。CubeMaster、CubeOps 和 CubeTemplateCenter 都可以在启动时运行迁移。设置 `CUBE_AUTO_MIGRATION=false` 时，请在启动依赖新表结构的组件版本前带外执行迁移。
+
+从 v0.8.0 或更早版本升级时，如果 PostgreSQL 迁移向现有表添加列（`ADD COLUMN`），旧版组件连接上的缓存查询可能返回 `SQLSTATE 0A000`。请先将所有读取受影响表的旧实例摘流，等待在途请求完成，再停止这些实例。完成这一步后，才能启动启用了自动迁移的新版 CubeOps、CubeMaster 或 CubeTemplateCenter 实例，或者启动带外迁移。迁移成功且替换实例建立新数据库连接后，再恢复流量。 [问题 #2380](https://github.com/TencentCloud/CubeSandbox/issues/2380)
+
+CubeOps 默认使用 `RollingUpdate`，`maxSurge: 1`。即使 CubeOps 只有一个副本，新 Pod 也可能在旧 CubeOps 或旧 CubeMaster Pod 仍运行时开始迁移。CubeMaster 默认的 `Recreate` 策略控制本 Deployment 内的 Pod 替换顺序。如果配置了 `controlPlane.master.deploymentStrategy.type: RollingUpdate`（适用于制品存储使用 ReadWriteMany 卷或仅使用 S3），新旧 CubeMaster Pod 可能同时运行。若 `controlPlane.master.replicas` 大于 1，请确认每个旧副本都已完成摘流并停止，再开始迁移。
+:::
+
 1. 在本地 `runtime-values.yaml`（与首次安装相同的 values 文件）里更新要升的镜像 **tag**，例如：
 
 ```yaml
@@ -125,13 +133,15 @@ kubectl rollout status deploy/cube-master -n cube-system
 
 期望：
 
-- 控制面 Pod 按 Deployment 策略完成（`cube-master` 为 Recreate；其它控制面 Deployment 为 RollingUpdate）
+- 控制面 Pod 已按各自 Deployment 配置的策略完成升级
 - 计算面：对应 DaemonSet 的 Pod 已换成新镜像并 Ready
 - 若升的是**Pod 网络**节点上的 Big Pod 运行时：该节点存量沙箱已中断；新沙箱可创建；节点已重新注册到 CubeOps
 
 ---
 
 ## 升级顺序
+
+从 v0.8.0 或更早版本升级且涉及 PostgreSQL 加列时，请在启动任何可执行迁移的组件或执行带外迁移之前，[将受影响的旧实例摘流并停止](#日常升级-推荐路径)。
 
 在 cube-master → cube-ops 迁移过程中，各组件的目标端点不同
 按以下顺序升级，避免切流期集群出现不一致：
