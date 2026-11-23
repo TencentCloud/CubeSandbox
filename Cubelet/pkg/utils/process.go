@@ -105,29 +105,36 @@ func ReadProcessIdentityAt(procRoot string, pid int) (ProcessIdentity, error) {
 // is reported as LivenessUnknown rather than LivenessAlive — the caller has to
 // decide, and the safe decision is to refuse.
 func (id ProcessIdentity) Status() Liveness {
+	status, _ := id.StatusWithError()
+	return status
+}
+
+// StatusWithError preserves the reason an identity could not be verified.
+// Unknown never proves that a process has released its resources.
+func (id ProcessIdentity) StatusWithError() (Liveness, error) {
 	if id.Pid <= 1 {
-		return LivenessGone
+		return LivenessGone, nil
 	}
 	st, err := readProcStatAt(normalizeProcRoot(id.procRoot), id.Pid)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return LivenessGone
+			return LivenessGone, nil
 		}
-		return LivenessUnknown
+		return LivenessUnknown, err
 	}
 	if st.state == 'Z' {
 		// A zombie holds no fds: it cannot keep a tap or a volume open, even
 		// though the parent has not reaped it yet.
-		return LivenessGone
+		return LivenessGone, nil
 	}
 	if id.StartTime == 0 {
-		return LivenessUnknown
+		return LivenessUnknown, fmt.Errorf("process %d has no recorded start time", id.Pid)
 	}
 	if st.startTime != id.StartTime {
 		// The number was recycled; our process is long gone.
-		return LivenessGone
+		return LivenessGone, nil
 	}
-	return LivenessAlive
+	return LivenessAlive, nil
 }
 
 // WaitIdentityGone blocks until the recorded incarnation has exited or ctx is
@@ -149,9 +156,9 @@ func WaitIdentityGone(ctx context.Context, id ProcessIdentity) error {
 		}
 		select {
 		case <-ctx.Done():
-			if id.Status() == LivenessUnknown {
-				return fmt.Errorf("process %d liveness unknown: refusing to assume it exited: %w",
-					id.Pid, ctx.Err())
+			if status, err := id.StatusWithError(); status == LivenessUnknown {
+				return fmt.Errorf("process %d (start time %d) liveness unknown: %w; refusing to assume it exited: %w",
+					id.Pid, id.StartTime, err, ctx.Err())
 			}
 			return fmt.Errorf("process %d still running: %w", id.Pid, ctx.Err())
 		case <-ticker.C:
