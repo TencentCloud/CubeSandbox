@@ -112,10 +112,8 @@ WITH_TESTS=(
 	"shim|Rust|0|make shim-test"
 	"agent|Rust|1|make builder-run BUILDER_CMD='cd /workspace/agent && make test'"
 	"cube-proxy|Lua|0|make cube-proxy-test"
-	# cubelog/cubedb run on the host, not via builder-run: both are pure Go with
-	# no CGO (no `import "C"`) and no builder-only build deps, so the host
-	# toolchain is sufficient and skipping the container is faster.
-	"cubelog|Go|0|cd pkgs/CubeLog && go test -short ./..."
+	# cubelog runs on the host with -race (needs CGO + gcc); cubedb is pure Go.
+	"cubelog|Go|0|cd pkgs/CubeLog && CGO_ENABLED=1 go test -short -race ./..."
 	"cubedb|Go|0|cd pkgs/cubedb && go mod download && go test ./..."
 	"blobstore|Go|0|cd pkgs/blobstore && go mod download && go test ./..."
 	# sandboxrestart is stdlib-only, so no module download is needed.
