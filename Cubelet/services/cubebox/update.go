@@ -406,15 +406,9 @@ const (
 	// fresh ctx and never reuse the already-expired ctx.
 	reconcileStatusTimeout = 5 * time.Second
 
-	// pausingStuckThreshold bounds how long a sandbox may legitimately remain
-	// in the PAUSING transient. A real pause completes well within
-	// taskPauseTimeout; once PausingAt is older than this -- e.g. the cubelet
-	// restarted mid-pause and missed both the RPC-level reconcile and the
-	// /tasks/paused event window -- the pause is no longer in flight and DeadGC
-	// may safely query the shim to converge. It MUST stay comfortably larger
-	// than taskPauseTimeout so an in-flight pause (during which the shim holds
-	// its sandbox mutex and a ttrpc state() query would time out) is never
-	// reconciled prematurely.
+	// pausingStuckThreshold is the minimum PAUSING age before DeadGC probes
+	// the shim for recovery. A live CubeCoW capture can take longer, so the
+	// probe is also serialized with the sandbox lifecycle operation.
 	pausingStuckThreshold = 2 * taskPauseTimeout
 )
 
@@ -617,12 +611,19 @@ func boundedReconcileTimeout(deadline time.Time) (time.Duration, bool) {
 // this a sandbox could stay stuck at PAUSING forever: DeadGC otherwise skips
 // paused/pausing sandboxes outright.
 //
-// The caller (DeadGC) MUST only invoke this once PausingAt has lingered past
-// pausingStuckThreshold, i.e. long after any genuine in-flight pause would
-// have released the shim's sandbox mutex, so the ttrpc status query below
-// cannot race it. Unlike cubes.RecoverContainer it never stamps Unknown=true,
-// so it cannot trigger a spurious Terminated/Destroy cascade.
-func reconcileStuckPausingSandbox(ctx context.Context, client *containerd.Client, cb *cubeboxstore.CubeBox) {
+// DeadGC invokes this after pausingStuckThreshold. The lifecycle lock keeps
+// the probe from publishing PAUSED between the shim save and catalog commit.
+// Unlike cubes.RecoverContainer, this probe never stamps Unknown=true.
+func reconcileStuckPausingSandbox(ctx context.Context, client *containerd.Client, cb *cubeboxstore.CubeBox, lifecycleLocks *utils.ResourceLocks) {
+	unlock, acquired := lifecycleLocks.TryLock(cb.ID)
+	if !acquired {
+		return
+	}
+	defer unlock()
+	if status := cb.GetStatus(); status == nil || status.Get().State() != cubebox.ContainerState_CONTAINER_PAUSING {
+		return
+	}
+
 	fc := cb.FirstContainer()
 	if fc == nil {
 		return

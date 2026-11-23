@@ -161,7 +161,7 @@ func clearPauseSnapshotStamp(sb *cubeboxstore.CubeBox) {
 	clearCubeBoxMetaKey(sb, constants.MasterAnnotationPauseSnapshotID)
 }
 
-// stampAbortedPauseSnapshotID records a busy-reject pause attempt whose CoW
+// stampAbortedPauseSnapshotID records a rolled-back pause attempt whose CoW
 // cleanup failed, so Destroy can still GC tpl-<snapID>-memory after the live
 // pause.snapshot.id stamp is rolled back to the restore base.
 func stampAbortedPauseSnapshotID(sb *cubeboxstore.CubeBox, snapID string) {
@@ -366,6 +366,15 @@ var (
 	pauseDeactivateObjects = deactivateCowSnapshotObjectsOn
 	pauseFinalizePackage   = storage.FinalizeS3PackageSnapshots
 )
+
+func capturePauseSnapshot(ctx context.Context, task containerd.Task, configJSON string) error {
+	// A canceled Update can return while the VMM is still writing. Wait for
+	// the shim's save result before the caller can release the snapshot volumes.
+	return task.Update(context.WithoutCancel(ctx), containerd.WithAnnotations(map[string]string{
+		shimUpdateActionAnnotation:        shimUpdatePauseToSnapshotAction,
+		shimUpdatePauseSnapshotAnnotation: configJSON,
+	}))
+}
 
 // updateWithPauseCow pauses a running sandbox into a CubeCow-backed catalog
 // snapshot (same layout as CommitSandbox), packs sandbox_spec.json beside the
@@ -604,18 +613,19 @@ func (s *service) updateWithPauseCow(
 	ctx = addPauseResumeMetaData(ctx, req)
 	preStopTaskStarted := time.Now()
 
-	// Detach from the Master RPC deadline: if the client times out, Cubelet must
-	// still finish PauseToSnapshot + keep_tombstone Destroy. Budget covers both
-	// under Master pauseCubeletRPCTimeout (120s); Destroy itself is still capped
-	// by destroy_dead_line (60s).
+	// Allow Cubelet to finish the pause after the Master RPC times out. Bound
+	// the work before and after capture independently of the shim's save.
 	const pauseCowWorkTimeout = 120 * time.Second
-	workCtx, workCancel := context.WithTimeout(context.WithoutCancel(ctx), pauseCowWorkTimeout)
+	pauseCtx := context.WithoutCancel(ctx)
+	workCtx, workCancel := context.WithTimeout(pauseCtx, pauseCowWorkTimeout)
 	defer workCancel()
 
 	failPause := func(code errorcode.ErrorCode, msg string) (*cubebox.UpdateCubeSandboxResponse, error) {
-		cleanupArtifacts(ctx)
+		cleanupCtx, cleanupCancel := context.WithTimeout(pauseCtx, pauseCowWorkTimeout)
+		defer cleanupCancel()
+		cleanupArtifacts(cleanupCtx)
 		markLocalPauseFailed(sb, errors.New(msg))
-		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
+		_ = s.cubeboxMgr.cubeboxManger.SyncByID(cleanupCtx, sb.ID)
 		rsp.Ret.RetCode = code
 		rsp.Ret.RetMsg = msg
 		return rsp, nil
@@ -661,32 +671,33 @@ func (s *service) updateWithPauseCow(
 	if err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("marshal pause snapshot config: %v", err))
 	}
+	if err := workCtx.Err(); err != nil {
+		return failPause(errorcode.ErrorCode_TaskPauseFailed, err.Error())
+	}
+	workCancel()
 
 	stepLog.Infof("PauseToSnapshot destination=%s memory_vol=%s snapID=%s snapshot_type=%s",
 		layout.MetaWork, memURL, snapID, pauseCfg.SnapshotType)
-	captureCtx := telemetry.DetachTrace(workCtx, startStage(telemetry.SpanPauseCapture,
+	captureCtx := telemetry.DetachTrace(ctx, startStage(telemetry.SpanPauseCapture,
 		attribute.String(telemetry.AttrSandboxID, req.SandboxID)))
 	// Shim returns Update OK and stays alive (Paused). Any error is Pause
 	// failure — do not treat ttrpc closed as success (shim no longer self-exits
 	// on PauseToSnapshot). Cubelet reaps the shim via keep_tombstone Delete below.
 	vmmPauseStarted := time.Now()
-	if err := task.Update(captureCtx, containerd.WithAnnotations(map[string]string{
-		shimUpdateActionAnnotation:        shimUpdatePauseToSnapshotAction,
-		shimUpdatePauseSnapshotAnnotation: string(cfgJSON),
-	})); err != nil {
-		cleanupOK := cleanupArtifacts(ctx)
-		// Shim rejects Pause while exec sessions are open *before* freezing
-		// the VM. That is retryable: clear the in-flight PausingAt markers,
-		// restore the previous pause.snapshot.id stamp (so lineage/GC still
-		// name the live restore base), and leave the sandbox RUNNING.
-		if isPauseBusyReject(err.Error()) {
-			applyPauseBusyRejectLocalState(sb, prevLiveSnap, snapID, cleanupOK)
+	captureErr := capturePauseSnapshot(captureCtx, task, string(cfgJSON))
+	workCtx, finalizeCancel := context.WithTimeout(pauseCtx, pauseCowWorkTimeout)
+	defer finalizeCancel()
+	if captureErr != nil {
+		cleanupOK := cleanupArtifacts(workCtx)
+		if pauseCaptureLeftVMRunning(captureErr.Error()) {
+			rollBackLocalPauseAttempt(sb, prevLiveSnap, snapID, cleanupOK)
+			rsp.ExtInfo = map[string][]byte{extInfoPauseVMRunning: []byte("true")}
 		} else {
-			markLocalPauseFailed(sb, err)
+			markLocalPauseFailed(sb, captureErr)
 		}
 		_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
-		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetMsg = captureErr.Error()
 		return rsp, nil
 	}
 	stageTimings.VMMPauseWriteSyncMS = durationMS(time.Since(vmmPauseStarted))
@@ -928,6 +939,12 @@ func markPauseDestroyPending(sb *cubeboxstore.CubeBox, requestID string) bool {
 // Cubelet/Master matchers in sync with it.
 const pauseBusyRejectMessage = "sandbox pause forbidding, terminate exec tasks first"
 
+// The Shim returns this marker after a successful rollback of a failed save.
+const pauseSnapshotVMRunningMessage = "pause snapshot failed; original VM is running:"
+
+// CubeMaster consumes this key on failed Pause responses.
+const extInfoPauseVMRunning = "pause_vm_running"
+
 // pauseFailedReason is stamped by markLocalPauseFailed and cleared by
 // clearLocalPauseAttempt on a retryable busy reject.
 const pauseFailedReason = "PauseFailed"
@@ -973,11 +990,15 @@ func isPauseBusyReject(msg string) bool {
 		strings.Contains(lower, "terminate exec tasks first")
 }
 
-// applyPauseBusyRejectLocalState rolls local pause bookkeeping back after a
-// pre-freeze busy reject. cleanupOK false means CoW/catalog delete failed, so
+func pauseCaptureLeftVMRunning(msg string) bool {
+	return isPauseBusyReject(msg) || strings.Contains(msg, pauseSnapshotVMRunningMessage)
+}
+
+// rollBackLocalPauseAttempt restores the running VM's pause bookkeeping.
+// cleanupOK false means CoW/catalog delete failed, so
 // the aborted snap id is retained for Destroy GC while the live stamp returns
 // to prevLiveSnap for lineage.
-func applyPauseBusyRejectLocalState(sb *cubeboxstore.CubeBox, prevLiveSnap, snapID string, cleanupOK bool) {
+func rollBackLocalPauseAttempt(sb *cubeboxstore.CubeBox, prevLiveSnap, snapID string, cleanupOK bool) {
 	clearLocalPauseAttempt(sb)
 	restorePauseSnapshotStamp(sb, prevLiveSnap)
 	if !cleanupOK {
@@ -987,9 +1008,7 @@ func applyPauseBusyRejectLocalState(sb *cubeboxstore.CubeBox, prevLiveSnap, snap
 	clearAbortedPauseSnapshotStamp(sb)
 }
 
-// clearLocalPauseAttempt rolls back in-flight pause bookkeeping when Pause
-// never left the sandbox running (busy reject). Unlike markLocalPauseFailed,
-// this does not stamp Unknown / PauseFailed.
+// clearLocalPauseAttempt restores the RUNNING state on a rejected or rolled-back pause.
 func clearLocalPauseAttempt(sb *cubeboxstore.CubeBox) {
 	if sb == nil {
 		return
