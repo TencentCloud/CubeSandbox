@@ -13,10 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/binding"
 	"github.com/tencentcloud/CubeSandbox/examples/volume/s3/internal/config"
 )
+
+var ErrMountRolledBack = errors.New("failed S3 attach left no attachment")
 
 // Spec is one volume's mount binding: where the data lives and which
 // credentials address it. Legacy volumes derive it from volume-s3.conf;
@@ -269,7 +272,13 @@ func (m *Manager) Mount(baseDir, volumeID string) (string, error) {
 
 // MountWithSpec idempotently mounts one binding under baseDir and returns the
 // mountpoint. Callers must hold the per-volume lock.
-func (m *Manager) MountWithSpec(baseDir, volumeID string, spec Spec) (string, error) {
+func (m *Manager) MountWithSpec(baseDir, volumeID string, spec Spec) (_ string, retErr error) {
+	started := false
+	defer func() {
+		if retErr != nil && !started {
+			retErr = fmt.Errorf("%w: %w", ErrMountRolledBack, retErr)
+		}
+	}()
 	if spec.Bucket == "" || spec.Subdir == "" {
 		return "", errors.New("s3fs: bucket and subdir are required")
 	}
@@ -309,6 +318,7 @@ func (m *Manager) MountWithSpec(baseDir, volumeID string, spec Spec) (string, er
 		return "", fmt.Errorf("create mount dir %q: %w", mnt, err)
 	}
 
+	started = true
 	out, runErr := m.run("s3fs", MountArgsFor(mnt, spec)...)
 
 	// s3fs can exit 0 even when authentication fails; require a real mountpoint.
@@ -321,10 +331,18 @@ func (m *Manager) MountWithSpec(baseDir, volumeID string, spec Spec) (string, er
 	if mounted {
 		return mnt, nil
 	}
-	_ = os.Remove(mnt)
+	// rmdir fails on an active mount or a nonempty directory, even when
+	// mountpoint's exit status alone could not distinguish those states.
+	removeErr := syscall.Rmdir(mnt)
 	m.removeFailedDynamicPasswd(volumeID, spec)
 	if runErr != nil {
-		return "", fmt.Errorf("s3fs mount %q: %w: %s", mnt, runErr, out)
+		cause := fmt.Errorf("s3fs mount %q: %w: %s", mnt, runErr, out)
+		var exitErr *exec.ExitError
+		if (removeErr == nil || errors.Is(removeErr, fs.ErrNotExist)) &&
+			errors.As(runErr, &exitErr) && exitErr.ExitCode() > 0 {
+			return "", fmt.Errorf("%w: %w", ErrMountRolledBack, cause)
+		}
+		return "", cause
 	}
 	return "", fmt.Errorf("s3fs mount %q: process exited 0 but path is not a mountpoint: %s", mnt, out)
 }

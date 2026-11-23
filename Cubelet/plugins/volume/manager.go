@@ -5,6 +5,7 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -154,10 +155,17 @@ func (m *Manager) Attach(ctx context.Context, req *AttachRequest) (*AttachResult
 	if pluginErr != nil {
 		// Roll back the ref-count on plugin failure. The transition is undone,
 		// so the caller must not report a 0→1 event to CubeMaster.
+		var released bool
 		if acquired {
-			if _, rbErr := rc.Release(req.Namespace, volID, req.SandboxID); rbErr != nil {
+			rr, rbErr := rc.Release(req.Namespace, volID, req.SandboxID)
+			if rbErr != nil {
 				return nil, fmt.Errorf("plugin_volume %q: %v (release after attach failure: %w)", volID, pluginErr, rbErr)
 			}
+			released = !rr.NotHeld
+		}
+		var rolledBack *AttachRolledBackError
+		if !released && errors.As(pluginErr, &rolledBack) {
+			return nil, fmt.Errorf("plugin_volume %q: %v (no new holder confirmed released)", volID, pluginErr)
 		}
 		return nil, pluginErr
 	}

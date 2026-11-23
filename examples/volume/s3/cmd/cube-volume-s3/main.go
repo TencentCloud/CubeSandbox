@@ -117,7 +117,12 @@ func main() {
 	if err := run(context.Background(), opts); err != nil {
 		log.Printf("ERROR: %v", err)
 		response := statusResponse{Error: err.Error()}
-		if opts.op == "create" {
+		switch opts.op {
+		case "attach":
+			if errors.Is(err, s3fsmnt.ErrMountRolledBack) {
+				response.ErrorKind = "attach_rolled_back"
+			}
+		case "create":
 			switch {
 			case errors.Is(err, binding.ErrMissingCredRef):
 				response.Error = binding.ErrMissingCredRef.Error()
@@ -310,7 +315,13 @@ func doDestroy(ctx context.Context, opts *options) error {
 
 // doAttach makes volume data visible on this node and tells Cubelet where it is.
 // Cubelet bind-mounts host_path into the sandbox at the user's chosen path.
-func doAttach(ctx context.Context, opts *options) error {
+func doAttach(ctx context.Context, opts *options) (retErr error) {
+	preparing := true
+	defer func() {
+		if retErr != nil && preparing {
+			retErr = fmt.Errorf("%w: %w", s3fsmnt.ErrMountRolledBack, retErr)
+		}
+	}()
 	if opts.volumeID == "" {
 		return fmt.Errorf("attach: --volume-id is required")
 	}
@@ -350,6 +361,7 @@ func doAttach(ctx context.Context, opts *options) error {
 
 	// Mount is idempotent, so a repeat attach (refCount > 0) resolves to the
 	// mountpoint that is already there instead of mounting twice.
+	preparing = false
 	mnt, err := mounts.MountWithSpec(opts.volumeBaseDir, opts.volumeID, spec)
 	if err != nil {
 		return err

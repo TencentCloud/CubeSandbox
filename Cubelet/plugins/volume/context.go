@@ -98,6 +98,13 @@ type AttachNotStartedError struct {
 func (e *AttachNotStartedError) Error() string { return e.Cause.Error() }
 func (e *AttachNotStartedError) Unwrap() error { return e.Cause }
 
+// AttachRolledBackError confirms the failed plugin call left no attachment
+// for this attempt. Manager also verifies release of its local holder.
+type AttachRolledBackError struct{ Cause error }
+
+func (e *AttachRolledBackError) Error() string { return e.Cause.Error() }
+func (e *AttachRolledBackError) Unwrap() error { return e.Cause }
+
 // DetachRequest is the counterpart of AttachRequest.
 type DetachRequest struct {
 	SandboxID string

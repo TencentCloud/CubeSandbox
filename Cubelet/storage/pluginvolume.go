@@ -176,9 +176,15 @@ func (l *local) attachPluginVolume(
 	res, err := mgr.Attach(ctx, req)
 	if err != nil {
 		var notStarted *volume.AttachNotStartedError
+		var rolledBack *volume.AttachRolledBackError
 		if errors.As(err, &notStarted) {
 			opts.PluginVolumeAttachAttempted = priorAttempt
 			opts.PluginVolumeAttachUncertain = false
+		} else if errors.As(err, &rolledBack) {
+			opts.PluginVolumeAttachUncertain = false
+			if len(opts.PluginVolumeIDs) == 0 && len(result.PluginVolumeBackendInfos) == 0 {
+				opts.PluginVolumeRollback = []workflow.VolumeRefEvent{}
+			}
 		}
 		return fmt.Errorf("plugin_volume %q (driver=%s): attach: %w", volumeName, driver, err)
 	}

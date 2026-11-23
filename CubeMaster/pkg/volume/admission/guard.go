@@ -11,6 +11,8 @@ import (
 	"slices"
 	"sync/atomic"
 
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"gorm.io/gorm"
@@ -62,7 +64,7 @@ func BeginCreate(ctx context.Context, db *gorm.DB, ids []string) (*CreateGuard, 
 
 // Finish removes this admission and applies any node reference changes in one
 // transaction. Call only for success, confirmed rollback, or an unstarted
-// attempt. A failed transaction cannot be safely replayed against the counter.
+// attempt. Replay only when the database definitely aborted the transaction.
 func (g *CreateGuard) Finish(ctx context.Context, ext map[string][]byte, rolledBack bool) error {
 	if !g.used.CompareAndSwap(false, true) {
 		return errors.New("volume create guard already settled")
@@ -88,7 +90,7 @@ func (g *CreateGuard) Finish(ctx context.Context, ext map[string][]byte, rolledB
 		}
 		changes[event.VolumeID] = event
 	}
-	return g.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	settle := func(tx *gorm.DB) error {
 		for _, row := range g.rows {
 			event, reported := changes[row.VolumeID]
 			delta := 0
@@ -113,7 +115,28 @@ func (g *CreateGuard) Finish(ctx context.Context, ext map[string][]byte, rolledB
 			}
 		}
 		return nil
+	}
+	db := g.db.WithContext(ctx)
+	var bodyErr error
+	err := db.Transaction(func(tx *gorm.DB) error {
+		bodyErr = settle(tx)
+		return bodyErr
 	})
+	// A Begin or Commit error never qualifies. In particular, a lost Commit
+	// reply could mean the counter already reflects this receipt.
+	if err != nil && ctx.Err() == nil && transactionAborted(bodyErr) {
+		return db.Transaction(settle)
+	}
+	return err
+}
+
+func transactionAborted(err error) bool {
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1213 {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001")
 }
 
 // BeginDelete claims the exact row before the potentially slow driver call.

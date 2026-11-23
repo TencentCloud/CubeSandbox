@@ -156,29 +156,61 @@ func TestPluginVolumeAttachClassifiesProcessStart(t *testing.T) {
 	require.NoError(t, driver.Init(t.Context(), volume.PluginConfig{BinaryPath: path}))
 	mgr.Register(driver)
 	ctx := namespaces.WithNamespace(t.Context(), "default")
-	for _, started := range []bool{false, true} {
-		if started {
-			require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0700))
-		}
-		opts := &workflow.CreateContext{
-			BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sb"},
-			ReqInfo: &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{
-				cubebox.AnnotationPluginVolumeSources: `[{"name":"vol","driver":"test-attach-process-start"}]`,
-			}},
-		}
-		info := &StorageInfo{SandboxID: opts.SandboxID, Namespace: "default"}
-		err := (&local{config: &Config{VolumePluginBaseDir: dir}}).attachPluginVolume(ctx, opts, &cubebox.Volume{Name: "vol"}, info)
-		if started {
+	const report = "printf '%s\\n' '{\"error\":\"mount rolled back\",\"error_kind\":\"attach_rolled_back\"}'\n"
+	for _, tc := range []struct {
+		name, script       string
+		prior, existing    bool
+		uncertain, settled bool
+	}{
+		{name: "process not started"},
+		{name: "generic failure", script: "exit 1\n", uncertain: true},
+		{name: "process killed after printing", script: report + "kill -KILL $$\n", uncertain: true},
+		{name: "clean attach failure", script: report + "exit 1\n", settled: true},
+		{name: "must detach other volumes first", script: report + "exit 1\n", prior: true, settled: true},
+		{name: "existing holder is preserved", script: report + "exit 1\n", existing: true, uncertain: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := tc.script != ""
+			if started {
+				body := "#!/bin/sh\nif [ \"$2\" = detach ]; then printf '{}\\n'; exit 0; fi\n" + tc.script
+				require.NoError(t, os.WriteFile(path, []byte(body), 0700))
+			}
+			opts := &workflow.CreateContext{
+				BaseWorkflowInfo: workflow.BaseWorkflowInfo{SandboxID: "sb"},
+				ReqInfo: &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{
+					cubebox.AnnotationPluginVolumeSources: `[{"name":"vol","driver":"test-attach-process-start"}]`,
+				}},
+			}
+			info := &StorageInfo{SandboxID: opts.SandboxID, Namespace: "default"}
+			if tc.prior {
+				_, err := store.Acquire(info.Namespace, "prior", opts.SandboxID, driver.Name())
+				require.NoError(t, err)
+				opts.PluginVolumeIDs = []string{"prior"}
+				info.PluginVolumeBackendInfos = map[string]*PluginVolumeBackendInfo{
+					"prior": {VolumeID: "prior", Driver: driver.Name()},
+				}
+			}
+			if tc.existing {
+				_, err := store.Acquire(info.Namespace, "vol", opts.SandboxID, driver.Name())
+				require.NoError(t, err)
+			}
+			l := &local{config: &Config{VolumePluginBaseDir: dir}}
+			err := l.attachPluginVolume(ctx, opts, &cubebox.Volume{Name: "vol"}, info)
 			require.Error(t, err)
 			var notStarted *volume.AttachNotStartedError
-			require.False(t, errors.As(err, &notStarted))
-		} else {
-			require.ErrorIs(t, err, os.ErrNotExist)
-		}
-		require.Equal(t, started, opts.PluginVolumeAttachAttempted)
-		require.Equal(t, started, opts.PluginVolumeAttachUncertain)
-		_, held, err := store.GetRecord("default", "vol")
-		require.NoError(t, err)
-		require.False(t, held)
+			require.Equal(t, !started, errors.As(err, &notStarted))
+			require.Equal(t, started, opts.PluginVolumeAttachAttempted)
+			require.Equal(t, tc.uncertain, opts.PluginVolumeAttachUncertain)
+			if tc.prior {
+				require.Nil(t, opts.PluginVolumeRollback)
+				rollback := &workflow.DestroyContext{BaseWorkflowInfo: workflow.BaseWorkflowInfo{IsRollBack: true}, CreateVolumeRollback: opts}
+				require.NoError(t, l.detachPluginVolumes(ctx, info, rollback))
+			}
+			require.Equal(t, tc.settled, opts.PluginVolumeRollback != nil)
+			require.Empty(t, opts.PluginVolumeRollback)
+			_, held, err := store.GetRecord(info.Namespace, "vol")
+			require.NoError(t, err)
+			require.Equal(t, tc.existing, held)
+		})
 	}
 }
