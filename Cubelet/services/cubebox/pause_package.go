@@ -243,6 +243,45 @@ func (b pauseRestoreBinding) applyTo(req *cubebox.RunCubeSandboxRequest) {
 	// storage restore stays on the pause catalog.
 }
 
+func pausePackagePluginVolumes(spec *cubebox.RunCubeSandboxRequest) (map[string]string, error) {
+	volumes, err := declaredPluginVolumes(spec.GetAnnotations())
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range spec.GetVolumes() {
+		if pv := v.GetVolumeSource().GetPluginVolume(); pv != nil {
+			volumes[v.GetName()] = pv.GetDriver()
+		}
+	}
+	return volumes, nil
+}
+
+func applyPausePluginVolumes(packed *cubebox.RunCubeSandboxRequest, annotations map[string]string) error {
+	volumes, err := pausePackagePluginVolumes(packed)
+	if err != nil {
+		return err
+	}
+	sources, err := declaredPluginVolumes(annotations)
+	if err != nil {
+		return err
+	}
+	if len(volumes) != len(sources) {
+		return fmt.Errorf("pause package plugin volumes do not match the reserved volumes")
+	}
+	for id := range volumes {
+		if _, ok := sources[id]; !ok {
+			return fmt.Errorf("pause package plugin volume %q is not reserved", id)
+		}
+	}
+	if len(sources) != 0 {
+		if packed.Annotations == nil {
+			packed.Annotations = make(map[string]string)
+		}
+		packed.Annotations[cubebox.AnnotationPluginVolumeSources] = annotations[cubebox.AnnotationPluginVolumeSources]
+	}
+	return nil
+}
+
 // expandPauseSnapshotPackage fills a Master-thin Create request from the
 // sandbox_spec.json packed inside the pause snapshot directory.
 func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
@@ -272,6 +311,9 @@ func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
 	packed, err := loadPauseSandboxSpec(specDir)
 	if err != nil {
 		return fmt.Errorf("load pause sandbox_spec: %w", err)
+	}
+	if err := applyPausePluginVolumes(packed, ann); err != nil {
+		return err
 	}
 
 	binding := pauseRestoreBindingFrom(req, snapID, backend)
