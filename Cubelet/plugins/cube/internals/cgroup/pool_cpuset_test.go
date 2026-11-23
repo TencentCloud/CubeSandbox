@@ -128,6 +128,7 @@ type cpusetTestHandle struct {
 }
 
 func (h *cpusetTestHandle) IsExist(context.Context, string) bool { return true }
+
 func (h *cpusetTestHandle) Create(context.Context, string) error { return nil }
 
 func (h *cpusetTestHandle) CreateWithCpuSet(context.Context, string, string, int) error {
@@ -144,14 +145,14 @@ func (h *cpusetTestHandle) CpusetDir(group string) (string, error) {
 	return h.dir, nil
 }
 
-func newCpusetTestPool(t *testing.T, h handle.Interface, strict bool) *cgPool {
+func newCpusetTestPool(t *testing.T, h handle.Interface) *cgPool {
 	t.Helper()
-	return newCpusetTestPoolWithCPUs(t, h, strict, "0-3")
+	return newCpusetTestPoolWithCPUs(t, h, "0-3")
 }
 
 // newCpusetTestPoolWithCPUs also sets the node's cpulist, so the empty-mask
 // case (a memory-only node) can be driven without a fake numa sysfs.
-func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, strict bool, cpulist string) *cgPool {
+func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, cpulist string) *cgPool {
 	t.Helper()
 	ranger, err := allocator.NewSimpleLinearRanger(0, 1)
 	require.NoError(t, err)
@@ -163,7 +164,8 @@ func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, strict bool, cp
 		poolV1Handle: h,
 		poolV2Handle: h,
 		poolV2: cgPoolV2{
-			handle: h,
+			handle:  h,
+			enabled: true,
 			numaPools: []cgPoolV2Numa{{
 				allocator: allocator.NewAllocator[uint16](ranger),
 				cgRanger:  ranger,
@@ -171,7 +173,7 @@ func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, strict bool, cp
 			}},
 		},
 		reparentFileEnabled: func() bool { return false },
-		numaAffinityInUse:   func() bool { return strict },
+		numaAffinityInUse:   func() bool { return true },
 	}
 }
 
@@ -185,8 +187,8 @@ func newSlotDir(t *testing.T) string {
 }
 
 // A v1 slot copies the parent mask when it is created, so one that predates a
-// CPU hot-add keeps the old mask; with the switch on the bootstrap repairs it,
-// otherwise a sandbox placed on it silently misses the new CPUs.
+// CPU hot-add keeps the old mask; the bootstrap repairs it, otherwise a sandbox
+// placed on it silently misses the new CPUs.
 func TestInitPoolV2LateRepairsSandboxSlots(t *testing.T) {
 	nodeDir := newSlotDir(t)
 	slotDir := newSlotDir(t)
@@ -195,24 +197,10 @@ func TestInitPoolV2LateRepairsSandboxSlots(t *testing.T) {
 
 	group := MakeCgroupPathByID(MakeFullCgID(0, true, 0))
 	h := &cpusetTestHandle{dir: nodeDir, dirs: map[string]string{group: slotDir}}
-	require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
+	require.NoError(t, newCpusetTestPool(t, h).initPoolV2Late())
 
 	require.Equal(t, "0-3", readCpusetFile(t, slotDir, "cpuset.cpus"))
 	require.Equal(t, "0", readCpusetFile(t, slotDir, "cpuset.mems"))
-}
-
-// With the switch off the pool is not handed out, so the bootstrap has to leave
-// the slots exactly as it found them.
-func TestInitPoolV2LateLeavesSandboxSlotsAloneWhenOff(t *testing.T) {
-	nodeDir := newSlotDir(t)
-	slotDir := newSlotDir(t)
-	require.NoError(t, os.WriteFile(filepath.Join(slotDir, "cpuset.cpus"), []byte("0"), 0644))
-
-	group := MakeCgroupPathByID(MakeFullCgID(0, true, 0))
-	h := &cpusetTestHandle{dir: nodeDir, dirs: map[string]string{group: slotDir}}
-	require.NoError(t, newCpusetTestPool(t, h, false).initPoolV2Late())
-
-	require.Equal(t, "0", readCpusetFile(t, slotDir, "cpuset.cpus"))
 }
 
 // A slot without cpuset files (nothing to repair there, e.g. an unset child on
@@ -224,71 +212,51 @@ func TestInitPoolV2LateToleratesSlotWithoutCpuset(t *testing.T) {
 		dir:  nodeDir,
 		dirs: map[string]string{group: filepath.Join(t.TempDir(), "gone")},
 	}
-	require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
+	require.NoError(t, newCpusetTestPool(t, h).initPoolV2Late())
 }
 
-// strict decides whether a broken slot stops startup, which is the whole point
-// of the switch: with it on a slot that carries no mask must not be handed out.
-// With it off the pool is unused and the path stays the one from before the
-// switch, so a create failure is still fatal there and only the re-assert is a
-// warning.
-func TestInitPoolV2LateStrictness(t *testing.T) {
-	t.Run("strict, apply fails, slot missing", func(t *testing.T) {
+// The bootstrap only runs with the switch on, so every way it can fail has to
+// stop startup: the pool is what Create hands out, and a node that reported
+// ready with an unbound pool would serve sandboxes with no affinity.
+func TestInitPoolV2LateFailures(t *testing.T) {
+	t.Run("apply fails, slot missing", func(t *testing.T) {
 		h := &cpusetTestHandle{dir: filepath.Join(t.TempDir(), "missing")}
-		err := newCpusetTestPool(t, h, true).initPoolV2Late()
+		err := newCpusetTestPool(t, h).initPoolV2Late()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "cpuset")
 	})
 
-	t.Run("strict, apply fails, create fails too", func(t *testing.T) {
+	t.Run("apply fails, create fails too", func(t *testing.T) {
 		h := &cpusetTestHandle{
 			createErr: errors.New("enable cpuset controller"),
 			dirErr:    errors.New("cpuset controller is not available"),
 		}
-		err := newCpusetTestPool(t, h, true).initPoolV2Late()
+		err := newCpusetTestPool(t, h).initPoolV2Late()
 		require.Error(t, err)
 		// Both halves have to survive: the create error is what explains why.
 		require.Contains(t, err.Error(), "enable cpuset controller")
 		require.Contains(t, err.Error(), "cpuset controller is not available")
 	})
 
-	t.Run("strict, create fails but slot was repaired", func(t *testing.T) {
+	t.Run("create fails but slot was repaired", func(t *testing.T) {
 		// The slot of a previous run: create reports it exists, the re-assert
 		// above proves the mask is in place, so startup continues.
 		h := &cpusetTestHandle{createErr: errors.New("slot already exists"), dir: newSlotDir(t)}
-		require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
+		require.NoError(t, newCpusetTestPool(t, h).initPoolV2Late())
 	})
 
 	// A memory-only node reports an empty cpulist; writing that is accepted by
-	// the kernel but leaves the slot without any mask, which is exactly what the
-	// strict path exists to reject.
-	t.Run("strict, node has no cpus", func(t *testing.T) {
+	// the kernel but leaves the slot without any mask, so it is rejected.
+	t.Run("node has no cpus", func(t *testing.T) {
 		h := &cpusetTestHandle{dir: newSlotDir(t)}
-		err := newCpusetTestPoolWithCPUs(t, h, true, "").initPoolV2Late()
+		err := newCpusetTestPoolWithCPUs(t, h, "").initPoolV2Late()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no cpus to bind")
 	})
 
-	t.Run("strict, healthy slot", func(t *testing.T) {
+	t.Run("healthy slot", func(t *testing.T) {
 		h := &cpusetTestHandle{dir: newSlotDir(t)}
-		require.NoError(t, newCpusetTestPool(t, h, true).initPoolV2Late())
-	})
-
-	t.Run("not strict, apply fails", func(t *testing.T) {
-		// Switch off: the pool is unused, and the re-assert is new here, so it is
-		// only a warning rather than a reason not to start.
-		h := &cpusetTestHandle{dirErr: errors.New("cpuset controller is not available")}
-		require.NoError(t, newCpusetTestPool(t, h, false).initPoolV2Late())
-	})
-
-	t.Run("not strict, create fails", func(t *testing.T) {
-		// Before the switch existed this returned the error, so it still does:
-		// a default deployment must not start on a host where the v2 pool root
-		// cannot be created.
-		h := &cpusetTestHandle{createErr: errors.New("create pool v2 root")}
-		err := newCpusetTestPool(t, h, false).initPoolV2Late()
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "create pool v2 root")
+		require.NoError(t, newCpusetTestPool(t, h).initPoolV2Late())
 	})
 }
 
