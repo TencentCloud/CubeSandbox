@@ -133,17 +133,33 @@ func (d *ArtifactDeleter) Delete(ctx context.Context, artifactID string) error {
 	// Delete the S3 object when the artifact was uploaded.
 	var dataErrs []error
 	if templatecenter.ArtifactUsesObjectStore(&artifact) {
+		ok, reason := artifactMatchesStore(&artifact, d.s3Client)
 		switch {
 		case d.s3Client == nil:
 			dataErrs = append(dataErrs, fmt.Errorf("artifact store is not configured for deletion"))
-		case artifact.StorageBackend != d.s3Client.BackendName() || artifact.Bucket != d.s3Client.Bucket() ||
-			(artifact.ObjectKey != "" && artifact.ObjectKey != d.s3Client.FullObjectKey(artifact.ArtifactID)):
-			dataErrs = append(dataErrs, fmt.Errorf("artifact storage identity does not match configured store; refusing deletion"))
+		case !ok:
+			// Only a populated, disagreeing identity blocks deletion; see
+			// artifactMatchesStore. Otherwise a pre-upgrade row (empty bucket)
+			// would refuse deletion forever, which also skips the local ext4
+			// below and makes the reconciler retry the same row indefinitely
+			// while its object is never reclaimed.
+			dataErrs = append(dataErrs, fmt.Errorf("artifact storage identity does not match the configured store, refusing deletion: %s", reason))
 		default:
-			if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
-				dataErrs = append(dataErrs, fmt.Errorf("delete artifact object: %w", err))
-			} else {
-				logger.Infof("deleted artifact object")
+			// Confirm the object is actually in this store before deleting, so
+			// a row whose identity was only *assumed* to match cannot report a
+			// successful delete it did not perform. A confirmed-absent object
+			// is already reclaimed and must not block the row's cleanup.
+			switch exists, err := d.s3Client.Stat(ctx, artifact.ArtifactID); {
+			case err != nil:
+				dataErrs = append(dataErrs, fmt.Errorf("probe artifact object before deletion: %w", err))
+			case !exists:
+				logger.Infof("artifact object is already absent from the configured store, nothing to delete")
+			default:
+				if err := d.s3Client.Delete(ctx, artifact.ArtifactID); err != nil {
+					dataErrs = append(dataErrs, fmt.Errorf("delete artifact object: %w", err))
+				} else {
+					logger.Infof("deleted artifact object")
+				}
 			}
 		}
 	}

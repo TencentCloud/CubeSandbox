@@ -334,14 +334,31 @@ RPC defaults to a 300-second deadline. Increase
 `controlPlane.master.appSnapshotTimeoutSeconds` for large templates or slow
 networks/disks. Non-positive values fall back to 300 seconds.
 
-Direct artifact distribution requires no DB migration.
+Direct artifact distribution adds one schema migration,
+`20261119140000_rootfs_artifact_store_identity`, which appends a `bucket` column
+to `t_cube_rootfs_artifact`. It is embedded in CubeMaster and applied on startup
+like every other migration, so a chart upgrade needs no manual step — but the
+upgrade does write to the database, and a read-only or pinned-schema database
+will fail the preflight. Historical rows are deliberately left with an empty
+`bucket`: their storage identity must come from the deployment that uploaded
+them, never from the current default.
+
 `artifactDownloadCapabilityTTL` defaults to `1h` (maximum `24h`). When the TC
 node-facing address is configured and the artifact is eligible, CubeMaster adds
 a TC direct-download endpoint; otherwise it uses S3 presign or the Master
 fallback. `CreateImage` retains the stable CubeMaster artifact URL for older Cubelets and
 adds the selected direct endpoint in a separate annotation; new Cubelets use the
 direct endpoint, while older Cubelets ignore it and continue through CubeMaster.
-No Cubelet version threshold or DB migration is needed.
+No Cubelet version threshold is needed.
+
+`artifactDownloadDirectEnabled` (default `true`) is the rollout kill switch.
+Setting it to `false` makes CubeMaster stop issuing any direct endpoint and hand
+every Cubelet the proxied URL again — the route that predates this feature — so
+a rollback trades Master-node bandwidth for safety rather than breaking template
+creation. `CUBEMASTER_ARTIFACT_DOWNLOAD_DIRECT_ENABLED=false` on the Master
+container does the same without editing values, for an incident where the chart
+change cannot wait. Either way it applies to artifacts distributed after the
+restart; a distribution already in flight keeps the URL it was given.
 
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive

@@ -309,6 +309,12 @@ func notifyTemplateCenterArtifactDelete(ctx context.Context, artifactID string) 
 	}
 }
 
+// getNodeFromView is the live node-view lookup, indirected so the stale-address
+// fallback matrix below is testable with a plain stub. Binary patching is not
+// an option: gomonkey cannot mprotect the text segment on darwin/arm64, so a
+// patched test panics instead of running.
+var getNodeFromView = localcache.GetNode
+
 // placementToNode resolves a placement row to a node, preferring the live
 // address by node id (the recorded ip may be stale after re-registration).
 func placementToNode(p *models.ArtifactNodePlacement) *node.Node {
@@ -318,7 +324,7 @@ func placementToNode(p *models.ArtifactNodePlacement) *node.Node {
 	nodeID := strings.TrimSpace(p.NodeID)
 	nodeIP := strings.TrimSpace(p.NodeIP)
 	if nodeID != "" {
-		if cached, ok := localcache.GetNode(nodeID); ok && cached != nil && strings.TrimSpace(cached.HostIP()) != "" {
+		if cached, ok := getNodeFromView(nodeID); ok && cached != nil && strings.TrimSpace(cached.HostIP()) != "" {
 			nodeIP = strings.TrimSpace(cached.HostIP())
 		}
 	}

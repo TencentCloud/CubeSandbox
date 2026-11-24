@@ -4,6 +4,7 @@
 package templatecenter
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -21,6 +22,34 @@ import (
 const ArtifactDownloadCapabilityTTL = config.DefaultArtifactDownloadCapabilityTTL
 
 const artifactDownloadCapabilityDomain = "cube-template-artifact-download/v1"
+
+// artifactCapabilityOnlyKey marks a request that arrived on a route mounted
+// OUTSIDE the user API-key middleware.
+type artifactCapabilityOnlyKey struct{}
+
+// WithCapabilityOnlyArtifactAuth marks ctx as belonging to an unauthenticated
+// route, where the long-lived per-artifact DownloadToken must NOT be accepted.
+//
+// That token is effectively a bearer password with no expiry: it is stored in
+// plaintext on the artifact row, handed to every Cubelet that ever pulled the
+// artifact, and only rotates on re-finalize. Behind the API-key middleware
+// that is tolerable, because the caller is already authenticated. On the
+// direct-download route there is no second factor, so a single leaked token
+// would grant permanent access to the artifact's bytes. Short-lived
+// artifact-bound capabilities are the only credential accepted there.
+func WithCapabilityOnlyArtifactAuth(ctx context.Context) context.Context {
+	return context.WithValue(ctx, artifactCapabilityOnlyKey{}, true)
+}
+
+// CapabilityOnlyArtifactAuth reports whether ctx was marked by
+// WithCapabilityOnlyArtifactAuth.
+func CapabilityOnlyArtifactAuth(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	only, _ := ctx.Value(artifactCapabilityOnlyKey{}).(bool)
+	return only
+}
 
 // NewArtifactDownloadCapability creates an artifact-bound token using the
 // one-hour compatibility default. Production issuance should use the TTL from

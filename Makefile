@@ -179,6 +179,7 @@ help:
 	@printf "  cubedb-test   Run CubeDB unit tests on the host\n"
 	@printf "  blobstore-test Run pkgs/blobstore unit tests on the host\n"
 	@printf "  sandboxrestart-test Run pkgs/sandboxrestart unit tests on the host\n"
+	@printf "  artifactsource-test Run pkgs/artifactsource unit tests on the host\n"
 	@printf "  proto-test    Run pkgs/proto unit tests on the host\n"
 	@printf "  cube-lifecycle-manager-test Run cube-lifecycle-manager unit tests in Docker\n"
 	@printf "  agent-test    Run cube-agent unit tests in Docker\n"
@@ -572,6 +573,13 @@ blobstore-test:
 .PHONY: sandboxrestart-test
 sandboxrestart-test:
 	cd pkgs/sandboxrestart && go test ./...
+
+# pkgs/artifactsource is stdlib-only. CubeMaster, CubeTemplateCenter and Cubelet
+# consume it via replace and therefore only compile its non-test code, so the
+# module's own _test.go files (the download-source wire contract) must run here.
+.PHONY: artifactsource-test
+artifactsource-test:
+	cd pkgs/artifactsource && go vet ./... && go test ./...
 .PHONY: redisx-test
 redisx-test:
 	cd pkgs/redisx && go test ./...

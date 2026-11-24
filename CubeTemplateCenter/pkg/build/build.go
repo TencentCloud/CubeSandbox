@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -284,7 +285,7 @@ func Build(ctx context.Context, jobID string, req *types.CreateTemplateFromImage
 		if existing, ok := reuseExistingArtifact(ctx, db, fingerprint, s3CfgEnabled, s3Client); ok {
 			waitSpan.SetAttributes(attribute.Bool(telemetry.AttrReused, true))
 			telemetry.End(waitSpan, nil)
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, artifactStoreOrNil(s3Client), logger)
 		}
 
 		select {
@@ -342,7 +343,7 @@ func runBuildLocked(
 			// The reused ext4 already contains the CA baked at build time; report
 			// the fingerprint we resolved so CubeMaster records it consistently.
 			trace.SpanFromContext(ctx).SetAttributes(attribute.Bool(telemetry.AttrReused, true))
-			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, s3Client, logger)
+			return reportExistingArtifact(ctx, jobID, existing, fingerprint, source, reporter, caPEM, caFingerprint, artifactStoreOrNil(s3Client), logger)
 		}
 	}
 
@@ -434,7 +435,7 @@ func runBuildLocked(
 	// Step 9: Report BUILT. CubeMaster persists the payload into result_json
 	// and resumes the job: finalize rootfs_artifacts, distribute to Cubelet
 	// nodes, register template_definitions.
-	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, uploaded, s3Client, objectKey, resolvedUser, logger); err != nil {
+	if err := reportArtifactBuilt(ctx, jobID, &result, artifactID, fingerprint, source, reporter, caBakeResult, uploaded, artifactStoreOrNil(s3Client), objectKey, resolvedUser, logger); err != nil {
 		return err
 	}
 
@@ -460,6 +461,60 @@ type artifactBuildStore interface {
 	FullObjectKey(artifactID string) string
 }
 
+// artifactStoreOrNil adapts the concrete client to artifactBuildStore without
+// producing a typed nil. Passing a nil *s3store.Client straight into the
+// interface yields a non-nil interface holding a nil pointer, so a `store !=
+// nil` guard passes and the first method call dereferences nil -- which is
+// exactly what happens in local-storage mode, where s3Client is nil.
+func artifactStoreOrNil(client *s3store.Client) artifactBuildStore {
+	if client == nil {
+		return nil
+	}
+	return client
+}
+
+// artifactStoreAbsent reports whether store carries no usable client, covering
+// both an untyped nil and a typed nil from an earlier conversion.
+func artifactStoreAbsent(store artifactBuildStore) bool {
+	if store == nil {
+		return true
+	}
+	value := reflect.ValueOf(store)
+	switch value.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// artifactMatchesStore reports whether an object-store artifact row may refer
+// to the store this replica is configured with.
+//
+// Rows created before the bucket column existed carry an empty bucket, and the
+// migration deliberately does not backfill one. Reading "empty" as "a different
+// bucket" would permanently refuse both reuse and deletion for every
+// pre-upgrade artifact, so an empty backend, bucket or object key means
+// "unknown" and only a populated value that disagrees is a real mismatch.
+// Callers still confirm the object with a HEAD probe before trusting the row,
+// and the object key is derived from the unique artifact ID, so an "unknown"
+// row can only ever resolve to this artifact's own object.
+func artifactMatchesStore(artifact *models.RootfsArtifact, store artifactBuildStore) (bool, string) {
+	if artifactStoreAbsent(store) {
+		return false, "artifact store is not configured"
+	}
+	if backend := strings.TrimSpace(artifact.StorageBackend); backend != "" && backend != store.BackendName() {
+		return false, fmt.Sprintf("storage backend %q does not match the configured %q", backend, store.BackendName())
+	}
+	if bucket := strings.TrimSpace(artifact.Bucket); bucket != "" && bucket != store.Bucket() {
+		return false, fmt.Sprintf("bucket %q does not match the configured %q", bucket, store.Bucket())
+	}
+	if key := strings.TrimSpace(artifact.ObjectKey); key != "" && key != store.FullObjectKey(artifact.ArtifactID) {
+		return false, fmt.Sprintf("object key %q does not match the configured layout %q", key, store.FullObjectKey(artifact.ArtifactID))
+	}
+	return true, ""
+}
+
 func reportExistingArtifact(
 	ctx context.Context,
 	jobID string,
@@ -474,14 +529,19 @@ func reportExistingArtifact(
 ) error {
 	inStore := false
 	objectKey := ""
-	if s3Client != nil && existing.StorageBackend == s3Client.BackendName() &&
-		existing.Bucket == s3Client.Bucket() &&
-		(existing.ObjectKey == "" || existing.ObjectKey == s3Client.FullObjectKey(existing.ArtifactID)) {
+	if ok, reason := artifactMatchesStore(existing, s3Client); ok {
 		exists, err := s3Client.Stat(ctx, existing.ArtifactID)
 		if err == nil && exists {
 			inStore = true
+			// A pre-upgrade row has no object key; report the canonical one so
+			// the adopted row stops being ambiguous.
 			objectKey = strings.TrimSpace(existing.ObjectKey)
+			if objectKey == "" {
+				objectKey = s3Client.FullObjectKey(existing.ArtifactID)
+			}
 		}
+	} else if logger != nil {
+		logger.Infof("artifact %s is not served from the configured store: %s", existing.ArtifactID, reason)
 	}
 	return reportArtifactBuilt(ctx, jobID, &image.BuildResult{
 		Ext4Path:  existing.Ext4Path,
@@ -544,7 +604,7 @@ func reportArtifactBuilt(
 	}
 	// Only report stable metadata after a successful upload or verified reuse;
 	// never persist a presigned URL in the BUILT callback.
-	if inStore && s3Client != nil {
+	if inStore && !artifactStoreAbsent(s3Client) {
 		backend := strings.TrimSpace(s3Client.BackendName())
 		if objectKey == "" {
 			objectKey = s3Client.FullObjectKey(artifactID)
@@ -808,12 +868,11 @@ func reuseExistingArtifact(ctx context.Context, db *gorm.DB, fingerprint string,
 		return nil, false
 	}
 
-	if templatecenter.ArtifactUsesObjectStore(&artifact) &&
-		(s3Client == nil || artifact.StorageBackend != s3Client.BackendName() ||
-			artifact.Bucket != s3Client.Bucket() ||
-			(strings.TrimSpace(artifact.ObjectKey) != "" && artifact.ObjectKey != s3Client.FullObjectKey(artifact.ArtifactID))) {
-		log.G(ctx).Warnf("reuse check: artifact %s belongs to a different backend/object key; refusing to select an unrelated store", artifact.ArtifactID)
-		return nil, false
+	if templatecenter.ArtifactUsesObjectStore(&artifact) {
+		if ok, reason := artifactMatchesStore(&artifact, s3Client); !ok {
+			log.G(ctx).Warnf("reuse check: refusing artifact %s: %s", artifact.ArtifactID, reason)
+			return nil, false
+		}
 	}
 	var statS3 func() (bool, error)
 	if s3CfgEnabled && s3Client != nil {

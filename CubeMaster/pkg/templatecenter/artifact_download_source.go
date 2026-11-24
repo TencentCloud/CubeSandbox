@@ -39,12 +39,20 @@ type ArtifactDownloadSource struct {
 var (
 	tcAddrWarnOnce                   sync.Once
 	artifactCapabilitySecretWarnOnce sync.Once
+	artifactDirectDisabledWarnOnce   sync.Once
 )
 
-// artifactTCSourceBaseURL resolves the TC URL handed to Cubelets. It mirrors
-// the Master URL reachability policy: rewrite loopback/wildcard addresses when
-// a routable node IP is available, accept only externally usable URLs, and
-// otherwise return empty so source selection falls back to the Master route.
+// artifactTCSourceBaseURL resolves the TC URL handed to Cubelets. Only an
+// address that is already routable is used; anything loopback or wildcard
+// returns empty so source selection falls back to the Master route.
+//
+// Deliberately NOT the Master reachability policy: rewriting a loopback
+// address to the shared node IP assumes the service also listens on that
+// interface. That holds for CubeMaster (one-click binds 0.0.0.0 by default)
+// but not for TC, which one-click binds to 127.0.0.1 because only the
+// co-located Master calls it. Rewriting TC's address would hand every Cubelet
+// a nodeIP:8090 URL with no listener behind it, so a deployment running on
+// local disk (no object store) would fail every template creation.
 var artifactTCSourceBaseURL = func() string {
 	// TemplateCenterNodeAddr checks the environment before dereferencing its
 	// receiver, so this also honors CUBE_TEMPLATE_CENTER_NODE_ADDR before the
@@ -53,16 +61,13 @@ var artifactTCSourceBaseURL = func() string {
 	if addr == "" {
 		return ""
 	}
-	if rewritten := RewriteLoopbackBaseURLWithSharedNodeIP(addr); rewritten != "" {
-		return rewritten
-	}
 	if ExternallyUsableBaseURL(addr) {
 		return NormalizeBaseURL(addr)
 	}
 	tcAddrWarnOnce.Do(func() {
 		log.G(context.Background()).Warnf(
-			"%s=%q is wildcard/loopback and %s is unavailable; direct-TC downloads fall back to the Master path",
-			config.EnvTemplateCenterNodeAddr, addr, sharedEnvNodeIP)
+			"%s=%q is wildcard/loopback, so it is not reachable from other nodes; direct-TC downloads fall back to the Master path. Set it to a routable address to enable them",
+			config.EnvTemplateCenterNodeAddr, addr)
 	})
 	return ""
 }
@@ -88,6 +93,21 @@ func issueArtifactDownloadSourceWithOptions(ctx context.Context, artifact *model
 	}
 	if ttl <= 0 || ttl > config.MaxArtifactDownloadCapabilityTTL {
 		return nil, fmt.Errorf("artifact download TTL must be in (0, %s]", config.MaxArtifactDownloadCapabilityTTL)
+	}
+	// Rollout kill switch. The legacy proxied URL is always a valid source, so
+	// an operator can disable every direct endpoint at once and lose only the
+	// bandwidth saving, not the ability to create templates.
+	if !config.GetConfig().ArtifactDownloadDirectEnabled() {
+		artifactDirectDisabledWarnOnce.Do(func() {
+			log.G(ctx).Warnf(
+				"direct artifact distribution is disabled (%s / common.artifact_download_direct_enabled); every Cubelet will download through CubeMaster",
+				config.EnvArtifactDownloadDirect)
+		})
+		return &ArtifactDownloadSource{
+			URL:   buildDownloadURL(strings.TrimRight(strings.TrimSpace(masterBaseURL), "/"), artifact.ArtifactID, artifact.DownloadToken),
+			Token: artifact.DownloadToken,
+			Kind:  ArtifactSourceLegacy,
+		}, nil
 	}
 	if ArtifactUsesObjectStore(artifact) {
 		if signedURL, err := presignArtifactGetURLWithTTL(ctx, artifact, ttl); err == nil && signedURL != "" {

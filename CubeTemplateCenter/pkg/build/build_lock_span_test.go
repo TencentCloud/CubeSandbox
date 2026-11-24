@@ -27,6 +27,17 @@ import (
 
 const lockTestDigest = "sha256:build-lock-span-test"
 
+// gomonkey matches a double against the target by reflection, so a signature
+// that drifts out of sync compiles cleanly and only panics once the test runs.
+// These assignments turn such a drift into a build failure instead.
+var (
+	_ func(context.Context, string, *models.RootfsArtifact, string, *image.PreparedSource, *Reporter, []byte, string, artifactBuildStore, *cubelog.Entry) error = reportExistingArtifact
+	_ func(context.Context, *gorm.DB, string, bool, *s3store.Client) (*models.RootfsArtifact, bool)                                                             = reuseExistingArtifact
+	_ func(context.Context, string, *types.CreateTemplateFromImageReq, string, string, *image.PreparedSource, *Reporter, []byte, string,
+		*templatecenter.EnvdInjectionPayload, *pullProgressSink, bool, bool, *s3store.Client, *cubelog.Entry) error = runBuildLocked
+	_ func(context.Context, *gorm.DB, string, func() error) error = lock.WithBuildLock
+)
+
 func buildLockTestRequest(templateID string) *types.CreateTemplateFromImageReq {
 	noCA := false
 	return &types.CreateTemplateFromImageReq{
@@ -137,7 +148,10 @@ func TestBuildLockWaitSpanRecordsReuseInsteadOfRunningBuild(t *testing.T) {
 		return nil
 	})
 	reused := ""
-	patches.ApplyFunc(reportExistingArtifact, func(_ context.Context, _ string, existing *models.RootfsArtifact, _ string, _ *image.PreparedSource, _ *Reporter, _ []byte, _ string, _ bool, _ *s3store.Client, _ *cubelog.Entry) error {
+	// Keep this double's signature identical to reportExistingArtifact: a
+	// mismatch is invisible at compile time and only panics inside gomonkey at
+	// run time. reportExistingArtifactSignature below pins it.
+	patches.ApplyFunc(reportExistingArtifact, func(_ context.Context, _ string, existing *models.RootfsArtifact, _ string, _ *image.PreparedSource, _ *Reporter, _ []byte, _ string, _ artifactBuildStore, _ *cubelog.Entry) error {
 		reused = existing.ArtifactID
 		return nil
 	})

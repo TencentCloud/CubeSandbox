@@ -231,14 +231,30 @@ func NormalizeRemoteBuildArtifactStore(ctx context.Context, result *RemoteBuildR
 		if result.StorageBackend == "fs" && result.Bucket != "" {
 			return fmt.Errorf("fs artifact cannot have an S3 bucket")
 		}
-		if result.StorageBackend == "s3" && result.Bucket != "" && result.Bucket != configenv.ParseArtifactS3().Bucket {
-			return fmt.Errorf("callback bucket does not match configured S3 bucket")
+		// Compare the bucket only when this CubeMaster actually has the S3
+		// configuration to compare against. In a split deployment where only
+		// TC holds credentials, ParseArtifactS3() is a zero struct, so an
+		// unconditional comparison would reject every BUILT callback and the
+		// reporter would retry until the job times out.
+		s3cfg := configenv.ParseArtifactS3()
+		if result.StorageBackend == "s3" && result.Bucket != "" {
+			switch {
+			case !s3cfg.Enabled:
+				log.G(ctx).Warnf("artifact %s reports bucket %q but this CubeMaster has no S3 configuration to verify it against; recording it as reported", result.ArtifactID, result.Bucket)
+			case result.Bucket != s3cfg.Bucket:
+				return fmt.Errorf("callback bucket does not match configured S3 bucket")
+			}
 		}
 		if result.Bucket == "" && result.StorageBackend == "s3" && strings.HasPrefix(result.ArtifactURL, "http") {
-			if err := validateHistoricalArtifactURL(result.ArtifactURL, result.ObjectKey); err != nil {
-				return err
+			switch {
+			case !s3cfg.Enabled:
+				log.G(ctx).Warnf("artifact %s reports a historical S3 URL that this CubeMaster cannot attribute without S3 configuration; keeping the stable backend/key only", result.ArtifactID)
+			default:
+				if err := validateHistoricalArtifactURL(result.ArtifactURL, result.ObjectKey); err != nil {
+					return err
+				}
+				result.Bucket = s3cfg.Bucket
 			}
-			result.Bucket = configenv.ParseArtifactS3().Bucket
 		}
 		result.ArtifactURL = blobstore.ObjectLocator(result.StorageBackend, result.ObjectKey)
 		return nil
@@ -256,7 +272,13 @@ func NormalizeRemoteBuildArtifactStore(ctx context.Context, result *RemoteBuildR
 	// verify the object exists before replacing it with a stable locator.
 	backend, key := artifactStoreColumns(result.ArtifactID)
 	if backend == "" || key == "" {
-		return fmt.Errorf("legacy artifact_url cannot be normalized: CubeMaster artifact store is not configured")
+		// This Master cannot resolve the configured object layout, which is
+		// the normal state for a remote-TC deployment where only TC holds S3
+		// credentials and Master used to just proxy downloads. Keep the
+		// reported payload as provenance and let TC serve the artifact;
+		// failing here would 500 every callback and wedge the build.
+		log.G(ctx).Warnf("artifact %s reports a legacy artifact_url that cannot be normalized because this CubeMaster has no artifact store configured; keeping the reported payload", result.ArtifactID)
+		return nil
 	}
 	if err := validateHistoricalArtifactURL(result.ArtifactURL, key); err != nil {
 		return err
@@ -268,10 +290,15 @@ func NormalizeRemoteBuildArtifactStore(ctx context.Context, result *RemoteBuildR
 		ObjectKey:      key,
 		Bucket:         result.Bucket,
 	})
-	if err != nil {
-		return fmt.Errorf("verify legacy artifact object before normalization: %w", err)
-	}
-	if !exists {
+	switch {
+	case err != nil:
+		// A failed HEAD is not evidence that the object is wrong, so do not
+		// reject the build over it; only a confirmed absence contradicts the
+		// report.
+		log.G(ctx).Warnf("artifact %s could not be verified in the configured %s store before normalization (%v); keeping the reported payload", result.ArtifactID, backend, err)
+		result.Bucket = ""
+		return nil
+	case !exists:
 		return fmt.Errorf("legacy artifact URL cannot be persisted because object %q is absent from the configured %s store", key, backend)
 	}
 	result.StorageBackend = backend
@@ -761,6 +788,10 @@ func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, re
 	}
 
 	if adopted {
+		// The losing build already uploaded its own object under its own
+		// artifact id, and adopting the winner means no row will ever
+		// reference those bytes again. Reclaim them before returning.
+		reclaimAdoptedArtifactUpload(ctx, record, result)
 		// Reuse the winner's finalized row verbatim; only the per-job create
 		// request is derived fresh, from the winner's metadata and THIS job's
 		// request (template_id differs between the two jobs).
@@ -780,6 +811,70 @@ func registerRemoteBuiltArtifactOnSession(ctx context.Context, sess *gorm.DB, re
 		return record, generatedReq, true, nil
 	}
 	return record, generatedReq, false, nil
+}
+
+// reclaimAdoptedArtifactUpload deletes the object a losing remote build
+// uploaded before Master adopted a different winner for the same fingerprint.
+//
+// Two builds of one template spec can race: TC uploads an object keyed by its
+// own artifact id, then reports BUILT. If the fingerprint row is already READY
+// under ANOTHER artifact id, Master adopts the winner and the loser's artifact
+// id never gets a row. Without this, those bytes are unreachable forever: the
+// artifact GC walks rows, so an object with no row is never a GC candidate,
+// and the leak is one full rootfs per lost race.
+//
+// Deliberately conservative — a wrong delete destroys a live template, while a
+// skipped delete only wastes storage:
+//   - the winner's own bytes are never touched (same id or same object key);
+//   - a report without a complete store identity means nothing was uploaded to
+//     a shared store, so there is nothing to reclaim;
+//   - an artifact id that still has a row (any state, including soft-deleted)
+//     is left to the GC, which owns that row's data;
+//   - the delete itself is delegated to TC. Master never removes artifact
+//     bytes directly (see requestTemplateCenterArtifactDelete).
+//
+// Failures are logged, not propagated: the adopted artifact is READY and the
+// job must succeed. A leak that is reported is recoverable; a failed template
+// creation is not.
+// lookupArtifactRowUnscoped is the row-existence seam used by
+// reclaimAdoptedArtifactUpload, indirected so the reclaim decision matrix is
+// testable without a database.
+var lookupArtifactRowUnscoped = getRootfsArtifactByIDUnscoped
+
+func reclaimAdoptedArtifactUpload(ctx context.Context, winner *models.RootfsArtifact, result *RemoteBuildResult) {
+	if winner == nil || result == nil {
+		return
+	}
+	loserID := strings.TrimSpace(result.ArtifactID)
+	loserKey := strings.TrimSpace(result.ObjectKey)
+	if loserID == "" || loserKey == "" || strings.TrimSpace(result.StorageBackend) == "" {
+		return
+	}
+	if loserID == strings.TrimSpace(winner.ArtifactID) || loserKey == strings.TrimSpace(winner.ObjectKey) {
+		// Adopting our own row (replay/redo or a lost finalize CAS): the
+		// reported object IS the adopted artifact's object.
+		return
+	}
+	logger := log.G(ctx).WithFields(map[string]any{
+		"artifact_id":         loserID,
+		"adopted_artifact_id": winner.ArtifactID,
+		"object_key":          loserKey,
+	})
+	if _, err := lookupArtifactRowUnscoped(ctx, loserID); err == nil {
+		// A row exists (possibly soft-deleted), so the artifact GC is the
+		// owner of these bytes. Deleting them here would pull the data out
+		// from under a row that may still be serving or awaiting cleanup.
+		logger.Infof("remote build adopted a different artifact; leaving the reported upload to the artifact GC because its row still exists")
+		return
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		logger.Warnf("remote build adopted a different artifact but the reported upload could not be reclaimed: row lookup failed: %v", err)
+		return
+	}
+	if err := requestTemplateCenterArtifactDelete(ctx, loserID); err != nil {
+		logger.Errorf("remote build adopted a different artifact and the reported upload is now orphaned (no row references it, so the artifact GC will not find it); manual cleanup of object %q may be required: %v", loserKey, err)
+		return
+	}
+	logger.Infof("reclaimed the upload of a lost remote build race after adopting artifact %s", winner.ArtifactID)
 }
 
 // finalizeRemoteArtifact mirrors finalizeArtifact but sources its values from

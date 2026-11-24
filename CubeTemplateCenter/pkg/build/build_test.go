@@ -121,9 +121,15 @@ func (f *fakeArtifactS3) FullObjectKey(artifactID string) string {
 func TestReportArtifactBuiltStoresStableMetadata(t *testing.T) {
 	var payload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		// Decode into a fresh map per request: decoding into a reused map
+		// merges keys, so the failed-upload iteration would still observe the
+		// stored iteration's artifact_url/storage_backend and the negative
+		// assertion below would never fail.
+		decoded := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
 			t.Errorf("decode report: %v", err)
 		}
+		payload = decoded
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()

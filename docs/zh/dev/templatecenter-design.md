@@ -271,11 +271,52 @@ TC 写 ext4，CubeMaster 通过 `/cube/template/artifact/download` 把它提供�
 目录，文件本身就是持久副本；以及上传成功但没能记录下载 URL 时，Master 对这类记录
 返回 502（并不会回退读 TC 的磁盘），保留字节是此时唯一的可恢复副本。
 
+### 9.8 直连下载的灰度开关与存储身份
+
+artifact 行上记录 `storage_backend` / `bucket` / `object_key` 三元组，作为 artifact
+字节的稳定身份；`bucket` 列由迁移
+`20261119140000_rootfs_artifact_store_identity.sql` 添加。历史行**故意**不回填
+`bucket`：它们的真实 bucket 只能由当初上传的那套部署决定，用当前默认值回填会把
+"身份未知"伪造成"身份已确认"。因此复用与删除逻辑把空字段当作"未知"处理，既不会
+因为比不上而强制重建，也不会因为比不上而永远删不掉。
+
+**两条下载路由接受的凭据不同**，因为它们位于用户 API-key 中间件的两侧：
+
+| 路由 | 挂载位置 | 接受的凭据 |
+| --- | --- | --- |
+| `/cube/template/artifact/download` | API-key 鉴权之内 | 长期 `DownloadToken` 或 capability |
+| `/cube/template/artifact/direct-download` | API-key 鉴权之外 | 仅 capability |
+
+长期 `DownloadToken` 是一个没有有效期的 bearer 凭据：明文存在 artifact 行上、发给过
+每一个拉取过该 artifact 的 Cubelet、只有重新 finalize 才会轮换。在 API-key 中间件后
+面这是可以接受的，因为调用方已经通过鉴权。但在 `direct-download` 上没有第二因子，接受
+它意味着一次泄漏就等于永久拿到 artifact 字节，因此该路由拒绝它——
+`CubeMaster/pkg/service/httpservice/cube/routes.go` 把请求标记为 capability-only，
+`validRootfsArtifactDownloadToken` 据此判定。CubeTemplateCenter 复用同一个注册函数，
+所以直连路径的两端都生效。这不会造成回退：capability 签不出来时 CubeMaster 会返回
+`ArtifactSourceLegacy` 并清掉全部直连注解，Cubelet 根本不会拿长期 token 去打
+`direct-download`。
+
+**构建竞争败者的对象回收**：输掉 fingerprint 竞争的那次构建已经用自己的 artifact id
+上传了对象，而 adopt 胜者意味着这个 id 永远不会有行。artifact GC 是按行扫描的，没有
+行的对象永远不会成为 GC 候选——每输一次竞争就泄漏一整个 rootfs。因此 Master 只在
+adopt 之后请求 TC 删除上报的那个对象。几道判断故意是不对称的，因为误删会毁掉一个在用
+的模板，而漏删只是浪费存储：胜者自己的字节绝不碰（同一 artifact id 或同一 object
+key）、上报里存储身份不完整就当作"没上传过"、artifact id 仍存在任何状态的行就交给
+拥有它的 GC。回收失败只记录 object key 供人工清理，绝不让 job 失败。
+
+`common.artifact_download_direct_enabled`（默认 true，可由
+`CUBEMASTER_ARTIFACT_DOWNLOAD_DIRECT_ENABLED` 覆盖）是直连下载的灰度总开关。置为
+false 时 CubeMaster 既不签发 presigned URL 也不下发 TC/Master 直连端点，只写旧的
+代理注解，等价于本特性之前的行为，cubelet 侧无需感知。由于代理路径始终可用，关掉
+它只是用 Master 的带宽换安全性，不会导致模板创建失败。开关对重启后新分发的
+artifact 生效，已经下发出去的 URL 不受影响。
+
 ## 10. 已知限制与后续项
 
 以下问题在当前版本里仍然存在：
 
-- **37 天预签名 URL 不刷新。** 上传到 S3 的 artifact 在构建时记录长时效 presigned URL；没有单独的刷新任务，超过时效后需要 redo 或重新 merge / rebuild 才会得到新 URL。
+- ~~**37 天预签名 URL 不刷新。**~~ 已解决：cubelet 下载的不再是构建时记录的那个 URL。每次 `CreateImage` 都会按 `common.artifact_download_capability_ttl` 重新签发短时效 presigned URL，模板再老也不需要 redo 换 URL。artifact 行上保存的是 `storage_backend` / `bucket` / `object_key` 这组稳定身份，而不是凭据。
 - **`hasActiveJob` 不含 `BUILT`。** 幂等窗口覆盖 `PENDING` / `RUNNING`；已 `BUILT` 但 resume 流水线还在分发时，重复创建可能发起第二次分发，而不是挂到第一次上。
 - **envd 时代的 redo 直接 `FAILED`。** 对旧版进程内构建器产出的模板，若缺少可复用 artifact 记录，redo 会快速失败而不是自动重建；这类模板请从源镜像重新创建。
 - **TC 仍依赖 CubeMaster 包。** TC 复用 CubeMaster 的 config loader、log、recovery、nodemeta 与 templatecenter store 包，所以当前 `go.mod` 里仍需要 `replace`。把共享部分抽到 `pkgs/` 仍是后续工作。

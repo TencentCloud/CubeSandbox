@@ -259,6 +259,14 @@ controlPlane:
     # Short-lived artifact download URL/capability TTL. The CubeMaster default
     # is one hour; accepted range is up to 24h.
     artifactDownloadCapabilityTTL: 1h
+    # Rollout kill switch for direct artifact distribution (S3 presign and the
+    # TC/Master direct-download endpoint). Set to false to make every Cubelet
+    # download the rootfs artifact through CubeMaster again: the proxied route
+    # is always a valid source, so rolling back costs bandwidth on the Master
+    # node rather than the ability to create templates. Takes effect for
+    # artifacts distributed after the restart; URLs already handed to a running
+    # distribution are unaffected.
+    artifactDownloadDirectEnabled: true
     # CubeMaster -> Cubelet AppSnapshot RPC timeout. Increase for large
     # templates or slow networks/disks.
     appSnapshotTimeoutSeconds: 300

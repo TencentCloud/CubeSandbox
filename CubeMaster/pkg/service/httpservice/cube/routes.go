@@ -3,7 +3,10 @@
 
 package cube
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+)
 
 // RegisterCubeRoutes registers all /cube routes onto the given gin.RouterGroup.
 // The method/path registrations preserve parity with the previous observable
@@ -194,8 +197,21 @@ func RegisterInternalTemplateRoutes(g *gin.RouterGroup) {
 // RegisterInternalArtifactDownloadRoutes mounts the short-lived-capability
 // artifact endpoint outside user API-key auth. The capability itself is
 // artifact-scoped, expires quickly, and is validated by the download handler.
+//
+// capabilityOnlyArtifactAuth is what keeps "outside API-key auth" from also
+// meaning "accepts the long-lived DownloadToken": with no second factor on
+// this route, that never-expiring token would be a permanent bearer password
+// for the artifact's bytes.
 func RegisterInternalArtifactDownloadRoutes(g *gin.RouterGroup) {
 	artifactPath := CubeURI() + TemplateArtifactDirectDownloadAction
-	g.GET(artifactPath, downloadTemplateArtifactGinHandler)
-	g.HEAD(artifactPath, headTemplateArtifactGinHandler)
+	g.GET(artifactPath, capabilityOnlyArtifactAuth, downloadTemplateArtifactGinHandler)
+	g.HEAD(artifactPath, capabilityOnlyArtifactAuth, headTemplateArtifactGinHandler)
+}
+
+// capabilityOnlyArtifactAuth restricts the downstream handler to short-lived
+// artifact-bound capabilities, rejecting the long-lived DownloadToken.
+func capabilityOnlyArtifactAuth(c *gin.Context) {
+	c.Request = c.Request.WithContext(
+		templatecenter.WithCapabilityOnlyArtifactAuth(c.Request.Context()))
+	c.Next()
 }

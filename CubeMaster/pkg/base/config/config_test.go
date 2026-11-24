@@ -146,6 +146,35 @@ func TestArtifactDownloadCapabilityConfigDefaultsAndParsesDuration(t *testing.T)
 	assert.NoError(t, preComHandleConf(&Config{Common: &CommonConf{ArtifactDownloadCapabilityTTL: 30 * time.Minute}}))
 }
 
+// The kill switch is a *bool precisely so that an explicit `false` survives.
+// A plain bool plus any `default`-style handling would silently re-enable
+// direct distribution during a rollback.
+func TestArtifactDownloadDirectEnabledHonorsExplicitFalse(t *testing.T) {
+	// Absent from yaml means enabled.
+	var parsed Config
+	assert.NoError(t, yaml.Unmarshal([]byte("common:\n  distribution_workers: 4\n"), &parsed))
+	assert.Nil(t, parsed.Common.ArtifactDownloadDirectEnabledValue)
+	assert.True(t, parsed.ArtifactDownloadDirectEnabled())
+
+	// An explicit false must be preserved through parsing and defaulting.
+	var disabled Config
+	assert.NoError(t, yaml.Unmarshal([]byte("common:\n  artifact_download_direct_enabled: false\n"), &disabled))
+	assert.NoError(t, preComHandleConf(&disabled))
+	assert.False(t, disabled.ArtifactDownloadDirectEnabled())
+
+	// Env wins over yaml in both directions.
+	t.Setenv(EnvArtifactDownloadDirect, "true")
+	assert.True(t, disabled.ArtifactDownloadDirectEnabled())
+	t.Setenv(EnvArtifactDownloadDirect, "false")
+	assert.False(t, parsed.ArtifactDownloadDirectEnabled())
+
+	// A nil Config must not panic: callers reach this through GetConfig(),
+	// which can still be nil before configuration is loaded.
+	t.Setenv(EnvArtifactDownloadDirect, "")
+	var nilCfg *Config
+	assert.True(t, nilCfg.ArtifactDownloadDirectEnabled())
+}
+
 func TestArtifactDownloadCapabilityConfigRejectsUnsafeLimits(t *testing.T) {
 	cfg := &Config{Common: &CommonConf{ArtifactDownloadCapabilityTTL: MaxArtifactDownloadCapabilityTTL + time.Second}}
 	assert.ErrorContains(t, validate(cfg), "must not exceed")

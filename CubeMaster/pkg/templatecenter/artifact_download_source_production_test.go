@@ -25,11 +25,24 @@ func TestArtifactTCSourceBaseURLRejectsLoopbackWithoutSharedNodeIP(t *testing.T)
 	}
 }
 
-func TestArtifactTCSourceBaseURLRewritesLoopbackWithSharedNodeIP(t *testing.T) {
+// A loopback TC address must NOT be rewritten to the shared node IP, even
+// when one is available. one-click binds TC to 127.0.0.1 (only the co-located
+// Master calls it) while CubeMaster binds 0.0.0.0, so nodeIP:8090 has no
+// listener; handing it to Cubelets would break every template creation on a
+// local-disk deployment. Falling back to the Master route keeps it working.
+func TestArtifactTCSourceBaseURLDoesNotRewriteLoopbackToSharedNodeIP(t *testing.T) {
 	t.Setenv(config.EnvTemplateCenterNodeAddr, "http://127.0.0.1:8090")
 	t.Setenv(sharedEnvNodeIP, "10.0.0.9")
-	if got, want := artifactTCSourceBaseURL(), "http://10.0.0.9:8090"; got != want {
-		t.Fatalf("artifactTCSourceBaseURL() = %q, want %q", got, want)
+	if got := artifactTCSourceBaseURL(); got != "" {
+		t.Fatalf("artifactTCSourceBaseURL() = %q, want empty so selection falls back to the Master route", got)
+	}
+}
+
+func TestArtifactTCSourceBaseURLRejectsWildcardBind(t *testing.T) {
+	t.Setenv(config.EnvTemplateCenterNodeAddr, "http://0.0.0.0:8090")
+	t.Setenv(sharedEnvNodeIP, "10.0.0.9")
+	if got := artifactTCSourceBaseURL(); got != "" {
+		t.Fatalf("artifactTCSourceBaseURL() = %q, want empty for a wildcard bind", got)
 	}
 }
 

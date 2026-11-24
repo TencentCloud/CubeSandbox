@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,13 @@ type CommonConf struct {
 	// ArtifactDownloadCapabilityTTL controls S3 presigned URL and TC capability
 	// lifetimes. Defaults to one hour; the verifier enforces a 24-hour ceiling.
 	ArtifactDownloadCapabilityTTL time.Duration `yaml:"artifact_download_capability_ttl"`
+	// ArtifactDownloadDirectEnabled is the rollout kill switch for direct
+	// artifact distribution (S3 presign and the TC/Master direct endpoint).
+	// A pointer so "absent" is distinguishable from an explicit false: the
+	// default is enabled, and operators roll back by setting it to false.
+	// When disabled, CubeMaster hands every Cubelet the legacy proxied URL.
+	// Access via Config.ArtifactDownloadDirectEnabled().
+	ArtifactDownloadDirectEnabledValue *bool `yaml:"artifact_download_direct_enabled"`
 	// DistributionWorkers is the max concurrency of one rootfs artifact
 	// distribution call. Default 4.
 	DistributionWorkers             int             `yaml:"distribution_workers"`
@@ -1501,6 +1509,28 @@ func (c *Config) TemplateCenterAddr() string {
 		return strings.TrimRight(strings.TrimSpace(c.Common.TemplateCenterAddrValue), "/")
 	}
 	return ""
+}
+
+// EnvArtifactDownloadDirect is the emergency rollback for direct artifact
+// distribution. Read on every call so a node-level incident can be contained
+// by restarting CubeMaster with the variable set, without editing conf.yaml.
+const EnvArtifactDownloadDirect = "CUBEMASTER_ARTIFACT_DOWNLOAD_DIRECT_ENABLED"
+
+// ArtifactDownloadDirectEnabled reports whether CubeMaster may hand Cubelets a
+// direct artifact endpoint (S3 presign, or the TC/Master direct-download
+// route). Default true; env overrides yaml. When false, every Cubelet receives
+// only the legacy URL proxied through CubeMaster, which is always a valid
+// source, so disabling this costs bandwidth rather than correctness.
+func (c *Config) ArtifactDownloadDirectEnabled() bool {
+	if raw := strings.TrimSpace(os.Getenv(EnvArtifactDownloadDirect)); raw != "" {
+		if enabled, err := strconv.ParseBool(raw); err == nil {
+			return enabled
+		}
+	}
+	if c != nil && c.Common != nil && c.Common.ArtifactDownloadDirectEnabledValue != nil {
+		return *c.Common.ArtifactDownloadDirectEnabledValue
+	}
+	return true
 }
 
 const EnvTemplateCenterNodeAddr = "CUBE_TEMPLATE_CENTER_NODE_ADDR"

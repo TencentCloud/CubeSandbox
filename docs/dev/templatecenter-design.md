@@ -187,15 +187,48 @@ TC/Master HMAC capability is bound to artifact ID and expiry, uses the shared
 callback secret with a separate domain separator, and is sent only in
 `X-Cube-Artifact-Token`, never in the URL.
 
+The two download routes accept deliberately different credentials, because
+they sit on different sides of the user API-key middleware:
+
+| Route | Mounted | Accepts |
+| --- | --- | --- |
+| `/cube/template/artifact/download` | inside API-key auth | long-lived `DownloadToken` or a capability |
+| `/cube/template/artifact/direct-download` | outside API-key auth | capability only |
+
+The long-lived `DownloadToken` is a bearer credential with no expiry: it is
+stored in plaintext on the artifact row, handed to every Cubelet that ever
+pulled that artifact, and only rotates on re-finalize. Behind the API-key
+middleware that is acceptable, since the caller is already authenticated.
+Accepting it on `direct-download` would mean a single leaked token grants
+permanent access to the artifact's bytes with no second factor, so the route
+refuses it — `CubeMaster/pkg/service/httpservice/cube/routes.go` marks the
+request capability-only, and `validRootfsArtifactDownloadToken` honors the
+mark. CubeTemplateCenter mounts the same registration function, so both ends
+of the direct path enforce this. Nothing regresses: when capability signing is
+unavailable CubeMaster emits `ArtifactSourceLegacy` and strips the direct
+annotations entirely, so a Cubelet never presents a long-lived token to
+`direct-download` in the first place.
+
 CubeMaster always preserves the stable Master artifact URL and legacy query
 token in the existing annotations, and adds the selected S3/TC/Master direct
 endpoint and short capability in separate additive annotations. New Cubelets
 prefer the direct endpoint when present. Older Cubelets ignore the unknown
 annotations and continue downloading from CubeMaster, so a partial Cubelet
-rollout needs no version threshold or database change. S3 remains selectable
-independently. TC direct-download is selected from the existing node-facing
-TC address and artifact storage metadata, with no separate rollout switch. S3
-and TC remain mutually exclusive per-node choices.
+rollout needs no version threshold. S3 remains selectable independently. TC
+direct-download is selected from the existing node-facing TC address and
+artifact storage metadata. S3 and TC remain mutually exclusive per-node
+choices.
+
+`common.artifact_download_direct_enabled` (default true, overridable by
+`CUBEMASTER_ARTIFACT_DOWNLOAD_DIRECT_ENABLED`) is the single rollout switch for
+all of it. When false, CubeMaster skips both the presign and the TC/Master
+direct endpoint and emits only the legacy proxied annotations, which is the
+pre-feature behavior; a Cubelet never has to be aware of the switch. Because
+the proxied route is always valid, the switch is a bandwidth/safety trade and
+not a functional toggle. Artifact store identity does require one additive
+column (`bucket`, migration `20261119140000_rootfs_artifact_store_identity`);
+historical rows are deliberately left empty there, so they stay reusable and
+deletable without inheriting the current deployment's bucket.
 
 Cubelet downloads the ext4 directly from the selected source, then verifies
 both the expected SHA-256 and byte size before atomically publishing the cache
@@ -362,13 +395,30 @@ upload succeeded but no download URL could be recorded, CubeMaster answers 502
 for that row (it never falls back to TC's disk), so the bytes are kept as the
 only recoverable copy instead of being deleted into nothing.
 
+#### Reclaiming the loser of a build race
+
+A build that loses the fingerprint race has already uploaded its object under
+its own artifact id, and adopting the winner means that id never gets a row.
+Since the artifact GC walks rows, an object with no row would never become a GC
+candidate — one full rootfs leaked per lost race. Master therefore asks TC to
+delete the reported object after an adopt, and only then. The guards are
+deliberately asymmetric, because a wrong delete destroys a live template while
+a skipped delete only wastes storage: the winner's own bytes are never touched
+(same artifact id or same object key), a report without a complete store
+identity is treated as "nothing was uploaded", and an artifact id that still
+has a row in any state is left to the GC that owns it. A failed reclaim is
+logged with the object key for manual cleanup and never fails the job.
+
 ## 10. Known limitations and follow-ups
 
 Released with full awareness; each item lists the planned follow-up.
 
-- **37-day presigned URLs are not refreshed.** Artifacts uploaded to S3 get a
-  long-lived presigned URL recorded at build time; there is no refresh job, so
-  a template older than the presign TTL needs a redo to mint a new URL.
+- ~~**37-day presigned URLs are not refreshed.**~~ Resolved by §6.3: the URL
+  recorded at build time is no longer what a Cubelet downloads. Each
+  `CreateImage` mints a fresh presign bounded by
+  `common.artifact_download_capability_ttl`, so a template older than any
+  presign TTL no longer needs a redo. What remains stored on the row is the
+  stable `storage_backend` / `bucket` / `object_key` identity, not a credential.
 - **envd-era redo goes straight to FAILED.** Redoing a template built by the
   legacy in-process builder has no reusable artifact record and fails fast
   rather than rebuilding; recreate such templates from the source image.

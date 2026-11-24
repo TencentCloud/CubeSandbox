@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -85,53 +86,144 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 	return nil
 }
 
+// artifactDownloadAttempt is one fully resolved download source. Resolving up
+// front keeps the URL, source kind and credential consistent for the whole
+// attempt, so a fallback cannot accidentally send one source's credential to
+// another endpoint.
+type artifactDownloadAttempt struct {
+	url    string
+	source artifactsource.Source
+	token  string
+}
+
+// artifactSourceError marks a failure attributable to the endpoint that was
+// asked for the artifact -- unreachable, unauthorized, absent or failing --
+// rather than to the artifact's bytes or to local disk. Only these make
+// another source worth trying.
+type artifactSourceError struct{ err error }
+
+func (e *artifactSourceError) Error() string { return e.err.Error() }
+func (e *artifactSourceError) Unwrap() error { return e.err }
+
+func artifactSourceFailure(format string, args ...any) error {
+	return &artifactSourceError{err: fmt.Errorf(format, args...)}
+}
+
+// artifactStatusIsSourceFailure reports whether a response status means "this
+// source cannot serve the artifact" -- a missing object or route (including a
+// CubeMaster that predates the direct route), a rejected or expired
+// capability, throttling, or a server-side error. A different source may still
+// hold the same artifact, so these are retried elsewhere. Other 4xx codes
+// indicate a malformed request, which every source would reject the same way.
+func artifactStatusIsSourceFailure(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= http.StatusInternalServerError
+}
+
+// resolveArtifactDownloadAttempts orders the sources to try for this artifact.
+//
+// A usable direct source comes first, with the stable CubeMaster URL kept as a
+// fallback. That fallback is the only way a node whose egress to S3/TC is
+// blocked, or whose capability has expired, can still pull an artifact without
+// rolling the whole deployment back.
+func resolveArtifactDownloadAttempts(ctx context.Context, spec *cubeimages.ImageSpec,
+	expectedSHA string, expectedSize int64) ([]artifactDownloadAttempt, error) {
+	legacyURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactURL])
+	directURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectURL])
+
+	var attempts []artifactDownloadAttempt
+	if directURL != "" {
+		source := artifactsource.Source(strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSource]))
+		if !source.Valid() || source == artifactsource.Legacy {
+			return nil, fmt.Errorf("direct artifact source %q is missing or unsupported", source)
+		}
+		token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectToken])
+		expiresAt, expiryErr := strconv.ParseInt(
+			strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactExpiresAt]), 10, 64)
+		if source.RequiresIntegrityCheck() {
+			if expectedSHA == "" || expectedSize <= 0 || expiryErr != nil || expiresAt <= 0 {
+				return nil, fmt.Errorf("direct artifact source requires sha256, positive size, and expires_at annotations")
+			}
+			if source.RequiresToken() && token == "" {
+				return nil, fmt.Errorf("direct HTTP artifact source requires a short-lived token")
+			}
+		}
+		// Check expiry here rather than letting the endpoint reject the
+		// request: a spent capability otherwise surfaces as an opaque 403, or
+		// as a size mismatch once an error page is counted as artifact bytes.
+		if expiresAt > 0 && time.Now().Unix() >= expiresAt {
+			if legacyURL == "" {
+				return nil, fmt.Errorf("direct artifact capability for source %q expired at %d and no fallback download url is available", source, expiresAt)
+			}
+			log.G(ctx).Warnf("direct artifact capability for source %s expired at %d; using the stable CubeMaster url instead", source, expiresAt)
+		} else {
+			attempts = append(attempts, artifactDownloadAttempt{url: directURL, source: source, token: token})
+		}
+	}
+	if legacyURL != "" {
+		// The artifact row's MasterNodeIP is not reachable from every node,
+		// while the node-local cubemaster_http_addr always is.
+		attempts = append(attempts, artifactDownloadAttempt{
+			url:    rewriteDownloadHost(legacyURL, cubeMasterHTTPAddr()),
+			source: artifactsource.Legacy,
+			token:  strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]),
+		})
+	}
+	if len(attempts) == 0 {
+		return nil, fmt.Errorf("artifact download url is empty")
+	}
+	return attempts, nil
+}
+
 func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages.ImageSpec) error {
 	if spec == nil || spec.Annotations == nil {
 		return fmt.Errorf("image spec annotations are empty")
 	}
-	downloadURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactURL])
-	directURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectURL])
-	source := ""
-	downloadToken := ""
-	if directURL != "" {
-		downloadURL = directURL
-		source = strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSource])
-		downloadToken = strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectToken])
-	} else if downloadURL != "" {
-		// Older CubeMaster versions provide only the stable Master URL. Keep
-		// that path usable even if unrelated direct-source annotations exist.
-		downloadURL = rewriteDownloadHost(downloadURL, cubeMasterHTTPAddr())
-	}
-	if downloadURL == "" {
-		return fmt.Errorf("artifact download url is empty")
-	}
 	expectedSHA := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSHA256])
-	expectedSizeRaw := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSizeBytes])
 	var expectedSize int64
-	if expectedSizeRaw != "" {
-		var err error
-		expectedSize, err = strconv.ParseInt(expectedSizeRaw, 10, 64)
-		if err != nil || expectedSize <= 0 {
+	if expectedSizeRaw := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSizeBytes]); expectedSizeRaw != "" {
+		parsed, err := strconv.ParseInt(expectedSizeRaw, 10, 64)
+		if err != nil || parsed <= 0 {
 			return fmt.Errorf("invalid artifact size annotation %q", expectedSizeRaw)
 		}
+		expectedSize = parsed
 	}
-	expiresAtRaw := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactExpiresAt])
-	sourceKind := artifactsource.Source(source)
-	if directURL != "" && (!sourceKind.Valid() || sourceKind == artifactsource.Legacy) {
-		return fmt.Errorf("direct artifact source %q is missing or unsupported", source)
-	}
-	if sourceKind.RequiresIntegrityCheck() {
-		expiresAt, err := strconv.ParseInt(expiresAtRaw, 10, 64)
-		if expectedSHA == "" || expectedSize <= 0 || err != nil || expiresAt <= 0 {
-			return fmt.Errorf("direct artifact source requires sha256, positive size, and expires_at annotations")
-		}
-		if sourceKind.RequiresToken() && downloadToken == "" {
-			return fmt.Errorf("direct HTTP artifact source requires a short-lived token")
-		}
+	attempts, err := resolveArtifactDownloadAttempts(ctx, spec, expectedSHA, expectedSize)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return err
 	}
+
+	var lastErr error
+	for i, attempt := range attempts {
+		err := downloadArtifactFromSource(ctx, imagePath, attempt, expectedSHA, expectedSize)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Only an endpoint-attributable failure is retried, and only against a
+		// source we have not tried yet. A wrong digest or size means the bytes
+		// were served but do not match the artifact, so another source would
+		// not help and retrying would mask the corruption.
+		var sourceErr *artifactSourceError
+		if i+1 < len(attempts) && errors.As(err, &sourceErr) {
+			log.G(ctx).Warnf("artifact download from source %s failed (%v); retrying with source %s",
+				attempt.source, err, attempts[i+1].source)
+			continue
+		}
+		return err
+	}
+	return lastErr
+}
+
+func downloadArtifactFromSource(ctx context.Context, imagePath string, attempt artifactDownloadAttempt,
+	expectedSHA string, expectedSize int64) error {
 	tmpPath := imagePath + ".download"
 	// imagePath is keyed by artifact ID, not by content: leftover bytes may
 	// come from an older build and cannot be trusted without a digest to
@@ -142,9 +234,11 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		resumeFrom = st.Size()
 		havePartial = true
 	}
-	resp, err := fetchArtifactResp(ctx, downloadURL, spec, havePartial, resumeFrom)
+	resp, err := fetchArtifactResp(ctx, attempt, havePartial, resumeFrom)
 	if err != nil {
-		return err
+		// Unreachable endpoint, DNS or TLS failure: the artifact may still be
+		// available elsewhere.
+		return artifactSourceFailure("fetch artifact from source %s: %w", attempt.source, err)
 	}
 
 	restart := false
@@ -169,8 +263,8 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		if cr, crOK := parseContentRange(resp.Header.Get("Content-Range")); crOK && cr.total >= 0 {
 			total, ok = cr.total, true
 		}
-		if !ok {
-			total, ok = artifactSizeFromSpec(spec)
+		if !ok && expectedSize > 0 {
+			total, ok = expectedSize, true
 		}
 		if ok && total == resumeFrom {
 			verifyOnly = true
@@ -181,6 +275,9 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		// Full body: no partial, or the server ignored Range.
 	default:
 		resp.Body.Close()
+		if artifactStatusIsSourceFailure(resp.StatusCode) {
+			return artifactSourceFailure("source %s returned download status code %d", attempt.source, resp.StatusCode)
+		}
 		return fmt.Errorf("download status code %d", resp.StatusCode)
 	}
 	if restart {
@@ -188,12 +285,15 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		// without Range in the same call so the caller sees no failure.
 		resp.Body.Close()
 		_ = os.Remove(tmpPath)
-		resp, err = fetchArtifactResp(ctx, downloadURL, spec, false, 0)
+		resp, err = fetchArtifactResp(ctx, attempt, false, 0)
 		if err != nil {
-			return err
+			return artifactSourceFailure("refetch artifact from source %s: %w", attempt.source, err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
+			if artifactStatusIsSourceFailure(resp.StatusCode) {
+				return artifactSourceFailure("source %s returned download status code %d", attempt.source, resp.StatusCode)
+			}
 			return fmt.Errorf("download status code %d", resp.StatusCode)
 		}
 	}
@@ -419,24 +519,19 @@ func sparseCopy(dst sparseFile, hasher hash.Hash, src io.Reader, bufSize int, st
 	return totalBytes, nil
 }
 
-func fetchArtifactResp(ctx context.Context, downloadURL string, spec *cubeimages.ImageSpec, withRange bool, resumeFrom int64) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+func fetchArtifactResp(ctx context.Context, attempt artifactDownloadAttempt, withRange bool, resumeFrom int64) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, attempt.url, nil)
 	if err != nil {
 		return nil, err
 	}
 	if withRange {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
-	if directURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectURL]); directURL != "" {
-		kind := artifactsource.Source(strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSource]))
-		if !kind.Valid() || kind == artifactsource.Legacy {
-			return nil, fmt.Errorf("unsupported direct artifact source %q", kind)
-		}
-		if kind.RequiresToken() {
-			req.Header.Set("X-Cube-Artifact-Token", strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectToken]))
-		}
-	} else if token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]); token != "" {
-		req.Header.Set("X-Cube-Artifact-Token", token)
+	// Send a credential only to a source that authenticates with one. An S3
+	// presigned URL carries its own authorization, so forwarding a Cube token
+	// there would hand a Cube credential to the object store.
+	if attempt.token != "" && (attempt.source == artifactsource.Legacy || attempt.source.RequiresToken()) {
+		req.Header.Set("X-Cube-Artifact-Token", attempt.token)
 	}
 	client := *http.DefaultClient
 	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
@@ -501,18 +596,6 @@ func parseContentRange(v string) (contentRange, bool) {
 	}
 	cr.start, cr.end = start, end
 	return cr, true
-}
-
-func artifactSizeFromSpec(spec *cubeimages.ImageSpec) (int64, bool) {
-	v := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSizeBytes])
-	if v == "" {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	return n, true
 }
 
 // RefreshArtifactRuntimeFiles rewrites runtime companion files from the current shared sources.

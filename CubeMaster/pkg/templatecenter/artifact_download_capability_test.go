@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 )
@@ -105,6 +106,72 @@ func TestIssueArtifactDownloadSourceUsesConfiguredTTLForS3(t *testing.T) {
 	}
 	if gotTTL != configuredTTL || source.ExpiresAt != now.Add(configuredTTL).Unix() {
 		t.Fatalf("signer TTL=%s source expires=%d, want TTL=%s", gotTTL, source.ExpiresAt, configuredTTL)
+	}
+}
+
+// The rollout kill switch must suppress BOTH direct sources: an S3 presign and
+// the TC/Master direct endpoint. Disabling it has to produce the legacy
+// CubeMaster-proxied URL so an operator can roll the feature back without
+// losing the ability to create templates.
+func TestIssueArtifactDownloadSourceKillSwitchForcesLegacy(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "shared-template-secret")
+	t.Setenv(config.EnvArtifactDownloadDirect, "false")
+	oldSigner := presignArtifactGetURLWithTTL
+	oldTCURL := artifactTCSourceBaseURL
+	t.Cleanup(func() {
+		presignArtifactGetURLWithTTL = oldSigner
+		artifactTCSourceBaseURL = oldTCURL
+	})
+	presignArtifactGetURLWithTTL = func(context.Context, *models.RootfsArtifact, time.Duration) (string, error) {
+		t.Fatal("presign must not be attempted while direct distribution is disabled")
+		return "", nil
+	}
+	artifactTCSourceBaseURL = func() string {
+		t.Fatal("the TC endpoint must not be selected while direct distribution is disabled")
+		return ""
+	}
+	source, err := IssueArtifactDownloadSource(context.Background(), &models.RootfsArtifact{
+		ArtifactID: "artifact-s3", StorageBackend: "s3", ObjectKey: "artifact-s3.ext4", DownloadToken: "legacy-token",
+	}, "https://master.example", time.Unix(1_800_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Kind != ArtifactSourceLegacy {
+		t.Fatalf("source kind = %q, want %q", source.Kind, ArtifactSourceLegacy)
+	}
+	if source.Token != "legacy-token" || !strings.HasPrefix(source.URL, "https://master.example/") {
+		t.Fatalf("unexpected legacy source: %+v", source)
+	}
+	// A legacy source carries no expiry, and setArtifactDownloadAnnotations
+	// relies on the Kind alone to strip the direct annotations.
+	if source.ExpiresAt != 0 {
+		t.Fatalf("legacy source must not advertise an expiry, got %d", source.ExpiresAt)
+	}
+	annotations := map[string]string{}
+	setArtifactDownloadAnnotations(annotations, source.URL, source.Token, source)
+	for _, key := range []string{
+		constants.CubeAnnotationRootfsArtifactDirectURL,
+		constants.CubeAnnotationRootfsArtifactDirectToken,
+		constants.CubeAnnotationRootfsArtifactSource,
+		constants.CubeAnnotationRootfsArtifactExpiresAt,
+	} {
+		if _, ok := annotations[key]; ok {
+			t.Fatalf("annotation %q must be absent while direct distribution is disabled", key)
+		}
+	}
+}
+
+// Default-on: an unset switch must not change the existing behavior.
+func TestArtifactDownloadDirectEnabledDefaultsOn(t *testing.T) {
+	t.Setenv(config.EnvArtifactDownloadDirect, "")
+	if !config.GetConfig().ArtifactDownloadDirectEnabled() {
+		t.Fatal("direct artifact distribution must default to enabled")
+	}
+	// A malformed override is ignored rather than silently disabling the
+	// feature (or crashing the control plane).
+	t.Setenv(config.EnvArtifactDownloadDirect, "not-a-bool")
+	if !config.GetConfig().ArtifactDownloadDirectEnabled() {
+		t.Fatal("an unparseable override must leave the default in place")
 	}
 }
 

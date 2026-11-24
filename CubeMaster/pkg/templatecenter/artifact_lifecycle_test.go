@@ -10,25 +10,31 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agiledragon/gomonkey/v2"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
+// A stale NodeIP is the normal case after a node re-registers, so the live
+// view has to win -- but only when it actually resolves to an address, because
+// falling through to nil would make artifact cleanup skip a node that still
+// holds the file.
+//
+// Uses the getNodeFromView seam rather than patching localcache.GetNode:
+// gomonkey cannot mprotect the text segment on darwin/arm64, so a patched
+// version of this test panics instead of running.
 func TestPlacementToNodeAddressResolution(t *testing.T) {
 	var live map[string]string // node id -> ip currently in the view
-	patches := gomonkey.NewPatches()
-	defer patches.Reset()
-	patches.ApplyFunc(localcache.GetNode, func(id string) (*node.Node, bool) {
+	orig := getNodeFromView
+	t.Cleanup(func() { getNodeFromView = orig })
+	getNodeFromView = func(id string) (*node.Node, bool) {
 		ip, ok := live[id]
 		if !ok {
 			return nil, false
 		}
 		return &node.Node{InsID: id, IP: ip}, true
-	})
+	}
 
 	cases := []struct {
 		name   string

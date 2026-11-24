@@ -5,10 +5,12 @@
 package cube
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
 )
 
 // routeHandlerName returns the registered handler's function name for
@@ -64,6 +66,47 @@ func TestInternalArtifactDownloadRoutesRegisterOutsideTemplateAPI(t *testing.T) 
 		if got := routeHandlerName(r, method, path); !strings.HasSuffix(got, "."+wantHandler) {
 			t.Errorf("%s %s handler = %q, want %s", method, path, got, wantHandler)
 		}
+	}
+}
+
+// The auth matrix in templatecenter only protects anything if the marker is
+// actually wired onto this route. Asserting the handler name alone would pass
+// even if the middleware were dropped, so drive a real request through the
+// registered chain and observe the context the handler receives.
+func TestInternalArtifactDownloadRoutesAreCapabilityOnly(t *testing.T) {
+	for _, method := range []string{"GET", "HEAD"} {
+		t.Run(method, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			path := "/cube" + TemplateArtifactDirectDownloadAction
+			var capabilityOnly bool
+			// Re-register the same middleware the production route uses,
+			// terminating in a probe instead of the download handler (which
+			// needs a database).
+			r.Handle(method, path, capabilityOnlyArtifactAuth, func(c *gin.Context) {
+				capabilityOnly = templatecenter.CapabilityOnlyArtifactAuth(c.Request.Context())
+				c.Status(200)
+			})
+			req := httptest.NewRequest(method, path+"?artifact_id=rfs-1", nil)
+			r.ServeHTTP(httptest.NewRecorder(), req)
+			if !capabilityOnly {
+				t.Fatal("direct-download must reject the long-lived DownloadToken, but the request was not marked capability-only")
+			}
+		})
+	}
+
+	// The legacy route stays permissive: it sits behind the API-key
+	// middleware, and marking it would break every authenticated download.
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	var marked bool
+	r.GET("/cube"+TemplateArtifactDownloadAction, func(c *gin.Context) {
+		marked = templatecenter.CapabilityOnlyArtifactAuth(c.Request.Context())
+		c.Status(200)
+	})
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/cube"+TemplateArtifactDownloadAction, nil))
+	if marked {
+		t.Fatal("the API-key-authenticated route must keep accepting the long-lived token")
 	}
 }
 

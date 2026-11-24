@@ -413,7 +413,7 @@ func GetRootfsArtifactForRedirect(ctx context.Context, artifactID, token string)
 	if err != nil {
 		return nil, err
 	}
-	if !validRootfsArtifactDownloadToken(record, token) {
+	if !validRootfsArtifactDownloadToken(ctx, record, token) {
 		return nil, fmt.Errorf("invalid or expired artifact token")
 	}
 	return record, nil
@@ -424,7 +424,7 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 	if err != nil {
 		return nil, nil, err
 	}
-	if !validRootfsArtifactDownloadToken(record, token) {
+	if !validRootfsArtifactDownloadToken(ctx, record, token) {
 		return nil, nil, fmt.Errorf("invalid or expired artifact token")
 	}
 	f, err := os.Open(record.Ext4Path)
@@ -451,11 +451,19 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 	return record, f, nil
 }
 
-func validRootfsArtifactDownloadToken(record *models.RootfsArtifact, token string) bool {
+// validRootfsArtifactDownloadToken accepts either the long-lived per-artifact
+// DownloadToken or a short-lived artifact-bound capability.
+//
+// On a route mounted outside the API-key middleware the long-lived token is
+// refused: it never expires and is shared by every Cubelet that pulled the
+// artifact, so without a second factor one leak would be permanent. See
+// WithCapabilityOnlyArtifactAuth.
+func validRootfsArtifactDownloadToken(ctx context.Context, record *models.RootfsArtifact, token string) bool {
 	if record == nil {
 		return false
 	}
-	if token != "" && record.DownloadToken != "" && token == record.DownloadToken {
+	if !CapabilityOnlyArtifactAuth(ctx) &&
+		token != "" && record.DownloadToken != "" && token == record.DownloadToken {
 		return true
 	}
 	return ValidArtifactDownloadCapability(record.ArtifactID, token, time.Now())

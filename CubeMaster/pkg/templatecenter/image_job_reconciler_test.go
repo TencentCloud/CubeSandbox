@@ -36,7 +36,7 @@ func writeFakeArtifactFile(t *testing.T, name string) string {
 // reconciler silently zeroed out (or overwrote) the S3/MinIO presigned URL
 // that TC had reported in the original terminal callback.
 func TestRootfsArtifactDownloadTokenRejectsEmptyLegacyToken(t *testing.T) {
-	if validRootfsArtifactDownloadToken(&models.RootfsArtifact{ArtifactID: "rfs-1"}, "") {
+	if validRootfsArtifactDownloadToken(context.Background(), &models.RootfsArtifact{ArtifactID: "rfs-1"}, "") {
 		t.Fatal("empty stored token must not authorize an anonymous download")
 	}
 }
@@ -69,6 +69,49 @@ func TestNormalizeRemoteBuildArtifactStore(t *testing.T) {
 			err := NormalizeRemoteBuildArtifactStore(context.Background(), &result)
 			if (err != nil) != tc.wantErr || (!tc.wantErr && result.ArtifactURL != tc.want) {
 				t.Fatalf("normalized artifact_url=%q error=%v, want %q err=%v", result.ArtifactURL, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A split deployment where only CubeTemplateCenter holds the CUBE_S3_*
+// credentials used to have every BUILT callback rejected: Master compared the
+// reported bucket against a zero ArtifactS3, and could neither attribute a
+// historical URL nor resolve its own object layout. That turned a missing
+// local configuration into a 500 on the callback and wedged the build until the
+// job timed out. Normalization must degrade to a warning and keep the reported
+// payload instead.
+func TestNormalizeRemoteBuildArtifactStoreDegradesWithoutS3Config(t *testing.T) {
+	for _, key := range []string{
+		"CUBE_S3_ENDPOINT", "CUBE_S3_BUCKET",
+		"CUBE_S3_ACCESS_KEY_ID", "CUBE_S3_SECRET_ACCESS_KEY",
+	} {
+		t.Setenv(key, "")
+	}
+	cases := []struct {
+		name  string
+		input RemoteBuildResult
+		want  string
+	}{
+		{
+			"unverifiable bucket is recorded as reported",
+			RemoteBuildResult{ArtifactID: "rfs-1", StorageBackend: "s3", ObjectKey: "rfs-1.ext4", Bucket: "tc-only-artifacts"},
+			"blobstore:s3:rfs-1.ext4",
+		},
+		{
+			"historical url keeps the stable backend and key",
+			RemoteBuildResult{ArtifactID: "rfs-1", ArtifactURL: "https://minio.example/tc-only-artifacts/rfs-1.ext4?X-Amz-Signature=old", StorageBackend: "s3", ObjectKey: "rfs-1.ext4"},
+			"blobstore:s3:rfs-1.ext4",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := tc.input
+			if err := NormalizeRemoteBuildArtifactStore(context.Background(), &result); err != nil {
+				t.Fatalf("normalization must not fail when this CubeMaster has no S3 configuration: %v", err)
+			}
+			if result.ArtifactURL != tc.want {
+				t.Fatalf("normalized artifact_url=%q, want %q", result.ArtifactURL, tc.want)
 			}
 		})
 	}

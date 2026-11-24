@@ -120,6 +120,10 @@ WITH_TESTS=(
 	"blobstore|Go|0|cd pkgs/blobstore && go mod download && go test ./..."
 	# sandboxrestart is stdlib-only, so no module download is needed.
 	"sandboxrestart|Go|0|cd pkgs/sandboxrestart && go test ./..."
+	# artifactsource is stdlib-only and consumed via replace by CubeMaster,
+	# CubeTemplateCenter and Cubelet, whose `go test ./...` never runs a
+	# dependency's _test.go files, so the module needs its own lane.
+	"artifactsource|Go|0|cd pkgs/artifactsource && go vet ./... && go test ./..."
 	"redisx|Go|0|make redisx-test"
 	"cubebench|Shell|0|make cubebench-test"
 	# Same prerequisites and package set as CI's `make cubelet-test`, but via
