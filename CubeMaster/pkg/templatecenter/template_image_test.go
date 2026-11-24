@@ -26,8 +26,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/qos"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"gorm.io/gorm"
@@ -1645,6 +1648,1100 @@ func TestResolveRedoTargetsRejectsWhenNoFailedReplicas(t *testing.T) {
 	}
 }
 
+func TestEnsureRedoTemplateNotInUseScopesNonJFSToTargetNodes(t *testing.T) {
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true}
+	nodeC := &node.Node{InsID: "node-c", IP: "10.0.0.3", Healthy: true}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA, nodeB, nodeC}
+	})
+
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+
+	var mu sync.Mutex
+	listCalls := 0
+	var seenHostIDs []string
+	var listRsp *types.ListCubeSandboxRes
+	sandboxes := []*types.SandboxBriefData{
+		{SandboxID: "sb-a", TemplateID: "tpl-1", HostID: "node-a", HostIP: "10.0.0.1"},
+		{SandboxID: "sb-other", TemplateID: "tpl-other", HostID: "node-b", HostIP: "10.0.0.2"},
+	}
+	listRedoTemplateSandboxes = func(_ context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		mu.Lock()
+		defer mu.Unlock()
+		listCalls++
+		if req != nil {
+			seenHostIDs = append(seenHostIDs, req.HostID)
+		}
+		if listRsp != nil {
+			return listRsp
+		}
+		return &types.ListCubeSandboxRes{
+			Ret:  &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+			Data: sandboxes,
+		}
+	}
+
+	// Non-JFS redo targeting only node-b (no running sandbox on node-b) is allowed
+	// and queries node-b specifically via HostID.
+	err := ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeB})
+	require.NoError(t, err)
+	require.Equal(t, 1, listCalls)
+	require.Equal(t, []string{"node-b"}, seenHostIDs)
+
+	// Non-JFS redo targeting newly added node-c (no running sandbox on node-c) is allowed.
+	seenHostIDs = nil
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeC})
+	require.NoError(t, err)
+	require.Equal(t, 2, listCalls)
+	require.Equal(t, []string{"node-c"}, seenHostIDs)
+
+	// Non-JFS redo targeting node-a (has running sandbox) is rejected.
+	seenHostIDs = nil
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeA})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{"node-a"}, seenHostIDs)
+
+	// Non-JFS redo targeting both node-a and node-b is rejected.
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeA, nodeB})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+
+	// HostIP-only sandbox match still blocks target node.
+	sandboxes[0] = &types.SandboxBriefData{SandboxID: "sb-a-ip", TemplateID: "tpl-1", HostIP: "10.0.0.1"}
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "s3", false, []*node.Node{nodeA})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+
+	// Non-JFS redo that needs a full rebuild checks cluster-wide (HostID == "") even when targeting node-b.
+	seenHostIDs = nil
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", true, []*node.Node{nodeB})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{""}, seenHostIDs)
+
+	// JFS redo checks cluster-wide (HostID == "") even when targeting node-b.
+	seenHostIDs = nil
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "jfs", false, []*node.Node{nodeB})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{""}, seenHostIDs)
+
+	// Target Cubelet list RPC failure fails closed instead of silently treating as 0 sandboxes.
+	listRsp = &types.ListCubeSandboxRes{
+		Ret: &types.Ret{
+			RetCode: int(errorcode.ErrorCode_ReqCubeAPIFailed),
+			RetMsg:  "list sandbox failed: cubelet unreachable",
+		},
+	}
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeB})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrTemplateInUse)
+	require.Contains(t, err.Error(), "list sandbox failed: cubelet unreachable")
+	require.NotContains(t, err.Error(), "list sandbox failed: list sandbox failed:")
+
+	// Empty / nil response from listRedoTemplateSandboxes also fails closed.
+	emptyRspFn := listRedoTemplateSandboxes
+	listRedoTemplateSandboxes = func(_ context.Context, _ *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return nil
+	}
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeB})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "list sandbox returned empty response")
+	listRedoTemplateSandboxes = emptyRspFn
+	listRsp = nil
+
+	// Duplicate target nodes are deduplicated to a single HostID query.
+	seenHostIDs = nil
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeB, nodeB})
+	require.NoError(t, err)
+	require.Equal(t, []string{"node-b"}, seenHostIDs)
+
+	// Non-empty slice with only nil / empty target nodes short-circuits without querying.
+	seenHostIDs = nil
+	callsBefore := listCalls
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nil, {}})
+	require.NoError(t, err)
+	require.Equal(t, callsBefore, listCalls)
+
+	// IP-only target node (empty InsID): Node.ID() returns IP, so it still queries
+	// via HostID="10.0.0.1" and matches sandboxes on that HostIP.
+	seenHostIDs = nil
+	ipOnlyTarget := &node.Node{IP: "10.0.0.1", Healthy: true}
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{ipOnlyTarget})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{"10.0.0.1"}, seenHostIDs)
+
+	// Sandbox matched only via AppSnapshotTemplateID annotation blocks target node.
+	sandboxes[0] = &types.SandboxBriefData{
+		SandboxID: "sb-a-label",
+		HostID:    "node-a",
+		HostIP:    "10.0.0.1",
+		Labels:    map[string]string{constants.CubeAnnotationAppSnapshotTemplateID: "tpl-1"},
+	}
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "xfs", false, []*node.Node{nodeA})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+}
+
+func TestResolveRedoAffectedNodesAndJFSHostFactGroups(t *testing.T) {
+	nodeA1 := &node.Node{
+		InsID:     "node-a1",
+		IP:        "10.0.0.1",
+		Healthy:   true,
+		HostFacts: &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"},
+	}
+	nodeA2 := &node.Node{
+		InsID:     "node-a2",
+		IP:        "10.0.0.2",
+		Healthy:   true,
+		HostFacts: &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"},
+	}
+	nodeB1 := &node.Node{
+		InsID:     "node-b1",
+		IP:        "10.0.0.3",
+		Healthy:   true,
+		HostFacts: &node.HostFacts{CPUIDHash: "cpu-b", HostKernelRelease: "6.6.0"},
+	}
+	nodeNoFacts := &node.Node{InsID: "node-nofacts", IP: "10.0.0.4", Healthy: true}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA1, nodeA2, nodeB1}
+	})
+
+	// Non-JFS reuse affects only requested targets; empty targets means 0 nodes (scoped=true).
+	affected, scoped := resolveRedoAffectedNodes("tpl-1", "cubebox", "xfs", false, []*node.Node{nodeB1})
+	require.True(t, scoped)
+	require.Equal(t, []*node.Node{nodeB1}, affected)
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "xfs", false, []*node.Node{})
+	require.True(t, scoped)
+	require.Empty(t, affected)
+
+	// Full rebuild always checks cluster-wide (scoped=false).
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "jfs", true, []*node.Node{nodeB1})
+	require.False(t, scoped)
+	require.Nil(t, affected)
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "xfs", true, []*node.Node{nodeB1})
+	require.False(t, scoped)
+	require.Nil(t, affected)
+
+	// JFS targeting nodeB1 affects only HostFact group B ([nodeB1], scoped=true).
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "jfs", false, []*node.Node{nodeB1})
+	require.True(t, scoped)
+	require.Equal(t, []*node.Node{nodeB1}, affected)
+
+	// JFS targeting nodeA2 expands to entire HostFact group A ([nodeA2, nodeA1], scoped=true).
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "jfs", false, []*node.Node{nodeA2})
+	require.True(t, scoped)
+	require.Equal(t, []*node.Node{nodeA2, nodeA1}, affected)
+
+	// JFS targeting a node without HostFacts falls back conservatively to cluster-wide (scoped=false).
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "jfs", false, []*node.Node{nodeNoFacts})
+	require.False(t, scoped)
+	require.Nil(t, affected)
+	// Empty JFS target list also falls back conservatively to cluster-wide (scoped=false).
+	affected, scoped = resolveRedoAffectedNodes("tpl-1", "cubebox", "jfs", false, nil)
+	require.False(t, scoped)
+	require.Nil(t, affected)
+
+	var mu sync.Mutex
+	var seenHostIDs []string
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+	listRedoTemplateSandboxes = func(_ context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		if req != nil {
+			mu.Lock()
+			seenHostIDs = append(seenHostIDs, req.HostID)
+			mu.Unlock()
+			if req.HostID == "node-b1" || req.HostID == "node-a2" {
+				return &types.ListCubeSandboxRes{
+					Ret:  &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+					Data: nil,
+				}
+			}
+		}
+		return &types.ListCubeSandboxRes{
+			Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+			Data: []*types.SandboxBriefData{
+				{SandboxID: "sb-a1", TemplateID: "tpl-1", HostID: "node-a1", HostIP: "10.0.0.1"},
+			},
+		}
+	}
+
+	// Sandbox running on nodeA1 (group A) does NOT block JFS redo targeting nodeB1 (group B).
+	seenHostIDs = nil
+	require.NoError(t, ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "jfs", false, []*node.Node{nodeB1}))
+	require.Equal(t, []string{"node-b1"}, seenHostIDs)
+
+	// Sandbox running on nodeA1 (group A) DOES block JFS redo targeting peer nodeA2 in group A.
+	seenHostIDs = nil
+	err := ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "jfs", false, []*node.Node{nodeA2})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Contains(t, seenHostIDs, "node-a1")
+	require.Subset(t, []string{"node-a2", "node-a1"}, seenHostIDs)
+
+	// JFS target without HostFacts falls back to cluster-wide scan and rejects.
+	seenHostIDs = nil
+	err = ensureRedoTemplateNotInUse(context.Background(), "tpl-1", "cubebox", "jfs", false, []*node.Node{nodeNoFacts})
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{""}, seenHostIDs)
+}
+
+func TestSubmitRedoTemplateFromImageScopedInUseAndFullRebuild(t *testing.T) {
+	newTestDB := func(t *testing.T) *gorm.DB {
+		t.Helper()
+		dbName := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
+		db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+		require.NoError(t, err)
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		require.NoError(t, db.AutoMigrate(&models.TemplateDefinition{}, &models.TemplateImageJob{}, &models.TemplateReplica{}, &models.RootfsArtifact{}))
+		oldDB := store.db
+		store.db = db
+		t.Cleanup(func() {
+			store.db = oldDB
+			_ = sqlDB.Close()
+		})
+		return db
+	}
+
+	setupRedoCluster := func(t *testing.T, patches *gomonkey.Patches, nodes []*node.Node, listFn func(*types.ListCubeSandboxReq) *types.ListCubeSandboxRes) *[]string {
+		t.Helper()
+		patches.ApplyFunc(healthyTemplateNodes, func(string) []*node.Node { return nodes })
+		patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList { return nodes })
+		var mu sync.Mutex
+		var seenHostIDs []string
+		origList := listRedoTemplateSandboxes
+		t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+		listRedoTemplateSandboxes = func(_ context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+			if req != nil {
+				mu.Lock()
+				seenHostIDs = append(seenHostIDs, req.HostID)
+				mu.Unlock()
+			}
+			return listFn(req)
+		}
+		return &seenHostIDs
+	}
+
+	seedRedoTemplate := func(t *testing.T, db *gorm.DB, tplID, defStatus, backend, artStatus string, replicas ...models.TemplateReplica) {
+		t.Helper()
+		reqJSON, err := marshalTemplateImageJobRequest(&types.CreateTemplateFromImageReq{
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			TemplateID:        tplID,
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			Backend:           backend,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.Create(&models.TemplateDefinition{
+			TemplateID:     tplID,
+			InstanceType:   cubeboxv1.InstanceType_cubebox.String(),
+			Status:         defStatus,
+			StorageBackend: backend,
+			RequestJSON:    "{}",
+		}).Error)
+		artID := "art-" + tplID
+		require.NoError(t, db.Create(&models.RootfsArtifact{
+			ArtifactID: artID,
+			Status:     artStatus,
+		}).Error)
+		require.NoError(t, db.Create(&models.TemplateImageJob{
+			JobID:       "job-" + tplID + "-1",
+			TemplateID:  tplID,
+			RequestID:   "req-" + tplID + "-1",
+			AttemptNo:   1,
+			Operation:   JobOperationCreate,
+			ArtifactID:  artID,
+			Status:      JobStatusReady,
+			Phase:       JobPhaseReady,
+			RequestJSON: reqJSON,
+		}).Error)
+		for _, r := range replicas {
+			r.TemplateID = tplID
+			require.NoError(t, db.Create(&r).Error)
+		}
+	}
+
+	sandboxOnNodeA := func(tplID string) func(*types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return func(req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+			if req != nil && req.HostID == "node-b" {
+				return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+			}
+			return &types.ListCubeSandboxRes{
+				Ret:  &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+				Data: []*types.SandboxBriefData{{SandboxID: "sb-a", TemplateID: tplID, HostID: "node-a", HostIP: "10.0.0.1"}},
+			}
+		}
+	}
+
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true}
+	nodeC := &node.Node{InsID: "node-c", IP: "10.0.0.3", Healthy: true}
+
+	t.Run("partially ready failed_only allowed when sandbox runs on ready node", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, sandboxOnNodeA("tpl-partial"))
+		redoLaunched := make(chan struct{}, 1)
+		patches.ApplyFunc(runRedoTemplateImageJob, func(context.Context, string, *types.RedoTemplateFromImageReq, string) {
+			redoLaunched <- struct{}{}
+		})
+		seedRedoTemplate(t, db, "tpl-partial", StatusPartiallyReady, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+
+		info, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:    &types.Request{RequestID: "req-redo-partial"},
+			TemplateID: "tpl-partial",
+			FailedOnly: true,
+		}, "http://master.example")
+		require.NoError(t, err)
+		require.Equal(t, RedoModeFailedOnly, info.RedoMode)
+		require.Equal(t, []string{"node-b"}, info.RedoScope)
+		select {
+		case <-redoLaunched:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected runRedoTemplateImageJob to be invoked")
+		}
+	})
+
+	t.Run("explicit redo to new node allowed while sandbox runs on existing node", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB, nodeC}, sandboxOnNodeA("tpl-newnode"))
+		redoLaunched := make(chan struct{}, 1)
+		patches.ApplyFunc(runRedoTemplateImageJob, func(context.Context, string, *types.RedoTemplateFromImageReq, string) {
+			redoLaunched <- struct{}{}
+		})
+		seedRedoTemplate(t, db, "tpl-newnode", StatusReady, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+		)
+
+		info, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-newnode"},
+			TemplateID:        "tpl-newnode",
+			DistributionScope: []string{"node-c"},
+		}, "http://master.example")
+		require.NoError(t, err)
+		require.Equal(t, RedoModeNodes, info.RedoMode)
+		require.Equal(t, []string{"node-c"}, info.RedoScope)
+		select {
+		case <-redoLaunched:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected runRedoTemplateImageJob to be invoked")
+		}
+	})
+
+	t.Run("partially ready scoped to ready node in use is rejected", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, sandboxOnNodeA("tpl-blocked"))
+		seedRedoTemplate(t, db, "tpl-blocked", StatusPartiallyReady, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+		)
+
+		_, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-blocked"},
+			TemplateID:        "tpl-blocked",
+			DistributionScope: []string{"node-a"},
+		}, "http://master.example")
+		require.ErrorIs(t, err, ErrTemplateInUse)
+	})
+
+	t.Run("full rebuild checks cluster-wide even when targeting failed node", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, sandboxOnNodeA("tpl-rebuild"))
+		seedRedoTemplate(t, db, "tpl-rebuild", StatusPartiallyReady, "xfs", ArtifactStatusFailed,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+
+		_, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-rebuild"},
+			TemplateID:        "tpl-rebuild",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.ErrorIs(t, err, ErrTemplateInUse)
+	})
+
+	t.Run("missing definition is rejected with ErrTemplateNotFound", func(t *testing.T) {
+		db := newTestDB(t)
+		reqJSON, err := marshalTemplateImageJobRequest(&types.CreateTemplateFromImageReq{
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			TemplateID:        "tpl-no-def",
+			WritableLayerSize: "20Gi",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			Backend:           "xfs",
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.Create(&models.TemplateImageJob{
+			JobID:       "job-nodef-1",
+			TemplateID:  "tpl-no-def",
+			RequestID:   "req-nodef-1",
+			AttemptNo:   1,
+			Operation:   JobOperationCreate,
+			Status:      JobStatusFailed,
+			Phase:       JobPhaseDistributing,
+			RequestJSON: reqJSON,
+		}).Error)
+
+		_, err = SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:    &types.Request{RequestID: "req-redo-nodef"},
+			TemplateID: "tpl-no-def",
+		}, "http://master.example")
+		require.ErrorIs(t, err, ErrTemplateNotFound)
+	})
+
+	t.Run("jfs_backend_without_host_facts_checks_cluster-wide", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		seenHostIDs := setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, sandboxOnNodeA("tpl-jfs"))
+		seedRedoTemplate(t, db, "tpl-jfs", StatusPartiallyReady, "jfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+
+		_, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-jfs"},
+			TemplateID:        "tpl-jfs",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.ErrorIs(t, err, ErrTemplateInUse)
+		require.Equal(t, []string{""}, *seenHostIDs)
+	})
+
+	t.Run("jfs_redo_to_different_host_fact_group_allowed_while_sandbox_runs_in_other_group", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		nodeGroupA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}}
+		nodeGroupB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-b", HostKernelRelease: "6.6.0"}}
+		seenHostIDs := setupRedoCluster(t, patches, []*node.Node{nodeGroupA, nodeGroupB}, sandboxOnNodeA("tpl-jfs-groups"))
+		redoLaunched := make(chan struct{}, 1)
+		patches.ApplyFunc(runRedoTemplateImageJob, func(context.Context, string, *types.RedoTemplateFromImageReq, string) {
+			redoLaunched <- struct{}{}
+		})
+		seedRedoTemplate(t, db, "tpl-jfs-groups", StatusPartiallyReady, "jfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+		)
+
+		info, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-jfs-group-b"},
+			TemplateID:        "tpl-jfs-groups",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.NoError(t, err)
+		require.Equal(t, []string{"node-b"}, info.RedoScope)
+		require.Equal(t, []string{"node-b"}, *seenHostIDs)
+		select {
+		case <-redoLaunched:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected runRedoTemplateImageJob to be invoked")
+		}
+	})
+
+	t.Run("jfs_redo_to_peer_node_in_same_host_fact_group_rejected_when_group_in_use", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		nodeGroupA1 := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}}
+		nodeGroupA2 := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}}
+		seenHostIDs := setupRedoCluster(t, patches, []*node.Node{nodeGroupA1, nodeGroupA2}, sandboxOnNodeA("tpl-jfs-same-group"))
+		seedRedoTemplate(t, db, "tpl-jfs-same-group", StatusPartiallyReady, "jfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+		)
+
+		_, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-jfs-same-group"},
+			TemplateID:        "tpl-jfs-same-group",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.ErrorIs(t, err, ErrTemplateInUse)
+		require.Contains(t, *seenHostIDs, "node-a")
+		require.Subset(t, []string{"node-b", "node-a"}, *seenHostIDs)
+	})
+
+	t.Run("target_node_cubelet_rpc_failure_fails_closed_and_rolls_back_job", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		seenHostIDs := setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, func(*types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+			return &types.ListCubeSandboxRes{
+				Ret: &types.Ret{
+					RetCode: int(errorcode.ErrorCode_ReqCubeAPIFailed),
+					RetMsg:  "list sandbox failed: cubelet unreachable",
+				},
+			}
+		})
+		seedRedoTemplate(t, db, "tpl-rpc-fail", StatusPartiallyReady, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+
+		_, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-rpc-fail"},
+			TemplateID:        "tpl-rpc-fail",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "list sandbox failed: cubelet unreachable")
+		require.Equal(t, []string{"node-b"}, *seenHostIDs)
+
+		var redoCount int64
+		require.NoError(t, db.Table(constants.TemplateImageJobTableName).
+			Where("template_id = ? AND operation = ?", "tpl-rpc-fail", JobOperationRedo).
+			Count(&redoCount).Error)
+		require.Zero(t, redoCount)
+	})
+
+	t.Run("cubelet_rpc_runs_outside_template_write_lock", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		lockFree := false
+		setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, func(*types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+			lock := templateRequestLockGroup.get("tpl-lock-free")
+			if lock != nil && lock.TryRLock() {
+				lockFree = true
+				lock.RUnlock()
+			}
+			return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+		})
+		redoLaunched := make(chan struct{}, 1)
+		patches.ApplyFunc(runRedoTemplateImageJob, func(context.Context, string, *types.RedoTemplateFromImageReq, string) {
+			redoLaunched <- struct{}{}
+		})
+		seedRedoTemplate(t, db, "tpl-lock-free", StatusPartiallyReady, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+
+		info, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:    &types.Request{RequestID: "req-redo-lock-free"},
+			TemplateID: "tpl-lock-free",
+			FailedOnly: true,
+		}, "http://master.example")
+		require.NoError(t, err)
+		require.False(t, info.NeedsFullRebuild)
+		require.True(t, lockFree, "template write lock must not be held while running Cubelet ListSandbox RPCs")
+		select {
+		case <-redoLaunched:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected runRedoTemplateImageJob to be invoked")
+		}
+	})
+
+	t.Run("concurrent_scope_widening_between_preflight_and_lock_rejected_without_second_rpc", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		seenHostIDs := setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, func(*types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+			// Simulate concurrent artifact invalidation before SubmitRedoTemplateFromImage enters the write lock.
+			require.NoError(t, db.Table(constants.RootfsArtifactTableName).
+				Where("artifact_id = ?", "art-tpl-race").
+				Update("status", ArtifactStatusFailed).Error)
+			return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+		})
+		seedRedoTemplate(t, db, "tpl-race", StatusPartiallyReady, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+
+		_, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-race"},
+			TemplateID:        "tpl-race",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.ErrorIs(t, err, ErrRedoTemplateScopeChanged)
+		require.NotErrorIs(t, err, ErrTemplateAttemptInProgress)
+		require.Equal(t, []string{"node-b"}, *seenHostIDs)
+	})
+
+	t.Run("resume_phase_building_ext4_with_ready_artifact_requires_full_rebuild", func(t *testing.T) {
+		db := newTestDB(t)
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		seenHostIDs := setupRedoCluster(t, patches, []*node.Node{nodeA, nodeB}, func(*types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+			return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+		})
+		patches.ApplyFunc(runRedoTemplateImageJob, func(context.Context, string, *types.RedoTemplateFromImageReq, string) {
+			t.Fatal("runRedoTemplateImageJob must not run locally when ResumePhase requires full rebuild")
+		})
+		seedRedoTemplate(t, db, "tpl-ext4-ready", StatusFailed, "xfs", ArtifactStatusReady,
+			models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady},
+			models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed},
+		)
+		require.NoError(t, db.Table(constants.TemplateImageJobTableName).
+			Where("job_id = ?", "job-tpl-ext4-ready-1").
+			Updates(map[string]any{
+				"status": JobStatusFailed,
+				"phase":  JobPhaseBuildingExt4,
+			}).Error)
+
+		info, err := SubmitRedoTemplateFromImage(context.Background(), &types.RedoTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-redo-ext4-ready"},
+			TemplateID:        "tpl-ext4-ready",
+			DistributionScope: []string{"node-b"},
+		}, "http://master.example")
+		require.NoError(t, err)
+		require.Equal(t, JobStatusPending, info.Status)
+		require.Equal(t, JobPhaseBuildingExt4, info.ResumePhase)
+		require.True(t, info.NeedsFullRebuild)
+		require.True(t, RedoNeedsFullRebuild(context.Background(), info.JobID))
+		require.Equal(t, []string{""}, *seenHostIDs)
+	})
+}
+
+func TestPrepareRedoTemplateReplicasScopedInUse(t *testing.T) {
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA, nodeB}
+	})
+
+	cleanupCalls := 0
+	patches.ApplyFunc(cleanupTemplateReplicasOnNodes, func(context.Context, string, []models.TemplateReplica, []*node.Node, string) error {
+		cleanupCalls++
+		return nil
+	})
+	patches.ApplyFunc(markJFSRedoReplicaRowsUnavailable, func(context.Context, string, []*node.Node) error { return nil })
+	patches.ApplyFunc(deleteJFSRedoReplicaRows, func(context.Context, string, []*node.Node) error { return nil })
+
+	var mu sync.Mutex
+	var seenHostIDs []string
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+	listRedoTemplateSandboxes = func(_ context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		if req != nil {
+			mu.Lock()
+			seenHostIDs = append(seenHostIDs, req.HostID)
+			mu.Unlock()
+			if req.HostID == "node-b" {
+				return &types.ListCubeSandboxRes{
+					Ret:  &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+					Data: nil,
+				}
+			}
+		}
+		return &types.ListCubeSandboxRes{
+			Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+			Data: []*types.SandboxBriefData{
+				{SandboxID: "sb-a", TemplateID: "tpl-prep", HostID: "node-a", HostIP: "10.0.0.1"},
+			},
+		}
+	}
+
+	// Non-JFS xfs targeting node-b passes in-use check and cleans up node-b.
+	require.NoError(t, prepareRedoTemplateReplicas(context.Background(), "tpl-prep", "cubebox", nil, []*node.Node{nodeB}, "xfs"))
+	require.Equal(t, []string{"node-b"}, seenHostIDs)
+	require.Equal(t, 1, cleanupCalls)
+
+	// Non-JFS xfs targeting node-a (has sandbox) is rejected before cleanup.
+	seenHostIDs = nil
+	err := prepareRedoTemplateReplicas(context.Background(), "tpl-prep", "cubebox", nil, []*node.Node{nodeA}, "xfs")
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{"node-a"}, seenHostIDs)
+	require.Equal(t, 1, cleanupCalls)
+
+	// JFS targeting node-b without HostFacts falls back to cluster-wide (HostID == "") and rejects before cleanup.
+	seenHostIDs = nil
+	err = prepareRedoTemplateReplicas(context.Background(), "tpl-prep", "cubebox", nil, []*node.Node{nodeB}, "jfs")
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Equal(t, []string{""}, seenHostIDs)
+	require.Equal(t, 1, cleanupCalls)
+
+	// JFS targeting node-b in a different HostFact group is allowed even while node-a has a running sandbox.
+	nodeA.HostFacts = &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}
+	nodeB.HostFacts = &node.HostFacts{CPUIDHash: "cpu-b", HostKernelRelease: "6.6.0"}
+	seenHostIDs = nil
+	require.NoError(t, prepareRedoTemplateReplicas(context.Background(), "tpl-prep", "cubebox", nil, []*node.Node{nodeB}, "jfs"))
+	require.Equal(t, []string{"node-b"}, seenHostIDs)
+	require.Equal(t, 2, cleanupCalls)
+
+	// JFS targeting node-b in the SAME HostFact group as node-a expands to [node-b, node-a] and rejects before cleanup.
+	nodeB.HostFacts = &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}
+	seenHostIDs = nil
+	err = prepareRedoTemplateReplicas(context.Background(), "tpl-prep", "cubebox", nil, []*node.Node{nodeB}, "jfs")
+	require.ErrorIs(t, err, ErrTemplateInUse)
+	require.Contains(t, seenHostIDs, "node-a")
+	require.Subset(t, []string{"node-b", "node-a"}, seenHostIDs)
+	require.Equal(t, 2, cleanupCalls)
+}
+
+func TestRunRedoTemplateImageJobBuildingExt4ChecksClusterWideInUseBeforeDestructivePrepare(t *testing.T) {
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA, nodeB}
+	})
+
+	var lastUpdate map[string]any
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			JobID:       jobID,
+			TemplateID:  "tpl-ext4-guard",
+			ResumePhase: JobPhaseDistributing,
+			ArtifactID:  "artifact-stale",
+		}, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		lastUpdate = values
+		return nil
+	})
+	patches.ApplyFunc(unmarshalTemplateImageJobRequest, func(payload string) (*types.CreateTemplateFromImageReq, error) {
+		return &types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-1"},
+			TemplateID:        "tpl-ext4-guard",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			WritableLayerSize: "20Gi",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			Backend:           "xfs",
+		}, nil
+	})
+	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
+		return []models.TemplateReplica{
+			{NodeID: "node-a", Status: ReplicaStatusReady},
+			{NodeID: "node-b", Status: ReplicaStatusFailed},
+		}, nil
+	})
+	patches.ApplyFunc(resolveRedoTargets, func(instanceType string, req *types.RedoTemplateFromImageReq, replicas []models.TemplateReplica) ([]*node.Node, error) {
+		return []*node.Node{nodeB}, nil
+	})
+	// Downgrade to BUILDING_EXT4 because artifact is not reusable.
+	patches.ApplyFunc(rootfsArtifactReusableForRedo, func(context.Context, string) bool { return false })
+	patches.ApplyFunc(getRootfsArtifactByID, func(ctx context.Context, artifactID string) (*models.RootfsArtifact, error) {
+		return &models.RootfsArtifact{ArtifactID: artifactID, Status: ArtifactStatusFailed}, nil
+	})
+	patches.ApplyFunc(rootfsArtifactReuseVerdict, func(context.Context, *models.RootfsArtifact) error {
+		return nil
+	})
+	patches.ApplyFunc(prepareRootfsArtifactForRedoBuild, func(context.Context, string) (*models.RootfsArtifact, bool) {
+		t.Fatal("prepareRootfsArtifactForRedoBuild must not be called before cluster-wide in-use check")
+		return nil, false
+	})
+
+	var seenHostIDs []string
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+	listRedoTemplateSandboxes = func(_ context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		if req != nil {
+			seenHostIDs = append(seenHostIDs, req.HostID)
+		}
+		return &types.ListCubeSandboxRes{
+			Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+			Data: []*types.SandboxBriefData{
+				{SandboxID: "sb-a", TemplateID: "tpl-ext4-guard", HostID: "node-a", HostIP: "10.0.0.1"},
+			},
+		}
+	}
+
+	runRedoTemplateImageJob(context.Background(), "job-ext4-guard", &types.RedoTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-redo"},
+		TemplateID:        "tpl-ext4-guard",
+		DistributionScope: []string{"node-b"},
+	}, "http://master.example")
+
+	require.Equal(t, []string{""}, seenHostIDs)
+	require.NotNil(t, lastUpdate)
+	require.Equal(t, JobStatusFailed, lastUpdate["status"])
+	require.Contains(t, lastUpdate["error_message"], ErrTemplateInUse.Error())
+}
+
+func TestTemplateInUseSeamsKeepDeleteFailOpenAndRedoFailClosed(t *testing.T) {
+	require.Equal(t,
+		reflect.ValueOf(sandbox.ListSandbox).Pointer(),
+		reflect.ValueOf(listTemplateSandboxes).Pointer(),
+		"delete/snapshot path must keep sandbox.ListSandbox",
+	)
+	require.Equal(t,
+		reflect.ValueOf(sandbox.ListSandboxWithFailOnError).Pointer(),
+		reflect.ValueOf(listRedoTemplateSandboxes).Pointer(),
+		"redo path must use sandbox.ListSandboxWithFailOnError",
+	)
+	require.Equal(t,
+		reflect.ValueOf(isTemplateInUseFailClosed).Pointer(),
+		reflect.ValueOf(redoTemplateInUse).Pointer(),
+	)
+
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA}
+	})
+
+	origDeleteList := listTemplateSandboxes
+	origRedoList := listRedoTemplateSandboxes
+	t.Cleanup(func() {
+		listTemplateSandboxes = origDeleteList
+		listRedoTemplateSandboxes = origRedoList
+	})
+
+	listTemplateSandboxes = func(context.Context, *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+	}
+	listRedoTemplateSandboxes = func(context.Context, *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return &types.ListCubeSandboxRes{
+			Ret: &types.Ret{
+				RetCode: int(errorcode.ErrorCode_ReqCubeAPIFailed),
+				RetMsg:  "cubelet unreachable",
+			},
+		}
+	}
+
+	inUse, err := isTemplateInUse(context.Background(), "tpl-seam", "cubebox")
+	require.NoError(t, err)
+	require.False(t, inUse)
+
+	_, err = redoTemplateInUse(context.Background(), "tpl-seam", "cubebox")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cubelet unreachable")
+}
+
+func TestIsTemplateInUseOnNodesQueriesPeersInParallel(t *testing.T) {
+	nodes := []*node.Node{
+		{InsID: "node-1", IP: "10.0.0.1", Healthy: true},
+		{InsID: "node-2", IP: "10.0.0.2", Healthy: true},
+		{InsID: "node-3", IP: "10.0.0.3", Healthy: true},
+	}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList(nodes)
+	})
+
+	origRedoList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origRedoList })
+
+	var mu sync.Mutex
+	started := 0
+	allStarted := make(chan struct{})
+	seenHostIDs := make([]string, 0, len(nodes))
+	listRedoTemplateSandboxes = func(ctx context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		mu.Lock()
+		seenHostIDs = append(seenHostIDs, req.HostID)
+		started++
+		if started == len(nodes) {
+			close(allStarted)
+		}
+		mu.Unlock()
+
+		// Deadlocks until test timeout if isTemplateInUseOnNodes queries nodes sequentially.
+		select {
+		case <-allStarted:
+		case <-time.After(2 * time.Second):
+			return &types.ListCubeSandboxRes{
+				Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_ReqCubeAPIFailed), RetMsg: "timed out waiting for parallel peer check"},
+			}
+		case <-ctx.Done():
+			return &types.ListCubeSandboxRes{
+				Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_ReqCubeAPIFailed), RetMsg: ctx.Err().Error()},
+			}
+		}
+		return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+	}
+
+	inUse, err := isTemplateInUseOnNodes(context.Background(), "tpl-parallel", "cubebox", nodes)
+	require.NoError(t, err)
+	require.False(t, inUse)
+	require.ElementsMatch(t, []string{"node-1", "node-2", "node-3"}, seenHostIDs)
+}
+
+func TestRunRedoTemplateImageJobDistributingChecksInUseBeforeArtifactCleanup(t *testing.T) {
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true}
+
+	artifactData := []byte("artifact-data")
+	artifactPath, artifactSHA := writeRootfsArtifactTestFile(t, artifactData)
+	generatedReqPayload, _ := json.Marshal(&types.CreateCubeSandboxReq{
+		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateID:      "tpl-dist-guard",
+			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+		},
+	})
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA, nodeB}
+	})
+
+	var lastUpdate map[string]any
+	patches.ApplyFunc(getTemplateImageJobRecordByID, func(ctx context.Context, jobID string) (*models.TemplateImageJob, error) {
+		return &models.TemplateImageJob{
+			JobID:       jobID,
+			TemplateID:  "tpl-dist-guard",
+			ResumePhase: JobPhaseDistributing,
+			ArtifactID:  "artifact-ready",
+		}, nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, values map[string]any) error {
+		lastUpdate = values
+		return nil
+	})
+	patches.ApplyFunc(unmarshalTemplateImageJobRequest, func(payload string) (*types.CreateTemplateFromImageReq, error) {
+		return &types.CreateTemplateFromImageReq{
+			Request:           &types.Request{RequestID: "req-1"},
+			TemplateID:        "tpl-dist-guard",
+			InstanceType:      cubeboxv1.InstanceType_cubebox.String(),
+			WritableLayerSize: "20Gi",
+			SourceImageRef:    "docker.io/library/nginx:latest",
+			Backend:           "xfs",
+		}, nil
+	})
+	patches.ApplyFunc(ListReplicas, func(ctx context.Context, templateID string) ([]models.TemplateReplica, error) {
+		return []models.TemplateReplica{{NodeID: "node-b", Status: ReplicaStatusFailed}}, nil
+	})
+	patches.ApplyFunc(resolveRedoTargets, func(instanceType string, req *types.RedoTemplateFromImageReq, replicas []models.TemplateReplica) ([]*node.Node, error) {
+		return []*node.Node{nodeB}, nil
+	})
+	patches.ApplyFunc(getRootfsArtifactByID, func(ctx context.Context, artifactID string) (*models.RootfsArtifact, error) {
+		return &models.RootfsArtifact{
+			ArtifactID:           artifactID,
+			Ext4Path:             artifactPath,
+			Ext4SHA256:           artifactSHA,
+			Ext4SizeBytes:        int64(len(artifactData)),
+			DownloadToken:        "token-1",
+			MasterNodeIP:         "http://master.example",
+			Status:               ArtifactStatusReady,
+			GeneratedRequestJSON: string(generatedReqPayload),
+		}, nil
+	})
+	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
+		t.Fatal("cleanupArtifactOnNodes must not be called before in-use check")
+		return nil
+	})
+	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
+		t.Fatal("distributeRootfsArtifact must not be called before in-use check")
+		return nil, 0, 0, 0, nil
+	})
+
+	var seenHostIDs []string
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+	listRedoTemplateSandboxes = func(_ context.Context, req *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		if req != nil {
+			seenHostIDs = append(seenHostIDs, req.HostID)
+		}
+		return &types.ListCubeSandboxRes{
+			Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+			Data: []*types.SandboxBriefData{
+				{SandboxID: "sb-b", TemplateID: "tpl-dist-guard", HostID: "node-b", HostIP: "10.0.0.2"},
+			},
+		}
+	}
+
+	runRedoTemplateImageJob(context.Background(), "job-dist-guard", &types.RedoTemplateFromImageReq{
+		Request:           &types.Request{RequestID: "req-redo"},
+		TemplateID:        "tpl-dist-guard",
+		DistributionScope: []string{"node-b"},
+	}, "http://master.example")
+
+	require.Equal(t, []string{"node-b"}, seenHostIDs)
+	require.NotNil(t, lastUpdate)
+	require.Equal(t, JobStatusFailed, lastUpdate["status"])
+	require.Contains(t, lastUpdate["error_message"], ErrTemplateInUse.Error())
+}
+
+func TestRedoInUseScopeCovers(t *testing.T) {
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-a", HostKernelRelease: "5.15.0"}}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-b", HostKernelRelease: "6.6.0"}}
+	nodeC := &node.Node{InsID: "node-c", IP: "10.0.0.3", Healthy: true, HostFacts: &node.HostFacts{CPUIDHash: "cpu-b", HostKernelRelease: "6.6.0"}}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA, nodeB, nodeC}
+	})
+
+	_, scopedA := newRedoInUseScope("tpl-scope", "cubebox", "xfs", false, []*node.Node{nodeA})
+	_, scopedAB := newRedoInUseScope("tpl-scope", "cubebox", "xfs", false, []*node.Node{nodeA, nodeB})
+	_, scopedCluster := newRedoInUseScope("tpl-scope", "cubebox", "xfs", true, []*node.Node{nodeA})
+	_, scopedOtherType := newRedoInUseScope("tpl-scope", "otherbox", "xfs", false, []*node.Node{nodeA})
+	_, jfsGroupA := newRedoInUseScope("tpl-scope", "cubebox", "jfs", false, []*node.Node{nodeA})
+	_, jfsGroupB := newRedoInUseScope("tpl-scope", "cubebox", "jfs", false, []*node.Node{nodeB})
+
+	tests := []struct {
+		name string
+		pre  redoInUseScope
+		cur  redoInUseScope
+		want bool
+	}{
+		{name: "identical scoped", pre: scopedA, cur: scopedA, want: true},
+		{name: "narrowed scoped", pre: scopedAB, cur: scopedA, want: true},
+		{name: "widened scoped", pre: scopedA, cur: scopedAB, want: false},
+		{name: "cluster-wide covers scoped", pre: scopedCluster, cur: scopedAB, want: true},
+		{name: "scoped cannot cover cluster-wide", pre: scopedAB, cur: scopedCluster, want: false},
+		{name: "instance type mismatch", pre: scopedCluster, cur: scopedOtherType, want: false},
+		{name: "jfs group switch", pre: jfsGroupA, cur: jfsGroupB, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.pre.covers(tt.cur))
+		})
+	}
+}
+
+func TestListSandboxesForTemplateCheckFailsClosedOnCancelledContext(t *testing.T) {
+	nodeA := &node.Node{InsID: "node-a", IP: "10.0.0.1", Healthy: true}
+	nodeB := &node.Node{InsID: "node-b", IP: "10.0.0.2", Healthy: true}
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(localcache.GetHealthyNodesByInstanceType, func(int, string) node.NodeList {
+		return node.NodeList{nodeA, nodeB}
+	})
+
+	origRedoList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origRedoList })
+	// Simulates doOneList/dealRspData exiting early on ctx.Done() with Success and empty/truncated Data.
+	listRedoTemplateSandboxes = func(_ context.Context, _ *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return &types.ListCubeSandboxRes{
+			Ret:  &types.Ret{RetCode: int(errorcode.ErrorCode_Success)},
+			Data: nil,
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("single target node", func(t *testing.T) {
+		inUse, err := isTemplateInUseOnNodes(ctx, "tpl-ctx", "cubebox", []*node.Node{nodeA})
+		require.ErrorIs(t, err, context.Canceled)
+		require.False(t, inUse)
+	})
+
+	t.Run("multiple target nodes", func(t *testing.T) {
+		inUse, err := isTemplateInUseOnNodes(ctx, "tpl-ctx", "cubebox", []*node.Node{nodeA, nodeB})
+		require.ErrorIs(t, err, context.Canceled)
+		require.False(t, inUse)
+	})
+
+	t.Run("cluster-wide fail-closed path", func(t *testing.T) {
+		inUse, err := isTemplateInUseFailClosed(ctx, "tpl-ctx", "cubebox")
+		require.ErrorIs(t, err, context.Canceled)
+		require.False(t, inUse)
+	})
+}
+
 func TestDetermineRedoResumePhase(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1767,6 +2864,11 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 		t.Fatal("distributeRootfsArtifact should not be called after cleanup failure")
 		return nil, 0, 0, 0, nil
 	})
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+	listRedoTemplateSandboxes = func(context.Context, *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+	}
 
 	runRedoTemplateImageJob(context.Background(), "job-1", &types.RedoTemplateFromImageReq{
 		Request:    &types.Request{RequestID: "req-redo"},
@@ -1893,6 +2995,11 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	patches.ApplyFunc(cleanupArtifactOnNodes, func(ctx context.Context, gotArtifactID, instanceType string, targets []*node.Node) error {
 		return nil
 	})
+	origList := listRedoTemplateSandboxes
+	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
+	listRedoTemplateSandboxes = func(context.Context, *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
+		return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+	}
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
 		distributedToken = artifact.DownloadToken
 		distributedSHA = artifact.Ext4SHA256

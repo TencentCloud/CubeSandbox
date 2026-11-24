@@ -6,11 +6,18 @@ package cube
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -172,4 +179,73 @@ func TestForwardRedoBuildJobToTemplateCenterMissingEndpointMessageIsNotStale(t *
 	if !strings.Contains(msg, config.EnvTemplateCenterAddr) {
 		t.Fatalf("error_message must name the missing env var %s, got %q", config.EnvTemplateCenterAddr, msg)
 	}
+}
+
+func TestHandleRedoTemplateActionUsesSubmitDecisionInsteadOfDBReread(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	runCase := func(t *testing.T, needsFullRebuild bool, expectForward bool) {
+		t.Helper()
+		origSubmit := redoTemplateFromImageFn
+		t.Cleanup(func() { redoTemplateFromImageFn = origSubmit })
+
+		redoTemplateFromImageFn = func(context.Context, *types.RedoTemplateFromImageReq, string) (*types.TemplateImageJobInfo, error) {
+			return &types.TemplateImageJobInfo{
+				JobID:            "job-redo-decision",
+				TemplateID:       "tpl-1",
+				NeedsFullRebuild: needsFullRebuild,
+			}, nil
+		}
+
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+
+		// Even if RedoNeedsFullRebuild flips to true after submission (e.g. local
+		// goroutine downgraded resume_phase to BUILDING_EXT4), the handler must
+		// follow job.NeedsFullRebuild rather than re-reading mutable DB state.
+		patches.ApplyFunc(templatecenter.RedoNeedsFullRebuild, func(context.Context, string) bool {
+			t.Fatal("handleRedoTemplateAction must not call RedoNeedsFullRebuild after SubmitRedoTemplateFromImage")
+			return !needsFullRebuild
+		})
+
+		forwarded := make(chan string, 1)
+		patches.ApplyFunc(forwardRedoBuildJobToTemplateCenter, func(jobID string, downloadBaseURL string) {
+			forwarded <- jobID
+		})
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		req := httptest.NewRequest(http.MethodPost, "/cube/template/redo", strings.NewReader(`{"requestID":"req-1","template_id":"tpl-1"}`))
+		req.Header.Set("Content-Type", "application/json")
+		c.Request = req.WithContext(CubeLog.WithRequestTrace(req.Context(), &CubeLog.RequestTrace{}))
+
+		handleRedoTemplateAction(c)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if expectForward {
+			select {
+			case jobID := <-forwarded:
+				if jobID != "job-redo-decision" {
+					t.Fatalf("unexpected forwarded jobID %q", jobID)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("expected forwardRedoBuildJobToTemplateCenter to be called")
+			}
+		} else {
+			select {
+			case jobID := <-forwarded:
+				t.Fatalf("unexpected forwardRedoBuildJobToTemplateCenter(%q) when NeedsFullRebuild=false", jobID)
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+
+	t.Run("redistribution_does_not_forward", func(t *testing.T) {
+		runCase(t, false, false)
+	})
+	t.Run("full_rebuild_forwards", func(t *testing.T) {
+		runCase(t, true, true)
+	})
 }
