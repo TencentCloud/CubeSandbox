@@ -51,6 +51,9 @@ func buildSnapshotFromStore(reg *store.NodeRegistration, st *store.NodeStatus, v
 		_ = json.Unmarshal([]byte(st.ImagesJSON), &snap.Images)
 		_ = json.Unmarshal([]byte(st.LocalTemplatesJSON), &snap.LocalTemplates)
 		snap.HeartbeatTime = time.Unix(st.HeartbeatUnix, 0)
+		if st.HeartbeatReceivedUnix > 0 {
+			snap.HeartbeatReceivedAt = time.Unix(st.HeartbeatReceivedUnix, 0)
+		}
 		snap.ReportedReady = st.Healthy
 	}
 
@@ -261,6 +264,7 @@ func ToSchedulerNode(snap *model.NodeSnapshot) *model.SchedulerNode {
 		CreateConcurrentNum:   snap.CreateConcurrentNum,
 		MaxMvmLimit:           snap.MaxMvmNum,
 		MetaDataUpdateAt:      snap.HeartbeatTime,
+		HeartbeatReceivedAt:   snap.HeartbeatReceivedAt,
 		QuotaCpu:              quotaCPU,
 		QuotaMem:              quotaMem,
 		MetricUpdate:          snap.MetricUpdate,

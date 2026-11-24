@@ -40,12 +40,13 @@ func (NodeRegistration) TableName() string {
 
 type NodeStatus struct {
 	gorm.Model
-	NodeID             string `gorm:"column:node_id"`
-	ConditionsJSON     string `gorm:"column:conditions_json"`
-	ImagesJSON         string `gorm:"column:images_json"`
-	LocalTemplatesJSON string `gorm:"column:local_templates_json"`
-	HeartbeatUnix      int64  `gorm:"column:heartbeat_unix"`
-	Healthy            bool   `gorm:"column:healthy"`
+	NodeID                string `gorm:"column:node_id"`
+	ConditionsJSON        string `gorm:"column:conditions_json"`
+	ImagesJSON            string `gorm:"column:images_json"`
+	LocalTemplatesJSON    string `gorm:"column:local_templates_json"`
+	HeartbeatUnix         int64  `gorm:"column:heartbeat_unix"`
+	HeartbeatReceivedUnix int64  `gorm:"column:heartbeat_received_unix"`
+	Healthy               bool   `gorm:"column:healthy"`
 }
 
 func (NodeStatus) TableName() string {

@@ -13,15 +13,14 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 )
 
-// TestPlacementNodeAbsentLongEnoughGraceBoundary pins the grace semantics
-// without a database: the boundary is inclusive and legacy ip: ids never
-// qualify, however long they have been "absent".
-func TestPlacementNodeAbsentLongEnoughGraceBoundary(t *testing.T) {
+// TestPlacementNodeUnreachableLongEnoughGraceBoundary pins the grace semantics
+// without a database: the boundary is inclusive and legacy ip: ids never qualify.
+func TestPlacementNodeUnreachableLongEnoughGraceBoundary(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 	var since time.Time
 	var ok bool
-	patches.ApplyFunc(localcache.AbsentSince, func(string) (time.Time, bool) { return since, ok })
+	patches.ApplyFunc(localcache.UnreachableSince, func(string) (time.Time, bool) { return since, ok })
 
 	now := time.Now()
 	cases := []struct {
@@ -42,9 +41,9 @@ func TestPlacementNodeAbsentLongEnoughGraceBoundary(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			since, ok = c.since, c.ok
 			p := &models.ArtifactNodePlacement{NodeID: c.nodeID}
-			gotSince, got := placementNodeAbsentLongEnough(p, now)
+			gotSince, got := placementNodeUnreachableLongEnough(p, now)
 			if got != c.want {
-				t.Fatalf("placementNodeAbsentLongEnough(%q)=%v want %v", c.nodeID, got, c.want)
+				t.Fatalf("placementNodeUnreachableLongEnough(%q)=%v want %v", c.nodeID, got, c.want)
 			}
 			if c.want && !gotSince.Equal(c.since) {
 				t.Fatalf("absence start = %s, want %s", gotSince, c.since)
@@ -54,7 +53,7 @@ func TestPlacementNodeAbsentLongEnoughGraceBoundary(t *testing.T) {
 			}
 		})
 	}
-	if _, absent := placementNodeAbsentLongEnough(nil, now); absent {
-		t.Fatal("nil placement must not be treated as absent")
+	if _, unreachable := placementNodeUnreachableLongEnough(nil, now); unreachable {
+		t.Fatal("nil placement must not be treated as unreachable")
 	}
 }

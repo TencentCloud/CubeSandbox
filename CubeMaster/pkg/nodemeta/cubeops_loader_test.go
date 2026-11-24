@@ -124,6 +124,8 @@ func TestCubeOpsLoader_FullNodeRoundTrip(t *testing.T) {
 		HostStatus:          "running",
 		ReportedReady:       true,
 		Healthy:             true,
+		MetaDataUpdateAt:    time.Now().Add(-time.Hour).Truncate(time.Second),
+		HeartbeatReceivedAt: time.Now().Truncate(time.Second),
 		LocalTemplates:      []string{"tpl-1", "tpl-2"},
 		NodeLabels:          map[string]string{"zone": "gz"},
 	}
@@ -153,6 +155,12 @@ func TestCubeOpsLoader_FullNodeRoundTrip(t *testing.T) {
 	}
 	if n.QuotaCpu != want.QuotaCpu {
 		t.Errorf("QuotaCpu=%d", n.QuotaCpu)
+	}
+	if !n.MetaDataUpdateAt.Equal(want.MetaDataUpdateAt) {
+		t.Errorf("MetaDataUpdateAt=%s, want server heartbeat %s", n.MetaDataUpdateAt, want.MetaDataUpdateAt)
+	}
+	if !n.HeartbeatReceivedAt.Equal(want.HeartbeatReceivedAt) {
+		t.Errorf("HeartbeatReceivedAt=%s, want %s", n.HeartbeatReceivedAt, want.HeartbeatReceivedAt)
 	}
 	if n.MaxMvmLimit != want.MaxMvmLimit {
 		t.Errorf("MaxMvmLimit=%d", n.MaxMvmLimit)

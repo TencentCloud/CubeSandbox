@@ -220,8 +220,31 @@ On success:
 template deleted: tpl-748094d2f2374b0a8a37e6ec
 ```
 
-> ⚠️ Deletion removes both the template metadata and all node-local artifact
-> replicas. Once deleted, new sandboxes can no longer be created from it.
+> ⚠️ A successful delete removes the template metadata and the replicas on every
+> reachable node. New sandboxes can no longer be created from the template.
+
+**Unreachable nodes.** A node CubeMaster has not heard from for more than 15
+minutes does not block the delete: it is recorded for later cleanup and the
+delete still succeeds, so that node may keep the template's local data for a
+while. Once the node returns, CubeMaster finishes the cleanup in the background,
+usually within 10 minutes. A node that never returns keeps its pending record.
+A node unreachable for less than 15 minutes is still contacted; if that fails,
+the delete returns an error and can be retried.
+
+Do not reuse a deleted template ID until its pending cleanup has finished.
+
+To follow pending cleanup, check the CubeMaster logs for these messages:
+
+| Message | Meaning |
+|---------|---------|
+| `unreachable past grace` | A node was skipped and recorded for later cleanup |
+| `orphan replica cleanup still failing` | The node is back but cleanup is still failing |
+| `orphan replica cleanup converged` | The template's local data on that node is removed |
+| `deferred placement cleanup converged` | The image file on that node is removed |
+
+While `CUBE_MASTER_IMAGE_JOB_RECONCILE_DISABLED` is set on CubeMaster, the
+template's local data on returning nodes is not cleaned up; image files still
+are.
 
 
 ## Troubleshooting

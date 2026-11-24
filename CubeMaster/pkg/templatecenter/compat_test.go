@@ -205,3 +205,11 @@ func TestIsReplicaSchedulableAllowsStale(t *testing.T) {
 		t.Fatal("non-READY replica must not be schedulable")
 	}
 }
+
+// A READY row kept for an unreachable node awaits cleanup and must not serve.
+func TestReplicaAwaitingCleanupIsNotSchedulable(t *testing.T) {
+	pending := ReplicaStatus{Status: ReplicaStatusReady, CleanupRequired: true}
+	if isReplicaSchedulable(pending) || isReplicaSchedulableNow(context.Background(), pending) {
+		t.Fatal("a replica awaiting cleanup must not be schedulable")
+	}
+}

@@ -243,7 +243,7 @@ func (s *gormNodeStore) UpsertStatus(ctx context.Context, status *NodeStatus) er
 		Columns: []clause.Column{{Name: "node_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"conditions_json", "images_json", "local_templates_json",
-			"heartbeat_unix", "healthy", "updated_at",
+			"heartbeat_unix", "heartbeat_received_unix", "healthy", "updated_at",
 		}),
 	}).Create(status).Error
 }
