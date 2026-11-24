@@ -144,6 +144,10 @@ impl LogForwardHandle {
     }
 }
 
+fn exec_uses_passfd(sandbox_passfd: bool, terminal: bool, template_build: bool) -> bool {
+    !template_build && (sandbox_passfd || !terminal)
+}
+
 fn validate_log_path_component(id: &str) -> CResult<()> {
     if id.is_empty() || id.contains('/') || id.contains("..") || id.contains('\0') {
         return Err(format!("invalid container id for log path: {}", id));
@@ -621,6 +625,20 @@ impl Container {
             && !self.sb_conf.app_snapshot_create
             && !self.info.stdout.is_empty()
             && !self.info.stderr.is_empty()
+    }
+
+    /// Non-tty execs always use passfd: the agent creates no stdio pipes for
+    /// them on the RPC path, so their output would be lost. An exec starts
+    /// after any restore and never carries a connection captured in a
+    /// snapshot. Template builds still take the RPC path, since the snapshot
+    /// they create could capture a running exec's connections. TTY execs keep
+    /// the pty-backed RPC path.
+    fn exec_passfd_io_enabled(&self, terminal: bool) -> bool {
+        exec_uses_passfd(
+            self.passfd_io_enabled(),
+            terminal,
+            self.sb_conf.app_snapshot_create,
+        )
     }
 
     pub async fn create_container(&mut self, trace: &Trace) -> CResult<()> {
@@ -1197,7 +1215,8 @@ impl Container {
             proc.set_consoleSize(console);
         }
 
-        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+        let exec_passfd = self.exec_passfd_io_enabled(exec.tty.terminal);
+        let (stdin_port, stdout_port, stderr_port) = if exec_passfd {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
                 &self.sandbox_id,
                 &exec.tty.stdin,
@@ -1275,7 +1294,7 @@ impl Container {
             .wait_process(client_wait, cid, real_id, exec_id, tx_containerd)
             .await;
 
-        if !self.passfd_io_enabled() {
+        if !exec_passfd {
             let conn = AsyncUtils::connect_agent(&self.sandbox_id)
                 .await
                 .map_err(|e| Error::Other(e.to_string()))?;
@@ -1603,5 +1622,33 @@ mod sandbox_log_path_tests {
         assert!(super::remove_sandbox_log_dir_sync("../etc").is_err());
         assert!(super::remove_sandbox_log_dir_sync("a/b").is_err());
         assert!(super::remove_sandbox_log_dir_sync("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod exec_passfd_tests {
+    use super::exec_uses_passfd;
+
+    #[test]
+    fn non_tty_exec_uses_passfd_without_the_sandbox_opt_in() {
+        assert!(exec_uses_passfd(false, false, false));
+    }
+
+    #[test]
+    fn tty_exec_keeps_the_rpc_path_without_the_sandbox_opt_in() {
+        assert!(!exec_uses_passfd(false, true, false));
+    }
+
+    #[test]
+    fn template_build_exec_keeps_the_rpc_path() {
+        assert!(!exec_uses_passfd(false, false, true));
+        assert!(!exec_uses_passfd(true, false, true));
+        assert!(!exec_uses_passfd(true, true, true));
+    }
+
+    #[test]
+    fn sandbox_opt_in_still_enables_passfd_for_every_exec() {
+        assert!(exec_uses_passfd(true, true, false));
+        assert!(exec_uses_passfd(true, false, false));
     }
 }
