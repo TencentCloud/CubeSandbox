@@ -345,14 +345,14 @@ printf 'NoSchedule ' > "$TEST_STATE/effects"
 printf 'maintenance ' > "$TEST_STATE/values"
 IS_UPGRADE=true sh "$PREFLIGHT_SCRIPT"
 
-# No matching nodes fails.
-if (
-  : > "$TEST_STATE/nodes"
-  sh "$PREFLIGHT_SCRIPT"
-) 2>/dev/null; then
-  echo "empty node list unexpectedly passed" >&2
+# No matching nodes is a successful no-op.
+: > "$TEST_STATE/nodes"
+: > "$TEST_LOG"
+if ! sh "$PREFLIGHT_SCRIPT" >/dev/null 2>"$TEST_STATE/no-nodes.log"; then
+  echo "empty node list unexpectedly failed" >&2
   exit 1
 fi
+grep -q 'no nodes match placement.pvm' "$TEST_STATE/no-nodes.log"
 
 # Stale check pods are cleaned before proceeding.
 : > "$TEST_LOG"

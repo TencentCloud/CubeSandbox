@@ -1423,6 +1423,10 @@ bootstrap:
       priorityClassName: ""
       priorityClassCreate: true
       priorityValue: 1000000
+      # requirePreflight=true installs the pre-install/pre-upgrade Hook that
+      # verifies PVM fingerprint/CNI before the compute DaemonSets roll. With
+      # no matching placement.pvm nodes the Hook logs and exits successfully;
+      # nodes that join later are gated by the PVM DaemonSet.
       requirePreflight: true
       preflightTimeoutSeconds: 900
       drainTimeoutSeconds: 300
