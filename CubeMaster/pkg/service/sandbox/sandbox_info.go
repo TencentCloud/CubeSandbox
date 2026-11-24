@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -153,15 +154,11 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 		}
 		locatedHost = n.IP
 	} else {
-		locatedHost = cachedSandboxHostIPWith(ctx, req.SandboxID, deps.getSandboxProxyMap)
-		if locatedHost == "" && rec != nil {
-			locatedHost = strings.TrimSpace(rec.NodeIP)
-		}
+		locatedHost, n, exist = locateSandboxHostWith(ctx, req.SandboxID, rec, deps)
 		if locatedHost == "" {
 			setError(errorcode.ErrorCode_NotFound, rsp)
 			return "", "", nil, false
 		}
-		n, exist = deps.getNodesByIP(locatedHost)
 	}
 
 	if !exist || n == nil || !n.Healthy {
@@ -183,18 +180,61 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 	return deps.getCubeletAddr(locatedHost), locatedHost, rec, true
 }
 
-// cachedSandboxHostIPWith returns where the sandbox was last seen running. It
-// wins over the pause binding's node: after a cross-node resume whose binding
+// locateSandboxHostWith picks the node to ask about a sandbox when the caller
+// did not pin one. The candidates, in order, are:
+//
+//  1. the local sandbox cache, a hint left by earlier list responses (the
+//     sandbox may have been running or paused there);
+//  2. the shared route (proxy map), which can be stale too;
+//  3. the pause binding's node.
+//
+// The cache wins over the binding: after a cross-node resume whose binding
 // cleanup failed, the binding still names the origin node.
-func cachedSandboxHostIPWith(ctx context.Context, sandboxID string,
-	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)) string {
-	if v := localcache.GetSandboxCache(sandboxID); v != nil {
-		return v.HostIP
+//
+// A candidate whose node Master no longer knows, for example a node removed
+// by a cluster autoscaler after the sandbox moved off it, is skipped, and a
+// cache entry naming one is dropped. A known node is used even when it is
+// unhealthy, as before. When no candidate names a known node, the last
+// non-empty one is returned with exist false, so that the binding's own node
+// still lets a shimless pause be answered from Master.
+func locateSandboxHostWith(ctx context.Context, sandboxID string, rec *pausesnap.Record,
+	deps sandboxInfoLookupDeps) (host string, n *node.Node, exist bool) {
+	known := func(ip string) bool {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			return false
+		}
+		host = ip
+		n, exist = deps.getNodesByIP(ip)
+		return exist
 	}
-	if proxyMap, ok := getSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
-		return proxyMap.HostIP
+	if cached := localcache.GetSandboxCache(sandboxID); cached != nil {
+		if known(cached.HostIP) {
+			return host, n, exist
+		}
+		if localcache.CompareAndDeleteSandboxCache(sandboxID, cached) && allowStaleSandboxHostLog(time.Now()) {
+			log.G(ctx).Infof("GetSandboxInfo: dropped cached host %q of sandbox %s: node is no longer known", cached.HostIP, sandboxID)
+		}
 	}
-	return ""
+	if proxyMap, ok := deps.getSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil && known(proxyMap.HostIP) {
+		return host, n, exist
+	}
+	if rec != nil && known(rec.NodeIP) {
+		return host, n, exist
+	}
+	return host, nil, false
+}
+
+// lastStaleSandboxHostLog rate-limits the log of dropped cache entries: a
+// removed node can leave many of them behind.
+var lastStaleSandboxHostLog atomic.Int64
+
+func allowStaleSandboxHostLog(now time.Time) bool {
+	last := lastStaleSandboxHostLog.Load()
+	if last != 0 && now.UnixNano()-last < int64(10*time.Second) {
+		return false
+	}
+	return lastStaleSandboxHostLog.CompareAndSwap(last, now.UnixNano())
 }
 
 func lookupPauseBindingWith(ctx context.Context, sandboxID string,
