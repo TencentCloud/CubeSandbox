@@ -168,6 +168,18 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 
 其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`，其内置 network runtime 直接读取 `Cubelet/config/config.toml` 中的网络插件配置；`cube-api` 和 `cubeops` 都从 `.one-click.env` 读环境变量。CubeOps 仓库相关项是 `CUBE_OPS_WAREHOUSE_*`（超时、GitHub/CNB 白名单和 token）以及 `CUBE_OPS_S3_*`；默认复用 Volume 的 MinIO/S3 连接、用独立的 `cube-ops` 桶，不需要额外配置。一键安装不写 CubeOps YAML。`cube-api` 默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，以 Docker 容器运行并由专用 systemd service 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，从发布包内 build context 本地构建镜像，并由 systemd 管理。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI；其生命周期同样由 systemd 托管。
 
+若 COS/OBS 端点要求虚拟主机寻址，在 `.env` 中设置
+`CUBE_S3_ADDRESSING_STYLE=virtual`。CubeMaster 和 CubeTemplateCenter 使用此共享配置。
+若 `CUBE_OPS_S3_ADDRESSING_STYLE` 去掉首尾空白后为空，CubeOps 会继承共享值。
+若服务使用内置 MinIO，安装器会在停服务前拒绝 `virtual`。使用 `virtual` 时应选择支持
+存储桶子域名的外部端点。
+
+两个配置项均接受 `auto`、`path` 或 `virtual`，默认不设置。请直接填写模式，
+每行写一条 `KEY=VALUE`，可以加 `export`。安装器将已设置的键写入 `.one-click.env`。升级时，
+`.env` 优先于安装器进程环境，显式空值会清除旧配置，省略的键保留旧值。
+原有升级合并流程需要 `python3`。仓库仍使用独立的 `cube-ops` 存储桶，
+S3 Volume 插件和 S3lvol 使用各自的配置。
+
 ### OpenTelemetry 链路追踪（可选）
 
 链路追踪默认关闭。请在**安装前**在 `.env` 中设置 `OTEL_EXPORTER_OTLP_ENDPOINT`，然后（重新）执行 `install.sh` 生效——全新安装与升级同样适用。

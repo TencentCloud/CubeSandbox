@@ -1,4 +1,7 @@
 {{- if .Values.controlPlane.enabled }}
+{{- $styleName := "CUBE_S3_ADDRESSING_STYLE" }}
+{{- $serviceEnv := .Values.controlPlane.templateCenter.env | default list }}
+{{- $globalEnv := .Values.global.env | default list }}
 {{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -143,7 +146,12 @@ spec:
             # wins.
             {{- include "cube.artifactStoreEnv" . | nindent 12 }}
             {{- include "cube.artifactS3Env" . | nindent 12 }}
-            {{- with .Values.global.env }}
+            {{- if (.Values.controlPlane.artifactStore).s3Backed }}
+            {{- with include "cube.s3AddressingStyleEnv" (dict "name" $styleName "env" (concat $globalEnv $serviceEnv) "default" (.Values.controlPlane.artifactStore).s3AddressingStyle) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- with $globalEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
             # Node address, used for the log identity. It deliberately does NOT
@@ -165,7 +173,7 @@ spec:
             - name: CUBEMASTER_MIGRATION_SKIP_FINGERPRINT_CHECK
               value: "true"
             {{- end }}
-            {{- with .Values.controlPlane.templateCenter.env }}
+            {{- with $serviceEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:

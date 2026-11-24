@@ -27,6 +27,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/reconcile"
 	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/tcconfig"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 	"github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao"
 	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/mysql"    // register mysql driver
 	_ "github.com/tencentcloud/CubeSandbox/pkgs/cubedb/dao/driver/postgres" // register postgres driver
@@ -186,6 +187,9 @@ func applyNodeIdentity(ctx context.Context, cfg *config.Config) {
 // It intentionally skips CubeMaster-only services (scheduler/sandbox/lifecycle)
 // because template center does not own sandbox creation.
 func coreInit(ctx context.Context, cfg *config.Config) error {
+	if err := configenv.ValidateArtifactS3Addressing(); err != nil {
+		return err
+	}
 	log.Init(config.GetLogConfig())
 
 	errorcode.InitCubeCodeRetryMap(cfg)

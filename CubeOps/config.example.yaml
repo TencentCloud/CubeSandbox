@@ -87,6 +87,9 @@ s3:
   bucket: "cube-ops"      # CUBE_OPS_S3_BUCKET
   region: "us-east-1"     # CUBE_OPS_S3_REGION (required for presign; skips getBucketLocation)
   path_style: true        # CUBE_OPS_S3_PATH_STYLE
+  # CUBE_OPS_S3_ADDRESSING_STYLE: auto, path, or virtual; nonempty overrides path_style.
+  # Empty preserves path_style (true = path, false = SDK automatic selection).
+  addressing_style: ""
   create_bucket: true     # CUBE_OPS_S3_CREATE_BUCKET
 
 # --- Component warehouse ---

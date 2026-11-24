@@ -121,6 +121,55 @@ flowchart TB
 | 外部 S3 | `minio.enabled=false` 且设置 `volumeS3.endpoint` / `volumeS3.existingSecret` → 不部署内置 MinIO；`volume-s3.conf` 从 `volumeS3.*` 生成 |
 | 本地盘 blobstore | `artifactStore.backend=fs` / `cubeOps.store.backend=fs` 用于模板产物与组件仓库（默认 `s3`）；S3 Volume 不受影响 |
 
+#### 组件仓库与模板产物的 S3 寻址方式
+
+CubeOps、CubeMaster 和 CubeTemplateCenter 使用的共享 S3 blobstore
+支持显式选择 bucket 寻址方式：
+
+| 取值 | 请求 URL 形式 |
+| --- | --- |
+| `auto` | 由 minio-go 根据 endpoint 和 bucket 的启发式规则选择。 |
+| `path` | `https://s3.example.com/bucket/key` |
+| `virtual` | `https://bucket.s3.example.com/key` |
+
+若 COS 或 OBS endpoint 要求 virtual-hosted 请求，在已有 endpoint、bucket、region
+和密钥配置的基础上加入以下 Helm 覆盖值。endpoint 使用服务商的地域级 S3 地址，
+不包含 bucket 或路径前缀。DNS 和 TLS 必须支持添加 bucket 前缀后的主机名。
+三个服务均使用外部 S3 时，关闭内置 MinIO。
+
+```yaml
+minio:
+  enabled: false
+cubeOps:
+  s3:
+    addressingStyle: "virtual"
+controlPlane:
+  artifactStore:
+    s3Backed: true
+    s3AddressingStyle: "virtual"
+```
+
+`controlPlane.artifactStore.s3AddressingStyle` 在 `s3Backed=true` 时作用于共享
+artifact 客户端。`global.env` 中的 `CUBE_S3_ADDRESSING_STYLE` 会覆盖 Chart 生成的值。各服务单独配置的环境变量优先于共享值。
+
+两个值均默认为空。非空的显式设置优先于旧的 path-style 布尔值。Helm 在渲染时
+检查生效的字面值。对于 CubeOps，以及 `s3Backed=true` 的制品存储，Helm 会检查
+字面值配置的内置 MinIO 端点是否搭配了 `virtual`。`valueFrom` 的值在运行时读取。
+即使 `s3Backed=false`，完整的 `CUBE_S3_*` 环境变量也可以在制品服务中启用 S3，
+这种配置不在上述 Helm 校验范围内。使用内置 MinIO 时请设为 `path` 或留空。
+CubeOps、CubeMaster 和 CubeTemplateCenter 在 S3 配置完整时会拒绝带非法寻址值的配置并终止启动。
+一键安装器会在停止服务前拒绝非法值和内置 MinIO 搭配 `virtual` 的配置。留空时保留原行为：`true` 强制 path style，`false` 使用
+minio-go 自动检测。现有内置 MinIO 部署无需修改。`auto` 不保证 COS 或 OBS 使用
+virtual-hosted URL；有此要求时应显式设置 `virtual`。同一策略同时用于数据请求和
+预签名 GET URL，也包括 CubeOps 单独配置的 `nodeEndpoint`。
+
+不使用 Helm 时，CubeOps 可设置 YAML `s3.addressing_style` 或环境变量
+`CUBE_OPS_S3_ADDRESSING_STYLE`（非空的环境变量值覆盖 YAML）；CubeMaster 和
+CubeTemplateCenter 均设置 `CUBE_S3_ADDRESSING_STYLE`。旧环境变量
+`CUBE_OPS_S3_PATH_STYLE` / `CUBE_S3_USE_PATH_STYLE` 继续支持。这些选项用于组件包和
+模板产物；S3 Volume 插件（`volumeS3.*`）和 S3lvol/SPDK（`cubeS3lvol.s3.*`）
+使用各自独立的配置。
+
 ### 2.3 计算面：四个核心 DaemonSet 与可选存储
 
 `cube-node` / `cube-node-installer` / `cube-node-bootstrap` 用 `placement.compute`（**不含** `allow-pvm-bootstrap`）。`cube-node-pvm` 用 `placement.pvm`（含 `allow-pvm-bootstrap`），因此非 PVM 节点不会拉取 `cube-pvm-host-bootstrap` 大镜像。

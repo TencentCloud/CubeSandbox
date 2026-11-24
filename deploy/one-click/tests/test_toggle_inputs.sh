@@ -49,7 +49,9 @@ reset_toggle_vars() {
     CUBE_SANDBOX_MINIO_ENABLED \
     CUBE_PVM_ENABLE \
     OTEL_EXPORTER_OTLP_ENDPOINT \
-    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
+    CUBE_S3_ADDRESSING_STYLE \
+    CUBE_OPS_S3_ADDRESSING_STYLE
 }
 
 # Simulate what install.sh does around the upgrade merge for the toggle keys:
@@ -82,7 +84,9 @@ test_toggle_keys_registry() {
     CUBE_SANDBOX_MINIO_ENABLED \
     CUBE_PVM_ENABLE \
     OTEL_EXPORTER_OTLP_ENDPOINT \
-    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
+    CUBE_S3_ADDRESSING_STYLE \
+    CUBE_OPS_S3_ADDRESSING_STYLE
 }
 
 # Some toggles still accept their template default as explicit intent. The

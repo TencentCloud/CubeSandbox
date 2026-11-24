@@ -75,7 +75,7 @@ minio:
 #     nodeEndpoint: https://cos.ap-guangzhou.myqcloud.com
 #     bucket: cube-ops
 #     region: ap-guangzhou
-#     pathStyle: false
+#     addressingStyle: virtual
 #     existingSecret: my-cubeops-s3   # keys: s3-access-key-id / s3-secret-access-key
 #     # or inline: accessKeyId / secretAccessKey
 

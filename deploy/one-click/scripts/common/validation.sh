@@ -16,6 +16,14 @@ if ! type die >/dev/null 2>&1; then
   }
 fi
 
+normalize_s3_addressing_style() {
+  local value="$1"
+  local LC_ALL=C
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value,,}"
+}
+
 validate_ipv4_literal() {
   local value="$1"
   local name="${2:-IPv4 address}"

@@ -257,6 +257,23 @@ Set `redis.host` to use an existing Redis service; the chart will not install `c
 CubeProxy registry heartbeats resolve Redis by hostname, so a redis Pod IP change self-heals.
 Use an FQDN or IP literal: nginx's `resolver` does not apply search domains.
 
+## S3 addressing for artifacts and warehouse
+
+| Value | Consumer |
+| --- | --- |
+| `controlPlane.artifactStore.s3AddressingStyle` | CubeMaster and CubeTemplateCenter with `s3Backed=true` |
+| `cubeOps.s3.addressingStyle` | CubeOps warehouse |
+
+Both accept `auto`, `path`, and `virtual`, ignoring case and surrounding
+whitespace. Leave the value empty to keep the existing path-style setting.
+Helm checks the effective literal value after environment overrides. The
+bundled MinIO guard covers literal styles and endpoints for CubeOps and for
+the artifact store with `s3Backed=true`. Values supplied through `valueFrom`
+are resolved at runtime. With `s3Backed=false`, a complete `CUBE_S3_*`
+environment can still enable S3 in the artifact services, outside this Helm
+guard. Use `path` or leave the value empty with bundled MinIO. Use `virtual`
+with external endpoints that support bucket subdomains.
+
 ## MinIO and the S3 volume plugin
 
 `minio.*` only installs MinIO (image, port, root user/password, bucket, PVC).

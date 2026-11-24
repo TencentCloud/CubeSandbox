@@ -10,8 +10,11 @@
 package configenv
 
 import (
+	"fmt"
 	"os"
 	"strings"
+
+	s3driver "github.com/tencentcloud/CubeSandbox/pkgs/blobstore/driver/s3"
 )
 
 const (
@@ -23,6 +26,7 @@ const (
 	LegacyEnvS3SecretKey      = "CUBE_S3_SECRET_KEY"
 	EnvS3Region               = "CUBE_S3_REGION"
 	EnvS3UsePathStyle         = "CUBE_S3_USE_PATH_STYLE"
+	EnvS3AddressingStyle      = "CUBE_S3_ADDRESSING_STYLE"
 	EnvS3UseSSL               = "CUBE_S3_USE_SSL"
 	EnvS3ArtifactPrefix       = "CUBE_S3_ARTIFACT_PREFIX"
 	EnvArtifactStoreBackend   = "CUBE_ARTIFACT_STORE_BACKEND"
@@ -36,27 +40,29 @@ const (
 
 // ArtifactS3 is the parsed CUBE_S3_* artifact-store configuration.
 type ArtifactS3 struct {
-	Enabled      bool
-	Endpoint     string
-	Bucket       string
-	AccessKey    string
-	SecretKey    string
-	Region       string
-	Prefix       string
-	UsePathStyle bool
-	UseSSL       bool
+	Enabled         bool
+	Endpoint        string
+	Bucket          string
+	AccessKey       string
+	SecretKey       string
+	Region          string
+	Prefix          string
+	UsePathStyle    bool
+	AddressingStyle string
+	UseSSL          bool
 }
 
 // ParseArtifactS3 reads CUBE_S3_*. Enabled is false and every field is empty
 // when any of endpoint, bucket, access key, or secret key is missing.
 func ParseArtifactS3() ArtifactS3 {
 	cfg := ArtifactS3{
-		Endpoint:     EnvOr(EnvS3Endpoint),
-		Bucket:       EnvOr(EnvS3Bucket),
-		Region:       EnvOr(EnvS3Region),
-		Prefix:       EnvOr(EnvS3ArtifactPrefix),
-		UsePathStyle: BoolEnv(EnvS3UsePathStyle),
-		UseSSL:       BoolEnv(EnvS3UseSSL),
+		Endpoint:        EnvOr(EnvS3Endpoint),
+		Bucket:          EnvOr(EnvS3Bucket),
+		Region:          EnvOr(EnvS3Region),
+		Prefix:          EnvOr(EnvS3ArtifactPrefix),
+		UsePathStyle:    BoolEnv(EnvS3UsePathStyle),
+		AddressingStyle: EnvOr(EnvS3AddressingStyle),
+		UseSSL:          BoolEnv(EnvS3UseSSL),
 	}
 	cfg.AccessKey, _ = Lookup(EnvS3AccessKeyID, LegacyEnvS3AccessKey)
 	cfg.SecretKey, _ = Lookup(EnvS3SecretAccessKey, LegacyEnvS3SecretKey)
@@ -65,6 +71,26 @@ func ParseArtifactS3() ArtifactS3 {
 	}
 	cfg.Enabled = true
 	return cfg
+}
+
+// ValidateArtifactS3Addressing validates the explicitly configured S3 address
+// policy at service startup when the S3 backend has a complete configuration.
+func ValidateArtifactS3Addressing() error {
+	if ArtifactStoreBackend() == "fs" {
+		return nil
+	}
+	cfg := ParseArtifactS3()
+	if !cfg.Enabled {
+		return nil
+	}
+	opts := s3driver.Options{
+		AddressingStyle: os.Getenv(EnvS3AddressingStyle),
+		Endpoint:        cfg.Endpoint,
+	}
+	if err := opts.ValidateAddressing(); err != nil {
+		return fmt.Errorf("%s: %w", EnvS3AddressingStyle, err)
+	}
+	return nil
 }
 
 // ArtifactStoreBackend returns "fs" or "s3" (default, including unknown values).

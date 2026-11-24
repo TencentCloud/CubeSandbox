@@ -277,9 +277,11 @@ if [[ "${INSTALL_MODE}" == "upgrade" ]]; then
   MERGE_OLD_BASELINE=""
   [[ -f "${INSTALL_PREFIX}/env.example" ]] && MERGE_OLD_BASELINE="${INSTALL_PREFIX}/env.example"
 
+  # The three-way merger reads plain KEY=VALUE lines.
+  normalize_s3_addressing_env "${RUNTIME_ENV_OLD}" > "${WORK_DIR}/runtime.env"
   merge_env_three_way \
     "${SCRIPT_DIR}/env.example" \
-    "${RUNTIME_ENV_OLD}" \
+    "${WORK_DIR}/runtime.env" \
     "${MERGE_OLD_BASELINE}" \
     "${MERGE_NEW_DOTENV}" \
     "${MERGED_ENV}" \
@@ -305,6 +307,9 @@ apply_one_click_rcow_log_intent
 # Re-apply this-run DB engine intent so upgrade merge cannot keep a stale
 # opposite-engine CUBE_EXTERNAL_* marker from .one-click.env.
 apply_one_click_database_intent
+
+# Check the effective values before stopping services or replacing files.
+validate_s3_addressing_styles
 
 # Old packages had no unified knob. Preserve a previous non-zero Master /
 # per-component DB instead of silently resetting all consumers to DB 0.
@@ -1897,6 +1902,7 @@ if [[ "${CUBE_OPS_STORE_BACKEND}" == "fs" ]]; then
 fi
 export CUBE_ARTIFACT_STORE_BACKEND CUBE_OPS_STORE_BACKEND
 fill_s3_from_local_minio
+validate_bundled_minio_addressing
 CUBE_SANDBOX_ETH_NAME="${CUBE_SANDBOX_ETH_NAME:-$(detect_primary_interface || true)}"
 if [[ -n "${CUBE_SANDBOX_ETH_NAME}" ]]; then
   export CUBE_SANDBOX_ETH_NAME
@@ -2317,7 +2323,8 @@ if [[ "${INSTALL_MODE}" == "upgrade" && -n "${MERGED_ENV}" ]]; then
   # Upgrade: write the config-preserving merged env as the runtime env.
   cp -f "${MERGED_ENV}" "${RUNTIME_ENV_FILE}"
 elif [[ -f "${ENV_FILE}" ]]; then
-  cp -f "${ENV_FILE}" "${RUNTIME_ENV_FILE}"
+  normalize_s3_addressing_env "${ENV_FILE}" > "${WORK_DIR}/runtime.env"
+  install -m 600 "${WORK_DIR}/runtime.env" "${RUNTIME_ENV_FILE}"
 else
   : > "${RUNTIME_ENV_FILE}"
 fi
@@ -2327,6 +2334,7 @@ fi
 # mktemp+mv, which replaces the inode; it sets 0600 on its temp file so this
 # mode is preserved across every later upsert rather than reverting to 0644.
 chmod 600 "${RUNTIME_ENV_FILE}"
+persist_s3_addressing_styles "${RUNTIME_ENV_FILE}" "${INSTALL_MODE}"
 
 # Install version files so the installed system can report its version.
 if [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then

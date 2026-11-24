@@ -121,6 +121,7 @@ const (
 	legacyEnvS3SecretKey    = configenv.LegacyEnvS3SecretKey
 	EnvS3Region             = configenv.EnvS3Region
 	EnvS3UsePathStyle       = configenv.EnvS3UsePathStyle
+	EnvS3AddressingStyle    = configenv.EnvS3AddressingStyle
 	EnvS3UseSSL             = configenv.EnvS3UseSSL
 	EnvS3ArtifactPrefix     = configenv.EnvS3ArtifactPrefix
 	EnvArtifactStoreBackend = configenv.EnvArtifactStoreBackend

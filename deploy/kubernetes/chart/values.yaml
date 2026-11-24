@@ -345,6 +345,10 @@ controlPlane:
   #     attach on several nodes anyway) unless the claim is ReadWriteMany.
   artifactStore:
     s3Backed: false
+    # Optional CUBE_S3_ADDRESSING_STYLE for Master and TC when s3Backed=true.
+    # auto, path, or virtual overrides the legacy path-style setting; empty
+    # preserves it. global.env can override this value.
+    s3AddressingStyle: ""
     # Durable blob backend for template rootfs artifacts. Default s3 keeps
     # today's behaviour (incomplete CUBE_S3_* falls back to local disk).
     # Set backend=fs to store objects on the shared artifact PVC via
@@ -566,6 +570,9 @@ cubeOps:
     bucket: cube-ops
     region: us-east-1
     pathStyle: true
+    # Optional auto, path, or virtual; nonempty overrides pathStyle.
+    # Empty preserves pathStyle (false uses SDK automatic selection).
+    addressingStyle: ""
     createBucket: true
   # Blob backend for the component warehouse. Default s3 keeps today's
   # behaviour (no S3 credentials → warehouse APIs return 501).

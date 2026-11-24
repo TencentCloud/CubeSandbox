@@ -6,6 +6,35 @@
 {{- $templateCenter := .Values.controlPlane.templateCenter -}}
 {{- $s3Backed := ((.Values.controlPlane.artifactStore).s3Backed) | default false -}}
 {{- $artifactBackend := include "cube.artifactStoreBackend" . -}}
+{{- $builtinMinio := eq (include "cube.minioBuiltinEnabled" .) "true" }}
+{{- $globalEnv := .Values.global.env | default list }}
+{{- range $service, $serviceEnv := dict "master" .Values.controlPlane.master.env "templateCenter" $templateCenter.env }}
+{{- $env := concat $globalEnv ($serviceEnv | default list) }}
+{{- $envSetting := "global.env" }}
+{{- if include "cube.lastEnvEntry" (dict "env" $serviceEnv "name" "CUBE_S3_ADDRESSING_STYLE") | fromJson }}
+{{- $envSetting = printf "controlPlane.%s.env" $service }}
+{{- end }}
+{{- $style := include "cube.s3AddressingStyle" (dict "env" $env "envSetting" $envSetting "name" "CUBE_S3_ADDRESSING_STYLE" "setting" "controlPlane.artifactStore.s3AddressingStyle" "default" ($.Values.controlPlane.artifactStore).s3AddressingStyle) }}
+{{- if and $builtinMinio $.Values.controlPlane.enabled $s3Backed (eq $style "virtual") }}
+{{- $endpoint := include "cube.effectiveEnvValue" (dict "env" $env "name" "CUBE_S3_ENDPOINT" "default" (include "cube.volumeS3EffectiveEndpoint" $)) }}
+{{- $backend := include "cube.effectiveEnvValue" (dict "env" $env "name" "CUBE_ARTIFACT_STORE_BACKEND" "default" $artifactBackend) }}
+{{- if and (ne ($backend | trim | lower) "fs") (include "cube.isBuiltinMinioEndpoint" (dict "root" $ "endpoint" $endpoint)) }}
+{{- fail (printf "controlPlane.artifactStore.s3AddressingStyle: virtual addressing requires an external S3 endpoint; bundled MinIO uses path style (%s)" $service) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $opsEnv := .Values.cubeOps.env }}
+{{- $opsStyle := include "cube.s3AddressingStyle" (dict "env" $opsEnv "envSetting" "cubeOps.env" "name" "CUBE_OPS_S3_ADDRESSING_STYLE" "setting" "cubeOps.s3.addressingStyle" "default" (.Values.cubeOps.s3).addressingStyle) }}
+{{- if and $builtinMinio (eq (include "cube.opsEnabled" .) "true") (eq $opsStyle "virtual") }}
+{{- $backend := include "cube.effectiveEnvValue" (dict "env" $opsEnv "name" "CUBE_OPS_STORE_BACKEND" "default" (include "cube.opsStoreBackend" .)) }}
+{{- $endpoint := include "cube.effectiveEnvValue" (dict "env" $opsEnv "name" "CUBE_OPS_S3_ENDPOINT" "default" (include "cube.opsS3Endpoint" .)) }}
+{{- $node := include "cube.effectiveEnvValue" (dict "env" $opsEnv "name" "CUBE_OPS_S3_NODE_ENDPOINT" "default" (include "cube.opsS3NodeEndpoint" .)) }}
+{{- $builtinEndpoint := include "cube.isBuiltinMinioEndpoint" (dict "root" . "endpoint" $endpoint) }}
+{{- $builtinNode := include "cube.isBuiltinMinioEndpoint" (dict "root" . "endpoint" $node) }}
+{{- if and (ne ($backend | trim | lower) "fs") (or $builtinEndpoint $builtinNode) }}
+{{- fail "cubeOps.s3.addressingStyle: virtual addressing requires external S3 data and download endpoints; bundled MinIO uses path style" }}
+{{- end }}
+{{- end }}
 {{- if and $s3Backed (eq $artifactBackend "fs") }}
 {{- fail "controlPlane.artifactStore.backend=fs cannot be combined with controlPlane.artifactStore.s3Backed=true" }}
 {{- end }}
