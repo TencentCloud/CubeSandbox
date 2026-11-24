@@ -393,3 +393,23 @@ func TestEnsureSignerConcurrent(t *testing.T) {
 		t.Fatal("in-memory key != disk")
 	}
 }
+
+func TestListStaysInsideDirectoryAndNamespace(t *testing.T) {
+	s := testStore(t, "")
+	for _, key := range []string{"tenant/logs/a", "tenant/logs-old/b", "tenant-old/logs/c"} {
+		if _, err := s.Put(t.Context(), key, strings.NewReader("x"), blobstore.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.prefix = "tenant"
+	for prefix, want := range map[string]int{"": 2, "logs": 2, "logs/": 1} {
+		var keys []string
+		err := s.List(t.Context(), prefix, func(obj blobstore.ObjectInfo) error {
+			keys = append(keys, obj.Key)
+			return nil
+		})
+		if err != nil || len(keys) != want || (prefix == "logs/" && keys[0] != "logs/a") {
+			t.Errorf("List(%q) = %v, %v", prefix, keys, err)
+		}
+	}
+}

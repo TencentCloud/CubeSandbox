@@ -402,13 +402,7 @@ func (s *store) List(ctx context.Context, prefix string, fn func(blobstore.Objec
 	if err := blobstore.ValidatePrefix(prefix); err != nil {
 		return err
 	}
-	fullPrefix := s.objKey(prefix)
-	if prefix == "" {
-		fullPrefix = s.prefix
-		if fullPrefix != "" {
-			fullPrefix += "/"
-		}
-	}
+	fullPrefix := blobstore.JoinPrefix(s.prefix, prefix)
 	prefixSlash := ""
 	if s.prefix != "" {
 		prefixSlash = s.prefix + "/"
@@ -538,15 +532,15 @@ func (s *store) setLifecycle(ctx context.Context, rules []lifecycle.Rule) error 
 }
 
 func (s *store) GC(ctx context.Context, opts blobstore.GCOptions) (blobstore.GCResult, error) {
+	if err := blobstore.ValidatePrefix(opts.Prefix); err != nil {
+		return blobstore.GCResult{}, err
+	}
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
 	var result blobstore.GCResult
-	prefix := s.objKey(opts.Prefix)
-	if opts.Prefix == "" {
-		prefix = s.prefix
-	}
+	prefix := blobstore.JoinPrefix(s.prefix, opts.Prefix)
 	ttl := 24 * time.Hour
 	for _, r := range s.retention {
 		if r.AbortIncompleteAfter > 0 {
