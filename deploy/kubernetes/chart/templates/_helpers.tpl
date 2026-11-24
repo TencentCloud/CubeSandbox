@@ -1722,3 +1722,31 @@ true
 {{- printf "%s-ops-blobs" (include "cube.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+cube.extraVolumePluginsEnv renders volumePlugins.extra for the Cubelet side as
+"name|type|path" entries separated by ";", where path is node.socketPath for
+rpc plugins and node.binaryPath for binary plugins.
+*/}}
+{{- define "cube.extraVolumePluginsEnv" -}}
+{{- $entries := list -}}
+{{- range . -}}
+{{- $name := required "volumePlugins.extra[].name is required" .name -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_-]+$" $name) -}}
+{{- fail (printf "volumePlugins.extra[].name %q must match ^[a-zA-Z0-9_-]+$" $name) -}}
+{{- end -}}
+{{- $path := "" -}}
+{{- if eq .type "rpc" -}}
+{{- $path = required "volumePlugins.extra[].node.socketPath is required for rpc" .node.socketPath -}}
+{{- else if eq .type "binary" -}}
+{{- $path = required "volumePlugins.extra[].node.binaryPath is required for binary" .node.binaryPath -}}
+{{- else -}}
+{{- fail (printf "volumePlugins.extra[].type %q must be rpc or binary" .type) -}}
+{{- end -}}
+{{- if or (contains "|" $path) (contains ";" $path) (contains "\"" $path) -}}
+{{- fail (printf "volumePlugins.extra[] path %q must not contain | ; or quotes" $path) -}}
+{{- end -}}
+{{- $entries = append $entries (printf "%s|%s|%s" $name .type $path) -}}
+{{- end -}}
+{{- join ";" $entries -}}
+{{- end -}}
