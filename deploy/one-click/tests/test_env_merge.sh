@@ -722,6 +722,28 @@ test_crlf_inputs_do_not_leak_carriage_returns() {
   assert_value "${out}" CUSTOM_ONLY keepme
 }
 
+# An active tuning key set in the new bundle's .env must override the stale
+# value kept in .one-click.env by the previous install.
+test_active_tuning_key_overrides_stale_runtime_value() {
+  local new="${TMP_DIR}/new-egress.example" old="${TMP_DIR}/old-egress.env"
+  local dotenv="${TMP_DIR}/new-egress.env"
+  local out="${TMP_DIR}/out-egress.env" diff="${TMP_DIR}/diff-egress.txt"
+  cat > "${new}" <<'EOF'
+ONE_CLICK_DEPLOY_ROLE=control
+CUBE_EGRESS_NET_WAIT_TIMEOUT=300
+EOF
+  cat > "${old}" <<'EOF'
+CUBE_EGRESS_NET_WAIT_TIMEOUT=300
+EOF
+  cat > "${dotenv}" <<'EOF'
+CUBE_EGRESS_NET_WAIT_TIMEOUT=600
+EOF
+
+  merge_env_three_way "${new}" "${old}" "${new}" "${dotenv}" "${out}" "${diff}" 2>/dev/null
+
+  assert_value "${out}" CUBE_EGRESS_NET_WAIT_TIMEOUT 600
+}
+
 test_cidr_preflight_skip_conflict_param() {
   # skip=1 must still enforce format validation (invalid format -> die)
   if ( check_cidr_preflight "not-a-cidr" 1 ) >/dev/null 2>&1; then
@@ -769,5 +791,6 @@ test_read_helpers
 test_detect_existing_install
 test_crlf_inputs_do_not_leak_carriage_returns
 test_cidr_preflight_skip_conflict_param
+test_active_tuning_key_overrides_stale_runtime_value
 
 echo "env merge tests OK"

@@ -2,24 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
-# Install the cube-egress host-side iptables/ip-rule rules, waiting for the
-# sandbox ingress interface (cube-dev) to appear — but only for a bounded
-# time, then failing explicitly.
+# Install the cube-egress host-side iptables/ip-rule rules.
 #
-# cube-dev is created by Cubelet's embedded network runtime during plugin
-# init, after cubelet's PIDFile already appeared (its unit is Type=forking),
-# so After=cube-sandbox-cubelet.service does NOT imply the interface exists.
-# Waiting inside this wrapper (#2141) must still be bounded: install.sh
-# calls `systemctl enable --now` on this unit, which blocks until the start
-# job finishes — an unbounded wait would hang the installer forever.
+# cube-dev is created during cubelet's network plugin init, which the cubelet
+# unit's readiness signal (Type=forking + PIDFile) does not cover, so
+# After=cubelet does not imply the interface exists. Wait for it, bounded,
+# then fail: install.sh's `enable --now` on the target waits for this unit.
+# WAIT_TIMEOUT defaults to 300s, matching the k8s entrypoint.
 #
-# The default matches the k8s entrypoint's 300s initial-wait figure
-# (deploy/kubernetes/images/scripts/cube-egress-net-entrypoint.sh); unlike
-# the container, which has no synchronous caller, we turn it into a hard
-# deadline. Retries on init failure also live HERE, in the wrapper, not in
-# the unit: Restart= on Type=oneshot requires systemd >= 244 and is a
-# load-time refusal (not a silent skip) on older systemd — RHEL/CentOS 8
-# and OpenCloudOS 8 ship 239, so a Restart= unit would never run there.
+# Retries live here, not in the unit: Restart= on Type=oneshot is refused at
+# load time on systemd < 244 (RHEL/CentOS/OpenCloudOS 8).
 
 set -euo pipefail
 
@@ -35,13 +27,17 @@ INGRESS_IFACE="${CUBE_INGRESS_IFACE:-cube-dev}"
 WAIT_TIMEOUT="${CUBE_EGRESS_NET_WAIT_TIMEOUT:-300}"
 POLL_INTERVAL="${CUBE_EGRESS_NET_POLL_INTERVAL:-1}"
 INIT_RETRIES="${CUBE_EGRESS_NET_INIT_RETRIES:-3}"
-[[ "${WAIT_TIMEOUT}" =~ ^[0-9]+$ ]] || die "CUBE_EGRESS_NET_WAIT_TIMEOUT must be a non-negative integer, got '${WAIT_TIMEOUT}'"
-[[ "${POLL_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "CUBE_EGRESS_NET_POLL_INTERVAL must be a positive integer, got '${POLL_INTERVAL}'"
-[[ "${INIT_RETRIES}" =~ ^[1-9][0-9]*$ ]] || die "CUBE_EGRESS_NET_INIT_RETRIES must be a positive integer, got '${INIT_RETRIES}'"
+# Decimal, no leading zeros, digit-capped: 0600 is octal in $(( )), and huge
+# values overflow the deadline. 0 means "probe once, fail if absent".
+[[ "${WAIT_TIMEOUT}" =~ ^(0|[1-9][0-9]{0,5})$ ]] || die "CUBE_EGRESS_NET_WAIT_TIMEOUT must be a decimal integer between 0 and 999999 without leading zeros, got '${WAIT_TIMEOUT}'"
+[[ "${POLL_INTERVAL}" =~ ^[1-9][0-9]{0,3}$ ]] || die "CUBE_EGRESS_NET_POLL_INTERVAL must be an integer between 1 and 9999, got '${POLL_INTERVAL}'"
+[[ "${INIT_RETRIES}" =~ ^[1-9][0-9]{0,3}$ ]] || die "CUBE_EGRESS_NET_INIT_RETRIES must be an integer between 1 and 9999, got '${INIT_RETRIES}'"
 
 INIT_SCRIPT="${CUBE_EGRESS_NET_INIT:-${TOOLBOX_ROOT}/scripts/cube-egress/cube-egress-iptables-init.sh}"
 ensure_executable "${INIT_SCRIPT}"
 
+# Checked after each failed probe, so failure can be reported up to one poll
+# interval late.
 deadline=$(( SECONDS + WAIT_TIMEOUT ))
 until ip link show dev "${INGRESS_IFACE}" >/dev/null 2>&1; do
   if (( SECONDS >= deadline )); then
@@ -52,17 +48,16 @@ until ip link show dev "${INGRESS_IFACE}" >/dev/null 2>&1; do
 done
 
 log "${INGRESS_IFACE} present, installing egress rules"
-# Retry a failing init run here (lost race against a cubelet restart, a
-# transiently missing ip/route binary, ...): after INIT_RETRIES failures the
-# wrapper exits non-zero and the unit stays failed — visible to an operator,
-# never silently missing rules (#2141).
+# After INIT_RETRIES failures, exit non-zero so the unit is visibly failed.
 attempt=1
 while true; do
   if "${INIT_SCRIPT}" up; then
     log "egress rules installed (attempt ${attempt}/${INIT_RETRIES})"
     exit 0
+  else
+    # Keep inside `else`: after `fi` this is always 0.
+    rc=$?
   fi
-  rc=$?
   if (( attempt >= INIT_RETRIES )); then
     die "init script failed ${INIT_RETRIES} time(s), last exit ${rc}; leaving the unit failed for an operator"
   fi

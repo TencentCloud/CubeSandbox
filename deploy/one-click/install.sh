@@ -1652,12 +1652,8 @@ switch_cubes3lvol_bare_to() {
 }
 
 stop_existing_systemd_deployment() {
-  # Disable + stop the targets first; PartOf= on each child service is
-  # supposed to cascade the stop. In practice, units that are stuck in
-  # `failed` or `activating` state don't always get cleaned up by the
-  # target stop alone — typically `cube-sandbox-cube-egress-net.service`
-  # blocked on a missing cube-dev interface, leaving its requirer
-  # `cube-sandbox-cube-egress.service` perpetually inactive.
+  # PartOf= should cascade the stop, but units stuck in `failed`/`activating`
+  # (e.g. egress-net waiting for cube-dev) are not always cleaned up.
   #
   # So we belt-and-suspenders explicitly stop every cube-sandbox-*
   # service afterwards, which both forces failed units back to inactive
@@ -2408,6 +2404,11 @@ if [[ -n "${CUBE_SANDBOX_CUBE_ROUTER_CIDR:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_ROUTER_CIDR" "${CUBE_SANDBOX_CUBE_ROUTER_CIDR}"
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_ADMIN_PORT" "${CUBE_EGRESS_ADMIN_PORT}"
+# The unit reads only .one-click.env; persist these so process-env-only
+# values also reach it.
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_NET_WAIT_TIMEOUT" "${CUBE_EGRESS_NET_WAIT_TIMEOUT:-300}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_NET_POLL_INTERVAL" "${CUBE_EGRESS_NET_POLL_INTERVAL:-1}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_NET_INIT_RETRIES" "${CUBE_EGRESS_NET_INIT_RETRIES:-3}"
 if [[ -n "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_CUBE_EGRESS_IMAGE" "${CUBE_SANDBOX_CUBE_EGRESS_IMAGE}"
 fi

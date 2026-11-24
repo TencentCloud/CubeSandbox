@@ -34,13 +34,22 @@ require_root() { :; }
 ensure_executable() { [[ -x "\$1" ]] || die "required executable not found: \$1"; }
 EOF
 
-# Fake ip: "link show dev <iface>" succeeds only while the flag file exists.
+# Fake ip: fails while fail_probes > 0 (decremented per call), then follows
+# ${TMP}/present, so wait scenarios need no timers.
 cat > "${TMP}/bin/ip" <<EOF
 #!/usr/bin/env bash
 echo "ip \$*" >> "${TMP}/ip.log"
-if [[ "\$1 \$2" == "link show" && -e "${TMP}/present" ]]; then
-    exit 0
+if [[ "\$1 \$2" != "link show" ]]; then
+    exit 1
 fi
+if [[ -f "${TMP}/fail_probes" ]]; then
+    n="\$(cat "${TMP}/fail_probes")"
+    if (( n > 0 )); then
+        echo "\$(( n - 1 ))" > "${TMP}/fail_probes"
+        exit 1
+    fi
+fi
+[[ -e "${TMP}/present" ]] && exit 0
 exit 1
 EOF
 chmod +x "${TMP}/bin/ip"
@@ -64,8 +73,12 @@ bash -n "${START_SH_SRC}" || fail "cube-egress-net-start.sh fails bash -n"
 # These run BEFORE init-script resolution, so they are reachable even with
 # no init script installed (the fixture dir is still empty here) — deleting
 # the numeric validation in the wrapper must turn these red.
+# Leading zeros (octal) and overflow-sized values must be rejected.
 for bad in "CUBE_EGRESS_NET_WAIT_TIMEOUT=abc" \
            "CUBE_EGRESS_NET_WAIT_TIMEOUT=-1" \
+           "CUBE_EGRESS_NET_WAIT_TIMEOUT=0600" \
+           "CUBE_EGRESS_NET_WAIT_TIMEOUT=0800" \
+           "CUBE_EGRESS_NET_WAIT_TIMEOUT=999999999999999999999999" \
            "CUBE_EGRESS_NET_POLL_INTERVAL=0" \
            "CUBE_EGRESS_NET_INIT_RETRIES=0"; do
     if env "${bad}" timeout 20 env PATH="${TMP}/bin:/usr/bin:/bin" \
@@ -100,6 +113,22 @@ fi
 grep -q "required executable not found" "${TMP}/err" \
     || fail "explicit-path miss did not hit ensure_executable"
 
+# --- 4b: an explicit CUBE_EGRESS_NET_INIT override is honoured --------------
+# The canonical path is absent, so this only passes if the override ran.
+cat > "${TMP}/override-init.sh" <<EOF
+#!/usr/bin/env bash
+echo "override \$*" >> "${TMP}/override.log"
+EOF
+chmod +x "${TMP}/override-init.sh"
+touch "${TMP}/present"
+CUBE_EGRESS_NET_INIT="${TMP}/override-init.sh" run_wrapper 2>"${TMP}/out" \
+    || fail "wrapper failed with an explicit CUBE_EGRESS_NET_INIT override"
+[[ "$(cat "${TMP}/override.log" 2>/dev/null)" == "override up" ]] \
+    || fail "CUBE_EGRESS_NET_INIT override was not executed (got: $(cat "${TMP}/override.log" 2>/dev/null))"
+[[ ! -e "${LAYOUT}/scripts/cube-egress/cube-egress-iptables-init.sh" ]] \
+    || fail "fixture unexpectedly has the canonical init script"
+rm -f "${TMP}/present"
+
 # Now place the fake init script: records each invocation; exit code from
 # init.exit if present, but succeeds from the Nth call on when
 # init.succeed_after=<N> exists (for retry scenarios).
@@ -119,6 +148,7 @@ chmod +x "${LAYOUT}/scripts/cube-egress/cube-egress-iptables-init.sh"
 
 # --- 5: interface already present → install immediately ---------------------
 : > "${INIT_LOG}"
+: > "${IP_LOG}"   # count only this scenario's probes
 touch "${TMP}/present"
 run_wrapper 2>"${TMP}/out" || fail "wrapper failed with interface present"
 [[ "$(cat "${INIT_LOG}")" == "init up" ]] \
@@ -127,20 +157,19 @@ grep -q '^ip link show dev cube-dev$' "${IP_LOG}" \
     || fail "wrapper never probed for cube-dev"
 
 # --- 6: core #2141 scenario — absent then present ----------------------------
-# The interface appears 0.3s in; with a 1s poll the wrapper must probe at
-# least twice (i.e. actually waited), call the init script only after the
-# interface exists, and exit 0.
+# Two failed probes, then success: the wrapper must re-probe and only then
+# run the init script.
 : > "${INIT_LOG}"
-rm -f "${TMP}/present"
-( sleep 0.3; touch "${TMP}/present" ) &
-TIMER_PID=$!
+: > "${IP_LOG}"   # count only this scenario's probes
+touch "${TMP}/present"
+echo 2 > "${TMP}/fail_probes"
 run_wrapper 2>"${TMP}/out" || fail "wrapper failed on absent→present interface"
-wait "${TIMER_PID}"
-PROBES="$(grep -c '^ip link show dev cube-dev$' "${IP_LOG}")"
-[[ "${PROBES}" -ge 2 ]] \
+PROBES="$(grep -c '^ip link show dev cube-dev$' "${IP_LOG}" || true)"
+[[ "${PROBES}" -ge 3 ]] \
     || fail "expected the wrapper to re-probe while waiting, got ${PROBES}"
 [[ "$(cat "${INIT_LOG}")" == "init up" ]] \
     || fail "init script not called after interface appeared"
+rm -f "${TMP}/fail_probes"
 
 # --- 7: interface never appears → explicit timeout failure -------------------
 # The core #2141 behavior: never exit 0 while the interface is missing (the
@@ -175,6 +204,9 @@ set -e
     || fail "expected exactly 2 init attempts, got $(wc -l < "${INIT_LOG}")"
 grep -q "failed 2 time" "${TMP}/out" \
     || fail "retry exhaustion message missing (got: $(cat "${TMP}/out"))"
+# The message must carry the init script's real exit status.
+grep -q "last exit 7" "${TMP}/out" \
+    || fail "exhaustion message does not carry the init exit status (got: $(cat "${TMP}/out"))"
 rm -f "${TMP}/init.exit"
 
 # 8b: transient failure (fails once, succeeds on the 2nd call) → wrapper
