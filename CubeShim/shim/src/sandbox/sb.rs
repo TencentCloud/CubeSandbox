@@ -646,8 +646,10 @@ impl SandBox {
 
         infof!(self.log, "agent is ready");
 
-        let mut stat = trace
-            .start(telemetry::SPAN_GUEST_INIT)
+        let stage = trace.start(telemetry::SPAN_GUEST_INIT);
+        let mut ctx = self.ctx.clone();
+        stage.inject(&mut ctx.metadata);
+        let mut stat = stage
             .run(async {
                 //add vfio device
                 if !self.app_snapshot_restore() {
@@ -674,8 +676,6 @@ impl SandBox {
                 if snapshot {
                     req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
                 }
-
-                let mut ctx = self.ctx.clone();
 
                 ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
                 if self.app_snapshot_create() {
