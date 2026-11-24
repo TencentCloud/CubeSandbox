@@ -18,11 +18,46 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/gorm"
 )
 
 var ErrRedoTemplateScopeChanged = errors.New("redo target scope changed concurrently, please retry")
 
-var redoTemplateInUse = isTemplateInUseFailClosed
+var (
+	redoTemplateInUse  = isTemplateInUseFailClosed
+	redoArtifactShared = func(ctx context.Context, artifactID, excludeTemplateID string) (bool, error) {
+		if !isReady() {
+			return false, nil
+		}
+		var refs int64
+		err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var err error
+			refs, err = countArtifactReferencesTx(ctx, tx, artifactID, excludeTemplateID)
+			return err
+		})
+		return refs > 0, err
+	}
+)
+
+// cleanupRedoArtifactBeforeRedistribute removes the ext4 artifact on target
+// nodes before redistributing only when no other template, active job, or
+// snapshot references the same artifact. For shared artifacts, it skips node
+// deletion and relies on CreateImage being idempotent so peer templates are
+// never broken on nodes without running sandboxes.
+func cleanupRedoArtifactBeforeRedistribute(ctx context.Context, artifactID, instanceType, templateID string, targets []*node.Node) error {
+	shared, err := redoArtifactShared(ctx, artifactID, templateID)
+	if err != nil {
+		return fmt.Errorf("check shared artifact references before cleanup failed: %w", err)
+	}
+	if shared {
+		log.G(ctx).Warnf("redo template=%s artifact=%s: skipping node artifact cleanup because other templates or snapshots still reference it; existing on-node ext4 files will be kept as-is", templateID, artifactID)
+		return nil
+	}
+	if err := cleanupArtifactOnNodes(ctx, artifactID, instanceType, targets); err != nil {
+		return fmt.Errorf("cleanup artifact before redistribute failed: %w", err)
+	}
+	return nil
+}
 
 func jfsNodeVariantID(templateID string, target *node.Node) (string, bool) {
 	if target == nil || target.HostFacts == nil {
@@ -656,8 +691,8 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, err.Error())
 			return
 		}
-		if err := cleanupArtifactOnNodes(ctx, artifact.ArtifactID, generatedReq.InstanceType, targets); err != nil {
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, fmt.Sprintf("cleanup artifact before redistribute failed: %v", err))
+		if err := cleanupRedoArtifactBeforeRedistribute(ctx, artifact.ArtifactID, generatedReq.InstanceType, req.TemplateID, targets); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, err.Error())
 			return
 		}
 		distributedTargets, expected, ready, failed, distErr := distributeRootfsArtifact(ctx, &workingReq, generatedReq, artifact, req.TemplateID, jobID)

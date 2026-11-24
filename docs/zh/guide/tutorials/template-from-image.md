@@ -102,7 +102,7 @@ template_status:           READY
 | `distribution` | `N/M ready` — 已收到 artifact 的集群节点数。 |
 | `artifact_id` | 构建出的 rootfs artifact 的稳定 ID。 |
 | `artifact_sha256` | rootfs artifact 的 SHA-256 摘要，用于完整性校验。 |
-| `template_spec_fingerprint` | 模板规格的确定性指纹（镜像 + 构建参数），相同输入始终产生相同指纹。 |
+| `template_spec_fingerprint` | 构建期模板规格的确定性指纹（镜像 + 影响 rootfs 的构建参数，不包含 `--cpu`/`--memory`、`--cmd`/`--arg`、`--env`、`--probe` 等运行期覆盖项）。相同输入始终产生相同指纹，基于同一镜像创建的不同运行规格模板会复用同一 rootfs artifact。 |
 
 ### Status（单次查询）
 

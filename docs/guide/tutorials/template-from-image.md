@@ -103,7 +103,7 @@ Key output fields:
 | `distribution` | `N/M ready` — how many cluster nodes have received the artifact. |
 | `artifact_id` | Stable ID of the built rootfs artifact. |
 | `artifact_sha256` | SHA-256 digest of the rootfs artifact for integrity verification. |
-| `template_spec_fingerprint` | Deterministic fingerprint of the full template spec (image + flags). Same input always produces the same fingerprint. |
+| `template_spec_fingerprint` | Deterministic fingerprint of the build-time template spec (image + rootfs-affecting flags, excluding runtime-only overrides such as `--cpu`/`--memory`, `--cmd`/`--arg`, `--env`, and `--probe`). Same input always produces the same fingerprint, so templates with different runtime specs from the same image reuse the same rootfs artifact. |
 
 ### Status (single snapshot)
 
