@@ -126,7 +126,7 @@ type backfillDistributeRecorder struct {
 // pushed, without fabricating replica rows or needing a generated request.
 func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
-	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", WritableLayerSize: "4Gi"})
+	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 // every node is pure waste.
 func TestBackfillTemplateReplicasJFSSkipsFullyPlaced(t *testing.T) {
 	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
-	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox"})
+	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
