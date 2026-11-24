@@ -375,6 +375,9 @@ quickcheck_main() {
 
   echo "[quickcheck] check systemd units"
   check_unit_active cube-sandbox-cubelet.service
+  # The targets only Wants= this unit, so a failed start would otherwise go
+  # unnoticed by the installer.
+  check_unit_active cube-sandbox-cube-egress-net.service
   # ops-agent ships wherever cubelet does (compute role and all-in-one
   # control); check the unit and its local health endpoint.
   check_unit_active cube-sandbox-ops-agent.service

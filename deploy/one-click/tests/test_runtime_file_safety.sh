@@ -283,6 +283,15 @@ test_quickcheck_probes_are_race_tolerant() {
   assert_not_contains "${path}" 'test -S "/data/cubelet/cubelet.sock"'
 }
 
+# The targets only Wants= the net unit, so quickcheck is what turns a failed
+# start into a failed install.
+test_quickcheck_checks_egress_net_unit() {
+  local path="${ONE_CLICK_DIR}/scripts/one-click/quickcheck.sh"
+
+  assert_contains "${path}" "check_unit_active cube-sandbox-cube-egress-net.service"
+  assert_contains "${path}" "check_unit_active cube-sandbox-cubelet.service"
+}
+
 # Source quickcheck.sh for its helper functions (its probe sequence is guarded
 # behind a BASH_SOURCE check) so the retry semantics can be exercised at
 # runtime, not just asserted as source text. `sleep` is stubbed to a no-op so
@@ -1213,6 +1222,7 @@ test_quickcheck_node_registration_response_missing_ip_field
 test_quickcheck_check_socket_retries_then_succeeds
 test_quickcheck_check_http_retries_then_succeeds
 test_quickcheck_check_unit_active_dies_fast_on_failed_unit
+test_quickcheck_checks_egress_net_unit
 test_cube_proxy_postcheck_defaults_to_http_port_80
 test_cube_proxy_postcheck_follows_http_port
 test_cube_proxy_postcheck_ignores_https_port
