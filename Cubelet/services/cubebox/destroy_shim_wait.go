@@ -653,6 +653,7 @@ func (l *local) waitSandboxRuntimeGoneByID(ctx context.Context, sandboxID string
 	seen := map[string]struct{}{}
 	var bundles []string
 	foundShim := false
+	unknownBundle := false
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -668,20 +669,20 @@ func (l *local) waitSandboxRuntimeGoneByID(ctx context.Context, sandboxID string
 		}
 		if found {
 			foundShim = true
-			if bundle != "" {
-				bundles = append(bundles, bundle)
+			if bundle == "" {
+				// One unreadable bundle is enough to make the whole verdict
+				// unknown; a readable sibling must not hide it.
+				unknownBundle = true
+				continue
 			}
+			bundles = append(bundles, bundle)
 		}
 	}
 	if !foundShim {
 		return nil
 	}
-	if len(bundles) == 0 {
-		// A shim is registered but its bundle path is empty. We cannot read
-		// the pid files, and there is no on-disk timestamp to age the intent
-		// from. Fail closed rather than invent a fresh intent that would be
-		// reset on every retry.
-		return fmt.Errorf("sandbox %s: shim registered without a readable bundle; cannot prove runtime is gone", sandboxID)
+	if unknownBundle {
+		return fmt.Errorf("sandbox %s: a registered shim has no readable bundle; cannot prove runtime is gone", sandboxID)
 	}
 	sb := &cubeboxstore.CubeBox{
 		ContainersMap: &cubeboxstore.ContainersMap{

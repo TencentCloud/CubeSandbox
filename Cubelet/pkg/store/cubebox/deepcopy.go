@@ -32,6 +32,7 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 		Endpoint:                               cb.Endpoint,
 		Version:                                cb.Version,
 		RequestSource:                          cb.RequestSource,
+		CreateAttemptID:                        cb.CreateAttemptID,
 		UserDeleteMark:                         cb.UserDeleteMark.DeepCopy(),
 		HostMetricsBaselineMissingAtAssignment: cb.HostMetricsBaselineMissingAtAssignment,
 		// Store.Sync serialises this copy: a field left out never reaches

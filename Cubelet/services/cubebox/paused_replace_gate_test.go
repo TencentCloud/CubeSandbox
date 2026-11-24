@@ -306,6 +306,26 @@ func TestGatePausedReplaceRejectsShimWithoutBundle(t *testing.T) {
 	assert.False(t, gate.reclaimRootfs)
 }
 
+// One unreadable shim bundle is enough to fail closed; a readable sibling must
+// not hide the shim whose liveness is unknown.
+func TestGatePausedReplaceRejectsMixedBundleVisibility(t *testing.T) {
+	readable := t.TempDir()
+	previous := lookupShimBundleByID
+	lookupShimBundleByID = func(_ *local, _ context.Context, id string) (string, bool, error) {
+		if id == "workload-1" {
+			return readable, true, nil
+		}
+		return "", true, nil
+	}
+	t.Cleanup(func() { lookupShimBundleByID = previous })
+
+	req := pauseResumeRequest("sb-resume")
+	req.Containers[0].Id = "workload-1"
+	gate, err := gateOnlyService(nil, time.Minute).gatePausedReplace(context.Background(), req)
+	require.Error(t, err)
+	assert.False(t, gate.reclaimRootfs)
+}
+
 // A shim lookup error is unknown, not "not present".
 func TestGatePausedReplaceRefusesOnShimLookupError(t *testing.T) {
 	previous := lookupShimBundleByID

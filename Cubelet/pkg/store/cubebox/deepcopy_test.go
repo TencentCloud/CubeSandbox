@@ -263,6 +263,23 @@ func TestNilDeepCopy(t *testing.T) {
 	}
 }
 
+// Store.Sync serialises DeepCopy; an omitted CreateAttemptID would disappear
+// after a restart and failover would lose its ownership token.
+func TestCubeBoxDeepCopyKeepsCreateAttemptID(t *testing.T) {
+	original := &CubeBox{
+		Metadata:        Metadata{ID: "attempt-row"},
+		CreateAttemptID: "attempt-1",
+	}
+	copied := original.DeepCopy()
+	if copied.CreateAttemptID != "attempt-1" {
+		t.Fatalf("CreateAttemptID = %q, want %q", copied.CreateAttemptID, "attempt-1")
+	}
+	copied.CreateAttemptID = "attempt-2"
+	if original.CreateAttemptID != "attempt-1" {
+		t.Fatal("DeepCopy aliased CreateAttemptID")
+	}
+}
+
 // TestCubeBoxDeepCopyKeepsRestartBookkeeping guards every restart field that
 // Store.Sync serialises. DeepCopy copies Metadata field by field, so a field
 // left out is silently dropped from the bolt row: the value looks right in

@@ -9,6 +9,7 @@ import (
 	"errors"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -41,5 +42,7 @@ func (l *local) claimPausedAttempt(ctx context.Context, sandboxID, attemptID str
 	sb.Lock()
 	defer sb.Unlock()
 	sb.CreateAttemptID = attemptID
-	return l.cubeboxManger.Save(ctx, sb)
+	// Internal bookkeeping must not dispatch a lifecycle update event to the
+	// metrics/listener pipeline mid-resume.
+	return l.cubeboxManger.Save(ctx, sb, cubes.WithNoEvent)
 }
