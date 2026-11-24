@@ -105,7 +105,8 @@ Public `/cube/template*` routes on CubeMaster:
 | POST `/cube/template`, `/from-image`, `/redo`; DELETE; GET; PUT alias | CubeMaster (local) | cubelet RPCs, process-local caches, or forward-build env |
 | GET `/cube/template/build/:id/status`, GET `/from-image` | CubeMaster (local) | plain DB reads on master-owned rows; proxying made create-200/poll-502 when TC was down |
 | GET/POST `/cube/template/compat` | proxied to TC | uncached DB read/write |
-| GET/HEAD `/cube/template/artifact/download` | proxied to TC | file serving / S3 redirect |
+| GET/HEAD `/cube/template/artifact/download` | proxied to TC | user-facing file serving / S3 proxy |
+| GET/HEAD `/cube/template/artifact/direct-download` | CubeMaster or TC, outside API-key middleware | Cubelet-only artifact pull authenticated by a short-lived artifact capability |
 | GET `/cube/template/artifact/...` (rootfs, CA) | CubeMaster (local) | cubelet pulls from the shared disk via master |
 
 `RegisterTemplateRoutes` (the TC process) registers only the uncached pure-DB
@@ -130,6 +131,10 @@ Everything TC reads is spelled `CUBE_TEMPLATE_CENTER_*`. CubeMaster reads
 - one-click: `cubemaster-start.sh` defaults `CUBE_TEMPLATE_CENTER_ADDR` to
   `http://127.0.0.1:8090`; TC's conf.yaml gets `__CUBETEMPLATECENTER_*__`
   placeholders resolved at install.
+- Direct artifact pulls use `CUBE_TEMPLATE_CENTER_NODE_ADDR` or
+  `common.template_center_node_addr` when the node-reachable TC address differs
+  from the Master-to-TC build address. If unset, CubeMaster falls back to
+  `CUBE_TEMPLATE_CENTER_ADDR`; operators must ensure Cubelet nodes can reach it.
 
 ### 5.3 Backward compatibility window
 
@@ -165,6 +170,39 @@ TC's internal `/tc/api/v1/*` endpoints require the same shared token (see
 §6.1) and must additionally stay on a cluster-internal / VPC-internal address
 (the chart renders the optional CLB as internal-only; one-click binds TC to
 loopback by default).
+
+### 6.3 Cubelet artifact delivery
+
+Before each per-node `CreateImage`, CubeMaster selects exactly one data source
+and puts only that source's URL into the node request. S3-backed artifacts use a
+fresh presigned GET URL when Master can sign the object. TC direct-download is
+an optional rollout-gated source; when disabled/unavailable, Master serves the
+artifact through its compatible download endpoint. S3/TC/Master direct URLs use
+a configurable short-lived authorization. `common.artifact_download_capability_ttl`
+defaults to one hour and is bounded to 24 hours; the one-hour default allows
+large artifacts on slower node links while keeping leaked links time-limited.
+If TC's node-facing address is configured and the artifact is eligible for TC,
+CubeMaster selects that direct endpoint after S3 presigning is unavailable. The
+TC/Master HMAC capability is bound to artifact ID and expiry, uses the shared
+callback secret with a separate domain separator, and is sent only in
+`X-Cube-Artifact-Token`, never in the URL.
+
+CubeMaster always preserves the stable Master artifact URL and legacy query
+token in the existing annotations, and adds the selected S3/TC/Master direct
+endpoint and short capability in separate additive annotations. New Cubelets
+prefer the direct endpoint when present. Older Cubelets ignore the unknown
+annotations and continue downloading from CubeMaster, so a partial Cubelet
+rollout needs no version threshold or database change. S3 remains selectable
+independently. TC direct-download is selected from the existing node-facing
+TC address and artifact storage metadata, with no separate rollout switch. S3
+and TC remain mutually exclusive per-node choices.
+
+Cubelet downloads the ext4 directly from the selected source, then verifies
+both the expected SHA-256 and byte size before atomically publishing the cache
+file. Direct S3 requires node egress to the object endpoint; direct TC requires
+Cubelet reachability to the node-facing TC address. Expired presigns/capability
+tokens are renewed by a new Master distribution attempt. Legacy persisted
+requests keep the stable Master download path for compatibility.
 
 ## 7. Reconciliation
 

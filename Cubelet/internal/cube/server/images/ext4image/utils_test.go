@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -314,6 +315,156 @@ func TestDownloadArtifactWithIndependentKernelSource(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.SharedKernelPath); err != nil {
 		t.Fatalf("shared kernel must survive artifact deletion: %v", err)
+	}
+}
+
+func TestTryDownloadPmemFileUsesDirectTCEndpointAndVerifiesSize(t *testing.T) {
+	rootfs := bytes.Repeat([]byte("rootfs-data"), 256)
+	sum := sha256.Sum256(rootfs)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Cube-Artifact-Token"); got != "short-capability" {
+			t.Errorf("artifact capability header = %q", got)
+		}
+		_, _ = w.Write(rootfs)
+	}))
+	defer server.Close()
+
+	spec := &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:         "https://master.example/cube/template/artifact/download?artifact_id=artifact-1&token=legacy-token",
+		constants.MasterAnnotationRootfsArtifactToken:       "legacy-token",
+		constants.MasterAnnotationRootfsArtifactDirectURL:   server.URL + "/cube/template/artifact/direct-download?artifact_id=artifact-1",
+		constants.MasterAnnotationRootfsArtifactDirectToken: "short-capability",
+		constants.MasterAnnotationRootfsArtifactSource:      "tc",
+		constants.MasterAnnotationRootfsArtifactExpiresAt:   strconv.FormatInt(time.Now().Add(5*time.Minute).Unix(), 10),
+		constants.MasterAnnotationRootfsArtifactSHA256:      hex.EncodeToString(sum[:]),
+		constants.MasterAnnotationRootfsArtifactSizeBytes:   strconv.Itoa(len(rootfs)),
+	}}
+	imagePath := filepath.Join(t.TempDir(), "artifact.ext4")
+	if err := tryDownloadPmemFile(context.Background(), imagePath, spec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(imagePath)
+	if err != nil || !bytes.Equal(got, rootfs) {
+		t.Fatalf("downloaded artifact mismatch: err=%v", err)
+	}
+}
+
+func TestDirectArtifactRedirectDoesNotForwardCapability(t *testing.T) {
+	rootfs := []byte("redirected-artifact")
+	sum := sha256.Sum256(rootfs)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Cube-Artifact-Token"); got != "" {
+			t.Errorf("redirect leaked artifact capability %q", got)
+		}
+		_, _ = w.Write(rootfs)
+	}))
+	defer backend.Close()
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Cube-Artifact-Token"); got != "short-capability" {
+			t.Errorf("initial request capability = %q", got)
+		}
+		http.Redirect(w, r, backend.URL, http.StatusTemporaryRedirect)
+	}))
+	defer front.Close()
+
+	spec := &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:         "https://master.example/cube/template/artifact/download?artifact_id=artifact-1&token=legacy-token",
+		constants.MasterAnnotationRootfsArtifactToken:       "legacy-token",
+		constants.MasterAnnotationRootfsArtifactDirectURL:   front.URL,
+		constants.MasterAnnotationRootfsArtifactDirectToken: "short-capability",
+		constants.MasterAnnotationRootfsArtifactSource:      "tc",
+		constants.MasterAnnotationRootfsArtifactExpiresAt:   strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10),
+		constants.MasterAnnotationRootfsArtifactSHA256:      hex.EncodeToString(sum[:]),
+		constants.MasterAnnotationRootfsArtifactSizeBytes:   strconv.Itoa(len(rootfs)),
+	}}
+	imagePath := filepath.Join(t.TempDir(), "artifact.ext4")
+	if err := tryDownloadPmemFile(context.Background(), imagePath, spec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTryDownloadPmemFileRejectsUnknownDirectSource(t *testing.T) {
+	spec := &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactDirectURL: "http://127.0.0.1:1/artifact",
+		constants.MasterAnnotationRootfsArtifactSource:    "template_center",
+	}}
+	err := tryDownloadPmemFile(context.Background(), filepath.Join(t.TempDir(), "artifact.ext4"), spec)
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported direct source error, got %v", err)
+	}
+}
+
+func TestTryDownloadPmemFileDoesNotSendCapabilityToS3Source(t *testing.T) {
+	rootfs := bytes.Repeat([]byte("rootfs-data"), 64)
+	sum := sha256.Sum256(rootfs)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Cube-Artifact-Token"); got != "" {
+			t.Errorf("S3 request unexpectedly received Cube artifact token %q", got)
+		}
+		_, _ = w.Write(rootfs)
+	}))
+	defer server.Close()
+
+	spec := &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactDirectURL:   server.URL,
+		constants.MasterAnnotationRootfsArtifactDirectToken: "must-not-leak-to-object-store",
+		constants.MasterAnnotationRootfsArtifactSource:      "s3",
+		constants.MasterAnnotationRootfsArtifactExpiresAt:   strconv.FormatInt(time.Now().Add(5*time.Minute).Unix(), 10),
+		constants.MasterAnnotationRootfsArtifactSHA256:      hex.EncodeToString(sum[:]),
+		constants.MasterAnnotationRootfsArtifactSizeBytes:   strconv.Itoa(len(rootfs)),
+	}}
+	imagePath := filepath.Join(t.TempDir(), "artifact.ext4")
+	if err := tryDownloadPmemFile(context.Background(), imagePath, spec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTryDownloadPmemFileFallsBackToStableMasterURLWithoutDirectURL(t *testing.T) {
+	rootfs := bytes.Repeat([]byte("legacy-master-path"), 128)
+	sum := sha256.Sum256(rootfs)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != "legacy-token" {
+			t.Errorf("legacy query token = %q", r.URL.Query().Get("token"))
+		}
+		_, _ = w.Write(rootfs)
+	}))
+	defer server.Close()
+
+	spec := &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:       server.URL + "/cube/template/artifact/download?artifact_id=artifact-1&token=legacy-token",
+		constants.MasterAnnotationRootfsArtifactSource:    "s3",
+		constants.MasterAnnotationRootfsArtifactSHA256:    hex.EncodeToString(sum[:]),
+		constants.MasterAnnotationRootfsArtifactSizeBytes: strconv.Itoa(len(rootfs)),
+	}}
+	imagePath := filepath.Join(t.TempDir(), "artifact.ext4")
+	if err := tryDownloadPmemFile(context.Background(), imagePath, spec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(imagePath)
+	if err != nil || !bytes.Equal(got, rootfs) {
+		t.Fatalf("legacy fallback artifact mismatch: err=%v", err)
+	}
+}
+
+func TestTryDownloadPmemFileRejectsArtifactSizeMismatch(t *testing.T) {
+	rootfs := bytes.Repeat([]byte("rootfs-data"), 256)
+	sum := sha256.Sum256(rootfs)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(rootfs)
+	}))
+	defer server.Close()
+
+	spec := &cubeimages.ImageSpec{Annotations: map[string]string{
+		constants.MasterAnnotationRootfsArtifactURL:       "https://master.example/cube/template/artifact/download?artifact_id=artifact-1&token=legacy-token",
+		constants.MasterAnnotationRootfsArtifactDirectURL: server.URL,
+		constants.MasterAnnotationRootfsArtifactSource:    "s3",
+		constants.MasterAnnotationRootfsArtifactExpiresAt: strconv.FormatInt(time.Now().Add(5*time.Minute).Unix(), 10),
+		constants.MasterAnnotationRootfsArtifactSHA256:    hex.EncodeToString(sum[:]),
+		constants.MasterAnnotationRootfsArtifactSizeBytes: strconv.Itoa(len(rootfs) + 1),
+	}}
+	err := tryDownloadPmemFile(context.Background(), filepath.Join(t.TempDir(), "artifact.ext4"), spec)
+	if err == nil || !strings.Contains(err.Error(), "artifact size mismatch") {
+		t.Fatalf("expected size mismatch error, got %v", err)
 	}
 }
 

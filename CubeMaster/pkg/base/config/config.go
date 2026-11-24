@@ -126,7 +126,11 @@ type CommonConf struct {
 	// Named with a Value suffix to avoid colliding with the TemplateCenterAddr()
 	// method on Config. Access via Config.TemplateCenterAddr() which handles the
 	// env > yaml priority.
-	TemplateCenterAddrValue string `yaml:"template_center_addr"`
+	TemplateCenterAddrValue     string `yaml:"template_center_addr"`
+	TemplateCenterNodeAddrValue string `yaml:"template_center_node_addr"`
+	// ArtifactDownloadCapabilityTTL controls S3 presigned URL and TC capability
+	// lifetimes. Defaults to one hour; the verifier enforces a 24-hour ceiling.
+	ArtifactDownloadCapabilityTTL time.Duration `yaml:"artifact_download_capability_ttl"`
 	// DistributionWorkers is the max concurrency of one rootfs artifact
 	// distribution call. Default 4.
 	DistributionWorkers             int             `yaml:"distribution_workers"`
@@ -752,6 +756,11 @@ const DefaultCubeEgressCAPath = "/etc/cube/ca/cube-root-ca.crt"
 // its own fallback from this single source of truth.
 const DefaultDistributionWorkers = 4
 
+const (
+	DefaultArtifactDownloadCapabilityTTL = time.Hour
+	MaxArtifactDownloadCapabilityTTL     = 24 * time.Hour
+)
+
 type AppHookConfig struct {
 	PrestartHookByEnvKeys map[string][]*types.Hook `yaml:"prestart_hook_by_env_keys"`
 
@@ -937,6 +946,9 @@ func preComHandleConf(config *Config) error {
 	if config.Common.DistributionWorkers <= 0 {
 		// Template rootfs artifact distribution concurrency.
 		config.Common.DistributionWorkers = DefaultDistributionWorkers
+	}
+	if config.Common.ArtifactDownloadCapabilityTTL == 0 {
+		config.Common.ArtifactDownloadCapabilityTTL = DefaultArtifactDownloadCapabilityTTL
 	}
 	if config.Common.DefaultHeadlessServiceNodesNum == 0 {
 		config.Common.DefaultHeadlessServiceNodesNum = 1
@@ -1319,6 +1331,14 @@ func preHandSchedulerScore(config *Config) {
 }
 
 func validate(cfg *Config) error {
+	if cfg != nil && cfg.Common != nil {
+		if cfg.Common.ArtifactDownloadCapabilityTTL < 0 {
+			return errors.New("common.artifact_download_capability_ttl must be positive")
+		}
+		if cfg.Common.ArtifactDownloadCapabilityTTL > MaxArtifactDownloadCapabilityTTL {
+			return fmt.Errorf("common.artifact_download_capability_ttl must not exceed %s", MaxArtifactDownloadCapabilityTTL)
+		}
+	}
 	if cfg.Log == nil {
 		return errors.New("log config is nil. ")
 	}
@@ -1477,10 +1497,25 @@ func (c *Config) TemplateCenterAddr() string {
 	if addr := strings.TrimSpace(os.Getenv(EnvTemplateCenterAddr)); addr != "" {
 		return strings.TrimRight(addr, "/")
 	}
-	if c.Common != nil {
+	if c != nil && c.Common != nil {
 		return strings.TrimRight(strings.TrimSpace(c.Common.TemplateCenterAddrValue), "/")
 	}
 	return ""
+}
+
+const EnvTemplateCenterNodeAddr = "CUBE_TEMPLATE_CENTER_NODE_ADDR"
+
+// TemplateCenterNodeAddr returns the CubeTemplateCenter artifact endpoint
+// reachable from Cubelet nodes. It falls back to TemplateCenterAddr for
+// deployments where the service address is also node-routable.
+func (c *Config) TemplateCenterNodeAddr() string {
+	if addr := strings.TrimSpace(os.Getenv(EnvTemplateCenterNodeAddr)); addr != "" {
+		return strings.TrimRight(addr, "/")
+	}
+	if c != nil && c.Common != nil && strings.TrimSpace(c.Common.TemplateCenterNodeAddrValue) != "" {
+		return strings.TrimRight(strings.TrimSpace(c.Common.TemplateCenterNodeAddrValue), "/")
+	}
+	return c.TemplateCenterAddr()
 }
 
 var defaultAllowedHostMountPrefixes = []string{"/data/shared/"}

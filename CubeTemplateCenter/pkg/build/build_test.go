@@ -5,14 +5,19 @@ package build
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/cube_egress_ca"
+	"github.com/tencentcloud/CubeSandbox/CubeTemplateCenter/pkg/image"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 )
 
 // Regression coverage for the P1 bug where READY-artifact reuse only ever
@@ -99,7 +104,6 @@ func TestArtifactDataExistsLocalOnlyArtifact(t *testing.T) {
 	}
 }
 
-// fakeArtifactS3 is an in-memory artifactS3Ops for presign-guard tests.
 type fakeArtifactS3 struct {
 	objects map[string]bool
 }
@@ -108,35 +112,37 @@ func (f *fakeArtifactS3) Stat(_ context.Context, artifactID string) (bool, error
 	return f.objects[artifactID], nil
 }
 
-func (f *fakeArtifactS3) PresignedGetURL(_ context.Context, artifactID string) (string, error) {
-	return "https://s3.example.com/bucket/" + artifactID + ".ext4?sig=x", nil
+func (f *fakeArtifactS3) BackendName() string { return "s3" }
+func (f *fakeArtifactS3) Bucket() string      { return "test-artifacts" }
+func (f *fakeArtifactS3) FullObjectKey(artifactID string) string {
+	return "template-artifacts/" + artifactID + ".ext4"
 }
 
-// Regression: reusing a legacy artifact that predates S3 (artifact_url empty,
-// ext4 on local disk, nothing in the bucket) must NOT produce a presigned URL
-// -- the signed URL 404s for cubelets and marks the row S3-backed, skipping
-// the working local-file serving path.
-func TestArtifactPresignedURLSkipsObjectsMissingFromBucket(t *testing.T) {
-	s3 := &fakeArtifactS3{objects: map[string]bool{}}
-	logger := log.G(context.Background())
-	if got := artifactPresignedURL(context.Background(), true, s3, "rfs-legacy", logger); got != "" {
-		t.Fatalf("expected empty URL for an object that was never uploaded, got %q", got)
-	}
-}
-
-func TestArtifactPresignedURLSignsExistingObject(t *testing.T) {
-	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-fresh": true}}
-	logger := log.G(context.Background())
-	got := artifactPresignedURL(context.Background(), true, s3, "rfs-fresh", logger)
-	if !strings.Contains(got, "rfs-fresh.ext4") {
-		t.Fatalf("expected presigned URL for an existing object, got %q", got)
-	}
-}
-
-func TestArtifactPresignedURLDisabledWhenS3Off(t *testing.T) {
-	s3 := &fakeArtifactS3{objects: map[string]bool{"rfs-1": true}}
-	logger := log.G(context.Background())
-	if got := artifactPresignedURL(context.Background(), false, s3, "rfs-1", logger); got != "" {
-		t.Fatalf("expected empty URL when S3 is disabled, got %q", got)
+func TestReportArtifactBuiltStoresStableMetadata(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode report: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	reporter := &Reporter{masterURL: server.URL, httpClient: server.Client()}
+	store := &fakeArtifactS3{objects: map[string]bool{"rfs-1": true}}
+	for _, inStore := range []bool{true, false} {
+		if err := reportArtifactBuilt(context.Background(), "job-1", &image.BuildResult{
+			Ext4Path: "/data/CubeMaster/storage/rfs-1/rfs-1.ext4", SHA256: "checksum", SizeBytes: 10,
+		}, "rfs-1", "fingerprint", &image.PreparedSource{Digest: "digest", MasterNodeIP: "http://master"},
+			reporter, cube_egress_ca.Result{}, inStore, store, "", nil, log.G(context.Background())); err != nil {
+			t.Fatal(err)
+		}
+		if inStore {
+			want := blobstore.ObjectLocator("s3", store.FullObjectKey("rfs-1"))
+			if payload["artifact_url"] != want || payload["storage_backend"] != "s3" || payload["object_key"] != store.FullObjectKey("rfs-1") || payload["bucket"] != store.Bucket() {
+				t.Fatalf("stored object must report stable locator/backend/key, got %+v", payload)
+			}
+		} else if payload["artifact_url"] != nil || payload["storage_backend"] != nil || payload["object_key"] != nil || payload["bucket"] != nil {
+			t.Fatalf("failed upload must remain local, got %+v", payload)
+		}
 	}
 }

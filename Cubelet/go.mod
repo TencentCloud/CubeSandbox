@@ -35,6 +35,7 @@ require (
 	github.com/tatsushid/go-fastping v0.0.0-20160109021039-d7bb493dee3e
 	github.com/tchap/go-patricia/v2 v2.3.3
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/artifactsource v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/sandboxrestart v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode v0.0.0
@@ -231,5 +232,7 @@ replace (
 )
 
 replace github.com/tencentcloud/CubeSandbox/CubeNet/cubevs => ../CubeNet/cubevs
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/artifactsource => ../pkgs/artifactsource
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode => ../pkgs/snapshotmode

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
+	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore/configenv"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
@@ -109,10 +112,13 @@ type RemoteBuildResult struct {
 	// This is why TC and CubeMaster must share the artifact directory (one CBS
 	// disk / PVC): the file is written by TC and served by CubeMaster.
 	MasterNodeIP string
-	// ArtifactURL is the S3/MinIO presigned download URL or a blobstore: locator.
+	// ArtifactURL is a stable blobstore:<backend>:<key> locator on new writes.
+	// Historical presigned URLs are accepted only as legacy callback input and
+	// normalized to backend/key before persistence.
 	ArtifactURL             string
 	StorageBackend          string
 	ObjectKey               string
+	Bucket                  string
 	CubeEgressCABaked       bool
 	CubeEgressCAFingerprint string
 	CubeEgressCATargets     int
@@ -147,6 +153,31 @@ func (r *RemoteBuildResult) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("remote build result is missing required field(s): %s", strings.Join(missing, ", "))
 	}
+	backend := strings.TrimSpace(r.StorageBackend)
+	objectKey := strings.TrimSpace(r.ObjectKey)
+	if (backend == "") != (objectKey == "") {
+		return fmt.Errorf("remote build result must provide both storage_backend and object_key")
+	}
+	if r.Bucket != "" && backend != "s3" {
+		return fmt.Errorf("remote build result bucket requires s3 backend")
+	}
+	if backend != "" {
+		if backend != "s3" && backend != "fs" {
+			return fmt.Errorf("remote build result has unsupported storage_backend %q", backend)
+		}
+		if err := blobstore.ValidateKey(objectKey); err != nil {
+			return fmt.Errorf("remote build result has invalid object_key: %w", err)
+		}
+	}
+	if locator := strings.TrimSpace(r.ArtifactURL); blobstore.IsObjectLocator(locator) {
+		locatorBackend, locatorKey, err := blobstore.ParseObjectLocator(locator)
+		if err != nil {
+			return fmt.Errorf("remote build result has invalid artifact locator: %w", err)
+		}
+		if backend != "" && (backend != locatorBackend || objectKey != locatorKey) {
+			return fmt.Errorf("remote build result artifact locator conflicts with storage_backend/object_key")
+		}
+	}
 	// Path-traversal guard: the status callback is unauthenticated, so
 	// ext4_path is attacker-controlled. It must resolve to a file INSIDE one of
 	// the controlled artifact root directories, or Cubelet could be told to
@@ -155,6 +186,125 @@ func (r *RemoteBuildResult) Validate() error {
 	// the artifact dir.
 	if err := r.validateExt4PathWithinStore(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// NormalizeRemoteBuildArtifactStore converts callback-era presigned URLs into
+// stable blobstore metadata before the payload is persisted. New callbacks
+// already provide storage_backend/object_key (and may provide a blobstore:
+// locator); old callbacks that only contain a presigned URL are accepted only
+// when this CubeMaster can resolve and HEAD the corresponding configured object.
+// No presigned URL is written back to the artifact row or job result_json.
+func NormalizeRemoteBuildArtifactStore(ctx context.Context, result *RemoteBuildResult) error {
+	if result == nil {
+		return fmt.Errorf("remote build result is nil")
+	}
+	result.ArtifactID = strings.TrimSpace(result.ArtifactID)
+	result.ArtifactURL = strings.TrimSpace(result.ArtifactURL)
+	result.StorageBackend = strings.TrimSpace(result.StorageBackend)
+	result.ObjectKey = strings.TrimSpace(result.ObjectKey)
+	result.Bucket = strings.TrimSpace(result.Bucket)
+
+	if blobstore.IsObjectLocator(result.ArtifactURL) {
+		backend, key, err := blobstore.ParseObjectLocator(result.ArtifactURL)
+		if err != nil {
+			return fmt.Errorf("parse artifact locator: %w", err)
+		}
+		if result.StorageBackend != "" && result.StorageBackend != backend {
+			return fmt.Errorf("artifact locator backend %q conflicts with storage_backend %q", backend, result.StorageBackend)
+		}
+		if result.ObjectKey != "" && result.ObjectKey != key {
+			return fmt.Errorf("artifact locator key conflicts with object_key")
+		}
+		result.StorageBackend = backend
+		result.ObjectKey = key
+	}
+
+	if result.StorageBackend != "" && result.ObjectKey != "" {
+		if result.StorageBackend != "s3" && result.StorageBackend != "fs" {
+			return fmt.Errorf("unsupported artifact storage_backend %q", result.StorageBackend)
+		}
+		if err := blobstore.ValidateKey(result.ObjectKey); err != nil {
+			return fmt.Errorf("invalid artifact object_key: %w", err)
+		}
+		if result.StorageBackend == "fs" && result.Bucket != "" {
+			return fmt.Errorf("fs artifact cannot have an S3 bucket")
+		}
+		if result.StorageBackend == "s3" && result.Bucket != "" && result.Bucket != configenv.ParseArtifactS3().Bucket {
+			return fmt.Errorf("callback bucket does not match configured S3 bucket")
+		}
+		if result.Bucket == "" && result.StorageBackend == "s3" && strings.HasPrefix(result.ArtifactURL, "http") {
+			if err := validateHistoricalArtifactURL(result.ArtifactURL, result.ObjectKey); err != nil {
+				return err
+			}
+			result.Bucket = configenv.ParseArtifactS3().Bucket
+		}
+		result.ArtifactURL = blobstore.ObjectLocator(result.StorageBackend, result.ObjectKey)
+		return nil
+	}
+
+	if result.ArtifactURL == "" {
+		if result.Bucket != "" {
+			return fmt.Errorf("local artifact cannot specify an S3 bucket")
+		}
+		return nil
+	}
+
+	// Compatibility for an older TC callback that reports only a signed URL.
+	// Never persist that expiring URL: infer the configured artifact key and
+	// verify the object exists before replacing it with a stable locator.
+	backend, key := artifactStoreColumns(result.ArtifactID)
+	if backend == "" || key == "" {
+		return fmt.Errorf("legacy artifact_url cannot be normalized: CubeMaster artifact store is not configured")
+	}
+	if err := validateHistoricalArtifactURL(result.ArtifactURL, key); err != nil {
+		return err
+	}
+	result.Bucket = configenv.ParseArtifactS3().Bucket
+	exists, err := statArtifactObjectInS3(ctx, &models.RootfsArtifact{
+		ArtifactID:     result.ArtifactID,
+		StorageBackend: backend,
+		ObjectKey:      key,
+		Bucket:         result.Bucket,
+	})
+	if err != nil {
+		return fmt.Errorf("verify legacy artifact object before normalization: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("legacy artifact URL cannot be persisted because object %q is absent from the configured %s store", key, backend)
+	}
+	result.StorageBackend = backend
+	result.ObjectKey = key
+	result.ArtifactURL = blobstore.ObjectLocator(backend, key)
+	return nil
+}
+
+// validateHistoricalArtifactURL uses the old URL only as an identity clue.
+// It never sends an HTTP request to that URL or treats its signature as valid.
+func validateHistoricalArtifactURL(raw, key string) error {
+	cfg := configenv.ParseArtifactS3()
+	if !cfg.Enabled {
+		return fmt.Errorf("historical artifact URL cannot be attributed: S3 is not configured")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("historical artifact URL has no verifiable storage identity")
+	}
+	endpoint := cfg.Endpoint
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "https://" + endpoint
+	}
+	base, err := url.Parse(endpoint)
+	if err != nil || base.Host == "" {
+		return fmt.Errorf("configured S3 endpoint cannot be parsed")
+	}
+	pathStyle := strings.EqualFold(u.Hostname(), base.Hostname()) && u.Port() == base.Port() &&
+		u.Path == "/"+cfg.Bucket+"/"+key
+	virtualHost := strings.EqualFold(u.Hostname(), cfg.Bucket+"."+base.Hostname()) && u.Port() == base.Port() &&
+		u.Path == "/"+key
+	if !pathStyle && !virtualHost {
+		return fmt.Errorf("historical artifact URL does not match configured bucket, key and endpoint")
 	}
 	return nil
 }
@@ -233,6 +383,17 @@ func mergeRemoteBuildReport(prior string, finalResult []byte) []byte {
 	// Defensive: never nest a report inside a report, which would grow the
 	// column on every finalize.
 	delete(priorPayload, remoteBuildReportKey)
+	// Older job rows may still contain a signed artifact URL. Keep the
+	// diagnostic payload, but replace it with a stable locator when backend/key
+	// are available; otherwise drop the URL instead of perpetuating an expiring
+	// credential in result_json.
+	backend, _ := priorPayload["storage_backend"].(string)
+	objectKey, _ := priorPayload["object_key"].(string)
+	if backend != "" && objectKey != "" && blobstore.ValidateKey(objectKey) == nil && (backend == "s3" || backend == "fs") {
+		priorPayload["artifact_url"] = blobstore.ObjectLocator(backend, objectKey)
+	} else {
+		delete(priorPayload, "artifact_url")
+	}
 
 	var merged map[string]any
 	if err := json.Unmarshal(finalResult, &merged); err != nil || merged == nil {
@@ -279,6 +440,9 @@ func prepareTemplateImageJobAfterRemoteBuild(ctx context.Context, jobID string, 
 	}
 	if result == nil {
 		return nil, fmt.Errorf("remote build result is nil")
+	}
+	if err := NormalizeRemoteBuildArtifactStore(ctx, result); err != nil {
+		return nil, err
 	}
 	if err := result.Validate(); err != nil {
 		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
@@ -628,6 +792,9 @@ func finalizeRemoteArtifact(
 	result *RemoteBuildResult,
 	imageCfg DockerImageConfig,
 ) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
+	if err := NormalizeRemoteBuildArtifactStore(ctx, result); err != nil {
+		return nil, nil, err
+	}
 	record.SourceImageDigest = result.SourceImageDigest
 	record.MasterNodeIP = result.MasterNodeIP
 	record.Ext4Path = result.Ext4Path
@@ -638,6 +805,7 @@ func finalizeRemoteArtifact(
 	record.ArtifactURL = result.ArtifactURL
 	record.StorageBackend = result.StorageBackend
 	record.ObjectKey = result.ObjectKey
+	record.Bucket = result.Bucket
 	record.Status = ArtifactStatusReady
 	record.GCDeadline = time.Now().Add(defaultTemplateArtifactTTL).Unix()
 	record.CubeEgressCABaked = result.CubeEgressCABaked
@@ -674,6 +842,7 @@ func finalizeRemoteArtifact(
 		"artifact_url":                   record.ArtifactURL,
 		"storage_backend":                record.StorageBackend,
 		"object_key":                     record.ObjectKey,
+		"bucket":                         record.Bucket,
 		"status":                         record.Status,
 		"gc_deadline":                    record.GCDeadline,
 		"last_error":                     "",

@@ -8,6 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -17,8 +21,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
-	"os"
-	"strings"
 )
 
 var getTemplateImageJobPullProgress = localcache.GetTemplateImageJobPullProgress
@@ -411,8 +413,8 @@ func GetRootfsArtifactForRedirect(ctx context.Context, artifactID, token string)
 	if err != nil {
 		return nil, err
 	}
-	if record.DownloadToken != "" && token != record.DownloadToken {
-		return nil, fmt.Errorf("invalid artifact token")
+	if !validRootfsArtifactDownloadToken(record, token) {
+		return nil, fmt.Errorf("invalid or expired artifact token")
 	}
 	return record, nil
 }
@@ -422,8 +424,8 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 	if err != nil {
 		return nil, nil, err
 	}
-	if record.DownloadToken != "" && token != record.DownloadToken {
-		return nil, nil, fmt.Errorf("invalid artifact token")
+	if !validRootfsArtifactDownloadToken(record, token) {
+		return nil, nil, fmt.Errorf("invalid or expired artifact token")
 	}
 	f, err := os.Open(record.Ext4Path)
 	if err != nil {
@@ -447,4 +449,14 @@ func OpenRootfsArtifact(ctx context.Context, artifactID, token string) (*models.
 		return nil, nil, err
 	}
 	return record, f, nil
+}
+
+func validRootfsArtifactDownloadToken(record *models.RootfsArtifact, token string) bool {
+	if record == nil {
+		return false
+	}
+	if token != "" && record.DownloadToken != "" && token == record.DownloadToken {
+		return true
+	}
+	return ValidArtifactDownloadCapability(record.ArtifactID, token, time.Now())
 }

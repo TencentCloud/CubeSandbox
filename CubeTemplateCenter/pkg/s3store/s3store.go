@@ -161,6 +161,14 @@ func (c *Client) Stat(ctx context.Context, artifactID string) (bool, error) {
 	return true, nil
 }
 
+// Bucket returns the S3 namespace used by this client; fs has none.
+func (c *Client) Bucket() string {
+	if c.BackendName() != "s3" {
+		return ""
+	}
+	return c.cfg.Bucket
+}
+
 // BackendName returns s3 or fs.
 func (c *Client) BackendName() string {
 	return normalizeDriver(c.cfg.Driver)

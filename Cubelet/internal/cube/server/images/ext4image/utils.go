@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/pkgs/artifactsource"
 	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
@@ -89,11 +90,45 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		return fmt.Errorf("image spec annotations are empty")
 	}
 	downloadURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactURL])
+	directURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectURL])
+	source := ""
+	downloadToken := ""
+	if directURL != "" {
+		downloadURL = directURL
+		source = strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSource])
+		downloadToken = strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectToken])
+	} else if downloadURL != "" {
+		// Older CubeMaster versions provide only the stable Master URL. Keep
+		// that path usable even if unrelated direct-source annotations exist.
+		downloadURL = rewriteDownloadHost(downloadURL, cubeMasterHTTPAddr())
+	}
 	if downloadURL == "" {
 		return fmt.Errorf("artifact download url is empty")
 	}
-	downloadURL = rewriteDownloadHost(downloadURL, cubeMasterHTTPAddr())
 	expectedSHA := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSHA256])
+	expectedSizeRaw := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSizeBytes])
+	var expectedSize int64
+	if expectedSizeRaw != "" {
+		var err error
+		expectedSize, err = strconv.ParseInt(expectedSizeRaw, 10, 64)
+		if err != nil || expectedSize <= 0 {
+			return fmt.Errorf("invalid artifact size annotation %q", expectedSizeRaw)
+		}
+	}
+	expiresAtRaw := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactExpiresAt])
+	sourceKind := artifactsource.Source(source)
+	if directURL != "" && (!sourceKind.Valid() || sourceKind == artifactsource.Legacy) {
+		return fmt.Errorf("direct artifact source %q is missing or unsupported", source)
+	}
+	if sourceKind.RequiresIntegrityCheck() {
+		expiresAt, err := strconv.ParseInt(expiresAtRaw, 10, 64)
+		if expectedSHA == "" || expectedSize <= 0 || err != nil || expiresAt <= 0 {
+			return fmt.Errorf("direct artifact source requires sha256, positive size, and expires_at annotations")
+		}
+		if sourceKind.RequiresToken() && downloadToken == "" {
+			return fmt.Errorf("direct HTTP artifact source requires a short-lived token")
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return err
 	}
@@ -221,6 +256,16 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		_ = pf.Close()
 		if err != nil {
 			return err
+		}
+	}
+	if expectedSize > 0 {
+		st, err := os.Stat(tmpPath)
+		if err != nil {
+			return err
+		}
+		if st.Size() != expectedSize {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("artifact size mismatch, got %d want %d", st.Size(), expectedSize)
 		}
 	}
 	gotSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -382,10 +427,26 @@ func fetchArtifactResp(ctx context.Context, downloadURL string, spec *cubeimages
 	if withRange {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
-	if token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]); token != "" {
+	if directURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectURL]); directURL != "" {
+		kind := artifactsource.Source(strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSource]))
+		if !kind.Valid() || kind == artifactsource.Legacy {
+			return nil, fmt.Errorf("unsupported direct artifact source %q", kind)
+		}
+		if kind.RequiresToken() {
+			req.Header.Set("X-Cube-Artifact-Token", strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactDirectToken]))
+		}
+	} else if token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]); token != "" {
 		req.Header.Set("X-Cube-Artifact-Token", token)
 	}
-	return http.DefaultClient.Do(req)
+	client := *http.DefaultClient
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many artifact download redirects")
+		}
+		next.Header.Del("X-Cube-Artifact-Token")
+		return nil
+	}
+	return client.Do(req)
 }
 
 // contentRange is a parsed Content-Range header value. start and end are -1

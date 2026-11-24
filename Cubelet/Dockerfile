@@ -26,6 +26,7 @@ WORKDIR /workspace
 
 COPY cubecow/ /workspace/cubecow/
 COPY pkgs/CubeLog/ /workspace/pkgs/CubeLog/
+COPY pkgs/artifactsource/ /workspace/pkgs/artifactsource/
 COPY pkgs/proto/ /workspace/pkgs/proto/
 COPY pkgs/sandboxrestart/ /workspace/pkgs/sandboxrestart/
 COPY pkgs/snapshotmode/ /workspace/pkgs/snapshotmode/

@@ -5,6 +5,7 @@ package cube
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,6 +65,36 @@ func TestTemplateJobStatusCallbackRejectsBadToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestTemplateJobBuiltCallbackPersistsOnlyStableLocator(t *testing.T) {
+	t.Setenv(constants.TemplateCallbackTokenEnv, "s3cret")
+	t.Setenv("CUBE_S3_ENDPOINT", "old.example")
+	t.Setenv("CUBE_S3_BUCKET", "test-artifacts")
+	t.Setenv("CUBE_S3_ACCESS_KEY_ID", "test-key")
+	t.Setenv("CUBE_S3_SECRET_ACCESS_KEY", "test-secret")
+	oldApply := applyTemplateImageJobBuiltReport
+	t.Cleanup(func() { applyTemplateImageJobBuiltReport = oldApply })
+	var persisted map[string]any
+	applyTemplateImageJobBuiltReport = func(_ context.Context, _ string, values map[string]any) (bool, error) {
+		if raw, ok := values["result_json"].(string); ok {
+			if err := json.Unmarshal([]byte(raw), &persisted); err != nil {
+				t.Fatalf("decode persisted report: %v", err)
+			}
+		}
+		return false, nil // duplicate callback; no async continuation
+	}
+	body := `{"status":"BUILT","artifact_id":"rfs-1","artifact_url":"https://old.example/test-artifacts/rfs-1.ext4?X-Amz-Signature=secret","storage_backend":"s3","object_key":"rfs-1.ext4"}`
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/internal/template/jobs/job-1/status", strings.NewReader(body))
+	c.Request.Header.Set(constants.TemplateCallbackTokenHeader, "s3cret")
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "job_id", Value: "job-1"}}
+	handleTemplateJobStatusCallback(c)
+	if w.Code != http.StatusOK || persisted["artifact_url"] != "blobstore:s3:rfs-1.ext4" || persisted["bucket"] != "test-artifacts" {
+		t.Fatalf("callback status=%d persisted=%+v", w.Code, persisted)
 	}
 }
 

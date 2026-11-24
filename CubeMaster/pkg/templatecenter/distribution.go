@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
@@ -300,17 +301,11 @@ func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTempl
 }
 
 func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
-	// Always give Cubelets the CubeMaster download endpoint. That keeps the
-	// node-facing address uniform across local-disk and S3-backed artifacts and
-	// avoids per-node dependence on the object-store endpoint's reachability.
-	downloadURL := buildDownloadURL(effectiveArtifactDownloadBaseURL("", artifact), artifact.ArtifactID, artifact.DownloadToken)
 	spec := &imagev1.ImageSpec{
 		Image:        artifact.ArtifactID,
 		StorageMedia: imagev1.ImageStorageMediaType_ext4.String(),
 		Annotations: map[string]string{
 			constants.CubeAnnotationRootfsArtifactID:        artifact.ArtifactID,
-			constants.CubeAnnotationRootfsArtifactURL:       downloadURL,
-			constants.CubeAnnotationRootfsArtifactToken:     artifact.DownloadToken,
 			constants.CubeAnnotationRootfsArtifactSHA256:    artifact.Ext4SHA256,
 			constants.CubeAnnotationRootfsArtifactSizeBytes: strconv.FormatInt(artifact.Ext4SizeBytes, 10),
 			constants.CubeAnnotationWritableLayerSize:       req.WritableLayerSize,
@@ -326,6 +321,7 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 	sem := make(chan struct{}, distributionWorkerCount())
 	var wg sync.WaitGroup
 	readyTargets := make([]*node.Node, 0, len(targets))
+	masterArtifactBaseURL := effectiveArtifactDownloadBaseURL("", artifact)
 	for _, target := range targets {
 		target := target
 		wg.Add(1)
@@ -352,9 +348,41 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 			if trackReplicas {
 				replica = buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
 			}
+			downloadSource, sourceErr := IssueArtifactDownloadSource(rpcCtx, artifact, masterArtifactBaseURL, time.Now())
+			if sourceErr != nil {
+				lock.Lock()
+				failed++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("issue rootfs artifact download source: %w", sourceErr)
+				}
+				if trackReplicas && templateID != "" && generatedReq != nil {
+					replica.Phase = ReplicaPhaseFailed
+					replica.ErrorMessage = sourceErr.Error()
+					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
+				}
+				lock.Unlock()
+				telemetry.End(rpcSpan, sourceErr)
+				return
+			}
+			// Build a brand-new ImageSpec per node instead of `nodeSpec := *spec`:
+			// imagev1.ImageSpec is a generated proto message carrying an internal
+			// protoimpl.MessageState (which embeds a sync.Mutex), so copying the
+			// struct by value trips `go vet`'s lock-copy check and risks sharing
+			// that internal state across concurrent per-node goroutines.
+			nodeAnnotations := make(map[string]string, len(spec.Annotations)+3)
+			for key, value := range spec.Annotations {
+				nodeAnnotations[key] = value
+			}
+			legacyURL := buildDownloadURL(masterArtifactBaseURL, artifact.ArtifactID, artifact.DownloadToken)
+			setArtifactDownloadAnnotations(nodeAnnotations, legacyURL, artifact.DownloadToken, downloadSource)
+			nodeSpec := &imagev1.ImageSpec{
+				Image:        spec.Image,
+				StorageMedia: spec.StorageMedia,
+				Annotations:  nodeAnnotations,
+			}
 			rsp, err := cubelet.CreateImage(rpcCtx, cubelet.GetCubeletAddr(target.HostIP()), &imagev1.CreateImageRequest{
 				RequestID: uuid.New().String(),
-				Spec:      spec,
+				Spec:      nodeSpec,
 			})
 			if err != nil {
 				telemetry.End(rpcSpan, err)

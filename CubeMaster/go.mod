@@ -33,6 +33,7 @@ require (
 	github.com/smallnest/weighted v0.0.0-20230419055410-36b780e40a7a
 	github.com/stretchr/testify v1.11.1
 	github.com/tencentcloud/CubeSandbox/pkgs/CubeLog v0.1.1-0.20260113105508-a996703fa42f
+	github.com/tencentcloud/CubeSandbox/pkgs/artifactsource v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/blobstore v0.0.0
 	github.com/tencentcloud/CubeSandbox/pkgs/cubedb v0.0.0-00010101000000-000000000000
 	github.com/tencentcloud/CubeSandbox/pkgs/proto v0.0.0
@@ -200,6 +201,8 @@ require (
 )
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/CubeLog => ../pkgs/CubeLog
+
+replace github.com/tencentcloud/CubeSandbox/pkgs/artifactsource => ../pkgs/artifactsource
 
 replace github.com/tencentcloud/CubeSandbox/pkgs/blobstore => ../pkgs/blobstore
 

@@ -133,6 +133,28 @@ func TestPreComHandleConfDistributionWorkersDefault(t *testing.T) {
 	assert.Equal(t, 16, cfg.Common.DistributionWorkers)
 }
 
+func TestArtifactDownloadCapabilityConfigDefaultsAndParsesDuration(t *testing.T) {
+	cfg := &Config{Common: &CommonConf{}}
+	assert.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, time.Hour, cfg.Common.ArtifactDownloadCapabilityTTL)
+
+	var parsed Config
+	err := yaml.Unmarshal([]byte("common:\n  artifact_download_capability_ttl: 45m\n"), &parsed)
+	assert.NoError(t, err)
+	assert.Equal(t, 45*time.Minute, parsed.Common.ArtifactDownloadCapabilityTTL)
+
+	assert.NoError(t, preComHandleConf(&Config{Common: &CommonConf{ArtifactDownloadCapabilityTTL: 30 * time.Minute}}))
+}
+
+func TestArtifactDownloadCapabilityConfigRejectsUnsafeLimits(t *testing.T) {
+	cfg := &Config{Common: &CommonConf{ArtifactDownloadCapabilityTTL: MaxArtifactDownloadCapabilityTTL + time.Second}}
+	assert.ErrorContains(t, validate(cfg), "must not exceed")
+
+	cfg = &Config{Common: &CommonConf{ArtifactDownloadCapabilityTTL: -time.Second}}
+	assert.ErrorContains(t, validate(cfg), "must be positive")
+
+}
+
 func TestNestedLogSettingsUseSnakeCaseOnRoundTrip(t *testing.T) {
 	var cfg Config
 	err := yaml.Unmarshal([]byte("log:\n  file_size: 100\n  file_num: 10\n  enable_log_metric: true\n"), &cfg)
