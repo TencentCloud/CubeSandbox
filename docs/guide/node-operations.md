@@ -61,6 +61,8 @@ Restore compatibility then works as follows:
 | No machine type | `cpuid_hash` and `host_kernel_release` (unchanged) |
 | Machine type `<T>` | Machine type `<T>` and `cpuid_hash`; the host kernel is no longer compared |
 
+After binding, a node restores only onto nodes with the same machine type and `cpuid_hash`; unbound nodes are excluded even when CPU and kernel match. When enabling a type for a group that could already restore between its members, bind the whole group.
+
 A machine type that contains more than one CPU only produces a warning — those nodes still cannot restore onto each other. To see the CPU and kernel spread inside a type, use `cubeopscli machine-type get <name>`.
 
 Deleting a type that still has nodes bound requires unbinding them at the same time (CLI: `--unbind`).

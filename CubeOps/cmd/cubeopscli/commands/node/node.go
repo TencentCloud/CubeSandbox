@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -90,8 +91,18 @@ func listAction(c *cli.Context) error {
 
 	hostID := c.String("hostid")
 	scoreOnly := c.Bool("score-only")
+	machineType := strings.TrimSpace(c.String("machine-type"))
+	unassigned := c.Bool("unassigned-machine-type")
+	if machineType != "" && unassigned {
+		return errors.New("use only one of --machine-type and --unassigned-machine-type")
+	}
+	serverFilter := machineType
+	if unassigned {
+		serverFilter = model.MachineTypeUnassigned
+	}
+
 	var rsp []*model.SchedulerNode
-	if hostID != "" {
+	if hostID != "" && serverFilter == "" {
 		reqURL := buildURL(host, fmt.Sprintf("/internal/v1/nodes/%s?requestID=%s", url.PathEscape(hostID), requestID))
 		if scoreOnly {
 			reqURL += "&score_only=true"
@@ -104,19 +115,31 @@ func listAction(c *cli.Context) error {
 			rsp = []*model.SchedulerNode{single}
 		}
 	} else {
+		// The server applies machineType before building the score view. A
+		// --hostid + machine-type query therefore uses the ids filter of the
+		// list endpoint: the single-node endpoint has no machine-type filter,
+		// and its full view does not carry Score.
 		reqURL := buildURL(host, fmt.Sprintf("/internal/v1/nodes?requestID=%s", requestID))
+		if hostID != "" {
+			reqURL += "&ids=" + url.QueryEscape(hostID)
+		}
 		if scoreOnly {
 			reqURL += "&score_only=true"
+		}
+		if serverFilter != "" {
+			reqURL += "&machineType=" + url.QueryEscape(serverFilter)
 		}
 		if err := doHttpReq(c, reqURL, http.MethodGet, requestID, nil, &rsp); err != nil {
 			return err
 		}
 		sort.Slice(rsp, func(i, j int) bool { return rsp[i].ID() < rsp[j].ID() })
 	}
-	if c.Bool("unassigned-machine-type") && c.String("machine-type") != "" {
-		return errors.New("use only one of --machine-type and --unassigned-machine-type")
+	// Full views carry NodeLabels, so the local pass is idempotent and keeps
+	// compatibility with servers that do not know machineType. Score views do
+	// not carry labels; their filtering must happen server-side.
+	if !scoreOnly {
+		rsp = filterSchedulerNodes(rsp, machineType, unassigned)
 	}
-	rsp = filterSchedulerNodes(rsp, c.String("machine-type"), c.Bool("unassigned-machine-type"))
 	if c.Bool("json") {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

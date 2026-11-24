@@ -61,6 +61,8 @@ type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5(cordoned)
 | 未绑定机型 | `cpuid_hash` 和 `host_kernel_release` 都相等（不变） |
 | 绑定机型 `<T>` | 同为机型 `<T>` 且 `cpuid_hash` 相同；不再比较宿主内核 |
 
+绑定机型后，节点只能恢复到同一机型、`cpuid_hash` 相同的节点；未绑定节点即使 CPU、内核一致也会被排除。给一组原本可互相恢复的节点启用机型时，要整组一起绑定。
+
 一个机型里混入多种 CPU 时只会得到告警——这些节点之间依然无法跨机恢复。查看机型内的 CPU、内核分布用 `cubeopscli machine-type get <name>`。
 
 删除仍绑定着节点的机型时必须同时解绑（CLI 加 `--unbind`）。

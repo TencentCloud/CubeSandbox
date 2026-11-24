@@ -44,6 +44,37 @@ func TestInternal_ListNodes(t *testing.T) {
 	}
 }
 
+func TestInternal_ListNodes_MachineTypeFilterBeforeScoreView(t *testing.T) {
+	svc := &fakeNodeService{
+		listNodes: func(_ context.Context) ([]*model.NodeSnapshot, error) {
+			return []*model.NodeSnapshot{
+				{NodeID: "n-1", Score: 0.5, Labels: map[string]string{model.LabelMachineType: "t"}},
+				{NodeID: "n-2", Score: 0.9},
+			}, nil
+		},
+	}
+	r := gin.New()
+	handler.NewInternalHandler(svc).Register(r.Group("/internal/v1"))
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/nodes?machineType=t&score_only=true", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp []*model.SchedulerNode
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp) != 1 || resp[0].ID() != "n-1" {
+		t.Fatalf("resp = %+v, want only n-1", resp)
+	}
+	if resp[0].Score != 0.5 {
+		t.Fatalf("score = %v, want 0.5", resp[0].Score)
+	}
+}
+
 func TestInternal_Isolate(t *testing.T) {
 	var gotDetail string
 	svc := &fakeNodeService{
