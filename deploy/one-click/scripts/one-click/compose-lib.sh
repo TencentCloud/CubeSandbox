@@ -24,6 +24,12 @@ compose_run() {
   fi
 
   docker run --rm \
+    -e CUBE_PROXY_OTEL_ENABLE \
+    -e CUBE_PROXY_OTEL_ENDPOINT \
+    -e CUBE_PROXY_OTEL_SERVICE_NAME \
+    -e CUBE_PROXY_OTEL_SAMPLE_RATIO \
+    -e CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS \
+    -e CUBE_PROXY_OTEL_TIMEOUT_MS \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "${TOOLBOX_ROOT}:${TOOLBOX_ROOT}" \
     -w "${PROXY_DIR}" \

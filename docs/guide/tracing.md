@@ -59,6 +59,40 @@ Cubelet launches a fresh CubeShim process per sandbox; the process lives alongsi
 
 Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
 
+### CubeProxy data-plane tracing
+
+The operator deploying CubeProxy enables tracing in the proxy's deployment
+configuration. Tracing is disabled by default.
+
+For one-click deployments, add these settings to the `.env` next to
+`install.sh` and run the installer to apply them:
+
+```dotenv
+CUBE_PROXY_OTEL_ENABLE=1
+CUBE_PROXY_OTEL_ENDPOINT=http://collector:4318/v1/traces
+```
+
+For Helm, add the following to your values overlay and apply it with Helm:
+
+```yaml
+cubeProxy:
+  tracing:
+    enabled: true
+    endpoint: http://otel-collector.monitoring.svc.cluster.local:4318/v1/traces
+```
+
+Use a Collector OTLP/HTTP endpoint that accepts JSON and is reachable from
+CubeProxy. The exporter supports plain HTTP. Hostname endpoints require an
+Nginx resolver. For custom deployments, set the same environment variables
+when launching CubeProxy.
+
+The optional settings are `CUBE_PROXY_OTEL_SERVICE_NAME` (default `cube-proxy`),
+`CUBE_PROXY_OTEL_SAMPLE_RATIO` (default `1`), `CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS`
+and `CUBE_PROXY_OTEL_TIMEOUT_MS` (both default to `2000`). In Helm these are
+`serviceName`, `sampleRatio`, `flushIntervalMs`, and `timeoutMs` under
+`cubeProxy.tracing`. The sampling ratio applies to requests with a sampled
+incoming W3C `traceparent`. CubeProxy forwards the child context to the sandbox.
+
 ### Rust envd REST tracing
 
 To enable tracing in Rust envd, set `CUBE_ENVD_OTEL_ENDPOINT` in the guest

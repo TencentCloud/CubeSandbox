@@ -28,3 +28,12 @@ proxy_registry.setup({
     redis_sentinel_nodes = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SENTINEL_NODES"),
     redis_sentinel_pd = os.getenv("CUBE_PROXY_REGISTRY_REDIS_SENTINEL_PASSWORD"),
 })
+
+require("trace").setup({
+    enable = os.getenv("CUBE_PROXY_OTEL_ENABLE") == "1",
+    endpoint = os.getenv("CUBE_PROXY_OTEL_ENDPOINT"),
+    service_name = os.getenv("CUBE_PROXY_OTEL_SERVICE_NAME"),
+    sample_ratio = tonumber(os.getenv("CUBE_PROXY_OTEL_SAMPLE_RATIO") or ""),
+    flush_interval_ms = tonumber(os.getenv("CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS") or ""),
+    timeout_ms = tonumber(os.getenv("CUBE_PROXY_OTEL_TIMEOUT_MS") or ""),
+})

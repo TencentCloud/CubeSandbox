@@ -59,6 +59,37 @@ Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启�
 
 Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后，等待会有意持续到任务退出；创建请求取消或超时不会丢失退出事件。等待上下文只保留 containerd 命名空间，不继承请求取消、日志字段或已结束的创建 Span。若任务启动失败，则取消等待。
 
+### CubeProxy 数据面追踪
+
+由部署 CubeProxy 的管理员在部署配置中开启追踪。默认关闭。
+
+一键部署时，在 `install.sh` 同目录的 `.env` 中添加以下配置，再运行安装脚本使其生效：
+
+```dotenv
+CUBE_PROXY_OTEL_ENABLE=1
+CUBE_PROXY_OTEL_ENDPOINT=http://collector:4318/v1/traces
+```
+
+Helm 部署时，在 values 文件中添加以下配置并应用：
+
+```yaml
+cubeProxy:
+  tracing:
+    enabled: true
+    endpoint: http://otel-collector.monitoring.svc.cluster.local:4318/v1/traces
+```
+
+接收地址应能从 CubeProxy 访问，并支持 OTLP/HTTP JSON。导出器使用明文 HTTP，
+使用域名时需要设置 Nginx resolver。自定义部署可在启动 CubeProxy 时直接传入
+上述环境变量。
+
+还可以设置 `CUBE_PROXY_OTEL_SERVICE_NAME`（默认 `cube-proxy`）、
+`CUBE_PROXY_OTEL_SAMPLE_RATIO`（默认 `1`）、
+`CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS` 和 `CUBE_PROXY_OTEL_TIMEOUT_MS`（均默认 `2000`）。
+对应的 Helm 字段位于 `cubeProxy.tracing` 下，分别是 `serviceName`、
+`sampleRatio`、`flushIntervalMs` 和 `timeoutMs`。采样比例应用于携带已采样
+W3C `traceparent` 的请求。CubeProxy 会将子 Span 的上下文传给沙箱。
+
 ### Rust envd REST 追踪
 
 要启用 Rust envd 追踪，请在 envd 启动时读取的沙箱环境中设置

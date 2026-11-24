@@ -6,6 +6,7 @@
 
 local activity = require "activity"
 local metrics = require "metrics"
+local trace = require "trace"
 
 local function get_currtime()
     -- ngx.var.msec = 1663839717.105
@@ -27,3 +28,4 @@ ngx.var.access_time = get_currtime()
 activity.touch(ngx.var.ins_id)
 
 metrics.finish_current_request()
+trace.finish()
