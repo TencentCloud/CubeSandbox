@@ -303,3 +303,32 @@ func TestChangePassword_NoAuth_401(t *testing.T) {
 		t.Errorf("status = %d, want 401 (no auth)", w.Code)
 	}
 }
+
+// --- Validation errors (400 with the original reason, not a generic 500) ---
+
+func TestAuthValidationErrors_400(t *testing.T) {
+	jm := auth.NewJWTManager("test-secret-32-bytes-long-enough!", 15*time.Minute, 168*time.Hour)
+	token, err := jm.GenerateAccessToken("admin")
+	if err != nil {
+		t.Fatalf("GenerateAccessToken: %v", err)
+	}
+	for _, tc := range []struct {
+		name, path, body, bearer, want string
+	}{
+		{"login empty password", "/api/v1/auth/login", `{"username":"admin","password":""}`, "", "username and password are required"},
+		{"refresh empty token", "/api/v1/auth/refresh", `{"refreshToken":""}`, "", "refreshToken is required"},
+		{"change-password missing old", "/api/v1/auth/change-password", `{"oldPassword":"","newPassword":"newpass123"}`, token, "oldPassword and newPassword are required"},
+		{"change-password too short", "/api/v1/auth/change-password", `{"oldPassword":"s3cret","newPassword":"abc"}`, token, "new password must be at least 4 characters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := newAuthRouter(t)
+			w := doRequest(t, r, "POST", tc.path, tc.body, tc.bearer)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.want) {
+				t.Errorf("body = %s, want it to contain %q", w.Body.String(), tc.want)
+			}
+		})
+	}
+}

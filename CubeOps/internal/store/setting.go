@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"gorm.io/gorm"
 )
@@ -15,16 +16,12 @@ const settingMasterKey = "secret_master_key"
 
 // ── System-level settings (t_system_setting) ────────────────────────────────
 
-// GetSystemSetting retrieves a system-level setting value by key.
+// GetSystemSetting returns the system setting for key. A missing row or
+// NULL/empty value yields ("", nil); an error means the read itself failed.
 func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error) {
-	var val string
-	err := s.db.WithContext(ctx).Raw(
+	return scanString(s.db.WithContext(ctx).Raw(
 		"SELECT setting_value FROM t_system_setting WHERE setting_key = ? LIMIT 1", key,
-	).Scan(&val).Error
-	if errors.Is(err, sql.ErrNoRows) || val == "" {
-		return "", nil
-	}
-	return val, err
+	).Row(), fmt.Sprintf("get system setting %q", key))
 }
 
 // GetOrCreateSystemSetting atomically gets an existing system setting or
@@ -50,16 +47,12 @@ func (s *Store) SetSystemSetting(ctx context.Context, key, value string) error {
 
 // ── AgentHub-level settings (t_agenthub_setting) ────────────────────────────
 
-// GetSetting retrieves an AgentHub-level setting value by key.
+// GetSetting returns the AgentHub setting for key. A missing row or
+// NULL/empty value yields ("", nil); an error means the read itself failed.
 func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
-	var val string
-	err := s.db.WithContext(ctx).Raw(
+	return scanString(s.db.WithContext(ctx).Raw(
 		"SELECT setting_value FROM t_agenthub_setting WHERE setting_key = ? LIMIT 1", key,
-	).Scan(&val).Error
-	if errors.Is(err, sql.ErrNoRows) || val == "" {
-		return "", nil
-	}
-	return val, err
+	).Row(), fmt.Sprintf("get agenthub setting %q", key))
 }
 
 // GetOrCreateSetting atomically gets an existing setting or creates it with the given value.
@@ -102,16 +95,12 @@ func (s *Store) SetSettingsTx(ctx context.Context, kv map[string]string) error {
 
 // ── System users (t_system_user) ────────────────────────────────────────────
 
-// GetUserPassword retrieves the stored password hash for a user.
+// GetUserPassword returns the stored password hash for username. A missing
+// row or NULL/empty value yields ("", nil); an error means the read failed.
 func (s *Store) GetUserPassword(ctx context.Context, username string) (string, error) {
-	var pwd string
-	err := s.db.WithContext(ctx).Raw(
+	return scanString(s.db.WithContext(ctx).Raw(
 		"SELECT password FROM t_system_user WHERE username = ? LIMIT 1", username,
-	).Scan(&pwd).Error
-	if errors.Is(err, sql.ErrNoRows) || pwd == "" {
-		return "", nil
-	}
-	return pwd, err
+	).Row(), "get user password")
 }
 
 // SetUserPassword updates the password hash for a user.
@@ -127,4 +116,16 @@ func (s *Store) SetUserPassword(ctx context.Context, username, passwordHash stri
 		return errors.New("user not found")
 	}
 	return nil
+}
+
+// scanString scans one string column; a missing row or NULL yields ("", nil).
+func scanString(row *sql.Row, what string) (string, error) {
+	var v sql.NullString
+	if err := row.Scan(&v); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("%s: %w", what, err)
+	}
+	return v.String, nil
 }
