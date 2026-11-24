@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
@@ -918,7 +919,7 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 	if !restoreplace.CanCrossNode(src.Backend, src.RemoteStatus) {
 		home := &restoreplace.Placement{
 			NodeID: strings.TrimSpace(src.OriginNodeID),
-			NodeIP: strings.TrimSpace(src.OriginNodeIP),
+			NodeIP: localcache.ResolveNodeIP(src.OriginNodeID, strings.TrimSpace(src.OriginNodeIP)),
 		}
 		if home.NodeID == "" && home.NodeIP == "" {
 			return nil, fmt.Errorf("snapshot %s: origin node unknown and snapshot cannot restore cross-node", snapshotID)

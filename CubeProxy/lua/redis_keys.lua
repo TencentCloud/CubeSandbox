@@ -15,6 +15,11 @@ function _M.sandbox_proxy(ins_id)
     return PREFIX .. ":" .. VERSION .. ":shared:sandbox:proxy:" .. ins_id
 end
 
+-- NodeID -> live HostIP Hash (written by CubeOps, read by CubeProxy).
+function _M.node_endpoint()
+    return PREFIX .. ":" .. VERSION .. ":shared:node:endpoint"
+end
+
 function _M.legacy_sandbox_proxy(ins_id)
     return "bypass_host_proxy:" .. ins_id
 end

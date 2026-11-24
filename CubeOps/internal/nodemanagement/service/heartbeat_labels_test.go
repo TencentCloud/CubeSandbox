@@ -129,3 +129,41 @@ func TestHeartbeatAppliesUnisolateFromRegistration(t *testing.T) {
 		t.Fatalf("stale isolation survived the heartbeat")
 	}
 }
+
+// A racing heartbeat carrying an older Redis snapshot must not overwrite a
+// newly re-registered HostIP/GRPCPort persisted in the registration table.
+func TestHeartbeatDoesNotRevertReRegisteredHostIP(t *testing.T) {
+	ms := installMemSnapshots(t)
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1", HostIP: "10.0.0.1", GRPCPort: 9999,
+	}); err != nil {
+		t.Fatalf("initial register: %v", err)
+	}
+	staleSnapshot := ms.raw("node-1")
+
+	if _, err := svc.RegisterNode(ctx, &model.RegisterNodeRequest{
+		NodeID: "node-1", HostIP: "10.0.0.2", GRPCPort: 19999,
+	}); err != nil {
+		t.Fatalf("re-register with new IP: %v", err)
+	}
+	// Simulate an older snapshot landing in Redis before the next heartbeat.
+	ms.put("node-1", staleSnapshot)
+
+	if _, err := svc.UpdateNodeStatus(ctx, "node-1", &model.UpdateNodeStatusRequest{}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	stored, _ := ms.read("node-1")
+	if stored.HostIP != "10.0.0.2" || stored.GRPCPort != 19999 {
+		t.Fatalf("heartbeat reverted endpoint: got %s:%d, want 10.0.0.2:19999", stored.HostIP, stored.GRPCPort)
+	}
+	nodes, err := svc.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].HostIP != "10.0.0.2" {
+		t.Fatalf("ListNodes HostIP = %q, want 10.0.0.2", nodes[0].HostIP)
+	}
+}

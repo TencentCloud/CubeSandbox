@@ -54,16 +54,18 @@ var decidePauseResumePlacementFn = restoreplace.Decide
 //
 // Called under sandboxlock. Returns only after READY or FAILED is recorded so
 // resume/delete cannot interleave. Never CleanupTemplate / delete the sandbox record.
-func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) *types.Res {
+func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostID, hostIP string) *types.Res {
 	rsp := &types.Res{
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
 	}
-	nodeID := ""
-	if n, ok := localcache.GetNodesByIp(hostIP); ok {
-		nodeID = n.ID()
+	nodeID := strings.TrimSpace(hostID)
+	if nodeID == "" {
+		if n, ok := localcache.GetNodesByIp(hostIP); ok {
+			nodeID = n.ID()
+		}
 	}
 
 	// Resume success + failed pausesnap.Delete must not brick the next Pause.
@@ -167,7 +169,7 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		return rsp
 	}
 	if pauseNeedsRemoteStatusWatch(req.Backend) {
-		remotestatus.WatchPause(ctx, snapID, hostIP, req.Backend)
+		remotestatus.WatchPause(ctx, snapID, nodeID, hostIP, req.Backend)
 	}
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID)
 	if lifecyclePublisher.Enabled() {
@@ -379,9 +381,11 @@ func clearStalePauseBindingIfRunning(ctx context.Context, requestID, sandboxID, 
 func runningHostForLostResume(ctx context.Context, sandboxID, hostIP string) string {
 	hostIP = strings.TrimSpace(hostIP)
 	candidates := []string{hostIP}
+	var pmHostID string
 	if pm, ok := getSandboxProxyMapFn(ctx, sandboxID); ok && pm != nil {
 		if ip := strings.TrimSpace(pm.HostIP); ip != "" && ip != hostIP {
 			candidates = append(candidates, ip)
+			pmHostID = pm.HostID
 		}
 	}
 	for _, ip := range candidates {
@@ -393,6 +397,7 @@ func runningHostForLostResume(ctx context.Context, sandboxID, hostIP string) str
 				sandboxID, ip, hostIP)
 			localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
 				SandboxID: sandboxID,
+				HostID:    pmHostID,
 				HostIP:    ip,
 			})
 		}
@@ -475,18 +480,19 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		return rsp
 	}
 	targetIP := strings.TrimSpace(hostIP)
+	targetNodeID := strings.TrimSpace(rec.NodeID)
 	if rec.NodeIP != "" {
 		targetIP = rec.NodeIP
 	}
 	if placement != nil {
+		if id := strings.TrimSpace(placement.NodeID); id != "" {
+			targetNodeID = id
+		}
 		if ip := strings.TrimSpace(placement.NodeIP); ip != "" {
 			targetIP = ip
-		} else if id := strings.TrimSpace(placement.NodeID); id != "" {
-			if n, ok := localcache.GetNode(id); ok && n != nil && n.HostIP() != "" {
-				targetIP = n.HostIP()
-			}
 		}
 	}
+	targetIP = localcache.ResolveNodeIP(targetNodeID, targetIP)
 	if targetIP == "" {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_SelectNodesFailed)
 		rsp.Ret.RetMsg = "resume placement returned no host IP"
@@ -584,7 +590,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// Resume recreates the guest NIC / host ports. Normal Create writes Redis
 	// proxy metadata in dealSuccResult; thin resume Create must rewrite it or
 	// CubeProxy keeps routing to the pre-pause SandboxIP (same-node 504).
-	if err := refreshProxyMapAfterResume(ctx, req.SandboxID, targetIP, cubeRsp); err != nil {
+	if err := refreshProxyMapAfterResume(ctx, req.SandboxID, targetNodeID, targetIP, cubeRsp); err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
 		rsp.Ret.RetMsg = fmt.Sprintf("refreshSandboxProxyMap after resume fail:%s", err.Error())
 		return rsp
@@ -699,14 +705,22 @@ func fillResumeRecreateFields(ctx context.Context, sandboxID string, out *cubebo
 // refreshProxyMapAfterResume rewrites sandbox→backend routing for CubeProxy.
 // Preserves AllowPublicTraffic / TrafficAccessToken / MaskRequestHost /
 // CreatedAt from the pre-pause entry when present.
-func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostIP string, cubeRsp *cubebox.RunCubeSandboxResponse) error {
+func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostID, hostIP string, cubeRsp *cubebox.RunCubeSandboxResponse) error {
 	sandboxID = strings.TrimSpace(sandboxID)
+	hostID = strings.TrimSpace(hostID)
 	hostIP = strings.TrimSpace(hostIP)
 	if sandboxID == "" || hostIP == "" || cubeRsp == nil {
 		return fmt.Errorf("missing sandboxID/hostIP/create response")
 	}
 
+	if hostID == "" {
+		if n, ok := localcache.GetNodesByIp(hostIP); ok && n != nil {
+			hostID = n.ID()
+		}
+	}
+
 	proxy := &proxytypes.SandboxProxyMap{
+		HostID:             hostID,
 		HostIP:             hostIP,
 		SandboxID:          sandboxID,
 		SandboxIP:          strings.TrimSpace(cubeRsp.GetSandboxIP()),
@@ -748,6 +762,7 @@ func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostIP string, c
 	}
 	localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
 		SandboxID: sandboxID,
+		HostID:    hostID,
 		HostIP:    hostIP,
 	})
 	log.G(ctx).Infof("resume: refreshed proxy map sandbox=%s host=%s sandboxIP=%s ports=%v",
@@ -778,18 +793,24 @@ func lookupPauseSnapshotID(ctx context.Context, sandboxID string) string {
 	return ""
 }
 
-// resolvePauseHostIP prefers the pause-snap replica node, then cache/proxy.
-func resolvePauseHostIP(ctx context.Context, sandboxID string) (string, bool) {
+// resolvePauseHost prefers the pause-snap replica node, then cache/proxy.
+func resolvePauseHost(ctx context.Context, sandboxID string) (string, string, bool) {
 	if rec, err := pausesnap.GetBySandbox(ctx, sandboxID); err == nil && rec != nil && rec.NodeIP != "" {
-		return rec.NodeIP, true
+		return rec.NodeID, rec.NodeIP, true
 	}
 	if v := localcache.GetSandboxCache(sandboxID); v != nil && v.HostIP != "" {
-		return v.HostIP, true
+		return v.HostID, v.HostIP, true
 	}
 	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
-		return proxyMap.HostIP, true
+		return proxyMap.HostID, proxyMap.HostIP, true
 	}
-	return "", false
+	return "", "", false
+}
+
+// resolvePauseHostIP prefers the pause-snap replica node, then cache/proxy.
+func resolvePauseHostIP(ctx context.Context, sandboxID string) (string, bool) {
+	_, ip, ok := resolvePauseHost(ctx, sandboxID)
+	return ip, ok
 }
 
 // resumePlacement returns where Resume should Create. Same-node cases

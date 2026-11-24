@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"strings"
+	"net"
 	"sync/atomic"
 	"time"
 
@@ -233,6 +233,26 @@ type DestroySandboxTaskHandler struct {
 	wrapconcurrent.ConcurrentHandle
 }
 
+var cubeletAddrFn = cubelet.GetCubeletAddr
+
+// resolveTaskCallEp refreshes the Cubelet endpoint from localcache when NodeID
+// is set so queued/retried tasks follow compute-node IP changes. When NodeID is
+// explicitly present but missing from localcache, it fails closed (ok=false)
+// instead of dialing a potentially recycled legacy IP.
+func resolveTaskCallEp(t *Task) (string, string, bool) {
+	if t.NodeID != "" {
+		if n, ok := localcache.GetNode(t.NodeID); ok && n.IP != "" {
+			return cubeletAddrFn(n.IP), n.IP, true
+		}
+		return "", "", false
+	}
+	fallbackIP, _, err := net.SplitHostPort(t.CallEp)
+	if err != nil {
+		fallbackIP = t.CallEp
+	}
+	return t.CallEp, fallbackIP, true
+}
+
 func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) error {
 	req, ok := t.Request.(*cubebox.DestroyCubeSandboxRequest)
 	if !ok {
@@ -244,15 +264,18 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 		TTL:   sandboxlock.DeleteTTL,
 	}, func(ctx context.Context) error {
 		ctx = context.WithoutCancel(ctx)
-		hostIP := strings.Split(t.CallEp, ":")[0]
-		_, nodeOK := localcache.GetNodesByIp(hostIP)
+		callEp, hostIP, nodeFound := resolveTaskCallEp(t)
+		nodeOK := nodeFound
+		if t.NodeID == "" {
+			_, nodeOK = localcache.GetNodesByIp(hostIP)
+		}
 		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)
 		if err != nil {
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
 		}
 		if !handled && nodeOK {
-			rsp, err := cubelet.Destroy(ctx, t.CallEp, req)
+			rsp, err := cubelet.Destroy(ctx, callEp, req)
 			defer func() {
 				if log.IsDebug() {
 					log.G(ctx).Debugf("Destroy_rsp:%+v", utils.InterfaceToString(rsp))
@@ -307,7 +330,11 @@ func (h *CreateImageTaskHandler) HandleTask(ctx context.Context, t *Task) error 
 		return nil
 	}
 
-	rsp, err := cubelet.CreateImage(ctx, t.CallEp, req)
+	callEp, _, ok := resolveTaskCallEp(t)
+	if !ok {
+		return ret.Errorf(errorcode.ErrorCode_ConnHostFailed, "node %s not found", t.NodeID)
+	}
+	rsp, err := cubelet.CreateImage(ctx, callEp, req)
 	defer func() {
 		if log.IsDebug() {
 			log.G(ctx).Debugf("CreateImage_rsp:%+v", utils.InterfaceToString(rsp))
@@ -335,7 +362,11 @@ func (h *DeleteImageTaskHandler) HandleTask(ctx context.Context, t *Task) error 
 		return nil
 	}
 
-	rsp, err := cubelet.DeleteImage(ctx, t.CallEp, req)
+	callEp, _, ok := resolveTaskCallEp(t)
+	if !ok {
+		return ret.Errorf(errorcode.ErrorCode_ConnHostFailed, "node %s not found", t.NodeID)
+	}
+	rsp, err := cubelet.DeleteImage(ctx, callEp, req)
 	defer func() {
 		if log.IsDebug() {
 			log.G(ctx).Debugf("DeleteImage_rsp:%+v", utils.InterfaceToString(rsp))
@@ -385,7 +416,11 @@ func (h *UpdateSandboxTaskHandler) HandleTask(ctx context.Context, t *Task) erro
 		return ret.Errorf(errorcode.ErrorCode_Unknown, "action is valid:[%s]", action)
 	}
 
-	rsp, err := cubelet.Update(ctx, t.CallEp, req)
+	callEp, _, ok := resolveTaskCallEp(t)
+	if !ok {
+		return ret.Errorf(errorcode.ErrorCode_ConnHostFailed, "node %s not found", t.NodeID)
+	}
+	rsp, err := cubelet.Update(ctx, callEp, req)
 	defer func() {
 		if log.IsDebug() {
 			log.G(ctx).Errorf("Update_rsp:%+v", utils.InterfaceToString(rsp))

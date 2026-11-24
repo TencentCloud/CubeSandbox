@@ -16,14 +16,19 @@ import (
 const (
 	nodeSnapshotKeyPrefix = "cube:v1:cubeops:node:snapshot:"
 	nodeSnapshotTTLSec    = 30
+
+	// nodeEndpointHashKey is the shared NodeID -> HostIP Hash read by CubeProxy
+	// to dereference sandbox routing entries across compute-node IP changes.
+	nodeEndpointHashKey = "cube:v1:shared:node:endpoint"
 )
 
 func nodeSnapshotKey(nodeID string) string {
 	return nodeSnapshotKeyPrefix + nodeID
 }
 
-// WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob. Best-effort:
-// errors are logged, not returned, so a Redis hiccup does not break registration.
+// WriteNodeSnapshot stores the node snapshot as a short-TTL JSON blob and keeps
+// the shared NodeID -> HostIP endpoint mapping in sync. Best-effort: errors are
+// logged, not returned, so a Redis hiccup does not break registration.
 func WriteNodeSnapshot(snap *model.NodeSnapshot) {
 	if snap != nil && snap.NodeID != "" && writeNodeSnapshotHook != nil {
 		writeNodeSnapshotHook(snap)
@@ -41,6 +46,13 @@ func WriteNodeSnapshot(snap *model.NodeSnapshot) {
 	defer conn.Close()
 	if _, err := conn.Do("SET", nodeSnapshotKey(snap.NodeID), data, "EX", nodeSnapshotTTLSec); err != nil {
 		logging.G(context.Background()).Warnf("nodesnapshot: redis SET failed: node=%s: %v", snap.NodeID, err)
+	}
+	if snap.HostIP != "" {
+		// Intentionally written on every heartbeat as well as registration so
+		// cube:v1:shared:node:endpoint self-heals after a Redis restart or flush.
+		if _, err := conn.Do("HSET", nodeEndpointHashKey, snap.NodeID, snap.HostIP); err != nil {
+			logging.G(context.Background()).Warnf("nodesnapshot: redis HSET endpoint failed: node=%s: %v", snap.NodeID, err)
+		}
 	}
 }
 
@@ -158,7 +170,7 @@ func ScanNodeSnapshots() ([]*model.NodeSnapshot, error) {
 	return out, nil
 }
 
-// DeleteNodeSnapshot removes a node snapshot from Redis.
+// DeleteNodeSnapshot removes a node snapshot and its shared endpoint entry from Redis.
 func DeleteNodeSnapshot(nodeID string) {
 	if nodeID == "" || pool == nil {
 		return
@@ -168,9 +180,17 @@ func DeleteNodeSnapshot(nodeID string) {
 	if _, err := conn.Do("DEL", nodeSnapshotKey(nodeID)); err != nil {
 		logging.G(context.Background()).Warnf("nodesnapshot: redis DEL failed: node=%s: %v", nodeID, err)
 	}
+	if _, err := conn.Do("HDEL", nodeEndpointHashKey, nodeID); err != nil {
+		logging.G(context.Background()).Warnf("nodesnapshot: redis HDEL endpoint failed: node=%s: %v", nodeID, err)
+	}
 }
 
 // SnapshotKeyForTest exposes the key prefix for tests.
 func SnapshotKeyForTest(nodeID string) string {
 	return nodeSnapshotKey(nodeID)
+}
+
+// NodeEndpointHashKeyForTest exposes the shared NodeID -> HostIP hash key for tests.
+func NodeEndpointHashKeyForTest() string {
+	return nodeEndpointHashKey
 }

@@ -438,6 +438,7 @@ func loadSandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxty
 }
 
 func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) error {
+	nodeIP = localcache.ResolveNodeIP(nodeID, nodeIP)
 	success := false
 	defer func() {
 		recordSnapshotCommitResult(success)
@@ -620,7 +621,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return failSnapshotCreateJob(registerCtx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	if snapUpdates["remote_status"] == constants.RemoteStatusInProgress {
-		remotestatus.WatchSnapshot(ctx, snapshotID, nodeIP, commitBackend, exportUUIDs, mode)
+		remotestatus.WatchSnapshot(ctx, snapshotID, nodeID, nodeIP, commitBackend, exportUUIDs, mode)
 	}
 	// Commit yields a single authoritative envd version; persist it (best-effort)
 	// to the snapshot definition annotation so created sandboxes inherit it.
@@ -847,6 +848,7 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 }
 
 func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) (err error) {
+	nodeIP = localcache.ResolveNodeIP(nodeID, nodeIP)
 	success := false
 	var activeSpan trace.Span
 	defer func() {

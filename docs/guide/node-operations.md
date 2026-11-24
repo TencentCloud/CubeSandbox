@@ -20,6 +20,41 @@ cubeopscli node list
 cubeopscli node list --hostid <node_id>
 ```
 
+## Node identity and dynamic IP resolution
+
+CubeSandbox separates a compute node's stable identity (`node_id` / `InstanceID`) from its dialable address (`HostIP` / endpoint IP) so that control-plane and data-plane traffic can follow a node even if its IP changes.
+
+### How `node_id` and endpoint IP are selected
+
+On startup, `cubelet` resolves its identity in the following precedence order (`Cubelet/pkg/utils/cloud.go`):
+
+1. **`node_id` (stable node identity)**:
+   1. `CUBE_SANDBOX_NODE_ID` — highest priority; can be any stable identifier. In Kubernetes Helm deployments, the chart injects `spec.nodeName` via the Downward API so `node_id` stays unchanged across `cube-node` Pod restarts or recreations on the same Kubernetes node.
+   2. `CUBE_SANDBOX_NODE_IP` — used when `CUBE_SANDBOX_NODE_ID` is unset (the default in one-click / systemd / Terraform bare-metal deployments, where the host IP is static and doubles as `node_id`).
+   3. Auto-detected primary non-loopback IPv4 address (default route interface → outbound IPv4 → first non-loopback IPv4) when neither environment variable is set.
+2. **Endpoint IP (dialable `HostIP`)**:
+   1. `CUBE_SANDBOX_ENDPOINT_IP` — in Kubernetes Helm deployments, the chart injects `status.podIP` via the Downward API.
+   2. Otherwise, if `node_id` is a valid non-loopback IPv4 address, reuse `node_id`.
+   3. Otherwise, fall back to the auto-detected primary non-loopback IPv4 address.
+
+> **Requirement for dynamic IP tracking**: To keep control-plane and data-plane communication unaffected across IP changes, `node_id` must remain stable when the IP changes (i.e., set `CUBE_SANDBOX_NODE_ID` explicitly or use the Kubernetes Helm chart default `spec.nodeName`). If `CUBE_SANDBOX_NODE_ID` is unset and `node_id` falls back to the node's IP, an IP change is treated as a new node identity.
+
+### How control plane and data plane track IP changes
+
+When a compute node re-registers with the same `node_id` and a new `HostIP`:
+
+- **CubeOps** updates the node's `HostIP` in storage and publishes `node_id -> host_ip` into the shared Redis Hash `cube:v1:shared:node:endpoint` on registration and every heartbeat (and deletes it when the node is deleted). Subsequent heartbeats preserve the latest registered `HostIP`.
+- **CubeMaster** records `HostID` alongside `HostIP` across sandbox proxy routes, in-memory caches, pause snapshots, async tasks, and status reconcilers, resolving the live `HostIP` by `node_id` before dialing `cubelet`. When a node's IP changes, CubeMaster automatically closes stale gRPC connections to the previous IP.
+- **CubeProxy** stores `HostID` in its local route cache and resolves the live upstream IP from `cube:v1:shared:node:endpoint` (cached locally with a 10s freshness TTL, single-flight refresh, and a longer last-known-IP fallback with 1s error backoff during Redis outages, without purging existing sandbox route entries).
+
+**Backward compatibility & rolling upgrades**:
+
+- Existing `sandbox:proxy:{sandboxID}` entries without `HostID` automatically fall back to their static `HostIP` in both CubeMaster and CubeProxy.
+- Recommended rolling upgrade order: upgrade **CubeOps** first (heartbeats populate `cube:v1:shared:node:endpoint` within ~10s), then **CubeProxy** and **CubeMaster**. (Upgrading CubeMaster before CubeProxy is also safe because older CubeProxy ignores `HostID` and continues using static `HostIP`.)
+- **Multi-replica CubeMaster rolling upgrade**: avoid cross-node Resume while old and new CubeMaster replicas coexist. An old replica does not know about `HostID` and would update `HostIP` without clearing a `HostID` written by a new replica, leaving `HostID` pointing at the previous node until all replicas finish upgrading.
+- **Rollback**: rolling back **CubeMaster** from a new version to an old version leaves existing `HostID` fields in Redis intact; if the old CubeMaster later performs a cross-node Resume, it only rewrites `HostIP` while a new CubeProxy keeps resolving the stale `HostID` to the previous node. Roll back **CubeProxy** first (or remove the `HostID` field from affected `sandbox:proxy:{sandboxID}` entries).
+- **CubeProxy reload behavior**: pre-upgrade cached routes in shared memory lack the `HostID` field and will trigger a one-time reload from Redis on first access after an in-place nginx reload.
+
 ## Node groups
 
 Cross-node restore of a sandbox requires the source and the target node to have exactly the same CPU and kernel; we call such machines the same node type. A memory snapshot taken on one node type can only be restored onto the same node type.

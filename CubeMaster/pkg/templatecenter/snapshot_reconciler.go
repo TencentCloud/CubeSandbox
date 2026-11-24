@@ -613,16 +613,7 @@ func derivedUsagePct(metrics map[string]uint64) uint64 {
 }
 
 func resolveNodeIP(nodeID, nodeIP string) string {
-	if strings.TrimSpace(nodeIP) != "" {
-		return strings.TrimSpace(nodeIP)
-	}
-	if strings.TrimSpace(nodeID) == "" {
-		return ""
-	}
-	if node, ok := localcache.GetNode(nodeID); ok && node != nil {
-		return strings.TrimSpace(node.HostIP())
-	}
-	return ""
+	return strings.TrimSpace(localcache.ResolveNodeIP(nodeID, strings.TrimSpace(nodeIP)))
 }
 
 func firstNonEmpty(values ...string) string {

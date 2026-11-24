@@ -153,7 +153,7 @@ func TestPauseLocalBoundary(t *testing.T) {
 			t.Run(backend+failure, func(t *testing.T) {
 				p := lifecycleBuffer(t)
 				patchPauseDependencies(t, failure, backend)
-				rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
+				rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "", "127.0.0.1")
 				if failure != "" {
 					require.NotEqual(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 					require.Empty(t, p.Events())
@@ -199,7 +199,7 @@ func patchResumeDependencies(t *testing.T, failure string) {
 		}
 		return &cubebox.RunCubeSandboxResponse{Ret: &ec.Ret{RetCode: ec.ErrorCode_Success}, SandboxID: id, SandboxIP: "10.0.0.1"}, nil
 	})
-	p.ApplyFunc(refreshProxyMapAfterResume, func(context.Context, string, string, *cubebox.RunCubeSandboxResponse) error {
+	p.ApplyFunc(refreshProxyMapAfterResume, func(context.Context, string, string, string, *cubebox.RunCubeSandboxResponse) error {
 		if failure == "proxy" {
 			return errors.New("proxy")
 		}
@@ -240,7 +240,7 @@ func TestPauseResumeRuntimeHTTP(t *testing.T) {
 	c.dealSuccResult()
 	t.Run("pause", func(t *testing.T) {
 		patchPauseDependencies(t, "", "s3")
-		rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
+		rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "", "127.0.0.1")
 		require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 	})
 	t.Run("resume", func(t *testing.T) {
@@ -328,7 +328,7 @@ func TestPauseResumeNotificationFailureIsolation(t *testing.T) {
 		require.Equal(t, int(errorcode.ErrorCode_Success), c.masterRsp.Ret.RetCode)
 		t.Run("pause", func(t *testing.T) {
 			patchPauseDependencies(t, "", "s3")
-			rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1")
+			rsp := pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "", "127.0.0.1")
 			require.Equal(t, int(errorcode.ErrorCode_Success), rsp.Ret.RetCode)
 		})
 		t.Run("resume", func(t *testing.T) {
@@ -390,13 +390,13 @@ func TestPauseDuplicateAndUploadResult(t *testing.T) {
 			p := lifecycleBuffer(t)
 			patchPauseDependencies(t, "real-store", "s3")
 			req := &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}
-			first := pauseSandbox(context.Background(), req, "127.0.0.1")
+			first := pauseSandbox(context.Background(), req, "", "127.0.0.1")
 			require.Equal(t, int(errorcode.ErrorCode_Success), first.Ret.RetCode)
 			var row models.PauseSnapshotRecord
 			require.NoError(t, db.Where("sandbox_id = ?", "sb").First(&row).Error)
 			require.Equal(t, constants.RemoteStatusInProgress, row.RemoteStatus)
 			require.Len(t, p.Events(), 1)
-			again := pauseSandbox(context.Background(), req, "127.0.0.1")
+			again := pauseSandbox(context.Background(), req, "", "127.0.0.1")
 			require.NotEqual(t, int(errorcode.ErrorCode_Success), again.Ret.RetCode)
 			require.Contains(t, again.Ret.RetMsg, "already has pause snapshot")
 			require.Len(t, p.Events(), 1)
@@ -476,7 +476,7 @@ func TestDisabledRuntimeSkipsLifecycleProducerPreparation(t *testing.T) {
 			patches.ApplyFunc(webhook.Capture, func(webhook.CaptureInput) (*webhook.CapturedEvent, error) { panic("disabled Capture/UUID path") })
 			t.Run("pause", func(t *testing.T) {
 				patchPauseDependencies(t, "", "xfs")
-				require.Equal(t, 200, pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "127.0.0.1").Ret.RetCode)
+				require.Equal(t, 200, pauseSandbox(context.Background(), &types.UpdateRequest{SandboxID: "sb", InstanceType: "cubebox"}, "", "127.0.0.1").Ret.RetCode)
 			})
 			t.Run("resume", func(t *testing.T) {
 				patchResumeDependencies(t, "")

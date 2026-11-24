@@ -212,7 +212,7 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	if err != nil {
 		return nil, err
 	}
-	applyRegistrationLabels(snap, reg)
+	applyRegistrationFields(snap, reg)
 	snap.Conditions = append([]model.NodeCondition(nil), req.Conditions...)
 	snap.Images = append([]model.ContainerImage(nil), req.Images...)
 	snap.LocalTemplates = append([]model.LocalTemplate(nil), req.LocalTemplates...)
@@ -350,7 +350,7 @@ func (svc *NodeService) GetNode(ctx context.Context, nodeID string) (*model.Node
 		}
 		return nil, err
 	}
-	applyRegistrationLabels(snap, reg)
+	applyRegistrationFields(snap, reg)
 	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 	svc.applyHostMeta(ctx, []*model.NodeSnapshot{snap})
 	return snap, nil
@@ -382,7 +382,7 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 		if reg == nil {
 			continue // stale Redis key for a node no longer registered
 		}
-		applyRegistrationLabels(s, reg)
+		applyRegistrationFields(s, reg)
 		applyCurrentHealth(s, now)
 		s.SchedulingDisabled = snapSchedulingDisabled(s)
 		out = append(out, s)
@@ -402,7 +402,7 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 		}
 		// A scan miss can still GET a stale snapshot; the registration row
 		// remains the label source.
-		applyRegistrationLabels(snap, &regs[i])
+		applyRegistrationFields(snap, &regs[i])
 		snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 		out = append(out, snap)
 	}
@@ -498,7 +498,7 @@ func (svc *NodeService) syncRegistrationLabelsToRedis(ctx context.Context, nodeI
 		return
 	}
 	svc.updateSnapshotInRedis(ctx, nodeID, func(snap *model.NodeSnapshot) {
-		applyRegistrationLabels(snap, reg)
+		applyRegistrationFields(snap, reg)
 		snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 	})
 }

@@ -10,6 +10,7 @@ local _M = {}
 -- gated by HostIP/SandboxIP and overwritten on the next fill, so invalidation
 -- only needs to drop these fixed keys.
 local ROUTE_CACHE_SUFFIXES = {
+    "HostID",
     "HostIP",
     "SandboxIP",
     "CreatedAt",

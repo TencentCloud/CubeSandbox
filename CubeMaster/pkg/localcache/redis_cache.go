@@ -361,6 +361,10 @@ func (l *local) getByPassProsyFromRedis(ctx context.Context, key string) (*types
 		log.G(ctx).Warnf("redis get empty, key: %s", key)
 		return nil, errors.New("get empty HostIP")
 	}
+	if hostID, ok := mapvalues["HostID"]; ok {
+		nodeIdIp.HostID = hostID
+		delete(mapvalues, "HostID")
+	}
 	if createAt, ok := mapvalues["CreatedAt"]; ok {
 		nodeIdIp.CreatedAt = createAt
 		delete(mapvalues, "CreatedAt")
@@ -450,6 +454,9 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 		// missing → treated as public).
 		"AllowPublicTraffic", strconv.FormatBool(byPassProsy.AllowPublicTraffic),
 	}
+	if byPassProsy.HostID != "" {
+		fieldValues = append(fieldValues, "HostID", byPassProsy.HostID)
+	}
 	if byPassProsy.SandboxIP != "" {
 		fieldValues = append(fieldValues, "SandboxIP", byPassProsy.SandboxIP)
 	}
@@ -463,6 +470,14 @@ func (l *local) setByPassProsyToRedis(ctx context.Context, key string, byPassPro
 		fieldValues = append(fieldValues, k, v)
 	}
 	conn := wrapredis.GetRedis()
+	// Clear HostID before writing when absent so readers never observe a new
+	// HostIP paired with a stale HostID from a previous node.
+	if byPassProsy.HostID == "" {
+		if _, err = conn.Do("HDEL", key, "HostID"); err != nil {
+			log.G(ctx).Errorf("setByPassProsyToRedis HDEL HostID %s failed: %v", key, err)
+			return err
+		}
+	}
 	_, err = conn.Do("HSET", redis.Args{key}.AddFlat(fieldValues)...)
 	if err != nil {
 		log.G(ctx).Errorf("redis set error, key: %s, err: %s", key, err)

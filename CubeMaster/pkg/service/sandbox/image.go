@@ -73,6 +73,7 @@ func CreateImage(ctx context.Context, req *types.CreateImageReq) (rsp *types.Res
 		t := &task.Task{
 			RequestId: req.RequestID,
 			Request:   cubeletReq,
+			NodeID:    node.ID(),
 			CallEp:    cubelet.GetCubeletAddr(node.HostIP()),
 			TaskType:  task.CreateImage,
 		}
@@ -124,6 +125,7 @@ func DeleteImage(ctx context.Context, req *types.DeleteImageReq) (rsp *types.Res
 		t := &task.Task{
 			RequestId: req.RequestID,
 			Request:   cubeletReq,
+			NodeID:    node.ID(),
 			CallEp:    cubelet.GetCubeletAddr(node.HostIP()),
 			TaskType:  task.DeleteImage,
 		}

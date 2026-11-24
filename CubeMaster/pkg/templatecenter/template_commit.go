@@ -244,6 +244,7 @@ func inheritTemplateManagedQosAnnotations(dst, src *sandboxtypes.CreateCubeSandb
 }
 
 func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) {
+	nodeIP = localcache.ResolveNodeIP(nodeID, nodeIP)
 	var jobErr error
 	templateID := createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
 	logger := log.G(ctx).WithFields(map[string]any{

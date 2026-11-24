@@ -383,17 +383,23 @@ func mergeIncomingHostFacts(prev, incoming *model.HostFacts) *model.HostFacts {
 	return &out
 }
 
-// applyRegistrationLabels makes the stored registration the source of truth for
-// labels on a snapshot read back from Redis. A heartbeat rewrites the whole
-// Redis snapshot; without this, a heartbeat that read the snapshot just before
-// a label change (for example isolation) would write the old labels back, and
-// every later heartbeat would carry them forward, so CubeMaster would keep
-// seeing the node as schedulable while the database says isolated. Label
-// changes are written to the registration row before Redis, and the heartbeat
-// reads that row anyway.
-func applyRegistrationLabels(snap *model.NodeSnapshot, reg *store.NodeRegistration) {
+// applyRegistrationFields makes the stored registration the source of truth for
+// registration-owned fields (HostIP, GRPCPort, and labels) on a snapshot read
+// back from Redis. A heartbeat rewrites the whole Redis snapshot; without this,
+// a heartbeat that read the snapshot just before a label change (for example
+// isolation) or a re-registration with a new IP would write the old values
+// back, and every later heartbeat would carry them forward.
+func applyRegistrationFields(snap *model.NodeSnapshot, reg *store.NodeRegistration) {
 	if snap == nil || reg == nil {
 		return
+	}
+	// Keep endpoint fields aligned with the authoritative registration row so a
+	// concurrent heartbeat cannot revert a newly registered HostIP/GRPCPort.
+	if reg.HostIP != "" {
+		snap.HostIP = reg.HostIP
+	}
+	if reg.GRPCPort > 0 {
+		snap.GRPCPort = reg.GRPCPort
 	}
 	labels, err := store.ParseLabelsJSON(reg.LabelsJSON)
 	if err != nil {

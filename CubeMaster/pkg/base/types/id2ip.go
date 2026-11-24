@@ -5,6 +5,7 @@
 package types
 
 type SandboxProxyMap struct {
+	HostID      string `json:"HostID,omitempty"`
 	HostIP      string `json:"HostIP"`
 	SandboxID   string `json:"SandboxID"`
 	SandboxIP   string `json:"SandboxIP,omitempty"`

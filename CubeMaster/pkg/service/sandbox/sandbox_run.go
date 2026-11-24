@@ -544,6 +544,7 @@ func (c *createSandboxContext) failover() {
 				},
 			},
 			TaskType: task.DestroySandbox,
+			NodeID:   c.selectHost.ID(),
 			CallEp:   rt.CalleeEndpoint,
 		}
 
@@ -753,6 +754,7 @@ func (c *createSandboxContext) setProxyToRedis() error {
 		}
 
 		proxy := &proxytypes.SandboxProxyMap{
+			HostID:             c.selectHost.ID(),
 			HostIP:             c.selectHost.HostIP(),
 			SandboxID:          c.masterRsp.SandboxID,
 			SandboxIP:          c.masterRsp.SandboxIP,

@@ -384,6 +384,7 @@ func dealRspData(ctx context.Context, done chan struct{}, resChan chan *types.Sa
 			}
 			localcache.SetSandboxCache(res.SandboxID, &localcache.SandboxCache{
 				SandboxID: res.SandboxID,
+				HostID:    res.HostID,
 				HostIP:    res.HostIP,
 			})
 		}

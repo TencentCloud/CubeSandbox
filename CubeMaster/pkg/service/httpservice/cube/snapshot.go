@@ -784,10 +784,11 @@ var errSandboxNotFound = errors.New("sandbox not found")
 
 func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (string, string, error) {
 	hostIP := ""
+	hostID := ""
 	if cache := localcache.GetSandboxCache(sandboxID); cache != nil {
 		hostIP = cache.HostIP
+		hostID = cache.HostID
 	}
-	hostID := ""
 	if hostIP == "" {
 		infoRsp := sandbox.SandboxInfo(ctx, &types.GetCubeSandboxReq{
 			RequestID: requestID,

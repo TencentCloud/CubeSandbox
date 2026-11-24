@@ -1,10 +1,10 @@
 # Redis Key Naming Convention
 
-> Scope: the Redis instance shared by CubeMaster and CubeProxy; CubeAPI must follow this convention when it onboards in the future.
+> Scope: the Redis instance shared by CubeOps, CubeMaster, and CubeProxy; CubeAPI must follow this convention when it onboards in the future.
 
 ## 1. Overview
 
-Multiple CubeSandbox services (CubeMaster, CubeProxy, and potentially CubeAPI in the future) share the same Redis instance. To prevent key collisions, accidental deletes/overwrites, and to enable `SCAN`-based governance and auditing, every Redis key must follow a unified namespace convention.
+Multiple CubeSandbox services (CubeOps, CubeMaster, CubeProxy, and potentially CubeAPI in the future) share the same Redis instance. To prevent key collisions, accidental deletes/overwrites, and to enable `SCAN`-based governance and auditing, every Redis key must follow a unified namespace convention.
 
 **Core principles**:
 
@@ -57,6 +57,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Meaning | Key pattern | Type | scope | Writer | Reader | TTL |
 | --- | --- | --- | --- | --- | --- | --- |
 | Node resource metrics | `cube:v1:master:node:metric:{nodeID}` | Hash | master | CubeMaster | CubeMaster | refresh-style (heartbeat, default 600s) |
+| Node live endpoint table | `cube:v1:shared:node:endpoint` | Hash | shared | CubeOps | CubeProxy | none (`HSET` on register/heartbeat, `HDEL` on node delete) |
 | Sandbox proxy route | `cube:v1:shared:sandbox:proxy:{sandboxID}` | Hash | shared | CubeMaster | CubeProxy | none (lifecycle via `DEL`) |
 | Instance info | `cube:v1:master:instance:info:{insID}` | Hash | master | CubeMaster | CubeMaster | none |
 | Describe task result | `cube:v1:master:task:describe:{taskID}` | Hash | master | CubeMaster | CubeMaster / external | 86400s (configurable) |
@@ -84,11 +85,18 @@ The following are the standard keys currently registered in the system (`v1`). N
 | `nic_queues` | NIC queue count |
 | `data_disk_usage_per` / `storage_disk_usage_per` / `sys_disk_usage_per` | Disk usage (%) |
 
+**`node:endpoint`** (live node endpoint table, cross-service contract)
+
+| field | Meaning |
+| --- | --- |
+| `{nodeID}` | Current dialable `HostIP` of the compute node (written by CubeOps on register/heartbeat and removed on node delete) |
+
 **`sandbox:proxy`** (sandbox route, cross-service contract)
 
 | field | Meaning |
 | --- | --- |
-| `HostIP` | Host IP |
+| `HostID` | Stable compute node ID (optional for legacy entries; used by CubeMaster and CubeProxy to resolve the live node IP dynamically, falling back to `HostIP` when absent) |
+| `HostIP` | Host IP recorded when the route was written (fallback when `HostID` is absent or unresolved) |
 | `SandboxIP` | Sandbox internal IP (optional) |
 | `CreatedAt` | Creation time |
 | `AllowPublicTraffic` | Whether the public URL is accessible without a traffic token |
@@ -129,6 +137,7 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | Key type | Policy | Notes |
 | --- | --- | --- |
 | `node:metric` | Refresh-style TTL | `EXPIRE` after each heartbeat write (default 600s); live nodes keep refreshing, offline nodes auto-expire |
+| `node:endpoint` | No TTL | Maintained by CubeOps: `HSET` on node register and every heartbeat, `HDEL` on node deletion. CubeProxy caches lookups in `ngx.shared.local_cache` with a fixed 10s TTL (not renewed on hit) |
 | `sandbox:proxy` | No TTL | Written once at sandbox creation with no refresh path; lifecycle managed by CubeMaster `DEL` on teardown. **Do not** set a TTL shorter than the max sandbox lifetime |
 | `task:describe` | Fixed TTL | `EXPIRE` on write, default 86400s (`describe_task_expire_time`) |
 | `instance:info` / `instance:meta` | No TTL | Managed per instance lifecycle; may be augmented later |
@@ -143,6 +152,10 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 
 ## 7. Per-service implementation
 
+### CubeOps (Go)
+
+- Node endpoint sync: [`internal/nodemanagement/nodemetric/node_snapshot_store.go`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeOps/internal/nodemanagement/nodemetric/node_snapshot_store.go) maintains `cube:v1:shared:node:endpoint` alongside node snapshots (`HSET` on register/heartbeat, `HDEL` on node delete)
+
 ### CubeMaster (Go)
 
 - Key builders: [`pkg/base/rediskey`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/base/rediskey/rediskey.go)
@@ -154,6 +167,7 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 
 - Key builders: [`lua/redis_keys.lua`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeProxy/lua/redis_keys.lua)
 - Business reads: [`lua/sandbox_backend.lua`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeProxy/lua/sandbox_backend.lua), [`lua/utils.lua`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeProxy/lua/utils.lua)
+- CubeProxy resolves `HostID` via `cube:v1:shared:node:endpoint` with a fixed 10s local cache TTL, falling back to `HostIP` when `HostID` is absent or unresolved
 - CubeProxy is **read-only** for keys under `shared`; it does not write them
 
 ### CubeAPI (Rust, reserved)

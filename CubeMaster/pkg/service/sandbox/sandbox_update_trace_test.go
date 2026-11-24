@@ -82,7 +82,7 @@ func TestUpdateResumeSuccessEmitsSiblingStagesWithRealWorker(t *testing.T) {
 		}, nil
 	})
 	patches.ApplyFunc(volrefcount.ApplyFromExtInfo, func(ctx context.Context, extInfo map[string][]byte) {})
-	patches.ApplyFunc(refreshProxyMapAfterResume, func(ctx context.Context, id, hostIP string,
+	patches.ApplyFunc(refreshProxyMapAfterResume, func(ctx context.Context, id, hostID, hostIP string,
 		rsp *cubebox.RunCubeSandboxResponse) error {
 		return nil
 	})

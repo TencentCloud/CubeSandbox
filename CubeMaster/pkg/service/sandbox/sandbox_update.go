@@ -153,12 +153,15 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		// Client/HTTP cancel must not abort bookkeeping or release the lock
 		// while SAVE/Create/Destroy is still in flight on Cubelet.
 		ctx = context.WithoutCancel(ctx)
-		var hostIP string
+		var hostID, hostIP string
 		if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
+			hostID = v.HostID
 			hostIP = v.HostIP
 		} else if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID); ok {
+			hostID = proxyMap.HostID
 			hostIP = proxyMap.HostIP
-		} else if ip, ok := resolvePauseHostIP(ctx, req.SandboxID); ok {
+		} else if id, ip, ok := resolvePauseHost(ctx, req.SandboxID); ok {
+			hostID = id
 			hostIP = ip
 		} else {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
@@ -173,7 +176,7 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 
 		switch req.Action {
 		case "pause":
-			*rsp = *pauseSandbox(ctx, req, hostIP)
+			*rsp = *pauseSandbox(ctx, req, hostID, hostIP)
 		case "resume":
 			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
 			if rsp.Ret.RetCode == int(errorcode.ErrorCode_Success) {

@@ -57,7 +57,7 @@ func TestRefreshProxyMapAfterResumeRewritesSandboxIP(t *testing.T) {
 		defer func() { cfg.CubeletConf.EnableExposedPort = prevEnable }()
 	}
 
-	err := refreshProxyMapAfterResume(context.Background(), "sb-1", "10.0.0.1", &cubebox.RunCubeSandboxResponse{
+	err := refreshProxyMapAfterResume(context.Background(), "sb-1", "node-1", "10.0.0.1", &cubebox.RunCubeSandboxResponse{
 		SandboxIP: "192.168.1.62",
 		PortMappings: []*cubebox.PortMapping{
 			{ContainerPort: 49999, HostPort: 20010},
@@ -68,6 +68,9 @@ func TestRefreshProxyMapAfterResumeRewritesSandboxIP(t *testing.T) {
 	}
 	if stored == nil {
 		t.Fatal("expected proxy rewrite")
+	}
+	if stored.HostID != "node-1" {
+		t.Fatalf("HostID=%q, want node-1", stored.HostID)
 	}
 	if stored.SandboxIP != "192.168.1.62" {
 		t.Fatalf("SandboxIP=%q, want 192.168.1.62", stored.SandboxIP)
@@ -98,7 +101,7 @@ func TestRefreshProxyMapAfterResumeRequiresSandboxIP(t *testing.T) {
 		t.Fatal("must not write without SandboxIP")
 		return nil
 	}
-	err := refreshProxyMapAfterResume(context.Background(), "sb-1", "10.0.0.1", &cubebox.RunCubeSandboxResponse{})
+	err := refreshProxyMapAfterResume(context.Background(), "sb-1", "node-1", "10.0.0.1", &cubebox.RunCubeSandboxResponse{})
 	if err == nil {
 		t.Fatal("expected error for missing SandboxIP")
 	}

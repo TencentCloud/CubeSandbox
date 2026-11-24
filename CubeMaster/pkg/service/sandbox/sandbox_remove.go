@@ -166,17 +166,20 @@ func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *tas
 	var hostIP string
 	if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
 		hostIP = v.HostIP
+		t.NodeID = v.HostID
 	} else {
 		proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
 		if !ok {
 			// Paused sandboxes keep proxy normally; fall back to pausesnap node.
-			if ip, ok := resolvePauseHostIP(ctx, req.SandboxID); ok {
-				t.CallEp = cubelet.GetCubeletAddr(ip)
+			if rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID); err == nil && rec != nil && rec.NodeIP != "" {
+				t.NodeID = rec.NodeID
+				t.CallEp = cubelet.GetCubeletAddr(rec.NodeIP)
 				return true
 			}
 			return false
 		}
 		hostIP = proxyMap.HostIP
+		t.NodeID = proxyMap.HostID
 		if proxyMap.CreatedAt != "" {
 			created, err := strconv.ParseInt(proxyMap.CreatedAt, 10, 64)
 			if err == nil && created > 0 {
