@@ -5,7 +5,12 @@
 
 use anyhow::Result;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
-use opentelemetry::{global, sdk::trace::Config, trace::TracerProvider};
+use opentelemetry::{
+    global,
+    sdk::{trace::Config, Resource},
+    trace::TracerProvider,
+    KeyValue,
+};
 use slog::{info, o, Logger};
 use std::collections::HashMap;
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -20,7 +25,8 @@ pub fn setup_tracing(name: &'static str, logger: &Logger) -> Result<()> {
         .with_logger(&logger)
         .init();
 
-    let config = Config::default();
+    let config =
+        Config::default().with_resource(Resource::new(vec![KeyValue::new("service.name", name)]));
 
     let builder = opentelemetry::sdk::trace::TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry::runtime::TokioCurrentThread)
@@ -69,8 +75,8 @@ macro_rules! trace_rpc_call {
             propagator.extract(&extract_carrier_from_ttrpc($ctx))
         });
 
-        // generate tracing span
-        let rpc_span = span!(tracing::Level::INFO, $name, "mod"="rpc.rs", req=?$req);
+        // RPC payloads can contain environment variables, credentials, or file contents.
+        let rpc_span = span!(tracing::Level::INFO, $name, "mod" = "rpc.rs");
 
         // assign parent span from external context
         rpc_span.set_parent(parent_context);
