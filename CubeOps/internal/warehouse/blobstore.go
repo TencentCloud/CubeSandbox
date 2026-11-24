@@ -42,12 +42,11 @@ type BlobStore interface {
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 	// ListIncompleteUploads and AbortMultipartUpload remain for interface
-	// compatibility. Production cleanup is Store.GC / bucket lifecycle;
+	// compatibility. Multipart cleanup uses Store.GC;
 	// Adapter implementations are no-op stubs.
 	ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error)
 	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
 	EnsureBucket(ctx context.Context) error
-	EnsureLifecycle(ctx context.Context) error
 	GC(ctx context.Context) error
 }
 

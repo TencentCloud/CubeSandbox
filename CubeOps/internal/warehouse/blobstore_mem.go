@@ -171,6 +171,5 @@ func (m *MemBlobStore) AbortMultipartUpload(_ context.Context, key, uploadID str
 	return nil
 }
 
-func (m *MemBlobStore) EnsureBucket(context.Context) error    { return nil }
-func (m *MemBlobStore) EnsureLifecycle(context.Context) error { return nil }
-func (m *MemBlobStore) GC(context.Context) error              { return nil }
+func (m *MemBlobStore) EnsureBucket(context.Context) error { return nil }
+func (m *MemBlobStore) GC(context.Context) error           { return nil }
