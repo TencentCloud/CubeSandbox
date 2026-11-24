@@ -112,6 +112,7 @@
 #   CUBE_BENCH_SLO_CONCURRENCY  run one 500-request round at this concurrency (1..500)
 #                         for a single section: 3.2, 4.3 or 4.6
 #   CUBE_BENCH_SLO_OUTPUT  new JSON file for that round's raw samples
+#   CUBE_BENCH_SLO_SETTLE  seconds between SLO search rounds, default 5 (use 0 to skip)
 #   CUBE_TEMPLATE_ID      ready template to reuse across SLO rounds
 #   CUBE_SNAPSHOT_ID      ready snapshot to reuse for section 4.3 SLO rounds
 #   CUBE_BENCH_SDK_VENV   optional existing venv with the SDK for 4.x SLO rounds
@@ -1343,7 +1344,7 @@ prepare_snapshot_bench() {
 			snapshot_bench_failed "pip install -r ${EXAMPLES_DIR}/requirements.txt failed, set PIP_INDEX_URL to a reachable index if this host cannot use PyPI directly" "$log"
 			return 1
 		fi
-		if ! SDK_INSTALLED_VERSION="$(python -c 'import cubesandbox; from importlib.metadata import version; print(version("cubesandbox"))' 2>"$log")"; then
+		if ! SDK_INSTALLED_VERSION="$(python -c 'import cubesandbox; from importlib.metadata import version; print(version("cubesandbox"))' 2>>"$log")"; then
 			snapshot_bench_failed "cannot load the cubesandbox SDK in $venv" "$log"
 			return 1
 		fi

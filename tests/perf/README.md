@@ -119,6 +119,8 @@ OUTPUT_MD=/tmp/cubebench-3.2.md bash tests/perf/cubebench.sh search 3.2
 
 所有选定章节执行完毕且没有运行错误时，脚本更新同一目录中的 `cubebench-search-latest` 链接。如果某一章的历史、配置或测量出错，报告会标记 `FAILED`，其余章节继续执行。最终命令返回非零，保留原链接。可用 `--history /path/to/previous-search 3.2` 复用指定目录中已完成的 3.2 记录。
 
+不传 `--history` 时，脚本默认读取最近一次成功搜索的 `cubebench-search-latest` 链接；`--history latest` 是这一默认行为的显式写法。
+
 多节点集群也可以从控制节点执行，沿用上面配置的模板和快照：
 
 ```bash
