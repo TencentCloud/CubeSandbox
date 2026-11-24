@@ -16,6 +16,7 @@ import SandboxDetailPage from '@/pages/SandboxDetail';
 import SandboxNewPage from '@/pages/SandboxNew';
 import TemplatesPage from '@/pages/Templates';
 import NodesPage from '@/pages/Nodes';
+import MachineTypesPage from '@/pages/MachineTypes';
 import VersionsPage from '@/pages/Versions';
 import WarehousePage from '@/pages/Warehouse';
 import WarehouseComponentPage from '@/pages/WarehouseComponent';
@@ -60,6 +61,7 @@ const App = () => (
                 <Route path="/templates/:templateID" element={<TemplateDetailPage />} />
                 <Route path="/snapshots/:snapshotID" element={<SnapshotDetailPage />} />
                 <Route path="/nodes" element={<NodesPage />} />
+                <Route path="/nodes/machine-types" element={<MachineTypesPage />} />
                 <Route path="/nodes/:nodeID" element={<NodeDetailPage />} />
                 <Route path="/versions" element={<VersionsPage />} />
                 <Route path="/warehouse" element={<WarehousePage />} />

@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/scheduler/selctx"
@@ -933,6 +934,7 @@ func fromSnapshotPlacement(ctx context.Context, snapshotID string, reqInOut *typ
 		kind = restoreplace.FilesystemColdBoot
 	}
 	return decideRestorePlacementFn(ctx, restoreplace.Input{
+		SourceMachineType:   nodemeta.NodeMachineType(src.OriginNodeID, src.OriginNodeIP),
 		SnapshotID:          src.SnapshotID,
 		Backend:             src.Backend,
 		RemoteStatus:        src.RemoteStatus,

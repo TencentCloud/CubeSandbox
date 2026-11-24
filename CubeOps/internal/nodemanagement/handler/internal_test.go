@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -40,6 +41,37 @@ func TestInternal_ListNodes(t *testing.T) {
 	}
 	if len(resp) != 1 || resp[0].ID() != "n-1" {
 		t.Errorf("resp = %+v", resp)
+	}
+}
+
+func TestInternal_ListNodes_MachineTypeFilterBeforeScoreView(t *testing.T) {
+	svc := &fakeNodeService{
+		listNodes: func(_ context.Context) ([]*model.NodeSnapshot, error) {
+			return []*model.NodeSnapshot{
+				{NodeID: "n-1", Score: 0.5, Labels: map[string]string{model.LabelMachineType: "t"}},
+				{NodeID: "n-2", Score: 0.9},
+			}, nil
+		},
+	}
+	r := gin.New()
+	handler.NewInternalHandler(svc).Register(r.Group("/internal/v1"))
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/nodes?machineType=t&score_only=true", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp []*model.SchedulerNode
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp) != 1 || resp[0].ID() != "n-1" {
+		t.Fatalf("resp = %+v, want only n-1", resp)
+	}
+	if resp[0].Score != 0.5 {
+		t.Fatalf("score = %v, want 0.5", resp[0].Score)
 	}
 }
 
@@ -185,6 +217,36 @@ func TestInternal_DeleteNode_SandboxCheckFailed(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", w.Code)
+	}
+}
+
+func TestInternal_SetLabelsTruncatesOperator(t *testing.T) {
+	var got string
+	svc := &fakeNodeService{
+		updateNodeLabels: func(_ context.Context, _ string, _ map[string]string, operator string) error {
+			got = operator
+			return nil
+		},
+		getNode: func(_ context.Context, nodeID string) (*model.NodeSnapshot, error) {
+			return &model.NodeSnapshot{NodeID: nodeID}, nil
+		},
+	}
+	r := gin.New()
+	handler.NewInternalHandler(svc).Register(r.Group("/internal/v1"))
+
+	long := strings.Repeat("测", 200)
+	req := httptest.NewRequest(http.MethodPut, "/internal/v1/nodes/n-1/labels?operator="+url.QueryEscape(long), strings.NewReader(`{"labels":{"zone":"gz"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if len([]rune(got)) != 128 {
+		t.Fatalf("operator runes = %d, want 128", len([]rune(got)))
+	}
+	if got != string([]rune(long)[:128]) {
+		t.Fatal("operator was not the leading 128 runes")
 	}
 }
 

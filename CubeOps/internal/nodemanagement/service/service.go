@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -114,26 +116,29 @@ func (svc *NodeService) RegisterNode(ctx context.Context, req *model.RegisterNod
 		logging.G(ctx).Errorf("nodemgmt: register upsert failed: node=%s: %v", req.NodeID, err)
 		return nil, err
 	}
-	existing, err := svc.store.GetRegistration(ctx, req.NodeID)
+	mergedLabels, _, err := svc.store.MutateLabels(ctx, req.NodeID, func(current map[string]string) (map[string]string, bool, error) {
+		// Copy first: the merge writes into its existing map, and comparing
+		// that map with itself would always look unchanged.
+		merged := StripAndPreserveSchedulingLabel(cloneStringMap(current), req.Labels)
+		if err := ValidateLabelsSkippingReserved(merged); err != nil {
+			logging.G(ctx).Warnf("nodemgmt: register labels invalid: node=%s: %v", req.NodeID, err)
+			return nil, false, fmt.Errorf("register labels invalid: %w", err)
+		}
+		if CountUserLabels(merged) > maxLabelsPerNode {
+			logging.G(ctx).Warnf("nodemgmt: register label count exceeded: node=%s got=%d max=%d", req.NodeID, CountUserLabels(merged), maxLabelsPerNode)
+			return nil, false, fmt.Errorf("%w: a node cannot have more than %d labels, got %d after merge",
+				ErrInvalidLabel, maxLabelsPerNode, CountUserLabels(merged))
+		}
+		if labelsEqual(current, merged) {
+			return current, false, nil
+		}
+		return merged, true, nil
+	})
 	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: register re-fetch failed: node=%s: %v", req.NodeID, err)
-		return nil, err
-	}
-	existingLabels, err := store.ParseLabelsJSON(existing.LabelsJSON)
-	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: register labels corrupt: node=%s: %v", req.NodeID, err)
-		return nil, fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
-	}
-	mergedLabels := StripAndPreserveSchedulingLabel(existingLabels, req.Labels)
-	if err := ValidateLabelsSkippingReserved(mergedLabels); err != nil {
-		logging.G(ctx).Warnf("nodemgmt: register labels invalid: node=%s: %v", req.NodeID, err)
-		return nil, fmt.Errorf("register labels invalid: %w", err)
-	}
-	if CountUserLabels(mergedLabels) > maxLabelsPerNode {
-		logging.G(ctx).Warnf("nodemgmt: register label count exceeded: node=%s got=%d max=%d", req.NodeID, CountUserLabels(mergedLabels), maxLabelsPerNode)
-		return nil, fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, CountUserLabels(mergedLabels))
-	}
-	if err := svc.store.UpdateLabels(ctx, req.NodeID, mergedLabels); err != nil {
+		if errors.Is(err, store.ErrCorruptLabelsJSON) {
+			logging.G(ctx).Errorf("nodemgmt: register labels corrupt: node=%s: %v", req.NodeID, err)
+			return nil, fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
+		}
 		logging.G(ctx).Errorf("nodemgmt: register update labels failed: node=%s: %v", req.NodeID, err)
 		return nil, err
 	}
@@ -336,6 +341,17 @@ func (svc *NodeService) GetNode(ctx context.Context, nodeID string) (*model.Node
 	if err != nil {
 		return nil, err
 	}
+	// Redis is a status cache. The registration row is the label source of
+	// truth, including a node whose snapshot write has not landed yet.
+	reg, err := svc.store.GetRegistration(ctx, nodeID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	applyRegistrationLabels(snap, reg)
+	snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 	svc.applyHostMeta(ctx, []*model.NodeSnapshot{snap})
 	return snap, nil
 }
@@ -348,9 +364,9 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]struct{}, len(regs))
+	regByID := make(map[string]*store.NodeRegistration, len(regs))
 	for i := range regs {
-		byID[regs[i].NodeID] = struct{}{}
+		regByID[regs[i].NodeID] = &regs[i]
 	}
 
 	// Redis fast path for the status overlay.
@@ -362,9 +378,11 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 	out := make([]*model.NodeSnapshot, 0, len(regs))
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
-		if _, ok := byID[s.NodeID]; !ok {
+		reg := regByID[s.NodeID]
+		if reg == nil {
 			continue // stale Redis key for a node no longer registered
 		}
+		applyRegistrationLabels(s, reg)
 		applyCurrentHealth(s, now)
 		s.SchedulingDisabled = snapSchedulingDisabled(s)
 		out = append(out, s)
@@ -382,6 +400,10 @@ func (svc *NodeService) ListNodes(ctx context.Context) ([]*model.NodeSnapshot, e
 			logging.G(ctx).Warnf("nodemgmt: list nodes: skip node=%s: %v", regs[i].NodeID, err)
 			continue
 		}
+		// A scan miss can still GET a stale snapshot; the registration row
+		// remains the label source.
+		applyRegistrationLabels(snap, &regs[i])
+		snap.SchedulingDisabled = snapSchedulingDisabled(snap)
 		out = append(out, snap)
 	}
 	sortSnapshots(out)
@@ -401,92 +423,234 @@ func (svc *NodeService) ListSchedulerNodes(ctx context.Context) ([]*model.Schedu
 	return out, nil
 }
 
-func (svc *NodeService) UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
+// mutateNodeLabels is the single write path for node labels: read, apply
+// mutate, validate, persist, refresh the Redis snapshot and record the audit
+// entry. Control-plane-owned keys are never part of mutate's input or output;
+// they are restored from the persisted row afterwards.
+func (svc *NodeService) mutateNodeLabels(
+	ctx context.Context,
+	nodeID, operator, opType string,
+	protected map[string]struct{},
+	mutate func(mutable map[string]string) (map[string]string, error),
+) error {
 	if nodeID == "" {
 		return ErrNodeIDRequired
+	}
+	var beforeUser, afterUser map[string]string
+	_, changed, err := svc.store.MutateLabels(ctx, nodeID, func(current map[string]string) (map[string]string, bool, error) {
+		mutable := mutableLabels(current, protected)
+		beforeUser = cloneStringMap(mutable)
+		// Hand the callback its own copy so an in-place edit cannot alias the
+		// map we compare against.
+		nextUser, err := mutate(cloneStringMap(mutable))
+		if err != nil {
+			return nil, false, err
+		}
+		if err := ValidateLabels(nextUser); err != nil {
+			return nil, false, err
+		}
+		kept := protectedLabels(current, protected)
+		next := make(map[string]string, len(nextUser)+len(kept))
+		for k, v := range nextUser {
+			next[k] = v
+		}
+		for k, v := range kept {
+			next[k] = v
+		}
+		if CountUserLabels(next) > maxLabelsPerNode {
+			return nil, false, fmt.Errorf("%w: a node cannot have more than %d labels, got %d",
+				ErrInvalidLabel, maxLabelsPerNode, CountUserLabels(next))
+		}
+		afterUser = cloneStringMap(nextUser)
+		if labelsEqual(current, next) {
+			return current, false, nil
+		}
+		return next, true, nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrCorruptLabelsJSON) {
+			logging.G(ctx).Errorf("nodemgmt: %s labels corrupt: node=%s: %v", opType, nodeID, err)
+			return fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			logging.G(ctx).Errorf("nodemgmt: %s get registration failed: node=%s: %v", opType, nodeID, err)
+		}
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	svc.syncRegistrationLabelsToRedis(ctx, nodeID)
+	detail := labelChangeDetail(beforeUser, afterUser)
+	if err := svc.recordOperation(ctx, nodeID, opType, operator, truncateOperationDetail(detail)); err != nil {
+		logging.G(ctx).Warnf("nodemgmt: %s record operation failed: node=%s: %v", opType, nodeID, err)
+	}
+	return nil
+}
+
+// syncRegistrationLabelsToRedis copies the committed registration labels onto
+// the Redis snapshot. Reading after the transaction commits means a later
+// writer is not overwritten by an earlier in-memory map.
+func (svc *NodeService) syncRegistrationLabelsToRedis(ctx context.Context, nodeID string) {
+	reg, err := svc.store.GetRegistration(ctx, nodeID)
+	if err != nil {
+		logging.G(ctx).Warnf("nodemgmt: sync labels read failed: node=%s: %v", nodeID, err)
+		return
+	}
+	svc.updateSnapshotInRedis(ctx, nodeID, func(snap *model.NodeSnapshot) {
+		applyRegistrationLabels(snap, reg)
+		snap.SchedulingDisabled = snapSchedulingDisabled(snap)
+	})
+}
+
+func labelsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// UpdateNodeLabels merges labels into the node's user labels. Keys that are not
+// present in labels are preserved. Control-plane-owned keys cannot be modified.
+func (svc *NodeService) UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
+	// A nil map merges nothing (historical 200 no-op; only replace distinguishes
+	// "clear everything" from "no body").
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	// Reserved-key policy is checked before syntax so a control-plane key maps
+	// to 403 instead of 400.
+	if _, ok := labels[model.LabelSchedulingDisabled]; ok {
+		return fmt.Errorf("%w: cannot modify reserved label %q via label API", ErrReservedLabel, model.LabelSchedulingDisabled)
+	}
+	if _, ok := labels[model.LabelMachineType]; ok {
+		return fmt.Errorf("%w: machine-type is managed by the machine type API", ErrReservedLabel)
 	}
 	if err := ValidateLabels(labels); err != nil {
 		return err
 	}
-	if _, ok := labels[model.LabelSchedulingDisabled]; ok {
-		logging.G(ctx).Warnf("nodemgmt: set-labels rejected reserved label: node=%s operator=%s", nodeID, operator)
-		return fmt.Errorf("cannot modify reserved label %q via label API", model.LabelSchedulingDisabled)
-	}
-
-	reg, err := svc.store.GetRegistration(ctx, nodeID)
-	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: set-labels get registration failed: node=%s: %v", nodeID, err)
-		return err
-	}
-	existing, err := store.ParseLabelsJSON(reg.LabelsJSON)
-	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: set-labels labels corrupt: node=%s: %v", nodeID, err)
-		return fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
-	}
+	next := make(map[string]string, len(labels))
 	for k, v := range labels {
-		existing[k] = v
+		next[k] = v
 	}
-	if CountUserLabels(existing) > maxLabelsPerNode {
-		logging.G(ctx).Warnf("nodemgmt: set-labels count exceeded: node=%s got=%d max=%d", nodeID, CountUserLabels(existing), maxLabelsPerNode)
-		return fmt.Errorf("a node cannot have more than %d labels, got %d after merge", maxLabelsPerNode, CountUserLabels(existing))
-	}
-	if err := svc.store.UpdateLabels(ctx, nodeID, existing); err != nil {
-		logging.G(ctx).Errorf("nodemgmt: set-labels store failed: node=%s: %v", nodeID, err)
+	// machine-type is reserved and must stay out of the mutable set, or the
+	// merge would re-validate the stored value and reject it.
+	err := svc.mutateNodeLabels(ctx, nodeID, operator, model.OpSetLabels, replaceProtectedLabelKeys,
+		func(user map[string]string) (map[string]string, error) {
+			return mergeLabels(user, next), nil
+		})
+	if err != nil {
 		return err
-	}
-
-	svc.updateSnapshotInRedis(ctx, nodeID, func(snap *model.NodeSnapshot) {
-		snap.Labels = cloneStringMap(existing)
-		snap.LabelsJSONCorrupt = false
-		snap.SchedulingDisabled = snapSchedulingDisabled(snap)
-	})
-
-	if err := svc.recordOperation(ctx, nodeID, model.OpSetLabels, operator, model.MustJSON(labels)); err != nil {
-		logging.G(ctx).Warnf("nodemgmt: set-labels record operation failed: node=%s: %v", nodeID, err)
 	}
 	logging.G(ctx).Infof("nodemgmt: labels updated: node=%s operator=%s keys=%d", nodeID, operator, len(labels))
 	return nil
 }
 
-func (svc *NodeService) DeleteNodeLabel(ctx context.Context, nodeID, key, operator string) error {
-	if nodeID == "" {
-		return ErrNodeIDRequired
+// ReplaceNodeLabels replaces the node's complete user-label set. Control-plane
+// keys are preserved; user keys not present in labels are removed.
+func (svc *NodeService) ReplaceNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error {
+	if labels == nil {
+		return fmt.Errorf("%w: labels must not be empty; send {} to clear user labels", ErrInvalidLabel)
 	}
+	if _, ok := labels[model.LabelSchedulingDisabled]; ok {
+		return fmt.Errorf("%w: cannot modify reserved label %q via label API", ErrReservedLabel, model.LabelSchedulingDisabled)
+	}
+	if _, ok := labels[model.LabelMachineType]; ok {
+		return fmt.Errorf("%w: machine-type is managed by the machine type API", ErrReservedLabel)
+	}
+	if err := ValidateLabels(labels); err != nil {
+		return err
+	}
+	next := make(map[string]string, len(labels))
+	for k, v := range labels {
+		next[k] = v
+	}
+	// mutateNodeLabels re-attaches every control-plane and data-plane key from
+	// a fresh read, so the replacement set is exactly the caller's user labels.
+	err := svc.mutateNodeLabels(ctx, nodeID, operator, model.OpReplaceLabels, replaceProtectedLabelKeys,
+		func(map[string]string) (map[string]string, error) {
+			return next, nil
+		})
+	if err != nil {
+		return err
+	}
+	logging.G(ctx).Infof("nodemgmt: labels replaced: node=%s operator=%s keys=%d", nodeID, operator, len(labels))
+	return nil
+}
+
+// DeleteNodeLabel removes one user label. Control-plane keys cannot be deleted
+// through this API.
+func (svc *NodeService) DeleteNodeLabel(ctx context.Context, nodeID, key, operator string) error {
+	if key == "" {
+		return fmt.Errorf("%w: label key must not be empty", ErrInvalidLabel)
+	}
+	// DeleteLabelByQuery deletes a label key that may contain '/'.
+	// ValidateLabelKey rejects reserved keys (403); malformed keys map to 400.
 	if err := ValidateLabelKey(key); err != nil {
 		return err
 	}
-	if key == model.LabelSchedulingDisabled {
-		logging.G(ctx).Warnf("nodemgmt: delete-label rejected reserved label: node=%s key=%s operator=%s", nodeID, key, operator)
-		return fmt.Errorf("cannot delete reserved label %q via label API", model.LabelSchedulingDisabled)
-	}
-
-	reg, err := svc.store.GetRegistration(ctx, nodeID)
-	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: delete-label get registration failed: node=%s: %v", nodeID, err)
+	if err := svc.mutateNodeLabels(ctx, nodeID, operator, model.OpDelLabel, replaceProtectedLabelKeys,
+		func(user map[string]string) (map[string]string, error) {
+			delete(user, key)
+			return user, nil
+		}); err != nil {
 		return err
-	}
-	existing, err := store.ParseLabelsJSON(reg.LabelsJSON)
-	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: delete-label labels corrupt: node=%s: %v", nodeID, err)
-		return fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
-	}
-	delete(existing, key)
-	if err := svc.store.UpdateLabels(ctx, nodeID, existing); err != nil {
-		logging.G(ctx).Errorf("nodemgmt: delete-label store failed: node=%s key=%s: %v", nodeID, key, err)
-		return err
-	}
-
-	svc.updateSnapshotInRedis(ctx, nodeID, func(snap *model.NodeSnapshot) {
-		snap.Labels = cloneStringMap(existing)
-		snap.LabelsJSONCorrupt = false
-		snap.SchedulingDisabled = snapSchedulingDisabled(snap)
-	})
-
-	if err := svc.recordOperation(ctx, nodeID, model.OpDelLabel, operator, key); err != nil {
-		logging.G(ctx).Warnf("nodemgmt: delete-label record operation failed: node=%s: %v", nodeID, err)
 	}
 	logging.G(ctx).Infof("nodemgmt: label deleted: node=%s key=%s operator=%s", nodeID, key, operator)
 	return nil
+}
+
+// truncateOperationDetail keeps audit detail within the column budget.
+func truncateOperationDetail(detail string) string {
+	if utf8.RuneCountInString(detail) <= maxOperationDetailLen {
+		return detail
+	}
+	runes := []rune(detail)
+	return string(runes[:maxOperationDetailLen])
+}
+
+// labelChangeDetail summarizes an audit entry from the operator-label sets
+// before and after the write. Label names are included (sorted, capped).
+func labelChangeDetail(before, after map[string]string) string {
+	added, changed, removed := 0, 0, 0
+	var names []string
+	for k, v := range after {
+		old, ok := before[k]
+		switch {
+		case !ok:
+			added++
+			names = append(names, "+"+k)
+		case old != v:
+			changed++
+			names = append(names, "~"+k)
+		}
+	}
+	for k := range before {
+		if _, ok := after[k]; !ok {
+			removed++
+			names = append(names, "-"+k)
+		}
+	}
+	if len(names) == 0 {
+		return "no label change"
+	}
+	sort.Strings(names)
+	const maxNames = 8
+	shown := names
+	if len(shown) > maxNames {
+		shown = shown[:maxNames]
+	}
+	detail := fmt.Sprintf("added=%d changed=%d removed=%d keys=%s",
+		added, changed, removed, strings.Join(shown, ","))
+	if len(names) > maxNames {
+		detail += fmt.Sprintf(" (+%d more)", len(names)-maxNames)
+	}
+	return detail
 }
 
 func (svc *NodeService) SetNodeSchedulingDisabled(ctx context.Context, nodeID string, disabled bool, operator, detail string) (*model.NodeSnapshot, error) {
@@ -497,43 +661,29 @@ func (svc *NodeService) SetNodeSchedulingDisabled(ctx context.Context, nodeID st
 		return nil, fmt.Errorf("%w: detail must be at most %d characters, got %d", ErrDetailTooLong, maxOperationDetailLen, utf8.RuneCountInString(detail))
 	}
 
-	reg, err := svc.store.GetRegistration(ctx, nodeID)
+	_, changed, err := svc.store.MutateLabels(ctx, nodeID, func(current map[string]string) (map[string]string, bool, error) {
+		_, has := current[model.LabelSchedulingDisabled]
+		switch {
+		case disabled && (!has || current[model.LabelSchedulingDisabled] != model.LabelSchedulingDisabledValue):
+			current[model.LabelSchedulingDisabled] = model.LabelSchedulingDisabledValue
+			return current, true, nil
+		case !disabled && has:
+			delete(current, model.LabelSchedulingDisabled)
+			return current, true, nil
+		default:
+			return current, false, nil
+		}
+	})
 	if err != nil {
+		if errors.Is(err, store.ErrCorruptLabelsJSON) {
+			logging.G(ctx).Errorf("nodemgmt: isolation labels corrupt: node=%s: %v", nodeID, err)
+			return nil, fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
+		}
 		logging.G(ctx).Errorf("nodemgmt: isolation get registration failed: node=%s: %v", nodeID, err)
 		return nil, err
 	}
-	existing, err := store.ParseLabelsJSON(reg.LabelsJSON)
-	if err != nil {
-		logging.G(ctx).Errorf("nodemgmt: isolation labels corrupt: node=%s: %v", nodeID, err)
-		return nil, fmt.Errorf("%w: %v", ErrLabelsJSONCorrupt, err)
-	}
-
-	var changed bool
-	_, has := existing[model.LabelSchedulingDisabled]
-	switch {
-	case disabled && (!has || existing[model.LabelSchedulingDisabled] != model.LabelSchedulingDisabledValue):
-		existing[model.LabelSchedulingDisabled] = model.LabelSchedulingDisabledValue
-		changed = true
-	case !disabled && has:
-		delete(existing, model.LabelSchedulingDisabled)
-		changed = true
-	}
 	if changed {
-		if err := svc.store.UpdateLabels(ctx, nodeID, existing); err != nil {
-			logging.G(ctx).Errorf("nodemgmt: isolation store failed: node=%s disabled=%t: %v", nodeID, disabled, err)
-			return nil, err
-		}
-	}
-
-	var snap *model.NodeSnapshot
-	svc.updateSnapshotInRedis(ctx, nodeID, func(s *model.NodeSnapshot) {
-		s.Labels = cloneStringMap(existing)
-		s.LabelsJSONCorrupt = false
-		s.SchedulingDisabled = snapSchedulingDisabled(s)
-		snap = cloneSnapshotWithCurrentHealth(s)
-	})
-
-	if changed {
+		svc.syncRegistrationLabelsToRedis(ctx, nodeID)
 		op := model.OpIsolate
 		if !disabled {
 			op = model.OpUnisolate
@@ -546,11 +696,9 @@ func (svc *NodeService) SetNodeSchedulingDisabled(ctx context.Context, nodeID st
 		}
 		logging.G(ctx).Infof("nodemgmt: scheduling toggled: node=%s disabled=%t operator=%s", nodeID, disabled, operator)
 	}
-	if snap == nil {
-		snap, err = svc.getNodeFromRedisOrDB(ctx, nodeID)
-		if err != nil {
-			return nil, err
-		}
+	snap, err := svc.GetNode(ctx, nodeID)
+	if err != nil {
+		return nil, err
 	}
 	return cloneSnapshotWithCurrentHealth(snap), nil
 }

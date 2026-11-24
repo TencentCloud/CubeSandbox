@@ -4,6 +4,13 @@
 import type { components } from '@/api/generated/schema';
 import type { ClusterOverview, NodeView, VersionMatrixView } from '@/api/admin-types';
 import type { TemplateCompatMatrix } from '@/api/client';
+import {
+  ISOLATION_KEY,
+  MACHINE_TYPE_KEY,
+  isIsolationKey,
+  isReplaceProtectedKey,
+  isSystemLabelKey,
+} from '@/lib/nodeLabels';
 import { resetWarehouseState } from './warehouse';
 
 type ClusterOverviewDto = ClusterOverview;
@@ -156,6 +163,21 @@ function buildNodes(): NodeDto[] {
         { type: 'KernelDeadlock', status: 'False', lastHeartbeatTime: ago(60) },
       ],
       localTemplates: ['python-3.11-ai', 'nodejs-20-web', 'ubuntu-24.04'],
+      machineType: 'intel-e5-2680',
+      hostFacts: {
+        cpuVendor: 'GenuineIntel',
+        cpuModel: 'Intel Xeon E5-2680',
+        cpuidHash: 'cpu-intel-e5',
+        hostKernelRelease: '5.10.0-100',
+      },
+      labels: {
+        [MACHINE_TYPE_KEY]: 'intel-e5-2680',
+        team: 'inference',
+        zone: 'cn-shanghai-a',
+        'kubernetes.io/arch': 'amd64',
+        'beta.kubernetes.io/os': 'linux',
+        'cube.cloud.tencentcloud.com/instance-type': 'standard',
+      },
       versions: [
         { component: 'cubelet', version: 'v0.5.0', commit: 'a1b2c3d4e5f6', source: 'binary' },
         { component: 'containerd-shim-cube-rs', version: 'v0.5.0', source: 'manifest' },
@@ -181,6 +203,19 @@ function buildNodes(): NodeDto[] {
       heartbeatTime: ago(9),
       conditions: [{ type: 'Ready', status: 'True', lastHeartbeatTime: ago(9) }],
       localTemplates: ['nodejs-20-web', 'go-1.22', 'ubuntu-24.04'],
+      machineType: '',
+      hostFacts: {
+        cpuVendor: 'GenuineIntel',
+        cpuModel: 'Intel Xeon E5-2680',
+        cpuidHash: 'cpu-intel-e5',
+        hostKernelRelease: '5.10.0-134',
+      },
+      // No machine-type: exercises the "not set" empty state.
+      labels: {
+        team: 'web',
+        'kubernetes.io/arch': 'amd64',
+        'cube.cloud.tencentcloud.com/instance-type': 'standard',
+      },
       // edge-02 is on a different cubelet version, which demonstrates normal
       // multi-version distribution plus an undeclared version marker.
       versions: [
@@ -217,6 +252,21 @@ function buildNodes(): NodeDto[] {
         { type: 'MemoryPressure', status: 'True', lastHeartbeatTime: ago(60) },
       ],
       localTemplates: ['ubuntu-24.04'],
+      machineType: '',
+      hostFacts: {
+        cpuVendor: 'AuthenticAMD',
+        cpuModel: 'AMD EPYC 7B13',
+        cpuidHash: 'cpu-amd-epyc',
+        hostKernelRelease: '5.15.0-91',
+      },
+      // edge-03 is cordoned too, so it exercises the isolation row and an
+      // unhealthy node badge.
+      labels: {
+        [ISOLATION_KEY]: 'true',
+        team: 'batch',
+        'beta.kubernetes.io/os': 'linux',
+        'cube.cloud.tencentcloud.com/instance-type': 'standard',
+      },
       // edge-03 is unhealthy AND running a guest-image outside the release
       // declaration, covering "not ready" + undeclared in the matrix table.
       versions: [
@@ -231,14 +281,265 @@ function buildNodes(): NodeDto[] {
   ];
 }
 
+// --- node label mutations -------------------------------------------------
+//
+// The mock mirrors the CubeOps label contract, reusing the same predicates as
+// the UI so it cannot drift from it.
+
+export type LabelMutationResult =
+  { ok: true; node: NodeDto } | { ok: false; status: number; error: string };
+
+function writable(key: string): boolean {
+  return !isIsolationKey(key) && !isSystemLabelKey(key) && key !== MACHINE_TYPE_KEY;
+}
+
+function rejectWrite(labels: Record<string, string>): LabelMutationResult | null {
+  for (const key of Object.keys(labels)) {
+    if (!writable(key)) {
+      return {
+        ok: false,
+        status: 403,
+        error: `cannot modify reserved label "${key}" via label API`,
+      };
+    }
+  }
+  return null;
+}
+
+function findNode(nodeID: string): { node: NodeDto; index: number } | null {
+  const index = nodes.findIndex((n) => n.nodeID === nodeID);
+  return index === -1 ? null : { node: nodes[index], index };
+}
+
+export function patchNodeLabels(
+  nodeID: string,
+  incoming: Record<string, string>,
+): LabelMutationResult {
+  const found = findNode(nodeID);
+  if (!found) return { ok: false, status: 404, error: `node ${nodeID} not found` };
+  const bad = rejectWrite(incoming);
+  if (bad) return bad;
+  found.node.labels = { ...(found.node.labels ?? {}), ...incoming };
+  return { ok: true, node: clone(found.node) };
+}
+
+export function replaceNodeLabels(
+  nodeID: string,
+  incoming: Record<string, string>,
+): LabelMutationResult {
+  const found = findNode(nodeID);
+  if (!found) return { ok: false, status: 404, error: `node ${nodeID} not found` };
+  const bad = rejectWrite(incoming);
+  if (bad) return bad;
+  // Replace rewrites the operator labels only; protected keys are kept.
+  const kept: Record<string, string> = {};
+  for (const [key, value] of Object.entries(found.node.labels ?? {})) {
+    if (isReplaceProtectedKey(key)) kept[key] = value;
+  }
+  found.node.labels = { ...kept, ...incoming };
+  return { ok: true, node: clone(found.node) };
+}
+
+export function deleteNodeLabel(nodeID: string, key: string): LabelMutationResult {
+  const found = findNode(nodeID);
+  if (!found) return { ok: false, status: 404, error: `node ${nodeID} not found` };
+  if (!writable(key)) {
+    return { ok: false, status: 403, error: `cannot delete reserved label "${key}" via label API` };
+  }
+  if (!key) {
+    return { ok: false, status: 400, error: 'label key must not be empty' };
+  }
+  const labels = { ...(found.node.labels ?? {}) };
+  delete labels[key];
+  found.node.labels = labels;
+  return { ok: true, node: clone(found.node) };
+}
+
+interface MockMachineType {
+  name: string;
+  displayName: string;
+  description: string;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function seedMachineTypes(): MockMachineType[] {
+  return [
+    {
+      name: 'intel-e5-2680',
+      displayName: 'Intel E5',
+      description: 'Same CPU, kernel may differ.',
+      createdBy: 'ops',
+      updatedBy: 'ops',
+      createdAt: ago(86_400),
+      updatedAt: ago(3_600),
+    },
+  ];
+}
+
 let sandboxes = buildSandboxes();
 let templates = buildTemplates();
 let nodes = buildNodes();
+let machineTypes = seedMachineTypes();
+
+function syncMachineTypeField(node: NodeDto) {
+  node.machineType = node.labels?.[MACHINE_TYPE_KEY] ?? '';
+}
+
+function machineTypeView(row: MockMachineType) {
+  const members = nodes.filter((node) => node.labels?.[MACHINE_TYPE_KEY] === row.name);
+  const groups = new Map<string, { cpuModel: string; ids: string[] }>();
+  const kernels = new Map<string, number>();
+  for (const node of members) {
+    const hash = node.hostFacts?.cpuidHash || '';
+    const group = groups.get(hash) ?? { cpuModel: node.hostFacts?.cpuModel || '', ids: [] };
+    group.ids.push(node.nodeID);
+    groups.set(hash, group);
+    const release = node.hostFacts?.hostKernelRelease || '';
+    kernels.set(release, (kernels.get(release) ?? 0) + 1);
+  }
+  const cpuidGroups = [...groups.entries()].map(([hash, group]) => ({
+    cpuidHash: hash,
+    unknown: hash === '',
+    cpuVendor: '',
+    cpuModel: group.cpuModel,
+    nodeCount: group.ids.length,
+    nodeIDs: group.ids,
+  }));
+  const warnings: string[] = [];
+  if (cpuidGroups.filter((group) => !group.unknown).length > 1) warnings.push('multiple_cpuid');
+  if (cpuidGroups.some((group) => group.unknown)) warnings.push('missing_host_facts');
+  return {
+    ...row,
+    nodeCount: members.length,
+    healthyNodeCount: members.filter((node) => node.healthy).length,
+    nodes: members.map((node) => ({
+      nodeID: node.nodeID,
+      hostIP: node.hostIP,
+      healthy: node.healthy,
+      schedulingDisabled: false,
+      cpuVendor: node.hostFacts?.cpuVendor ?? '',
+      cpuModel: node.hostFacts?.cpuModel ?? '',
+      cpuidHash: node.hostFacts?.cpuidHash ?? '',
+      hostKernelRelease: node.hostFacts?.hostKernelRelease ?? '',
+    })),
+    cpuidGroups,
+    kernelReleases: [...kernels.entries()].map(([release, nodeCount]) => ({ release, nodeCount })),
+    warnings,
+  };
+}
+
+export function listMachineTypes() {
+  return machineTypes.map(machineTypeView);
+}
+
+export function createMachineType(body: {
+  name?: string;
+  displayName?: string;
+  description?: string;
+  nodeIDs?: string[];
+}) {
+  const name = (body.name ?? '').trim();
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) {
+    return { ok: false as const, status: 400, error: 'invalid machine type name' };
+  }
+  if (machineTypes.some((row) => row.name === name)) {
+    return { ok: false as const, status: 409, error: 'machine type already exists' };
+  }
+  const now = new Date().toISOString();
+  machineTypes.push({
+    name,
+    displayName: body.displayName ?? '',
+    description: body.description ?? '',
+    createdBy: 'mock',
+    updatedBy: 'mock',
+    createdAt: now,
+    updatedAt: now,
+  });
+  for (const nodeID of body.nodeIDs ?? []) {
+    const found = findNode(nodeID);
+    if (!found) continue;
+    found.node.labels = { ...(found.node.labels ?? {}), [MACHINE_TYPE_KEY]: name };
+    syncMachineTypeField(found.node);
+  }
+  return {
+    ok: true as const,
+    view: machineTypeView(machineTypes.find((row) => row.name === name)!),
+  };
+}
+
+export function setNodeMachineType(nodeID: string, name: string) {
+  const found = findNode(nodeID);
+  if (!found) return { ok: false as const, status: 404, error: 'node not found' };
+  if (!machineTypes.some((row) => row.name === name)) {
+    return { ok: false as const, status: 404, error: 'machine type not found' };
+  }
+  found.node.labels = { ...(found.node.labels ?? {}), [MACHINE_TYPE_KEY]: name };
+  syncMachineTypeField(found.node);
+  return { ok: true as const };
+}
+
+export function clearNodeMachineType(nodeID: string) {
+  const found = findNode(nodeID);
+  if (!found) return { ok: false as const, status: 404, error: 'node not found' };
+  const labels = { ...(found.node.labels ?? {}) };
+  delete labels[MACHINE_TYPE_KEY];
+  found.node.labels = labels;
+  syncMachineTypeField(found.node);
+  return { ok: true as const };
+}
+
+export function replaceMachineTypeNodes(name: string, nodeIDs: string[]) {
+  if (!machineTypes.some((row) => row.name === name)) {
+    return { ok: false as const, status: 404, error: 'machine type not found' };
+  }
+  const want = new Set(nodeIDs);
+  for (const node of nodes) {
+    const current = node.labels?.[MACHINE_TYPE_KEY];
+    if (current === name && !want.has(node.nodeID)) {
+      const labels = { ...(node.labels ?? {}) };
+      delete labels[MACHINE_TYPE_KEY];
+      node.labels = labels;
+      syncMachineTypeField(node);
+    }
+  }
+  for (const nodeID of nodeIDs) {
+    const found = findNode(nodeID);
+    if (!found) continue;
+    found.node.labels = { ...(found.node.labels ?? {}), [MACHINE_TYPE_KEY]: name };
+    syncMachineTypeField(found.node);
+  }
+  return {
+    ok: true as const,
+    result: { name, results: nodeIDs.map((nodeID) => ({ nodeID, ok: true })) },
+  };
+}
+
+export function deleteMachineType(name: string, unbind: boolean) {
+  const row = machineTypes.find((item) => item.name === name);
+  if (!row) return { ok: false as const, status: 404, error: 'machine type not found' };
+  const bound = nodes.filter((node) => node.labels?.[MACHINE_TYPE_KEY] === name);
+  if (bound.length > 0 && !unbind) {
+    return {
+      ok: false as const,
+      status: 409,
+      error: `machine type is still bound to nodes: ${bound.map((n) => n.nodeID).join(',')}`,
+    };
+  }
+  if (unbind) {
+    for (const node of bound) clearNodeMachineType(node.nodeID);
+  }
+  machineTypes = machineTypes.filter((item) => item.name !== name);
+  return { ok: true as const };
+}
 
 export function resetMockState() {
   sandboxes = buildSandboxes();
   templates = buildTemplates();
   nodes = buildNodes();
+  machineTypes = seedMachineTypes();
   resetWarehouseState();
 }
 

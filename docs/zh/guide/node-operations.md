@@ -7,6 +7,8 @@ lang: zh-CN
 
 日常节点管理建议使用控制节点上的 `cubeopscli` 命令行工具，也可以使用 WebUI 节点详情页（12088 端口）。
 
+本页说明 CubeSandbox 集群的主要计算节点操作：查看节点兼容性、管理机型与节点标签，以及增加、隔离、删除节点。
+
 > cubeopscli 默认访问本地 127.0.0.1:3010 的 CubeOps 服务，对于 Terraform 集群版等分离部署的方案，可以使用 `--address` 和 `--port` 参数指定控制面地址。
 
 可以通过以下命令确认节点 ID 和当前状态：
@@ -41,6 +43,67 @@ type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5(cordoned)
 - `unknown` 组汇集了未上报 `cpuid_hash`/`host_kernel_release` 的节点（例如旧版本 Cubelet 未采集）。这类节点的类别无法确认，跨机恢复对其按失败处理。
 
 在构建共享存储后端的模板、执行跨机恢复、规划宿主内核滚动升级之前，都可以先用该命令确认集群里混用了几种节点类型。
+
+## 机型配置
+
+机型用于声明一组可以互相恢复内存快照的节点。
+
+默认的跨机恢复规则要求源、目标节点 CPU 相同**且**宿主内核版本完全一致。宿主内核滚动升级之后，同一批机器的内核小版本常常不一致，本可以互相恢复的机器因此被挡在门外。把这组机器绑定到同一个机型，即可豁免内核一致性要求：
+
+- 在 WebUI 的「节点 → 机型管理」或用 `cubeopscli machine-type` 创建机型，并把节点绑定到机型上。
+- 绑定后的节点会带上标签 `cube.cubesandbox.io/machine-type=<机型名>`；没有该标签就是未绑定，不需要逐节点开关。
+- 机型只放宽内核比较，CPU 仍必须相同。
+
+绑定机型后，跨机恢复的判定变为：
+
+| 源节点 | 目标节点须满足 |
+|---|---|
+| 未绑定机型 | `cpuid_hash` 和 `host_kernel_release` 都相等（不变） |
+| 绑定机型 `<T>` | 同为机型 `<T>` 且 `cpuid_hash` 相同；不再比较宿主内核 |
+
+绑定机型后，节点只能恢复到同一机型、`cpuid_hash` 相同的节点；未绑定节点即使 CPU、内核一致也会被排除。给一组原本可互相恢复的节点启用机型时，要整组一起绑定。
+
+一个机型里混入多种 CPU 时只会得到告警——这些节点之间依然无法跨机恢复。查看机型内的 CPU、内核分布用 `cubeopscli machine-type get <name>`。
+
+删除仍绑定着节点的机型时必须同时解绑（CLI 加 `--unbind`）。
+
+```bash
+# 创建机型并绑定首批节点
+cubeopscli machine-type create intel-oc9-k66 \
+  --display-name "Intel OC9" \
+  --description "same CPU, mixed host kernel" \
+  --nodes node-1,node-2
+
+# 查看机型：成员、CPU 与内核分布、告警
+cubeopscli machine-type list
+cubeopscli machine-type get intel-oc9-k66
+
+# 之后随时绑定、解绑；bind 会把节点从原机型迁出
+cubeopscli machine-type bind intel-oc9-k66 node-3
+cubeopscli machine-type unbind node-3
+
+# 按机型查找节点
+cubeopscli node list --machine-type intel-oc9-k66
+cubeopscli node list --unassigned-machine-type
+
+# 删除仍绑定节点的机型需要 --unbind
+cubeopscli machine-type delete intel-oc9-k66 --unbind
+```
+
+以上命令同样可以写成 `cubeopscli node machine-type …`。
+
+## 节点标签
+
+节点支持自由格式的标签，便于做自己的记录，例如 `team=infra`、`zone=gz`：
+
+```bash
+cubeopscli node label list node-1
+cubeopscli node label set node-1 team=infra
+cubeopscli node label replace node-1 team=infra zone=gz
+cubeopscli node label delete node-1 team
+```
+
+`set` 增加或更新单个标签；`replace` 安装完整标签集，命令里没写的标签会被删除。系统标签——机型、隔离状态、Cubelet 上报的数据面标签（`kubernetes.io/*`、`beta.kubernetes.io/*`、`cube.cloud.tencentcloud.com/*`）——不会被标签命令改动。机型由上面的机型命令管理；隔离状态只能用 `node isolate` / `node unisolate` 修改。
 
 ## 增加节点
 

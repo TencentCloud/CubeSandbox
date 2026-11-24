@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
@@ -157,6 +158,10 @@ type CandidateNode struct {
 	NodeID    string
 	HostIP    string
 	HostFacts *HostFacts
+	// NodeLabels is the node's raw label set (CubeOps labels_json), copied so
+	// callers can scope candidates by operator-declared groups such as
+	// cube.cubesandbox.io/machine-type.
+	NodeLabels map[string]string
 }
 
 // GetNodeHostFacts returns the trusted host facts for a healthy node.
@@ -199,6 +204,47 @@ func GetPersistedNodeHostFacts(ctx context.Context, nodeID string) (*HostFacts, 
 	return n.HostFacts, true
 }
 
+// NodeMachineType returns the persisted machine-type label of a node from the
+// local cache (CubeOps labels_json mirrored by the metadata sync). Works for
+// unhealthy nodes too.
+func NodeMachineType(nodeID, nodeIP string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	nodeIP = strings.TrimSpace(nodeIP)
+	if nodeID != "" {
+		if n, ok := localcache.GetNode(nodeID); ok && n != nil {
+			return machineTypeOf(n.NodeLabels)
+		}
+	}
+	if nodeIP != "" {
+		if n, ok := localcache.GetNodesByIp(nodeIP); ok && n != nil {
+			return machineTypeIfIdentityMatches(nodeID, n)
+		}
+	}
+	return ""
+}
+
+// machineTypeIfIdentityMatches keeps an IP lookup from inheriting a machine
+// type that now belongs to a different node. An empty requested id or cached
+// id cannot contradict, and is accepted.
+func machineTypeIfIdentityMatches(requestedID string, n *node.Node) string {
+	if n == nil {
+		return ""
+	}
+	if requestedID != "" {
+		if id := strings.TrimSpace(n.ID()); id != "" && id != requestedID {
+			return ""
+		}
+	}
+	return machineTypeOf(n.NodeLabels)
+}
+
+func machineTypeOf(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(labels[constants.LabelMachineType])
+}
+
 // QueryHostFactCandidates returns all healthy nodes with host facts, optionally
 // filtered by CPUID hash and kernel release.
 func QueryHostFactCandidates(ctx context.Context, requiredCPUIDHash, requiredKernelRelease string, matchAll bool) ([]*CandidateNode, error) {
@@ -225,10 +271,18 @@ func filterHostFactCandidates(nodes node.NodeList, requiredCPUIDHash, requiredKe
 				continue
 			}
 		}
+		var nodeLabels map[string]string
+		if len(n.NodeLabels) > 0 {
+			nodeLabels = make(map[string]string, len(n.NodeLabels))
+			for k, v := range n.NodeLabels {
+				nodeLabels[k] = v
+			}
+		}
 		out = append(out, &CandidateNode{
-			NodeID:    n.InsID,
-			HostIP:    n.IP,
-			HostFacts: n.HostFacts,
+			NodeID:     n.InsID,
+			HostIP:     n.IP,
+			HostFacts:  n.HostFacts,
+			NodeLabels: nodeLabels,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })

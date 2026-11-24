@@ -46,6 +46,7 @@ func New() *cli.App {
 	app.Commands = []cli.Command{
 		version.Command,
 		node.NodeCommand,
+		node.MachineTypeCommand,
 		cluster.Command,
 	}
 	return app

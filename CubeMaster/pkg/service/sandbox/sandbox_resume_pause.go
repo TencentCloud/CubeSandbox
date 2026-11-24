@@ -21,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubeproxy"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/restoreplace"
@@ -826,6 +827,7 @@ func pauseResumePlacementInput(rec *pausesnap.Record, instanceType string, creat
 		in.OriginNodeID = rec.NodeID
 		in.OriginNodeIP = rec.NodeIP
 		in.OriginHostFactsJSON = rec.OriginHostFactsJSON
+		in.SourceMachineType = nodemeta.NodeMachineType(rec.NodeID, rec.NodeIP)
 	}
 	if createReq != nil && config.GetConfig() != nil {
 		if reqRes, rerr := checkAndGetReqResource(createReq); rerr == nil {

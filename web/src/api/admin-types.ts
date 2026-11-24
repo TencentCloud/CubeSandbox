@@ -95,6 +95,15 @@ export interface NodeView {
   heartbeatTime?: string | null;
   hostIP: string;
   instanceType?: string;
+  /**
+   * Node labels as stored by CubeOps, including control-plane-owned keys.
+   * Keep in sync with CubeOps/internal/nodemanagement/handler/common.go.
+   */
+  labels?: Record<string, string>;
+  /** Catalog machine type bound to this node. Empty when unassigned. */
+  machineType?: string;
+  /** Host identity used for cross-node restore. */
+  hostFacts?: NodeHostFactsView | null;
   localTemplates?: string[];
   /** Format: int64 */
   maxMvmSlots: number;
@@ -106,6 +115,15 @@ export interface NodeView {
   /** Format: int64. Memory quota in MiB assigned to this node. */
   quotaMemMB: number;
   versions?: ComponentVersionView[];
+}
+
+/** Host identity CubeMaster compares when it picks a cross-node restore target. */
+export interface NodeHostFactsView {
+  cpuVendor?: string;
+  cpuModel?: string;
+  cpuidHash?: string;
+  hostKernelRelease?: string;
+  kvmModuleTaint?: string;
 }
 
 /** Full node x component version matrix. */

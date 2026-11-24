@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
@@ -108,7 +109,12 @@ func EvaluateSnapshotRestoreCompat(ctx context.Context, snapshotID, targetNode s
 		targetVersions = nil
 	}
 
-	dims := buildHostFactDimensions(origin, target, !fsOnly)
+	dims := hostFactDimensionsFor(
+		origin, target,
+		nodemeta.NodeMachineType(info.OriginNodeID, info.OriginNodeIP),
+		nodemeta.NodeMachineType(targetNode, ""),
+		!fsOnly,
+	)
 	dims = append(dims, buildGuestDimensions(originGuestImage, originAgent, targetVersions)...)
 	result.Dimensions = dims
 	result.Compatible = allRequiredDimensionsMatch(dims)
@@ -167,10 +173,47 @@ func parseFrozenHostFacts(raw string) *nodemeta.HostFacts {
 // facts are collected and reported but demoted to informational so boot-param
 // drift, rolling kvm.ko upgrades and marketing model strings do not split the
 // node pool. The kvm_module_taint gate stays required — see below.
+// hostFactDimensionsFor is the single place that decides how the HostFacts
+// dimensions are assembled for a label-aware comparison, so the single-node
+// and aggregate previews cannot drift apart, and both mirror restoreplace's
+// rule: a matching machine type demotes host_kernel_release and a different
+// one becomes its own required mismatch.
+func hostFactDimensionsFor(origin, target *nodemeta.HostFacts, originMachineType, targetMachineType string, hostFactsRequired bool) []RestoreCompatDimension {
+	machineTypeMatched := hostFactsRequired &&
+		strings.TrimSpace(originMachineType) != "" &&
+		strings.TrimSpace(originMachineType) == strings.TrimSpace(targetMachineType)
+	dims := buildHostFactDimensionsWithMachineType(origin, target, hostFactsRequired, machineTypeMatched)
+	if dim, ok := machineTypeDimension(hostFactsRequired, originMachineType, targetMachineType); ok {
+		dims = append(dims, dim)
+	}
+	return dims
+}
+
+// machineTypeDimension makes the operator-declared machine type a required
+// dimension whenever the origin declares one, so the preview and the
+// placement decision (which filters by label) stay identical.
+func machineTypeDimension(hostFactsRequired bool, origin, target string) (RestoreCompatDimension, bool) {
+	origin, target = strings.TrimSpace(origin), strings.TrimSpace(target)
+	if !hostFactsRequired || origin == "" {
+		return RestoreCompatDimension{}, false
+	}
+	return newDimension("machine_type", true, origin, target), true
+}
+
+// buildHostFactDimensions is the strict HostFacts-only dimension set.
 func buildHostFactDimensions(origin, target *nodemeta.HostFacts, hostFactsRequired bool) []RestoreCompatDimension {
+	return buildHostFactDimensionsWithMachineType(origin, target, hostFactsRequired, false)
+}
+
+// buildHostFactDimensionsWithMachineType is the label-aware variant. When both
+// nodes carry the same operator-declared machine type, the host kernel release
+// is reported but not required, mirroring the placement path. The machine_type
+// dimension is added separately so a *different* machine type is rejected
+// rather than silently treated as compatible.
+func buildHostFactDimensionsWithMachineType(origin, target *nodemeta.HostFacts, hostFactsRequired, machineTypeMatched bool) []RestoreCompatDimension {
 	dims := []RestoreCompatDimension{
 		newDimension("cpuid_hash", hostFactsRequired, origin.CPUIDHash, target.CPUIDHash),
-		newDimension("host_kernel_release", hostFactsRequired, origin.HostKernelRelease, target.HostKernelRelease),
+		newDimension("host_kernel_release", hostFactsRequired && !machineTypeMatched, origin.HostKernelRelease, target.HostKernelRelease),
 		// Informational only: reported for debugging and a future tighter policy.
 		newDimension("cpu_vendor", false, origin.CPUVendor, target.CPUVendor),
 		newDimension("cpu_model", false, origin.CPUModel, target.CPUModel),
@@ -234,6 +277,15 @@ func kernelFingerprintDimension(origin, target *nodemeta.HostFacts) RestoreCompa
 		o, t = origin.HostKernelRelease, target.HostKernelRelease
 	}
 	return newDimension("host_kernel_fingerprint", false, o, t)
+}
+
+// candidateMachineTypeOf extracts the machine-type label from a candidate, so
+// the aggregate path applies the same rule as the placement path.
+func candidateMachineTypeOf(c *nodemeta.CandidateNode) string {
+	if c == nil || len(c.NodeLabels) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(c.NodeLabels[constants.LabelMachineType])
 }
 
 // buildGuestDimensions compares the guest-environment versions from the ready
@@ -368,7 +420,8 @@ func ListCompatibleNodesForSnapshot(ctx context.Context, snapshotID string, incl
 		}
 		origin = &nodemeta.HostFacts{}
 	}
-	nodes, err := listCompatibleNodesForMode(ctx, origin, includeAll, !fsOnly)
+	nodes, err := listCompatibleNodesForMode(ctx, origin, includeAll, !fsOnly,
+		nodemeta.NodeMachineType(info.OriginNodeID, info.OriginNodeIP))
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +464,9 @@ func ListCompatibleNodesForFactors(ctx context.Context, factors *nodemeta.HostFa
 // each is reported with its dimensions so a caller can diagnose why a node was
 // rejected.
 func listCompatibleNodes(ctx context.Context, origin *nodemeta.HostFacts, includeAll bool) ([]CompatibleNode, error) {
-	return listCompatibleNodesForMode(ctx, origin, includeAll, true)
+	// No origin node id here, so no machine-type label can be resolved; the
+	// strict HostFacts policy is the only correct answer.
+	return listCompatibleNodesForMode(ctx, origin, includeAll, true, "")
 }
 
 // listCompatibleNodesForMode applies the shared judgment with an explicit
@@ -423,8 +478,18 @@ func listCompatibleNodesForMode(
 	ctx context.Context,
 	origin *nodemeta.HostFacts,
 	includeAll, hostFactsRequired bool,
+	originMachineType string,
 ) ([]CompatibleNode, error) {
-	candidates, err := queryCandidatesFn(ctx, origin.CPUIDHash, origin.HostKernelRelease, includeAll || !hostFactsRequired)
+	// With a machine type the kernel release is no longer a selection key, so
+	// the query must not pre-filter on it: otherwise same-machine-type peers on
+	// a different kernel never appear, and the preview contradicts the resume
+	// that would actually succeed.
+	labelScoped := hostFactsRequired && strings.TrimSpace(originMachineType) != ""
+	queryCPUID, queryKernel := origin.CPUIDHash, origin.HostKernelRelease
+	if labelScoped {
+		queryCPUID, queryKernel = "", ""
+	}
+	candidates, err := queryCandidatesFn(ctx, queryCPUID, queryKernel, includeAll || !hostFactsRequired || labelScoped)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +498,7 @@ func listCompatibleNodesForMode(
 		if c == nil || c.HostFacts == nil {
 			continue
 		}
-		dims := buildHostFactDimensions(origin, c.HostFacts, hostFactsRequired)
+		dims := hostFactDimensionsFor(origin, c.HostFacts, originMachineType, candidateMachineTypeOf(c), hostFactsRequired)
 		compatible := allRequiredDimensionsMatch(dims)
 		if !compatible && !includeAll {
 			continue
