@@ -15,19 +15,9 @@ trap 'rm -rf "${TMP}"' EXIT
 # shellcheck disable=SC1090
 source <(awk '/^patch_extra_volume_plugins\(\) \{/,/^}/' "${ENTRY}")
 
+# The shipped Cubelet config, including the cow.* tables after volume_plugins.
 CFG="${TMP}/config.toml"
-cat >"${CFG}" <<'TOML'
-[plugins."io.cubelet.internal.v1.storage"]
-    volume_plugin_base_dir = "/data/cube-shared/volume"
-
-    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
-      name        = "s3"
-      type        = "binary"
-      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-s3"
-
-    [plugins."io.cubelet.internal.v1.storage".cow.log]
-      level = "info"
-TOML
+cp "${SCRIPT_DIR}/../../../../Cubelet/config/config.toml" "${CFG}"
 ORIGINAL="$(cat "${CFG}")"
 
 ok() { printf 'ok: %s\n' "$1"; }
@@ -61,14 +51,52 @@ if command -v python3 >/dev/null && python3 -c 'import tomllib' 2>/dev/null; the
 import sys, tomllib
 cfg = tomllib.load(open(sys.argv[1], "rb"))
 names = [p["name"] for p in cfg["plugins"]["io.cubelet.internal.v1.storage"]["volume_plugins"]]
-assert names == ["s3", "myfs"], names
+assert names == ["s3", "cos", "myfs"], names
 PY
   ok "valid TOML"
 fi
 
-for bad in 'bad name|rpc|/s.sock' 'x|nfs|/s.sock' 'x|rpc|' 'x|rpc|/a"b' 's3|binary|/opt/s3'; do
+patch_extra_volume_plugins "${CFG}" ""
+bad_inputs=(
+  'bad name|rpc|/s.sock'
+  'x|nfs|/s.sock'
+  'x|rpc|'
+  'x|rpc|/a"b'
+  'x|rpc|/a b'
+  'x|rpc|/data/a\form'
+  'x|rpc|/data/a\tb'
+  'x|rpc|/data/a\qb'
+  'x|rpc|/data/a\'
+  $'x|rpc|/data/a\tb'
+  $'x|rpc|/data/a\ny|rpc|/data/b'
+  $'x|rpc|/data/a\r'
+  's3|binary|/opt/s3'
+  'cos|rpc|/data/cos.sock'
+  'x|rpc|/data/a;x|rpc|/data/b'
+  'x|rpc|/data/a;y|rpc|/data/a\b'
+)
+for bad in "${bad_inputs[@]}"; do
   if (patch_extra_volume_plugins "${CFG}" "${bad}") 2>/dev/null; then
-    fail "accepted ${bad}"
+    fail "accepted $(printf '%q' "${bad}")"
   fi
+  [[ "$(cat "${CFG}")" == "${ORIGINAL}" ]] || fail "rejected $(printf '%q' "${bad}") must leave config.toml unchanged"
 done
-ok "invalid entries rejected"
+ok "invalid entries rejected, config.toml untouched"
+
+out="$( (patch_extra_volume_plugins "${CFG}" 'x|rpc|/data/a;x|rpc|/data/b') 2>&1 || true)"
+if [[ "${out}" == *'listed twice'* ]]; then
+  ok "duplicate reported as a duplicate"
+else
+  fail "duplicate must be reported as listed twice"
+fi
+out="$( (patch_extra_volume_plugins "${CFG}" 'cos|rpc|/data/a') 2>&1 || true)"
+if [[ "${out}" == *'packaged plugin'* ]]; then
+  ok "packaged name reported as packaged"
+else
+  fail "cos must be reported as a packaged plugin"
+fi
+
+# A name key outside volume_plugins must not count as a packaged plugin.
+printf '\n[plugins."io.cubelet.internal.v1.other"]\n  name = "myfs"\n' >>"${CFG}"
+patch_extra_volume_plugins "${CFG}" "${MYFS}" 2>/dev/null || fail "unrelated name key must not collide"
+ok "collision check scoped to volume_plugins"

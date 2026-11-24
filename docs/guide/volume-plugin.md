@@ -48,7 +48,7 @@ Reference: [COS plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/
 
 ### Configure CubeMaster / Cubelet and restart
 
-Register the same `driver` name on both sides (`volume_plugins`), point `binary_path` / `socket_path` at the deployed plugin, then restart CubeMaster and Cubelet so the config is loaded. See [Registration and Configuration](#registration-and-configuration).
+Register the same `driver` name on both sides (`volume_plugins`), point `binary_path` / `socket_path` at the deployed plugin, then restart CubeMaster and Cubelet so the config is loaded. See [Registration and Configuration](#registration-and-configuration). On a Helm install, use the chart value `volumePlugins.extra` instead of editing the files; see [Kubernetes (Helm chart)](#kubernetes-helm-chart-volumepluginsextra).
 
 ### Install the SDK
 
@@ -674,6 +674,53 @@ volume_plugins:
 > **`binary_path` / `socket_path` location:** install third-party plugins outside the cubetoolbox tree, otherwise they are reset on Cube upgrade.
 
 **`name` must be unique** within each process: no two `volume_plugins` entries with the same `name`. List order sets the default plugin when API/SDK omits `driver`.
+
+### Kubernetes (Helm chart): `volumePlugins.extra`
+
+On a Helm install, `conf.yaml` is rendered by the chart and `config.toml` is reset from the `cubelet` image on every container start, so editing either by hand does not last. Register third-party plugins through the chart value `volumePlugins.extra` instead. The chart appends each entry to CubeMaster's `volume_plugins` and passes it to the `cubelet` container, whose entrypoint appends it to `config.toml`.
+
+```yaml
+volumePlugins:
+  extra:
+    # rpc: a controller Service for CubeMaster, a node socket on every Cube node
+    - name: myfs
+      type: rpc
+      master:
+        socketPath: myfs-controller.myfs.svc:9200
+      node:
+        socketPath: /data/cube-shared/run/myfs/node.sock
+    # binary: an executable on both sides
+    - name: mytool
+      type: binary
+      master:
+        binaryPath: /opt/plugins/cube-volume-mytool   # needs a custom cube-master image
+      node:
+        binaryPath: /data/cube-shared/plugins/cube-volume-mytool
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | yes | Driver name, `[A-Za-z0-9_-]+`. Unique within `extra`, and not `s3` or `cos` (packaged plugins). |
+| `type` | yes | `rpc` or `binary`. `builtin` is not accepted here. |
+| `master.socketPath` / `master.binaryPath` | yes | CubeMaster side: `socketPath` for `rpc`, `binaryPath` for `binary`. |
+| `node.socketPath` / `node.binaryPath` | yes | Cubelet side, same rule. |
+
+Every path may only contain letters, digits and `._/:@+=,~-`: no spaces, quotes, backslashes or control characters. `helm template` fails on a bad entry (invalid or duplicate name, a packaged name, an unknown type, a missing `master`/`node` or path, a disallowed character) whether or not `cubeNode.enabled` is set, so a typo cannot reach CubeMaster or the cubelets and stop them at startup.
+
+**Where the plugin must live:**
+
+- **Node side.** The `cubelet` container mounts the host's `/data/cube-shared` (`hostPaths.dataCubeShared`), but not `/run` or other host paths. Put the node socket or binary under `/data/cube-shared`, installed by your own DaemonSet or node setup.
+- **CubeMaster side.** The `cube-master` Pod mounts no host paths and the chart has no extra volume hook. For `rpc`, use a TCP address that the `cube-master` Pod can reach, such as a Service `host:port`. For `binary`, build a custom `cube-master` image that contains the executable and set `images.master`.
+
+**Behavior to know:**
+
+- The packaged `s3` plugin stays first, so it is still the default driver when the API or SDK omits `driver`. Pass `driver="<name>"` to use an extra plugin.
+- Each side is only registered where that component is installed: with `cubeNode.enabled=false` only CubeMaster gets the plugin, and a release without the control plane only registers the node side. Set the same `extra` list in every release that installs either side.
+- The node side needs a `cubelet` image whose entrypoint reads `CUBE_EXTRA_VOLUME_PLUGINS` (added after v0.8.0). An older image ignores it: CubeMaster accepts volumes for the plugin, and attaches then fail on the nodes. Check the `cubelet` container log for `registered N extra volume plugin(s)` after an upgrade.
+- Before removing an entry, delete the volumes that use it. Volumes of a driver that is no longer registered can be neither attached nor destroyed.
+- Changing the list restarts the `cube-master` Pods (config checksum) and the `cube-node` Pods (Pod template).
+
+**Security boundary.** A registered plugin runs with Cube's privileges. A `binary` plugin on the node is executed by Cubelet inside the `cubelet` container, which runs as root, privileged, with the node's host mounts, the mounted plugin credential Secrets and the node ServiceAccount token. A node `rpc` plugin is trusted with every attach and detach on that node, and on CubeMaster with every create and destroy. Only register plugins you would trust with root on every Cube node.
 
 ---
 

@@ -1,3 +1,4 @@
+{{- include "cube.validateExtraVolumePlugins" .Values.volumePlugins.extra -}}
 {{- $computeSelector := .Values.placement.compute.nodeSelector -}}
 {{- $controlPlaneSelector := .Values.placement.controlPlane.nodeSelector -}}
 {{- if and .Values.controlPlane.enabled (not $controlPlaneSelector) }}

@@ -297,6 +297,29 @@ volumeS3:
 When `minio.rootPassword` is set, it must be at least 8 characters (MinIO
 requirement).
 
+## Third-party volume plugins
+
+`volumePlugins.extra` registers out-of-tree volume plugins (`rpc` or `binary`)
+on both CubeMaster and Cubelet, without editing `conf.yaml` or `config.toml`:
+
+```yaml
+volumePlugins:
+  extra:
+    - name: myfs
+      type: rpc
+      master:
+        socketPath: myfs-controller.myfs.svc:9200            # TCP, reachable from cube-master
+      node:
+        socketPath: /data/cube-shared/run/myfs/node.sock     # under the mounted /data/cube-shared
+```
+
+The default `extra: []` renders nothing. `helm template` rejects invalid,
+duplicate or packaged (`s3`, `cos`) names, unknown types, missing sides and
+paths outside `[A-Za-z0-9._/:@+=,~-]`. The node side needs a `cubelet` image
+newer than v0.8.0. See the
+[Kubernetes section of the volume plugin guide](../../../docs/guide/volume-plugin.md#kubernetes-helm-chart-volumepluginsextra)
+for where plugins must live, image requirements and the security boundary.
+
 ## Private-CA registry trust (trustedCACerts)
 
 If the image registries the TemplateCenter pod pulls from sit behind a

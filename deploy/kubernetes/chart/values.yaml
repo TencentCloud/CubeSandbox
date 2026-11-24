@@ -1503,14 +1503,21 @@ hostPaths:
 
 # Third-party volume plugins registered on both sides of Cube's volume plugin
 # framework: appended to CubeMaster conf.yaml volume_plugins (after s3 and cos,
-# so never the default driver) and to Cubelet config.toml. Install the plugin
-# itself (its node socket or binary on every Cube node, and its controller
-# endpoint reachable from CubeMaster) outside this chart, outside the
-# cubetoolbox tree so upgrades do not reset it. Example:
+# so s3 stays the default driver) and, through CUBE_EXTRA_VOLUME_PLUGINS, to
+# Cubelet config.toml. The plugin itself is installed outside this chart:
+#   - node side under /data/cube-shared, the only data hostPath the cubelet
+#     container mounts (not /run);
+#   - master side as a TCP rpc address the cube-master Pod can reach, or for
+#     binary plugins a custom images.master that contains the executable.
+# helm template rejects invalid, duplicate or packaged (s3, cos) names, types
+# other than rpc/binary, a missing master/node path, and paths with characters
+# outside [A-Za-z0-9._/:@+=,~-]. The node side needs a cubelet image newer than
+# v0.8.0. Plugins run with Cube's privileges (root, privileged, node
+# ServiceAccount). See docs/guide/volume-plugin.md, "Kubernetes (Helm chart)".
 #
 #   volumePlugins:
 #     extra:
-#       - name: myfs            # [A-Za-z0-9_-]+
+#       - name: myfs            # [A-Za-z0-9_-]+, not s3/cos
 #         type: rpc             # rpc | binary
 #         master:
 #           socketPath: myfs-controller.myfs.svc:9200   # binaryPath for binary

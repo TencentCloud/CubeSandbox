@@ -1724,29 +1724,80 @@ true
 {{- end -}}
 
 {{/*
+cube.validateExtraVolumePlugins fails the render unless volumePlugins.extra
+(passed as the argument) is a list of plugins with:
+  - a name matching ^[A-Za-z0-9_-]+$, unique, and not a packaged plugin name
+    (s3, cos), since a duplicate driver name stops CubeMaster and every cubelet;
+  - type rpc or binary;
+  - master and node maps, each with socketPath (rpc) or binaryPath (binary).
+Paths may only use [A-Za-z0-9._/:@+=,~-]: they are written unescaped into
+CubeMaster's YAML, into Cubelet's TOML basic strings, and into the
+"name|type|path;..." CUBE_EXTRA_VOLUME_PLUGINS list, where a backslash,
+quote, separator, space or control character would change or break them.
+validate.yaml calls it on every render, so a bad entry fails helm template even
+when cubeNode.enabled=false; the two renderers below call it as well.
+*/}}
+{{- define "cube.validateExtraVolumePlugins" -}}
+{{- $extra := . | default list -}}
+{{- if not (kindIs "slice" $extra) -}}
+{{- fail (printf "volumePlugins.extra must be a list, got %s" (kindOf $extra)) -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $i, $p := $extra -}}
+{{- if not (kindIs "map" $p) -}}
+{{- fail (printf "volumePlugins.extra[%d] must be a map with name, type, master and node" $i) -}}
+{{- end -}}
+{{- $name := toString ($p.name | default "") -}}
+{{- if not $name -}}
+{{- fail (printf "volumePlugins.extra[%d].name is required" $i) -}}
+{{- end -}}
+{{- $where := printf "volumePlugins.extra[%d] (%s)" $i $name -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]+$" $name) -}}
+{{- fail (printf "%s: name must match ^[A-Za-z0-9_-]+$" $where) -}}
+{{- end -}}
+{{- if has $name (list "s3" "cos") -}}
+{{- fail (printf "%s: name %q is a packaged plugin; pick another name" $where $name) -}}
+{{- end -}}
+{{- if hasKey $seen $name -}}
+{{- fail (printf "%s: name %q is already used by volumePlugins.extra[%d]" $where $name (get $seen $name)) -}}
+{{- end -}}
+{{- $_ := set $seen $name $i -}}
+{{- $type := toString ($p.type | default "") -}}
+{{- $key := "" -}}
+{{- if eq $type "rpc" -}}
+{{- $key = "socketPath" -}}
+{{- else if eq $type "binary" -}}
+{{- $key = "binaryPath" -}}
+{{- else -}}
+{{- fail (printf "%s: type must be rpc or binary, got %q" $where $type) -}}
+{{- end -}}
+{{- range $side := list "master" "node" -}}
+{{- $s := index $p $side | default dict -}}
+{{- if not (kindIs "map" $s) -}}
+{{- fail (printf "%s: %s must be a map with %s" $where $side $key) -}}
+{{- end -}}
+{{- $path := toString (index $s $key | default "") -}}
+{{- if not $path -}}
+{{- fail (printf "%s: %s.%s is required for %s plugins" $where $side $key $type) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._/:@+=,~-]+$" $path) -}}
+{{- fail (printf "%s: %s.%s %q may only contain letters, digits and ._/:@+=,~-" $where $side $key $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 cube.extraVolumePluginsEnv renders volumePlugins.extra for the Cubelet side as
 "name|type|path" entries separated by ";", where path is node.socketPath for
 rpc plugins and node.binaryPath for binary plugins.
 */}}
 {{- define "cube.extraVolumePluginsEnv" -}}
+{{- include "cube.validateExtraVolumePlugins" . -}}
 {{- $entries := list -}}
 {{- range . -}}
-{{- $name := required "volumePlugins.extra[].name is required" .name -}}
-{{- if not (regexMatch "^[a-zA-Z0-9_-]+$" $name) -}}
-{{- fail (printf "volumePlugins.extra[].name %q must match ^[a-zA-Z0-9_-]+$" $name) -}}
-{{- end -}}
-{{- $path := "" -}}
-{{- if eq .type "rpc" -}}
-{{- $path = required "volumePlugins.extra[].node.socketPath is required for rpc" .node.socketPath -}}
-{{- else if eq .type "binary" -}}
-{{- $path = required "volumePlugins.extra[].node.binaryPath is required for binary" .node.binaryPath -}}
-{{- else -}}
-{{- fail (printf "volumePlugins.extra[].type %q must be rpc or binary" .type) -}}
-{{- end -}}
-{{- if or (contains "|" $path) (contains ";" $path) (contains "\"" $path) -}}
-{{- fail (printf "volumePlugins.extra[] path %q must not contain | ; or quotes" $path) -}}
-{{- end -}}
-{{- $entries = append $entries (printf "%s|%s|%s" $name .type $path) -}}
+{{- $path := ternary .node.socketPath .node.binaryPath (eq .type "rpc") -}}
+{{- $entries = append $entries (printf "%s|%s|%s" .name .type $path) -}}
 {{- end -}}
 {{- join ";" $entries -}}
 {{- end -}}

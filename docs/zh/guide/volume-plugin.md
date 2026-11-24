@@ -48,7 +48,7 @@ CubeSandbox 正在逐步兼容 e2b Volume，为沙箱提供跨生命周期的持
 
 ### 配置 CubeMaster / Cubelet 并重启
 
-两侧 `volume_plugins` 使用相同的 `driver` 名，`binary_path` / `socket_path` 指向已部署的插件；修改后重启 CubeMaster 与 Cubelet 使配置生效。见 [注册与配置](#注册与配置)。
+两侧 `volume_plugins` 使用相同的 `driver` 名，`binary_path` / `socket_path` 指向已部署的插件；修改后重启 CubeMaster 与 Cubelet 使配置生效。见 [注册与配置](#注册与配置)。用 Helm 安装时，请改用 chart 的 `volumePlugins.extra`，不要手工修改这两个文件，见 [Kubernetes（Helm chart）](#kuberneteshelm-chartvolumepluginsextra)。
 
 ### 安装 cubesandbox SDK ≥ 0.6.0
 
@@ -669,6 +669,53 @@ volume_plugins:
 > **`binary_path` / `socket_path` 位置：** 第三方插件请安装到 cubetoolbox 目录之外，否则升级 Cube 时会被重置。
 
 **`name` 必须唯一**：同一进程内不能有两条相同 `name` 的 `volume_plugins`。列表顺序决定省略 `driver` 时的默认插件。
+
+### Kubernetes（Helm chart）：`volumePlugins.extra`
+
+用 Helm 安装时，`conf.yaml` 由 chart 渲染，`config.toml` 在 `cubelet` 容器每次启动时都会从镜像重置，手工修改这两个文件不会保留。第三方插件请通过 chart 的 `volumePlugins.extra` 注册：chart 把每一项追加到 CubeMaster 的 `volume_plugins`，并传给 `cubelet` 容器，由其入口脚本追加到 `config.toml`。
+
+```yaml
+volumePlugins:
+  extra:
+    # rpc：CubeMaster 侧连 controller Service，每个 Cube 节点上有 node socket
+    - name: myfs
+      type: rpc
+      master:
+        socketPath: myfs-controller.myfs.svc:9200
+      node:
+        socketPath: /data/cube-shared/run/myfs/node.sock
+    # binary：两侧都是可执行文件
+    - name: mytool
+      type: binary
+      master:
+        binaryPath: /opt/plugins/cube-volume-mytool   # 需要自定义 cube-master 镜像
+      node:
+        binaryPath: /data/cube-shared/plugins/cube-volume-mytool
+```
+
+| 字段 | 必填 | 含义 |
+| --- | --- | --- |
+| `name` | 是 | driver 名，`[A-Za-z0-9_-]+`。在 `extra` 内唯一，且不能是 `s3` 或 `cos`（内置插件）。 |
+| `type` | 是 | `rpc` 或 `binary`，这里不接受 `builtin`。 |
+| `master.socketPath` / `master.binaryPath` | 是 | CubeMaster 侧：`rpc` 填 `socketPath`，`binary` 填 `binaryPath`。 |
+| `node.socketPath` / `node.binaryPath` | 是 | Cubelet 侧，规则相同。 |
+
+路径只能包含字母、数字和 `._/:@+=,~-`，不能有空格、引号、反斜杠或控制字符。条目不合法时（名字非法或重复、用了内置插件名、未知 type、缺少 `master`/`node` 或路径、含不允许的字符），`helm template` 直接失败，与 `cubeNode.enabled` 无关，因此拼写错误不会进入 CubeMaster 或 cubelet，也不会让它们在启动时退出。
+
+**插件放在哪里：**
+
+- **Node 侧。** `cubelet` 容器挂载了宿主机的 `/data/cube-shared`（`hostPaths.dataCubeShared`），没有挂载 `/run` 等其他宿主机路径。请把 node socket 或可执行文件放在 `/data/cube-shared` 下，由你自己的 DaemonSet 或节点初始化安装。
+- **CubeMaster 侧。** `cube-master` Pod 不挂载宿主机路径，chart 也没有额外挂载卷的入口。`rpc` 请使用 `cube-master` Pod 能访问的 TCP 地址，例如 Service 的 `host:port`；`binary` 需要自行构建包含该可执行文件的 `cube-master` 镜像，并设置 `images.master`。
+
+**需要了解的行为：**
+
+- 内置的 `s3` 插件仍排在第一位，API 或 SDK 不指定 `driver` 时默认仍是它。要使用额外插件，请传 `driver="<name>"`。
+- 每一侧只在安装了对应组件的 release 中注册：`cubeNode.enabled=false` 时只有 CubeMaster 侧，不含控制面的 release 只注册 node 侧。在安装任一侧的每个 release 中设置相同的 `extra` 列表。
+- Node 侧需要入口脚本支持 `CUBE_EXTRA_VOLUME_PLUGINS` 的 `cubelet` 镜像（v0.8.0 之后加入）。旧镜像会忽略它：CubeMaster 接受该插件的 volume，挂载时才在节点上失败。升级后请在 `cubelet` 容器日志里确认 `registered N extra volume plugin(s)`。
+- 删除某一项之前，先删除使用它的 volume。driver 不再注册后，它的 volume 既无法挂载也无法销毁。
+- 修改列表会重启 `cube-master` Pod（配置校验和变化）和 `cube-node` Pod（Pod 模板变化）。
+
+**安全边界。** 注册的插件拥有 Cube 的权限。Node 侧的 `binary` 插件由 Cubelet 在 `cubelet` 容器内执行，该容器以 root、特权模式运行，带有节点的宿主机挂载、已挂载的插件凭证 Secret 和节点 ServiceAccount token。Node 侧 `rpc` 插件负责该节点上的每次挂载与卸载，CubeMaster 侧负责每次创建与销毁。只注册你愿意在每个 Cube 节点上授予 root 权限的插件。
 
 ---
 

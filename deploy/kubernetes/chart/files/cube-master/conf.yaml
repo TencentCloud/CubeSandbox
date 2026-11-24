@@ -114,14 +114,17 @@ volume_plugins:
   - name: cos
     type: binary
     binary_path: /usr/local/services/cubetoolbox/CubeMaster/plugin/cube-volume-cos
+{{- include "cube.validateExtraVolumePlugins" .Values.volumePlugins.extra }}
 {{- range .Values.volumePlugins.extra }}
   # Third-party plugin from values volumePlugins.extra (appended, so it is
   # never the default driver).
-  - name: {{ required "volumePlugins.extra[].name is required" .name | quote }}
-    type: {{ required "volumePlugins.extra[].type is required" .type | quote }}
+  - name: {{ .name | quote }}
+    type: {{ .type | quote }}
     {{- if eq .type "rpc" }}
-    socket_path: {{ required "volumePlugins.extra[].master.socketPath is required for rpc" .master.socketPath | quote }}
+    socket_path: {{ .master.socketPath | quote }}
+    {{- else if eq .type "binary" }}
+    binary_path: {{ .master.binaryPath | quote }}
     {{- else }}
-    binary_path: {{ required "volumePlugins.extra[].master.binaryPath is required for binary" .master.binaryPath | quote }}
+    {{- fail (printf "volumePlugins.extra (%s): type must be rpc or binary" .name) }}
     {{- end }}
 {{- end }}

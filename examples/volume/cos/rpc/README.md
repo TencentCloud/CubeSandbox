@@ -140,6 +140,8 @@ Can coexist with binary (`cos` / `cos-rpc`); see [binary/README.md](../binary/RE
 
 Restart CubeMaster and Cubelet after editing config, then confirm plugins loaded ([§5](#5-end-to-end-verification)).
 
+On a Kubernetes (Helm) install, do not edit these files: set `volumePlugins.extra` in the chart values instead, with the node socket under `/data/cube-shared` and a TCP address for CubeMaster. See [Kubernetes (Helm chart)](../../../../docs/guide/volume-plugin.md#kubernetes-helm-chart-volumepluginsextra).
+
 ---
 
 ## 5. End-to-end verification

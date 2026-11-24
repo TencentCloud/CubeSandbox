@@ -181,6 +181,13 @@ CUBE_NODE_BASE_IMAGE=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-2
 This keeps the CubeVS runtime fix while preserving the chart-side entrypoint
 behavior.
 
+### Third-party volume plugins
+
+| Content | Delivery |
+| --- | --- |
+| Plugin socket or binary | Not in the images. Install it yourself: on nodes under `/data/cube-shared` (the only data hostPath the `cubelet` container mounts); for CubeMaster a TCP `rpc` address, or a custom `cube-master` image for `binary`. |
+| Plugin registration | Chart value `volumePlugins.extra`. CubeMaster: appended to `files/cube-master/conf.yaml`. Cubelet: passed as `CUBE_EXTRA_VOLUME_PLUGINS=name\|type\|path;...`, which `component-entrypoint.sh` (`run_cubelet`) validates and appends to `config.toml` on every start, logging `registered N extra volume plugin(s)`. An invalid value fails the container start. |
+
 ## Image source policy
 
 - `cube-node` continues to use `deploy/kubernetes/images/cube-node/Dockerfile`.

@@ -138,6 +138,8 @@ volume_plugins:
 
 修改配置后重启 CubeMaster 与 Cubelet，并确认插件已加载（[§5](#5-端到端验证)）。
 
+用 Kubernetes（Helm）安装时不要手工修改这两个文件，请在 chart values 中设置 `volumePlugins.extra`：node socket 放在 `/data/cube-shared` 下，CubeMaster 侧使用 TCP 地址。见 [Kubernetes（Helm chart）](../../../../docs/zh/guide/volume-plugin.md#kuberneteshelm-chartvolumepluginsextra)。
+
 ---
 
 ## 5. 端到端验证
