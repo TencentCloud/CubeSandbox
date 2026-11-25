@@ -186,12 +186,14 @@ def _assert_backoff(
     multiplier: float,
     cap: float,
     jitter: float,
-    slack: float = 4,
+    slack: float = 5,
 ) -> None:
     """Delay is initial * multiplier^count, capped, plus up to jitter.
 
     nextRestartAt is compared with the API Date header. That header is whole
-    seconds, so the upper bound allows two extra seconds.
+    seconds, so the upper bound allows two extra seconds. The lower bound also
+    allows one status-report request deadline: BackOff is scheduled on the node
+    before the asynchronously reported status becomes visible through CubeAPI.
     """
     count = _count(status)
     raw = float(initial)
