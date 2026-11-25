@@ -535,11 +535,17 @@ fn vmm_thread_rules(
         (libc::SYS_getpid, vec![]),
         (libc::SYS_getrandom, vec![]),
         // Device threads inherit this filter before installing their own
-        // narrower per-device filter.
-        (
-            libc::SYS_getsockopt,
-            virtio_devices::seccomp_filters::create_virtio_device_getsockopt_seccomp_rule(),
-        ),
+        // narrower per-device filter. The NBD backend additionally reads
+        // SO_ERROR from TcpStream::connect_timeout() on the VMM thread.
+        (libc::SYS_getsockopt, {
+            let mut rules =
+                virtio_devices::seccomp_filters::create_virtio_device_getsockopt_seccomp_rule();
+            rules.push(and![
+                Cond::new(1, ArgLen::Dword, Eq, libc::SOL_SOCKET as u64)?,
+                Cond::new(2, ArgLen::Dword, Eq, libc::SO_ERROR as u64)?
+            ]);
+            rules
+        }),
         (libc::SYS_gettid, vec![]),
         (libc::SYS_gettimeofday, vec![]),
         (libc::SYS_getuid, vec![]),
@@ -601,6 +607,7 @@ fn vmm_thread_rules(
         (libc::SYS_sendto, vec![]),
         (libc::SYS_set_robust_list, vec![]),
         (libc::SYS_setsid, vec![]),
+        (libc::SYS_setsockopt, vec![]),
         (libc::SYS_shutdown, vec![]),
         (libc::SYS_sigaltstack, vec![]),
         (
@@ -608,6 +615,7 @@ fn vmm_thread_rules(
             or![
                 and![Cond::new(0, ArgLen::Dword, Eq, libc::AF_UNIX as u64)?],
                 and![Cond::new(0, ArgLen::Dword, Eq, libc::AF_INET as u64)?],
+                and![Cond::new(0, ArgLen::Dword, Eq, libc::AF_INET6 as u64)?],
             ],
         ),
         (libc::SYS_socketpair, vec![]),
@@ -876,7 +884,32 @@ fn thread_rules(
     let mut ioctl_rules = vec![(libc::SYS_ioctl, ioctl_rule)];
     rules.append(&mut ioctl_rules);
 
-    Ok(rules)
+    Ok(merge_duplicate_syscall_rules(rules))
+}
+
+/// `Thread::All` is the union of every per-thread rule list, so a syscall can
+/// appear several times. `SeccompFilter::new()` takes a `BTreeMap`, which
+/// keeps only the last entry for a key and silently drops the others (e.g.
+/// vsock's `getsockopt(SO_PEERCRED)` would hide the NBD reconnect's
+/// `getsockopt(SO_ERROR)`). Merge them instead: an empty rule list means
+/// "always allowed" and wins, otherwise the conditions are ORed.
+fn merge_duplicate_syscall_rules(
+    rules: Vec<(i64, Vec<SeccompRule>)>,
+) -> Vec<(i64, Vec<SeccompRule>)> {
+    let mut merged: std::collections::BTreeMap<i64, Option<Vec<SeccompRule>>> =
+        std::collections::BTreeMap::new();
+    for (syscall, conds) in rules {
+        let entry = merged.entry(syscall).or_insert_with(|| Some(Vec::new()));
+        if conds.is_empty() {
+            *entry = None;
+        } else if let Some(existing) = entry.as_mut() {
+            existing.extend(conds);
+        }
+    }
+    merged
+        .into_iter()
+        .map(|(syscall, conds)| (syscall, conds.unwrap_or_default()))
+        .collect()
 }
 
 fn create_runtime_seccomp_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
@@ -999,6 +1032,79 @@ mod tests {
         assert!(
             libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
             "inherited VMM filter rejected getsockopt(SOL_SOCKET, SO_PEERCRED): wait status {status:#x}"
+        );
+    }
+
+    /// The NBD queue thread reconnects over TCP with the VMM filter inherited
+    /// and the virtio-block filter stacked on top. Run the exact std calls the
+    /// reconnect path makes (connect_timeout, set_nodelay, timeouts, send,
+    /// recv) under both filters.
+    #[test]
+    fn strict_filters_allow_nbd_tcp_reconnect() {
+        let per_thread = vec![
+            get_seccomp_filter(&SeccompAction::Trap, Thread::Vmm, HypervisorType::Kvm).unwrap(),
+            get_virtio_filter(&SeccompAction::Trap, VirtioThread::VirtioBlock).unwrap(),
+        ];
+        // Default release mode: one process-wide filter built from the union
+        // of every thread's rules.
+        let process_wide = vec![get_seccomp_filter(
+            &SeccompAction::KillProcess,
+            Thread::All,
+            HypervisorType::Kvm,
+        )
+        .unwrap()];
+        for (mode, filters) in [("trap", per_thread), ("process", process_wide)] {
+            run_nbd_tcp_reconnect_under(mode, &filters);
+        }
+    }
+
+    fn run_nbd_tcp_reconnect_under(mode: &str, filters: &[seccompiler::BpfProgram]) {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dead_addr = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if filters.iter().any(|f| apply_filter(f).is_err()) {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            let ok = (|| -> std::io::Result<()> {
+                // While nbdkit is down the reconnect loop sees ECONNREFUSED,
+                // which connect_timeout() reads back via getsockopt(SO_ERROR).
+                let refused = TcpStream::connect_timeout(&dead_addr, Duration::from_secs(5));
+                if refused.is_ok() {
+                    return Err(std::io::Error::other("dead port accepted"));
+                }
+                let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
+                s.set_nodelay(true)?;
+                s.set_read_timeout(Some(Duration::from_secs(5)))?;
+                s.set_write_timeout(Some(Duration::from_secs(5)))?;
+                s.write_all(b"ping")?;
+                let mut buf = [0u8; 4];
+                s.read_exact(&mut buf)?;
+                Ok(())
+            })()
+            .is_ok();
+            unsafe { libc::syscall(libc::SYS_exit, if ok { 0 } else { 2 }) };
+            unreachable!();
+        }
+
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4];
+        let _ = conn.read_exact(&mut buf).and_then(|_| conn.write_all(&buf));
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "{mode}: seccomp filters rejected the NBD TCP reconnect path: wait status {status:#x}"
         );
     }
 }
