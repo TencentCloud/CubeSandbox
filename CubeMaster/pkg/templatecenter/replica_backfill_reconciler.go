@@ -82,7 +82,7 @@ var (
 	}
 	backfillArtifact        = getRootfsArtifactByID
 	backfillReplicas        = ListReplicas
-	backfillResolveNodes    = resolveTemplateNodes
+	backfillResolveNodes    = resolveBackfillNodes
 	backfillDistribute      = distributeRootfsArtifactToNodes
 	backfillPlacements      = listArtifactNodePlacements
 	backfillCreateReplica   = createReplicaOnNode
@@ -90,6 +90,42 @@ var (
 	backfillGetDefinition   = GetDefinition
 	backfillCleanupReplicas = cleanupTemplateReplicasOnNodes
 )
+
+// resolveBackfillNodes is resolveTemplateNodes without the all-or-nothing
+// scope check. A stored scope is a snapshot of the nodes that existed when
+// the job ran; once one of them leaves or turns unhealthy, the strict check
+// would fail the template on every tick and stop backfill to the nodes that
+// are still in scope. Entries without a healthy match are skipped instead.
+func resolveBackfillNodes(instanceType string, scope []string) ([]*node.Node, error) {
+	nodes := healthyTemplateNodes(instanceType)
+	if len(nodes) == 0 {
+		return nil, ErrNoTemplateNodes
+	}
+	allowed := make(map[string]struct{}, len(scope))
+	for _, item := range scope {
+		if item = strings.TrimSpace(item); item != "" {
+			allowed[item] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return nodes, nil
+	}
+	selected := make([]*node.Node, 0, len(nodes))
+	for _, item := range nodes {
+		if item == nil {
+			continue
+		}
+		_, byID := allowed[item.ID()]
+		_, byIP := allowed[item.HostIP()]
+		if byID || byIP {
+			selected = append(selected, item)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, ErrNoTemplateNodes
+	}
+	return selected, nil
+}
 
 // reconcileTemplateReplicaBackfill pushes READY templates to healthy nodes
 // that lack a READY replica. Runs inside the image-job reconcile pass.
