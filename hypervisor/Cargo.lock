@@ -1105,6 +1105,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbd"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "thiserror",
+]
+
+[[package]]
 name = "net_gen"
 version = "0.1.0"
 dependencies = [

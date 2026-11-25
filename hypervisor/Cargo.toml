@@ -79,6 +79,7 @@ members = [
     "event_notifier",
     "hypervisor",
     "logging",
+    "nbd",
     "net_gen",
     "net_util",
     "option_parser",
