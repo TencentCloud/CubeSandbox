@@ -59,6 +59,16 @@ Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启�
 
 Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后，等待会有意持续到任务退出；创建请求取消或超时不会丢失退出事件。等待上下文只保留 containerd 命名空间，不继承请求取消、日志字段或已结束的创建 Span。若任务启动失败，则取消等待。
 
+### cube-agent Guest 追踪
+
+Guest RPC 追踪需显式启用。在 CubeShim 继承的工作节点服务环境中设置以下变量：
+
+- 保持 `OTEL_EXPORTER_OTLP_ENDPOINT` 或 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` 已配置。
+- 将 `CUBE_TRACE_FORWARDER` 设为与 agent vsock 协议兼容的宿主机转发器绝对路径。Kata Containers 3.0.0 的 `kata-trace-forwarder` 采用相同的 OpenTelemetry 0.14 序列化格式。
+- 将 `CUBE_TRACE_JAEGER_ENDPOINT` 设为 Jaeger Thrift compact UDP 接收端的 IP 字面值和非零端口，例如 `127.0.0.1:6831`（默认值）或 `[::1]:6831`。Shim 创建 VM 时无需解析主机名或等待接收端。
+
+配置转发器后，Shim 会在新启动的 VM 中加上 `agent.trace=1`，除非模板显式指定了 `agent.trace`。该设置会随快照保存，启用后需要重建模板来使用新开关和新版 agent。沙箱初始化、容器创建和启动的 Guest RPC Span 会接到对应的 Shim Span 下，服务名为 `cube-agent`，Span 不记录 RPC 请求内容。
+
 ### Rust envd REST 追踪
 
 要启用 Rust envd 追踪，请在 envd 启动时读取的沙箱环境中设置

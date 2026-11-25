@@ -17,4 +17,7 @@ bincode = "1.3.3"
 byteorder = "1.4.3"
 slog = { version = "2.5.2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 async-trait = "0.1.50"
-tokio = "=1.45.1"
+tokio = { version = "=1.45.1", features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { version = "=1.45.1", features = ["macros", "rt"] }

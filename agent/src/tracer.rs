@@ -8,7 +8,7 @@ use opentelemetry::sdk::propagation::TraceContextPropagator;
 use opentelemetry::{
     global,
     sdk::{trace::Config, Resource},
-    trace::TracerProvider,
+    trace::{TraceContextExt, TracerProvider},
     KeyValue,
 };
 use slog::{info, o, Logger};
@@ -67,6 +67,10 @@ pub fn extract_carrier_from_ttrpc(ttrpc_context: &TtrpcContext) -> HashMap<Strin
     carrier
 }
 
+pub fn has_traced_parent(context: &opentelemetry::Context) -> bool {
+    context.span().span_context().is_valid()
+}
+
 #[macro_export]
 macro_rules! trace_rpc_call {
     ($ctx: ident, $name:literal, $req: ident) => {
@@ -75,11 +79,32 @@ macro_rules! trace_rpc_call {
             propagator.extract(&extract_carrier_from_ttrpc($ctx))
         });
 
-        // RPC payloads can contain environment variables, credentials, or file contents.
-        let rpc_span = span!(tracing::Level::INFO, $name, "mod" = "rpc.rs");
-
-        // assign parent span from external context
-        rpc_span.set_parent(parent_context);
-        let _enter = rpc_span.enter();
+        // Do not export payloads or start orphan traces for untraced RPCs.
+        let rpc_span = crate::tracer::has_traced_parent(&parent_context).then(|| {
+            let span = span!(tracing::Level::INFO, $name, "mod" = "rpc.rs");
+            span.set_parent(parent_context);
+            span
+        });
+        let _enter = rpc_span.as_ref().map(|span| span.enter());
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::propagation::TextMapPropagator;
+
+    #[test]
+    fn requires_a_valid_inbound_traceparent() {
+        let propagator = TraceContextPropagator::new();
+        let mut carrier = HashMap::new();
+        assert!(!has_traced_parent(&propagator.extract(&carrier)));
+        carrier.insert("traceparent".to_string(), "invalid".to_string());
+        assert!(!has_traced_parent(&propagator.extract(&carrier)));
+        carrier.insert(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        assert!(has_traced_parent(&propagator.extract(&carrier)));
+    }
 }

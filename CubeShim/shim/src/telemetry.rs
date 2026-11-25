@@ -87,6 +87,12 @@ impl Guard {
     }
 }
 
+pub(crate) fn tracing_enabled() -> bool {
+    let generic = std::env::var(ENV_ENDPOINT).unwrap_or_default();
+    let traces = std::env::var(ENV_TRACES_ENDPOINT).unwrap_or_default();
+    select_endpoint(&traces, &generic).is_some()
+}
+
 fn select_endpoint<'a>(traces: &'a str, generic: &'a str) -> Option<&'a str> {
     let traces = traces.trim();
     let generic = generic.trim();

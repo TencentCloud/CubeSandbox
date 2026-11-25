@@ -6,6 +6,7 @@ use containerd_shim::asynchronous::run as shim_run;
 use containerd_shim::{parse, Config};
 use containerd_shim_cube_rs::capabilities;
 use containerd_shim_cube_rs::common;
+use containerd_shim_cube_rs::guest_trace::{run_trace_forwarder_guard, TRACE_FORWARDER_GUARD_ARG};
 use containerd_shim_cube_rs::service::Service;
 
 use std::ffi::OsString;
@@ -24,6 +25,13 @@ fn main() {
 
     let mut thread_num = 1;
     let os_args: Vec<_> = std::env::args_os().collect();
+    if os_args.get(1).and_then(|arg| arg.to_str()) == Some(TRACE_FORWARDER_GUARD_ARG) {
+        if let Err(err) = run_trace_forwarder_guard(&os_args[2..]) {
+            eprintln!("trace forwarder supervisor: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if is_version_request(&os_args[1..]) {
         print_version();
         return;

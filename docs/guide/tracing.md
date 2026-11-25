@@ -59,6 +59,16 @@ Cubelet launches a fresh CubeShim process per sandbox; the process lives alongsi
 
 Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
 
+### Guest tracing for cube-agent
+
+Guest RPC tracing is opt-in. Set the following in the worker service environment inherited by CubeShim:
+
+- Keep the Shim OTLP endpoint configured with `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+- Set `CUBE_TRACE_FORWARDER` to the absolute path of a host forwarder compatible with the agent's vsock wire format. The Kata Containers 3.0.0 `kata-trace-forwarder` uses the same OpenTelemetry 0.14 serialization format.
+- Set `CUBE_TRACE_JAEGER_ENDPOINT` to a literal IP with a nonzero Jaeger Thrift compact UDP port, for example `127.0.0.1:6831` (the default) or `[::1]:6831`. Shim does not resolve hostnames or wait for a receiver during VM creation.
+
+When the forwarder is configured, Shim adds `agent.trace=1` to new VM boots unless the template explicitly supplies `agent.trace`. Rebuild snapshot templates to pick up the switch and the updated agent. The setting is captured in the snapshot. Guest RPC spans for sandbox initialization and container creation/startup join their parent Shim spans and use the `cube-agent` service name. They carry no RPC payload.
+
 ### Rust envd REST tracing
 
 To enable tracing in Rust envd, set `CUBE_ENVD_OTEL_ENDPOINT` in the guest

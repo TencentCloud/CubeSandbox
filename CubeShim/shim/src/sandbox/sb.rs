@@ -42,6 +42,7 @@ use crate::common::{
 };
 use crate::container::container_mgr::ContainerInfo;
 use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
+use crate::guest_trace::{self, TraceForwarder};
 use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
 use crate::hypervisor::snapshot::SnapshotInfo;
@@ -166,6 +167,7 @@ pub struct SandBox {
     monitor_conn: Option<Client>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    trace_forwarder: Arc<Mutex<Option<TraceForwarder>>>,
 }
 
 impl SandBox {
@@ -208,6 +210,7 @@ impl SandBox {
             monitor_conn: None,
             tx_oom_exited: None,
             oom_handle: None,
+            trace_forwarder: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -845,6 +848,15 @@ impl SandBox {
     }
 
     pub async fn destroy_sandbox(&mut self) -> CResult<()> {
+        let result = self.destroy_guest_and_vm().await;
+        let forwarder = self.trace_forwarder.lock().await.take();
+        if let Some(forwarder) = forwarder {
+            forwarder.stop().await;
+        }
+        result
+    }
+
+    async fn destroy_guest_and_vm(&mut self) -> CResult<()> {
         infof!(self.log, "destroy sandbox start");
         let req = agent::DestroySandboxRequest {
             ..Default::default()
@@ -948,6 +960,12 @@ impl SandBox {
             vc.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
         }
 
+        if self.trace_forwarder.lock().await.is_some() {
+            if let Some(param) = guest_trace::agent_trace_cmdline(&self.conf.extra_kernel_params) {
+                vc.add_cmdline(param);
+            }
+        }
+
         // Add externally passed pmem
         vc.add_pmems(&self.conf.pmem);
 
@@ -1042,6 +1060,14 @@ impl SandBox {
     }
     async fn start_vm(&mut self, trace: &Trace) -> CResult<bool> {
         infof!(self.log, "start vm start");
+        // Start the host forwarder before VMM launch installs seccomp filters
+        // that prevent later process creation.
+        {
+            let mut forwarder = self.trace_forwarder.lock().await;
+            if !forwarder.as_mut().is_some_and(TraceForwarder::is_running) {
+                *forwarder = TraceForwarder::spawn(&self.id, &self.log);
+            }
+        }
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             trace
