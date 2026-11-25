@@ -7,12 +7,41 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/config"
 )
+
+func TestOpenS3PrepareDoesNotWriteBucketLifecycle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == "/shared-bucket/" && r.URL.RawQuery == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	pathStyle := true
+	st, err := OpenS3(config.S3Config{
+		Endpoint:        server.URL,
+		Bucket:          "shared-bucket",
+		Region:          "us-east-1",
+		PathStyle:       &pathStyle,
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureBucket(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestOpenFSSignedURLUsesObjectMountPath(t *testing.T) {
 	key := hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))

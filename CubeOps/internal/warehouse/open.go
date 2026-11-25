@@ -56,6 +56,7 @@ func OpenFS(cfg config.StoreFSBackendConfig, presignTTL time.Duration) (BlobStor
 		MountPath:        ObjectMountPath,
 		Shared:           cfg.Shared,
 	}.Config(cfg.Root, "")
+	c.Retention = warehouseRetention()
 	return openAdapted(c)
 }
 
@@ -72,7 +73,6 @@ func decodeFSSigningKey(raw string) ([]byte, error) {
 }
 
 func openAdapted(c blobstore.Config) (BlobStore, error) {
-	c.Retention = warehouseRetention()
 	st, err := blobstore.Open(context.Background(), c)
 	if err != nil {
 		return nil, err

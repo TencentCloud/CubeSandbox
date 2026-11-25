@@ -152,9 +152,6 @@ func initWarehouseBlobs(ctx context.Context, cfg *config.Config) warehouse.BlobS
 		}
 		lctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
-		if err := blobs.EnsureLifecycle(lctx); err != nil {
-			slog.Warn("warehouse bucket lifecycle", "error", err)
-		}
 		if err := blobs.GC(lctx); err != nil {
 			slog.Warn("warehouse blobstore gc", "error", err)
 		}
