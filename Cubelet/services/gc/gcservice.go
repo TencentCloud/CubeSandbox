@@ -25,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
 
@@ -351,6 +352,16 @@ func (l *gcService) loadOrStore(sandboxID string) (bool, func()) {
 // A cubebox that is still stored and was not marked deleted keeps its disk
 // and metadata; its dirty-list entry is dropped. A missing row or a
 // user-delete mark proceeds. Any other lookup error waits for the next pass.
+//
+// One live shape keeps its entry instead of dropping it: a PAUSED tombstone.
+// It is how a failed Create-from-pause rollback leaves the sandbox — the
+// rollback restores the tombstone the user's retry resumes from, while the
+// teardown failure that queued this entry may have left host allocations
+// behind. Dropping the entry would strand them invisibly; reclaiming now
+// would destroy resumable state. Keeping it expresses "not yet": every pass
+// re-checks cheaply, and the entry resolves by itself when the tombstone's
+// lifecycle ends — a resume replaces the row (dropped as a live sandbox), a
+// user delete marks or removes it (cleanup proceeds and reclaims).
 func (l *gcService) allowCleanup(ctx context.Context, sandboxID string) bool {
 	if l == nil || l.gc == nil || l.gc.cubeboxManger == nil {
 		return true
@@ -365,6 +376,10 @@ func (l *gcService) allowCleanup(ctx context.Context, sandboxID string) bool {
 	}
 	if cb == nil || cb.UserMarkDeletedTime != nil {
 		return true
+	}
+	if st := cb.GetStatus(); st != nil && st.Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {
+		log.G(ctx).Debugf("cleanup deferred for paused sandbox %s: keeping the record until the tombstone is resumed or deleted", sandboxID)
+		return false
 	}
 	if delErr := l.gc.deleteSandBoxInfo(sandboxID); delErr != nil {
 		log.G(ctx).Warnf("cleanup keep live sandbox %s: %v", sandboxID, delErr)

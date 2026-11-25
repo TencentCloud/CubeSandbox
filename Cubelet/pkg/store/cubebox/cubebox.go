@@ -315,21 +315,27 @@ func (cb *CubeBox) mainContainerStatus() *StatusStorage {
 	return cb.FirstContainer().Status
 }
 
+// GetStatus returns the sandbox's effective status: the main container's
+// status when it has one. It is strictly read-only — it used to mirror the
+// resolution into cb.Status on every call, and that write-on-read raced the
+// 1s heartbeat's unlocked aggregate scan against RPC handlers the moment both
+// touched the same row (flagged by -race). The container status is the source
+// of truth; the sandbox-level Status field only ever mirrored it.
 func (cb *CubeBox) GetStatus() *StatusStorage {
-	if cb.mainContainerStatus() != nil {
-		cb.Status = cb.mainContainerStatus()
-	} else {
-		if cb.FirstContainer() == nil {
-			log.G(context.Background()).Warnf("cubebox %s has no main container", cb.ID)
-		} else {
-			cb.FirstContainer().Status = StoreStatus(Status{CreatedAt: cb.CreatedAt})
-			cb.Status = cb.FirstContainer().Status
-		}
+	if st := cb.mainContainerStatus(); st != nil {
+		return st
 	}
-	if cb.Status == nil {
-		cb.Status = StoreStatus(Status{CreatedAt: cb.CreatedAt})
+	if cb.FirstContainer() == nil {
+		log.G(context.Background()).Warnf("cubebox %s has no main container", cb.ID)
 	}
-	return cb.Status
+	if cb.Status != nil {
+		return cb.Status
+	}
+	// Degenerate row (no container, or a container without status): hand back
+	// a fresh non-nil storage seeded with the row's CreatedAt so callers keep
+	// their nil-free assumption. Deliberately not written back — a getter on
+	// the hottest read path must not mutate shared state.
+	return StoreStatus(Status{CreatedAt: cb.CreatedAt})
 }
 
 func (cb *CubeBox) Transmition() {
@@ -386,6 +392,13 @@ func (cb *CubeBox) All() map[string]*Container {
 }
 
 func (cb *CubeBox) FirstContainer() *Container {
+	// A degenerate row (freshly constructed, or a store decode that predates
+	// the container map) has no ContainersMap; treat it as "no main
+	// container" so GetStatus's documented degenerate fallback applies
+	// instead of panicking on the hottest read path.
+	if cb.ContainersMap == nil {
+		return nil
+	}
 	id := cb.FirstContainerName
 	if id == "" {
 		id = cb.ID

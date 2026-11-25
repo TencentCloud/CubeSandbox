@@ -298,7 +298,7 @@ paused_resource_release_ratio = 0.5   # release half, reserve half
 When `ratio > 0`, every resume triggers a **local real-time admission check** — if the node lacks enough free capacity to accommodate the released fraction, the resume is rejected:
 
 ```
-resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512MB
+resume rejected by paused_resource_release_ratio policy: need 1024MB + used 0MB >= mem quota 512MB
 ```
 
 The rejection travels through the following chain to reach the client: `Cubelet (130409 Conflict)` → `CubeAPI (HTTP 409)` → `WebUI (capacity diagnostic)`. HTTP 409 is a retriable status — when other sandboxes are destroyed or paused later, freeing capacity, the resume can be retried.

@@ -33,8 +33,11 @@ const RET_CODE_NOT_FOUND: i32 = 130404;
 const RET_CODE_NOT_FOUND_AT_CUBELET: i32 = 130406;
 const RET_CODE_CONFLICT: i32 = 130409;
 /// `errorcode.PreConditionFailed`: the request is impossible in the current
-/// state (e.g. a cold boot whose guest artifacts are missing on this node).
-/// It is a 409, not a server fault: retrying the same node cannot succeed.
+/// state — e.g. a cold boot whose guest artifacts are missing on this node, or
+/// a create-from-pause whose id collides with a non-paused sandbox (the
+/// cubelet message then says whether to retry shortly or DELETE first).
+/// It is a 409, not a server fault: the caller must change state, not just
+/// re-send the identical request.
 const RET_CODE_PRECONDITION: i32 = 130568;
 const RET_CODE_TASK_STATE_INVALID: i32 = 130490;
 const RET_CODE_TASK_RESUME_FAILED: i32 = 130589;

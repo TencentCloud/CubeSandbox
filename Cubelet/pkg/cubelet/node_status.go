@@ -516,8 +516,8 @@ func (kl *Cubelet) buildRegisterRequest(node *cubeletnodemeta.Node, hostCfg *con
 		req.PausedReleaseRatio = &ratio
 	}
 	// Fallbacks mirror the quota already resolved into Allocatable/Capacity.
-	req.QuotaCPU = resolveHostQuotaCPUMilli(hostCfg, req.Allocatable.MilliCPU, req.Capacity.MilliCPU)
-	req.QuotaMemMB = resolveHostQuotaMemMB(hostCfg, req.Allocatable.MemoryMB, req.Capacity.MemoryMB)
+	req.QuotaCPU = ResolveHostQuotaCPUMilli(hostCfg, req.Allocatable.MilliCPU, req.Capacity.MilliCPU)
+	req.QuotaMemMB = ResolveHostQuotaMemMB(hostCfg, req.Allocatable.MemoryMB, req.Capacity.MemoryMB)
 	req.MaxMvmNum = resolveHostMaxMvmNum(hostCfg, req.QuotaMemMB)
 	versions, incomplete := kl.collectVersionReport()
 	req.Versions = versions
@@ -554,9 +554,9 @@ func hostConfig() *config.HostConf {
 // buildQuotaReport resolves the effective quota with the same chain as
 // registration; nil means nothing resolved (treated as "no report").
 func buildQuotaReport(hostCfg *config.HostConf) *masterclient.QuotaReport {
-	quotaMemMB := resolveHostQuotaMemMB(hostCfg)
+	quotaMemMB := ResolveHostQuotaMemMB(hostCfg)
 	report := &masterclient.QuotaReport{
-		MilliCPU:  resolveHostQuotaCPUMilli(hostCfg),
+		MilliCPU:  ResolveHostQuotaCPUMilli(hostCfg),
 		MemMB:     quotaMemMB,
 		MaxMvmNum: resolveHostMaxMvmNum(hostCfg, quotaMemMB),
 	}
@@ -678,19 +678,26 @@ func applyHostQuotaWithConfig(node *cubeletnodemeta.Node, hostCfg *config.HostCo
 	if node.Status.Allocatable == nil {
 		node.Status.Allocatable = map[corev1.ResourceName]resource.Quantity{}
 	}
-	if cpuMilli := resolveHostQuotaCPUMilli(hostCfg, 0, 0); cpuMilli > 0 {
+	if cpuMilli := ResolveHostQuotaCPUMilli(hostCfg, 0, 0); cpuMilli > 0 {
 		q := *resource.NewMilliQuantity(cpuMilli, resource.DecimalSI)
 		node.Status.Capacity[corev1.ResourceCPU] = q.DeepCopy()
 		node.Status.Allocatable[corev1.ResourceCPU] = q.DeepCopy()
 	}
-	if memMB := resolveHostQuotaMemMB(hostCfg, 0, 0); memMB > 0 {
+	if memMB := ResolveHostQuotaMemMB(hostCfg, 0, 0); memMB > 0 {
 		q := *resource.NewQuantity(memMB*1024*1024, resource.BinarySI)
 		node.Status.Capacity[corev1.ResourceMemory] = q.DeepCopy()
 		node.Status.Allocatable[corev1.ResourceMemory] = q.DeepCopy()
 	}
 }
 
-func resolveHostQuotaCPUMilli(hostCfg *config.HostConf, fallbacks ...int64) int64 {
+// ResolveHostQuotaCPUMilli returns the node's effective CPU quota in
+// millicores: the configured mcpu_limit when set, otherwise the first
+// positive fallback, otherwise the host derivation (CPU count × 1000 ×
+// overcommit factor, default 2.0). Exported so the cubebox resume-admission
+// gate enforces exactly the quota this node reports to CubeMaster — an unset
+// config quota means "derive from the host" everywhere in cubelet, never
+// "unbounded" (the shipped configs/single-node/cubelet.yaml leaves it unset).
+func ResolveHostQuotaCPUMilli(hostCfg *config.HostConf, fallbacks ...int64) int64 {
 	if hostCfg != nil && hostCfg.Quota.Cpu > 0 {
 		return int64(hostCfg.Quota.Cpu)
 	}
@@ -706,7 +713,12 @@ func resolveHostQuotaCPUMilli(hostCfg *config.HostConf, fallbacks ...int64) int6
 	return int64(math.Round(float64(cpuCount) * 1000 * effectiveCPUOvercommitFactor(hostCfg)))
 }
 
-func resolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
+// ResolveHostQuotaMemMB returns the node's effective memory quota in MiB:
+// the configured mem_limit when parseable, otherwise the first positive
+// fallback, otherwise the host derivation (MemTotal × mem-overcommit factor,
+// default 1.25). See ResolveHostQuotaCPUMilli for why this is shared with
+// the resume-admission gate.
+func ResolveHostQuotaMemMB(hostCfg *config.HostConf, fallbacks ...int64) int64 {
 	if hostCfg != nil {
 		if memMB := parseMemMB(hostCfg.Quota.Mem); memMB > 0 {
 			return memMB

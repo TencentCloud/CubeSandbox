@@ -7,6 +7,7 @@ package cubebox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -202,7 +203,7 @@ func TestAdmitResumeNoOpWhenPolicyDisabled(t *testing.T) {
 	require.NotNil(t, release, "admitResume must always return a safe-to-defer release")
 	release()
 	// Policy off registers nothing, so the ledger stays empty.
-	memMB, cpuMilli := s.cubeboxMgr.resumeReservations.totals()
+	memMB, cpuMilli := s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB)
 	assert.Zero(t, cpuMilli)
 }
@@ -250,14 +251,14 @@ func TestResumeQuotaRejectionMessageFormat(t *testing.T) {
 		needMemMB:  4096,
 		memQuotaMB: 8192,
 	})
-	assert.Equal(t, "need 4096MB + used 6144MB > mem quota 8192MB", mem)
+	assert.Equal(t, "need 4096MB + used 6144MB >= mem quota 8192MB", mem)
 
 	cpu := resumeQuotaRejection(resumeQuotaCheck{
 		usedCPUMilli:  7000,
 		needCPUMilli:  2000,
 		cpuQuotaMilli: 8000,
 	})
-	assert.Equal(t, "need 2000m + used 7000m > cpu quota 8000m", cpu)
+	assert.Equal(t, "need 2000m + used 7000m >= cpu quota 8000m", cpu)
 }
 
 func TestAdmitResumeRejectsWhenResourceMetadataIsMissing(t *testing.T) {
@@ -303,78 +304,8 @@ func TestAdmitResumeRejectsWhenCapacityExceeded(t *testing.T) {
 	assert.Equal(t, errorcode.ErrorCode_Conflict, ret.RetCode)
 	release()
 	// A rejected resume must not leave a phantom reservation behind.
-	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	memMB, _ := s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB, "rejection must not register a reservation")
-}
-
-func TestResumeLockedSkipsAdmissionWhenFlagSet(t *testing.T) {
-	_, err := config.Init("", true)
-	require.NoError(t, err)
-	hostConf := config.GetHostConf()
-	hostConf.Quota.PausedResourceReleaseRatio = 1.0
-	hostConf.Quota.Cpu = 4000
-	hostConf.Quota.Mem = "4Gi"
-	defer func() {
-		hostConf.Quota.PausedResourceReleaseRatio = 0
-		hostConf.Quota.Cpu = 0
-		hostConf.Quota.Mem = ""
-	}()
-
-	sb := sandboxWithResourceForTest("sb-skip-admit", cubeboxstore.Status{
-		PausedAt: time.Now().UnixNano(),
-	}, "4000m", "8Gi", 4, 0, 0)
-	task := &fakeResumeTask{}
-	sb.FirstContainer().Container = &fakeDestroyContainer{task: task}
-	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
-
-	now := time.Now()
-	result := s.resumeLocked(context.Background(), sb, resumeOptions{
-		taskDeadline:      now.Add(5 * time.Second),
-		reconcileDeadline: now.Add(5 * time.Second),
-		persist:           false,
-		skipAdmission:     true,
-	})
-
-	require.True(t, result.running,
-		"resumeLocked with skipAdmission must proceed despite capacity pressure")
-	assert.Equal(t, 1, task.resumeCalls)
-	assert.Equal(t, int64(0), sb.GetStatus().Get().PausedAt)
-	assert.NotZero(t, sb.GetStatus().Get().StartedAt)
-}
-
-func TestResumeLockedRejectsWithoutSkipAdmissionUnderCapacityPressure(t *testing.T) {
-	_, err := config.Init("", true)
-	require.NoError(t, err)
-	hostConf := config.GetHostConf()
-	hostConf.Quota.PausedResourceReleaseRatio = 1.0
-	hostConf.Quota.Cpu = 4000
-	hostConf.Quota.Mem = "4Gi"
-	defer func() {
-		hostConf.Quota.PausedResourceReleaseRatio = 0
-		hostConf.Quota.Cpu = 0
-		hostConf.Quota.Mem = ""
-	}()
-
-	sb := sandboxWithResourceForTest("sb-no-skip-admit", cubeboxstore.Status{
-		PausedAt: time.Now().UnixNano(),
-	}, "4000m", "8Gi", 4, 0, 0)
-	task := &fakeResumeTask{}
-	sb.FirstContainer().Container = &fakeDestroyContainer{task: task}
-	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
-
-	now := time.Now()
-	result := s.resumeLocked(context.Background(), sb, resumeOptions{
-		taskDeadline:      now.Add(5 * time.Second),
-		reconcileDeadline: now.Add(5 * time.Second),
-		persist:           false,
-		skipAdmission:     false,
-	})
-
-	require.False(t, result.running,
-		"resumeLocked without skipAdmission must reject under capacity pressure")
-	require.NotNil(t, result.ret)
-	assert.Equal(t, errorcode.ErrorCode_Conflict, result.ret.RetCode)
-	assert.Zero(t, task.resumeCalls, "task.Resume must not be called when admission rejects")
 }
 
 // pausedReplaceRequest builds the thin Create-from-pause request CubeMaster
@@ -422,7 +353,7 @@ func TestAdmitPausedReplaceRejectsResumeCreateOverQuota(t *testing.T) {
 	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected.RetCode)
 	assert.Contains(t, rejected.RetMsg, "mem quota")
 	release()
-	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	memMB, _ := s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB, "a rejected resume must not register a reservation")
 }
 
@@ -452,17 +383,17 @@ func TestAdmitPausedReplaceAllowsWhenResumeFits(t *testing.T) {
 	// While the reservation is held, the admitted demand is visible to the
 	// ledger, so a second resume of the same size no longer fits the 16Gi node
 	// that already carries this 8Gi reservation.
-	memMB, cpuMilli := s.cubeboxMgr.resumeReservations.totals()
+	memMB, cpuMilli := s.cubeboxMgr.reservations.totals()
 	assert.Equal(t, int64(8192), memMB, "admission must reserve the sandbox's full memory quota")
 	assert.Equal(t, int64(4000), cpuMilli, "admission must reserve the sandbox's full cpu quota")
 
 	release()
-	memMB, cpuMilli = s.cubeboxMgr.resumeReservations.totals()
+	memMB, cpuMilli = s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB, "release must drop the reservation")
 	assert.Zero(t, cpuMilli)
 	// release is idempotent: a second call must not panic or go negative.
 	release()
-	memMB, _ = s.cubeboxMgr.resumeReservations.totals()
+	memMB, _ = s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB)
 }
 
@@ -489,7 +420,7 @@ func TestAdmitPausedReplaceNoOpWhenPolicyDisabled(t *testing.T) {
 	assert.Nil(t, rejected)
 	require.NotNil(t, release)
 	release()
-	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	memMB, _ := s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB, "policy off must not reserve anything")
 }
 
@@ -530,7 +461,7 @@ func TestAdmitPausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) 
 	assert.Nil(t, rejected,
 		"a live sandbox collision is rejected downstream as already exists, never here")
 	release()
-	memMB, _ := sRunning.cubeboxMgr.resumeReservations.totals()
+	memMB, _ := sRunning.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB, "non-replacements must not reserve anything")
 }
 
@@ -571,7 +502,7 @@ func TestAdmitPausedReplaceFailsClosedOnStoreError(t *testing.T) {
 	release, rejected = sNotFound.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-gone"))
 	assert.Nil(t, rejected, "not-found must keep the no-op (cross-node restore) behaviour")
 	release()
-	memMB, _ := sNotFound.cubeboxMgr.resumeReservations.totals()
+	memMB, _ := sNotFound.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB)
 }
 
@@ -763,7 +694,7 @@ func TestConcurrentResumesDoNotBothPassQuota(t *testing.T) {
 		assert.Equal(t, 1, passed,
 			"round %d: exactly one of the two over-subscription resumes may pass", round)
 
-		memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+		memMB, _ := s.cubeboxMgr.reservations.totals()
 		require.Zero(t, memMB, "round %d: reservations must be empty after release", round)
 	}
 }
@@ -805,7 +736,7 @@ func TestResumeReservationBlocksSecondUntilReleased(t *testing.T) {
 	// A fits on its own: 5120 + 2048 == 7168 < 8192.
 	releaseA, rejectedA := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-a"))
 	require.Nil(t, rejectedA)
-	memMB, _ := s.cubeboxMgr.resumeReservations.totals()
+	memMB, _ := s.cubeboxMgr.reservations.totals()
 	assert.Equal(t, int64(2048), memMB, "the admitted resume holds its full 2 GiB")
 
 	// With A's 2048 reserved, B sees used 5120 + reserved 2048 + need 2048 ==
@@ -817,10 +748,242 @@ func TestResumeReservationBlocksSecondUntilReleased(t *testing.T) {
 
 	// Once A releases (its create failed, say), B fits again.
 	releaseA()
-	memMB, _ = s.cubeboxMgr.resumeReservations.totals()
+	memMB, _ = s.cubeboxMgr.reservations.totals()
 	assert.Zero(t, memMB, "releasing A frees its reservation")
 
 	releaseB2, rejectedB2 := s.admitPausedReplace(context.Background(), pausedReplaceRequest("sb-b"))
 	assert.Nil(t, rejectedB2, "after A's release the same resume fits")
 	releaseB2()
+}
+
+// TestAdmitResumeUsesHostDerivedQuotaWhenConfigUnset pins the B1 fix: the
+// default deployment configures no quota, but node status reports one derived
+// from the host (cpuCount×2.0, MemTotal×1.25). Resume admission must derive
+// the same quota — a node that reports a capacity to Master must gate resumes
+// against it, or every default deployment would bypass the check entirely.
+func TestAdmitResumeUsesHostDerivedQuotaWhenConfigUnset(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	// Policy on, quota unset: exactly the default-config shape.
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 0
+	hostConf.Quota.Mem = ""
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// A demand far beyond any real host: the derived quota is nonzero on any
+	// machine that can run the test (cpu count and MemTotal read from the
+	// kernel), so the resume must be rejected — proving the check used the
+	// host derivation rather than skipping on the unset config.
+	sb := sandboxWithResourceForTest("sb-derived", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "1000000", "100Pi", 0, 0, 0)
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{cb: sb}}}
+
+	release, rejected := s.admitResume(context.Background(), sb)
+	defer release()
+	require.NotNil(t, rejected,
+		"with the policy on, an unset config quota must fall back to the host derivation, not skip the check")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected.RetCode)
+	assert.Contains(t, rejected.RetMsg, "mem quota",
+		"the rejection must name the derived dimension it exceeded")
+}
+
+// TestConcurrentResumesReserveOnlyTheReleasedFraction is the I4 pin at a
+// partial ratio: admission reserves r·F (the released fraction), not F. With
+// r=0.5 on an 8 GiB node, two 4 GiB tombstones each still hold 2 GiB in the
+// store aggregate and each need 2 GiB back — 4096 used + 2048 + 2048 == 8192
+// fills the node exactly, and the >= boundary rejects the second. A full-F
+// reservation would have rejected the second even though the pair genuinely
+// fits, stranding a resumable sandbox the node has room for.
+func TestConcurrentResumesReserveOnlyTheReleasedFraction(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 0.5
+	hostConf.Quota.Cpu = 0 // isolate the memory dimension
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	tombA := sandboxWithResourceForTest("sb-half-a", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tombA.SandboxID = "sb-half-a"
+	tombB := sandboxWithResourceForTest("sb-half-b", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tombB.SandboxID = "sb-half-b"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{
+		list: []*cubeboxstore.CubeBox{tombA, tombB},
+	}}}
+
+	// The store aggregate counts the retained half: 2048 + 2048 == 4096 MB.
+	alloc := s.cubeboxMgr.aggregateAllocated()
+	require.Equal(t, int64(4096), alloc.MemoryMB,
+		"at r=0.5 each tombstone keeps half its quota in the aggregate")
+
+	const rounds = 32
+	for round := 0; round < rounds; round++ {
+		results := make([]*errorcode.Ret, 2)
+		releases := make([]func(), 2)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, tomb := range []*cubeboxstore.CubeBox{tombA, tombB} {
+			wg.Add(1)
+			go func(i int, tomb *cubeboxstore.CubeBox) {
+				defer wg.Done()
+				<-start
+				releases[i], results[i] = s.admitResume(context.Background(), tomb)
+			}(i, tomb)
+		}
+		close(start)
+		wg.Wait()
+
+		// First admit sees 4096 + 2048 == 6144 < 8192 and passes, reserving
+		// only its r·F == 2048; the second then sees 4096 + 2048 + 2048 ==
+		// 8192 >= 8192 and is rejected. Exactly one passes per round.
+		passed := 0
+		for i := range results {
+			if results[i] == nil {
+				passed++
+				require.NotNil(t, releases[i])
+				releases[i]()
+			} else {
+				assert.Equal(t, errorcode.ErrorCode_Conflict, results[i].RetCode)
+				releases[i]()
+			}
+		}
+		assert.Equal(t, 1, passed,
+			"round %d: at r=0.5 exactly one of the two 2 GiB resumes fits under the >= boundary", round)
+
+		memMB, _ := s.cubeboxMgr.reservations.totals()
+		require.Zero(t, memMB, "round %d: reservations must be empty after release", round)
+	}
+}
+
+// TestAdmitResumeReservesReleasedFractionNotFullQuota is the deterministic
+// companion to the race above: at r=0.5 a 4 GiB tombstone on an empty-
+// aggregate node reserves exactly 2048 MB — the released fraction — so a
+// reservation never over-counts a demand the store aggregate still carries.
+func TestAdmitResumeReservesReleasedFractionNotFullQuota(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 0.5
+	hostConf.Quota.Cpu = 0
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	tomb := sandboxWithResourceForTest("sb-frac", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tomb.SandboxID = "sb-frac"
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{list: []*cubeboxstore.CubeBox{tomb}}}}
+
+	release, rejected := s.admitResume(context.Background(), tomb)
+	require.Nil(t, rejected)
+
+	memMB, _ := s.cubeboxMgr.reservations.totals()
+	assert.Equal(t, int64(2048), memMB,
+		"the reservation must be the released fraction r·F, not the full quota F")
+	release()
+	memMB, _ = s.cubeboxMgr.reservations.totals()
+	assert.Zero(t, memMB)
+}
+
+// raceSafeListManager serves List() from a fixed slice so the concurrent
+// readers of the race test never touch the fake's unsynchronized call
+// counters. Every other cubes.CubeboxAPI method is inherited from the fake.
+type raceSafeListManager struct {
+	*fakeCubeboxAPI
+	rows []*cubeboxstore.CubeBox
+}
+
+func (m *raceSafeListManager) List() []*cubeboxstore.CubeBox { return m.rows }
+
+// TestGetStatusConcurrentWithAggregateScanIsRaceFree pins the B2/C fix: the
+// heartbeat's aggregate scan walks every row calling GetStatus without holding
+// the row's write lock, and an RPC handler can concurrently Update the same
+// row's status. GetStatus used to mirror its resolution into cb.Status on
+// every call — a write on the hottest read path — which -race flagged the
+// moment both touched one row. Now that GetStatus is strictly read-only, the
+// concurrent scan and update must run clean under -race.
+func TestGetStatusConcurrentWithAggregateScanIsRaceFree(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	defer func() { hostConf.Quota.PausedResourceReleaseRatio = 0 }()
+
+	rows := make([]*cubeboxstore.CubeBox, 0, 16)
+	for i := 0; i < 16; i++ {
+		sb := sandboxWithResourceForTest(fmt.Sprintf("sb-race-%d", i), cubeboxstore.Status{
+			PausedAt: time.Now().UnixNano(),
+		}, "1000m", "1Gi", 0, 0, 0)
+		sb.SandboxID = sb.ID
+		rows = append(rows, sb)
+	}
+	// The shared fake counts calls on unsynchronized fields; the race this
+	// test hunts is in the rows themselves (GetStatus vs the aggregate scan),
+	// so List() is served from an immutable slice here.
+	s := &service{cubeboxMgr: &local{cubeboxManger: &raceSafeListManager{
+		fakeCubeboxAPI: &fakeCubeboxAPI{},
+		rows:           rows,
+	}}}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// Readers: the aggregate scan (calls GetStatus on every row) plus direct
+	// GetStatus on the first row, mimicking the heartbeat and an RPC handler.
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = s.cubeboxMgr.aggregateAllocated()
+				_ = rows[0].GetStatus().Get().State()
+			}
+		}()
+	}
+	// Writer: an RPC handler updating the same rows' status under its own lock.
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, sb := range rows {
+					_ = sb.GetStatus().Update(func(st cubeboxstore.Status) (cubeboxstore.Status, error) {
+						st.PausedAt = time.Now().UnixNano()
+						return st, nil
+					})
+				}
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

@@ -174,38 +174,22 @@ type CreateContext struct {
 	SavedContainerIDs map[int]string
 	RestartPrior      *RestartPrior
 
-	// PausedReplaceSnapshot is the PAUSED tombstone a Create-from-pause is
-	// replacing, deep-copied before the flow's first Save overwrites it. The
-	// rollback of a failed attempt saves it back so the user's retry finds
-	// the record its gates key on; nil for every other create. See
-	// restorePausedReplaceSnapshot in the cubebox destroy flow.
-	PausedReplaceSnapshot *cubeboxstore.CubeBox
+	// RollbackDone reports that the create flow already tore this attempt
+	// down synchronously itself (the envd-init cleanup). Rollback must not
+	// repeat the same destroy against records that are already gone; its
+	// afterDestroy hook still runs, so the Create-from-pause caller restores
+	// the tombstone over the cleaned-up row.
+	RollbackDone bool
 
-	// PausedReplaceDebrisCreatedAt is the CreatedAt of the store row this
-	// attempt is responsible for: the tombstone's until the flow's first Save
-	// replaces it with the new row's (createContainers updates it). The
-	// rollback compares it by value against the row it finds before restoring
-	// the snapshot — a value identity, not a pointer one, so it survives any
-	// copy the store layer makes. Zero means the attempt never resolved a row.
-	PausedReplaceDebrisCreatedAt int64
-
-	// RollbackSerialize, when set, is invoked by the async failover to acquire
-	// the per-sandbox lifecycle lock around the rollback Destroy. service.Create
-	// holds that lock for the whole create and releases it on return, but the
-	// failover runs afterwards in its own goroutine; without re-acquiring, its
-	// teardown and tombstone restore would race a concurrent retried Resume or
-	// user Delete on the same sandbox. Only set for Create-from-pause (the path
-	// that carries PausedReplaceSnapshot); nil elsewhere, so ordinary creates
-	// roll back exactly as before.
-	RollbackSerialize func(ctx context.Context, sandboxID string) (release func(), err error)
-
-	// RollbackStanddown, when set, is called by the async failover when it
-	// could not acquire RollbackSerialize within its wait budget and is
-	// therefore standing down without touching anything. It lets the service
-	// record the pending tombstone restore so the next lifecycle operation on
-	// the sandbox — which does hold the lock — completes it instead of leaving
-	// the debris row to brick every retry as "already exists".
-	RollbackStanddown func(ctx context.Context, sandboxID string)
+	// RollbackKeepsRow tells the rollback destroy to leave the cubebox store
+	// row in place: service.Create's synchronous Create-from-pause rollback
+	// restores the paused tombstone over it right after the teardown, and a
+	// delete-then-restore sequence would open a crash window where the paused
+	// sandbox has no local record at all — its retry would then bypass every
+	// gate (#2042). Only set for a Create-from-pause that is replacing a
+	// local tombstone; ordinary create rollbacks delete their debris row as
+	// before.
+	RollbackKeepsRow bool
 }
 
 func (b *CreateContext) GetInstanceType() string {
@@ -398,15 +382,12 @@ type DestroyContext struct {
 	// destroy response ext_info.
 	VolumeRefEvents []VolumeRefEvent
 
-	// PausedReplaceSnapshot carries the tombstone a failed Create-from-pause
-	// was replacing, and PausedReplaceDebrisCreatedAt the CreatedAt of the row
-	// that attempt was responsible for; the rollback restores the snapshot
-	// instead of deleting the row, whichever step of the create failed, as
-	// long as the store row still carries that CreatedAt. Only set by
-	// create-rollback paths (engine failover, envd-init cleanup), never by a
-	// user Destroy.
-	PausedReplaceSnapshot        *cubeboxstore.CubeBox
-	PausedReplaceDebrisCreatedAt int64
+	// RollbackKeepsRow, copied from the failed CreateContext by Rollback,
+	// makes the cubebox destroy step skip its final store delete: the
+	// synchronous Create-from-pause rollback in service.Create restores the
+	// paused tombstone over the row immediately afterwards, so the row must
+	// never be absent in between. See CreateContext.RollbackKeepsRow.
+	RollbackKeepsRow bool
 }
 
 func (b *DestroyContext) GetInstanceType() string {
@@ -609,19 +590,6 @@ func restartDestroyKeepsResources(opts ReqContext) bool {
 // not run because an earlier step used up the caller's deadline.
 const restartDestroyContinueTimeout = 60 * time.Second
 
-// failoverSerializeWait is the budget the async failover of a
-// Create-from-pause spends waiting for the per-sandbox lifecycle lock. It is
-// separate from (and runs before) the rollback destroy's CommonTimeout so the
-// wait cannot eat the destroy deadline. The budget is deliberately generous:
-// the lock holder is normally a retried Resume, whose create flow can hold it
-// for minutes (image pull, package restore) before failing against the debris
-// row and releasing it. Waiting that out beats standing down — standing down
-// leaves the debris row in place, which fails every further retry closed as
-// "already exists" until something restores the tombstone. If the budget is
-// exhausted anyway, the failover records the restore as pending
-// (RollbackStanddown) so the next lifecycle operation completes it.
-const failoverSerializeWait = 5 * time.Minute
-
 // restartDestroyContinuation carries namespace, trace and the destroy value
 // onto a live context. The parent is already expired, so this cannot derive
 // from it.
@@ -735,27 +703,73 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 	return nil
 }
 
+// failCreate is run's create-failure entry: it keeps the plugin-volume
+// reporting contract of #2362 — when this create attached plugin volumes and
+// their release is not yet confirmed, the rollback must complete BEFORE the
+// failure reply is sent (the reply carries the confirmed release), so it runs
+// synchronously; every other rollback runs async as before.
 func (e *Engine) failCreate(ctx context.Context, opts *CreateContext) {
 	if !opts.Failover {
 		return
 	}
-	if len(opts.PluginVolumeIDs) != 0 && !opts.PluginVolumeAttachUncertain && opts.PluginVolumeRollback == nil {
-		e.failover(ctx, opts, true)
+	if volumeReleaseMustBeReported(opts) {
+		e.Rollback(ctx, opts, nil)
 		return
 	}
-	go e.failover(ctx, opts, false)
+	go e.Rollback(ctx, opts, nil)
 }
 
-func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolumeRelease bool) {
+// volumeReleaseMustBeReported is the #2362 predicate: this create holds
+// plugin-volume references, the attach outcome is known, and the release has
+// not been confirmed yet — so the rollback destroy must prove the release and
+// the create failure reply must carry it.
+func volumeReleaseMustBeReported(opts *CreateContext) bool {
+	return len(opts.PluginVolumeIDs) != 0 && !opts.PluginVolumeAttachUncertain && opts.PluginVolumeRollback == nil
+}
+
+// Rollback tears a failed create down: it runs the destroy flow with
+// IsRollBack set on a fresh CommonTimeout deadline (so an expired create
+// context cannot starve the teardown), and hands the sandbox over to the
+// cleanup flow when the destroy itself failed.
+//
+// Ordinary creates reach it asynchronously ("go e.Rollback") from run;
+// service.Create calls it synchronously for a failed Create-from-pause while
+// it still holds the sandbox's lifecycle lock, so the teardown — and the
+// tombstone restore service.Create performs right after it — cannot race a
+// retried Resume or a user Delete (see rollbackPausedReplace in the cubebox
+// service).
+// afterDestroy, when non-nil, runs right after the rollback destroy returns
+// — success or failure — and before the cleanup-flow handoff. The synchronous
+// Create-from-pause rollback uses it to restore the paused tombstone BEFORE
+// the gc plugin records (and could later reclaim) the debris of the failed
+// teardown.
+func (e *Engine) Rollback(ctx context.Context, opts ReqContext, afterDestroy func()) {
+	rOpts, ok := opts.(*CreateContext)
+	if !ok {
+		return
+	}
+	if rOpts.RollbackDone {
+		log.G(ctx).Warnf("rollback skipped for %v: the create flow already rolled back", opts.GetSandboxID())
+		if afterDestroy != nil {
+			afterDestroy()
+		}
+		return
+	}
 	sandboxID := opts.GetSandboxID()
 	namespace, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
 		CubeLog.WithContext(ctx).Fatalf("fail over doing SandboxID:%v,error:%v", sandboxID, err)
+		if afterDestroy != nil {
+			afterDestroy()
+		}
 		return
 	}
 	rt := CubeLog.GetTraceInfo(ctx)
 	if rt == nil {
 		CubeLog.WithContext(ctx).Fatalf("failover: missing trace info SandboxID: %v", sandboxID)
+		if afterDestroy != nil {
+			afterDestroy()
+		}
 		return
 	}
 
@@ -770,43 +784,10 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	createCtx := ctx
 	ctx = namespaces.WithNamespace(context.Background(), namespace)
 	ctx = telemetry.DetachTrace(ctx, createCtx)
-	ctx = CubeLog.WithRequestTrace(ctx, failoverRt)
-	rOpts := opts.(*CreateContext)
-	// A Create-from-pause rollback restores the tombstone it was replacing, so
-	// it must be serialized against the lifecycle operations that own the same
-	// sandbox now that service.Create has returned and released its lock: a
-	// retried Resume, a Pause, or a user Delete. The wait gets its own budget
-	// (waiting must not eat the destroy deadline below), and the budget is
-	// generous because the usual contender is a retry whose create flow holds
-	// the lock for minutes (image pull, package restore) before failing
-	// against the debris row and releasing it.
-	//
-	// If the lock still cannot be taken, the rollback stands down without
-	// touching anything: an unsynchronized teardown would delete the very row
-	// a retry's quota gate keys on (re-opening #2042) and could kill a runtime
-	// a concurrent operation is building. Standing down silently would brick
-	// the sandbox instead — the debris row fails every later retry as
-	// "already exists", and the resume path has no Master compensation to
-	// clean it up — so the snapshot is handed to RollbackStanddown, which
-	// records it as a pending restore that the next lifecycle operation on
-	// this sandbox completes under its own lock before reading the row.
-	if rOpts.RollbackSerialize != nil {
-		lockCtx, lockCancel := context.WithTimeout(context.Background(), failoverSerializeWait)
-		release, lockErr := rOpts.RollbackSerialize(lockCtx, sandboxID)
-		lockCancel()
-		if lockErr != nil {
-			log.G(ctx).Errorf("fail over cannot serialize the rollback of %s (%v); deferring the tombstone restore to the next lifecycle operation", sandboxID, lockErr)
-			if rOpts.RollbackStanddown != nil {
-				rOpts.RollbackStanddown(ctx, sandboxID)
-			}
-			return
-		}
-		defer release()
-	}
-	// The rollback destroy gets its own fresh deadline, after the lock wait.
 	ctx, cancel := context.WithTimeout(ctx, config.GetCommon().CommonTimeout)
 	defer cancel()
 
+	ctx = CubeLog.WithRequestTrace(ctx, failoverRt)
 	destroyOpt := &DestroyContext{
 		DestroyInfo: &cubebox.DestroyCubeSandboxRequest{
 			RequestID:   uuid.New().String(),
@@ -814,9 +795,10 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 		},
 	}
 	destroyOpt.IsRollBack = true
-	if reportVolumeRelease {
-		destroyOpt.CreateVolumeRollback = opts
+	if volumeReleaseMustBeReported(rOpts) {
+		destroyOpt.CreateVolumeRollback = rOpts
 	}
+	destroyOpt.RollbackKeepsRow = rOpts.RollbackKeepsRow
 	if failoverRt.RequestID != "" {
 		destroyOpt.DestroyInfo.RequestID = failoverRt.RequestID
 	}
@@ -827,30 +809,34 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	}
 	ctx = context.WithValue(ctx, KDestroyContext, destroyOpt)
 	ctx = constants.WithFailoverOperation(ctx)
-	if opts.CubeBoxCreated {
+	if rOpts.CubeBoxCreated {
 		ctx = constants.WithCubeboxCreated(ctx)
 	}
 	// A failed restart must not delete the disk and network the next attempt
 	// (or the still-kept cubebox row) depends on.
-	if opts.IsRestart {
+	if rOpts.IsRestart {
 		destroyOpt.IsRestartDestroy = true
 	}
-	// A failed Create-from-pause must roll back to the tombstone it was
-	// replacing — whichever step failed, before or after the flow's first
-	// Save overwrote the row — because the user's retried Resume is gated on
-	// that record.
-	destroyOpt.PausedReplaceSnapshot = opts.PausedReplaceSnapshot
-	destroyOpt.PausedReplaceDebrisCreatedAt = opts.PausedReplaceDebrisCreatedAt
 	log.G(ctx).Warnf("fail over doing SandboxID:%v", sandboxID)
 	defer func() {
 		if err != nil {
-			if opts.IsRestart {
+			if rOpts.IsRestart {
 				log.G(ctx).Warnf("restart failover keeps sandbox %s: %v", sandboxID, err)
 				return
 			}
 			e.cleanUp(ctx, opts)
 		}
 	}()
+	// Registered before the crash handler and after the cleanup handoff, so
+	// on unwind it runs after a panic is captured into err and before this
+	// rollback's cleanup handoff: the tombstone restore is the LAST write to
+	// the row, so the gc plugin's final read sees the restored tombstone (and
+	// its failover+PAUSED stamp-skip keeps it unmarked). Any stamp an earlier
+	// handoff left — run's destroy-error path also calls cleanUp — is scrubbed
+	// by the restore.
+	if afterDestroy != nil {
+		defer afterDestroy()
+	}
 	defer recov.HandleCrash(func(panicError interface{}) {
 		err = fmt.Errorf("%v", panicError)
 		log.G(ctx).Fatalf("fail over Destroy  panic :%v %v", panicError, string(debug.Stack()))

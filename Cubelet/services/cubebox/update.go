@@ -15,11 +15,11 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
 	"google.golang.org/protobuf/proto"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	cubelethost "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
@@ -168,113 +168,6 @@ func addPauseResumeMetaData(ctx context.Context, req *cubebox.UpdateCubeSandboxR
 	return addSandboxTaskMetaData(ctx, req.SandboxID)
 }
 
-// resumeTask is the narrow part of containerd.Task needed by the resume
-// transition. Keeping the core on this interface makes its timeout and
-// reconciliation rules deterministic to test without a live containerd task.
-type resumeTask interface {
-	Resume(context.Context) error
-	Status(context.Context) (containerd.Status, error)
-}
-
-type resumeOptions struct {
-	taskDeadline      time.Time
-	reconcileDeadline time.Time
-	persist           bool
-	skipAdmission     bool // when true, skip paused-resource admission (tests / special callers)
-}
-
-type resumeResult struct {
-	ret               *errorcode.Ret
-	running           bool
-	reconciledRunning bool
-}
-
-// resumeLocked performs the pause -> running transition while the caller owns
-// the sandbox lifecycle lock. It does not validate the current state because
-// explicit Resume and Destroy intentionally apply different state policies.
-func (s *service) resumeLocked(ctx context.Context, sb *cubeboxstore.CubeBox, opts resumeOptions) resumeResult {
-	// The caller's runtime resume budget covers task loading and the resume RPC.
-	// Delete persists the converged state with its normal delete marker after
-	// this function returns, so it avoids a second synchronous store write in
-	// the bounded wake-up phase.
-	preflightCtx, preflightCancel := context.WithDeadline(ctx, opts.taskDeadline)
-	defer preflightCancel()
-
-	if !opts.skipAdmission {
-		release, rejected := s.admitResume(preflightCtx, sb)
-		if rejected != nil {
-			return resumeResult{ret: rejected}
-		}
-		// Hold the reservation until the transition settles: on success the
-		// row flips to running in the store aggregate (double-counted for the
-		// tail of this call — conservative), on failure the demand is dropped.
-		defer release()
-	}
-	if err := preflightCtx.Err(); err != nil {
-		return resumeResult{ret: &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_TaskResumeFailed,
-			RetMsg:  err.Error(),
-		}}
-	}
-
-	ns := sb.Namespace
-	if ns == "" {
-		ns = namespaces.Default
-	}
-	syncCtx := namespaces.WithNamespace(ctx, ns)
-	preflightCtx = namespaces.WithNamespace(preflightCtx, ns)
-	firstContainer := sb.FirstContainer()
-	if firstContainer == nil || firstContainer.Container == nil {
-		return resumeResult{ret: &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_TaskResumeFailed,
-			RetMsg:  "failed to load task for paused sandbox",
-		}}
-	}
-	task, err := firstContainer.Container.Task(preflightCtx, nil)
-	if err != nil {
-		return resumeResult{ret: &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_TaskResumeFailed,
-			RetMsg:  err.Error(),
-		}}
-	}
-
-	preflightCtx = addSandboxTaskMetaData(preflightCtx, sb.ID)
-	if opts.persist {
-		// Explicit Resume persists both an ordinary successful transition and a
-		// reconciliation that discovers the VM became RUNNING despite an RPC
-		// error. DELETE persists its converged RUNNING state immediately after
-		// this function returns, before it writes the delete marker.
-		defer s.cubeboxMgr.cubeboxManger.SyncByID(syncCtx, sb.ID)
-	}
-	defer utils.Recover()
-
-	return resumeTaskLocked(preflightCtx, sb, task, opts)
-}
-
-func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resumeTask, opts resumeOptions) resumeResult {
-	resumeCtx, resumeCancel := context.WithDeadline(ctx, opts.taskDeadline)
-	defer resumeCancel()
-	if err := task.Resume(resumeCtx); err != nil {
-		// A ttrpc error can race a completed resume. Reconcile against the shim
-		// within the caller-supplied budget before deciding that deletion must
-		// stop. Explicit Resume still returns this original RPC error.
-		reconciledRunning := reconcileStatusAfterResumeError(ctx, sb, task, err, opts.reconcileDeadline)
-		return resumeResult{
-			ret: &errorcode.Ret{
-				RetCode: errorcode.ErrorCode_TaskResumeFailed,
-				RetMsg:  err.Error(),
-			},
-			running:           reconciledRunning,
-			reconciledRunning: reconciledRunning,
-		}
-	}
-	convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
-	return resumeResult{
-		ret:     &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
-		running: true,
-	}
-}
-
 // admitResume enforces the resume side of the release-paused-resources policy.
 // When the policy is off it is a no-op (resume is always admitted, matching
 // the legacy guaranteed-resume behaviour). When on, pausing this sandbox
@@ -288,21 +181,35 @@ func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resume
 // release is noopRelease and the error is non-nil; on admission the error is
 // nil and the caller MUST defer release() for as long as the resume is in
 // flight (until the create flow's Save folds the demand into the store
-// aggregate, or the attempt fails). Admission is a hard node-level
-// reservation, not a best-effort snapshot: the check reads aggregateAllocated
-// plus the in-flight reservations, and registers this sandbox's demand, all
-// under the ledger lock, so concurrent resumes of different sandboxes
-// serialize at the gate and cannot both pass on a stale snapshot (#2042).
-// See resumeReservationLedger for what the reservation covers and why it
-// over- (never under-)counts at the window edges.
+// aggregate, or the failed attempt's synchronous rollback has restored the
+// tombstone). Admission is a hard node-level reservation, not a best-effort
+// snapshot: the check adds the in-flight reservations to the node aggregate
+// and registers this sandbox's demand under the ledger lock, so concurrent
+// resumes of different sandboxes serialize at the gate and cannot both pass
+// on a stale snapshot (#2042). The aggregate itself is served from a short
+// TTL cache (aggregateAllocatedCached) read just before the lock, keeping the
+// critical section O(1) in the common case; the reservations, which are the
+// part that must be exact between concurrent admissions, are always read
+// live under the lock. See resumeReservationLedger for what the reservation
+// covers and why every window over- (never under-)counts.
 //
 // Under a release ratio r the still-paused sandbox already contributes (1-r)
-// of its quota to aggregateAllocated, so resuming it only adds the remaining
-// r fraction; the check compares that incremental demand, while the
-// reservation records the full quota: the tombstone row keeps contributing
-// its (1-r) fraction until the flow's Save overwrites it with the new row,
-// and reserving the full demand keeps every window of that transition
-// over-counting only (see resumeReservationLedger).
+// of its quota to the aggregate, so resuming it only adds the remaining r
+// fraction: the check compares that incremental demand and the reservation
+// records exactly it. That is safe because the tombstone is guaranteed to
+// stay visible in the store until the flow's Save overwrites it in place —
+// the replacement branch never deletes the row, and a failed attempt gets it
+// back from the synchronous rollback under the lifecycle lock — so
+// T + r·F = F holds for the whole pre-Save window and only the post-Save
+// tail over-counts, by r·F, until the deferred release.
+//
+// The quota itself is resolved exactly like the node status report resolves
+// it: an unset mcpu_limit/mem_limit means "derive from the host" (CPU count ×
+// overcommit, MemTotal × mem-overcommit), never "unbounded" — the shipped
+// configs/single-node/cubelet.yaml leaves both unset, and an admission gate
+// that skipped a dimension there would leave #2042 open on every default
+// deployment. A dimension whose derivation fails (0) is skipped, matching
+// what the node reports to CubeMaster in that case.
 //
 // The rejection boundary matches the scheduler's mem/cpu filters, which
 // reject when free <= need: a resume that would fill the node exactly is
@@ -332,34 +239,45 @@ func (s *service) admitResume(
 		return noopRelease, ret
 	}
 
-	// One critical section for read-check-register: the store aggregate is
-	// recomputed live (no cache) inside the ledger lock so no concurrent
-	// admission can slip between observing it and registering this demand.
-	// Resume is far rarer than its VM-wake cost, so the O(n) scan under the
-	// lock is acceptable; the create flow itself runs outside it.
-	ledger := &s.cubeboxMgr.resumeReservations
-	ledger.Lock()
-	defer ledger.Unlock()
-
-	alloc := s.cubeboxMgr.aggregateAllocated()
-	reservedMemMB, reservedCPUMilli := ledger.totalsLocked()
-	memQuotaMB := int64(0)
-	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
-		memQuotaMB = bytesToMB(memQuota.Value())
-	}
+	// Everything expensive stays outside the node-wide ledger lock: the quota
+	// derivation may read the CPU count and MemTotal when the config leaves
+	// the quota unset, and the aggregate scan is absorbed by the TTL cache.
+	memQuotaMB := cubelethost.ResolveHostQuotaMemMB(hostConf)
+	cpuQuotaMilli := cubelethost.ResolveHostQuotaCPUMilli(hostConf)
 	// Only the released fraction is the incremental demand of resuming.
-	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
+	needMemMB, needCPUMilli := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
+	alloc := s.cubeboxMgr.aggregateAllocatedCached()
 
-	if reason := resumeQuotaRejection(resumeQuotaCheck{
+	id := sb.SandboxID
+	if id == "" {
+		id = sb.ID
+	}
+
+	// One critical section for check-and-register: the live reservation
+	// totals plus the aggregate snapshot above decide, and the demand is
+	// registered before the lock is released, so no concurrent admission can
+	// slip between observing and registering.
+	ledger := &s.cubeboxMgr.reservations
+	ledger.mu.Lock()
+	reservedMemMB, reservedCPUMilli := ledger.totalsLocked()
+	reason := resumeQuotaRejection(resumeQuotaCheck{
 		// In-flight reservations count as used: they are admitted demand the
 		// store cannot show yet (or still shows as a tombstone fraction).
 		usedMemMB:     alloc.MemoryMB + reservedMemMB,
 		needMemMB:     needMemMB,
 		memQuotaMB:    memQuotaMB,
 		usedCPUMilli:  alloc.MilliCPU + reservedCPUMilli,
-		needCPUMilli:  needCPU,
-		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
-	}); reason != "" {
+		needCPUMilli:  needCPUMilli,
+		cpuQuotaMilli: cpuQuotaMilli,
+	})
+	var release func()
+	var replaced *resumeReservation
+	if reason == "" {
+		release, replaced = ledger.reserveLocked(id, needMemMB, needCPUMilli)
+	}
+	ledger.mu.Unlock()
+
+	if reason != "" {
 		ret := &errorcode.Ret{
 			RetCode: errorcode.ErrorCode_Conflict,
 			RetMsg:  "resume rejected by paused_resource_release_ratio policy: " + reason,
@@ -371,27 +289,24 @@ func (s *service) admitResume(
 		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, ret.RetMsg)
 		return noopRelease, ret
 	}
-
-	// Reserve the FULL quota, not the r fraction checked above: while the
-	// flow is running the tombstone still contributes its (1-r) fraction to
-	// the store, and after its Save the new row contributes F. Counting F in
-	// the ledger keeps every window one-sided — over-counting only, never
-	// under-counting. See resumeReservationLedger.
-	id := sb.SandboxID
-	if id == "" {
-		id = sb.ID
+	if replaced != nil {
+		// Logged outside the critical section, on the request context so the
+		// line carries requestID and trace. An overwrite means two admissions
+		// for one sandbox ran concurrently — the lifecycle lock makes that
+		// impossible for the shapes Master sends, so this is the tripwire for
+		// a caller breaking the request-shape contract (see
+		// resumeReservationLedger).
+		log.G(ctx).Warnf("resume reservation for %s overwrites an in-flight reservation (mem %d→%d MB, cpu %d→%d milli); admissions for one sandbox must be serialized by its lifecycle lock",
+			id, replaced.memMB, needMemMB, replaced.cpuMilli, needCPUMilli)
 	}
-	release := ledger.reserveLocked(id,
-		bytesToMB(sb.ResourceWithOverHead.HostMemQ.Value()),
-		sb.ResourceWithOverHead.HostCpuQ.MilliValue())
 	return release, nil
 }
 
 // admitPausedReplace applies the admitResume quota check to the Create-from-pause
 // path. Since the cubecow pause rework, Resume no longer goes through
-// Update(resume)/resumeLocked: CubeMaster sends a thin Create carrying
-// cube.master.desired.sandbox.id and Cubelet recreates the sandbox from the
-// pause package, replacing the local PAUSED tombstone. Without this gate a
+// Update(resume) — that action answers "not supported": CubeMaster sends a
+// thin Create carrying cube.master.desired.sandbox.id and Cubelet recreates
+// the sandbox from the pause package, replacing the local PAUSED tombstone. Without this gate a
 // same-node resume (XFS is always pinned to the origin; Master placement never
 // consults the scheduler for it) bypasses the node CPU/memory quota entirely
 // once paused_resource_release_ratio has released the paused sandbox's share —
@@ -432,8 +347,9 @@ func (s *service) admitPausedReplace(
 		return noopRelease, ret
 	}
 	if !paused {
-		// Live or in-flight-pause collisions are rejected downstream as
-		// already exists; only a PAUSED tombstone is a resume replacement.
+		// Only a PAUSED tombstone is a resume replacement; live or
+		// pausing-in-flight collisions were already rejected upstream by
+		// gatePausedReplace, before the flow allocated anything.
 		return noopRelease, nil
 	}
 	return s.admitResume(ctx, sb)
@@ -463,8 +379,9 @@ type resumeQuotaCheck struct {
 // resumeQuotaRejection is the pure decision behind admitResume: it returns a
 // non-empty human-readable reason when bringing a paused sandbox back would
 // fill or exceed the node's CPU or memory quota, or "" when the resume fits.
-// A non-positive quota means "unbounded" for that dimension and is skipped,
-// which matches how the rest of the cubelet treats an unset host quota.
+// A non-positive quota means the dimension could not be resolved (neither
+// configured nor derivable from the host) and is skipped, matching what the
+// node status report tells CubeMaster in that case.
 //
 // The boundary is >= (reject when free <= need), matching the scheduler's
 // memfilter/cpufilter, which refuse a node when quotaMemFree <= need. A resume
@@ -476,32 +393,30 @@ func resumeQuotaRejection(c resumeQuotaCheck) string {
 	// NOTE: these two reason formats are an explicit cross-language contract:
 	// the WebUI parses them by regex in web/src/lib/sandboxActionError.ts
 	// (formatSandboxActionError) to render the localized capacity banner. Keep
-	// the exact wording ("need %dMB + used %dMB > mem quota %dMB" and the "%dm"
-	// CPU variant) in sync with that regex, or the frontend silently falls back
-	// to a generic message. TestResumeQuotaRejectionMessageFormat locks the
-	// format on this side. The literal ">" in the wording is part of that
-	// regex contract and stays even though the decision boundary is ">=" (an
-	// exact fill is rejected with this message; the numbers still tell the
-	// operator what does not fit).
+	// the exact wording ("need %dMB + used %dMB >= mem quota %dMB" and the
+	// "%dm" CPU variant) in sync with that regex, or the frontend silently
+	// falls back to a generic message. TestResumeQuotaRejectionMessageFormat
+	// locks the format on this side. The operator is ">=" — not ">" — so the
+	// message stays truthful at the rejection boundary: an exact fill is
+	// rejected, and its numbers read as equal because they are.
 	if c.memQuotaMB > 0 && c.usedMemMB+c.needMemMB >= c.memQuotaMB {
-		return fmt.Sprintf("need %dMB + used %dMB > mem quota %dMB",
+		return fmt.Sprintf("need %dMB + used %dMB >= mem quota %dMB",
 			c.needMemMB, c.usedMemMB, c.memQuotaMB)
 	}
 	if c.cpuQuotaMilli > 0 && c.usedCPUMilli+c.needCPUMilli >= c.cpuQuotaMilli {
-		return fmt.Sprintf("need %dm + used %dm > cpu quota %dm",
+		return fmt.Sprintf("need %dm + used %dm >= cpu quota %dm",
 			c.needCPUMilli, c.usedCPUMilli, c.cpuQuotaMilli)
 	}
 	return ""
 }
 
-// Upper bound for the Pause/Resume ttrpc calls. 30s is used because cubeshim
-// pausing a VM involves vCPU stop + device quiesce + memory eventual
-// consistency, which is normally < 5s; 30s is a safety net to prevent the
-// call from being stuck indefinitely when the upstream ctx is missing or
-// blocked. Used together with the reconcile* error convergence.
+// Upper bound for the Pause ttrpc call. 30s is used because cubeshim pausing
+// a VM involves vCPU stop + device quiesce + memory eventual consistency,
+// which is normally < 5s; 30s is a safety net to prevent the call from being
+// stuck indefinitely when the upstream ctx is missing or blocked. Used
+// together with the reconcile* error convergence.
 const (
-	taskPauseTimeout  = 30 * time.Second
-	taskResumeTimeout = 30 * time.Second
+	taskPauseTimeout = 30 * time.Second
 
 	// Dedicated status-query timeout opened during reconcile. It MUST use a
 	// fresh ctx and never reuse the already-expired ctx.
@@ -641,73 +556,6 @@ func convergeResumeStateAfterOpaqueRestore(sb *cubeboxstore.CubeBox, attachedAt 
 			return status, nil
 		})
 	}
-}
-
-// reconcileStatusAfterResumeError is the dual of the pause case. It returns
-// true only when the shim proves the VM is RUNNING and local state has been
-// converged accordingly. The fresh query context is bounded by deadline so a
-// caller with a short operation budget cannot spend extra time reconciling.
-func reconcileStatusAfterResumeError(
-	parentCtx context.Context,
-	sb *cubeboxstore.CubeBox,
-	task resumeTask,
-	resumeErr error,
-	deadline time.Time,
-) bool {
-	queryTimeout, ok := boundedReconcileTimeout(deadline)
-	if !ok {
-		log.G(parentCtx).Errorf(
-			"reconcileStatusAfterResumeError: deadline exhausted sandbox=%s resumeErr=%v",
-			sb.ID, resumeErr)
-		return false
-	}
-	queryCtx, cancel := context.WithTimeout(context.Background(), queryTimeout)
-	defer cancel()
-	if ns, ok := namespaces.Namespace(parentCtx); ok && ns != "" {
-		queryCtx = namespaces.WithNamespace(queryCtx, ns)
-	}
-
-	st, qerr := task.Status(queryCtx)
-	if qerr != nil {
-		log.G(parentCtx).Errorf(
-			"reconcileStatusAfterResumeError: task.Status failed sandbox=%s resumeErr=%v statusErr=%v",
-			sb.ID, resumeErr, qerr)
-		return false
-	}
-
-	switch st.Status {
-	case containerd.Running:
-		// The shim has actually resumed successfully; likewise invalidate the
-		// runtime snapshot bindings to stay consistent with the
-		// UpdateWithResume success path.
-		log.G(parentCtx).Warnf(
-			"reconcileStatusAfterResumeError: shim reports RUNNING despite resumeErr=%v, converging sandbox=%s",
-			resumeErr, sb.ID)
-		convergeResumeStateAfterOpaqueRestore(sb, time.Now().UTC())
-		return true
-	case containerd.Paused:
-		// Really not resumed, the state stays PAUSED and needs no rewrite (the
-		// success path has not run yet).
-		log.G(parentCtx).Warnf(
-			"reconcileStatusAfterResumeError: shim still PAUSED resumeErr=%v sandbox=%s",
-			resumeErr, sb.ID)
-	default:
-		log.G(parentCtx).Warnf(
-			"reconcileStatusAfterResumeError: shim reports %s, leaving status untouched sandbox=%s",
-			st.Status, sb.ID)
-	}
-	return false
-}
-
-func boundedReconcileTimeout(deadline time.Time) (time.Duration, bool) {
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return 0, false
-	}
-	if remaining < reconcileStatusTimeout {
-		return remaining, true
-	}
-	return reconcileStatusTimeout, true
 }
 
 // reconcileStuckPausingSandbox is the startup/background fallback -- the third

@@ -112,9 +112,10 @@ func createServiceForTest(sb *cubeboxstore.CubeBox, flow *fakeCreateFlow, ttl ti
 func TestGatePausedReplaceRefusesWhileTheOldRuntimeMayLive(t *testing.T) {
 	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()})
 
-	err := gateOnlyService(sb, 10*time.Minute).
+	snapshot, err := gateOnlyService(sb, 10*time.Minute).
 		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
 	require.Error(t, err, "a paused sandbox whose shim may still hold the tap must not be replaced")
+	assert.Nil(t, snapshot, "a refused replacement hands the caller no snapshot")
 	assert.True(t, pendingIntentOnlyError(t, err),
 		"the refusal has to be the deferrable kind, or the retry budget would quarantine a healthy resume")
 }
@@ -126,8 +127,14 @@ func TestGatePausedReplaceAllowsWhenTheOldRuntimeIsGone(t *testing.T) {
 		ShimSpawned:   true,
 		ShimSpawnedAt: time.Now().Add(-time.Hour),
 	})
-	require.NoError(t, gateOnlyService(sb, 10*time.Minute).
-		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume")))
+	snapshot, err := gateOnlyService(sb, 10*time.Minute).
+		gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
+	require.NoError(t, err)
+	// The snapshot is the tombstone the rollback restores if the create fails:
+	// same record, captured before the flow touches it.
+	require.NotNil(t, snapshot)
+	assert.Equal(t, sb.ID, snapshot.ID)
+	assert.Equal(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, snapshot.GetStatus().Get().State())
 }
 
 // The gate only owns the PAUSED-replacement case. Everything else has to fall
@@ -138,12 +145,32 @@ func TestGatePausedReplaceIgnoresEverythingButAPausedReplacement(t *testing.T) {
 	running.SandboxID = "sb-run"
 	s := gateOnlyService(running, time.Minute)
 
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("")),
-		"a create without the desired-id annotation is not a replacement")
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-run")),
-		"a live sandbox is rejected downstream as already exists, never waited on")
-	assert.NoError(t, s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-elsewhere")),
-		"a desired id this node does not hold is an ordinary create")
+	snapshot, err := s.gatePausedReplace(context.Background(), resumeReplaceRequest(""))
+	assert.NoError(t, err, "a create without the desired-id annotation is not a replacement")
+	assert.Nil(t, snapshot)
+
+	snapshot, err = s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-elsewhere"))
+	assert.NoError(t, err, "a desired id this node does not hold is an ordinary create")
+	assert.Nil(t, snapshot)
+}
+
+// A create-from-pause whose collision is NOT paused must be rejected at the
+// gate, before the flow allocates anything: the id belongs to a live sandbox
+// (or a previous attempt still being rolled back), and replacing it is never
+// what a resume means. The rejection carries the state so the caller can tell
+// "retry shortly" from "DELETE first".
+func TestGatePausedReplaceRejectsNonPausedCollision(t *testing.T) {
+	running := newCubeboxWithStatusForTest("sb-run", cubeboxstore.Status{StartedAt: 1})
+	running.SandboxID = "sb-run"
+	s := gateOnlyService(running, time.Minute)
+
+	snapshot, err := s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-run"))
+	require.Error(t, err, "a create-from-pause over a live sandbox must not be waited on or replaced")
+	assert.Nil(t, snapshot)
+	assert.Contains(t, err.Error(), "already exists")
+	assert.Contains(t, err.Error(), "CONTAINER_RUNNING",
+		"the message must carry the collided state so the caller can tell retry-shortly from DELETE-first")
+	assert.Contains(t, err.Error(), "DELETE the sandbox first")
 }
 
 // A refusal has to happen before the create flow runs. That is the whole point

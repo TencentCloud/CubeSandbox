@@ -20,7 +20,7 @@ export function formatSandboxActionError(err: unknown, t: TranslateFn): string {
     // regexes too (the Go side guards its format via
     // TestResumeQuotaRejectionMessageFormat). On a mismatch we fall back to the
     // generic errors.resumeCapacity message below.
-    const mem = raw.match(/need (\d+MB) \+ used (\d+MB) > mem quota (\d+MB)/);
+    const mem = raw.match(/need (\d+MB) \+ used (\d+MB) >= mem quota (\d+MB)/);
     if (mem) {
       return t('errors.resumeCapacityDetail', {
         need: mem[1],
@@ -28,7 +28,7 @@ export function formatSandboxActionError(err: unknown, t: TranslateFn): string {
         quota: mem[3],
       });
     }
-    const cpu = raw.match(/need (\d+m) \+ used (\d+m) > cpu quota (\d+m)/);
+    const cpu = raw.match(/need (\d+m) \+ used (\d+m) >= cpu quota (\d+m)/);
     if (cpu) {
       return t('errors.resumeCapacityDetailCpu', {
         need: cpu[1],

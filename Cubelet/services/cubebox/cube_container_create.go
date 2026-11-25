@@ -152,14 +152,13 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		if resolveErr != nil {
 			// Local state unknown: fail closed rather than guess — treating a
 			// store error as "no tombstone" would recreate over a live or
-			// pausing record. The code must trigger the engine failover: this
-			// is the flow's last step, so network/volume/storage/cgroup are
-			// already allocated and PreConditionFailed (which skips failover)
-			// would strand them with no one left to release them — the resume
-			// path has no Master-side compensation for a failed create.
-			// Failover is tombstone-safe now: its rollback keeps a still-PAUSED
-			// row (createRollbackKeepsPausedTombstone) and deletes nothing on
-			// a store error, so the retry still finds its record either way.
+			// pausing record. The code must not be PreConditionFailed: this is
+			// the flow's last step, so network/volume/storage/cgroup are
+			// already allocated, and PreConditionFailed is the one code both
+			// rollback owners skip — the engine's async failover for ordinary
+			// creates and service.Create's synchronous rollback for
+			// Create-from-pause. Any other error hands the teardown to
+			// whichever rollback owns this create, releasing the allocations.
 			return ret.Errorf(errorcode.ErrorCode_LoadContainerFromMetaDataFailed,
 				"cannot resolve the paused sandbox to replace: %v", resolveErr)
 		}
@@ -173,27 +172,13 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// wait runs before any of this, at the create entry point — see
 				// gatePausedReplace in service.go — and is deliberately not
 				// repeated here, where it would run after the records it
-				// protects are already gone.
+				// protects are already gone. The gate also captured the
+				// tombstone snapshot there, before this flow could touch the
+				// row; a failed attempt's synchronous rollback restores it
+				// (see rollbackPausedReplace in service.go).
 				// Resume replaces the paused row. Keep the restart bookkeeping
 				// so the next report is newer than the one CubeMaster already has.
 				desired := sb.SandboxID
-				// Deep-copy the tombstone before anything else happens: the
-				// store hands out live pointers, this flow's first Save
-				// overwrites the row (mid-flow, well before runContainer /
-				// probe / envd init), and a failed attempt must roll back to
-				// the tombstone the user's retry is gated on — whichever step
-				// failed. The rollback (engine failover or the envd-init
-				// cleanup) carries this copy into Destroy, which saves it back;
-				// see restorePausedReplaceSnapshot.
-				opts.PausedReplaceSnapshot = sb.DeepCopy()
-				// The identity of the store row this attempt is responsible
-				// for, by value (CreatedAt), not by pointer: the tombstone
-				// until the flow's first Save replaces it with the new row
-				// (createContainers updates it). The rollback only restores
-				// over a row that still carries this value, so a store layer
-				// that copies rows on Save/Get cannot break the check, and a
-				// newer attempt's row is never clobbered.
-				opts.PausedReplaceDebrisCreatedAt = sb.CreatedAt
 				if sb.RestartState != "" || sb.StatusSeq != 0 || sb.RestartCount != 0 || len(sb.OriginalRequest) > 0 {
 					opts.RestartPrior = restartPriorFrom(sb)
 				}
@@ -212,20 +197,19 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// the restart path relies on ("Save overwrites it").
 				//
 				// Deleting the row up front instead meant a create that failed
-				// afterwards left no trace of the paused sandbox: failover found
-				// nothing to roll back, the pause package survived (its GC is
-				// keyed on the row being readable) and CubeMaster kept the pause
-				// binding READY, so the user's retried Resume arrived as a thin
-				// Create with no local row to key on — and was admitted with no
-				// quota check at all (#2042).
+				// afterwards left no trace of the paused sandbox: the rollback
+				// found nothing to roll back to, the pause package survived (its
+				// GC is keyed on the row being readable) and CubeMaster kept the
+				// pause binding READY, so the user's retried Resume arrived as a
+				// thin Create with no local row to key on — and was admitted
+				// with no quota check at all (#2042).
 				//
-				// The same bypass would survive on the snapshot alone if the
-				// failure happened after that first Save — runContainer, probe
-				// and envd init all run after it — because the rollback would
-				// then find this attempt's debris row, not a PAUSED one, and
-				// delete it. So the tombstone is snapshotted above and the
-				// rollback saves the snapshot back whichever step failed; see
-				// restorePausedReplaceSnapshot in destroy.go.
+				// The same bypass would survive on any rollback that loses the
+				// row, which is why the rollback destroy keeps it
+				// (RollbackKeepsRow) and the synchronous restore in
+				// service.Create saves the gate's snapshot back over whatever
+				// this attempt left — whichever step failed, before or after
+				// the first Save below.
 				//
 				// The UserMarkDeletedTime stamp that used to precede the delete is
 				// gone with it: it existed only to satisfy the CDP user-delete
@@ -233,6 +217,10 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				// row that then survives a failed create would leave the tombstone
 				// looking user-deleted to the restart manager and to GC.
 			} else {
+				// Defence in depth: gatePausedReplace already rejected a
+				// non-paused collision before the flow allocated anything; this
+				// branch only fires if the row changed between the gate and
+				// here (it cannot for a locked Create-from-pause).
 				return ret.Err(errorcode.ErrorCode_PreConditionFailed, "already exists")
 			}
 		}
@@ -531,9 +519,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
 		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
 		if cleanupErr == nil {
-			// The sandbox has already been torn down synchronously, so the outer
-			// workflow failover does not need to repeat the same destroy path.
+			// The sandbox has already been torn down synchronously, so neither
+			// rollback owner may repeat the same destroy: the outer workflow
+			// failover of an ordinary create (Failover), nor the synchronous
+			// Create-from-pause rollback in service.Create (RollbackDone — it
+			// still restores the tombstone over the cleaned-up row).
 			flowOpts.Failover = false
+			flowOpts.RollbackDone = true
 		} else {
 			sanboxlog.Errorf("cleanup sandbox after envd init failure failed: %v", cleanupErr)
 		}
@@ -592,13 +584,12 @@ func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
 			RequestID: realReq.RequestID,
 			SandboxID: sandBox.ID,
 		},
-		// A failed Create-from-pause rolls back to its tombstone on this path
-		// too: the cleanup ctx carries the failover marker the restore checks,
-		// but the snapshot itself has to travel on the DestroyContext. The
-		// envd-init failure always happens after createContainers' first Save,
-		// so the debris identity is the row this attempt Saved.
-		PausedReplaceSnapshot:        flowOpts.PausedReplaceSnapshot,
-		PausedReplaceDebrisCreatedAt: flowOpts.PausedReplaceDebrisCreatedAt,
+		// A failed Create-from-pause restores its tombstone from the snapshot
+		// service.Create's gate captured (rollbackPausedReplace runs after
+		// this cleanup and before this RPC returns), so this teardown must
+		// keep the row rather than delete it — the same contract the engine
+		// rollback destroy honours via CreateContext.RollbackKeepsRow.
+		RollbackKeepsRow: flowOpts.RollbackKeepsRow,
 	})
 }
 
@@ -723,11 +714,6 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 	if err := l.cubeboxManger.Save(ctx, sandBox, cubes.WithNoEvent); err != nil {
 		log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
 		return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
-	}
-	if flowOpts.PausedReplaceSnapshot != nil {
-		// This Save overwrote the tombstone; from now on this new row is what
-		// a rollback of this attempt owns (and may restore over).
-		flowOpts.PausedReplaceDebrisCreatedAt = sandBox.CreatedAt
 	}
 	return nil
 }

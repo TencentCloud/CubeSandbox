@@ -298,7 +298,7 @@ paused_resource_release_ratio = 0.5   # 释放一半，保留一半
 当 `ratio > 0` 时，恢复操作会触发**本地实时准入检查**——如果节点当前无法容纳该沙箱释放出去的资源量，恢复会被拒绝：
 
 ```
-resume rejected by paused_resource_release_ratio policy: need 1024MB > quota 512MB
+resume rejected by paused_resource_release_ratio policy: need 1024MB + used 0MB >= mem quota 512MB
 ```
 
 拒绝信息通过以下链路透传给客户端：`Cubelet (130409 Conflict)` → `CubeAPI (HTTP 409)` → `WebUI（显示容量诊断）`。409 是可重试的状态码——当其他沙箱被销毁或暂停、节点资源释放后，恢复可以重新尝试。

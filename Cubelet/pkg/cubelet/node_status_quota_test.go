@@ -143,7 +143,7 @@ func TestScaleCeilMBAvoidsFloatOvershoot(t *testing.T) {
 
 func TestResolveHostQuotaMemMBDecimalFactor(t *testing.T) {
 	stubMachineInfo(t, 4, 102400)
-	got := resolveHostQuotaMemMB(&config.HostConf{
+	got := ResolveHostQuotaMemMB(&config.HostConf{
 		Quota: config.HostConfigQuota{MemOvercommitFactor: 1.1},
 	})
 	if got != 112640 {

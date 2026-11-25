@@ -20,10 +20,10 @@ import (
 
 // realStoreAPI adapts the real cubeboxstore.Store (bolt-backed indexer, the
 // production persistence path) to the cubes.CubeboxAPI the service uses,
-// mirroring cubes.local's Save (Add + Sync) and Get. The tombstone-restore
-// identity check must work against the real store's Save→Sync→Get sequence —
-// including Sync's deep-copy on the persistence path — not just against a
-// fake that preserves pointer identity by construction.
+// mirroring cubes.local's Save (Add + Sync) and Get. The tombstone restore
+// must work against the real store's Save→Sync→Get sequence — including
+// Sync's deep-copy on the persistence path — not just against a fake that
+// preserves pointer identity by construction.
 type realStoreAPI struct {
 	store     *cubeboxstore.Store
 	saveCalls int
@@ -57,17 +57,19 @@ func (r *realStoreAPI) Delete(_ context.Context, opt *cubes.DeleteOption) error 
 	return r.store.DeleteSync(opt.CubeboxID)
 }
 
-// TestRestorePausedReplaceSnapshotAgainstRealStore drives the actual
-// store sequence a create-from-pause rollback sees: tombstone Save'd, new row
-// Save'd over it (the flow's first Save), then the restore Save's the snapshot
-// back and a fresh Get must return the tombstone — with the identity check
-// keyed on the CreatedAt value, which survives Sync's deep copy.
-func TestRestorePausedReplaceSnapshotAgainstRealStore(t *testing.T) {
+// TestRestorePausedTombstoneAgainstRealStore drives the actual store sequence
+// a failed create-from-pause rollback sees: tombstone Save'd, the flow's first
+// Save overwrites it with the new attempt's debris, then the synchronous
+// restore Save's the gate's snapshot back — and a fresh Get through the real
+// indexer must return the tombstone, PAUSED, with the rollback's delete marks
+// scrubbed, so the retry's gate and quota admission see exactly the record the
+// first attempt saw.
+func TestRestorePausedTombstoneAgainstRealStore(t *testing.T) {
 	db, err := utils.NewCubeStoreExt(t.TempDir(), "meta_restore.db", 10, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	mgr := &realStoreAPI{store: cubeboxstore.NewStore(db)}
-	l := &local{cubeboxManger: mgr}
+	s := &service{cubeboxMgr: &local{cubeboxManger: mgr}}
 	ctx := context.Background()
 
 	// The pre-attempt tombstone, as the store holds it before the resume.
@@ -78,9 +80,10 @@ func TestRestorePausedReplaceSnapshotAgainstRealStore(t *testing.T) {
 	tomb.SandboxID = "sb-realstore"
 	tomb.RootfsWritableLayer = "disk/sb-realstore"
 	require.NoError(t, mgr.Save(ctx, tomb))
-	snapshot := tomb.DeepCopy() // what the replacement branch captures
+	snapshot := tomb.DeepCopy() // what the gate captures before the flow runs
 
-	// The flow's first Save overwrites the row with the new attempt's record.
+	// The flow's first Save overwrites the row with the new attempt's record
+	// (runContainer/probe/envd then fail — the common post-Save failure shape).
 	debris := newCubeboxWithStatusForTest("sb-realstore", cubeboxstore.Status{
 		CreatedAt: time.Now().UnixNano(),
 	})
@@ -93,11 +96,13 @@ func TestRestorePausedReplaceSnapshotAgainstRealStore(t *testing.T) {
 	assert.NotEqual(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, cur.GetStatus().Get().State(),
 		"the flow's Save must have replaced the tombstone")
 
-	// The rollback restores the snapshot, keyed on the debris row's CreatedAt.
-	opts := rollbackDestroyContext("sb-realstore")
-	opts.PausedReplaceSnapshot = snapshot
-	opts.PausedReplaceDebrisCreatedAt = debris.CreatedAt
-	require.True(t, l.restorePausedReplaceSnapshot(ctx, opts, "sb-realstore"))
+	// The rollback destroy stamps the delete marks (they let the CDP delete
+	// hooks pass); the restore must scrub them or the restored tombstone would
+	// read as user-deleted to gcservice.allowCleanup.
+	marked := time.Now()
+	snapshot.UserMarkDeletedTime = &marked
+	snapshot.DeleteRequestID = "rollback-destroy"
+	s.restorePausedTombstone(ctx, snapshot)
 
 	// A fresh Get (through the real indexer, after Sync persisted it) must see
 	// the tombstone again, with the fields the retry's gates and rebuild need.
@@ -106,49 +111,27 @@ func TestRestorePausedReplaceSnapshotAgainstRealStore(t *testing.T) {
 	require.NotNil(t, restored)
 	assert.Equal(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, restored.GetStatus().Get().State())
 	assert.Equal(t, snapshot.CreatedAt, restored.CreatedAt,
-		"the restore keeps the tombstone's own CreatedAt — the value identity is stable across Save/Sync/Get")
+		"the restore keeps the tombstone's own CreatedAt — stable across Save/Sync/Get")
 	assert.NotEqual(t, debris.CreatedAt, restored.CreatedAt,
 		"the debris row's identity is gone with it")
 	assert.NotNil(t, restored.ResourceWithOverHead)
 	assert.Equal(t, "disk/sb-realstore", restored.RootfsWritableLayer)
-	assert.Nil(t, restored.UserMarkDeletedTime)
+	assert.Nil(t, restored.UserMarkDeletedTime,
+		"the restored tombstone must not read as user-deleted")
+	assert.Empty(t, restored.DeleteRequestID)
 }
 
-// TestRestoreIdentitySurvivesRealStoreRowReplacement is the negative twin: a
-// newer attempt's Save changes the row's CreatedAt, and the stale rollback's
-// restore must then leave the newer row alone.
-func TestRestoreIdentitySurvivesRealStoreRowReplacement(t *testing.T) {
-	db, err := utils.NewCubeStoreExt(t.TempDir(), "meta_restore_newer.db", 10, nil)
+// TestRestorePausedTombstoneNilSnapshotIsNoop pins the cross-node resume
+// shape: no local tombstone existed, so the rollback destroy is the whole
+// story and the restore hook must not write anything.
+func TestRestorePausedTombstoneNilSnapshotIsNoop(t *testing.T) {
+	db, err := utils.NewCubeStoreExt(t.TempDir(), "meta_restore_nil.db", 10, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	mgr := &realStoreAPI{store: cubeboxstore.NewStore(db)}
-	l := &local{cubeboxManger: mgr}
-	ctx := context.Background()
+	s := &service{cubeboxMgr: &local{cubeboxManger: mgr}}
 
-	tomb := sandboxWithResourceForTest("sb-newer", cubeboxstore.Status{
-		StartedAt: 1,
-		PausedAt:  time.Now().Add(-time.Minute).UnixNano(),
-	}, "0m", "4Gi", 0, 0, 0)
-	tomb.SandboxID = "sb-newer"
-	require.NoError(t, mgr.Save(ctx, tomb))
-	staleSnapshot := tomb.DeepCopy()
-	staleCreatedAt := tomb.CreatedAt
+	s.restorePausedTombstone(context.Background(), nil)
 
-	newer := newCubeboxWithStatusForTest("sb-newer", cubeboxstore.Status{
-		CreatedAt: time.Now().Add(time.Second).UnixNano(),
-	})
-	newer.SandboxID = "sb-newer"
-	require.NoError(t, mgr.Save(ctx, newer))
-
-	savesBefore := mgr.saveCalls
-	opts := rollbackDestroyContext("sb-newer")
-	opts.PausedReplaceSnapshot = staleSnapshot
-	opts.PausedReplaceDebrisCreatedAt = staleCreatedAt
-	assert.True(t, l.restorePausedReplaceSnapshot(ctx, opts, "sb-newer"),
-		"the stale rollback must claim the row (so no delete runs) without restoring over it")
-	assert.Equal(t, savesBefore, mgr.saveCalls, "the stale snapshot must not be saved")
-
-	cur, err := mgr.Get(ctx, "sb-newer")
-	require.NoError(t, err)
-	assert.Equal(t, newer.CreatedAt, cur.CreatedAt, "the newer attempt's row is untouched")
+	assert.Zero(t, mgr.saveCalls, "a nil snapshot must not touch the store")
 }

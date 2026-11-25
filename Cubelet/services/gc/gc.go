@@ -187,6 +187,12 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		// package the user's retried Resume needs. Ordinary (non-failover)
 		// destroys keep the existing quarantine stamping, and a failover over a
 		// non-paused row is genuine debris that cleanup should still own.
+		//
+		// The dirty record created above is NOT stranded by the skipped stamp:
+		// allowCleanup keeps it (instead of dropping it) while the row is a
+		// live unmarked tombstone and re-checks every pass, so the failed
+		// teardown's leftover allocations are reclaimed once the tombstone is
+		// resumed or deleted.
 		if constants.IsFailoverOperation(ctx) &&
 			cb.GetStatus() != nil &&
 			cb.GetStatus().Get().State() == cubebox.ContainerState_CONTAINER_PAUSED {

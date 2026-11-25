@@ -83,3 +83,43 @@ func TestAllowCleanupKeepsLiveSandbox(t *testing.T) {
 		t.Fatalf("live sandbox stayed on the dirty list: %v %+v", err, left)
 	}
 }
+
+// TestAllowCleanupKeepsPausedTombstoneRecord pins the I11 fix: a live,
+// unmarked PAUSED tombstone — the shape a failed Create-from-pause rollback
+// leaves behind — must NOT have its dirty record dropped. Dropping it would
+// strand any host allocations the failed teardown left behind; reclaiming
+// now would destroy the resumable pause package. allowCleanup keeps the
+// record ("not yet") so every pass re-checks and the entry resolves once the
+// tombstone's lifecycle ends (resumed → dropped as live, or deleted →
+// proceeds and reclaims).
+func TestAllowCleanupKeepsPausedTombstoneRecord(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store := &local{config: &GCConfig{RootPath: dir}}
+	if err := store.initDb(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.saveSandBoxInfo(&sandBoxInfo{SandboxID: "sb-paused", Namespace: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := &gcService{gc: store}
+
+	// PAUSED + unmarked: keep the record, defer cleanup.
+	paused := gcRow("sb-paused", cubeboxstore.Status{StartedAt: 1, PausedAt: time.Now().UnixNano()})
+	svc.gc.cubeboxManger = gcBoxStub{cb: paused}
+	if svc.allowCleanup(ctx, "sb-paused") {
+		t.Fatal("a paused tombstone must not be sent to cleanup")
+	}
+	left, err := store.readAll()
+	if err != nil || len(left) != 1 {
+		t.Fatalf("paused tombstone dropped its dirty record (would strand teardown leftovers): %v %+v", err, left)
+	}
+
+	// The same tombstone, now user-delete marked: cleanup proceeds (the
+	// record is reclaimed by the cleanup flow, not by allowCleanup).
+	now := time.Now()
+	paused.UserMarkDeletedTime = &now
+	if !svc.allowCleanup(ctx, "sb-paused") {
+		t.Fatal("a user-deleted paused tombstone must proceed to cleanup")
+	}
+}

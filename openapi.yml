@@ -537,7 +537,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '409':
-          description: Sandbox is already running
+          description: Sandbox is already running, or the resume was rejected by the node's capacity admission (paused_resource_release_ratio policy); the message carries the capacity diagnostic and the rejection is retriable once capacity frees up
           content:
             application/json:
               schema:
