@@ -60,7 +60,8 @@ func TestLegacyTableNeverClaimsPostMechanismCapabilities(t *testing.T) {
 		resolved := FromLegacyVersion(version)
 		require.False(t, resolved.Capabilities.Declared(CapErrorsCoded), "%s: errors.coded", version)
 		require.False(t, resolved.Capabilities.Declared(CapUpdateCheckPauseAllowed), "%s: check_pause_allowed", version)
-		require.Empty(t, resolved.Runtime, "%s: no guest probe result exists for a legacy release", version)
+		require.False(t, resolved.Capabilities.Declared(CapGuestFSFreeze),
+			"%s: freeze support is declared by the agent artifact, not the shim", version)
 	}
 }
 

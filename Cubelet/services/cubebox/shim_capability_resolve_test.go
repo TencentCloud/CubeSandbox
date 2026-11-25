@@ -30,7 +30,7 @@ func resolvedShim(source capability.Source, capabilities capability.Set) capabil
 }
 
 func coordinatedFull() capability.Resolved {
-	return resolvedShim(capability.SourceRuntime, capability.Set{
+	return resolvedShim(capability.SourceArtifact, capability.Set{
 		capability.CapUpdateSnapshotCapture:       capability.LevelInitial,
 		capability.CapUpdateSnapshotCaptureFSOnly: capability.LevelInitial,
 		capability.CapErrorsCoded:                 capability.LevelInitial,
@@ -53,7 +53,7 @@ func TestPinnedShimVersionStillResolvesTheRecordedPin(t *testing.T) {
 		}
 		version, source := pinnedShimVersion(cb)
 		require.Equal(t, "v0.7.2-rc2", version)
-		require.Equal(t, shimVersionSourceComponentPin, source)
+		require.Equal(t, versionSourceComponentPin, source)
 	})
 
 	t.Run("run_template_fallback", func(t *testing.T) {
@@ -68,7 +68,7 @@ func TestPinnedShimVersionStillResolvesTheRecordedPin(t *testing.T) {
 		}
 		version, source := pinnedShimVersion(cb)
 		require.Equal(t, "v0.7.2", version)
-		require.Equal(t, shimVersionSourceRunTemplate, source)
+		require.Equal(t, versionSourceRunTemplate, source)
 	})
 
 	// A sandbox with no pin reports nothing here.
@@ -86,7 +86,7 @@ func TestPinnedShimVersionStillResolvesTheRecordedPin(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				version, source := pinnedShimVersion(tc.cb)
 				require.Empty(t, version)
-				require.Equal(t, shimVersionSourceUnknown, source)
+				require.Equal(t, versionSourceUnknown, source)
 			})
 		}
 	})
@@ -99,7 +99,69 @@ func TestPinnedShimVersionNormalizesPins(t *testing.T) {
 	}}
 	version, source := pinnedShimVersion(cb)
 	require.Equal(t, "sha256-aaaaaaaaaaaa", version)
-	require.Equal(t, shimVersionSourceComponentPin, source)
+	require.Equal(t, versionSourceComponentPin, source)
+}
+
+func TestPinnedComponentVersionReadsOnlyRecordedPins(t *testing.T) {
+	agent := templatetypes.CubeComponentCubeAgent
+
+	t.Run("component_pin_wins", func(t *testing.T) {
+		cb := &cubeboxstore.CubeBox{
+			ComponentVersions: map[string]string{agent: "v0.8.0"},
+			LocalRunTemplate: &templatetypes.LocalRunTemplate{
+				Componts: map[string]templatetypes.LocalComponent{
+					agent: {Component: templatetypes.MachineComponent{Version: "v0.7.3"}},
+				},
+			},
+		}
+		version, source := pinnedComponentVersion(cb, agent)
+		require.Equal(t, "v0.8.0", version)
+		require.Equal(t, versionSourceComponentPin, source)
+	})
+
+	t.Run("run_template_fallback", func(t *testing.T) {
+		cb := &cubeboxstore.CubeBox{LocalRunTemplate: &templatetypes.LocalRunTemplate{
+			Componts: map[string]templatetypes.LocalComponent{
+				agent: {Component: templatetypes.MachineComponent{Version: "v0.7.3-1027-1"}},
+			},
+		}}
+		version, source := pinnedComponentVersion(cb, agent)
+		require.Equal(t, "v0.7.3-1027-1", version)
+		require.Equal(t, versionSourceRunTemplate, source)
+	})
+
+	// A pin recorded for another component must not be mistaken for this one, and
+	// nothing pinned stays unknown: the answer describes the build this sandbox was
+	// created with, so the live install tree is never consulted as a fallback.
+	t.Run("other_pins_and_live_tree_are_not_used", func(t *testing.T) {
+		cb := &cubeboxstore.CubeBox{ComponentVersions: map[string]string{
+			templatetypes.CubeComponentCubeShim:  "v0.8.0",
+			templatetypes.CubeComponentCubeImage: "guest-image-260820-1",
+		}}
+		version, source := pinnedComponentVersion(cb, agent)
+		require.Empty(t, version)
+		require.Equal(t, versionSourceUnknown, source)
+	})
+}
+
+func TestSandboxAgentSelectedPathUsesOnlyTheRunTemplatePath(t *testing.T) {
+	agent := templatetypes.CubeComponentCubeAgent
+	const payload = "/data/cubelet/root/component_versions/cube-agent/v0.8.0/cube-agent.ext4"
+	cb := &cubeboxstore.CubeBox{LocalRunTemplate: &templatetypes.LocalRunTemplate{
+		Componts: map[string]templatetypes.LocalComponent{
+			agent: {Component: templatetypes.MachineComponent{Path: payload}},
+		},
+	}}
+	require.Equal(t, payload, sandboxAgentSelectedPath(cb))
+
+	// A relative path names nothing on this host, and the shim's path is not a
+	// stand-in for the agent's.
+	cb.LocalRunTemplate.Componts[agent] = templatetypes.LocalComponent{
+		Component: templatetypes.MachineComponent{Path: "cube-agent.ext4"},
+	}
+	require.Empty(t, sandboxAgentSelectedPath(cb))
+	require.Empty(t, sandboxAgentSelectedPath(&cubeboxstore.CubeBox{}))
+	require.Empty(t, sandboxAgentSelectedPath(nil))
 }
 
 type recordingLogger struct {
@@ -142,12 +204,12 @@ func TestLogSnapshotPathSelectionNamesTheSource(t *testing.T) {
 func TestLogShimDegradedToLegacyNamesTheSource(t *testing.T) {
 	logger := &recordingLogger{}
 	logShimDegradedToLegacy(logger, capability.Resolved{
-		Source:  capability.SourceRuntime,
+		Source:  capability.SourceArtifact,
 		Version: "v0.8.0",
 	})
 	require.Len(t, logger.warnings, 1)
 	require.Contains(t, logger.warnings[0], "v0.8.0")
-	require.Contains(t, logger.warnings[0], string(capability.SourceRuntime))
+	require.Contains(t, logger.warnings[0], string(capability.SourceArtifact))
 	require.Contains(t, logger.warnings[0], "rejected")
 }
 
@@ -185,9 +247,9 @@ func TestShouldRetryWithLegacy(t *testing.T) {
 
 // Fs-only ignores the declaration; full snapshots follow it.
 func TestUseCoordinatedSnapshotPath(t *testing.T) {
-	legacy := resolvedShim(capability.SourceRuntime, capability.Set{})
+	legacy := resolvedShim(capability.SourceArtifact, capability.Set{})
 	unknown := capability.Resolved{Source: capability.SourceNone}
-	coordinated := resolvedShim(capability.SourceRuntime, capability.Set{
+	coordinated := resolvedShim(capability.SourceArtifact, capability.Set{
 		capability.CapUpdateSnapshotCapture: capability.LevelInitial,
 	})
 
@@ -205,44 +267,49 @@ func TestUseCoordinatedSnapshotPath(t *testing.T) {
 
 // Nothing-known sandboxes must keep attempting the capture.
 func TestFsOnlyRefusalRefusesOnlyOnAPositiveAnswer(t *testing.T) {
-	fsOnlyShim := resolvedShim(capability.SourceRuntime, capability.Set{
+	fsOnlyShim := resolvedShim(capability.SourceArtifact, capability.Set{
 		capability.CapUpdateSnapshotCapture:       capability.LevelInitial,
 		capability.CapUpdateSnapshotCaptureFSOnly: capability.LevelInitial,
 	})
+	// An agent that declares it can freeze, and one that declares it cannot.
+	freezeAgent := resolvedShim(capability.SourceArtifact, capability.Set{
+		capability.CapGuestFSFreeze: capability.LevelInitial,
+	})
+	noFreezeAgent := resolvedShim(capability.SourceArtifact, capability.Set{})
 
 	t.Run("supported", func(t *testing.T) {
-		require.Empty(t, fsOnlyRefusal(fsOnlyShim, snapshotmode.FsOnly))
+		require.Empty(t, fsOnlyRefusal(fsOnlyShim, freezeAgent, snapshotmode.FsOnly))
 	})
 
 	t.Run("shim_declares_no_fs_only", func(t *testing.T) {
-		shim := resolvedShim(capability.SourceRuntime, capability.Set{
+		shim := resolvedShim(capability.SourceArtifact, capability.Set{
 			capability.CapUpdateSnapshotCapture: capability.LevelInitial,
 		})
 		require.Equal(t, snapshotmode.ErrFilesystemOnlyUnsupported,
-			fsOnlyRefusal(shim, snapshotmode.FsOnly))
+			fsOnlyRefusal(shim, freezeAgent, snapshotmode.FsOnly))
 	})
 
-	t.Run("guest_answered_no", func(t *testing.T) {
-		shim := fsOnlyShim
-		shim.Runtime = capability.Set{capability.CapGuestFSFreeze: 0}
+	t.Run("agent_declares_no_freeze", func(t *testing.T) {
 		require.Equal(t, snapshotmode.ErrFilesystemOnlyFreezeUnsupported,
-			fsOnlyRefusal(shim, snapshotmode.FsOnly))
+			fsOnlyRefusal(fsOnlyShim, noFreezeAgent, snapshotmode.FsOnly))
 	})
 
-	t.Run("guest_has_not_answered_yet", func(t *testing.T) {
-		// Absent is unknown, not a refusal: the capture must still be attempted.
-		require.Empty(t, fsOnlyRefusal(fsOnlyShim, snapshotmode.FsOnly))
+	t.Run("agent_declaration_missing_is_attempted", func(t *testing.T) {
+		// Absent is unknown, not a refusal: the capture must still be attempted and
+		// the freeze RPC remains the authority.
+		unknownAgent := capability.Resolved{Source: capability.SourceNone}
+		require.Empty(t, fsOnlyRefusal(fsOnlyShim, unknownAgent, snapshotmode.FsOnly))
 	})
 
 	t.Run("nothing_known", func(t *testing.T) {
 		// The pre-mechanism behaviour for a sandbox created before the upgrade.
-		require.Empty(t, fsOnlyRefusal(
-			capability.Resolved{Source: capability.SourceNone}, snapshotmode.FsOnly))
+		unknown := capability.Resolved{Source: capability.SourceNone}
+		require.Empty(t, fsOnlyRefusal(unknown, unknown, snapshotmode.FsOnly))
 	})
 
 	t.Run("full_requests_are_never_refused_here", func(t *testing.T) {
-		shim := resolvedShim(capability.SourceRuntime, capability.Set{})
-		require.Empty(t, fsOnlyRefusal(shim, snapshotmode.Full))
+		shim := resolvedShim(capability.SourceArtifact, capability.Set{})
+		require.Empty(t, fsOnlyRefusal(shim, noFreezeAgent, snapshotmode.Full))
 	})
 
 	// Unorderable versions must not be refused up front for fs-only.
@@ -250,21 +317,27 @@ func TestFsOnlyRefusalRefusesOnlyOnAPositiveAnswer(t *testing.T) {
 		for _, version := range []string{
 			"v0.8.0-1027-1", "0.8.0-1027-1", "v0.8.0-vendor", "v0.8.0-s1",
 		} {
-			resolved := capability.FromLegacyVersion(version)
-			require.Equal(t, capability.SourceNone, resolved.Source, version)
-			require.Empty(t, fsOnlyRefusal(resolved, snapshotmode.FsOnly),
+			ambiguous := capability.FromLegacyVersion(version)
+			require.Equal(t, capability.SourceNone, ambiguous.Source, version)
+			require.Empty(t, fsOnlyRefusal(ambiguous, ambiguous, snapshotmode.FsOnly),
 				"%s must be attempted, not refused up front", version)
+			// Same rule on the agent side.
+			require.Empty(t, fsOnlyRefusal(fsOnlyShim, capability.FromLegacyAgentVersion(version),
+				snapshotmode.FsOnly), "%s agent side", version)
 		}
 	})
 
 	// A version the table can order keeps its exact answer.
 	t.Run("orderable_versions_keep_their_answer", func(t *testing.T) {
-		require.Empty(t, fsOnlyRefusal(capability.FromLegacyVersion("v0.8.0"), snapshotmode.FsOnly))
+		require.Empty(t, fsOnlyRefusal(capability.FromLegacyVersion("v0.8.0"), freezeAgent, snapshotmode.FsOnly))
 		require.Equal(t, snapshotmode.ErrFilesystemOnlyUnsupported,
-			fsOnlyRefusal(capability.FromLegacyVersion("v0.7.3"), snapshotmode.FsOnly))
+			fsOnlyRefusal(capability.FromLegacyVersion("v0.7.3"), freezeAgent, snapshotmode.FsOnly))
 		require.Equal(t, snapshotmode.ErrFilesystemOnlyUnsupported,
-			fsOnlyRefusal(capability.FromLegacyVersion("0.7.3-1027-1"), snapshotmode.FsOnly),
+			fsOnlyRefusal(capability.FromLegacyVersion("0.7.3-1027-1"), freezeAgent, snapshotmode.FsOnly),
 			"an internal build number older than the boundary is still orderable")
+		// The agent table answers independently.
+		require.Equal(t, snapshotmode.ErrFilesystemOnlyFreezeUnsupported,
+			fsOnlyRefusal(fsOnlyShim, capability.FromLegacyAgentVersion("0.7.3-1027-1"), snapshotmode.FsOnly))
 	})
 }
 
@@ -272,7 +345,7 @@ func TestShimSupportsCheckPauseAllowedPrefersTheDeclaration(t *testing.T) {
 	require.True(t, shimSupportsCheckPauseAllowed(capability.Resolved{Source: capability.SourceNone}),
 		"nothing known: attempt the preflight, an old shim falls through harmlessly")
 	require.True(t, shimSupportsCheckPauseAllowed(
-		resolvedShim(capability.SourceRuntime, capability.Set{capability.CapUpdateCheckPauseAllowed: 1})))
+		resolvedShim(capability.SourceArtifact, capability.Set{capability.CapUpdateCheckPauseAllowed: 1})))
 	require.False(t, shimSupportsCheckPauseAllowed(
 		resolvedShim(capability.SourceLegacyTable, capability.Set{capability.CapUpdateSnapshotCapture: 1})),
 		"a positive statement that the action is absent must not be called")
@@ -280,7 +353,7 @@ func TestShimSupportsCheckPauseAllowedPrefersTheDeclaration(t *testing.T) {
 
 // A shim declaring errors.coded is judged by its code, not prose.
 func TestClassifyShimErrorPrefersTheCode(t *testing.T) {
-	coded := resolvedShim(capability.SourceRuntime, capability.Set{capability.CapErrorsCoded: 1})
+	coded := resolvedShim(capability.SourceArtifact, capability.Set{capability.CapErrorsCoded: 1})
 	uncoded := capability.Resolved{Source: capability.SourceNone}
 
 	t.Run("coded_unknown_action", func(t *testing.T) {
@@ -333,35 +406,35 @@ func TestIsPauseBusyRejectUnderstandsBothForms(t *testing.T) {
 	}
 }
 
-func TestSandboxShimBundleLookupSuppliesTheSandboxNamespace(t *testing.T) {
-	// Snapshot/pause decisions carry no namespace; the lookup supplies the sandbox's.
-	previous := resolveShimBundles
-	t.Cleanup(func() { resolveShimBundles = previous })
-
+// The shim manager refuses a context without a namespace, and an unstamped lookup
+// would silently find nothing while destroy believes nothing holds the resources.
+func TestShimLookupContextSuppliesTheSandboxNamespace(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb-ns", Namespace: "custom-ns"}}
 
-	var seenNamespace string
-	resolveShimBundles = func(_ *local, ctx context.Context, _ *cubeboxstore.CubeBox) []string {
-		if ns, ok := namespaces.Namespace(ctx); ok {
-			seenNamespace = ns
-		}
-		return []string{"/bundle"}
-	}
-	l := &local{}
-	require.Equal(t, "/bundle", l.sandboxShimBundlePath(context.Background(), cb))
-	require.Equal(t, "custom-ns", seenNamespace,
-		"the lookup must carry the sandbox's namespace")
+	ns, ok := namespaces.Namespace(shimLookupContext(context.Background(), cb))
+	require.True(t, ok, "the lookup must carry a namespace")
+	require.Equal(t, "custom-ns", ns)
+
+	// An explicit namespace already on the context wins: callers that know better
+	// must not be overridden.
+	pre := namespaces.WithNamespace(context.Background(), "already-set")
+	ns, _ = namespaces.Namespace(shimLookupContext(pre, cb))
+	require.Equal(t, "already-set", ns)
+
+	// A sandbox without one falls back to the containerd default.
+	ns, _ = namespaces.Namespace(shimLookupContext(context.Background(), &cubeboxstore.CubeBox{}))
+	require.Equal(t, namespaces.Default, ns)
 }
 
-func TestSandboxShimArtifactDirUsesOnlyRecordedAbsolutePaths(t *testing.T) {
+func TestSandboxShimSelectedPathUsesOnlyRecordedAbsolutePaths(t *testing.T) {
 	t.Run("runtime annotation_wins", func(t *testing.T) {
 		cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{
 			Annotations: map[string]string{
 				constants.AnnotationCubeletInternalRuntimePath: "/data/cubelet/root/component_versions/cube-shim/v0.8.0/bin/containerd-shim-cube-rs",
 			},
 		}}
-		require.Equal(t, "/data/cubelet/root/component_versions/cube-shim/v0.8.0",
-			sandboxShimArtifactDir(cb))
+		require.Equal(t, "/data/cubelet/root/component_versions/cube-shim/v0.8.0/bin/containerd-shim-cube-rs",
+			sandboxShimSelectedPath(cb))
 	})
 
 	t.Run("absolute template path is used", func(t *testing.T) {
@@ -372,20 +445,21 @@ func TestSandboxShimArtifactDirUsesOnlyRecordedAbsolutePaths(t *testing.T) {
 				}},
 			},
 		}}
-		require.Equal(t, "/usr/local/services/cubetoolbox/cube-shim", sandboxShimArtifactDir(cb))
+		require.Equal(t, "/usr/local/services/cubetoolbox/cube-shim/bin/containerd-shim-cube-rs",
+			sandboxShimSelectedPath(cb))
 	})
 
 	t.Run("relative or missing path yields nothing", func(t *testing.T) {
 		// A relative path names nothing on this host.
-		require.Empty(t, sandboxShimArtifactDir(&cubeboxstore.CubeBox{LocalRunTemplate: &templatetypes.LocalRunTemplate{
+		require.Empty(t, sandboxShimSelectedPath(&cubeboxstore.CubeBox{LocalRunTemplate: &templatetypes.LocalRunTemplate{
 			Componts: map[string]templatetypes.LocalComponent{
 				templatetypes.CubeComponentCubeShim: {Component: templatetypes.MachineComponent{
 					Path: "bin/containerd-shim-cube-rs",
 				}},
 			},
 		}}))
-		require.Empty(t, sandboxShimArtifactDir(&cubeboxstore.CubeBox{}))
-		require.Empty(t, sandboxShimArtifactDir(nil))
+		require.Empty(t, sandboxShimSelectedPath(&cubeboxstore.CubeBox{}))
+		require.Empty(t, sandboxShimSelectedPath(nil))
 	})
 
 	// The selection order must mirror withRuntimePathOpt: OciRuntime.Path, run
@@ -408,72 +482,20 @@ func TestSandboxShimArtifactDirUsesOnlyRecordedAbsolutePaths(t *testing.T) {
 		}
 
 		// Selection order asserted by withRuntimePathOpt: each later source wins.
-		require.Equal(t, "/annotated/v0.9.0", sandboxShimArtifactDir(cb),
+		require.Equal(t, "/annotated/v0.9.0/bin/containerd-shim-cube-rs", sandboxShimSelectedPath(cb),
 			"the annotation wins when all three are present")
 
 		delete(cb.Annotations, constants.AnnotationCubeletInternalRuntimePath)
-		require.Equal(t, "/template/v0.7.3", sandboxShimArtifactDir(cb),
+		require.Equal(t, "/template/v0.7.3/bin/containerd-shim-cube-rs", sandboxShimSelectedPath(cb),
 			"the run template wins over the registry default")
 
 		cb.LocalRunTemplate = nil
-		require.Equal(t, "/ociruntime/v0.8.0", sandboxShimArtifactDir(cb),
+		require.Equal(t, "/ociruntime/v0.8.0/bin/containerd-shim-cube-rs", sandboxShimSelectedPath(cb),
 			"OciRuntime.Path is the base the other two override, not something to skip")
 	})
 }
 
-func TestSandboxCapabilitiesRoundTripThroughTheRecord(t *testing.T) {
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb"}}
-	cb.RecordResolvedShimCapabilities(capability.Resolved{
-		Capabilities: capability.Set{capability.CapUpdateSnapshotCapture: 1},
-		Runtime:      capability.Set{capability.CapGuestFSFreeze: 0},
-		Source:       capability.SourceRuntime,
-		Version:      "v0.8.0",
-	})
-
-	resolved := cb.ResolvedShimCapabilities()
-	require.Equal(t, capability.SourceRuntime, resolved.Source)
-	require.Equal(t, "v0.8.0", resolved.Version)
-	require.True(t, resolved.Capabilities.Has(capability.CapUpdateSnapshotCapture, 1))
-	require.True(t, resolved.Runtime.KnownUnsupported(capability.CapGuestFSFreeze, 1))
-
-	// The persisted form must survive Store.Sync's serialisation of a DeepCopy.
-	copied := cb.DeepCopy()
-	require.NotNil(t, copied.ShimCapabilities)
-	require.Equal(t, cb.ShimCapabilities.Source, copied.ShimCapabilities.Source)
-
-	// Replacing the record removes capabilities the new shim does not have.
-	cb.RecordResolvedShimCapabilities(capability.Resolved{
-		Capabilities: capability.Set{},
-		Source:       capability.SourceNone,
-	})
-	replaced := cb.ResolvedShimCapabilities()
-	require.Equal(t, capability.SourceNone, replaced.Source)
-	require.Empty(t, replaced.Capabilities)
-}
-
-func TestShimCapabilityRecordDeepCopyIsIndependent(t *testing.T) {
-	original := &cubeboxstore.ShimCapabilitiesRecord{
-		Capabilities: map[string]uint32{capability.CapUpdateSnapshotCapture: 1},
-		Runtime:      map[string]uint32{capability.CapGuestFSFreeze: 1},
-		Source:       string(capability.SourceRuntime),
-	}
-	copied := original.DeepCopy()
-	copied.Capabilities[capability.CapUpdateSnapshotCapture] = 2
-	copied.Runtime[capability.CapGuestFSFreeze] = 0
-	require.Equal(t, uint32(1), original.Capabilities[capability.CapUpdateSnapshotCapture])
-	require.Equal(t, uint32(1), original.Runtime[capability.CapGuestFSFreeze])
-	require.Nil(t, (*cubeboxstore.ShimCapabilitiesRecord)(nil).DeepCopy())
-}
-
-func TestShimCapabilityFileExists(t *testing.T) {
-	dir := t.TempDir()
-	require.False(t, shimCapabilityFileExists(dir))
-	require.False(t, shimCapabilityFileExists(""))
-	writeCapabilityFile(t, dir, capability.RuntimeFileName, "v0.8.0", nil)
-	require.True(t, shimCapabilityFileExists(dir))
-}
-
-// writeCapabilityFile writes a shim capability document into dir.
+// writeCapabilityFile writes a component capability document into dir.
 func writeCapabilityFile(t *testing.T, dir, name, version string, caps map[string]uint32) string {
 	t.Helper()
 	body := fmt.Sprintf(`{"schema":1,"component":"cube-shim","version":%q`, version)
@@ -488,4 +510,27 @@ func writeCapabilityFile(t *testing.T, dir, name, version string, caps map[strin
 	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
 	return path
+}
+
+// installShimArtifactForTest creates a shim artifact tree carrying a declaration
+// and returns its root, so a test can drive resolution from a real file.
+func installShimArtifactForTest(t *testing.T, version string, caps map[string]uint32) string {
+	t.Helper()
+	root := t.TempDir()
+	writeCapabilityFile(t, root, capability.ArtifactFileName, version, caps)
+	return root
+}
+
+// pinShimArtifactForTest records the artifact path and version on a sandbox the
+// way a create does, which is what resolution reads.
+func pinShimArtifactForTest(cb *cubeboxstore.CubeBox, artifactRoot, version string) {
+	cb.ComponentVersions = map[string]string{templatetypes.CubeComponentCubeShim: version}
+	cb.LocalRunTemplate = &templatetypes.LocalRunTemplate{
+		Componts: map[string]templatetypes.LocalComponent{
+			templatetypes.CubeComponentCubeShim: {Component: templatetypes.MachineComponent{
+				Path:    filepath.Join(artifactRoot, "bin", "containerd-shim-cube-rs"),
+				Version: version,
+			}},
+		},
+	}
 }

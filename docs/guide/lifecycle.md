@@ -202,10 +202,12 @@ Rotating `lifecycleManager.adminToken` rolls the master, proxy and lifecycle-man
 
 ## Snapshot capability declaration
 
-A snapshot's capture path depends on what the **shim serving that sandbox** can do, so Cubelet asks the shim instead of inferring it. A shim declares its capabilities in a document (`CubeShim/docs/shimapi/README.md`) published in two places:
+A snapshot's capture path depends on what the **components backing that sandbox** can do, so each component declares it instead of Cubelet inferring it. Every component publishes a `capabilities.json` next to its `version` marker (`CubeShim/docs/shimapi/README.md`):
 
-* `<bundle>/cube-shim-capabilities.json` — written by the running shim itself, so it describes the process that will answer the request. This is what Cubelet prefers after a Cubelet restart, and after any capture.
-* `<component root>/capabilities.json` — shipped with the released build, next to `version.json`. Used when no sandbox is running yet.
+* `cube-shim` declares which capture actions it routes.
+* `cube-agent` declares whether the guest can freeze a filesystem.
+
+Cubelet reads these from the versioned component directories it already keeps for every installed version, so nothing is written or probed per sandbox, and a sandbox is always judged by the exact builds it was created with.
 
 Releases that predate the mechanism are covered by a frozen table inside Cubelet, so their sandboxes keep exactly the behaviour they had. A sandbox Cubelet learns nothing about keeps the historical best-effort path — **unknown is never treated as "cannot"**.
 
@@ -214,7 +216,7 @@ What this means for you:
 * **Full snapshots of a sandbox with no pinned shim version now take the consistent (coordinated) path** when the shim running it supports it. Previously such a sandbox was silently downgraded to the legacy best-effort path, whose rootfs capture can tear on `jfs`. The snapshot is still a full snapshot; only how it is captured changed, and the result is strictly more consistent.
 * **A filesystem-only snapshot that cannot work is refused up front**: when the shim, or the guest agent behind it, positively reports that it cannot capture without memory, Cubelet returns `409 snapshot_filesystem_only_unsupported_node` before pausing the VM. Previously the same request paused the guest and then failed.
 * **Pause preflight is skipped for shims that do not route it.** This only removes a wasted round trip; Pause still refuses while exec sessions are open.
-* Nothing changes for a sandbox whose shim cannot be identified at all: it behaves exactly as it did before the upgrade.
+* Nothing changes for a sandbox whose components cannot be identified at all: it behaves exactly as it did before the upgrade.
 
 ## Platform-managed Auto-pause / Auto-resume
 

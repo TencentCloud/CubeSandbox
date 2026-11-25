@@ -33,7 +33,15 @@ func fullDocument() Document {
 			CapUpdateSnapshotCaptureFSOnly: LevelInitial,
 			CapErrorsCoded:                 LevelInitial,
 		},
-		Runtime: map[string]uint32{CapGuestFSFreeze: 1},
+	}
+}
+
+func agentDocument() Document {
+	return Document{
+		Schema:       SchemaVersion,
+		Component:    "cube-agent",
+		Version:      "v0.8.0",
+		Capabilities: map[string]uint32{CapGuestFSFreeze: LevelInitial},
 	}
 }
 
@@ -45,7 +53,6 @@ func TestReadDocumentAcceptsARegularFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "v0.8.0", doc.Version)
 	require.True(t, Set(doc.Capabilities).Has(CapUpdateSnapshotCaptureFSOnly, 1))
-	require.Equal(t, uint32(1), doc.Runtime[CapGuestFSFreeze])
 }
 
 func TestReadDocumentRefusesASymlink(t *testing.T) {
@@ -101,67 +108,66 @@ func TestReadDocumentRefusesAnEmptyPath(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestResolvePrefersTheRunningShimOverEverythingElse(t *testing.T) {
-	bundle := t.TempDir()
-	artifact := t.TempDir()
-
-	// The bundle describes the process that will answer: fs-only present.
-	writeDoc(t, bundle, RuntimeFileName, Document{
-		Schema: SchemaVersion, Component: "cube-shim", Version: "v0.8.0",
-		Capabilities: map[string]uint32{CapUpdateSnapshotCapture: 1, CapUpdateSnapshotCaptureFSOnly: 1},
-		Runtime:      map[string]uint32{CapGuestFSFreeze: 0},
-	})
-	// The artifact of the pinned (older) version would say otherwise.
-	writeDoc(t, artifact, ArtifactFileName, Document{
-		Schema: SchemaVersion, Component: "cube-shim", Version: "v0.7.2",
-		Capabilities: map[string]uint32{CapUpdateSnapshotCapture: 1},
-	})
-
-	resolved := Resolve(bundle, artifact, "v0.7.2", nil)
-	require.Equal(t, SourceRuntime, resolved.Source)
-	require.True(t, resolved.Capabilities.Has(CapUpdateSnapshotCaptureFSOnly, 1),
-		"the running shim wins over the pinned version")
-	require.True(t, resolved.Runtime.KnownUnsupported(CapGuestFSFreeze, 1),
-		"a refused guest answer is carried through")
-}
-
-func TestResolveFallsBackToTheArtifactWhenTheBundleHasNoFile(t *testing.T) {
-	bundle := t.TempDir()
+// The artifact declaration is the only per-version source: a running process
+// publishes nothing, so this is what a decision must be based on.
+func TestResolveUsesTheArtifactDeclaration(t *testing.T) {
 	artifact := t.TempDir()
 	writeDoc(t, artifact, ArtifactFileName, fullDocument())
 
-	var reported []Source
-	resolved := Resolve(bundle, artifact, "v0.8.0", func(s Source, _ error) { reported = append(reported, s) })
+	resolved := Resolve(artifact, "v0.8.0", nil)
 	require.Equal(t, SourceArtifact, resolved.Source)
+	require.True(t, resolved.Capabilities.Has(CapUpdateSnapshotCapture, 1))
 	require.True(t, resolved.Capabilities.Has(CapUpdateSnapshotCaptureFSOnly, 1))
-	require.Empty(t, reported, "a missing runtime file is the ordinary case, not an error")
 }
 
-func TestResolveReportsAnUnusableFileAndKeepsFallingThrough(t *testing.T) {
-	bundle := t.TempDir()
-	artifact := t.TempDir()
-	// A corrupt runtime file must not stop the chain.
-	require.NoError(t, os.WriteFile(filepath.Join(bundle, RuntimeFileName), []byte("{oops"), 0o644))
-	writeDoc(t, artifact, ArtifactFileName, fullDocument())
-
-	var reported []Source
-	resolved := Resolve(bundle, artifact, "v0.8.0", func(s Source, _ error) { reported = append(reported, s) })
-	require.Equal(t, SourceArtifact, resolved.Source)
-	require.Equal(t, []Source{SourceRuntime}, reported)
-}
-
-func TestResolveFallsBackToTheLegacyTable(t *testing.T) {
-	resolved := Resolve(t.TempDir(), t.TempDir(), "v0.7.3", nil)
+// A missing declaration must fall through to the frozen table rather than erroring.
+func TestResolveFallsBackToTheFrozenTable(t *testing.T) {
+	resolved := Resolve(t.TempDir(), "v0.7.3", nil)
 	require.Equal(t, SourceLegacyTable, resolved.Source)
 	require.True(t, resolved.Capabilities.Has(CapUpdateSnapshotCapture, 1))
 	require.False(t, resolved.Capabilities.Has(CapUpdateSnapshotCaptureFSOnly, 1))
 }
 
+// A corrupt declaration is reported and then falls through: the caller gets the
+// same answer the previous release would have given, and the problem is visible.
+func TestResolveReportsAnUnusableDeclarationAndKeepsFallingThrough(t *testing.T) {
+	artifact := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(artifact, ArtifactFileName), []byte("{oops"), 0o644))
+
+	var reported []Source
+	resolved := Resolve(artifact, "v0.8.0", func(s Source, _ error) { reported = append(reported, s) })
+	require.Equal(t, SourceLegacyTable, resolved.Source)
+	require.Equal(t, []Source{SourceArtifact}, reported)
+	require.True(t, resolved.Capabilities.Has(CapUpdateSnapshotCaptureFSOnly, 1),
+		"the frozen table answers for a known version even when the artifact is unusable")
+}
+
 func TestResolveWithNothingKnownStaysEmpty(t *testing.T) {
-	resolved := Resolve(t.TempDir(), t.TempDir(), "", nil)
+	resolved := Resolve(t.TempDir(), "", nil)
 	require.Equal(t, SourceNone, resolved.Source)
 	require.True(t, resolved.Empty())
-	require.Empty(t, resolved.Capabilities)
+}
+
+// The guest agent uses the same two-level rule, with its own frozen table.
+func TestResolveGuestUsesTheAgentArtifact(t *testing.T) {
+	artifact := t.TempDir()
+	writeDoc(t, artifact, ArtifactFileName, agentDocument())
+
+	resolved := ResolveGuest(artifact, "v0.8.0", nil)
+	require.Equal(t, SourceArtifact, resolved.Source)
+	require.Equal(t, "cube-agent", agentDocument().Component)
+	require.True(t, resolved.Capabilities.Has(CapGuestFSFreeze, 1))
+}
+
+func TestResolveGuestFallsBackToTheAgentTable(t *testing.T) {
+	resolved := ResolveGuest(t.TempDir(), "v0.7.3", nil)
+	require.Equal(t, SourceLegacyTable, resolved.Source)
+	require.False(t, resolved.Capabilities.Has(CapGuestFSFreeze, 1),
+		"an agent older than the freeze RPCs cannot freeze")
+
+	resolved = ResolveGuest(t.TempDir(), "v0.8.0", nil)
+	require.Equal(t, SourceLegacyTable, resolved.Source)
+	require.True(t, resolved.Capabilities.Has(CapGuestFSFreeze, 1))
 }
 
 func TestArtifactDirForClimbsOutOfTheBinDirectory(t *testing.T) {
@@ -174,4 +180,8 @@ func TestArtifactDirForClimbsOutOfTheBinDirectory(t *testing.T) {
 	require.Equal(t,
 		"/usr/local/services/cubetoolbox/cube-shim",
 		ArtifactDirFor("/usr/local/services/cubetoolbox/cube-shim/bin/containerd-shim-cube-rs"))
+	// The agent artifact is a flat directory: the payload sits directly in it.
+	require.Equal(t,
+		"/data/cubelet/root/component_versions/cube-agent/v0.8.0",
+		ArtifactDirFor("/data/cubelet/root/component_versions/cube-agent/v0.8.0/cube-agent.ext4"))
 }

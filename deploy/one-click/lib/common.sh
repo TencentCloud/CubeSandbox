@@ -995,14 +995,19 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
-# assert_shim_capabilities FILE: validate a shim capability declaration.
-assert_shim_capabilities() {
+# assert_component_capabilities FILE [COMPONENT]
+#
+# Rejects a declaration Cubelet could not read. An unreadable one degrades silently
+# at runtime, so the build has to be the thing that catches it. The check lives next
+# to CubeShim so every build path validates identically.
+assert_component_capabilities() {
   local path="$1"
-  local validator="${ONE_CLICK_DIR}/../../CubeShim/scripts/check-shim-capabilities.py"
+  local component="${2:-}"
+  local validator="${ONE_CLICK_DIR}/../../CubeShim/scripts/check-component-capabilities.py"
   ensure_file "${path}"
   ensure_file "${validator}"
-  python3 "${validator}" "${path}" \
-    || die "invalid shim capability declaration: ${path}"
+  python3 "${validator}" "${path}" ${component:+"${component}"} \
+    || die "invalid ${component:-component} capability declaration: ${path}"
 }
 
 # sha256 hex of a file (no "sha256:" prefix).

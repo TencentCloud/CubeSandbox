@@ -122,7 +122,7 @@ chmod +x "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" "${RUNTIM
 log "generating cube-shim capability declaration"
 "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" --print-capabilities \
   > "${RUNTIME_LAYOUT_DIR}/cube-shim/capabilities.json"
-assert_shim_capabilities "${RUNTIME_LAYOUT_DIR}/cube-shim/capabilities.json"
+assert_component_capabilities "${RUNTIME_LAYOUT_DIR}/cube-shim/capabilities.json" cube-shim
 prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 
 log "building guest image artifacts via build-guest-image.sh"

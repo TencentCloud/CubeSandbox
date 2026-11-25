@@ -13,21 +13,23 @@ import (
 	"path/filepath"
 )
 
-// Document is the on-disk shape published by CubeShim, used by both the artifact
-// file and the running shim's bundle file.
+// Document is the on-disk shape published by a component's artifact. Every
+// component uses the same shape.
 type Document struct {
 	Schema       int               `json:"schema"`
 	Component    string            `json:"component"`
 	Version      string            `json:"version"`
 	Capabilities map[string]uint32 `json:"capabilities"`
-	Runtime      map[string]uint32 `json:"runtime"`
 }
 
 // SchemaVersion is the only document schema this build reads.
 const SchemaVersion = 1
 
-// ReadDocument reads and validates one capability document as untrusted input.
-// An error means this source has nothing usable; callers fall through to the next.
+// ReadDocument reads and validates one capability document.
+//
+// The file is untrusted input, so symlinks and non-regular files are refused, the
+// read is bounded, and every name and level is validated. An error means this
+// source has nothing usable; it never means the component declares nothing.
 func ReadDocument(path string) (*Document, error) {
 	if path == "" {
 		return nil, errors.New("capability path is empty")
@@ -49,7 +51,8 @@ func ReadDocument(path string) (*Document, error) {
 	}
 	defer func() { _ = file.Close() }()
 
-	// Read one byte past the limit so an oversized file is detected.
+	// Read one byte past the limit so an oversized file is detected rather than
+	// silently truncated into a valid-looking document.
 	body, err := io.ReadAll(io.LimitReader(file, maxDocumentBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -68,14 +71,12 @@ func ReadDocument(path string) (*Document, error) {
 	if err := Validate(Set(doc.Capabilities)); err != nil {
 		return nil, fmt.Errorf("%s capabilities: %w", path, err)
 	}
-	if err := Validate(Set(doc.Runtime)); err != nil {
-		return nil, fmt.Errorf("%s runtime capabilities: %w", path, err)
-	}
 	return &doc, nil
 }
 
-// ArtifactDirFor resolves the component root holding capabilities.json from a
-// binary path inside it. An already-directory path is returned as is.
+// ArtifactDirFor resolves the component root that holds `capabilities.json` from
+// a path to a file inside it: `<root>/bin/<binary>` or `<root>/<payload>`.
+// An already-directory path is returned as is.
 func ArtifactDirFor(path string) string {
 	path = filepath.Clean(path)
 	if path == "" || path == "." {
@@ -85,7 +86,6 @@ func ArtifactDirFor(path string) string {
 	if err == nil && info.IsDir() {
 		return path
 	}
-	// <root>/bin/<binary> -> <root>.
 	parent := filepath.Dir(path)
 	if filepath.Base(parent) == "bin" {
 		return filepath.Dir(parent)
@@ -93,61 +93,60 @@ func ArtifactDirFor(path string) string {
 	return parent
 }
 
-// Resolved is the outcome of resolving one sandbox's shim capabilities.
+// Resolved is the outcome of resolving one component's capabilities for one sandbox.
 type Resolved struct {
-	// Capabilities are the shim's own declarations (`update.*`, `errors.*`).
+	// Capabilities are the component's declarations, keyed by capability name.
 	Capabilities Set
-	// Runtime is what the live guest agent reported (`guest.*`).
-	Runtime Set
-	// Source says which of the three sources produced the result.
+	// Source says which source produced the result.
 	Source Source
-	// Version is the version recorded in the document, when one was read.
+	// Version is the version the declaration or table entry describes.
 	Version string
 }
 
-// Empty reports that nothing is known.
+// Empty reports that nothing is known, so every consumer must keep its
+// pre-existing behaviour.
 func (r Resolved) Empty() bool { return r.Source == SourceNone || len(r.Capabilities) == 0 }
 
-// Resolve finds the capabilities of the shim backing one sandbox, trying the
-// bundle runtime file, the artifact declaration, then the frozen historical
-// table, in that order. onError reports sources that could not be used.
-func Resolve(bundleDir, artifactDir, version string, onError func(source Source, err error)) Resolved {
-	report := func(source Source, err error) {
-		if onError != nil && err != nil {
-			onError(source, err)
-		}
+// resolveFromArtifact reads artifactDir's declaration. The bool reports whether
+// one was found and usable.
+func resolveFromArtifact(artifactDir string, onError func(source Source, err error)) (Resolved, bool) {
+	if artifactDir == "" {
+		return Resolved{}, false
 	}
-
-	if bundleDir != "" {
-		doc, err := ReadDocument(filepath.Join(bundleDir, RuntimeFileName))
-		switch {
-		case err == nil:
-			return Resolved{
-				Capabilities: Set(doc.Capabilities).Clone(),
-				Runtime:      Set(doc.Runtime).Clone(),
-				Source:       SourceRuntime,
-				Version:      doc.Version,
-			}
-		case !errors.Is(err, fs.ErrNotExist):
-			// A missing file is the ordinary case; other errors are worth reporting.
-			report(SourceRuntime, err)
+	doc, err := ReadDocument(filepath.Join(artifactDir, ArtifactFileName))
+	switch {
+	case err == nil:
+		return Resolved{
+			Capabilities: Set(doc.Capabilities).Clone(),
+			Source:       SourceArtifact,
+			Version:      doc.Version,
+		}, true
+	case errors.Is(err, fs.ErrNotExist):
+		return Resolved{}, false
+	default:
+		if onError != nil {
+			onError(SourceArtifact, err)
 		}
+		return Resolved{}, false
 	}
+}
 
-	if artifactDir != "" {
-		doc, err := ReadDocument(filepath.Join(artifactDir, ArtifactFileName))
-		switch {
-		case err == nil:
-			return Resolved{
-				Capabilities: Set(doc.Capabilities).Clone(),
-				Runtime:      Set(doc.Runtime).Clone(),
-				Source:       SourceArtifact,
-				Version:      doc.Version,
-			}
-		case !errors.Is(err, fs.ErrNotExist):
-			report(SourceArtifact, err)
-		}
+// Resolve finds what the shim backing one sandbox can do: the released artifact's
+// declaration first, then the frozen table keyed by the pinned version.
+//
+// A missing or malformed file falls through rather than failing the caller, so an
+// unreadable artifact degrades to the previous release's answer.
+func Resolve(artifactDir, version string, onError func(source Source, err error)) Resolved {
+	if resolved, ok := resolveFromArtifact(artifactDir, onError); ok {
+		return resolved
 	}
-
 	return FromLegacyVersion(version)
+}
+
+// ResolveGuest is the same two-level rule applied to the guest agent.
+func ResolveGuest(artifactDir, version string, onError func(source Source, err error)) Resolved {
+	if resolved, ok := resolveFromArtifact(artifactDir, onError); ok {
+		return resolved
+	}
+	return FromLegacyAgentVersion(version)
 }

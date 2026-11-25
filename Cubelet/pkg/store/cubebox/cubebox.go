@@ -287,10 +287,6 @@ type CubeBox struct {
 	MemoryLineage     *MemoryLineage `json:"memory_lineage,omitempty"`
 	memoryLineageLock sync.RWMutex   `json:"-"`
 
-	// ShimCapabilities is what the shim backing this sandbox declared it can do.
-	ShimCapabilities     *ShimCapabilitiesRecord `json:"shim_capabilities,omitempty"`
-	shimCapabilitiesLock sync.RWMutex            `json:"-"`
-
 	sync.RWMutex `json:"-"`
 }
 

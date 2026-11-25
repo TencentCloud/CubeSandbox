@@ -202,19 +202,21 @@ Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由�
 
 ## 快照能力声明
 
-快照走哪条捕获路径取决于**沙箱所在 shim** 的能力，因此 Cubelet 直接询问 shim，而不是靠推断。shim 用一份能力声明文档（见 `CubeShim/docs/shimapi/README.md`）声明自己支持什么，该文档会出现在两个位置：
+快照走哪条捕获路径取决于**该沙箱所用组件**的能力，因此由各组件自行声明，而不是靠 Cubelet 推断。每个组件都在自己的 `version` 标记旁发布一份 `capabilities.json`（详见 `CubeShim/docs/shimapi/README.md`）：
 
-* `<bundle>/cube-shim-capabilities.json`——由正在运行的 shim 自己写入，描述的就是将要处理该请求的那个进程。Cubelet 在重启之后、以及每次捕获之后都优先读它。
-* `<组件根目录>/capabilities.json`——随发布制品一起分发，与 `version.json` 同级。用于还没有运行中沙箱的场景。
+* `cube-shim` 声明它路由了哪些捕获动作。
+* `cube-agent` 声明 guest 能否冻结文件系统。
+
+Cubelet 从本机已保存的各版本组件目录里直接读取，因此**不按沙箱写文件、也不按沙箱探测**，每个沙箱始终按它创建时所用的确切版本判定。
 
 早于该机制的发布版本由 Cubelet 内一张冻结的历史表覆盖，其沙箱行为与升级前完全一致。对于 Cubelet 完全无法识别的沙箱，仍沿用历史上的 best-effort 路径——**未知不会被当作“不支持”**。
 
 对用户可感知的影响：
 
-* **没有固定 shim 版本的沙箱，在运行中的 shim 支持时，full 快照改走协调一致的路径**。此前这类沙箱会被静默降级到 legacy best-effort 路径，其 rootfs 捕获在 `jfs` 上可能出现撕裂。快照仍然是 full 快照，改变的只是捕获方式，一致性严格更好。
+* **没有固定 shim 版本的沙箱，在所用 shim 支持时，full 快照改走协调一致的路径**。此前这类沙箱会被静默降级到 legacy best-effort 路径，其 rootfs 捕获在 `jfs` 上可能出现撕裂。快照仍然是 full 快照，改变的只是捕获方式，一致性严格更好。
 * **注定失败的 fs-only 快照会被提前拒绝**：当 shim 或其背后的 guest agent 明确表示无法在不捕获内存的情况下捕获时，Cubelet 会在暂停 VM 之前返回 `409 snapshot_filesystem_only_unsupported_node`。此前同一个请求会先暂停 guest 再失败。
 * **不对未声明预检的 shim 调用 Pause 预检**：这只是省掉一次无用的往返；存在 exec 会话时 Pause 仍会被拒绝。
-* 完全无法识别 shim 的沙箱行为不变，与升级前一致。
+* 完全无法识别组件的沙箱行为不变，与升级前一致。
 
 ## 平台自动暂停 / 自动恢复
 

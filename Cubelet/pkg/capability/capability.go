@@ -42,11 +42,14 @@ const (
 	CapErrorsCoded = "errors.coded"
 )
 
-// ── runtime (guest) capabilities ─────────────────────────────────────────────
+// ── guest-agent capabilities (`guest.*`) ────────────────────────────────────
+// Declared by the cube-agent artifact, not discovered at runtime.
 
 const (
-	// CapGuestFSFreeze is the guest agent's filesystem-freeze answer.
-	// 1 = supported, 0 = answered and refused; absent = unknown.
+	// CapGuestFSFreeze means the guest agent can freeze and thaw a mounted
+	// filesystem, which is what a filesystem-only snapshot needs. It is published
+	// in the agent artifact's declaration, so it never has to be probed per
+	// sandbox.
 	CapGuestFSFreeze = "guest.fs_freeze"
 )
 
@@ -71,8 +74,6 @@ const LegacyUnknownActionFragment = "unknown update ext action: "
 type Source string
 
 const (
-	// SourceRuntime is the running shim's own bundle file.
-	SourceRuntime Source = "runtime"
 	// SourceArtifact is the released artifact's declaration.
 	SourceArtifact Source = "artifact"
 	// SourceLegacyTable is the frozen table of versions released before this mechanism.
@@ -81,13 +82,9 @@ const (
 	SourceNone Source = "none"
 )
 
-// File names published by CubeShim.
-const (
-	// RuntimeFileName is written by the running shim into its bundle directory.
-	RuntimeFileName = "cube-shim-capabilities.json"
-	// ArtifactFileName sits in the released component tree, next to version.json.
-	ArtifactFileName = "capabilities.json"
-)
+// ArtifactFileName is the capability declaration every released component tree
+// carries, next to its `version` marker and its payload.
+const ArtifactFileName = "capabilities.json"
 
 // Bounds on a document read from disk.
 const (
@@ -102,12 +99,6 @@ var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 func (s Set) Has(name string, min uint32) bool {
 	level, ok := s[name]
 	return ok && level >= min
-}
-
-// KnownUnsupported reports whether name is declared below min.
-func (s Set) KnownUnsupported(name string, min uint32) bool {
-	level, ok := s[name]
-	return ok && level < min
 }
 
 // Declared reports whether name appears at all, at any level.

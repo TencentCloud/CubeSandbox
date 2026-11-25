@@ -215,15 +215,15 @@ func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
 }
 
 func TestUpdateWithPauseCowSkipsPreflightTheShimDoesNotRoute(t *testing.T) {
-	// A shim that declares no CheckPauseAllowed action must not be asked.
+	// A shim that declares no CheckPauseAllowed action must not be asked. The
+	// declaration comes from the artifact of the version the sandbox pinned.
 	sb := newCubeboxWithStatusForTest("sb-no-preflight-capability", cubeboxstore.Status{
 		StartedAt: time.Now().UnixNano(),
 	})
-	sb.RecordResolvedShimCapabilities(capability.Resolved{
-		Source: capability.SourceRuntime,
-		// snapshot_capture present, check_pause_allowed absent.
-		Capabilities: capability.Set{capability.CapUpdateSnapshotCapture: 1},
-	})
+	// snapshot_capture present, check_pause_allowed absent.
+	root := installShimArtifactForTest(t, "v0.8.0",
+		map[string]uint32{capability.CapUpdateSnapshotCapture: 1})
+	pinShimArtifactForTest(sb, root, "v0.8.0")
 	first := sb.FirstContainer()
 	first.Config = &cubebox.ContainerConfig{
 		VolumeMounts: []*cubebox.VolumeMounts{{Name: "root", ContainerPath: "/"}},

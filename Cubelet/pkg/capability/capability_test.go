@@ -11,25 +11,22 @@ import (
 )
 
 func TestSetHasIsLevelAware(t *testing.T) {
-	set := Set{CapUpdateSnapshotCapture: 2, CapGuestFSFreeze: 0}
+	set := Set{CapUpdateSnapshotCapture: 2}
 	require.True(t, set.Has(CapUpdateSnapshotCapture, 1))
 	require.True(t, set.Has(CapUpdateSnapshotCapture, 2))
 	require.False(t, set.Has(CapUpdateSnapshotCapture, 3))
-	// Declared at 0 is a statement, not an absence.
-	require.True(t, set.Declared(CapGuestFSFreeze))
-	require.False(t, set.Has(CapGuestFSFreeze, 1))
-	require.True(t, set.KnownUnsupported(CapGuestFSFreeze, 1))
-	// Absent is never unsupported.
-	require.False(t, set.Declared("guest.not_probed"))
-	require.False(t, set.KnownUnsupported("guest.not_probed", 1))
-	require.False(t, set.Has("guest.not_probed", 0))
+	// Absent is never "unsupported": that would refuse work nobody refused.
+	require.False(t, set.Declared("update.absent"))
+	require.False(t, set.Has("update.absent", 1))
+	require.False(t, set.Has("update.absent", 0))
 }
 
-func TestKnownUnsupportedRequiresADeclarationBelowTheLevel(t *testing.T) {
-	set := Set{CapUpdateSnapshotCapture: 1}
-	require.False(t, set.KnownUnsupported(CapUpdateSnapshotCapture, 1), "supported is not unsupported")
-	require.True(t, set.KnownUnsupported(CapUpdateSnapshotCapture, 2), "below the asked level")
-	require.False(t, set.KnownUnsupported("update.absent", 1))
+// A declared level exists to be compared: a capability ships at a level, and a
+// consumer asks whether that level covers what it needs.
+func TestHasIsLevelAware(t *testing.T) {
+	set := Set{CapGuestFSFreeze: LevelInitial}
+	require.True(t, set.Has(CapGuestFSFreeze, LevelInitial))
+	require.False(t, set.Has(CapGuestFSFreeze, LevelInitial+1))
 }
 
 func TestCloneAndEqualTreatEmptyAsAbsent(t *testing.T) {

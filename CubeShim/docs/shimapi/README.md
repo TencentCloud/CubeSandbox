@@ -55,14 +55,20 @@ live toolbox points at a newer one, and a vendor-suffixed tag has no ordering at
 all.
 
 CubeShim therefore **declares** what it can do, and Cubelet reads that
-declaration. There are two published files and one frozen fallback:
+declaration. There is one published file and one frozen fallback:
 
 | Priority | Source | Path | What it describes |
 |---|---|---|---|
-| 1 | Runtime file | `<bundle>/cube-shim-capabilities.json` | **This shim process** — the one serving the sandbox. Written atomically by the shim when the sandbox is initialised and updated when the guest agent answers. |
-| 2 | Artifact file | `<component root>/capabilities.json` | The released build, next to `version.json` and beside `bin/`. Generated at image build time. |
-| 3 | Historical table | (Cubelet source) | Releases older than this mechanism. The only place in Cubelet that compares shim versions, and it is frozen. |
+| 1 | Artifact file | `<component root>/capabilities.json` | The released build, next to `version` and beside `bin/`. Generated at image build time. |
+| 2 | Historical table | (Cubelet source) | Releases older than this mechanism. The only place in Cubelet that compares component versions, and it is frozen. |
 | — | Nothing known | — | Cubelet keeps its pre-mechanism behaviour. Unknown is never read as "cannot". |
+
+Nothing is written at runtime and nothing is probed per sandbox: everything this
+component can do is fixed when it is built, and the build is already recorded in
+the versioned component directory the sandbox started from. The same two-level
+rule applies to every component that declares capabilities — the guest agent
+publishes its own `capabilities.json` the same way, so "can this sandbox freeze a
+filesystem" is answered by the agent artifact rather than by asking a live agent.
 
 ### Document schema
 
@@ -78,9 +84,6 @@ declaration. There are two published files and one frozen fallback:
     "update.rollback_snapshot": 1,
     "update.pause_to_snapshot": 1,
     "errors.coded": 1
-  },
-  "runtime": {
-    "guest.fs_freeze": 1
   }
 }
 ```
@@ -95,9 +98,11 @@ Rules that keep the format honest:
 3. **A missing file means "declares nothing", not "supports nothing".** Consumers
    that gate on a capability fail closed, but consumers choosing a *fallback* path
    must keep the behaviour they had before the mechanism existed.
-4. **`runtime` is separate from `capabilities`.** It answers a different question
-   (what the guest agent can do) with a different lifetime (it appears after the
-   agent connects).
+4. **Every component declares only what its own build knows.** A component never
+   reports something about another component, and nothing is discovered at
+   runtime: "can the guest agent freeze a filesystem" is published by the agent
+   artifact, not inferred by the shim. That keeps one question answered in one
+   place, and keeps a sandbox's create path free of probes.
 5. **A version the old release table cannot order is "unknown", not "old".**
    Builds that predate this mechanism publish no file, so Cubelet falls back to a
    frozen table keyed by version. That table only answers when the order against a
@@ -109,20 +114,30 @@ Rules that keep the format honest:
    that support them; answering "new enough" would send captures through an action
    the build may not have.
 
-### `runtime.guest.fs_freeze`
+### The guest agent's declaration
 
-Tri-state, and the distinction matters:
+The agent's ability to freeze a filesystem is a property of the agent build, not of
+the sandbox: the RPC surface is fixed at compile time and the endpoint allowlist is
+all-permissive unless a config file says otherwise, which nothing in this repository
+sets. `cube-agent` therefore publishes its own declaration with the same schema:
 
-| Value | Meaning | Consumer behaviour |
-|---|---|---|
-| `1` | The guest agent answered and can freeze a filesystem | Filesystem-only capture may proceed |
-| `0` | The guest agent answered and refused | Refuse a filesystem-only capture up front (409), instead of pausing the VM to find out |
-| absent | Not asked yet, or the probe failed | Fall through to the capture path's own check |
+```json
+{
+  "schema": 1,
+  "component": "cube-agent",
+  "version": "v0.8.0",
+  "capabilities": {
+    "guest.fs_freeze": 1
+  }
+}
+```
 
-The probe runs **off the create path**: once the guest agent answers on the
-sandbox's own connection, the shim asks `GetGuestDetails` in a background task and
-republishes the answer. A create therefore pays no extra round trip, and a slow
-agent simply leaves the value absent.
+Cubelet reads it from the agent version directory the sandbox was created with. A
+filesystem-only capture is refused up front only when a component positively reports
+that it cannot help — the shim lacking the capture mode, or the agent lacking the
+freeze RPCs. A version that predates the declaration falls back to a frozen table;
+if that table cannot order the version, the answer is "unknown" and the capture is
+attempted, with the freeze RPC remaining the authority.
 
 ### Generating the artifact file
 
@@ -131,10 +146,14 @@ file can never describe a different build:
 
 ```bash
 containerd-shim-cube-rs --print-capabilities > capabilities.json
+cube-agent --print-capabilities > capabilities.json
 ```
 
-`CubeShim/Dockerfile` and `deploy/one-click/build-vm-assets.sh` both do this. The
-runtime file is written by the shim itself into its containerd bundle.
+`CubeShim/Dockerfile`, `deploy/one-click/build-vm-assets.sh` and
+`deploy/one-click/build-agent-ext4.sh` all do this, and each validates the result
+with `CubeShim/scripts/check-component-capabilities.py` before the artifact leaves
+the build: an unreadable declaration degrades silently at runtime, so the build has
+to be the one that rejects it.
 
 ## Coded errors
 

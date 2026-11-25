@@ -14,7 +14,9 @@ import (
 // is frozen and covers only releases that predate the capability mechanism.
 
 // legacyVersionFloor is the first release with the coordinated snapshot actions.
-// Keep it at the rc tag: v0.7.2-rc2 is the default image tag and sorts below v0.7.2.
+// It must stay on the release candidate, which sorts below its final release and is
+// the default artifact tag; raising it would drop the shipped default back to the
+// legacy capture path.
 const legacyVersionFloor = "v0.7.2-rc2"
 
 // fsOnlyVersionFloor is the first release with snapshot_mode=fs-only.
@@ -78,8 +80,9 @@ func FromLegacyVersion(version string) Resolved {
 	return Resolved{Source: SourceLegacyTable, Version: version, Capabilities: Set{}}
 }
 
-// CanonicalShimVersion returns the canonical v-prefixed form of version, or empty when invalid.
-func CanonicalShimVersion(version string) string {
+// CanonicalVersion returns the canonical v-prefixed form of version, or empty when
+// it is not a semantic version.
+func CanonicalVersion(version string) string {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		return ""
@@ -93,6 +96,9 @@ func CanonicalShimVersion(version string) string {
 	// IsValid passed, so Canonical only drops build metadata.
 	return semver.Canonical(version)
 }
+
+// CanonicalShimVersion is the shim-specific name for CanonicalVersion.
+func CanonicalShimVersion(version string) string { return CanonicalVersion(version) }
 
 // order says how a version sits relative to a release-candidate boundary.
 type order int

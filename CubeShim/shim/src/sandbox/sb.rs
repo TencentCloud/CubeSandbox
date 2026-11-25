@@ -166,8 +166,6 @@ pub struct SandBox {
     monitor_conn: Option<Client>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
-    /// The containerd bundle directory, where the capability declaration is published.
-    bundle_dir: PathBuf,
 }
 
 impl SandBox {
@@ -210,7 +208,6 @@ impl SandBox {
             monitor_conn: None,
             tx_oom_exited: None,
             oom_handle: None,
-            bundle_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 
@@ -294,63 +291,7 @@ impl SandBox {
         vm_dir.push(self.id.clone());
         stdfs::create_dir_all(vm_dir).map_err(|e| format!("Mkdir vm run dir failed:{}", e))?;
         self.inited = true;
-        self.publish_static_capabilities();
         Ok(())
-    }
-
-    /// Publishes the static capability declaration into the bundle; failures are logged only.
-    fn publish_static_capabilities(&self) {
-        if let Err(e) = capabilities::ensure_runtime_document(&self.bundle_dir) {
-            warnf!(
-                self.log,
-                "publish capability declaration to {} failed: {}",
-                self.bundle_dir.display(),
-                e
-            );
-        }
-    }
-
-    /// Probes the guest agent for filesystem-freeze support and publishes `guest.fs_freeze`.
-    /// Supported (1), refused (0), or no key (unknown).
-    fn spawn_guest_capability_probe(&self) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let bundle_dir = self.bundle_dir.clone();
-        let log = self.log.clone();
-        tokio::spawn(async move {
-            let req = agent::GuestDetailsRequest::default();
-            // Same timeout as the capture path's probe.
-            let probed = {
-                let client = client.lock().await.clone();
-                tokio::time::timeout(
-                    FREEZE_CALL_BACKSTOP,
-                    client.get_guest_details(freeze_rpc_context(), &req),
-                )
-                .await
-            };
-            let level = match probed {
-                Ok(Ok(details)) => Some(u32::from(details.support_filesystem_freeze)),
-                Ok(Err(e)) => {
-                    debugf!(log, "guest capability probe failed: {}", e);
-                    None
-                }
-                Err(_) => {
-                    debugf!(log, "guest capability probe timed out");
-                    None
-                }
-            };
-            let Some(level) = level else {
-                return; // Unknown stays unknown.
-            };
-            if let Err(e) = capabilities::set_runtime_capability(
-                &bundle_dir,
-                capabilities::CAP_GUEST_FS_FREEZE,
-                level,
-            ) {
-                warnf!(log, "record guest fs_freeze capability failed: {}", e);
-            }
-        });
     }
 
     pub fn deinit(&mut self, _spec: Spec) {
@@ -773,8 +714,6 @@ impl SandBox {
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
         }
-        // Probe guest capabilities off the create path.
-        self.spawn_guest_capability_probe();
         stat.set_ok();
         Ok(())
     }
@@ -1932,8 +1871,6 @@ impl SandBox {
             .get_guest_details(freeze_rpc_context(), &req)
             .await
             .map_err(|e| format!("{ERR_FREEZE_UNSUPPORTED}: get guest details failed: {e}"))?;
-        // Publish the authoritative probe answer.
-        self.record_guest_fs_freeze(details.support_filesystem_freeze);
         if !details.support_filesystem_freeze {
             return Err(format!(
                 "{ERR_FREEZE_UNSUPPORTED}: guest agent does not support filesystem freeze"
@@ -1941,17 +1878,6 @@ impl SandBox {
             .into());
         }
         Ok(())
-    }
-
-    /// Republishes `guest.fs_freeze` from an answer the capture path already obtained.
-    fn record_guest_fs_freeze(&self, supported: bool) {
-        if let Err(e) = capabilities::set_runtime_capability(
-            &self.bundle_dir,
-            capabilities::CAP_GUEST_FS_FREEZE,
-            u32::from(supported),
-        ) {
-            warnf!(self.log, "record guest fs_freeze capability failed: {}", e);
-        }
     }
 
     async fn thaw_rootfs(&self, mount_point: &str) -> CResult<()> {
@@ -2235,9 +2161,6 @@ impl SandBox {
                     let mut state = self.state.lock().await;
                     *state = SandBoxState::Normal;
                 }
-
-                // Re-probe after restore; the previous answer no longer applies.
-                self.spawn_guest_capability_probe();
 
                 Ok(())
             })

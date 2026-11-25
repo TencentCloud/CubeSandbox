@@ -5,8 +5,6 @@ package cubebox
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/docker/go-metrics"
@@ -20,9 +18,15 @@ import (
 )
 
 var (
-	// A resolution is counted every time Cubelet resolves a sandbox's shim capabilities.
+	// A resolution is counted every time Cubelet works out what a sandbox's shim
+	// or guest agent can do. The source label is the useful part: a cluster still
+	// reporting `legacy-table` for live sandboxes has not finished rolling the
+	// artifact out, and `none` means those sandboxes keep the pre-mechanism
+	// behaviour.
 	shimCapabilityResolutions metrics.LabeledCounter
-	// Decision counts, by path and by the source that chose it.
+	// Decision counts, by path and by the source that chose it. Only decisions
+	// the capability mechanism actually makes are counted, so the sum is a direct
+	// answer to "how many captures took each path".
 	shimCapabilityDecisions metrics.LabeledCounter
 )
 
@@ -30,8 +34,8 @@ func init() {
 	ns := metrics.NewNamespace("cubebox", "shim", nil)
 	shimCapabilityResolutions = ns.NewLabeledCounter(
 		"capability_resolutions",
-		"Resolutions of a sandbox shim's capabilities, by the source that answered.",
-		"source",
+		"Resolutions of a sandbox component's capabilities, by the source that answered.",
+		"component", "source",
 	)
 	shimCapabilityDecisions = ns.NewLabeledCounter(
 		"capability_decisions",
@@ -41,7 +45,8 @@ func init() {
 	metrics.Register(ns)
 }
 
-// Decision labels for the capability metrics.
+// Decision labels. Kept as constants so the metric vocabulary is reviewable in
+// one place instead of being scattered as string literals at the call sites.
 const (
 	decisionCoordinatedCapture = "coordinated_capture"
 	decisionLegacyCapture      = "legacy_capture"
@@ -49,13 +54,18 @@ const (
 	decisionPausePreflight     = "pause_preflight"
 )
 
-// recordShimCapabilityResolution counts which source answered for a sandbox.
-func recordShimCapabilityResolution(resolved capability.Resolved) {
+// Component labels for the resolution counter.
+const (
+	componentShim  = "cube-shim"
+	componentAgent = "cube-agent"
+)
+
+func recordCapabilityResolution(component string, resolved capability.Resolved) {
 	source := resolved.Source
 	if source == "" {
 		source = capability.SourceNone
 	}
-	shimCapabilityResolutions.WithValues(string(source)).Inc()
+	shimCapabilityResolutions.WithValues(component, string(source)).Inc()
 }
 
 func recordShimCapabilityDecision(decision string, resolved capability.Resolved) {
@@ -66,21 +76,22 @@ func recordShimCapabilityDecision(decision string, resolved capability.Resolved)
 	shimCapabilityDecisions.WithValues(decision, string(source)).Inc()
 }
 
-// sandboxShimBundlePath returns the shim's bundle directory, or empty when unknown.
-// The shim manager requires a namespaced context.
-func (l *local) sandboxShimBundlePath(ctx context.Context, cb *cubeboxstore.CubeBox) string {
-	for _, bundle := range resolveShimBundles(l, shimLookupContext(ctx, cb), cb) {
-		if bundle != "" {
-			return bundle
-		}
-	}
-	return ""
-}
+// componentCapabilityCache is the node-wide answer table. Capabilities are a pure
+// function of the artifact tree and the pinned version, both fixed when a sandbox
+// is created, so one entry serves every sandbox started from that build.
+var componentCapabilityCache = capability.NewCache()
 
-// sandboxShimArtifactDir returns the released component root the sandbox's shim
-// was started from, or empty without an absolute runtime path. The selection
-// order must mirror withRuntimePathOpt in cube_container_create.go.
-func sandboxShimArtifactDir(cb *cubeboxstore.CubeBox) string {
+// sandboxShimSelectedPath returns the absolute path the sandbox's shim was started
+// from, or "" when the sandbox carries none.
+//
+// The precedence must mirror withRuntimePathOpt in cube_container_create.go, which
+// is what selects the shim binary. A mismatch would read another build's
+// declaration. The live toolbox path is not a source: an upgraded node points it
+// at a newer shim.
+//
+// This is the cache key's path component, so it stays the recorded string and is
+// never canonicalised against the filesystem.
+func sandboxShimSelectedPath(cb *cubeboxstore.CubeBox) string {
 	if cb == nil {
 		return ""
 	}
@@ -99,107 +110,119 @@ func sandboxShimArtifactDir(cb *cubeboxstore.CubeBox) string {
 	if path := strings.TrimSpace(cb.Annotations[constants.AnnotationCubeletInternalRuntimePath]); path != "" {
 		selected = path
 	}
-	// A relative path cannot be resolved to a component tree.
 	if !strings.HasPrefix(selected, "/") {
 		return ""
 	}
-	return capability.ArtifactDirFor(selected)
+	return selected
 }
 
-// resolveSandboxShimCapabilities resolves a sandbox's shim capabilities from the most trustworthy source.
-func (l *local) resolveSandboxShimCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
-	return resolveShimCapabilitiesFor(ctx, l, cb)
-}
-
-// Snapshot and pause use the same resolution as the create path.
-func (s *service) resolveSandboxShimCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
-	if s == nil || s.cubeboxMgr == nil {
-		return resolveShimCapabilitiesFor(ctx, nil, cb)
+// sandboxAgentSelectedPath returns the absolute path to the cube-agent payload the
+// sandbox boots with. The agent path is fixed at create time and only recorded in
+// the run template; the live toolbox would describe whatever is installed now.
+func sandboxAgentSelectedPath(cb *cubeboxstore.CubeBox) string {
+	if cb == nil || cb.LocalRunTemplate == nil {
+		return ""
 	}
-	return resolveShimCapabilitiesFor(ctx, s.cubeboxMgr, cb)
+	agent, ok := cb.LocalRunTemplate.Componts[templatetypes.CubeComponentCubeAgent]
+	if !ok {
+		return ""
+	}
+	path := strings.TrimSpace(agent.Component.Path)
+	if !strings.HasPrefix(path, "/") {
+		return ""
+	}
+	return path
+}
+
+// resolveSandboxShimCapabilities resolves a sandbox's shim capabilities from the
+// most trustworthy source available.
+func (l *local) resolveSandboxShimCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
+	return resolveShimCapabilitiesFor(ctx, cb)
+}
+
+// Snapshot and pause use the same resolution as the create path, so the path a
+// capture takes and the path a pause takes can never be chosen from two different
+// answers.
+func (s *service) resolveSandboxShimCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
+	return resolveShimCapabilitiesFor(ctx, cb)
 }
 
 // resolveShimCapabilitiesFor is the single implementation behind both wrappers.
-// bundles may be nil, in which case resolution starts from the artifact declaration.
-func resolveShimCapabilitiesFor(ctx context.Context, bundles *local, cb *cubeboxstore.CubeBox) capability.Resolved {
+// Only the artifact and the frozen table are consulted: nothing is published by a
+// running shim.
+func resolveShimCapabilitiesFor(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
 	if cb == nil {
 		return capability.Resolved{Source: capability.SourceNone}
 	}
-	bundle := ""
-	if bundles != nil {
-		bundle = bundles.sandboxShimBundlePath(ctx, cb)
-	}
-	artifact := sandboxShimArtifactDir(cb)
+	selected := sandboxShimSelectedPath(cb)
 	version, versionSource := pinnedShimVersion(cb)
 
-	resolved := capability.Resolve(bundle, artifact, version, func(source capability.Source, err error) {
-		log.G(ctx).Warnf("sandbox %s: shim capability source %s is unusable, falling through: %v",
-			sandboxIdentity(cb), source, err)
-	})
+	resolved := componentCapabilityCache.Get(componentShim, selected, version,
+		func() capability.Resolved {
+			return capability.Resolve(capability.ArtifactDirFor(selected), version,
+				func(source capability.Source, err error) {
+					log.G(ctx).Warnf("sandbox %s: shim capability source %s is unusable, falling through: %v",
+						sandboxIdentity(cb), source, err)
+				})
+		})
 
-	// The recorded pin only fills in the version for logging when the document omitted it.
 	if resolved.Version == "" {
 		resolved.Version = version
 	}
-	recordShimCapabilityResolution(resolved)
-	log.G(ctx).Debugf("sandbox %s: shim capabilities source=%s version=%q pin_source=%s declared=%v runtime=%v",
+	recordCapabilityResolution(componentShim, resolved)
+	log.G(ctx).Debugf("sandbox %s: shim capabilities source=%s version=%q pin_source=%s declared=%v",
 		sandboxIdentity(cb), resolved.Source, resolved.Version, versionSource,
-		resolved.Capabilities.Names(), resolved.Runtime.Names())
+		resolved.Capabilities.Names())
 
-	// Persist the answer for restarts, later decisions and operator queries.
-	cb.RecordResolvedShimCapabilities(resolved)
 	return resolved
 }
 
-// sandboxShimCapabilities returns the recorded capabilities, resolving on first use.
-func (s *service) sandboxShimCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
+// resolveSandboxGuestCapabilities resolves what the guest agent behind one sandbox
+// can do, using the agent artifact of the version the sandbox was created with.
+func (s *service) resolveSandboxGuestCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
+	return resolveGuestCapabilitiesFor(ctx, cb)
+}
+
+// resolveSandboxGuestCapabilities is the create path's entry point for the same
+// resolution, so a capture decision and a create-time record cannot disagree.
+func (l *local) resolveSandboxGuestCapabilities(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
+	return resolveGuestCapabilitiesFor(ctx, cb)
+}
+
+func resolveGuestCapabilitiesFor(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
 	if cb == nil {
 		return capability.Resolved{Source: capability.SourceNone}
 	}
-	if recorded := cb.ResolvedShimCapabilities(); recorded.Source != "" {
-		return recorded
+	selected := sandboxAgentSelectedPath(cb)
+	version, versionSource := pinnedComponentVersion(cb, templatetypes.CubeComponentCubeAgent)
+
+	resolved := componentCapabilityCache.Get(componentAgent, selected, version,
+		func() capability.Resolved {
+			return capability.ResolveGuest(capability.ArtifactDirFor(selected), version,
+				func(source capability.Source, err error) {
+					log.G(ctx).Warnf("sandbox %s: agent capability source %s is unusable, falling through: %v",
+						sandboxIdentity(cb), source, err)
+				})
+		})
+	if resolved.Version == "" {
+		resolved.Version = version
 	}
+	recordCapabilityResolution(componentAgent, resolved)
+	log.G(ctx).Debugf("sandbox %s: agent capabilities source=%s version=%q pin_source=%s declared=%v",
+		sandboxIdentity(cb), resolved.Source, resolved.Version, versionSource,
+		resolved.Capabilities.Names())
+	return resolved
+}
+
+// shimCapabilitiesForPause uses the same resolution as the snapshot paths: the
+// node-wide cache answers, so no per-sandbox record is read or written.
+func (s *service) shimCapabilitiesForPause(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
 	return s.resolveSandboxShimCapabilities(ctx, cb)
 }
 
-// shimCapabilitiesForPause uses the same resolution as the snapshot paths.
-func (s *service) shimCapabilitiesForPause(ctx context.Context, cb *cubeboxstore.CubeBox) capability.Resolved {
-	return s.sandboxShimCapabilities(ctx, cb)
-}
-
-// refreshShimCapabilitiesAfterRestart re-reads the declaration after a Cubelet restart.
-// The bundle file is authoritative after a restart.
-func (l *local) refreshShimCapabilitiesAfterRestart(ctx context.Context, cb *cubeboxstore.CubeBox) {
-	if cb == nil {
-		return
-	}
-	before := cb.ShimCapabilitiesCopy()
-	resolved := l.resolveSandboxShimCapabilities(ctx, cb)
-	if resolved.Source == capability.SourceNone {
-		return
-	}
-	if capabilitiesRecordEqual(before, cb.ShimCapabilitiesCopy()) {
-		// Nothing changed: skip the write so recovery does not touch every row.
-		return
-	}
-	if err := l.cubeboxManger.SyncByID(ctx, cb.ID); err != nil {
-		log.G(ctx).Warnf("sandbox %s: persist shim capabilities after restart: %v", sandboxIdentity(cb), err)
-	}
-}
-
-// capabilitiesRecordEqual compares two records by content, treating nil as no record.
-func capabilitiesRecordEqual(a, b *cubeboxstore.ShimCapabilitiesRecord) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Source != b.Source || a.Version != b.Version {
-		return false
-	}
-	return capability.Set(a.Capabilities).Equal(capability.Set(b.Capabilities)) &&
-		capability.Set(a.Runtime).Equal(capability.Set(b.Runtime))
-}
-
-// capturePathDecision reports and records which capture path a full snapshot will take.
+// capturePathDecision reports which capture path a full snapshot will take, and
+// records it. Keeping the decision and the log line in one function means the
+// metric cannot describe a path other than the one the caller then takes.
 func capturePathDecision(logger snapshotPathLogger, resolved capability.Resolved) bool {
 	coordinated := resolved.Capabilities.Has(capability.CapUpdateSnapshotCapture, 1)
 	decision := decisionLegacyCapture
@@ -213,27 +236,33 @@ func capturePathDecision(logger snapshotPathLogger, resolved capability.Resolved
 	return coordinated
 }
 
-// fsOnlyRefusal reports why a filesystem-only capture cannot be attempted, or empty.
-// Only a positive answer refuses up front: a known-missing shim capability or a
-// guest refusal. SourceNone deliberately proceeds.
-func fsOnlyRefusal(resolved capability.Resolved, mode snapshotmode.Mode) string {
+// fsOnlyRefusal reports why a filesystem-only capture cannot be attempted, or ""
+// when it may proceed. Two independent questions: does the shim implement the mode,
+// and can the guest agent freeze a filesystem.
+//
+// Only a positive answer refuses up front. SourceNone (a component that predates
+// the mechanism, or an unordered version) proceeds: the capture is attempted and
+// the artifact inspected afterwards, which is the pre-mechanism behaviour.
+func fsOnlyRefusal(shim capability.Resolved, guest capability.Resolved, mode snapshotmode.Mode) string {
 	if !mode.IsFsOnly() {
 		return ""
 	}
-	if resolved.Source != capability.SourceNone &&
-		!resolved.Capabilities.Has(capability.CapUpdateSnapshotCaptureFSOnly, 1) {
-		recordShimCapabilityDecision(decisionFsOnlyRefused, resolved)
+	if shim.Source != capability.SourceNone &&
+		!shim.Capabilities.Has(capability.CapUpdateSnapshotCaptureFSOnly, 1) {
+		recordShimCapabilityDecision(decisionFsOnlyRefused, shim)
 		return snapshotmode.ErrFilesystemOnlyUnsupported
 	}
-	if resolved.Runtime.KnownUnsupported(capability.CapGuestFSFreeze, 1) {
-		recordShimCapabilityDecision(decisionFsOnlyRefused, resolved)
+	if guest.Source != capability.SourceNone &&
+		!guest.Capabilities.Has(capability.CapGuestFSFreeze, 1) {
+		recordShimCapabilityDecision(decisionFsOnlyRefused, guest)
 		return snapshotmode.ErrFilesystemOnlyFreezeUnsupported
 	}
 	return ""
 }
 
 // shimSupportsCheckPauseAllowed reports whether the pause preflight may be called.
-// Nothing known attempts the preflight; a declared lack of the action skips it.
+// Nothing known means attempt it: an older shim rejects the action and falls through
+// to PauseToSnapshot at the cost of one round trip.
 func shimSupportsCheckPauseAllowed(resolved capability.Resolved) bool {
 	if resolved.Source == capability.SourceNone {
 		return true
@@ -241,8 +270,10 @@ func shimSupportsCheckPauseAllowed(resolved capability.Resolved) bool {
 	return resolved.Capabilities.Has(capability.CapUpdateCheckPauseAllowed, 1)
 }
 
-// classifyShimError decides whether err rejects the coordinated capture action.
-// With errors.coded the code decides; otherwise the legacy wording is matched here.
+// classifyShimError reports how err should be classified. With `errors.coded` the
+// code decides and the prose is never read; the code is matched anywhere because
+// Cubelet wraps the error before this sees it. Without it, the wording match below
+// is the only option and is confined to this function.
 func classifyShimError(err error, resolved capability.Resolved) shimErrorKind {
 	if err == nil {
 		return shimErrorNone
@@ -279,12 +310,15 @@ const (
 	shimErrorOther
 )
 
-// shimRejectsCapture reports whether err rejects the coordinated capture action.
+// shimRejectsCapture reports whether err is the shim refusing the coordinated
+// capture action because it does not implement it.
 func shimRejectsCapture(err error, resolved capability.Resolved) bool {
 	return classifyShimError(err, resolved) == shimErrorUnknownAction
 }
 
-// isPauseBusyReject reports a shim pause refusal in coded or legacy form.
+// isPauseBusyReject reports a shim pause refusal. It understands both the coded
+// form and the pre-capability wording, so it works across a rolling upgrade in
+// either direction.
 func isPauseBusyReject(message string) bool {
 	if capability.CodedErrorCode(message) == capability.ErrCodePauseBusy {
 		return true
@@ -296,13 +330,4 @@ func isPauseBusyReject(message string) bool {
 		}
 	}
 	return false
-}
-
-// shimCapabilityFileExists reports whether a bundle carries a runtime declaration.
-func shimCapabilityFileExists(bundleDir string) bool {
-	if bundleDir == "" {
-		return false
-	}
-	info, err := os.Stat(filepath.Join(bundleDir, capability.RuntimeFileName))
-	return err == nil && info.Mode().IsRegular()
 }

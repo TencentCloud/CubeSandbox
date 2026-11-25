@@ -29,7 +29,7 @@ func TestSnapshotCaptureErrorReportsIncompatibleShim(t *testing.T) {
 
 	// A shim declaring errors.coded is judged by its code, not prose.
 	coded := capability.Resolved{
-		Source:       capability.SourceRuntime,
+		Source:       capability.SourceArtifact,
 		Capabilities: capability.Set{capability.CapErrorsCoded: 1},
 	}
 	reworded := fmt.Errorf("update shim: %w",

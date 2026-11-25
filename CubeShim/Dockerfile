@@ -31,7 +31,7 @@ RUN set -eux; \
     install -m 0755 target/release/containerd-shim-cube-rs /out/cube-shim/bin/containerd-shim-cube-rs; \
     install -m 0755 target/release/cube-runtime /out/cube-shim/bin/cube-runtime; \
     /out/cube-shim/bin/containerd-shim-cube-rs --print-capabilities > /out/cube-shim/capabilities.json; \
-    python3 scripts/check-shim-capabilities.py /out/cube-shim/capabilities.json
+    python3 scripts/check-component-capabilities.py /out/cube-shim/capabilities.json cube-shim
 
 COPY deploy/one-click/config-cube.toml /out/cube-shim/conf/config-cube.toml
 

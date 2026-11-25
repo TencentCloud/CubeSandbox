@@ -14,26 +14,35 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
-// Where a recorded shim version came from, for logging.
+// Where a recorded component version came from, for logging.
 const (
-	shimVersionSourceComponentPin = "component-pin"
-	shimVersionSourceRunTemplate  = "run-template"
-	shimVersionSourceUnknown      = "unknown"
+	versionSourceComponentPin = "component-pin"
+	versionSourceRunTemplate  = "run-template"
+	versionSourceUnknown      = "unknown"
 )
+
+// pinnedComponentVersion returns the version of one component pinned to a sandbox.
+//
+// Only recorded pins are consulted, never the live toolbox: the answer describes
+// the build this sandbox was created with, and the install tree describes whatever
+// is installed now.
+func pinnedComponentVersion(cb *cubeboxstore.CubeBox, name string) (version, source string) {
+	if cb == nil {
+		return "", versionSourceUnknown
+	}
+	if v := componentVersionFromMap(cb.ComponentVersions, name); v != "" {
+		return v, versionSourceComponentPin
+	}
+	if v := componentVersionFromMap(versionsFromLocalTemplate(cb.LocalRunTemplate), name); v != "" {
+		return v, versionSourceRunTemplate
+	}
+	return "", versionSourceUnknown
+}
 
 // pinnedShimVersion resolves the shim version pinned to a sandbox. It locates the
 // artifact tree and keys the legacy table; capabilities come from the shim's declaration.
 func pinnedShimVersion(cb *cubeboxstore.CubeBox) (version, source string) {
-	if cb == nil {
-		return "", shimVersionSourceUnknown
-	}
-	if v := componentVersionFromMap(cb.ComponentVersions, templatetypes.CubeComponentCubeShim); v != "" {
-		return v, shimVersionSourceComponentPin
-	}
-	if v := componentVersionFromMap(versionsFromLocalTemplate(cb.LocalRunTemplate), templatetypes.CubeComponentCubeShim); v != "" {
-		return v, shimVersionSourceRunTemplate
-	}
-	return "", shimVersionSourceUnknown
+	return pinnedComponentVersion(cb, templatetypes.CubeComponentCubeShim)
 }
 
 // snapshotPathLogger is the narrow logging surface the path selection needs.
