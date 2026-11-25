@@ -52,6 +52,49 @@ def test_filesystem_snapshot_restore_uses_long_timeout(monkeypatch, create_optio
     assert captured == expected
 
 
+def test_filesystem_snapshot_restart_waits_for_a_new_restart(monkeypatch):
+    events = []
+    waits = iter(
+        [
+            [{"restartState": "Running", "lastSuccessfulRestartAt": "old"}],
+            [
+                {
+                    "restartState": "Running",
+                    "restartCount": 1,
+                    "lastSuccessfulRestartAt": "old",
+                },
+                # The restart count may reset after the stable duration; the
+                # successful-restart timestamp remains a generation marker.
+                {"restartState": "Running", "restartCount": 1, "lastSuccessfulRestartAt": "new"},
+            ],
+        ]
+    )
+
+    def wait_for_status(_sandbox, predicate, **_kwargs):
+        events.append("wait")
+        for status in next(waits):
+            if predicate(status):
+                return status
+        raise AssertionError("predicate never matched")
+
+    monkeypatch.setattr(filesystem_only, "wait_for_restart_status", wait_for_status)
+    monkeypatch.setattr(
+        filesystem_only, "crash_guest", lambda *_args, **_kwargs: events.append("crash")
+    )
+    monkeypatch.setattr(
+        filesystem_only,
+        "wait_until_data_plane_ready",
+        lambda *_args, **_kwargs: events.append("ready"),
+    )
+
+    filesystem_only._restart_sandbox(
+        object(),
+        SimpleNamespace(command_timeout=1, restart_policy_wait=1, default_timeout=1),
+    )
+
+    assert events == ["wait", "crash", "wait", "ready"]
+
+
 @pytest.mark.parametrize("delete_before_capture", [False, True])
 @pytest.mark.parametrize("restore_failure", [False, True])
 def test_snapshot_chain_releases_each_sandbox_once(

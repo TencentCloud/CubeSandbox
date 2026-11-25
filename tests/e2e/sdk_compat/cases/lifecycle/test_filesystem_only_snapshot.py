@@ -796,12 +796,24 @@ def _assert_layer_changes(sandbox, *, timeout: int) -> None:
 
 
 def _restart_sandbox(sandbox, sdk_e2e_config) -> None:
+    # A memory-restored sandbox may already have restarted while it was being
+    # created. Capture the last successful restart before inducing this crash;
+    # accepting a stale Running status lets the test snapshot the previous
+    # incarnation while the new restart is still in progress. restartCount is
+    # unsuitable as a generation because it resets after the stable duration.
+    before = wait_for_restart_status(
+        sandbox,
+        lambda item: bool(item) and item.get("restartState") == "Running",
+        timeout=sdk_e2e_config.restart_policy_wait,
+    )
+    before_restart_at = (before or {}).get("lastSuccessfulRestartAt")
     crash_guest(sandbox, timeout=sdk_e2e_config.command_timeout)
     status = wait_for_restart_status(
         sandbox,
         lambda item: bool(item)
         and item.get("restartState") == "Running"
-        and item.get("restartCount", 0) >= 1,
+        and bool(item.get("lastSuccessfulRestartAt"))
+        and item.get("lastSuccessfulRestartAt") != before_restart_at,
         timeout=sdk_e2e_config.restart_policy_wait,
     )
     assert status is not None, "sandbox never came back after the guest crash"
