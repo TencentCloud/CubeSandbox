@@ -64,3 +64,13 @@ jobs:
         run: |
           set -euo pipefail
           npm run lint:locales
+
+      # The unit tests use node --test with --experimental-strip-types; the
+      # Node 22 pinned above supports it. Without this step the label and mock
+      # handler tests would never run in CI.
+      - name: Unit tests (node --test)
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test

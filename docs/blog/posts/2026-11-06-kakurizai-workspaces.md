@@ -3,8 +3,7 @@ title: "Building Lightweight Isolated Workspaces with CubeSandbox: A Layered App
 date: 2026-11-06
 author: Ryo Sato (mizuame, University of Tsukuba — lead of the KakuriZai project)
 description: "Running multiple agents in parallel on the same large project means their file changes collide, and a full environment copy per agent is unaffordable for a giant project like Unreal Engine with source and binaries together. In the KakuriZai project at IPA-CyberLab, the host's source tree is shared by all workspaces as a read-only lower layer, each agent holds only its own writable upper layer, and execution is delegated to CubeSandbox."
-featured: true
-weight: 1
+featured: false
 ---
 
 # Building Lightweight Isolated Workspaces with CubeSandbox: A Layered Approach to Parallel Multi-Agent Editing

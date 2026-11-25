@@ -59,6 +59,10 @@ spec:
                   key: mysql-password
           args:
             - --skip-name-resolve
+            # Built-in MySQL: --skip-log-bin prevents binlogs from filling the 20Gi PVC.
+            # External instances (mysql.host / CUBE_EXTERNAL_MYSQL_HOST) are unaffected.
+            # keep binlog enabled there only if replication/PITR is needed.
+            - --skip-log-bin
           ports:
             - name: mysql
               containerPort: 3306

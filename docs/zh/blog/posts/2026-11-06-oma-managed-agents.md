@@ -3,8 +3,7 @@ title: "Managed Agents 云端智能体托管平台：从跑通 Agent 到稳定�
 date: 2026-11-06
 author: 张师傅的博客
 description: "OMA 是一个自托管的云端智能体托管平台，参考 Anthropic 的托管智能体设计，在自己的基础设施上实现会话管理、推理与执行解耦、凭证托管和文件系统等能力，云端沙箱采用腾讯开源的 CubeSandbox。本文介绍它的整体架构和设计取舍。"
-featured: true
-weight: 3
+featured: false
 ---
 
 # Managed Agents 云端智能体托管平台：从跑通 Agent 到稳定交付

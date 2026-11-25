@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,6 +24,7 @@ type NodeService interface {
 	GetNode(ctx context.Context, nodeID string) (*model.NodeSnapshot, error)
 	ListNodes(ctx context.Context) ([]*model.NodeSnapshot, error)
 	UpdateNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error
+	ReplaceNodeLabels(ctx context.Context, nodeID string, labels map[string]string, operator string) error
 	DeleteNodeLabel(ctx context.Context, nodeID, key, operator string) error
 	SetNodeSchedulingDisabled(ctx context.Context, nodeID string, disabled bool, operator, detail string) (*model.NodeSnapshot, error)
 	GetVersionMatrix(ctx context.Context) (*model.VersionMatrix, error)
@@ -39,6 +39,17 @@ type NodeService interface {
 	GetOpsAgentSpec(ctx context.Context, nodeID string) (*model.OpsAgentSpecResponse, error)
 	GetClusterQuotaDefaults(ctx context.Context) (*model.ClusterQuotaDefaults, error)
 	SetClusterQuotaDefaults(ctx context.Context, ratio *float64, operator string) (*model.ClusterQuotaDefaults, *model.QuotaPropagation, error)
+
+	CreateMachineType(ctx context.Context, req *model.CreateMachineTypeRequest, operator string) (*model.MachineTypeView, error)
+	UpdateMachineType(ctx context.Context, name string, req *model.UpdateMachineTypeRequest, operator string) (*model.MachineTypeView, error)
+	DeleteMachineType(ctx context.Context, name string, unbind bool, operator string) error
+	GetMachineType(ctx context.Context, name string) (*model.MachineTypeView, error)
+	ListMachineTypes(ctx context.Context) ([]*model.MachineTypeView, error)
+	SetNodeMachineType(ctx context.Context, nodeID, name, operator string) error
+	ClearNodeMachineType(ctx context.Context, nodeID, operator string) error
+	BindMachineTypeNodes(ctx context.Context, name string, nodeIDs []string, operator string) (*model.MachineTypeBindResult, error)
+	UnbindMachineTypeNodes(ctx context.Context, name string, nodeIDs []string, operator string) (*model.MachineTypeBindResult, error)
+	ReplaceMachineTypeNodes(ctx context.Context, name string, nodeIDs []string, operator string) (*model.MachineTypeBindResult, error)
 }
 
 var _ NodeService = (*service.NodeService)(nil)
@@ -68,10 +79,16 @@ func MapNodeError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrSandboxCheckFailed):
 		// 502: CubeMaster unreachable; cannot verify the inventory safely.
 		httputil.WriteError(c, http.StatusBadGateway, err.Error())
-	case strings.Contains(err.Error(), "cannot have more than"):
-		httputil.WriteError(c, http.StatusBadRequest, err.Error())
-	case strings.Contains(err.Error(), "cannot modify reserved label"), strings.Contains(err.Error(), "cannot delete reserved label"):
+	case errors.Is(err, service.ErrReservedLabel):
 		httputil.WriteError(c, http.StatusForbidden, err.Error())
+	case errors.Is(err, service.ErrInvalidLabel):
+		httputil.WriteError(c, http.StatusBadRequest, err.Error())
+	case errors.Is(err, service.ErrMachineTypeInvalid):
+		httputil.WriteError(c, http.StatusBadRequest, err.Error())
+	case errors.Is(err, service.ErrMachineTypeNotFound):
+		httputil.WriteError(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, service.ErrMachineTypeExists), errors.Is(err, service.ErrMachineTypeInUse):
+		httputil.WriteError(c, http.StatusConflict, err.Error())
 	default:
 		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
 	}
@@ -117,6 +134,24 @@ type NodeView struct {
 	Conditions          []NodeConditionView    `json:"conditions"`
 	LocalTemplates      []string               `json:"localTemplates"`
 	Versions            []ComponentVersionView `json:"versions"`
+	// Labels is the node's raw label set as stored by CubeOps, including
+	// control-plane owned keys. Not omitempty: clients distinguish "no labels"
+	// from "field not supported" by field presence.
+	Labels map[string]string `json:"labels"`
+	// MachineType is the catalog name bound to this node; not omitempty so
+	// "unassigned" is explicit.
+	MachineType string `json:"machineType"`
+	// HostFacts is the restore-compatibility identity reported by Cubelet.
+	HostFacts *NodeHostFactsView `json:"hostFacts,omitempty"`
+}
+
+// NodeHostFactsView is the subset of host facts the console shows.
+type NodeHostFactsView struct {
+	CPUVendor         string `json:"cpuVendor"`
+	CPUModel          string `json:"cpuModel"`
+	CPUIDHash         string `json:"cpuidHash"`
+	HostKernelRelease string `json:"hostKernelRelease"`
+	KVMModuleTaint    string `json:"kvmModuleTaint"`
 }
 
 type ClusterOverview struct {
@@ -205,7 +240,33 @@ func ToNodeView(s *model.NodeSnapshot, usedMap map[string]struct{ CPUMilli, Memo
 		Conditions:          conditions,
 		LocalTemplates:      localTemplates,
 		Versions:            versions,
+		Labels:              cloneLabelsOrEmpty(s.Labels),
+		MachineType:         model.MachineTypeValue(s.Labels),
+		HostFacts:           hostFactsView(s.HostFacts),
 	}
+}
+
+func hostFactsView(f *model.HostFacts) *NodeHostFactsView {
+	if f == nil || f.IsZero() {
+		return nil
+	}
+	return &NodeHostFactsView{
+		CPUVendor:         f.CPUVendor,
+		CPUModel:          f.CPUModel,
+		CPUIDHash:         f.CPUIDHash,
+		HostKernelRelease: f.HostKernelRelease,
+		KVMModuleTaint:    f.KVMModuleTaint,
+	}
+}
+
+// cloneLabelsOrEmpty returns a non-nil map so the JSON payload carries
+// "labels": {} for a node without labels.
+func cloneLabelsOrEmpty(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func BuildOverview(nodes []*model.NodeSnapshot, usedMap map[string]struct{ CPUMilli, MemoryMB int64 }) ClusterOverview {

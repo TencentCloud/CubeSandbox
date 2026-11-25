@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/moby/sys/mountinfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -30,6 +32,14 @@ const hostDirMountTimeout = 3 * time.Second
 const hostDirMountBinary = "/usr/bin/mount"
 
 var runHostDirCommand = defaultRunHostDirCommand
+
+var (
+	listHostDirMounts = mountinfo.GetMounts
+	unmountHostDir    = unix.Unmount
+)
+
+// maxStackedHostDirMounts bounds the per-mountpoint unmount loop.
+const maxStackedHostDirMounts = 64
 
 type HostDirBackendInfo struct {
 	VolumeName string `json:"volume_name"`
@@ -212,6 +222,11 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 		return fmt.Errorf("cleanupHostDirVolumes: stat %s: %w", sandboxDir, err)
 	}
 
+	if err := detachHostDirMounts(sandboxDir); err != nil {
+		log.G(ctx).Warnf("cleanupHostDirVolumes: skip removeAll %s: %v", sandboxDir, err)
+		return err
+	}
+
 	if err := filepath.WalkDir(sandboxDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -242,6 +257,50 @@ func (l *local) cleanupHostDirVolumes(ctx context.Context, info *StorageInfo) er
 	if err := os.RemoveAll(sandboxDir); err != nil {
 		log.G(ctx).Warnf("cleanupHostDirVolumes: removeAll %s: %v", sandboxDir, err)
 		return err
+	}
+	return nil
+}
+
+// detachHostDirMounts lazily unmounts every mount that mountinfo lists at or
+// below sandboxDir, deepest first, repeating on each mountpoint until none is
+// left so stacked mounts are removed too. It must not stat the mountpoints: when
+// the source of a FUSE-backed bind is deleted, lstat/statfs on the mountpoint
+// fail with ENOENT, which makes stat-based checks (utils.IsMountPoint, and
+// containerd's mount.UnmountAll) treat a live mount as absent. umount2 still
+// resolves such a mountpoint, so it is called on the mountinfo path directly.
+func detachHostDirMounts(sandboxDir string) error {
+	mounts, err := listHostDirMounts(mountinfo.PrefixFilter(sandboxDir))
+	if err != nil {
+		return fmt.Errorf("list mounts under %s: %w", sandboxDir, err)
+	}
+
+	seen := make(map[string]struct{}, len(mounts))
+	targets := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		if _, ok := seen[m.Mountpoint]; ok {
+			continue
+		}
+		seen[m.Mountpoint] = struct{}{}
+		targets = append(targets, m.Mountpoint)
+	}
+	sort.SliceStable(targets, func(i, j int) bool {
+		return len(targets[i]) > len(targets[j])
+	})
+
+	for _, target := range targets {
+		for i := 0; ; i++ {
+			if i == maxStackedHostDirMounts {
+				return fmt.Errorf("unmount %s: still mounted after %d attempts", target, i)
+			}
+			err := unmountHostDir(target, unix.MNT_DETACH)
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) {
+				break
+			}
+			return fmt.Errorf("unmount %s: %w", target, err)
+		}
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
@@ -51,6 +52,76 @@ func TestApplyRestartBookkeepingKeepsSeq(t *testing.T) {
 	applyRestartBookkeeping(resumed, prior, false)
 	if resumed.StatusSeq != 8 || resumed.RestartCount != 3 || resumed.RestartState != restartpolicy.StateRunning {
 		t.Fatalf("resume seq=%d count=%d state=%s", resumed.StatusSeq, resumed.RestartCount, resumed.RestartState)
+	}
+}
+
+// TestSetBackoffWritesOnce keeps the guarantee PR #2338 established: the
+// backoff state reaches the store in a single write with a single StatusSeq
+// bump, so control-plane readers never see restartCount and restartState from
+// different generations.
+//
+// It no longer asserts that the streak is cleared here. Clearing moved to the
+// stabilizer (see restart_stabilize_test.go), because doing it only in this
+// function meant a healthy sandbox never had its streak re-evaluated.
+func TestSetBackoffWritesOnce(t *testing.T) {
+	now := time.Date(2026, time.November, 19, 2, 0, 0, 0, time.UTC)
+	cb := &cubeboxstore.CubeBox{}
+	cb.ID = "sb"
+	cb.RestartCount = 2
+	cb.StatusSeq = 7
+	cb.RestartState = restartpolicy.StateRunning
+	store := &memBoxes{cb: cb}
+	m := newRestartMgr(store)
+	backoff := restartpolicy.Backoff{
+		Initial:        3 * time.Second,
+		Max:            6 * time.Second,
+		Multiplier:     4,
+		MaxRestarts:    5,
+		StableDuration: 8 * time.Second,
+	}
+
+	delay, count, allowed, err := m.setBackoff("sb", backoff, now)
+	if err != nil || !allowed {
+		t.Fatalf("err=%v allowed=%t", err, allowed)
+	}
+	// Delay(2) = 3s * 4^2 = 48s, capped at Max 6s.
+	if delay != 6*time.Second || count != 2 {
+		t.Fatalf("delay=%s count=%d", delay, count)
+	}
+	if cb.RestartState != restartpolicy.StateBackOff {
+		t.Fatalf("state=%s", cb.RestartState)
+	}
+	if cb.NextRestartAt != now.Add(6*time.Second).UnixNano() || cb.StatusSeq != 8 {
+		t.Fatalf("next=%d seq=%d", cb.NextRestartAt, cb.StatusSeq)
+	}
+	if store.saves != 1 || len(store.saved) != 1 {
+		t.Fatalf("saves=%d snapshots=%d", store.saves, len(store.saved))
+	}
+	saved := store.saved[0]
+	if saved.RestartState != restartpolicy.StateBackOff ||
+		saved.NextRestartAt != now.Add(6*time.Second).UnixNano() || saved.StatusSeq != 8 {
+		t.Fatalf("saved state=%s next=%d seq=%d",
+			saved.RestartState, saved.NextRestartAt, saved.StatusSeq)
+	}
+}
+
+func TestSetBackoffGivesUpWithoutStableReset(t *testing.T) {
+	now := time.Date(2026, time.November, 19, 2, 0, 0, 0, time.UTC)
+	cb := &cubeboxstore.CubeBox{}
+	cb.ID = "sb"
+	cb.RestartCount = 2
+	cb.StatusSeq = 7
+	cb.RestartState = restartpolicy.StateRunning
+	cb.LastRestartAt = now.Add(-time.Second).UnixNano()
+	m := newRestartMgr(&memBoxes{cb: cb})
+	backoff := restartpolicy.Backoff{Initial: time.Second, MaxRestarts: 2, StableDuration: 8 * time.Second}
+
+	_, count, allowed, err := m.setBackoff("sb", backoff, now)
+	if err != nil || allowed || count != 2 {
+		t.Fatalf("err=%v allowed=%t count=%d", err, allowed, count)
+	}
+	if cb.RestartState != restartpolicy.StateGaveUp || cb.StatusSeq != 8 || cb.NextRestartAt != 0 {
+		t.Fatalf("state=%s seq=%d next=%d", cb.RestartState, cb.StatusSeq, cb.NextRestartAt)
 	}
 }
 
@@ -115,6 +186,66 @@ func TestMarkResumedAfterPause(t *testing.T) {
 	markResumedAfterPause(nil)
 }
 
+// TestRecoverDoesNotReviveExhausted pins the outcome that D3 changed.
+//
+// Before this change a spent budget was cleared inside setBackoff, so recovery
+// re-entered the loop, saw Allow(0) == true and restarted a sandbox the user had
+// already lost -- contradicting docs/guide/lifecycle.md ("after the limit the
+// sandbox ... is not brought up again"). Now the reset lives in the stabilizer,
+// which only touches Running sandboxes, so recovery of a spent BackOff row ends
+// in GaveUp with the budget untouched.
+//
+// The assertion is exactly GaveUp rather than "BackOff or GaveUp", because both
+// paths start from BackOff and accepting either would make the test pass under
+// the old behaviour too.
+//
+// Scope note, stated honestly: with the anchor backfill in place, StableSince is
+// fresh at recovery time, so a mutant that reintroduces the reset inside
+// setBackoff is *not* caught by this test -- the reset would not fire either
+// way. What this test does pin is the end state the user observes: a spent
+// budget ends in GaveUp and is never cleared. The "no reset path exists" claim
+// is carried by the code structure (setBackoff no longer calls Stable) and by
+// TestSetBackoffWritesOnce, not by this test.
+func TestRecoverDoesNotReviveExhausted(t *testing.T) {
+	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	cb.ID = "sb"
+	cb.RestartCount = 2
+	cb.LastRestartAt = time.Now().Add(-time.Minute).UnixNano()
+	cb.LastExitReason = "Error"
+	cb.RestartState = restartpolicy.StateBackOff
+	if err := cb.SetOriginalRequest(&cubebox.RunCubeSandboxRequest{
+		RestartPolicy: restartpolicy.OnFailure,
+		RestartBackoff: &cubebox.RestartBackoffConfig{
+			InitialIntervalSecond: 60,
+			MaxRestarts:           2,
+			StableDurationSecond:  1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := newRestartMgr(&memBoxes{cb: cb})
+	m.Recover()
+	t.Cleanup(func() { m.Stop("sb") })
+
+	// The verdict is reached on the restart-loop goroutine.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cb.Lock()
+		count, state := cb.RestartCount, cb.RestartState
+		cb.Unlock()
+		if state == restartpolicy.StateGaveUp {
+			if count != 2 {
+				t.Fatalf("recovery cleared a spent budget: count=%d", count)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spent sandbox was not given up: count=%d state=%s (BackOff here means it is about to restart, which is D3)", count, state)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestRecoverGaveUpWhenRetriesSpent(t *testing.T) {
 	cb := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
 	cb.ID = "sb"
@@ -129,22 +260,40 @@ func TestRecoverGaveUpWhenRetriesSpent(t *testing.T) {
 	}
 	m := newRestartMgr(&memBoxes{cb: cb})
 	m.Recover()
-	if cb.RestartState != restartpolicy.StateGaveUp {
-		t.Fatalf("state %s", cb.RestartState)
-	}
-	if cb.StatusSeq == 0 {
-		t.Fatal("gave up did not advance status seq")
+	deadline := time.Now().Add(time.Second)
+	for {
+		cb.Lock()
+		state, seq := cb.RestartState, cb.StatusSeq
+		cb.Unlock()
+		m.mu.Lock()
+		run := m.runs["sb"]
+		m.mu.Unlock()
+		if state == restartpolicy.StateGaveUp && run == nil {
+			if seq == 0 {
+				t.Fatal("gave up did not advance status seq")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state %s run=%v", state, run != nil)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
 type memBoxes struct {
-	cb *cubeboxstore.CubeBox
+	cb    *cubeboxstore.CubeBox
+	saves int
+	saved []*cubeboxstore.CubeBox
+	// saveErr makes Save fail, so tests can exercise the rollback path.
+	saveErr error
 }
 
-func (m *memBoxes) Init(context.Context) error { return nil }
 func (m *memBoxes) Get(context.Context, string) (*cubeboxstore.CubeBox, error) {
 	return m.cb, nil
 }
+
+func (m *memBoxes) Init(context.Context) error { return nil }
 func (m *memBoxes) FindContainerOfCubebox(context.Context, string) (*cubeboxstore.Container, *cubeboxstore.CubeBox, error) {
 	return nil, nil, nil
 }
@@ -152,7 +301,12 @@ func (m *memBoxes) List() []*cubeboxstore.CubeBox { return []*cubeboxstore.CubeB
 func (m *memBoxes) IsImageInUse(string) (bool, error) {
 	return false, nil
 }
-func (m *memBoxes) Save(context.Context, *cubeboxstore.CubeBox, ...cubes.UpdateCubeboxOpt) error {
+func (m *memBoxes) Save(_ context.Context, cb *cubeboxstore.CubeBox, _ ...cubes.UpdateCubeboxOpt) error {
+	m.saves++
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.saved = append(m.saved, cb.DeepCopy())
 	return nil
 }
 func (m *memBoxes) SyncByID(context.Context, string, ...cubes.UpdateCubeboxOpt) error {
@@ -270,6 +424,40 @@ func TestRestartPinsTheAnnotatedNumaNode(t *testing.T) {
 	}
 	if info.NumaNode != 1 {
 		t.Fatalf("numa node %d", info.NumaNode)
+	}
+}
+
+// The highest node id is a valid pin: the check used to compare against the node
+// count, so pinning the last node of the host was rejected.
+func TestRestartPinsTheHighestNumaNode(t *testing.T) {
+	restoreNumaQueries(t, 11, 12)
+	s := &service{numaNodeIndex: 1}
+	info := &workflow.CreateContext{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationsNumaNode: "11"},
+	}
+	if err := s.setRequestResource(info, req); err != nil {
+		t.Fatalf("highest node id rejected: %v", err)
+	}
+	if info.NumaNode != 11 {
+		t.Fatalf("numa node %d, want 11", info.NumaNode)
+	}
+}
+
+func TestRestartRejectsNumaNodePastTheLastOne(t *testing.T) {
+	restoreNumaQueries(t, 11, 12)
+	s := &service{numaNodeIndex: 1}
+	info := &workflow.CreateContext{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Annotations: map[string]string{constants.MasterAnnotationsNumaNode: "12"},
+	}
+	if err := s.setRequestResource(info, req); err == nil {
+		t.Fatal("node id past the last one was accepted")
+	}
+	// Both callers drop the error, so what stays in the context decides where
+	// the sandbox lands: the round-robin pick from index 1 (-> 2), not 0.
+	if info.NumaNode != 2 {
+		t.Fatalf("numa node %d after a rejected pin, want the round-robin 2", info.NumaNode)
 	}
 }
 

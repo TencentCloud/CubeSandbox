@@ -201,6 +201,11 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 
 ### Warehouse
 
+CubeOps leaves S3 bucket lifecycle configuration to the bucket owner. It
+cleans up abandoned temporary uploads under `warehouse/uploads/` and
+aborts stale multipart uploads under `warehouse/`. When upgrading an
+existing bucket, review any lifecycle rules installed by older versions.
+
 The warehouse catalog is a closed set of four components (`cube-shim`,
 `cube-image`, `cube-agent`, `cube-kernel-scf`). Artifacts stay keyed by
 `(arch, component, version)`. `GET /warehouse/components` always returns

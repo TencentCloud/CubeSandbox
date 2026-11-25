@@ -34,6 +34,7 @@ const (
 
 type dnsUploadTestEnv struct {
 	program        *ebpf.Program
+	perfProbe      *ebpf.Program
 	meta           *ebpf.Map
 	track          *ebpf.Map
 	caseStore      *ebpf.Map
@@ -68,13 +69,14 @@ func loadDNSUploadTestEnv(t *testing.T) *dnsUploadTestEnv {
 
 	env := &dnsUploadTestEnv{
 		program:        coll.Programs["test_dns_upload"],
+		perfProbe:      coll.Programs["test_skb_perf_output"],
 		meta:           coll.Maps["ifindex_to_mvmmeta"],
 		track:          coll.Maps["dns_query_track"],
 		caseStore:      coll.Maps["test_upload_case"],
 		events:         coll.Maps["dns_events"],
 		sandboxMetrics: coll.Maps["sandbox_metrics"],
 	}
-	if env.program == nil || env.meta == nil || env.track == nil ||
+	if env.program == nil || env.perfProbe == nil || env.meta == nil || env.track == nil ||
 		env.caseStore == nil || env.events == nil || env.sandboxMetrics == nil {
 		t.Fatal("loaded dns upload test program or maps missing")
 	}
@@ -331,11 +333,20 @@ func TestDNSUploadRecordCarriesTheWholeFrame(t *testing.T) {
 		if err := env.sandboxMetrics.Lookup(&metricsKey, &metrics); err != nil {
 			t.Fatalf("read sandbox metrics after perf timeout: %v", err)
 		}
-		if metrics.IngressDropPackets != 0 || metrics.IngressPackets != 1 {
-			t.Fatalf("perf helper did not succeed: forwarded=%d dropped=%d",
-				metrics.IngressPackets, metrics.IngressDropPackets)
+		if metrics.IngressDropPackets == 0 && metrics.IngressPackets == 1 {
+			t.Skipf("kernel BPF test-run cannot deliver appended skb bytes to perf reader: %v", err)
 		}
-		t.Skipf("kernel BPF test-run cannot deliver appended skb bytes to perf reader: %v", err)
+		if metrics.IngressDropPackets == 1 && metrics.IngressPackets == 0 {
+			// Positively detect kernels whose BPF_PROG_TEST_RUN path rejects
+			// skb-backed perf output. The isolated probe calls the helper directly,
+			// so only that capability failure is skipped; if the probe succeeds,
+			// this drop remains a datapath regression.
+			if ret, _, probeErr := env.perfProbe.Test(frame); probeErr == nil && ret != 0 {
+				t.Skipf("kernel BPF test-run cannot emit skb-backed perf events: %v", err)
+			}
+		}
+		t.Fatalf("perf helper did not produce a readable event: forwarded=%d dropped=%d",
+			metrics.IngressPackets, metrics.IngressDropPackets)
 	}
 	if err != nil {
 		t.Fatalf("read perf record: %v", err)

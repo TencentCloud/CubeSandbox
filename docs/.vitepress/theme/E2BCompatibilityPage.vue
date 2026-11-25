@@ -11,7 +11,11 @@ const copy = {
     intro: 'Compare public SDK methods by name, see what works unchanged, and find the Cube alternative when behavior differs.',
     heroMeta: { result: 'Result', releases: 'Tested releases', latest: 'Latest validated', recommended: 'Recommended' },
     quickstartTitle: 'Python SDK quick start',
-    quickstartIntro: 'Use the E2B Python SDK for existing E2B code, or the native CubeSandbox Python SDK for Cube APIs. Install and configure them as follows:',
+    quickstartIntro: 'Choose either the E2B Python SDK (for existing E2B code) or the native CubeSandbox Python SDK (for Cube APIs), then install and configure its environment variables:',
+    quickstartNotes: {
+      e2b: 'For existing E2B code. Point the official E2B SDK at your CubeSandbox API endpoint.',
+      cube: 'For native Cube APIs and extensions. Reads CUBE_TEMPLATE_ID automatically when template is omitted.'
+    },
     versionLabel: '01 · VERSIONS',
     versionTitle: 'Every E2B release, tested',
     versionLead: 'Each E2B Python SDK release from 1.0.0 through 2.62.0 was run against the full compatibility suite. Hover a block for its verdict; the bands below explain every judgment.',
@@ -33,7 +37,7 @@ const copy = {
     hideExample: 'Hide example',
     copyCode: 'Copy',
     copiedCode: 'Copied',
-    exampleNote: 'Examples run against Cube with a validated E2B Python SDK. Set E2B_API_KEY and CUBE_TEMPLATE_ID first. "Not available" entries show calls Cube does not implement.',
+    exampleNote: 'Examples run against Cube using the quick-start configuration above (replace "tpl-xxx" with your template ID in E2B examples, or set CUBE_TEMPLATE_ID for the CubeSandbox SDK). "Not available" entries show calls Cube does not implement.',
     apiLabel: '03 · CUBE API',
     apiTitle: 'REST API compatibility',
     apiIntro: 'One level below the SDK: e2b client endpoints against CubeAPI paths, parameters, responses, and error codes.',
@@ -61,7 +65,11 @@ const copy = {
     heroLabel: 'SDK 兼容性矩阵',
     heroMeta: { result: '测试结果', releases: '实测版本', latest: '最新验证', recommended: '推荐版本' },
     quickstartTitle: 'Python SDK 快速上手',
-    quickstartIntro: '已有 E2B 代码可以使用 E2B Python SDK，也可以使用 CubeSandbox 原生 Python SDK。安装并配置以下环境变量即可：',
+    quickstartIntro: '按使用场景二选一：已有 E2B 代码使用 E2B Python SDK，使用 Cube 原生能力使用 CubeSandbox Python SDK，分别安装并配置对应环境变量即可：',
+    quickstartNotes: {
+      e2b: '兼容已有 E2B 代码，直接将官方 E2B SDK 指向 CubeSandbox API 地址即可使用。',
+      cube: '使用 Cube 原生接口与扩展能力。省略 template 参数时会自动读取 CUBE_TEMPLATE_ID。'
+    },
     versionLabel: '01 · 版本',
     versionTitle: 'E2B版本兼容性',
     versionLead: '从 1.0.0 到 2.62.0 的每个 E2B Python SDK 版本都跑了完整的兼容性测试套件。',
@@ -82,6 +90,7 @@ const copy = {
     hideExample: '收起示例',
     copyCode: '复制',
     copiedCode: '已复制',
+    exampleNote: '示例基于上方快速上手配置运行（E2B 示例请将 "tpl-xxx" 替换为实际模板 ID，CubeSandbox SDK 通过 CUBE_TEMPLATE_ID 指定）。标注“暂不支持”的条目展示 Cube 尚未实现的调用。',
     apiLabel: '03 · Cube API',
     apiTitle: 'REST API 兼容性',
     apiIntro: 'SDK 之下的协议层：逐端点对比 e2b 客户端与 CubeAPI 的路径、入参、响应与错误码。',
@@ -103,14 +112,25 @@ const copy = {
   }
 }
 
-const setupCommands = `pip install "e2b==2.29.5"
-pip install cubesandbox
+const setupGuides = [
+  {
+    key: 'e2b',
+    label: 'E2B SDK',
+    commands: `pip install "e2b==2.29.5"
+
+export E2B_API_URL="http://127.0.0.1:3000"
+export E2B_API_KEY="e2b_000000"`
+  },
+  {
+    key: 'cube',
+    label: 'CubeSandbox SDK',
+    commands: `pip install cubesandbox
 
 export CUBE_API_URL="http://127.0.0.1:3000"
 export CUBE_API_KEY="e2b_000000"
-export CUBE_TEMPLATE_ID="tpl-xxx"
-export E2B_API_URL="http://127.0.0.1:3000"
-export E2B_API_KEY="e2b_000000"`
+export CUBE_TEMPLATE_ID="tpl-xxx"`
+  }
+]
 
 /* E2B Python SDK releases run against the 195-case compatibility suite.
    Each entry is [version, raw passed count, verdict: 'ok' | 'partial' | 'no']. */
@@ -865,9 +885,8 @@ function localizedExample(api, kind) {
   let source = examples[api]?.[kind] || ''
   if (kind === 'e2b' && /\b(?:Async)?Sandbox\.create\(/.test(source)) {
     // The official E2B SDK never reads CUBE_TEMPLATE_ID by itself.
-    source = `import os\n${source}`
-    source = source.replace(/\b(AsyncSandbox|Sandbox)\.create\(\)/g, '$1.create(template=os.environ["CUBE_TEMPLATE_ID"])')
-    source = source.replace(/\b(AsyncSandbox|Sandbox)\.create\((?!template=)/g, '$1.create(template=os.environ["CUBE_TEMPLATE_ID"], ')
+    source = source.replace(/\b(AsyncSandbox|Sandbox)\.create\(\)/g, '$1.create(template="tpl-xxx")')
+    source = source.replace(/\b(AsyncSandbox|Sandbox)\.create\((?!template=)/g, '$1.create(template="tpl-xxx", ')
   }
   if (props.locale === 'zh') {
     for (const [english, chinese] of Object.entries(zhComments)) source = source.replaceAll(english, chinese)
@@ -949,9 +968,11 @@ function apiLabels(api) {
 const activeCategory = ref('all')
 const query = ref('')
 const copiedApi = ref('')
+const setupTab = ref('e2b')
 const exampleTab = ref({})
 let copyResetTimer
 const t = computed(() => copy[props.locale] || copy.en)
+const activeSetupGuide = computed(() => setupGuides.find((item) => item.key === setupTab.value) || setupGuides[0])
 const categories = ['lifecycle', 'runtime', 'storage', 'platform', 'extension']
 const filteredRows = computed(() => {
   const needle = query.value.trim().toLowerCase()
@@ -1020,7 +1041,25 @@ async function copyCode(key, code) {
       <section class="e2b-quickstart">
         <h2>{{ t.quickstartTitle }}</h2>
         <p>{{ t.quickstartIntro }}</p>
-        <pre class="e2b-shell"><code v-html="highlightShell(setupCommands)"></code></pre>
+        <div class="e2b-tabs">
+          <button
+            v-for="sdk in setupGuides"
+            :key="sdk.key"
+            type="button"
+            :class="{ active: setupTab === sdk.key }"
+            @click="setupTab = sdk.key"
+          >{{ sdk.label }}</button>
+        </div>
+        <div class="e2b-code">
+          <button
+            type="button"
+            class="e2b-copy"
+            :class="{ copied: copiedApi === `setup-${setupTab}` }"
+            @click="copyCode(`setup-${setupTab}`, activeSetupGuide.commands)"
+          >{{ copiedApi === `setup-${setupTab}` ? t.copiedCode : t.copyCode }}</button>
+          <pre class="e2b-shell"><code v-html="highlightShell(activeSetupGuide.commands)"></code></pre>
+        </div>
+        <p class="e2b-quickstart-note">{{ t.quickstartNotes[setupTab] }}</p>
       </section>
 
       <section class="e2b-figures">

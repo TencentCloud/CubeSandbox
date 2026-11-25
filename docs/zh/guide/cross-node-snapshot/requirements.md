@@ -61,6 +61,8 @@ type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5
 | `host_kernel_release` | `uname -r` | 相等匹配 |
 | `kvm_module_taint` | 强制、树外或未签名 KVM 模块标记 | 目标侧非空则拒绝 |
 
+默认情况下两个相等门禁同时生效。CPU 相同、只是宿主内核小版本不同的机器，可以通过绑定[机型](../node-operations.md#机型配置)豁免内核门禁。
+
 ### 源节点不可调度
 
 由于沙箱跨机需要将共享数据上传到目标节点，第一次在非本机节点恢复的性能较差，因此在源节点可用时调度器始终优先调度源节点。调度的优先级为：
@@ -71,5 +73,5 @@ type-2   AMD            AMD EPYC 7B13 ...     2      node-4,node-5
 
 需要注意的是，外部存储也会限制调度：
 
-- **host-mount**：如果沙箱使用了 host-mount 挂载的 Volume，则无法跨机迁移。因为需要无法保证挂载的目录在目标节点上也能访问，见 [host-mount 限制](../persistent-storage.md)。从 fs-only 快照创建的沙箱不记录挂载，需在创建时重新声明，按普通新建沙箱调度。
-- **Plugin Volume**：如果沙箱使用了 Plugin Volume，则沙箱可以跨机，但需要保证目标节点上也安装了对应的 driver 并能访问后端。Cube 不会自动检查目标节点上的 Volume 状态以及是否可用，需要 Volumn 开发者自行保证，见 [Plugin Volume 限制](../volume-plugin.md)
+- **host-mount**：如果沙箱使用了 host-mount 挂载宿主机目录，则无法跨机迁移，因为无法保证挂载的目录在目标节点上也能访问。从 fs-only 快照创建的沙箱不记录挂载，需在创建时重新声明，按普通新建沙箱调度。
+- **Plugin Volume**：如果沙箱使用了 Plugin Volume，则沙箱可以跨机，但需要保证目标节点上也安装了对应的 driver 并能访问后端。Cube 不会自动检查目标节点上的 Volume 状态以及是否可用，需要运维侧自行保证，见 [Volume 使用](../volume.md#_4-5-配合快照、回滚、克隆与跨机恢复)

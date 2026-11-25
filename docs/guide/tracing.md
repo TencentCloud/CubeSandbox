@@ -52,7 +52,7 @@ Deploy the receiver and query backend separately. Each component exports under i
 
 Configuration is environment-based and follows the install method:
 
-- **Bare metal / one-click**: set the variable before install — see [Bare-Metal Deployment](./bare-metal-deploy.md).
+- **Bare metal / one-click**: set `OTEL_EXPORTER_OTLP_ENDPOINT=http://<receiver-host>:<OTLP-gRPC-port>` in the `.env` next to `install.sh` before installing or upgrading (set `OTEL_EXPORTER_OTLP_ENDPOINT=` and re-run the installer to disable) — see [one-click README · OpenTelemetry tracing](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md#opentelemetry-tracing-optional).
 - **Kubernetes**: add it to the per-component `env` arrays — see [Helm Install · Tracing configuration](./kubernetes/install.md#_8-4-tracing-configuration).
 
 Cubelet launches a fresh CubeShim process per sandbox; the process lives alongside its sandbox and inherits Cubelet's environment at process start, so an already-running shim keeps its previous setting.

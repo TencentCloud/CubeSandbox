@@ -40,12 +40,13 @@ func (NodeRegistration) TableName() string {
 
 type NodeStatus struct {
 	gorm.Model
-	NodeID             string `gorm:"column:node_id"`
-	ConditionsJSON     string `gorm:"column:conditions_json"`
-	ImagesJSON         string `gorm:"column:images_json"`
-	LocalTemplatesJSON string `gorm:"column:local_templates_json"`
-	HeartbeatUnix      int64  `gorm:"column:heartbeat_unix"`
-	Healthy            bool   `gorm:"column:healthy"`
+	NodeID                string `gorm:"column:node_id"`
+	ConditionsJSON        string `gorm:"column:conditions_json"`
+	ImagesJSON            string `gorm:"column:images_json"`
+	LocalTemplatesJSON    string `gorm:"column:local_templates_json"`
+	HeartbeatUnix         int64  `gorm:"column:heartbeat_unix"`
+	HeartbeatReceivedUnix int64  `gorm:"column:heartbeat_received_unix"`
+	Healthy               bool   `gorm:"column:healthy"`
 }
 
 func (NodeStatus) TableName() string {
@@ -148,3 +149,18 @@ type NodeQuotaSpec struct {
 func (NodeQuotaSpec) TableName() string {
 	return "t_cube_node_quota_spec"
 }
+
+// MachineType is one row of the operator-managed machine type catalog.
+// Membership is not stored here; it lives on the node machine-type label.
+type MachineType struct {
+	ID          uint      `gorm:"primarykey"`
+	Name        string    `gorm:"column:name"`
+	DisplayName string    `gorm:"column:display_name"`
+	Description string    `gorm:"column:description"`
+	CreatedBy   string    `gorm:"column:created_by"`
+	UpdatedBy   string    `gorm:"column:updated_by"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at"`
+}
+
+func (MachineType) TableName() string { return "t_cube_machine_type" }

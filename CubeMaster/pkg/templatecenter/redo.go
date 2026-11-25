@@ -18,19 +18,184 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/hostcompat"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/gorm"
 )
 
-var redoTemplateInUse = isTemplateInUse
+var ErrRedoTemplateScopeChanged = errors.New("redo target scope changed concurrently, please retry")
 
-func ensureRedoTemplateNotInUse(ctx context.Context, templateID, instanceType string) error {
-	inUse, err := redoTemplateInUse(ctx, templateID, instanceType)
-	if err != nil {
-		return fmt.Errorf("check template references before redo: %w", err)
+var (
+	redoTemplateInUse  = isTemplateInUseFailClosed
+	redoArtifactShared = func(ctx context.Context, artifactID, excludeTemplateID string) (bool, error) {
+		if !isReady() {
+			return false, ErrTemplateStoreNotInitialized
+		}
+		var refs int64
+		err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var err error
+			refs, err = countArtifactReferencesTx(ctx, tx, artifactID, excludeTemplateID)
+			return err
+		})
+		return refs > 0, err
 	}
-	if inUse {
-		return ErrTemplateInUse
+)
+
+// cleanupRedoArtifactBeforeRedistribute removes the ext4 artifact on target
+// nodes before redistributing only when no other template, active job, or
+// snapshot references the same artifact. For shared artifacts, it skips node
+// deletion and relies on CreateImage being idempotent so peer templates are
+// never broken on nodes without running sandboxes.
+func cleanupRedoArtifactBeforeRedistribute(ctx context.Context, artifactID, instanceType, templateID string, targets []*node.Node) error {
+	shared, err := redoArtifactShared(ctx, artifactID, templateID)
+	if err != nil {
+		return fmt.Errorf("check shared artifact references before cleanup failed: %w", err)
+	}
+	if shared {
+		log.G(ctx).Warnf("redo template=%s artifact=%s: skipping node artifact cleanup because other templates or snapshots still reference it; existing on-node ext4 files will be kept as-is", templateID, artifactID)
+		return nil
+	}
+	if err := cleanupArtifactOnNodes(ctx, artifactID, instanceType, targets); err != nil {
+		return fmt.Errorf("cleanup artifact before redistribute failed: %w", err)
 	}
 	return nil
+}
+
+func jfsNodeVariantID(templateID string, target *node.Node) (string, bool) {
+	if target == nil || target.HostFacts == nil {
+		return "", false
+	}
+	variantID, _, ok := hostcompat.TemplateVariantID(
+		templateID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
+	)
+	return variantID, ok
+}
+
+// resolveRedoAffectedNodes resolves the nodes whose template state will be
+// invalidated by a redo on targets. It returns scoped=false when the blast
+// radius cannot be bounded to specific nodes and must be checked cluster-wide
+// (full rootfs rebuild, or JFS when target HostFacts are unavailable).
+func resolveRedoAffectedNodes(templateID, instanceType, backend string, needsFullRebuild bool, targets []*node.Node) ([]*node.Node, bool) {
+	if needsFullRebuild {
+		return nil, false
+	}
+	if !constants.IsJFSBackend(pinnedCleanupBackend(backend)) {
+		return targets, true
+	}
+	if len(targets) == 0 {
+		return nil, false
+	}
+	targetVariants := make(map[string]struct{}, len(targets))
+	seenNodeIDs := make(map[string]struct{}, len(targets))
+	affected := make([]*node.Node, 0, len(targets))
+	appendUnique := func(n *node.Node) {
+		if id := strings.TrimSpace(n.ID()); id != "" {
+			if _, exists := seenNodeIDs[id]; exists {
+				return
+			}
+			seenNodeIDs[id] = struct{}{}
+		}
+		affected = append(affected, n)
+	}
+	for _, target := range targets {
+		variantID, ok := jfsNodeVariantID(templateID, target)
+		if !ok {
+			return nil, false
+		}
+		targetVariants[variantID] = struct{}{}
+		appendUnique(target)
+	}
+	// Only peers sharing a target's JFS variant can read/execute the same
+	// shared rootfs files; candidates without HostFacts have no computable
+	// variant ID and cannot host that variant. (Target nodes themselves fail
+	// closed above if any lacks HostFacts.)
+	for _, candidate := range healthyTemplateNodes(instanceType) {
+		variantID, ok := jfsNodeVariantID(templateID, candidate)
+		if !ok {
+			continue
+		}
+		if _, match := targetVariants[variantID]; !match {
+			continue
+		}
+		appendUnique(candidate)
+	}
+	return affected, true
+}
+
+type redoNodeKey struct {
+	id string
+	ip string
+}
+
+type redoInUseScope struct {
+	instanceType string
+	clusterWide  bool
+	nodes        map[redoNodeKey]struct{}
+}
+
+func newRedoInUseScope(templateID, instanceType, backend string, needsFullRebuild bool, targets []*node.Node) ([]*node.Node, redoInUseScope) {
+	affectedNodes, scoped := resolveRedoAffectedNodes(templateID, instanceType, backend, needsFullRebuild, targets)
+	scope := redoInUseScope{
+		instanceType: instanceType,
+		clusterWide:  !scoped,
+	}
+	if scoped {
+		scope.nodes = make(map[redoNodeKey]struct{}, len(affectedNodes))
+		for _, n := range affectedNodes {
+			if n == nil {
+				continue
+			}
+			key := redoNodeKey{
+				id: strings.TrimSpace(n.ID()),
+				ip: strings.TrimSpace(n.HostIP()),
+			}
+			if key != (redoNodeKey{}) {
+				scope.nodes[key] = struct{}{}
+			}
+		}
+	}
+	return affectedNodes, scope
+}
+
+func (s redoInUseScope) covers(cur redoInUseScope) bool {
+	if s.instanceType != cur.instanceType {
+		return false
+	}
+	if s.clusterWide {
+		return true
+	}
+	if cur.clusterWide {
+		return false
+	}
+	for key := range cur.nodes {
+		if _, ok := s.nodes[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func checkRedoTemplateInUse(ctx context.Context, templateID, instanceType, backend string, needsFullRebuild bool, targets []*node.Node) (redoInUseScope, error) {
+	affectedNodes, scope := newRedoInUseScope(templateID, instanceType, backend, needsFullRebuild, targets)
+	var (
+		inUse bool
+		err   error
+	)
+	if !scope.clusterWide {
+		inUse, err = isTemplateInUseOnNodes(ctx, templateID, instanceType, affectedNodes)
+	} else {
+		inUse, err = redoTemplateInUse(ctx, templateID, instanceType)
+	}
+	if err != nil {
+		return redoInUseScope{}, fmt.Errorf("check template references before redo: %w", err)
+	}
+	if inUse {
+		return redoInUseScope{}, ErrTemplateInUse
+	}
+	return scope, nil
+}
+
+func ensureRedoTemplateNotInUse(ctx context.Context, templateID, instanceType, backend string, needsFullRebuild bool, targets []*node.Node) error {
+	_, err := checkRedoTemplateInUse(ctx, templateID, instanceType, backend, needsFullRebuild, targets)
+	return err
 }
 
 func normalizeRedoTemplateImageRequest(req *types.RedoTemplateFromImageReq) (*types.RedoTemplateFromImageReq, error) {
@@ -102,16 +267,11 @@ func jfsRedoVariantIDs(templateID string, targets []*node.Node) []string {
 	variantIDs := make([]string, 0, len(targets))
 	seen := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
-		if target == nil || target.HostFacts == nil {
-			continue
-		}
-		variantID, _, ok := hostcompat.TemplateVariantID(
-			templateID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
-		)
+		variantID, ok := jfsNodeVariantID(templateID, target)
 		if !ok {
 			continue
 		}
-		if _, ok := seen[variantID]; ok {
+		if _, exists := seen[variantID]; exists {
 			continue
 		}
 		seen[variantID] = struct{}{}
@@ -145,7 +305,7 @@ func deleteJFSRedoReplicaRows(ctx context.Context, templateID string, targets []
 }
 
 func prepareRedoTemplateReplicas(ctx context.Context, templateID, instanceType string, existingReplicas []models.TemplateReplica, targets []*node.Node, backend string) error {
-	if err := ensureRedoTemplateNotInUse(ctx, templateID, instanceType); err != nil {
+	if err := ensureRedoTemplateNotInUse(ctx, templateID, instanceType, backend, false, targets); err != nil {
 		return err
 	}
 	backend = pinnedCleanupBackend(backend)
@@ -251,15 +411,10 @@ func resolveRedoTargets(instanceType string, req *types.RedoTemplateFromImageReq
 		if target == nil {
 			continue
 		}
-		if target.HostFacts != nil && len(failedVariants) > 0 {
-			variantID, _, ok := hostcompat.TemplateVariantID(
-				req.TemplateID, target.HostFacts.CPUIDHash, target.HostFacts.HostKernelRelease,
-			)
-			if ok {
-				if _, failed := failedVariants[variantID]; failed {
-					filtered = append(filtered, target)
-					continue
-				}
+		if variantID, ok := jfsNodeVariantID(req.TemplateID, target); ok {
+			if _, failed := failedVariants[variantID]; failed {
+				filtered = append(filtered, target)
+				continue
 			}
 		}
 		if _, ok := failedSet[target.ID()]; ok {
@@ -462,6 +617,10 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 					"the existing artifact was left untouched")
 			return
 		}
+		if err := ensureRedoTemplateNotInUse(ctx, req.TemplateID, sourceReq.InstanceType, "" /* unused on full rebuild */, true, targets); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseBuildingExt4, err.Error())
+			return
+		}
 		// Try to reuse a still-valid prior artifact under the build lock; if
 		// none is usable, fall through to the full rebuild below. Holding the
 		// lock guarantees that a concurrent create cannot replace the artifact
@@ -528,8 +687,12 @@ func runRedoTemplateImageJob(ctx context.Context, jobID string, req *types.RedoT
 
 	readyTargets := targets
 	if resumePhase == JobPhaseDistributing {
-		if err := cleanupArtifactOnNodes(ctx, artifact.ArtifactID, generatedReq.InstanceType, targets); err != nil {
-			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, fmt.Sprintf("cleanup artifact before redistribute failed: %v", err))
+		if err := ensureRedoTemplateNotInUse(ctx, req.TemplateID, generatedReq.InstanceType, storageBackendFromCreate(generatedReq), false, targets); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, err.Error())
+			return
+		}
+		if err := cleanupRedoArtifactBeforeRedistribute(ctx, artifact.ArtifactID, generatedReq.InstanceType, req.TemplateID, targets); err != nil {
+			failRedoTemplateImageJob(ctx, jobID, JobPhaseDistributing, err.Error())
 			return
 		}
 		distributedTargets, expected, ready, failed, distErr := distributeRootfsArtifact(ctx, &workingReq, generatedReq, artifact, req.TemplateID, jobID)

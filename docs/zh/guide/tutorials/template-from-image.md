@@ -102,7 +102,7 @@ template_status:           READY
 | `distribution` | `N/M ready` — 已收到 artifact 的集群节点数。 |
 | `artifact_id` | 构建出的 rootfs artifact 的稳定 ID。 |
 | `artifact_sha256` | rootfs artifact 的 SHA-256 摘要，用于完整性校验。 |
-| `template_spec_fingerprint` | 模板规格的确定性指纹（镜像 + 构建参数），相同输入始终产生相同指纹。 |
+| `template_spec_fingerprint` | 判断能否复用 artifact 的确定性指纹。不包含 `--cpu`/`--memory`、`--cmd`/`--arg`、`--env`、`--probe`、工作目录、volume 挂载、rlimit，仅这些字段不同的模板共享同一 artifact（相同 `artifact_id`）。`--expose-port`、`--network-type`、`--dns`、`--writable-layer-size`、`--instance-type`、`--user` 仍会改变指纹。 |
 
 ### Status（单次查询）
 
@@ -241,7 +241,24 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 
 `--force` 只用于清除卡住的构建任务或定义构建，使删除可以继续；它不会覆盖使用中检查：只要仍有运行中的沙箱依赖该模板，后端就会拒绝删除，包括带 `--force` 的请求。
 
-> ⚠️ 删除操作会同时移除模板元数据和所有节点上的 artifact 副本。删除后无法再用该模板创建新沙箱。
+> ⚠️ 删除成功表示模板元数据和所有可达节点上的副本已被移除。删除后无法再用该模板创建新沙箱。
+
+如果模板的 rootfs artifact 与其他模板共享，删除该模板不会立即回收 artifact；要等最后一个引用它的模板被删除后才回收。
+
+**不可达节点**：CubeMaster 超过 15 分钟未收到心跳的节点不会阻塞删除，它会被记为待清理，删除照常返回成功，因此该节点上可能暂时保留模板的本地数据。节点恢复后，CubeMaster 会在后台完成清理，通常在 10 分钟内。节点一直不恢复，待清理记录就一直保留。不可达不足 15 分钟的节点仍会被正常请求，失败时删除返回错误，可稍后重试。
+
+在待清理完成之前，不要复用已删除的模板 ID。
+
+可以在 CubeMaster 日志中查看以下关键字来跟踪待清理进度：
+
+| 日志关键字 | 含义 |
+|------------|------|
+| `unreachable past grace` | 节点被跳过，已记为待清理 |
+| `orphan replica cleanup still failing` | 节点已恢复，但清理仍然失败 |
+| `orphan replica cleanup converged` | 该节点上的模板本地数据已删除 |
+| `deferred placement cleanup converged` | 该节点上的镜像文件已删除 |
+
+CubeMaster 设置了 `CUBE_MASTER_IMAGE_JOB_RECONCILE_DISABLED` 时，恢复节点上的模板本地数据不会被补清理，镜像文件仍会清理。
 
 
 ## 常见问题

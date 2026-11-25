@@ -66,6 +66,13 @@ func cloneFields(f LifecycleFields) LifecycleFields {
 	return f
 }
 
+// IsUserMetadataKey reports whether a label is a sandbox's user metadata
+// rather than one Cube sets itself (the caller, the host-mount request, and
+// every cube.master.* key).
+func IsUserMetadataKey(key string) bool {
+	return key != "host-mount" && key != constants.Caller && !strings.HasPrefix(key, "cube.master.")
+}
+
 // UserMetadata must run before template merging. The request constructor's
 // internal labels do not consume the user budget. Exact internal namespaces/keys
 // are excluded; user keys such as api_token stay.
@@ -85,7 +92,7 @@ func UserMetadata(labels map[string]string) LifecycleFields {
 	if labels != nil {
 		metadata = make(map[string]string, entries)
 		for k, v := range labels {
-			if k == "host-mount" || k == constants.Caller || strings.HasPrefix(k, "cube.master.") {
+			if !IsUserMetadataKey(k) {
 				continue
 			}
 			metadata[k] = v

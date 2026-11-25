@@ -49,6 +49,30 @@ import zhAgentHub from '@/locales/zh/agentHub.json';
 import zhAuth from '@/locales/zh/auth.json';
 import zhWarehouse from '@/locales/zh/warehouse.json';
 
+import zhTWCommon from '@/locales/zh-TW/common.json';
+import zhTWNav from '@/locales/zh-TW/nav.json';
+import zhTWTopbar from '@/locales/zh-TW/topbar.json';
+import zhTWCommand from '@/locales/zh-TW/command.json';
+import zhTWOverview from '@/locales/zh-TW/overview.json';
+import zhTWSandboxes from '@/locales/zh-TW/sandboxes.json';
+import zhTWSandboxDetail from '@/locales/zh-TW/sandboxDetail.json';
+import zhTWTemplates from '@/locales/zh-TW/templates.json';
+import zhTWTemplateDetail from '@/locales/zh-TW/templateDetail.json';
+import zhTWSnapshotDetail from '@/locales/zh-TW/snapshotDetail.json';
+import zhTWNodes from '@/locales/zh-TW/nodes.json';
+import zhTWNodeDetail from '@/locales/zh-TW/nodeDetail.json';
+import zhTWVersions from '@/locales/zh-TW/versions.json';
+import zhTWNetwork from '@/locales/zh-TW/network.json';
+import zhTWPlaceholder from '@/locales/zh-TW/placeholder.json';
+import zhTWSandboxNew from '@/locales/zh-TW/sandboxNew.json';
+import zhTWTheme from '@/locales/zh-TW/theme.json';
+import zhTWSettings from '@/locales/zh-TW/settings.json';
+import zhTWObservability from '@/locales/zh-TW/observability.json';
+import zhTWStore from '@/locales/zh-TW/store.json';
+import zhTWAgentHub from '@/locales/zh-TW/agentHub.json';
+import zhTWAuth from '@/locales/zh-TW/auth.json';
+import zhTWWarehouse from '@/locales/zh-TW/warehouse.json';
+
 export const resources = {
   en: {
     common: enCommon,
@@ -99,6 +123,31 @@ export const resources = {
     agentHub: zhAgentHub,
     auth: zhAuth,
     warehouse: zhWarehouse,
+  },
+  'zh-TW': {
+    common: zhTWCommon,
+    nav: zhTWNav,
+    topbar: zhTWTopbar,
+    command: zhTWCommand,
+    overview: zhTWOverview,
+    sandboxes: zhTWSandboxes,
+    sandboxDetail: zhTWSandboxDetail,
+    templates: zhTWTemplates,
+    templateDetail: zhTWTemplateDetail,
+    snapshotDetail: zhTWSnapshotDetail,
+    nodes: zhTWNodes,
+    nodeDetail: zhTWNodeDetail,
+    versions: zhTWVersions,
+    network: zhTWNetwork,
+    placeholder: zhTWPlaceholder,
+    sandboxNew: zhTWSandboxNew,
+    theme: zhTWTheme,
+    settings: zhTWSettings,
+    observability: zhTWObservability,
+    store: zhTWStore,
+    agentHub: zhTWAgentHub,
+    auth: zhTWAuth,
+    warehouse: zhTWWarehouse,
   },
 } as const;
 

@@ -5,6 +5,7 @@
 package bufferqueue
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"math/rand"
@@ -31,14 +32,22 @@ func (r *testReq) Handle() {
 
 }
 
+func shortScale(full, short int) int {
+	if testing.Short() {
+		return short
+	}
+	return full
+}
+
 func TestQueue(t *testing.T) {
 	worked := int32(0)
 	bw := New(&Options{Limit: 1})
 	testnum := 10
+	sleep := time.Duration(shortScale(1000, 100)) * time.Millisecond
 	for i := 1; i <= testnum; i++ {
-		bw.Push(&testReq{id: i, sleep: time.Second, worked: &worked})
+		bw.Push(&testReq{id: i, sleep: sleep, worked: &worked})
 	}
-	waittime := time.Duration(testnum) * time.Second
+	waittime := time.Duration(testnum)*sleep + time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), waittime)
 	defer cancel()
 	bw.GraceFullStop(ctx)
@@ -60,23 +69,20 @@ func TestQueueGracefullStopTimeout(t *testing.T) {
 
 func TestTimeSortedQueue(t *testing.T) {
 	var sortq TimeSortedQueue
-	testnum := 3000
-	for i := 1; i <= testnum; i++ {
-		randt := time.Duration(float64(rand.Intn(5)) * (1 + 0.8*rand.Float64()))
-		t := time.Now().Add(-randt)
+	testnum := shortScale(3000, 300)
+	for value, priority := range rand.Perm(testnum) {
 		item := &Item{
-			value:    i,
-			priority: t.UnixNano(),
+			value:    value,
+			priority: int64(priority),
 		}
-		sortq.Push(item)
-		time.Sleep(time.Millisecond * 5)
+		heap.Push(&sortq, item)
 	}
 
-	for i, v := range sortq {
-		assert.LessOrEqual(t, v.priority, sortq[i+1].priority)
-		if i == len(sortq)-2 {
-			break
-		}
+	previous := heap.Pop(&sortq).(*Item).priority
+	for sortq.Len() > 0 {
+		current := heap.Pop(&sortq).(*Item).priority
+		assert.LessOrEqual(t, previous, current)
+		previous = current
 	}
 }
 
@@ -112,7 +118,7 @@ func (r *testReqWithTimestamp) Handle() {
 func TestQueueCheckTimestampPriority(t *testing.T) {
 	worked := int32(0)
 	dealQ := &dealItems{}
-	testnum := 3000
+	testnum := shortScale(3000, 300)
 	bw := New(&Options{Limit: 5})
 	for i := 1; i <= testnum; i++ {
 		randt := time.Duration(float64(rand.Intn(5)) * (1 + 0.8*rand.Float64()))

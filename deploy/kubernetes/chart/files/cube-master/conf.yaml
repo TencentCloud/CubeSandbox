@@ -49,12 +49,16 @@ cubelet_conf:
 auth:
   enable: false
 
-# CubeProxy admin cache invalidation on sandbox resume. admin_token must match
-# the release Secret key cube-admin-token (what CubeProxy validates as
-# X-Cube-Admin-Token). Rendered from the chart helper; see cube.adminToken.
-# admin_port/heartbeat_ttl_ms fall back to defaults (8082 / 15000).
+# CubeProxy admin cache invalidation on sandbox resume. The chart injects the
+# shared release Secret as CUBE_PROXY_ADMIN_TOKEN (see master.yaml), which must
+# match what CubeProxy validates as X-Cube-Admin-Token. Keep this empty in the
+# chart: Helm renders each template independently, so generating the token here
+# as well would produce a different value from the release Secret on a fresh
+# install. A hand-written deployment without the environment variable may set
+# admin_token here instead. admin_port/heartbeat_ttl_ms fall back to defaults
+# (8082 / 15000).
 cube_proxy_conf:
-  admin_token: {{ include "cube.adminToken" . | quote }}
+  admin_token: ""
 
 req_template_conf:
   whitelist_req_tag:

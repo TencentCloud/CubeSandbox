@@ -54,26 +54,59 @@ func TestNodeStore_RegistrationLifecycle(t *testing.T) {
 }
 
 func TestNodeStore_StatusLifecycle(t *testing.T) {
-	env := newTestStore(t)
-	defer env.teardown()
+	for _, tc := range []struct {
+		name string
+		open func(*testing.T) *testStoreEnv
+	}{{engineMySQL, newMySQLTestStore}, {enginePostgres, newPostgresTestStore}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := tc.open(t)
+			defer env.teardown()
+			ctx := context.Background()
+			s := nmstore.NewNodeStore(env.store.DB())
+			first := time.Now().Unix()
 
-	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+			st := &nmstore.NodeStatus{
+				NodeID: "node-1", HeartbeatUnix: first,
+				HeartbeatReceivedUnix: first, Healthy: true,
+			}
+			if err := s.UpsertStatus(ctx, st); err != nil {
+				t.Fatalf("upsert: %v", err)
+			}
+			got, err := s.GetStatus(ctx, "node-1")
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if !got.Healthy || got.HeartbeatReceivedUnix != first {
+				t.Fatalf("first upsert lost receive time: %+v", got)
+			}
 
-	st := &nmstore.NodeStatus{
-		NodeID:        "node-1",
-		HeartbeatUnix: time.Now().Unix(),
-		Healthy:       true,
-	}
-	if err := s.UpsertStatus(ctx, st); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	got, err := s.GetStatus(ctx, "node-1")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Healthy != true {
-		t.Errorf("healthy = %v", got.Healthy)
+			st = &nmstore.NodeStatus{
+				NodeID: "node-1", HeartbeatUnix: first + 1,
+				HeartbeatReceivedUnix: first + 1, Healthy: true,
+			}
+			if err := s.UpsertStatus(ctx, st); err != nil {
+				t.Fatalf("second upsert: %v", err)
+			}
+			got, err = s.GetStatus(ctx, "node-1")
+			if err != nil {
+				t.Fatalf("second get: %v", err)
+			}
+			if got.HeartbeatReceivedUnix != first+1 {
+				t.Fatalf("receive time did not advance: got=%d want=%d", got.HeartbeatReceivedUnix, first+1)
+			}
+
+			// An old writer omits the new column; its row must remain fail-closed.
+			if err := env.store.DB().Exec(
+				"INSERT INTO t_cube_node_status (node_id, heartbeat_unix, healthy) VALUES (?, ?, ?)",
+				"legacy", first, true,
+			).Error; err != nil {
+				t.Fatalf("legacy insert: %v", err)
+			}
+			legacy, err := s.GetStatus(ctx, "legacy")
+			if err != nil || legacy.HeartbeatReceivedUnix != 0 {
+				t.Fatalf("legacy row: status=%+v err=%v", legacy, err)
+			}
+		})
 	}
 }
 

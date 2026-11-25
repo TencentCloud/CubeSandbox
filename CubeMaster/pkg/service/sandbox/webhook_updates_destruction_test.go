@@ -188,13 +188,12 @@ func setupDestroyFixture(t *testing.T) *destroyFixture {
 	// the real InitTask interface dispatch. The App test exercises the unwrapped
 	// queue, real worker handler and its retry path separately.
 	worker := queueworker.NewQueueWorker(&queueworker.Options{QueueSize: 4, WorkerNum: 4}, func(interface{}) error { return nil })
-	p.ApplyFunc(queueworker.NewQueueWorker, func(options *queueworker.Options, _ queueworker.WorkHandler) queueworker.QueueWorker {
+	ctx, cancel := context.WithCancel(context.Background())
+	task.InitTask(ctx, cfg, task.WithQueueWorkerFactory(func(options *queueworker.Options, _ queueworker.WorkHandler) queueworker.QueueWorker {
 		require.Equal(t, 4, options.QueueSize)
 		require.Equal(t, 4, options.WorkerNum)
 		return &capturedDestroyQueue{QueueWorker: worker, fixture: f}
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	task.InitTask(ctx, cfg)
+	}))
 	t.Cleanup(func() { task.Stop(context.Background()); cancel() })
 	return f
 }

@@ -111,6 +111,7 @@ def test_probe_reports_malformed_error_messages(monkeypatch, config):
 def test_probe_skips_when_volume_api_is_unavailable(monkeypatch, config):
     api = SimpleNamespace(
         create_volume_raw=lambda name, driver: _Response(404, {}, "not found"),
+        list_volumes_raw=lambda: _Response(404, {}, "not found"),
         close=lambda: None,
     )
     monkeypatch.setattr("framework.volume.ApiClient", lambda unused: api)
@@ -119,6 +120,44 @@ def test_probe_skips_when_volume_api_is_unavailable(monkeypatch, config):
 
     assert not result.available
     assert "HTTP 404" in result.reason
+
+
+def test_probe_does_not_hide_business_404(monkeypatch, config):
+    api = SimpleNamespace(
+        create_volume_raw=lambda name, driver: _Response(
+            404, {"message": "backend resource not found"}, "backend resource not found"
+        ),
+        list_volumes_raw=lambda: _Response(200, []),
+        close=lambda: None,
+    )
+    monkeypatch.setattr("framework.volume.ApiClient", lambda unused: api)
+
+    with pytest.raises(RuntimeError, match="create returned HTTP 404"):
+        probe_volume_plugin(config)
+
+
+def test_probe_preserves_volume_route_transport_failure(monkeypatch, config):
+    route_error = requests.Timeout("list timed out")
+
+    def list_volumes_raw():
+        raise route_error
+
+    api = SimpleNamespace(
+        create_volume_raw=lambda name, driver: _Response(
+            404, {"message": "backend resource not found"}, "backend resource not found"
+        ),
+        list_volumes_raw=list_volumes_raw,
+        close=lambda: None,
+    )
+    monkeypatch.setattr("framework.volume.ApiClient", lambda unused: api)
+
+    with pytest.raises(
+        RuntimeError,
+        match="could not distinguish a missing Volume API from a create backend failure",
+    ) as exc_info:
+        probe_volume_plugin(config)
+
+    assert exc_info.value.__cause__ is route_error
 
 
 def test_probe_does_not_hide_method_rejection(monkeypatch, config):
@@ -214,6 +253,40 @@ def test_probe_cleans_up_malformed_success_body(monkeypatch, config, response):
 
     assert len(deleted) == 1
     assert deleted[0].startswith("sdk-e2e-volume-probe-")
+
+
+def test_probe_accepts_cleanup_after_transient_failure_for_malformed_success(
+    monkeypatch, config
+):
+    statuses = iter([500, 204])
+    api = SimpleNamespace(
+        create_volume_raw=lambda name, driver: _InvalidJsonResponse(201),
+        delete_volume=lambda volume_id: next(statuses),
+        close=lambda: None,
+    )
+    monkeypatch.setattr("framework.volume.ApiClient", lambda unused: api)
+    monkeypatch.setattr("framework.volume.time.sleep", lambda unused: None)
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        probe_volume_plugin(config)
+
+
+def test_probe_reports_cleanup_failure_after_malformed_success(monkeypatch, config):
+    closed = []
+    api = SimpleNamespace(
+        create_volume_raw=lambda name, driver: _InvalidJsonResponse(201),
+        delete_volume=lambda volume_id: 500,
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setattr("framework.volume.ApiClient", lambda unused: api)
+    monkeypatch.setattr("framework.volume.time.sleep", lambda unused: None)
+
+    with pytest.raises(RuntimeError, match="cleanup failed after an invalid create response") as exc:
+        probe_volume_plugin(config)
+
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert "invalid JSON" in str(exc.value.__cause__)
+    assert closed == [True]
 
 
 def test_probe_cleans_up_success_without_volume_id(monkeypatch, config):

@@ -61,6 +61,25 @@ func buildTemplateSpecFingerprintWithCA(req *types.CreateTemplateFromImageReq, s
 	return buildTemplateSpecFingerprintWithEnvdSHA(req, sourceImageDigest, cubeEgressCAFingerprint, "")
 }
 
+// fingerprintContainerOverrides retains only ContainerOverrides fields that
+// participate in rootfs artifact identity (DnsConfig, SecurityContext,
+// Annotations), dropping runtime-only overrides (Resources, Command, Args,
+// WorkingDir, Envs, Probe, VolumeMounts, RLimit). Returns nil when none of the
+// retained fields are set so runtime-only or empty overrides match nil.
+func fingerprintContainerOverrides(in *types.ContainerOverrides) *types.ContainerOverrides {
+	if in == nil || (in.DnsConfig == nil && in.SecurityContext == nil && len(in.Annotations) == 0) {
+		return nil
+	}
+	kept := &types.ContainerOverrides{
+		DnsConfig:       in.DnsConfig,
+		SecurityContext: in.SecurityContext,
+	}
+	if len(in.Annotations) > 0 {
+		kept.Annotations = in.Annotations
+	}
+	return kept
+}
+
 func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageReq, sourceImageDigest, cubeEgressCAFingerprint, envdSHA string) string {
 	type fingerprintPayload struct {
 		SourceImageDigest       string                    `json:"source_image_digest"`
@@ -78,7 +97,7 @@ func buildTemplateSpecFingerprintWithEnvdSHA(req *types.CreateTemplateFromImageR
 		ExposedPorts:            req.ExposedPorts,
 		InstanceType:            req.InstanceType,
 		NetworkType:             req.NetworkType,
-		ContainerOverrides:      req.ContainerOverrides,
+		ContainerOverrides:      fingerprintContainerOverrides(req.ContainerOverrides),
 		CubeEgressCAFingerprint: cubeEgressCAFingerprint,
 		EnvdBinarySHA256:        envdSHA,
 	})

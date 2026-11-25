@@ -3,6 +3,7 @@
 //
 
 use crate::error::AppError;
+use crate::middleware::auth::{extract_credential, AuthCredential};
 use crate::state::AppState;
 use axum::{
     extract::{Request, State},
@@ -11,9 +12,10 @@ use axum::{
     response::Response,
 };
 
-/// Per-API-key token bucket rate limiter middleware.
-/// Reads the X-API-Key header and checks the governor limiter for the
-/// request's class: read requests (GET/HEAD) use `RATE_LIMIT_READ_PER_SEC`,
+/// Per-credential token bucket rate limiter middleware.
+/// Uses the same Bearer-first credential precedence as authentication and
+/// checks the governor limiter for the request's class: read requests
+/// (GET/HEAD) use `RATE_LIMIT_READ_PER_SEC`,
 /// write requests (POST/PUT/PATCH/DELETE) use `RATE_LIMIT_WRITE_PER_SEC`,
 /// and any class without a dedicated quota — as well as methods outside both
 /// lists — falls back to the shared `RATE_LIMIT_PER_SEC` limiter.
@@ -23,13 +25,32 @@ pub async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // Extract key; fall back to IP or "anonymous"
-    let key = request
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    // Match unified_auth's Bearer-first precedence. Prefix the credential kind
+    // so an API key cannot collide with a Bearer token having the same bytes.
+    let key = if state
+        .config
+        .auth_callback_url
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+        && !state
+            .config
+            .cube_api_key
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+    {
+        // Simple-key auth accepts the configured secret through either header,
+        // so both forms are the same authenticated principal and must share a
+        // bucket. Authentication runs before this middleware in production.
+        "simple-key".to_string()
+    } else {
+        match extract_credential(&request) {
+            Some(AuthCredential::Bearer(token)) => format!("bearer:{token}"),
+            Some(AuthCredential::ApiKey(key)) => format!("api-key:{key}"),
+            None => "anonymous".to_string(),
+        }
+    };
 
     match limiter_for_method(&state, request.method()).check_key(&key) {
         Ok(_) => Ok(next.run(request).await),
@@ -91,17 +112,51 @@ mod tests {
     }
 
     fn test_config() -> ServerConfig {
-        ServerConfig::default()
+        ServerConfig {
+            // Keep credential-bucketing tests independent of CUBE_API_KEY in
+            // the developer's environment.
+            cube_api_key: None,
+            auth_callback_url: None,
+            ..ServerConfig::default()
+        }
     }
 
-    async fn request(server: &TestServer, method: Method, path: &str) -> axum_test::TestResponse {
+    async fn request_with_key(
+        server: &TestServer,
+        method: Method,
+        path: &str,
+        key: &'static str,
+    ) -> axum_test::TestResponse {
         server
             .method(method, path)
             .add_header(
                 HeaderName::from_static(API_KEY_HEADER),
-                HeaderValue::from_static(KEY),
+                HeaderValue::from_static(key),
             )
             .await
+    }
+
+    async fn request_with_bearer(
+        server: &TestServer,
+        method: Method,
+        token: &str,
+        api_key: Option<&str>,
+    ) -> axum_test::TestResponse {
+        let mut request = server.method(method, "/ping").add_header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("valid test Bearer token"),
+        );
+        if let Some(api_key) = api_key {
+            request = request.add_header(
+                HeaderName::from_static(API_KEY_HEADER),
+                HeaderValue::from_str(api_key).expect("valid test API key"),
+            );
+        }
+        request.await
+    }
+
+    async fn request(server: &TestServer, method: Method, path: &str) -> axum_test::TestResponse {
+        request_with_key(server, method, path, KEY).await
     }
 
     /// Backwards compatibility: with neither new setting configured, every
@@ -142,6 +197,95 @@ mod tests {
         // read bucket nor the shared bucket.
         let write = request(&server, Method::POST, "/ping").await;
         write.assert_status_ok();
+    }
+
+    /// The split is symmetric: exhausting lifecycle writes must not throttle
+    /// status polling. Using DELETE and POST also verifies that both methods
+    /// consume the write bucket.
+    #[tokio::test]
+    async fn write_exhaustion_does_not_throttle_reads() {
+        let mut config = test_config();
+        config.rate_limit_read_per_sec = Some(100);
+        config.rate_limit_write_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        let first = request(&server, Method::DELETE, "/ping").await;
+        first.assert_status_ok();
+        let second = request(&server, Method::POST, "/ping").await;
+        second.assert_status(StatusCode::TOO_MANY_REQUESTS);
+
+        let read = request(&server, Method::GET, "/ping").await;
+        read.assert_status_ok();
+    }
+
+    /// Quotas are keyed independently rather than acting as one global bucket.
+    #[tokio::test]
+    async fn rate_limit_is_independent_per_api_key() {
+        let mut config = test_config();
+        config.rate_limit_read_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        request_with_key(&server, Method::GET, "/ping", "key-a")
+            .await
+            .assert_status_ok();
+        request_with_key(&server, Method::GET, "/ping", "key-a")
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+        request_with_key(&server, Method::GET, "/ping", "key-b")
+            .await
+            .assert_status_ok();
+    }
+
+    /// Bearer users get independent buckets, and an unrelated API-key header
+    /// cannot change the identity selected by authentication.
+    #[tokio::test]
+    async fn bearer_identity_matches_auth_precedence() {
+        let mut config = test_config();
+        config.rate_limit_read_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        request_with_bearer(&server, Method::GET, "token-a", None)
+            .await
+            .assert_status_ok();
+        request_with_bearer(&server, Method::GET, "token-a", Some("rotated-key"))
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+        request_with_bearer(&server, Method::GET, "token-b", None)
+            .await
+            .assert_status_ok();
+    }
+
+    /// Simple-key authentication treats Bearer and API-key forms as aliases
+    /// for one configured principal, so switching headers cannot evade quota.
+    #[tokio::test]
+    async fn simple_key_header_forms_share_a_bucket() {
+        let mut config = test_config();
+        config.cube_api_key = Some("same-value".to_string());
+        config.rate_limit_read_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        request_with_bearer(&server, Method::GET, "same-value", None)
+            .await
+            .assert_status_ok();
+        request_with_key(&server, Method::GET, "/ping", "same-value")
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Callback authentication can assign different identities to a Bearer
+    /// token and API key with identical bytes, so their namespaces stay split.
+    #[tokio::test]
+    async fn bearer_and_api_key_namespaces_do_not_collide() {
+        let mut config = test_config();
+        config.rate_limit_read_per_sec = Some(1);
+        let server = test_server(config).await;
+
+        request_with_bearer(&server, Method::GET, "same-value", None)
+            .await
+            .assert_status_ok();
+        request_with_key(&server, Method::GET, "/ping", "same-value")
+            .await
+            .assert_status_ok();
     }
 
     /// Fallback documented for a single setting: when only the read limit is

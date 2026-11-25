@@ -18,75 +18,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestRemove(t *testing.T) {
-	nodes := NodeList{}
-	testNum := 10
-	for i := 1; i <= testNum; i++ {
-		n := &Node{
-			Index: i,
-			InsID: fmt.Sprintf("%d", i),
-		}
-		nodes.Append(n)
-	}
-	if testNum != nodes.Len() {
-		t.Fatalf("testNum != nodes.Len(), testNum: %d, nodes.Len(): %d", testNum, nodes.Len())
-	}
-	nodes.Add(&Node{InsID: "1"}, &Node{InsID: "2"}, &Node{InsID: "3"})
-	if testNum != nodes.Len() {
-		t.Fatalf("after Add,testNum != nodes.Len(), testNum: %d, nodes.Len(): %d", testNum, nodes.Len())
-	}
-	l := nodes.AllSortByIndex()
-	l.Remove(&Node{InsID: fmt.Sprint(testNum)})
-}
-func TestSorted(t *testing.T) {
-	nodes := NodeList{}
-	testNum := 100
-	for i := 1; i <= testNum; i++ {
-		n := &Node{
-			Index: i,
-			InsID: fmt.Sprintf("%d", i),
-		}
-		nodes.Append(n)
-	}
-	if testNum != nodes.Len() {
-		t.Fatalf("testNum != nodes.Len(), testNum: %d, nodes.Len(): %d", testNum, nodes.Len())
-	}
-	nodes.Add(&Node{InsID: "1"}, &Node{InsID: "2"}, &Node{InsID: "3"})
-	if testNum != nodes.Len() {
-		t.Fatalf("after Add,testNum != nodes.Len(), testNum: %d, nodes.Len(): %d", testNum, nodes.Len())
-	}
-
-	l := nodes.AllSortByIndex()
-	for i := 1; i < testNum; i++ {
-		assert.Less(t, l[i-1].Index, l[i].Index)
-	}
-	oldNum := nodes.Len()
-	nodes.Remove(&Node{InsID: "1"}, &Node{InsID: "2"}, &Node{InsID: "3"})
-	if oldNum-3 != nodes.Len() {
-		t.Fatalf(
-			"oldNum-3 != nodes.Len(), oldNum: %d, nodes.Len(): %d",
-			oldNum-3,
-			nodes.Len())
-	}
-	oldNum = nodes.Len()
-	nodes.Remove(&Node{InsID: "1"}, &Node{InsID: "99"}, &Node{InsID: "4"})
-	if oldNum-2 != nodes.Len() {
-		t.Fatalf(
-			"oldNum-2 != nodes.Len(), oldNum: %d, nodes.Len(): %d",
-			oldNum-2,
-			nodes.Len())
-	}
-
-	oldNum = nodes.Len()
-	nodes.Remove(&Node{InsID: "1"}, &Node{InsID: "99"}, &Node{InsID: "4"})
-	if oldNum != nodes.Len() {
-		t.Fatalf(
-			"oldNum != nodes.Len(), oldNum: %d, nodes.Len(): %d",
-			oldNum,
-			nodes.Len())
-	}
-}
-
 func TestNodes_IndexByPage(t *testing.T) {
 	nodes := NodeList{}
 	assert.Equal(t, 0, nodes.Len())
@@ -433,14 +364,17 @@ func TestNodeCloneCoversAllFields(t *testing.T) {
 			fillNonZeroField(sourceValue.Field(i))
 		}
 	}
+	// Unexported atomic fields are invisible to the loop below, so they are
+	// filled and compared explicitly through their accessors.
 	source.SetSchedulingDisabled(true)
+	source.SetScore(1.5)
 
 	cloned := source.Clone()
 	clonedValue := reflect.ValueOf(cloned).Elem()
 	for i := 0; i < sourceType.NumField(); i++ {
 		field := sourceType.Field(i)
 		if !field.IsExported() {
-			// schedulingDisabled is copied through SetSchedulingDisabled;
+			// schedulingDisabled and score are copied through their accessors;
 			// labelsCache is intentionally reset.
 			continue
 		}
@@ -450,6 +384,7 @@ func TestNodeCloneCoversAllFields(t *testing.T) {
 		}
 	}
 	assert.Equal(t, source.SchedulingDisabled(), cloned.SchedulingDisabled())
+	assert.Equal(t, source.GetScore(), cloned.GetScore())
 }
 
 func fillNonZeroField(v reflect.Value) {

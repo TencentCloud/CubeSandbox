@@ -4,7 +4,7 @@
 
 > **本页是"操作参考"**：面向需要**手动部署插件 / 接入外部 S3** 的运维人员。
 >
-> **如果你用的是默认安装（one-click 或 Helm 默认值）** —— 安装脚本已经自动起好 MinIO、装好插件、写好凭证，你**不需要看本页**，直接看用户教程：[S3 持久卷](../../../docs/zh/guide/s3-volume.md)。
+> **如果你用的是默认安装（one-click 或 Helm 默认值）** —— 安装脚本已经自动起好 MinIO、装好插件、写好凭证，你**不需要看本页**，直接看用户教程：[S3 持久卷](../../../docs/zh/guide/volume.md)。
 
 English: [README.md](README.md)
 
@@ -27,7 +27,7 @@ CubeSandbox 的沙箱默认是临时的，销毁即丢数据。Volume 插件给�
 
 | 你的情况 | 去哪 |
 |----------|------|
-| 默认安装（one-click / Helm 默认），想用 S3 Volume | [用户教程](../../../docs/zh/guide/s3-volume.md) —— 直接用 SDK，无需配置 |
+| 默认安装（one-click / Helm 默认），想用 S3 Volume | [用户教程](../../../docs/zh/guide/volume.md) —— 直接用 SDK，无需配置 |
 | 想把后端从捆绑 MinIO 换成外部 S3 | 本页 [§2](#2-安装插件与凭证) 起，改 `volume-s3.conf` 即可 |
 | 每个用户自带桶和凭证，不希望重新部署 | [动态桶与凭证引用](#动态桶与凭证引用) |
 | 从零手动部署 S3 Volume 插件 | 本页全文 |
@@ -509,7 +509,7 @@ make cube-volume-s3-test
 
 | 文档 | 内容 |
 |------|------|
-| [S3 持久卷（用户教程）](../../../docs/zh/guide/s3-volume.md) | 面向最终用户的快速上手 |
+| [S3 持久卷（用户教程）](../../../docs/zh/guide/volume.md) | 面向最终用户的快速上手 |
 | [Volume 插件开发框架](../../../docs/zh/guide/volume-plugin.md) | 协议、RefCount、Hook 语义 |
 | [COS 示例](../cos/README.zh.md) | 本插件所参照的参考实现 |
 | [s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse) | 挂载驱动选项与行为 |

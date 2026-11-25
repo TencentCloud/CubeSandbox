@@ -63,7 +63,10 @@ tolerates_gate() {
 }
 
 nodes="$(kubectl get nodes -l "$NODE_SELECTOR" -o name)"
-[ -n "$nodes" ] || fail "no nodes match placement.pvm (${NODE_SELECTOR})"
+if [ -z "$nodes" ]; then
+  printf 'PVM preflight: no nodes match placement.pvm (%s); nothing to gate\n' "$NODE_SELECTOR" >&2
+  exit 0
+fi
 
 render_image_pull_secrets() {
   [ -n "$IMAGE_PULL_SECRET_NAMES" ] || return 0

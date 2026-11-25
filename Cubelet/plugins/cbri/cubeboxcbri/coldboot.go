@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
@@ -187,6 +189,45 @@ func coldBootWritableLayer(snapshotSpecDir string) (string, error) {
 			snapshotmode.ErrFilesystemOnlyGuestRuntime, layer, err)
 	}
 	return layer, nil
+}
+
+// snapshotRestoreWritableLayer is the overlay upper a memory restore must keep.
+func snapshotRestoreWritableLayer(templateID, snapshotSpecPath, priorLayer string, req *cubebox.RunCubeSandboxRequest) string {
+	if metadata, err := readSnapshotMetadata(snapshotSpecPath); err == nil {
+		if layer := strings.TrimSpace(metadata.RootfsWritableLayer); validateWritableLayerSubdir(layer) == nil {
+			return layer
+		}
+	}
+	if layer := strings.TrimSpace(priorLayer); validateWritableLayerSubdir(layer) == nil {
+		return layer
+	}
+	if metadata, err := readSnapshotMetadata(snapshotSpecPath); err == nil {
+		if containerID := strings.TrimSpace(metadata.AppSnapshotContainerID); containerID != "" {
+			layer := "disk/" + containerID
+			if validateWritableLayerSubdir(layer) == nil {
+				return layer
+			}
+		}
+	}
+	id := ""
+	if req != nil {
+		annotations := req.GetAnnotations()
+		id = strings.TrimSpace(annotations[constants.MasterAnnotationJFSTemplateVariantID])
+		if id == "" {
+			id = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+		}
+	}
+	if id == "" {
+		id = strings.TrimSpace(templateID)
+	}
+	if id == "" {
+		return ""
+	}
+	layer := "disk/" + id + "_0"
+	if validateWritableLayerSubdir(layer) != nil {
+		return ""
+	}
+	return layer
 }
 
 // validateWritableLayerSubdir keeps a package-supplied path inside the disk

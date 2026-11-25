@@ -893,7 +893,7 @@ pub struct CubeTCPSocket {
 }
 
 /// Network egress control sent to CubeMaster.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CubeNetworkConfig {
     /// Allow internet (public) access. Maps to CubeMaster allowInternetAccess.
     #[serde(
@@ -916,27 +916,34 @@ pub struct CubeNetworkConfig {
     pub mask_request_host: Option<String>,
 
     /// Allowed outbound CIDRs whitelist.
-    #[serde(rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "allowOut", skip_serializing_if = "Vec::is_empty")]
     pub allow_out: Vec<String>,
 
     /// Denied outbound CIDRs blacklist.
-    #[serde(rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "denyOut", skip_serializing_if = "Vec::is_empty")]
     pub deny_out: Vec<String>,
 
     /// L7 egress rules, evaluated first-match-wins in list order.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<CubeEgressRule>,
+    /// Set by CubeMaster when the persisted config carried rules (which are
+    /// scrubbed from this same payload).
+    #[serde(default, rename = "rules_present")]
+    pub rules_present: Option<bool>,
 }
 
 /// L7 egress rule forwarded to CubeMaster (camelCase wire keys).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CubeEgressRule {
     pub name: String,
+    // types.EgressRule marks these omitempty; persisted template rules may lack either.
+    #[serde(default)]
     pub r#match: CubeEgressRuleMatch,
+    #[serde(default)]
     pub action: CubeEgressRuleAction,
 }
 
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CubeEgressRuleMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
@@ -952,7 +959,7 @@ pub struct CubeEgressRuleMatch {
     pub port: Option<i32>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CubeEgressRuleAction {
     pub allow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -961,7 +968,7 @@ pub struct CubeEgressRuleAction {
     pub inject: Option<Vec<CubeEgressRuleInject>>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CubeEgressRuleInject {
     pub header: String,
     pub secret: String,
@@ -1301,6 +1308,14 @@ pub struct SandboxInfo {
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub auto_pause: Option<bool>,
+    #[serde(default)]
+    pub auto_resume: Option<bool>,
+    #[serde(default)]
+    pub cube_network_config: Option<CubeNetworkConfig>,
+    #[serde(default)]
+    pub end_at_status: Option<String>,
 }
 
 // ─── Get single sandbox ────────────────────────────────────────────────────
@@ -1349,6 +1364,14 @@ pub struct GetSandboxDataItem {
     pub volume_mounts: Vec<CubeVolumeMount>,
     #[serde(default)]
     pub restart_status: Option<CubeRestartStatus>,
+    #[serde(default)]
+    pub auto_pause: Option<bool>,
+    #[serde(default)]
+    pub auto_resume: Option<bool>,
+    #[serde(default)]
+    pub cube_network_config: Option<CubeNetworkConfig>,
+    #[serde(default)]
+    pub end_at_status: Option<String>,
     #[serde(default)]
     pub host_ip: String,
     #[serde(default)]
@@ -1409,6 +1432,10 @@ pub struct SandboxDetail {
     pub volume_mounts: Vec<CubeVolumeMount>,
     pub restart_status: Option<CubeRestartStatus>,
     pub configured_qos: Option<CubeQosConfig>,
+    pub auto_pause: Option<bool>,
+    pub auto_resume: Option<bool>,
+    pub cube_network_config: Option<CubeNetworkConfig>,
+    pub end_at_status: Option<String>,
 }
 
 fn parse_cpu_millicores(s: &str) -> i32 {
@@ -1648,6 +1675,10 @@ impl GetSandboxResponse {
             volume_mounts: item.volume_mounts,
             restart_status: item.restart_status,
             configured_qos: item.configured_qos,
+            auto_pause: item.auto_pause,
+            auto_resume: item.auto_resume,
+            cube_network_config: item.cube_network_config,
+            end_at_status: item.end_at_status,
         })
     }
 }
@@ -2607,6 +2638,28 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_info_tolerates_egress_rules_without_match_or_action() {
+        // Go's types.EgressRule marks match/action omitempty, so a persisted
+        // template rule can carry neither; strict decode would 500 the response.
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "cube_network_config": {
+                "rules": [
+                    {"name": "tpl-rule"},
+                    {"name": "host-rule", "match": {"host": "api.example.com"}}
+                ]
+            }
+        }))
+        .expect("rules without match/action must not fail the whole decode");
+
+        let config = info.cube_network_config.expect("network config");
+        assert_eq!(config.rules.len(), 2);
+        assert!(config.rules[0].r#match.sni.is_none());
+        assert!(!config.rules[0].action.allow);
+    }
+
+    #[test]
     fn non_empty_str_trims_surrounding_whitespace() {
         assert_eq!(non_empty_str(" op-1 "), Some("op-1"));
         assert_eq!(non_empty_str("\top-1\n"), Some("op-1"));
@@ -3197,7 +3250,15 @@ pub struct GetVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
     pub request_id: String,
     pub ret: RetCode,
+    pub volume: CubeMasterVolumeDetails,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CubeMasterVolumeDetails {
+    #[serde(flatten)]
     pub volume: CubeMasterVolume,
+    pub in_flight_creates: Option<i64>,
+    pub deleting: Option<bool>,
 }
 
 /// DELETE /cube/volume/{volume_id} — response.

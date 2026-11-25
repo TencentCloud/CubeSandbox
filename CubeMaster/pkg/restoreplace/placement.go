@@ -5,8 +5,10 @@
 // Package restoreplace implements the CubeMaster §3.1 restore placement tree
 // shared by Pause Resume and from-snapshot Create: origin node first; leave
 // the origin only when staying would fail and the snapshot is S3
-// remote_ready. Cross-node candidates must match the origin cpuid_hash and
-// host_kernel_release.
+// remote_ready. Cross-node memory restore requires the origin cpuid_hash; when
+// the origin declares a machine-type label the target must share it and the
+// host_kernel_release comparison is skipped, otherwise both cpuid_hash and
+// host_kernel_release must match.
 package restoreplace
 
 import (
@@ -58,6 +60,10 @@ type Input struct {
 	// Kind is MemoryRestore for pause/rollback/from-full-snapshot and
 	// FilesystemColdBoot for a create from a filesystem-only snapshot.
 	Kind Kind
+	// SourceMachineType is the source node's machine-type label value. When
+	// set, candidates must share this label and the source cpuid_hash; the
+	// host_kernel_release comparison is skipped.
+	SourceMachineType string
 }
 
 // Placement is the chosen host. CrossNode is true only after origin failed
@@ -74,12 +80,13 @@ type compatibleCandidate struct {
 }
 
 var (
-	lookupNodeFn              = defaultLookupNode
-	selectNodeFn              = defaultSelectNode
-	selectPinnedFn            = scheduler.SelectPinned
-	listCompatibleFn          = defaultListCompatible
-	listColdBootFn            = defaultListColdBootCandidates
-	queryHostFactCandidatesFn = nodemeta.QueryHostFactCandidates
+	lookupNodeFn                = defaultLookupNode
+	selectNodeFn                = defaultSelectNode
+	selectPinnedFn              = scheduler.SelectPinned
+	listCompatibleFn            = defaultListCompatible
+	listColdBootFn              = defaultListColdBootCandidates
+	listMachineTypeCandidatesFn = defaultListMachineTypeCandidates
+	queryHostFactCandidatesFn   = nodemeta.QueryHostFactCandidates
 )
 
 func crossNodeBlockedReason(in Input) string {
@@ -100,6 +107,18 @@ func CanCrossNode(backend, remoteStatus string) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(remoteStatus), constants.RemoteStatusReady)
+}
+
+// MachineTypeLabelKey aliases constants.LabelMachineType for readable call
+// sites inside the restore code.
+const MachineTypeLabelKey = constants.LabelMachineType
+
+// MachineTypeLabel returns the machine-type label value from a node label set.
+func MachineTypeLabel(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(labels[MachineTypeLabelKey])
 }
 
 // Decide runs the §3.1 tree. Origin is returned whenever it can still take
@@ -138,13 +157,29 @@ func Decide(ctx context.Context, in Input) (*Placement, error) {
 		}
 	} else {
 		facts := parseOriginHostFacts(in.OriginHostFactsJSON)
-		if facts == nil || strings.TrimSpace(facts.CPUIDHash) == "" || strings.TrimSpace(facts.HostKernelRelease) == "" {
-			return nil, fmt.Errorf("cannot cross-node restore %s: origin cpuid_hash/host_kernel_release unknown",
-				strings.TrimSpace(in.SnapshotID))
-		}
-		candidates, err = listCompatibleFn(ctx, facts)
-		if err != nil {
-			return nil, fmt.Errorf("list compatible nodes for %s: %w", strings.TrimSpace(in.SnapshotID), err)
+		machineType := strings.TrimSpace(in.SourceMachineType)
+		if machineType == "" {
+			// Historical path, unchanged: both facts are required.
+			if facts == nil || strings.TrimSpace(facts.CPUIDHash) == "" || strings.TrimSpace(facts.HostKernelRelease) == "" {
+				return nil, fmt.Errorf("cannot cross-node restore %s: origin cpuid_hash/host_kernel_release unknown",
+					strings.TrimSpace(in.SnapshotID))
+			}
+			candidates, err = listCompatibleFn(ctx, facts)
+			if err != nil {
+				return nil, fmt.Errorf("list compatible nodes for %s: %w", strings.TrimSpace(in.SnapshotID), err)
+			}
+		} else {
+			// Operator-declared machine type: same label plus same CPU. The
+			// host kernel release is intentionally not compared here; the
+			// node-side snapshot checks still run.
+			if facts == nil || strings.TrimSpace(facts.CPUIDHash) == "" {
+				return nil, fmt.Errorf("cannot cross-node restore %s: origin cpuid_hash unknown",
+					strings.TrimSpace(in.SnapshotID))
+			}
+			candidates, err = listMachineTypeCandidatesFn(ctx, facts.CPUIDHash, machineType)
+			if err != nil {
+				return nil, fmt.Errorf("list %s candidates for %s: %w", MachineTypeLabelKey, strings.TrimSpace(in.SnapshotID), err)
+			}
 		}
 	}
 
@@ -186,6 +221,10 @@ func Decide(ctx context.Context, in Input) (*Placement, error) {
 		if in.Kind == FilesystemColdBoot {
 			return nil, fmt.Errorf("no healthy node for cross-node cold boot of %s",
 				strings.TrimSpace(in.SnapshotID))
+		}
+		if strings.TrimSpace(in.SourceMachineType) != "" {
+			return nil, fmt.Errorf("no compatible node for cross-node restore of %s (machine type %q and cpuid match)",
+				strings.TrimSpace(in.SnapshotID), in.SourceMachineType)
 		}
 		return nil, fmt.Errorf("no compatible node for cross-node restore of %s (cpuid_hash/kernel match)",
 			strings.TrimSpace(in.SnapshotID))
@@ -327,7 +366,34 @@ func defaultListCompatible(ctx context.Context, origin *nodemeta.HostFacts) ([]c
 	return out, nil
 }
 
+// defaultListMachineTypeCandidates narrows the healthy, fact-bearing node set
+// by machine-type label and CPU identity. Kernel release is the only dimension
+// the label replaces.
+func defaultListMachineTypeCandidates(ctx context.Context, cpuidHash, machineType string) ([]compatibleCandidate, error) {
+	// matchAll=true: the kernel release must not filter here.
+	rows, err := queryHostFactCandidatesFn(ctx, "", "", true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]compatibleCandidate, 0, len(rows))
+	for _, row := range rows {
+		if row == nil || row.HostFacts == nil {
+			continue
+		}
+		if row.HostFacts.CPUIDHash != cpuidHash {
+			continue
+		}
+		if MachineTypeLabel(row.NodeLabels) != machineType {
+			continue
+		}
+		out = append(out, compatibleCandidate{NodeID: row.NodeID, NodeIP: row.HostIP})
+	}
+	return out, nil
+}
+
 func defaultListColdBootCandidates(_ context.Context, instanceType string) ([]compatibleCandidate, error) {
+	// A filesystem-only snapshot carries no guest memory, so there is no host
+	// ABI to match and a node without HostFacts can still accept it.
 	nodes := localcache.GetHealthyNodesByInstanceType(-1, instanceType)
 	out := make([]compatibleCandidate, 0, nodes.Len())
 	for _, n := range nodes {

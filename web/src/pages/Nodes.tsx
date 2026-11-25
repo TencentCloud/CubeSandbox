@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Tencent. All rights reserved.
 
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
-import { clusterApi } from '@/api/client';
+import { Link, useSearchParams } from 'react-router-dom';
+import { clusterApi, machineTypeApi } from '@/api/client';
+import { NodesHeaderTabs } from '@/components/nodes/NodesHeaderTabs';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Cpu, HardDrive, Server, ShieldAlert } from 'lucide-react';
 import { cn, formatRelative } from '@/lib/utils';
@@ -17,14 +20,70 @@ export default function NodesPage() {
     queryFn: clusterApi.nodes,
     refetchInterval: 15_000,
   });
+  const typesQuery = useQuery({
+    queryKey: ['machine-types'],
+    queryFn: machineTypeApi.list,
+    refetchInterval: 15_000,
+  });
   const { t } = useTranslation('nodes');
+  const [params, setParams] = useSearchParams();
+  const machineType = params.get('machineType') ?? '';
+  const [query, setQuery] = useState('');
+  const types = typesQuery.data ?? [];
+  const typeName = (value: string) =>
+    types.find((item) => item.name === value)?.displayName || value;
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (data ?? []).filter((node) => {
+      if (machineType === '__unassigned__' && node.machineType) return false;
+      if (machineType && machineType !== '__unassigned__' && node.machineType !== machineType) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        node.nodeID.toLowerCase().includes(q) ||
+        (node.address ?? '').toLowerCase().includes(q) ||
+        (node.hostname ?? '').toLowerCase().includes(q)
+      );
+    });
+  }, [data, machineType, query]);
 
   return (
     <div className="animate-fade-in space-y-5">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">{t('title')}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{t('subtitle')}</p>
-      </header>
+      <NodesHeaderTabs
+        subtitle={t('subtitle')}
+        nodeCount={data?.length}
+        machineTypeCount={typesQuery.data?.length}
+      />
+      <div className="flex flex-wrap gap-2">
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('searchPlaceholder')}
+          className="h-9 max-w-xs"
+          aria-label={t('searchPlaceholder')}
+        />
+        <select
+          value={machineType}
+          onChange={(e) => {
+            const next = new URLSearchParams(params);
+            if (e.target.value) next.set('machineType', e.target.value);
+            else next.delete('machineType');
+            setParams(next, { replace: true });
+          }}
+          aria-label={t('machineTypeFilter')}
+          className="h-9 rounded-md border border-input bg-background/50 px-3 text-sm"
+        >
+          <option value="">{t('filterAll')}</option>
+          <option value="__unassigned__">{t('filterUnassigned')}</option>
+          {types.map((item) => (
+            <option key={item.name} value={item.name}>
+              {item.displayName ? `${item.displayName} (${item.name})` : item.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {isLoading && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -35,13 +94,22 @@ export default function NodesPage() {
       )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {data?.map((n) => (
-          <Link
-            key={n.nodeID}
-            to={`/nodes/${n.nodeID}`}
-            className="block hover:opacity-90 transition-opacity"
-          >
-            <Card className="panel-hover h-full">
+        {visible.map((n) => (
+          // The whole card stays clickable through an overlay link, while the
+          // machine-type badge is its own link on top. Nesting a button inside
+          // the card's <a> was invalid (an anchor must not contain interactive
+          // content) and confused keyboard/AT navigation.
+          <div key={n.nodeID} className="relative hover:opacity-90 transition-opacity">
+            <Link
+              to={`/nodes/${n.nodeID}`}
+              className="absolute inset-0 z-0 rounded-xl"
+              aria-label={
+                n.hostname && n.hostname !== n.nodeID ? `${n.hostname} (${n.nodeID})` : n.nodeID
+              }
+            >
+              <span className="sr-only">{n.nodeID}</span>
+            </Link>
+            <Card className="panel-hover pointer-events-none h-full">
               <CardHeader>
                 <div className="flex items-center gap-3">
                   <span className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
@@ -71,6 +139,17 @@ export default function NodesPage() {
                     </CardTitle>
                     {n.hostname && n.hostname !== n.nodeID && (
                       <CardDescription className="font-mono text-xs">{n.nodeID}</CardDescription>
+                    )}
+                    {n.machineType && (
+                      <Link
+                        to={`/nodes?machineType=${encodeURIComponent(n.machineType)}`}
+                        className="pointer-events-auto relative z-10 mt-1 inline-flex"
+                        title={n.machineType}
+                      >
+                        <Badge tone="mute" className="max-w-[14rem] truncate font-mono text-[11px]">
+                          {typeName(n.machineType)}
+                        </Badge>
+                      </Link>
                     )}
                   </div>
                 </div>
@@ -115,9 +194,15 @@ export default function NodesPage() {
                 </div>
               )}
             </Card>
-          </Link>
+          </div>
         ))}
       </div>
+
+      {visible.length === 0 && !isLoading && (data?.length ?? 0) > 0 && (
+        <Card>
+          <div className="py-16 text-center text-sm text-muted-foreground">{t('noMatch')}</div>
+        </Card>
+      )}
 
       {data?.length === 0 && !isLoading && (
         <Card>

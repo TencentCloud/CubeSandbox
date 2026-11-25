@@ -1265,6 +1265,24 @@ func TestWritableLayerSubdirKeepsTemplateUpperOnRestart(t *testing.T) {
 		},
 	}
 	assert.Equal(t, "disk/sandbox-id", writableLayerSubdir(firstBoot, "sandbox-id", "0"))
+
+	side := &workflow.CreateContext{
+		IsRestart:             true,
+		SnapshotWritableLayer: "disk/tpl-from-the-snapshot_0",
+	}
+	assert.Equal(t, "disk/tpl-from-the-snapshot_1", writableLayerSubdir(side, "side-container", "1"))
+	assert.Equal(t, "disk/side-container", writableLayerSubdir(&workflow.CreateContext{
+		SnapshotWritableLayer: "disk/tpl-from-the-snapshot_0",
+	}, "side-container", "1"))
+}
+
+func TestRememberWritableLayerSkipsSideContainers(t *testing.T) {
+	box := &cubeboxstore.CubeBox{}
+	rememberWritableLayer(box, "0", "disk/tpl-1_0")
+	assert.Equal(t, "disk/tpl-1_0", box.RootfsWritableLayer)
+	rememberWritableLayer(box, "1", "disk/tpl-1_1")
+	assert.Equal(t, "disk/tpl-1_0", box.RootfsWritableLayer)
+	rememberWritableLayer(nil, "0", "disk/ignored")
 }
 
 func TestTransformError(t *testing.T) {

@@ -107,6 +107,7 @@ func setError(code errorcode.ErrorCode, rsp *types.GetCubeSandboxRes) string {
 type sandboxInfoLookupDeps struct {
 	getPauseBinding    func(context.Context, string) (*pausesnap.Record, error)
 	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)
+	getNode            func(string) (*node.Node, bool)
 	getNodesByIP       func(string) (*node.Node, bool)
 	getCubeletAddr     func(string) string
 }
@@ -122,6 +123,7 @@ func checkValidAndGetReq(ctx context.Context, req *types.GetCubeSandboxReq, cube
 	return checkValidAndGetReqWithDeps(ctx, req, cubeletReq, rsp, sandboxInfoLookupDeps{
 		getPauseBinding:    pausesnap.GetBySandbox,
 		getSandboxProxyMap: localcache.GetSandboxProxyMap,
+		getNode:            localcache.GetNode,
 		getNodesByIP:       localcache.GetNodesByIp,
 		getCubeletAddr:     cubelet.GetCubeletAddr,
 	})
@@ -144,8 +146,8 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 		exist bool
 	)
 	if req.HostID != "" {
-		n, exist = localcache.GetNode(req.HostID)
-		if !exist {
+		n, exist = deps.getNode(req.HostID)
+		if !exist || n == nil {
 			setError(errorcode.ErrorCode_NotFound, rsp)
 			return "", "", nil, false
 		}
@@ -162,7 +164,7 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 		n, exist = deps.getNodesByIP(locatedHost)
 	}
 
-	if !exist || !n.Healthy {
+	if !exist || n == nil || !n.Healthy {
 		// A caller-pinned host keeps the old error. An unpinned Info of a
 		// shimless pause is answered from Master only when the located host is
 		// the binding's own node. A cache entry that names some other node
@@ -264,6 +266,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		return nil
 	}
 	enrichSandboxInfoRestart(ctx, rsp.Data)
+	specs := decorateSandboxConfig(ctx, rsp.Data, nil)
 	if req.HostID != "" {
 		for _, item := range rsp.Data {
 			item.HostID = req.HostID
@@ -273,7 +276,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		return nil
 	}
 	if item := findSandboxData(rsp.Data, req.SandboxID); item != nil {
-		decorateSandboxQos(ctx, item, sandboxspec.GetAnnotations)
+		decorateSandboxQos(ctx, item, specs[item.SandboxID])
 	}
 	proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
 	if !ok || proxyMap == nil {
@@ -306,21 +309,81 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 	return nil
 }
 
+// decorateSandboxConfig echoes the persisted lifecycle/network config from one
+// spec read and returns the specs so QoS reuses the same rows. When preloaded
+// is non-nil the caller already holds the spec and no read happens.
+func decorateSandboxConfig(ctx context.Context, items []*types.SandboxData,
+	preloaded map[string]*types.CreateCubeSandboxReq) map[string]*types.CreateCubeSandboxReq {
+	specs := preloaded
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	if specs == nil {
+		var err error
+		specs, err = sandboxspec.GetMany(ctx, ids)
+		if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+			log.G(ctx).Warnf("GetSandboxInfo: batch read sandbox specs: %v", err)
+		}
+	}
+	applySandboxConfig(items, specs, LookupSandboxDeadlines(ctx, ids))
+	return specs
+}
+
+func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.CreateCubeSandboxReq, deadlines map[string]DeadlineInfo) {
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		d := deadlines[item.SandboxID]
+		if d.Found {
+			item.EndAt = d.EndAtMs
+		}
+		item.EndAtStatus = endAtStatusFor(item.EndAt, d)
+		spec, ok := specs[item.SandboxID]
+		if !ok {
+			continue
+		}
+		item.AutoPause = &spec.AutoPause
+		item.AutoResume = &spec.AutoResume
+		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
+	}
+}
+
+// endAtStatusFor derives the status from the live lifecycle metadata, never
+// from the create-time spec: a later set-timeout rewrites only the metadata,
+// so the spec can claim -1 long after the sandbox gained a deadline. itemEndAt
+// is the deadline already known to the caller; it covers the case where the
+// metadata batch could not be read but the item still carries a deadline.
+func endAtStatusFor(itemEndAt int64, d DeadlineInfo) string {
+	if d.Found {
+		if d.EndAtMs > 0 {
+			return types.EndAtStatusDeadline
+		}
+		if d.TimeoutSeconds != nil && *d.TimeoutSeconds == types.NeverTimeout {
+			return types.EndAtStatusNever
+		}
+		return types.EndAtStatusUnknown
+	}
+	// Metadata unreadable: the item's own deadline, when present, still
+	// proves a deadline. Nothing proves "never", so it is unknown.
+	if itemEndAt > 0 {
+		return types.EndAtStatusDeadline
+	}
+	return types.EndAtStatusUnknown
+}
+
 // decorateSandboxQos reports the QoS configuration of one sandbox. The
 // persisted create request is authoritative; when it is missing or carries no
 // QoS annotations, the template configuration is used as a fallback.
-func decorateSandboxQos(ctx context.Context, item *types.SandboxData, getAnnotations func(context.Context, string) (map[string]string, error)) {
+func decorateSandboxQos(ctx context.Context, item *types.SandboxData, spec *types.CreateCubeSandboxReq) {
 	if item == nil {
 		return
 	}
-	if getAnnotations != nil {
-		annotations, err := getAnnotations(ctx, item.SandboxID)
-		switch {
-		case err == nil:
-			item.ConfiguredQos = parseSandboxQosAnnotations(ctx, item.SandboxID, annotations)
-		case !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound):
-			log.G(ctx).Warnf("failed to load persisted QoS annotations for sandbox %s: %v", item.SandboxID, err)
-		}
+	if spec != nil {
+		item.ConfiguredQos = parseSandboxQosAnnotations(ctx, item.SandboxID, spec.Annotations)
 	}
 	if item.ConfiguredQos == nil && item.TemplateID != "" {
 		if configured, err := lookupTemplateQos(ctx, item.TemplateID); err == nil && configured != nil {
@@ -367,6 +430,8 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		return false
 	}
 	item := findSandboxData(rsp.Data, req.SandboxID)
+	synthesized := false
+	var loadedSpec *types.CreateCubeSandboxReq
 	var observed int32
 	if item != nil {
 		observed = item.Status
@@ -398,11 +463,12 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		if req.HostID == "" && !pauseBindingOnHost(rec, locatedHost) {
 			return false
 		}
-		spec := loadSandboxSpec(ctx, req.SandboxID)
-		if spec == nil {
+		synthesized = true
+		loadedSpec = loadSandboxSpec(ctx, req.SandboxID)
+		if loadedSpec == nil {
 			recordPauseViewWithoutSpec("info")
 		}
-		item = sandboxDataFromSpec(req.SandboxID, spec)
+		item = sandboxDataFromSpec(req.SandboxID, loadedSpec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
 		// The binding only knows when the pause happened; the durable spec
 		// carries when the sandbox was created.
@@ -414,6 +480,16 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
 	setPauseLocation(ctx, req, item, rec)
 	rsp.Data = []*types.SandboxData{item}
+	// The pause overlay replaced rsp.Data, so re-apply the config echo. The
+	// synthesized branch already holds the spec; reuse it instead of reading
+	// the same row again.
+	var preloaded map[string]*types.CreateCubeSandboxReq
+	if synthesized && loadedSpec != nil {
+		preloaded = map[string]*types.CreateCubeSandboxReq{item.SandboxID: loadedSpec}
+	}
+	if item != nil {
+		decorateSandboxConfig(ctx, rsp.Data, preloaded)
+	}
 	if rsp.Ret == nil {
 		rsp.Ret = &types.Ret{}
 	}

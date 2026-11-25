@@ -980,7 +980,7 @@ paths:
           type: string
       - name: sync
         in: query
-        description: Wait for deletion to complete before returning
+        description: Wait for the delete to finish before returning; nodes unreachable past the 15-minute grace period are still cleaned in the background
         required: false
         schema:
           type: boolean
@@ -992,7 +992,7 @@ paths:
           type: boolean
       responses:
         '204':
-          description: Template or snapshot deleted
+          description: Template or snapshot deleted; data on nodes unreachable past the 15-minute grace period is cleaned in the background once they return
         '404':
           description: Template or snapshot not found
           content:
@@ -1501,7 +1501,7 @@ paths:
       tags:
       - handlers::volumes
       summary: Get info for a single volume (includes auth token).
-      description: Returns `200 OK` with `VolumeAndToken` on success.
+      description: Returns `200 OK` with `VolumeDetails` on success.
       operationId: get_volume
       parameters:
       - name: volumeID
@@ -1516,7 +1516,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VolumeAndToken'
+                $ref: '#/components/schemas/VolumeDetails'
         '401':
           description: Authentication error
           content:
@@ -2217,6 +2217,7 @@ components:
       - sandboxID
       - clientID
       - startedAt
+      - endAt
       - cpuCount
       - memoryMB
       - state
@@ -2243,13 +2244,9 @@ components:
           - 'null'
           format: int32
         endAt:
-          type:
-          - string
-          - 'null'
+          type: string
           format: date-time
-          description: |-
-            Projected next-timeout instant. Omitted for never-timeout sandboxes
-            (no deadline) rather than being misreported as equal to startedAt.
+          description: Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
         envdVersion:
           type: string
         memoryMB:
@@ -2279,6 +2276,28 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Persisted internet-access flag; absent when the spec was not read.
+        endAtStatus:
+          type:
+          - string
+          - 'null'
+          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Persisted lifecycle config; absent when the spec was not read.
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
+            description: |-
+              Persisted egress config; absent when the spec was not read or when it
+              carried only egress rules (rules never appear on the wire).
     LivenessHTTPGet:
       type: object
       required:
@@ -2715,6 +2734,14 @@ components:
           - integer
           - 'null'
           format: int32
+          description: |-
+            Seconds of uninterrupted uptime after which the restart count is
+            reset. Zero or omitted uses the node default (600). The clock starts
+            when the current run starts being up -- on create, on a successful
+            restart, or on resume -- and a failed attempt does not restart it.
+            The reset is applied as soon as the window elapses; it does not wait
+            for the next exit, and it never revives a sandbox that already
+            reached maxRestarts.
     RestartStatus:
       type: object
       description: |-
@@ -2859,6 +2886,7 @@ components:
       - sandboxID
       - clientID
       - startedAt
+      - endAt
       - envdVersion
       - cpuCount
       - memoryMB
@@ -2893,13 +2921,9 @@ components:
           - string
           - 'null'
         endAt:
-          type:
-          - string
-          - 'null'
+          type: string
           format: date-time
-          description: |-
-            Projected next-timeout instant. Omitted for never-timeout sandboxes
-            (no deadline) rather than being misreported as equal to startedAt.
+          description: Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
         envdAccessToken:
           type:
           - string
@@ -2936,6 +2960,28 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Persisted internet-access flag; absent when the spec was not read.
+        endAtStatus:
+          type:
+          - string
+          - 'null'
+          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Persisted lifecycle config; absent when the spec was not read.
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
+            description: |-
+              Persisted egress config; absent when the spec was not read or when it
+              carried only egress rules (rules never appear on the wire).
     SandboxLifecycleConfig:
       type: object
       description: |-
@@ -3050,6 +3096,41 @@ components:
               L7 egress rules. Accepts CubeSandbox's ordered rule array and E2B's
               host-keyed transform map for compatibility. Both are normalized to the
               ordered internal rule model.
+
+    SandboxNetworkConfigEcho:
+      type: object
+      description: |-
+        Query-response form of [`SandboxNetworkConfig`]. Egress `rules` never
+        appear here — they carry plaintext inject secrets and are scrubbed before
+        a response is built — so the response schema must not declare them.
+      properties:
+        allowOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        allowPublicTraffic:
+          type:
+          - boolean
+          - 'null'
+        denyOut:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        maskRequestHost:
+          type:
+          - string
+          - 'null'
+        rulesPresent:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            True when the persisted config carried egress rules, which never
+            appear on the wire (plaintext inject secrets).
     SandboxNetworkRulesInput:
       oneOf:
       - type: array
@@ -3557,7 +3638,7 @@ components:
     VolumeAndToken:
       type: object
       description: |-
-        Volume descriptor with auth token — returned on create / get-single.
+        Volume descriptor with auth token — returned on create.
         E2B SDK requires `token` to always be present (non-optional); use empty
         string when the plugin does not return a token.
       required:
@@ -3569,6 +3650,29 @@ components:
         token:
           type: string
           description: Auth token returned by the volume plugin. Empty string when not applicable.
+        volumeID:
+          type: string
+    VolumeDetails:
+      type: object
+      description: Single-volume GET response, including admission state when supplied by CubeMaster.
+      required:
+      - volumeID
+      - name
+      - token
+      properties:
+        deleting:
+          type:
+          - boolean
+          - 'null'
+        in_flight_creates:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        name:
+          type: string
+        token:
+          type: string
         volumeID:
           type: string
   securitySchemes:

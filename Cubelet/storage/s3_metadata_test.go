@@ -6,7 +6,10 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -45,6 +48,7 @@ func stubS3MetadataMounts(t *testing.T) {
 	origMount := mountS3MetadataDevice
 	origUmount := unmountS3MetadataPath
 	origIsMounted := s3MetadataIsMounted
+	origMountSource := s3MetadataMountSource
 	origKV := testS3MetadataKV
 	kv := &memS3MetadataKV{}
 	testS3MetadataKV = kv
@@ -63,16 +67,91 @@ func stubS3MetadataMounts(t *testing.T) {
 		_, ok := mounted[mountPath]
 		return ok
 	}
+	s3MetadataMountSource = func(mountPath string) string { return mounted[mountPath] }
 	t.Cleanup(func() {
 		formatS3MetadataBaseDevice = origFormat
 		mountS3MetadataDevice = origMount
 		unmountS3MetadataPath = origUmount
 		s3MetadataIsMounted = origIsMounted
+		s3MetadataMountSource = origMountSource
 		testS3MetadataKV = origKV
 		s3MetadataMu.Lock()
 		s3MetadataMounts = map[string]string{}
 		s3MetadataMu.Unlock()
 	})
+}
+
+func TestS3MetadataMountAliasDoesNotRemount(t *testing.T) {
+	stubS3MetadataMounts(t)
+	root := t.TempDir()
+	real := filepath.Join(root, "real data", "metadata")
+	require.NoError(t, os.MkdirAll(real, 0o755))
+	alias := filepath.Join(root, "alias")
+	require.NoError(t, os.Symlink(filepath.Dir(real), alias))
+	aliasMount := filepath.Join(alias, "metadata")
+	// The kernel escapes spaces and records the real path, not the alias.
+	fixture := fmt.Sprintf("42 1 259:1 / %s rw - ext4 /dev/nvme42n1 rw\n", strings.ReplaceAll(real, " ", `\040`))
+	s3MetadataMountSource = func(path string) string {
+		return s3MetadataMountSourceFrom(strings.NewReader(fixture), path)
+	}
+	s3MetadataIsMounted = s3MetadataIsMountedImpl
+	mounts, unmounts := 0, 0
+	mountS3MetadataDevice = func(string, string) error { mounts++; return nil }
+	unmountS3MetadataPath = func(string) error { unmounts++; return nil }
+	s3MetadataMounts["tpl-alias"] = aliasMount
+	require.True(t, s3MetadataIsMounted(aliasMount))
+	require.Equal(t, "/dev/nvme42n1", s3MetadataMountSource(aliasMount))
+	require.NoError(t, mountS3MetadataLocked("tpl-alias", "/dev/nvme42n1", real))
+	require.NoError(t, mountS3MetadataLocked("tpl-alias", "/dev/nvme42n1", aliasMount))
+	require.Zero(t, mounts)
+	require.Zero(t, unmounts)
+}
+
+func TestS3MetadataUnknownSourceDoesNotUnmount(t *testing.T) {
+	stubS3MetadataMounts(t)
+	s3MetadataIsMounted = func(string) bool { return true }
+	s3MetadataMountSource = func(string) string { return "" }
+	unmountS3MetadataPath = func(string) error { t.Fatal("must preserve an unidentified mounted disk"); return nil }
+	require.ErrorContains(t, mountS3MetadataLocked("tpl-unknown", "/dev/nvme42n1", t.TempDir()), "refusing to unmount")
+}
+
+func TestS3MetadataRecoverySkipsActivePackageWriter(t *testing.T) {
+	stubS3MetadataMounts(t)
+	id := "tpl-writing"
+	engine := &fakeCowEngine{volumeInfos: map[string]*cubecow.Volume{
+		S3MetadataVolumeName(id): {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/meta-writing"},
+	}}
+	useTestCowStorage(t, engine)
+	_, release, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	require.NoError(t, err)
+	t.Cleanup(release)
+	require.True(t, S3PackageOperationInProgress(id))
+	_, _, err = BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	require.Error(t, err)
+	dir := t.TempDir()
+	require.NoError(t, MountS3MetadataForRecovery(context.Background(), cow.BackendS3, id, dir))
+	require.Empty(t, engine.activatedVolumes)
+	require.False(t, s3MetadataIsMounted(dir))
+	release()
+	release()
+	require.False(t, S3PackageOperationInProgress(id))
+	require.NoError(t, MountS3MetadataForRecovery(context.Background(), cow.BackendS3, id, dir))
+	require.True(t, s3MetadataIsMounted(dir))
+}
+
+func TestValidateS3PackageMetadataRejectsMissingState(t *testing.T) {
+	stubS3MetadataMounts(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "snapshot"), 0o755))
+	for _, name := range []string{"config.json", "state.json"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", name), []byte(`{}`), 0o644))
+	}
+	// Host files underneath an unmounted metadata disk must not be accepted.
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "not mounted")
+	require.NoError(t, mountS3MetadataDevice("/dev/nvme42n1", dir))
+	require.NoError(t, ValidateS3PackageMetadata(cow.BackendS3, dir))
+	require.NoError(t, os.Remove(filepath.Join(dir, "snapshot", "state.json")))
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "state.json")
 }
 
 func TestEnsureS3MetadataBaseCreatesOnce(t *testing.T) {
@@ -509,4 +588,78 @@ func TestMountRollbackSnapshotMetadataIsOwnedBySandbox(t *testing.T) {
 	require.NotContains(t, engine.deletedSnapshots, packageSnap)
 	require.False(t, s3MetadataIsMounted(dir))
 	require.NoDirExists(t, dir)
+}
+
+func TestS3MetadataInvalidMountPaths(t *testing.T) {
+	stubS3MetadataMounts(t)
+	s3MetadataIsMounted = func(string) bool { t.Fatal("invalid path reached mount lookup"); return true }
+	s3MetadataMountSource = func(string) string { t.Fatal("invalid path reached source lookup"); return "/dev/root" }
+	unmountS3MetadataPath = func(string) error { t.Fatal("invalid path reached unmount"); return nil }
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	fixture := fmt.Sprintf("42 1 259:1 / %s rw - ext4 /dev/root rw\n", strings.ReplaceAll(cwd, " ", `\040`))
+	for _, path := range []string{"", " ", ".", "./", "child/.."} {
+		require.NoError(t, UnmountS3Metadata(path), path)
+		require.False(t, s3MetadataIsMountedImpl(path), path)
+		require.Empty(t, s3MetadataMountSourceFrom(strings.NewReader(fixture), path), path)
+	}
+}
+
+func TestS3MetadataCleanupExcludesWritersAndRecovery(t *testing.T) {
+	stubS3MetadataMounts(t)
+	id := "tpl-cleaning"
+	engine := &fakeCowEngine{volumeInfos: map[string]*cubecow.Volume{
+		S3MetadataVolumeName(id): {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/meta-cleaning"},
+	}}
+	useTestCowStorage(t, engine)
+	release, err := BeginS3PackageCleanup(context.Background(), cow.BackendS3, id)
+	require.NoError(t, err)
+	t.Cleanup(release)
+	_, _, err = BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	require.ErrorContains(t, err, "active cleanup")
+	_, err = BeginS3PackageCleanup(context.Background(), cow.BackendS3, id)
+	require.ErrorContains(t, err, "active cleanup")
+	dir := t.TempDir()
+	require.NoError(t, MountS3MetadataForRecovery(context.Background(), cow.BackendS3, id, dir))
+	require.Empty(t, engine.activatedVolumes)
+	require.False(t, s3MetadataIsMounted(dir))
+	_, otherRelease, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, "other-package")
+	require.NoError(t, err)
+	otherRelease()
+	release()
+	release()
+	_, writerRelease, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	require.NoError(t, err)
+	t.Cleanup(writerRelease)
+	_, err = BeginS3PackageCleanup(context.Background(), cow.BackendS3, id)
+	require.ErrorContains(t, err, "active write")
+	writerRelease()
+	require.NoError(t, MountS3MetadataForRecovery(context.Background(), cow.BackendS3, id, dir))
+	require.True(t, s3MetadataIsMounted(dir))
+}
+
+func TestS3MetadataCleanupRequiresCurrentWriterContext(t *testing.T) {
+	id := "tpl-owned-cleanup"
+	ctx, release, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	require.NoError(t, err)
+	t.Cleanup(release)
+	cleanupRelease, err := BeginS3PackageCleanup(ctx, cow.BackendS3, id)
+	require.NoError(t, err)
+	cleanupRelease()
+	require.True(t, S3PackageOperationInProgress(id), "nested cleanup must not release the writer")
+	_, err = BeginS3PackageCleanup(context.Background(), cow.BackendS3, id)
+	require.ErrorContains(t, err, "retry later")
+
+	_, otherRelease, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, "another-package")
+	require.NoError(t, err)
+	t.Cleanup(otherRelease)
+	_, err = BeginS3PackageCleanup(ctx, cow.BackendS3, "another-package")
+	require.ErrorContains(t, err, "active write")
+
+	release()
+	_, nextRelease, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, id)
+	require.NoError(t, err)
+	t.Cleanup(nextRelease)
+	_, err = BeginS3PackageCleanup(ctx, cow.BackendS3, id)
+	require.ErrorContains(t, err, "active write", "a stale context must not own the next writer")
 }

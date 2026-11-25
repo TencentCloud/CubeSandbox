@@ -137,6 +137,14 @@ test:
 	done )
 	# todo: add integration test
 
+# Same package set as `test`, but one `go test` invocation without coverage,
+# so packages build and run in parallel instead of one at a time. It does not
+# stop at the first failing package and writes no coverage/*.cov files.
+.PHONY: test-fast
+test-fast:
+	$(call msg,Run unit tests (parallel packages, no coverage))
+	$(Q)CI=true go test -count=1 ${TEST_FLAGS} ${COVERAGE_PACKAGES}
+
 .PHONY: coverage
 coverage:
 	$(Q)echo 'mode: set' > ./coverage/cubelet.cov

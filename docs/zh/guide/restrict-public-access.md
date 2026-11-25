@@ -116,7 +116,7 @@ Token 值不会出现在日志中。
 
 - [网络策略](/zh/guide/network-policy) —— 出站 CIDR 白/黑名单
   （`allow_out` / `deny_out`、`allow_internet_access`）。
-- [安全代理](/zh/guide/security-proxy) —— 出站 HTTP/HTTPS 七层规则。
+- [出网安全代理（过滤与凭证注入）](/zh/guide/security-proxy) —— 出站 HTTP/HTTPS 七层规则。
 
 典型的"私有 Agent"部署会三者叠加：网络策略限制出站只允许几个
 SaaS API、安全代理在出站端注入 API 凭证以避免密钥进入沙箱、

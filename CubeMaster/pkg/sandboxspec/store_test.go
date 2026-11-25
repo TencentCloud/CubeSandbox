@@ -58,7 +58,7 @@ func TestCanonicalizeRequestStripsTransientSnapshotAnnotations(t *testing.T) {
 	assert.Equal(t, "preserve", out.Annotations["unrelated-annotation"],
 		"unrelated annotations must be preserved")
 	assert.Equal(t, "me", out.Labels["keep"])
-	assert.Zero(t, out.Timeout)
+	assert.Equal(t, 30, *out.Timeout)
 }
 
 // TestCanonicalizeRequestHandlesNilAnnotations confirms nil maps are forced

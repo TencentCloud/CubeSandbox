@@ -228,6 +228,14 @@ impl Snapshot {
         Ok(body_bytes)
     }
 
+    fn vmm_config(&self) -> vmm_config::VmmConfig {
+        vmm_config::VmmConfig {
+            sandbox_id: self.id.clone(),
+            guest_reset_shutdown: true,
+            ..Default::default()
+        }
+    }
+
     fn launch_vmm(&mut self) -> CResult<()> {
         //launch
         cube_hypervisor::set_runtime_seccomp_rules(vec![
@@ -239,10 +247,7 @@ impl Snapshot {
             (libc::SYS_setsockopt, vec![]),
             (libc::SYS_faccessat2, vec![]),
         ]);
-        let mut vmm_config = vmm_config::VmmConfig {
-            sandbox_id: self.id.clone(),
-            ..Default::default()
-        };
+        let mut vmm_config = self.vmm_config();
         let (sender, receiver) = channel::<NotifyEvent>();
         let notifier = vmm_config::EventNotifyConfig { notifier: sender };
         vmm_config.event_notifier = Some(notifier);
@@ -467,4 +472,19 @@ fn clear_dir_contents(path: &Path) -> CResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Snapshot;
+
+    #[test]
+    fn snapshot_vmm_config_shuts_down_on_guest_reset() {
+        let snapshot = Snapshot {
+            id: "test-sandbox".to_string(),
+            ..Default::default()
+        };
+
+        assert!(snapshot.vmm_config().guest_reset_shutdown);
+    }
 }

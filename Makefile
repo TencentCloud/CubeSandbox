@@ -8,6 +8,7 @@ BUILDER_CONTAINER_HOME ?= /home/builder
 TMP_GIT_CREDENTIALS ?= /tmp/.cube-sandbox-builder-tmp-git-credentials
 BUILDER_CMD ?= bash
 BUILDER_RUN_EXTRA_MOUNTS ?=
+BUILDER_RUN_LABELS ?=
 # User the builder container runs as. Defaults to the host user so bind-mounted
 # outputs stay host-writable; privileged test targets (e.g. cubevs-test, which
 # loads eBPF / mounts bpffs) override this to 0:0 along with --privileged.
@@ -150,6 +151,8 @@ help:
 	@printf "  cube-proxy-sidecar Build cube-proxy-sidecar (developer-only; not in 'all')\n"
 	@printf "  cube-volume-s3 Build the S3-compatible Volume plugin in Docker\n"
 	@printf "  cube-volume-s3-test Run S3 Volume plugin unit tests in Docker\n"
+	@printf "  cube-volume-nfs Build the NFS Volume plugin in Docker\n"
+	@printf "  cube-volume-nfs-test Run NFS Volume plugin unit tests in Docker\n"
 	@printf "  cube-volume-cos-rpc-test Run COS RPC Volume plugin unit tests in Docker\n"
 	@printf "  agent         Build cube-agent in Docker\n"
 	@printf "  cube-init     Build cube-init (guest PID1) in Docker (alias: guest-init)\n"
@@ -167,7 +170,8 @@ help:
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubetemplatecenter-test Run CubeTemplateCenter unit tests in Docker\n"
 	@printf "  cubetemplatecenter-docker-test Run CubeTemplateCenter Docker-backed tests on the host\n"
-	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
+	@printf "  cubelet-test  Run Cubelet unit tests with coverage in Docker\n"
+	@printf "  cubelet-test-fast Run Cubelet unit tests without coverage in Docker\n"
 	@printf "  cubelet-mount-test Run Cubelet mount tests in privileged Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
 	@printf "  cube-api-test Run CubeAPI unit tests in Docker\n"
@@ -283,6 +287,7 @@ endif
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(BUILDER_RUN_EXTRA_MOUNTS) \
+		$(BUILDER_RUN_LABELS) \
 		$(DOCKER_GIT_CRED) \
 		-w /workspace \
 		$(BUILDER_IMAGE) \
@@ -420,6 +425,11 @@ cube-volume-s3: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/examples/volume/s3 && go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/cube-volume-s3 ./cmd/cube-volume-s3"
 
+.PHONY: cube-volume-nfs
+cube-volume-nfs: builder-image
+	@mkdir -p "$(OUTPUT_DIR)"
+	$(MAKE) builder-run BUILDER_CMD="mkdir -p /workspace/_output/bin && cd /workspace/examples/volume/nfs && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags '-s -w' -o /workspace/_output/bin/cube-volume-nfs ./cmd/cube-volume-nfs"
+
 .PHONY: cube-proxy-sidecar
 cube-proxy-sidecar: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
@@ -489,6 +499,10 @@ ops-agent-test: builder-image
 cube-volume-s3-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/s3 && go mod download && go vet ./... && go test ./...'
 
+.PHONY: cube-volume-nfs-test
+cube-volume-nfs-test: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace/examples/volume/nfs && go vet ./... && go test ./...'
+
 # COS RPC Volume plugin (examples/volume/cos/rpc): the reference gRPC volume
 # plugin and the only example consuming pkgs/proto. Standalone Go module (its
 # own go.mod), so it is not covered by any component test target above.
@@ -521,6 +535,10 @@ cubetemplatecenter-docker-test:
 cubelet-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test'
 
+.PHONY: cubelet-test-fast
+cubelet-test-fast: builder-image
+	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make test-fast'
+
 # Keep the ordinary Cubelet gate unprivileged while still exercising tests that
 # call mount(2) in CI. Run every storage test protected by requireRoot; the full
 # package also contains unrelated timing-sensitive tests. Patchoverlay's other
@@ -544,12 +562,10 @@ cube-api-test: builder-image
 shim-test: builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace/CubeShim && make test'
 
-# cubelog/cubedb run on the host: both are pure Go with no CGO and no
-# builder-only deps, so the host toolchain is sufficient and skipping the
-# container is faster.
+# cubelog runs on the host with -race (needs CGO + gcc); cubedb is pure Go.
 .PHONY: cubelog-test
 cubelog-test:
-	cd pkgs/CubeLog && go test -short ./...
+	cd pkgs/CubeLog && CGO_ENABLED=1 go test -short -race ./...
 
 .PHONY: cubedb-test
 cubedb-test:
@@ -581,6 +597,10 @@ proto-test:
 .PHONY: cubebench-test
 cubebench-test:
 	bash tests/perf/cubebench_test.sh
+
+.PHONY: cubeegress-test
+cubeegress-test:
+	bash CubeEgress/tests/cube-egress-iptables-init_test.sh
 
 .PHONY: cube-lifecycle-manager-test
 cube-lifecycle-manager-test: builder-image
@@ -725,6 +745,8 @@ ifeq ($(IN_CUBE_SANDBOX_BUILDER),1)
 	@$(MAKE) -C examples/cube-bench fmt
 	@printf '  %-8s %s\n' "FMT" "examples/volume/s3"
 	@$(MAKE) -C examples/volume/s3 fmt
+	@printf '  %-8s %s\n' "FMT" "examples/volume/nfs"
+	@cd examples/volume/nfs && go fmt ./...
 else
 	@$(MAKE) builder-image
 	$(MAKE) builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make fmt'

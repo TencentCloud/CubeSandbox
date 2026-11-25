@@ -168,14 +168,13 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 	// that Destroy runs beside the restart loop, and the loop is the only
 	// owner of the next destroy and create. Normal Create still sets Failover.
 	createInfo := &workflow.CreateContext{
-		ReqInfo:           proto.Clone(req).(*cubebox.RunCubeSandboxRequest),
-		Failover:          false,
-		IsRestart:         true,
-		SavedContainerIDs: ids,
-		RestartPrior:      prior,
-		LocalRunTemplate:  template,
-		// Reuse the layer captured by the snapshot this sandbox cold-booted from.
-		SnapshotWritableLayer: old.RootfsWritableLayer,
+		ReqInfo:               proto.Clone(req).(*cubebox.RunCubeSandboxRequest),
+		Failover:              false,
+		IsRestart:             true,
+		SavedContainerIDs:     ids,
+		RestartPrior:          prior,
+		LocalRunTemplate:      template,
+		SnapshotWritableLayer: effectiveSandboxWritableLayer(old),
 		BaseWorkflowInfo:      workflow.BaseWorkflowInfo{SandboxID: sandboxID},
 	}
 	createCtx, createCancel := context.WithTimeout(base, deadline)
@@ -250,6 +249,10 @@ func markResumedAfterPause(box *cubeboxstore.CubeBox) {
 	}
 	box.DestroyFailCount = 0
 	box.RestartState = restartpolicy.StateRunning
+	// A resume starts a fresh run, so the stability window restarts with it.
+	// pause() is not a restart, but the time before the pause must not count:
+	// the guest was frozen, so it was not demonstrably stable.
+	box.StableSince = time.Now().UnixNano()
 	box.StatusSeq++
 }
 
@@ -271,7 +274,11 @@ type restartTransition struct {
 	bumpSeq           bool
 	resetCount        bool
 	clearDestroyFails bool
-	now               int64
+	// stableSince anchors the current run. Callers set it when a run starts
+	// being up (create, successful restart, resume), never on a failed attempt.
+	stableSince    int64
+	setStableSince bool
+	now            int64
 }
 
 func applyRestartTransition(box *cubeboxstore.CubeBox, t restartTransition) {
@@ -305,6 +312,9 @@ func applyRestartTransition(box *cubeboxstore.CubeBox, t restartTransition) {
 	}
 	if t.setNext {
 		box.NextRestartAt = t.nextRestartAt
+	}
+	if t.setStableSince {
+		box.StableSince = t.stableSince
 	}
 	if t.bumpSeq {
 		box.StatusSeq++
@@ -355,14 +365,21 @@ func (s *service) noteRestartSuccess(sandboxID string) {
 	}
 	cb.Lock()
 	defer cb.Unlock()
+	now := time.Now().UnixNano()
 	applyRestartTransition(cb, restartTransition{
 		markSuccess:       true,
-		now:               time.Now().UnixNano(),
+		now:               now,
 		setState:          true,
 		state:             restartpolicy.StateRunning,
 		setNext:           true,
 		nextRestartAt:     0,
 		clearDestroyFails: true,
+		// The rebuilt sandbox becomes a brand-new CubeBox that inherits only
+		// workflow.RestartPrior, which has no StableSince. Writing it here is
+		// what gives a restarted sandbox a usable stability anchor; without it
+		// StableSince would stay 0 and the streak could never clear.
+		setStableSince: true,
+		stableSince:    now,
 	})
 	if err := s.cubeboxMgr.cubeboxManger.Save(context.Background(), cb); err != nil {
 		log.G(context.Background()).Warnf("restart: save success for %s: %v", sandboxID, err)

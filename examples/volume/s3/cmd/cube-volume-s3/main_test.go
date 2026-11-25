@@ -152,7 +152,7 @@ func TestPasswdFileFromMetadata(t *testing.T) {
 
 // Exercise the shipped entry point so its JSON envelope and exit status are
 // checked together rather than inferred from doCreate's returned error.
-func TestBinaryCreateErrorKinds(t *testing.T) {
+func TestBinaryErrorKinds(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "cube-volume-s3")
 	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -183,10 +183,11 @@ func TestBinaryCreateErrorKinds(t *testing.T) {
 		{"configuration failure", "create", `{"bucket":"user-bucket","cred_ref":"user"}`, "", missingConfig},
 		{"64 character reference reaches configuration", "create", `{"bucket":"user-bucket","cred_ref":"` + strings.Repeat("a", 64) + `"}`, "", missingConfig},
 		{"legacy configuration failure", "create", "", "", missingConfig},
-		{"destroy state failure", "destroy", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "", "requires cred_ref"},
-		{"attach state failure", "attach", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "", "requires cred_ref"},
-		{"destroy invalid state reference", "destroy", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/","cred_ref":"../x"}`, "", "must not contain .."},
-		{"attach invalid state reference", "attach", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/","cred_ref":"../x"}`, "", "must not contain .."},
+		{"destroy state failure", "destroy", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "destroy_not_started", "requires cred_ref"},
+		{"attach state failure", "attach", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/"}`, "attach_rolled_back", "requires cred_ref"},
+		{"destroy invalid state reference", "destroy", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/","cred_ref":"../x"}`, "destroy_not_started", "must not contain .."},
+		{"attach invalid state reference", "attach", `{"v":1,"bucket":"user-bucket","prefix":"workspaces/user-a/","cred_ref":"../x"}`, "attach_rolled_back", "must not contain .."},
+		{"attach configuration failure", "attach", "", "attach_rolled_back", missingConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -209,12 +210,12 @@ func TestBinaryCreateErrorKinds(t *testing.T) {
 			if err := json.Unmarshal(response["error"], &message); err != nil || message == "" {
 				t.Fatalf("error field = %s, decode error = %v", response["error"], err)
 			}
-			if tc.wantKind != "" && message != tc.wantError {
+			if tc.wantKind == "invalid_argument" && message != tc.wantError {
 				t.Errorf("error = %q, want public message %q", message, tc.wantError)
 			} else if !strings.Contains(message, tc.wantError) {
 				t.Errorf("error = %q, want it to contain %q", message, tc.wantError)
 			}
-			if tc.wantKind != "" {
+			if tc.wantKind == "invalid_argument" {
 				for _, private := range []string{"create:", "../x", "user-bucket", missingConfig} {
 					if strings.Contains(message, private) {
 						t.Errorf("public error contains internal/input detail %q: %q", private, message)

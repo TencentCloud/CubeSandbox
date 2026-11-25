@@ -121,8 +121,9 @@ type InitInfo struct {
 // 0→1) and Referenced=0 when it stopped (1→0). Repeat references on the same
 // node (count 1→2, 2→1, …) do NOT produce an event.
 type VolumeRefEvent struct {
-	VolumeID   string `json:"volume_id"`
-	Referenced int    `json:"referenced"`
+	VolumeID            string `json:"volume_id"`
+	Referenced          int    `json:"referenced"`
+	CreateReportClaimed bool   `json:"create_report_claimed,omitempty"`
 }
 
 type CreateContext struct {
@@ -147,24 +148,25 @@ type CreateContext struct {
 
 	LocalRunTemplate *templatetypes.LocalRunTemplate
 
-	// VolumeRefEvents collects node-level plugin_volume ref-count transitions
-	// (0→1) observed during this create, to be reported to CubeMaster in the
-	// create response ext_info on success.
-	VolumeRefEvents []VolumeRefEvent
+	// PluginVolumeIDs are the holders installed for this Create. Only the
+	// successful response can take responsibility for a pending +1.
+	PluginVolumeIDs             []string
+	PluginVolumeAttachAttempted bool
+	PluginVolumeAttachUncertain bool
+	// A non-nil rollback slice confirms all holds were released. It can be
+	// empty when this rollback did not end a reported node reference.
+	PluginVolumeRollback []VolumeRefEvent
 
 	// SnapshotMode is the artifact mode of the snapshot this sandbox is
 	// created from. It is empty for ordinary creates and is always full for
 	// pause/resume. Master supplies it through the typed proto field.
 	SnapshotMode snapshotmode.Mode
 
-	// SnapshotWritableLayer names the overlay upper directory the snapshot's
-	// rootfs was written by ("disk/<container id>"). A cold boot boots the
-	// captured disk, so it must mount that layer instead of deriving a fresh
-	// one from this sandbox's own ids -- a fresh name would be empty and the
-	// guest would see the base image alone. The CBRI plugin fills this from the
-	// snapshot package while resolving the boot artifacts, and only for a cold
-	// boot; ordinary creates leave it empty.
+	// SnapshotWritableLayer is the overlay upper ("disk/<id>") this create must mount.
 	SnapshotWritableLayer string
+
+	// PriorWritableLayer is the layer on the paused row Resume is replacing.
+	PriorWritableLayer string
 
 	// IsRestart rebuilds a sandbox that already has an ID, disk and network.
 	// Plugins consult Retain and WantsSnapshotRestore instead of guessing.
@@ -354,6 +356,10 @@ type DestroyContext struct {
 	// What is kept is decided only by Retain.
 	IsRestartDestroy bool
 
+	// CreateVolumeRollback is set only while a failed Create is waiting for
+	// its own cleanup. Storage sets PluginVolumeRollback once it proves release.
+	CreateVolumeRollback *CreateContext
+
 	// VolumeRefEvents collects node-level plugin_volume ref-count transitions
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
 	// destroy response ext_info.
@@ -509,10 +515,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 				}
 
 				if flow_create == do {
-					rOpts := opts.(*CreateContext)
-					if rOpts.Failover {
-						go e.failover(ctx, opts)
-					}
+					e.failCreate(ctx, opts.(*CreateContext))
 				}
 
 				if flow_destroy == do && !restartDestroyKeepsResources(opts) {
@@ -526,10 +529,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 
 				if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
 					if flow_create == do {
-						rOpts := opts.(*CreateContext)
-						if rOpts.Failover {
-							go e.failover(ctx, opts)
-						}
+						e.failCreate(ctx, opts.(*CreateContext))
 					}
 					// A restart destroy that spent its deadline inside an earlier
 					// step still has to release cgroup and netfile before create.
@@ -679,7 +679,18 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 	return nil
 }
 
-func (e *Engine) failover(ctx context.Context, opts ReqContext) {
+func (e *Engine) failCreate(ctx context.Context, opts *CreateContext) {
+	if !opts.Failover {
+		return
+	}
+	if len(opts.PluginVolumeIDs) != 0 && !opts.PluginVolumeAttachUncertain && opts.PluginVolumeRollback == nil {
+		e.failover(ctx, opts, true)
+		return
+	}
+	go e.failover(ctx, opts, false)
+}
+
+func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolumeRelease bool) {
 	sandboxID := opts.GetSandboxID()
 	namespace, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
@@ -714,6 +725,9 @@ func (e *Engine) failover(ctx context.Context, opts ReqContext) {
 		},
 	}
 	destroyOpt.IsRollBack = true
+	if reportVolumeRelease {
+		destroyOpt.CreateVolumeRollback = opts
+	}
 	if failoverRt.RequestID != "" {
 		destroyOpt.DestroyInfo.RequestID = failoverRt.RequestID
 	}
@@ -724,19 +738,18 @@ func (e *Engine) failover(ctx context.Context, opts ReqContext) {
 	}
 	ctx = context.WithValue(ctx, KDestroyContext, destroyOpt)
 	ctx = constants.WithFailoverOperation(ctx)
-	rOpts := opts.(*CreateContext)
-	if rOpts.CubeBoxCreated {
+	if opts.CubeBoxCreated {
 		ctx = constants.WithCubeboxCreated(ctx)
 	}
 	// A failed restart must not delete the disk and network the next attempt
 	// (or the still-kept cubebox row) depends on.
-	if rOpts.IsRestart {
+	if opts.IsRestart {
 		destroyOpt.IsRestartDestroy = true
 	}
 	log.G(ctx).Warnf("fail over doing SandboxID:%v", sandboxID)
 	defer func() {
 		if err != nil {
-			if rOpts != nil && rOpts.IsRestart {
+			if opts.IsRestart {
 				log.G(ctx).Warnf("restart failover keeps sandbox %s: %v", sandboxID, err)
 				return
 			}

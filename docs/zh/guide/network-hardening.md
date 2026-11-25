@@ -302,6 +302,6 @@ export E2B_API_KEY=your-actual-api-key
 ## 相关文档
 
 - [网络策略](/zh/guide/network-policy) —— 沙箱出站 CIDR 放通/拒绝。
-- [安全代理](/zh/guide/security-proxy) —— 对沙箱出站 HTTP/HTTPS 的 L7 规则。
+- [出网安全代理（过滤与凭证注入）](/zh/guide/security-proxy) —— 对沙箱出站 HTTP/HTTPS 的 L7 规则。
 - [限制公开访问](/zh/guide/restrict-public-access) —— 单沙箱入站令牌。
 - [多机集群部署](/zh/guide/multi-node-deploy) —— 添加 compute 节点。

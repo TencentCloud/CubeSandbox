@@ -39,6 +39,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -228,6 +229,7 @@ func init() {
 			restarts.bind(s)
 			restarts.Recover()
 			restarts.startStatusReporter()
+			restarts.startStabilizer()
 
 			go func() {
 				CubeLog.Info("Start subscribing containerd event")
@@ -345,6 +347,21 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 		ExtInfo:   map[string][]byte{},
 	}
+	var createInfo *workflow.CreateContext
+	defer func() {
+		if ret.IsSuccessCode(rsp.GetRet().GetRetCode()) || string(rsp.ExtInfo[cubebox.ExtVolumeCreateReportFailed]) == "true" {
+			return
+		}
+		if createInfo != nil && createInfo.PluginVolumeRollback != nil {
+			rsp.ExtInfo[cubebox.ExtVolumeCreateRolledBack] = []byte("true")
+			if events := marshalVolumeRefEvents(createInfo.PluginVolumeRollback); events != nil {
+				rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = events
+			}
+		} else if (createInfo == nil || !createInfo.PluginVolumeAttachAttempted) &&
+			(req.GetAnnotations()[cubebox.AnnotationPluginVolumeSources] != "" || resumeFromPauseSandboxID(req) != "") {
+			rsp.ExtInfo[cubebox.ExtVolumeAttachNotStarted] = []byte("true")
+		}
+	}()
 	// Registered first, so it runs after the defers below have filled rsp in.
 	defer func() {
 		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, rsp.GetSandboxID()))
@@ -418,7 +435,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 
 	start := time.Now()
-	createInfo := &workflow.CreateContext{
+	createInfo = &workflow.CreateContext{
 		ReqInfo:      req,
 		Failover:     true,
 		SnapshotMode: mode,
@@ -475,7 +492,6 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.SandboxIP = getSandboxIp(createInfo)
 		rsp.PortMappings = getAllocatedPort(createInfo)
 
-		setCubeExtKey(rsp, createInfo)
 	}()
 
 	or, e := s.cubeboxMgr.getSandboxRuntime(req)
@@ -534,6 +550,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	err, _ := ret.FromError(createErr)
 	rsp.Ret.RetMsg = err.Message()
 	rsp.Ret.RetCode = err.Code()
+	if ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
+		if err := setCreateVolumeRefEvents(rsp, ns, createInfo); err != nil {
+			log.G(ctx).Errorf("create volume reference report: %v", err)
+			rsp.Ret.RetMsg = "could not confirm plugin volume reference report"
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.ExtInfo[cubebox.ExtVolumeCreateReportFailed] = []byte("true")
+		}
+	}
 	if strings.Contains(rsp.Ret.RetMsg, "no space left") ||
 		strings.Contains(rsp.Ret.RetMsg, "No space left") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_NoSpaceLeftOnDevice
@@ -573,19 +597,19 @@ func SetRunCubeSandboxRequestDefaultValue(req *cubebox.RunCubeSandboxRequest) {
 	}
 }
 
-func setCubeExtKey(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
-	// Only report node-level volume ref-count transitions when the sandbox
-	// was created successfully. On failure the workflow rolls back (detach),
-	// so the net node transition is zero and nothing should be reported.
-	if !ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
-		return
+func setCreateVolumeRefEvents(rsp *cubebox.RunCubeSandboxResponse, namespace string, createInfo *workflow.CreateContext) error {
+	ids, err := volume.Global().TakeCreateReports(namespace, createInfo.SandboxID, createInfo.PluginVolumeIDs)
+	if err != nil {
+		return err
 	}
-	if data := marshalVolumeRefEvents(createInfo.VolumeRefEvents); data != nil {
-		if rsp.ExtInfo == nil {
-			rsp.ExtInfo = map[string][]byte{}
-		}
+	events := make([]workflow.VolumeRefEvent, 0, len(ids))
+	for _, id := range ids {
+		events = append(events, workflow.VolumeRefEvent{VolumeID: id, Referenced: 1})
+	}
+	if data := marshalVolumeRefEvents(events); data != nil {
 		rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = data
 	}
+	return nil
 }
 
 // setDestroyVolumeRefEvents reports node-level volume ref-count transitions

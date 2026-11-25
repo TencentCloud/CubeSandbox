@@ -18,6 +18,7 @@ on:
       - 'CubeShim/**'
       - 'agent/**'
       - 'examples/volume/s3/**'
+      - 'examples/volume/nfs/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -38,6 +39,7 @@ on:
       - 'CubeShim/**'
       - 'agent/**'
       - 'examples/volume/s3/**'
+      - 'examples/volume/nfs/**'
       - 'docker/Dockerfile.builder'
       - '.github/workflows/build-builder-image.yml'
       - '.github/workflows/build-check.yml'
@@ -69,7 +71,7 @@ jobs:
         # make target + expected binaries. Architecture coverage catches
         # arch-specific regressions (e.g. cfg(target_arch) code in the shim /
         # hypervisor) that an amd64-only build would miss.
-        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3, OpsAgent]
+        component: [CubeAPI, CubeOps, CubeMaster, CubeTemplateCenter, Cubelet, agent, CubeShim, volume-s3, volume-nfs, OpsAgent]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -114,6 +116,10 @@ jobs:
             make_target: cube-volume-s3
             expected_bins: |
               _output/bin/cube-volume-s3
+          - component: volume-nfs
+            make_target: cube-volume-nfs
+            expected_bins: |
+              _output/bin/cube-volume-nfs
           # ops-agent: standalone Go module (own go.mod, replace => ../pkgs/CubeLog).
           - component: OpsAgent
             make_target: ops-agent

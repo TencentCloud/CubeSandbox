@@ -50,7 +50,7 @@ func TestApplyPauseBindingToInfoIncludesLifecycleEndAt(t *testing.T) {
 	}{
 		{name: "finite timeout", endAt: 123456789, wantLookups: 1},
 		{name: "never timeout", endAt: 0, wantLookups: 1},
-		{name: "reuse cubelet deadline", endAt: 123456789, cubeletEndAt: 987654321},
+		{name: "live metadata wins over the node snapshot", endAt: 123456789, cubeletEndAt: 987654321},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := &mockTimeoutProvider{returnEndAt: tc.endAt}
@@ -68,11 +68,10 @@ func TestApplyPauseBindingToInfoIncludesLifecycleEndAt(t *testing.T) {
 
 			require.True(t, filled)
 			require.Len(t, rsp.Data, 1)
-			wantEndAt := tc.endAt
-			if tc.cubeletEndAt != 0 {
-				wantEndAt = tc.cubeletEndAt
-			}
-			require.Equal(t, wantEndAt, rsp.Data[0].EndAt)
+			// The live metadata read is authoritative, matching the list path
+			// (TestEnrichSandboxListEndAtsAppliesAuthoritativeZero); a stale
+			// node snapshot is replaced by it.
+			require.Equal(t, tc.endAt, rsp.Data[0].EndAt)
 			require.Equal(t, tc.wantLookups, provider.lookupCalls)
 		})
 	}
@@ -310,6 +309,9 @@ func TestCheckValidAndGetReqFallsBackToPauseBinding(t *testing.T) {
 		getSandboxProxyMap: func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
 			return nil, false
 		},
+		getNode: func(string) (*node.Node, bool) {
+			return nil, false
+		},
 		getNodesByIP: func(ip string) (*node.Node, bool) {
 			return &node.Node{IP: ip, InsID: "node-a", Healthy: true}, true
 		},
@@ -322,6 +324,46 @@ func TestCheckValidAndGetReqFallsBackToPauseBinding(t *testing.T) {
 	require.Equal(t, "10.0.0.1:50051", endpoint)
 	require.Equal(t, "10.0.0.1", locatedHost)
 	require.Equal(t, sandboxID, rec.SandboxID)
+}
+
+func TestCheckValidAndGetReqUsesInjectedHostLookup(t *testing.T) {
+	const hostID = "node-a"
+	called := false
+	deps := sandboxInfoLookupDeps{
+		getPauseBinding: func(context.Context, string) (*pausesnap.Record, error) {
+			return nil, pausesnap.ErrNotReady
+		},
+		getSandboxProxyMap: func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
+			return nil, false
+		},
+		getNode: func(got string) (*node.Node, bool) {
+			called = true
+			require.Equal(t, hostID, got)
+			return &node.Node{IP: "10.0.0.1", Healthy: true}, true
+		},
+		getNodesByIP: func(string) (*node.Node, bool) {
+			t.Fatal("host lookup must not use the IP index")
+			return nil, false
+		},
+		getCubeletAddr: func(hostIP string) string { return hostIP + ":50051" },
+	}
+
+	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
+	endpoint, locatedHost, _, ok := checkValidAndGetReqWithDeps(context.Background(), &types.GetCubeSandboxReq{HostID: hostID}, &cubebox.ListCubeSandboxRequest{}, rsp, deps)
+	require.True(t, ok)
+	require.True(t, called)
+	require.Equal(t, "10.0.0.1:50051", endpoint)
+	require.Equal(t, "10.0.0.1", locatedHost)
+}
+
+func TestCheckValidAndGetReqRejectsNilHostNode(t *testing.T) {
+	deps := sandboxInfoLookupDeps{
+		getNode: func(string) (*node.Node, bool) { return nil, true },
+	}
+	rsp := &types.GetCubeSandboxRes{Ret: &types.Ret{}}
+	_, _, _, ok := checkValidAndGetReqWithDeps(context.Background(), &types.GetCubeSandboxReq{HostID: "node-a"}, &cubebox.ListCubeSandboxRequest{}, rsp, deps)
+	require.False(t, ok)
+	require.Equal(t, int(errorcode.ErrorCode_NotFound), rsp.Ret.RetCode)
 }
 
 func TestCheckValidAndGetReqPrefersCacheOverBinding(t *testing.T) {

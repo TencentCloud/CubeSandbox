@@ -249,30 +249,86 @@ objects with no CLEANUP_PENDING row left for the backstop.
 
 ### 9.6 Node placements
 
-`ArtifactNodePlacement` rows record which nodes hold a copy; they drive both
-Phase 2 deletion and download locality.
+`ArtifactNodePlacement` rows record which nodes hold a copy; they drive both the
+per-node physical deletion performed while removing an artifact (the second
+stage of the three-phase cleanup in §9.5) and download locality.
 
-A node that stays absent from the node view for 15 minutes (the async
-operation timeout; health is ignored, only absence counts) is skipped in Phase
-2 so a dead node cannot pin the artifact in CLEANUP_PENDING forever. Its row is
-kept with `deferred_at` set while the other rows are dropped and TC is
-notified. Each artifact GC pass retries deferred rows whose node is back in
-the view, using the node's current address, and deletes a row only after a
-confirmed destroy. A node that never returns keeps its row. Legacy `ip:` ids
-are never treated as absent.
+Deleting an artifact means telling every node that holds a copy to remove its
+local ext4. A node that is already gone can never acknowledge that request, so
+the whole deletion would sit in CLEANUP_PENDING and keep both the artifact row
+and the artifact fingerprint it pins alive.
+
+A node absent from the node view, or still registered with a heartbeat expired
+for 15 minutes (the async operation timeout), therefore stops taking part in the
+current cleanup pass: no destroy request is sent to it, and its placement row is
+kept with `deferred_at` set. Rows for every other node are removed as usual, and
+TC is then asked to delete the artifact so the fingerprint is released. Each
+artifact GC pass retries deferred rows once their node is reachable again, using
+the node's current address, and deletes a row only after a confirmed destroy. A
+node that never recovers keeps its row. Legacy `ip:` ids do not participate.
 
 **Scope and limits**:
 - This mechanism covers deferred cleanup of `ArtifactNodePlacement` rows.
-- crashed/unhealthy-but-registered nodes are out of scope: only complete
-  disappearance from the node view counts as absence, health is ignored.
+  When template/snapshot deletion meets a node unreachable past the grace
+  period, it sends no Cubelet cleanup request, marks that node's replica row
+  `cleanup_required=true` and keeps it, then continues with artifact and
+  metadata cleanup, so the delete call can succeed first. The template's local
+  data on that node is not yet confirmed deleted: once the node returns, the
+  orphan cleanup resends the request at the node's current address and deletes
+  the row only after confirmation. A node that never returns keeps the row,
+  visible to operators. After the node returns, the orphan cleanup (every 5
+  minutes) and the deferred artifact GC (every 10 minutes) converge within
+  about 10 minutes. The user guide and the API 204 description state this
+  contract.
+- A `cleanup_required=true` replica row whose template and snapshot records are
+  both gone only tracks node-side data and no longer counts as an artifact
+  reference, so it cannot block artifact finalisation or flip it back to
+  `READY`. Replicas whose template record still exists count as before.
+- The replica row kept for an unreachable node is marked
+  `cleanup_required=true`, meaning its node-side data still needs cleanup. The
+  same flag also marks failed replicas for redo. Deletion clears it on every
+  node that confirmed cleanup, so after a delete only deferred nodes keep a
+  flagged row. Paths that clean every node before removing metadata (create
+  rollback and rebuilding a FAILED template) clear the flag once all nodes
+  confirm. A replica row awaiting cleanup is never scheduled. Do not reuse a
+  deleted template id before those nodes return: the orphan cleanup replays the
+  request by template id.
+- An unreachable node without a replica row (e.g. a locator that only comes from
+  a snapshot or job record) has nowhere to record the pending cleanup, so the
+  Cubelet request is still sent and a failure fails the delete, which can be
+  retried. Redo never skips unreachable nodes. The orphan cleanup skips the
+  request only for nodes unreachable past grace, keeping their
+  `t_cube_template_replica` cleanup records for retry after the nodes return;
+  inside grace it still sends the request.
+- For a node still in the view, only `HeartbeatReceivedAt` decides: the
+  server-side time CubeOps last persisted its heartbeat, kept as Unix seconds in
+  `t_cube_node_status.heartbeat_received_unix` and free of time zones. An
+  unknown receive time fails closed. `Healthy` and `UnhealthyReason` follow the
+  Cubelet wall clock and play no part: a node whose clock runs ahead keeps
+  reporting Healthy long after it stops.
+- CubeMaster never subtracts a CubeOps timestamp from its own clock. Each
+  replica records the local time the value last changed and ages the node from
+  there. It compares whole seconds, because rebuilding a snapshot from the DB
+  drops sub-second precision. Clock skew between CubeOps replicas and
+  CubeMaster therefore causes no false verdict. After a restart, CubeMaster
+  ages each node from when it first sees it, delaying the verdict by at most
+  one grace period.
+- A node view without a successful sync for 3 minutes (longer than the
+  worst-case sync) yields no verdict, and the first successful sync after such
+  a gap restarts aging for every node. Neither a CubeOps outage nor its
+  recovery therefore causes a false verdict. When over half of the nodes show
+  no new receive time for a minute, CubeMaster logs a WARN, at most once a
+  minute.
+- The heartbeat branch requires `cube_ops_addr`: neither the DB fallback loader
+  nor an older CubeOps supplies receive times, so only view absence applies.
 - Legacy `ip:` ids come from the 20260623145000 backfill of replica rows
-  without `node_id`. They are never treated as absent: an artifact with only
-  `ip:` placements on a retired node stays CLEANUP_PENDING. These are a closed
-  historical set; verify with
+  without `node_id`. They are never treated as unreachable: an artifact with
+  only `ip:` placements on a retired node stays CLEANUP_PENDING. These are a
+  closed historical set; verify with
   `SELECT COUNT(*) FROM t_cube_artifact_node_placement WHERE node_id LIKE 'ip:%'`
   and clean up manually if needed.
 - User-visible delay: 15m grace + up to one 10m GC cadence, i.e. at most ~25
-  minutes after the node disappears before the artifact finalises.
+  minutes after the node becomes unreachable before the artifact finalises.
 
 Deferred rows are never reaped automatically: the row is the only record that
 the node may still hold the files, so dropping it by age would silently leak
@@ -281,18 +337,31 @@ can release its rows with `DELETE FROM t_cube_artifact_node_placement WHERE
 deferred_at > 0 AND node_id = '<node-id>'`. **Back up first, use a controlled
 CLI, and watch relevant metrics.**
 
-The absence start time is kept in process memory only: a Master restart resets
-the timer, and HA replicas keep independent clocks. Deferral is idempotent
-(`deferred_at = 0` guard), so replicas disagreeing on the exact moment is safe;
-a restart merely postpones convergence by up to one grace period. The deferral
-log records the absence start and elapsed time for observability.
+Both timers, view absence and heartbeat expiry, live only in process memory
+and run on the local clock. A Master restart restarts them, and HA replicas may
+reach the verdict at different times. Deferral is idempotent (`deferred_at = 0`
+guard), so differing verdicts cannot corrupt data, and a restart delays the
+verdict by at most one grace period. Logs record the start and elapsed time.
 
 **Upgrade order**: the `deferred_at` column is added by migration
 `20261112071208_artifact_placement_deferred_at.sql`. Apply the migration before
 rolling out new CubeMaster / CubeTemplateCenter binaries; otherwise the GC scan
 and the TC backstop will fail with an unknown-column error. With
 `CUBE_AUTO_MIGRATION=false`, run the migration SQL manually before starting the
-new binaries.
+new binaries. The heartbeat receive time is added by
+`20261119125300_node_heartbeat_received_unix.sql`; apply it and finish upgrading
+all CubeOps replicas before relying on this branch. Existing rows stay 0 rather
+than receiving a time-zone-ambiguous backfill. Live nodes recover on their next
+heartbeat; nodes already permanently unreachable before the migration remain
+fail-closed while present in the view. During a rolling upgrade the receive time
+can be stale or missing: an old replica neither reports it nor advances it on
+conflict, so a later DB rebuild can surface a stale value. This may postpone
+deferral or cause a false unreachable; do not rely on the verdict until the
+rollout completes. To roll back, revert CubeMaster, CubeTemplateCenter and
+every CubeOps replica before running the Down migrations: with the new binaries
+still running, dropping `deferred_at` breaks the GC scan and the TC backstop,
+and dropping `heartbeat_received_unix` fails every heartbeat write, so nodes
+turn unhealthy and unschedulable.
 
 ### 9.7 Shared artifact store
 

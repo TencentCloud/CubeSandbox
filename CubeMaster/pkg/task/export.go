@@ -33,6 +33,7 @@ type Task struct {
 	CallEp    string
 	TaskType  OpType
 
+	CreateFailover bool
 	DescribeTaskID string
 
 	retryTimes int64
@@ -70,7 +71,28 @@ type localTask struct {
 
 var l *localTask
 
-func InitTask(ctx context.Context, cfg *config.Config) {
+type initTaskOptions struct {
+	queueWorkerFactory func(*queueworker.Options, queueworker.WorkHandler) queueworker.QueueWorker
+}
+
+type InitTaskOption func(*initTaskOptions)
+
+func WithQueueWorkerFactory(factory func(*queueworker.Options, queueworker.WorkHandler) queueworker.QueueWorker) InitTaskOption {
+	return func(options *initTaskOptions) {
+		if factory != nil {
+			options.queueWorkerFactory = factory
+		}
+	}
+}
+
+func InitTask(ctx context.Context, cfg *config.Config, options ...InitTaskOption) {
+	opts := initTaskOptions{queueWorkerFactory: queueworker.NewQueueWorker}
+	for _, option := range options {
+		if option != nil {
+			option(&opts)
+		}
+	}
+
 	l = &localTask{
 		ctx:          ctx,
 		initialDelay: time.Duration(1) * time.Second,
@@ -107,7 +129,7 @@ func InitTask(ctx context.Context, cfg *config.Config) {
 		workerNum = len(l.handles)
 	}
 
-	l.asyncTask = queueworker.NewQueueWorker(&queueworker.Options{
+	l.asyncTask = opts.queueWorkerFactory(&queueworker.Options{
 		QueueSize: cfg.Common.AsyncTaskQueueSize,
 		WorkerNum: workerNum,
 	}, l.workHandler)

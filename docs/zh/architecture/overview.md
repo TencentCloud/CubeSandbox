@@ -99,7 +99,7 @@ flowchart TB
 - **增量脏页追踪**：快照仅持久化自上次快照以来发生变更的匿名（脏）内存页，未变更页通过 reflink 继续共享，从而最小化写放大和快照体积。
 - Cubelet 通过 CubeCoW 完成所有 rootfs 与内存卷操作（创建、克隆、快照、删除）。
 
-### CubeEgress（安全代理）
+### CubeEgress（出网安全代理）
 
 部署在每台主机上的透明 **L7 出网代理**（OpenResty + Lua），通过 TPROXY 拦截每一个出站 HTTP/HTTPS 请求：
 
@@ -194,6 +194,6 @@ sequenceDiagram
 - [沙箱生命周期](../guide/lifecycle.md) —— 状态模型、自动暂停与自动恢复。
 - [快照、回滚与克隆](../guide/snapshot-rollback-clone.md) —— 基于 CubeCoW 的高级 API。
 - [跨机迁移](../guide/cross-node-snapshot/requirements.md) —— 通过 JuiceFS 或 CubeS3lvol 在其他节点执行 Pause / Resume / FromSnap。
-- [安全代理](../guide/security-proxy.md) —— CubeEgress 域名过滤与凭据注入。
+- [出网安全代理（过滤与凭证注入）](../guide/security-proxy.md) —— CubeEgress 域名过滤与凭据注入。
 - [性能基准](../guide/performance-benchmark.md) —— 冷启动、快照与密度数据。
 - [模板概览](../guide/templates.md) —— 三步式模板生命周期。

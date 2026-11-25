@@ -9,7 +9,10 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -78,10 +81,47 @@ func TestReconcileOrphanReplicaCleanups(t *testing.T) {
 	if len(deleted) != 1 || deleted[0] != 1 {
 		t.Fatalf("deleted rows = %v, want [1]", deleted)
 	}
-	// The node is absent from the live cache in tests, so the stored IP is
-	// used as the fallback address.
+	// The node is absent from the cache but within grace, so the stored IP is used.
 	if cleaned["node-ok"] != "10.0.0.1" || cleaned["node-dead"] != "10.0.0.2" {
 		t.Fatalf("locators = %v, want stored IPs used as fallback", cleaned)
+	}
+}
+
+// A tombstone on a node unreachable past the grace period is neither retried
+// nor deleted: the row waits for the node to come back.
+func TestReconcileOrphanReplicaCleanupsSkipsUnreachableNode(t *testing.T) {
+	stubSweepStore(t)
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(localcache.UnreachableSince, func(id string) (time.Time, bool) {
+		if id == "node-gone" {
+			return time.Now().Add(-placementAbsenceGrace - time.Minute), true
+		}
+		return time.Time{}, false
+	})
+	oldList, oldCleanup, oldDelete := listOrphanCleanupReplicas, cleanupOrphanReplicaOnNode, deleteReplicaRowByID
+	t.Cleanup(func() {
+		listOrphanCleanupReplicas, cleanupOrphanReplicaOnNode, deleteReplicaRowByID = oldList, oldCleanup, oldDelete
+	})
+	listOrphanCleanupReplicas = func(context.Context, int) ([]orphanCleanupReplica, error) {
+		return []orphanCleanupReplica{
+			{ID: 1, TemplateID: "tpl-gone", NodeID: "node-gone", NodeIP: "10.0.0.1"},
+			{ID: 2, TemplateID: "tpl-gone", NodeID: "node-back", NodeIP: "10.0.0.2"},
+		}, nil
+	}
+	var rpcs []string
+	cleanupOrphanReplicaOnNode = func(_ context.Context, _ string, l templateCleanupLocator, _ string) error {
+		rpcs = append(rpcs, l.NodeID)
+		return nil
+	}
+	var deleted []uint
+	deleteReplicaRowByID = func(_ context.Context, id uint) error { deleted = append(deleted, id); return nil }
+
+	if err := reconcileOrphanReplicaCleanups(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpcs) != 1 || rpcs[0] != "node-back" || len(deleted) != 1 || deleted[0] != 2 {
+		t.Fatalf("unreachable tombstone must be kept untouched: rpcs=%v deleted=%v", rpcs, deleted)
 	}
 }
 

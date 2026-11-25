@@ -20,10 +20,12 @@ on:
       - 'pkgs/sandboxrestart/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
+      - 'CubeEgress/**'
       - 'cubecow/**'
       - 'agent/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
+      - 'examples/volume/nfs/**'
       - 'tests/perf/**'
       - 'tests/unittest/run.sh'
       - 'docker/Dockerfile.builder'
@@ -48,10 +50,12 @@ on:
       - 'pkgs/sandboxrestart/**'
       - 'cube-lifecycle-manager/**'
       - 'Cubelet/**'
+      - 'CubeEgress/**'
       - 'cubecow/**'
       - 'agent/**'
       - 'hypervisor/**'
       - 'examples/volume/s3/**'
+      - 'examples/volume/nfs/**'
       - 'tests/perf/**'
       - 'tests/unittest/run.sh'
       - 'docker/Dockerfile.builder'
@@ -84,9 +88,11 @@ on:
           - agent
           - hypervisor
           - volume-s3
+          - volume-nfs
           - volume-cos-rpc
           - proto
           - cubebench
+          - cubeegress
 
 concurrency:
   group: unit-test-${{ github.event.pull_request.number || github.ref }}
@@ -154,9 +160,11 @@ jobs:
             add_component "agent"
             add_component "hypervisor"
             add_component "volume-s3"
+            add_component "volume-nfs"
             add_component "volume-cos-rpc"
             add_component "proto"
             add_component "cubebench"
+            add_component "cubeegress"
           }
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -180,9 +188,11 @@ jobs:
               agent) add_component "agent" ;;
               hypervisor) add_component "hypervisor" ;;
               volume-s3) add_component "volume-s3" ;;
+              volume-nfs) add_component "volume-nfs" ;;
               volume-cos-rpc) add_component "volume-cos-rpc" ;;
               proto) add_component "proto" ;;
               cubebench) add_component "cubebench" ;;
+              cubeegress) add_component "cubeegress" ;;
               *)
                 echo "::error::unsupported component input: ${selected_component}"
                 exit 1
@@ -317,11 +327,18 @@ jobs:
                   # Standalone Go module, not covered by any component above.
                   add_component "volume-s3"
                   ;;
+                examples/volume/nfs/*)
+                  add_component "volume-nfs"
+                  ;;
                 examples/volume/cos/rpc/*)
                   # Standalone Go module (the reference gRPC volume plugin and
                   # the only example consuming pkgs/proto), not covered by any
                   # component build above.
                   add_component "volume-cos-rpc"
+                  ;;
+                CubeEgress/*)
+                  # Shell-based test set (see cubeegress-test in the Makefile).
+                  add_component "cubeegress"
                   ;;
                 tests/perf/*)
                   add_component "cubebench"
@@ -360,9 +377,11 @@ jobs:
                     elif . == "agent" then "Agent"
                     elif . == "hypervisor" then "Hypervisor"
                     elif . == "volume-s3" then "S3 Volume Plugin"
+                    elif . == "volume-nfs" then "NFS Volume Plugin"
                     elif . == "volume-cos-rpc" then "COS RPC Volume Plugin"
                     elif . == "proto" then "Proto"
                     elif . == "cubebench" then "CubeBench"
+                    elif . == "cubeegress" then "CubeEgress"
                     else error("unsupported component: " + .)
                     end
                   ),
@@ -385,13 +404,15 @@ jobs:
                     elif . == "agent" then "agent-test"
                     elif . == "hypervisor" then "hypervisor-test"
                     elif . == "volume-s3" then "cube-volume-s3-test"
+                    elif . == "volume-nfs" then "cube-volume-nfs-test"
                     elif . == "volume-cos-rpc" then "cube-volume-cos-rpc-test"
                     elif . == "proto" then "proto-test"
                     elif . == "cubebench" then "cubebench-test"
+                    elif . == "cubeegress" then "cubeegress-test"
                     else error("unsupported component: " + .)
                     end
                   ),
-                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "redisx" and . != "proto" and . != "cubebench"),
+                  requires_builder: (. != "CubeProxy" and . != "cubelog" and . != "cubedb" and . != "blobstore" and . != "redisx" and . != "proto" and . != "cubebench" and . != "cubeegress"),
                   run_mode: "root_make"
                 })
               | [

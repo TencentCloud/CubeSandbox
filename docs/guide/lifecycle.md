@@ -96,12 +96,27 @@ print(info)
 #   "templateID": "rki5dems9wqfm4r03t7g",
 #   "state": "running",
 #   "startedAt": "2026-06-17T12:34:56Z",
-#   "endAt":     "2026-06-17T12:39:56Z",
-#   "metadata":  {...}
+#   "endAt":       "2026-06-17T12:39:56Z",
+#   "endAtStatus": "deadline",
+#   "metadata":    {...}
 # }
 ```
 
-`endAt` is the projected next-timeout instant given the current `timeout`. It is refreshed every time the sandbox receives a request (or when you call `set_timeout`, when available). Pausing does not cancel a finite idle deadline, so both detail and list APIs continue to return the same `endAt` while the sandbox is paused. For **never-timeout** sandboxes there is no deadline, so `endAt` is **omitted** from the response rather than reported as equal to `startedAt`.
+`endAt` is when the sandbox is due to time out. It is calculated from the last time the timeout was set (create, `set_timeout`, `resume`) plus the timeout. A sandbox that keeps receiving traffic stays alive, so the real pause can happen later than `endAt`: treat it as the earliest the sandbox could pause, not an exact time. Pausing does not cancel a finite timeout, so the detail and list APIs keep returning the same `endAt` while a sandbox is paused. The E2B SDK requires the field on every response, so it is always present; read the sibling `endAtStatus` to know what it means:
+
+| `endAtStatus` | `endAt` | Meaning |
+|---|---|---|
+| `deadline` | the projected instant | A finite timeout is set. The time is a best guess; traffic can push the actual pause later. |
+| `never` | `9999-12-31T23:59:59Z` | The sandbox has no timeout. The sentinel is not a real instant. |
+| `unknown` | `9999-12-31T23:59:59Z` | The deadline lookup failed. Treat the deadline as unknown and do not reclaim the sandbox from this value. |
+
+The same responses echo the sandbox's persisted configuration:
+
+- `lifecycle`: `onTimeout` (`"pause"` / `"kill"`) and `autoResume`.
+- `allowInternetAccess`: the internet-access flag.
+- `network`: `allowOut`, `denyOut`, `allowPublicTraffic`, `maskRequestHost`.
+
+A field is absent either because the persisted spec could not be read (unknown) or because it was never set and the server default applies. Egress rules never appear in these responses because they can carry inject secrets; when rules are a sandbox's only egress policy, `network` carries just `"rulesPresent": true`, which tells you a policy exists without exposing it.
 
 ## List Running Sandboxes
 
@@ -177,14 +192,11 @@ See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentclou
 
 ### CubeProxy cache after Resume
 
-Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then best-effort purges CubeProxy `local_cache` via `POST /admin/backend_cache/delete` so traffic does not keep routing to the pre-pause IP (same-node 504).
+Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy map. CubeMaster then purges CubeProxy's `local_cache` via `POST /admin/backend_cache/delete` so traffic no longer routes to the pre-pause IP; if the purge fails, the resume returns an error.
 
-For that purge to succeed, **CubeMaster and CubeProxy must share the same admin token**:
+**CubeMaster and CubeProxy must share the same admin token**: on a Helm install the chart wires both sides automatically; hand-written deployments must align them. If the two tokens differ, the purge returns **403**, the stale route never expires on its own, and the sandbox stays unreachable.
 
-- CubeMaster: `cubeproxy.admin_token` (sent as `X-Cube-Admin-Token`)
-- CubeProxy: `$cube_admin_token` in `nginx.conf` (see `CubeProxy/lua/admin_phase.lua`)
-
-If the token is set on only one side, or the values differ, cache purge returns **403**, Redis is still correct, but CubeProxy may serve a stale cached backend until the entry expires. Align the token in deploy / Helm values whenever Resume is used.
+Rotating `lifecycleManager.adminToken` rolls the master, proxy and lifecycle-manager Pods in sequence during the same `helm upgrade`; a Resume issued before the rollout finishes can fail while the old token is still being validated. Wait for the rollout to complete and retry the Resume.
 
 ## Platform-managed Auto-pause / Auto-resume
 
@@ -312,7 +324,7 @@ A create request can set `restartPolicy`. The meaning matches Kubernetes `restar
 
 A restart keeps the disk, the network, the volume and host mounts, and the sandbox ID, then cold-starts. Memory is not kept.
 
-Repeated failures wait 10 seconds, then double, capped at 300 seconds; after 10 minutes of stability the restart count resets. The restart limit is `restartBackoff.maxRestarts` (default `0` means unlimited); a global cap can be set with `cubelet_conf.max_restarts_cap` (once set, even `0` is tightened to that cap). After the limit the sandbox stops restarting and is not brought up again, but it still counts toward the node's `MvmNum` quota until idle timeout or an explicit destroy.
+Repeated failures wait 10 seconds, then double, capped at 300 seconds; after 10 minutes of stability the restart count resets. "Stability" is measured from the moment the current run started being up -- a sandbox is created, restarted successfully, or resumed from a pause. A **failed** restart attempt does not restart that clock, so a crash loop cannot renew its own budget. The reset is applied by the node as soon as the window elapses; it does not wait for the next exit. The restart limit is `restartBackoff.maxRestarts` (default `0` means unlimited); a global cap can be set with `cubelet_conf.max_restarts_cap` (once set, even `0` is tightened to that cap). After the limit the sandbox stops restarting and is not brought up again, but it still counts toward the node's `MvmNum` quota until idle timeout or an explicit destroy. Restarting cubelet does not revive a sandbox that already reached the limit: the stable-period reset only ever returns the retry budget, it never takes the decision to start a sandbox that the policy already gave up on.
 
 ### Liveness probe
 

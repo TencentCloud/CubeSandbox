@@ -58,6 +58,19 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   [plugins."io.cubelet.internal.v1.cgroup"]
     pool_size = 3000
     pool_workers = 1
+    # Pin each sandbox's CPUs and memory to one NUMA node by placing it under
+    # cube_sandbox_v2/sandbox/numa<N>. Off by default.
+    #
+    # The pool is pre-provisioned only when this is on AND the host has more
+    # than one NUMA node, as pool_size slots per node. Otherwise it is not
+    # created at all, and sandboxes from an earlier run stay untouched until
+    # they are destroyed. Requires a usable cpuset controller; cubelet refuses
+    # to start if any node has no CPUs (memory-only CXL/PMEM, or all CPUs listed
+    # in cgroup_disable_cpuset_list).
+    #
+    # Applies to sandboxes created after the restart (nothing is migrated). The
+    # node is round-robin unless cube.master.instance.numa_node pins one.
+    enable_numa_affinity = false
     pool_trigger_interval_in_ms = 1000
     vm_cpu_overhead = "0"
     vm_memory_overhead_base = "42Mi"

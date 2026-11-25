@@ -19,6 +19,14 @@ import (
 // See docs/guide/lifecycle.md — Timeout semantics (canonical).
 const NeverTimeout = -1
 
+// endAtStatus values carried on the sandbox query responses, so callers can
+// tell a real never-timeout from a failed deadline lookup.
+const (
+	EndAtStatusDeadline = "deadline"
+	EndAtStatusNever    = "never"
+	EndAtStatusUnknown  = "unknown"
+)
+
 // TimeoutPtr is a convenience constructor for the pointer-typed
 // CreateCubeSandboxReq.Timeout field.
 func TimeoutPtr(v int) *int {
@@ -168,6 +176,8 @@ type CubeNetworkConfig struct {
 	// MaskRequestHost is an ingress-only Host authority template consumed by
 	// CubeProxy. It is intentionally not forwarded to Cubelet.
 	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
+	// Set when the config carried rules, which are scrubbed from this echo.
+	RulesPresent *bool `json:"rules_present,omitempty"`
 }
 
 // EgressRule is an L7 egress rule, evaluated first-match-wins.
@@ -224,6 +234,7 @@ func (c *CubeNetworkConfig) DeepCopy() *CubeNetworkConfig {
 		AllowOut:            append([]string(nil), c.AllowOut...),
 		DenyOut:             append([]string(nil), c.DenyOut...),
 		MaskRequestHost:     cloneStringPtr(c.MaskRequestHost),
+		RulesPresent:        cloneBoolPtr(c.RulesPresent),
 	}
 	if len(c.Rules) > 0 {
 		out.Rules = make([]*EgressRule, 0, len(c.Rules))
@@ -610,6 +621,24 @@ type SandboxBriefData struct {
 	EndAt           int64              `json:"end_at,omitempty"`
 	VolumeMounts    []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus   *RestartStatus     `json:"restart_status,omitempty"`
+	// Echo of the persisted spec; pointers distinguish "spec not read" from explicit false.
+	AutoPause         *bool              `json:"auto_pause,omitempty"`
+	AutoResume        *bool              `json:"auto_resume,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+	// One of the EndAtStatus* constants; empty when the spec was not read.
+	EndAtStatus string `json:"end_at_status,omitempty"`
+}
+
+// MarshalJSON scrubs egress rules on the wire; see scrubEchoNetworkConfig.
+func (d SandboxBriefData) MarshalJSON() ([]byte, error) {
+	type alias SandboxBriefData
+	return FastestJsoniter.Marshal(&struct {
+		CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+		*alias
+	}{
+		CubeNetworkConfig: scrubEchoNetworkConfig(d.CubeNetworkConfig),
+		alias:             (*alias)(&d),
+	})
 }
 
 type GetCubeSandboxReq struct {
@@ -651,6 +680,33 @@ type SandboxData struct {
 	VolumeMounts        []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus       *RestartStatus     `json:"restart_status,omitempty"`
 	ConfiguredQos       *qos.Config        `json:"configured_qos,omitempty"`
+	// Echo of the persisted spec; pointers distinguish "spec not read" from explicit false.
+	AutoPause         *bool              `json:"auto_pause,omitempty"`
+	AutoResume        *bool              `json:"auto_resume,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+	// One of the EndAtStatus* constants; empty when the spec was not read.
+	EndAtStatus string `json:"end_at_status,omitempty"`
+}
+
+// MarshalJSON scrubs egress rules on the wire; see SandboxBriefData.
+func (d SandboxData) MarshalJSON() ([]byte, error) {
+	type alias SandboxData
+	return FastestJsoniter.Marshal(&struct {
+		CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
+		*alias
+	}{
+		CubeNetworkConfig: scrubEchoNetworkConfig(d.CubeNetworkConfig),
+		alias:             (*alias)(&d),
+	})
+}
+
+func scrubEchoNetworkConfig(cfg *CubeNetworkConfig) *CubeNetworkConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Rules = nil
+	return &out
 }
 
 // RestartStatus is the control-plane view of node-local restarts. It is
@@ -809,6 +865,7 @@ type TemplateImageJobInfo struct {
 	FailedNodeCount         int32               `json:"failed_node_count,omitempty"`
 	TemplateStatus          string              `json:"template_status,omitempty"`
 	ArtifactStatus          string              `json:"artifact_status,omitempty"`
+	NeedsFullRebuild        bool                `json:"-"`
 	PullTotalBytes          int64               `json:"pull_total_bytes,omitempty"`
 	PullDownloadedBytes     int64               `json:"pull_downloaded_bytes,omitempty"`
 	PullTotalLayers         int32               `json:"pull_total_layers,omitempty"`

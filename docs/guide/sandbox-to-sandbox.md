@@ -267,4 +267,4 @@ exposed, `enable_exposed_port` off, egress policy blocking).
 
 - [Network Policy](./network-policy.md) — sandbox egress allow/deny lists and L7 rules.
 - [Restrict Public Access](./restrict-public-access.md) — per-sandbox tokens on the CubeProxy ingress.
-- [Security Proxy](./security-proxy.md) — domain filtering and credential injection for outbound HTTP/HTTPS.
+- [Egress Proxy (Filtering & Secrets)](./security-proxy.md) — domain filtering and credential injection for outbound HTTP/HTTPS.

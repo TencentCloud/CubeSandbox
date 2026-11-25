@@ -1,0 +1,20 @@
+{
+  "title": "叢集總覽",
+  "subtitle": "沙箱、容量與流水線的即時快照。",
+  "kpi": {
+    "runningSandboxes": "執行中沙箱",
+    "cpuUtilization": "CPU 使用率",
+    "memoryUtilization": "記憶體使用率",
+    "healthyNodes": "健康節點",
+    "templatesAvailable": "{{count}} 個範本可用",
+    "coresUsed": "{{used}} / {{total}} 核",
+    "memoryUsed": "{{used}} / {{total}} GiB",
+    "maxSlots": "最大 {{count}} 個 MVM 槽位"
+  },
+  "recentSandboxes": "最近沙箱",
+  "recentSandboxesDesc": "叢集中最新執行的微虛擬機器。",
+  "templatePipeline": "範本流水線",
+  "templatePipelineDesc": "可用於啟動的範本列表。",
+  "noSandboxes": "暫無執行中的沙箱。",
+  "noTemplates": "暫無範本。"
+}

@@ -1,4 +1,4 @@
-# Security Proxy
+# Egress Proxy (Filtering & Secrets)
 
 Cube Sandbox includes a per-host transparent egress proxy — **CubeEgress** —
 that intercepts every outbound HTTP/HTTPS request a sandbox makes,

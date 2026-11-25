@@ -17,6 +17,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | --- | --- |
 | [Claude Code](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/claude-code-integration) | Redirect Claude Code Bash tool calls into isolated CubeSandbox MicroVMs. |
 | [LangChain](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/langchain-integration) | Use CubeSandbox as a command-execution tool with both LangChain 0.x and 1.x agents. |
+| [LangGraph](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/langgraph-integration) | Build an explicit `StateGraph` agent (generate → execute → review → retry) that executes Python in a MicroVM, with checkpointing across `pause()` / `connect()`. |
 | [Pi Agent](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/pi-agent-integration) | Connect Pi Agent tool execution to a CubeSandbox environment. |
 | [OpenClaw](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openclaw-integration) | Configure the OpenClaw skill so agents can execute code in isolated MicroVMs. |
 | [OpenAI Agents SDK](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/openai-agents-example) | Connect `E2BSandboxClient` to CubeSandbox, including Shell Agent, pause/resume, and SWE-bench flows. |
@@ -41,6 +42,7 @@ Runnable examples demonstrating CubeSandbox features and integrations. Follow ea
 | [ivshmem](https://github.com/TencentCloud/CubeSandbox/tree/master/examples/ivshmem) | Enable host/guest shared memory and try a ring-buffer protocol and mmap throughput benchmark. |
 | [Tencent Cloud COS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/README.md) | Deploy and exercise the binary or RPC COS volume plugin through its complete lifecycle. |
 | [S3-Compatible Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/s3/README.md) | Connect AWS S3, Tencent Cloud COS, Cloudflare R2, MinIO, or another S3-compatible backend. |
+| [NFS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/nfs/README.md) | Share provisioned NFSv3 directories with read-only or read-write mounts per sandbox. |
 | [JuiceFS Volume Plugin](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/juicefs/README.md) | A POSIX file system over object storage: one file system, `--subdir` per volume, several sandboxes sharing a volume and seeing each other's writes |
 
 ## Benchmarking

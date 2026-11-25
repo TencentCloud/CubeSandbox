@@ -10,9 +10,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	// glebarez/sqlite is a pure-Go (CGO-free) SQLite driver, used here as an
@@ -27,7 +31,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/admission"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/plugin/binary"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -42,6 +49,7 @@ type fakeControllerPlugin struct {
 	// handler's DB-row rollback path.
 	createErr  error
 	destroyErr error
+	onDestroy  func(context.Context) error
 	// privateData is the Create response; inputs are recorded independently.
 	privateData string
 
@@ -84,7 +92,12 @@ func (f *fakeControllerPlugin) Create(_ context.Context, volumeID, name, private
 	}, nil
 }
 
-func (f *fakeControllerPlugin) Destroy(_ context.Context, volumeID, privateData string) error {
+func (f *fakeControllerPlugin) Destroy(ctx context.Context, volumeID, privateData string) error {
+	if f.onDestroy != nil {
+		if err := f.onDestroy(ctx); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.destroyCalls++
@@ -119,6 +132,9 @@ func newVolumeTestEngine(t *testing.T) (*gin.Engine, *gorm.DB, *fakeControllerPl
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	require.NoError(t, db.AutoMigrate(&models.VolumeRecord{}))
 
 	origDB := volumeDB
@@ -359,6 +375,67 @@ func TestVolumeHTTP_DeleteWhenRefCountNonZeroReturnsConflict(t *testing.T) {
 	assert.Equal(t, 1, fake.destroyCalls)
 }
 
+func TestVolumeHTTP_CreateAndDeleteShareAdmission(t *testing.T) {
+	ctx := t.Context()
+	r, db, fake := newVolumeTestEngine(t)
+	const id = "vol-guarded"
+	w, created := doVolumeRequest(t, r, http.MethodPost, "/cube/volume", volumeCreateBody(t, id, fake.Name(), ""))
+	require.Zero(t, created.Ret.RetCode)
+	require.NotContains(t, w.Body.String(), `"in_flight_creates"`)
+	require.NotContains(t, w.Body.String(), `"deleting"`)
+
+	checkAdmission := func(pending, deleting string) {
+		w, got := doVolumeRequest(t, r, http.MethodGet, "/cube/volume/"+id, "")
+		require.Zero(t, got.Ret.RetCode)
+		var body struct {
+			Volume map[string]json.RawMessage `json:"volume"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		require.Equal(t, pending, string(body.Volume["in_flight_creates"]))
+		require.Equal(t, deleting, string(body.Volume["deleting"]))
+	}
+	checkAdmission("0", "false")
+	reserve := func() *admission.CreateGuard {
+		guard, rows, err := admission.BeginCreate(ctx, db, []string{id, id})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		return guard
+	}
+	del := func(code int) {
+		_, deleted := doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+id, "")
+		require.Equal(t, code, deleted.Ret.RetCode)
+	}
+	conflict := int(errorcode.ErrorCode_Conflict)
+	first := reserve()
+	second := reserve()
+	checkAdmission("2", "false")
+	w, listed := doVolumeRequest(t, r, http.MethodGet, "/cube/volume", "")
+	require.Zero(t, listed.Ret.RetCode)
+	require.NotContains(t, w.Body.String(), `"in_flight_creates"`)
+	require.NotContains(t, w.Body.String(), `"deleting"`)
+	del(conflict)
+	require.NoError(t, first.Finish(ctx, nil, false)) // proven not started
+	require.Error(t, first.Finish(ctx, nil, false))
+	del(conflict)
+	require.NoError(t, second.Finish(ctx, map[string][]byte{
+		refcount.ExtInfoKey: []byte(`[{"volume_id":"vol-guarded","referenced":1}]`),
+	}, false))
+	del(conflict)
+	require.Zero(t, fake.destroyCalls)
+
+	require.NoError(t, db.Model(&models.VolumeRecord{}).Where("volume_id = ?", id).Update("refcount", 0).Error)
+	fake.onDestroy = func(context.Context) error {
+		// Backend Destroy has started but not yet returned: reverse the order.
+		checkAdmission("0", "true")
+		_, _, err := admission.BeginCreate(ctx, db, []string{id})
+		require.ErrorIs(t, err, admission.ErrBusy)
+		del(conflict)
+		return nil
+	}
+	del(0)
+	require.Equal(t, 1, fake.destroyCalls)
+}
+
 func TestVolumeHTTP_UnknownDriverRejected(t *testing.T) {
 	r, _, _ := newVolumeTestEngine(t)
 	_, env := doVolumeRequest(t, r, http.MethodPost, "/cube/volume",
@@ -519,6 +596,230 @@ func TestVolumeHTTP_PrivateDataDestroyErrorPreservesRecord(t *testing.T) {
 	var record models.VolumeRecord
 	require.NoError(t, db.Where("volume_id = ?", volumeID).First(&record).Error)
 	assert.Equal(t, fake.privateData, record.PrivateData)
+	assert.True(t, record.Deleting)
+
+	_, retry := doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+volumeID, "")
+	assert.Equal(t, int(errorcode.ErrorCode_Conflict), retry.Ret.RetCode)
+	assert.Equal(t, 1, fake.destroyCalls)
+}
+
+func TestVolumeHTTP_DeleteCancellationAndClaim(t *testing.T) {
+	type traceKey struct{}
+	for _, tc := range []struct {
+		name        string
+		beforeClaim bool
+		retry       bool
+		destroyErr  error
+		wantCode    int
+	}{
+		{name: "success after disconnect"},
+		{name: "unknown after disconnect", destroyErr: errors.New("backend outcome unknown"), wantCode: int(errorcode.ErrorCode_MasterInternalError)},
+		{name: "canceled before claim", beforeClaim: true, wantCode: int(errorcode.ErrorCode_DBError)},
+		{name: "retry excludes another delete", retry: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db, fake := newVolumeTestEngine(t)
+			record := models.VolumeRecord{VolumeID: "vol-delete-cancel", Name: "vol-delete-cancel", Driver: fake.Name()}
+			record.Deleting, record.DeleteRetryable = tc.retry, tc.retry
+			require.NoError(t, db.Create(&record).Error)
+			fake.destroyErr = tc.destroyErr
+
+			ctx, cancel := context.WithCancel(context.WithValue(t.Context(), traceKey{}, record.VolumeID))
+			defer cancel()
+			req := httptest.NewRequestWithContext(ctx, http.MethodDelete, "/cube/volume/"+record.VolumeID, nil)
+			w := httptest.NewRecorder()
+			if tc.beforeClaim {
+				cancel()
+				r.ServeHTTP(w, req)
+			} else {
+				entered := make(chan context.Context, 1)
+				release := make(chan struct{})
+				done := make(chan struct{})
+				fake.onDestroy = func(pluginCtx context.Context) error {
+					entered <- pluginCtx
+					<-release
+					return pluginCtx.Err()
+				}
+				go func() {
+					defer close(done)
+					r.ServeHTTP(w, req)
+				}()
+				defer func() {
+					close(release)
+					<-done
+				}()
+
+				select {
+				case pluginCtx := <-entered:
+					require.NoError(t, db.First(&record, record.ID).Error)
+					require.True(t, record.Deleting)
+					require.False(t, record.DeleteRetryable)
+					if tc.retry {
+						_, other := doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+record.VolumeID, "")
+						require.EqualValues(t, errorcode.ErrorCode_Conflict, other.Ret.RetCode)
+						_, _, err := admission.BeginCreate(t.Context(), db, []string{record.VolumeID})
+						require.ErrorIs(t, err, admission.ErrBusy)
+					}
+					cancel()
+					require.NoError(t, pluginCtx.Err())
+					require.Equal(t, record.VolumeID, pluginCtx.Value(traceKey{}))
+					deadline, ok := pluginCtx.Deadline()
+					require.True(t, ok)
+					require.True(t, time.Until(deadline) > 0)
+				case <-done:
+					t.Fatal("Delete returned before calling the plugin")
+				case <-time.After(5 * time.Second):
+					t.Fatal("Delete did not call the plugin")
+				}
+
+				// Release the plugin before inspecting the SQL settlement.
+				release <- struct{}{}
+				<-done
+			}
+
+			require.Equal(t, http.StatusOK, w.Code)
+			var res volumeRetEnvelope
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &res))
+			require.NotNil(t, res.Ret)
+			require.Equal(t, tc.wantCode, res.Ret.RetCode)
+			err := db.First(&record, record.ID).Error
+			switch {
+			case tc.beforeClaim:
+				require.NoError(t, err)
+				require.False(t, record.Deleting)
+				require.Zero(t, fake.destroyCalls)
+			case tc.destroyErr != nil:
+				require.NoError(t, err)
+				require.True(t, record.Deleting)
+				require.Equal(t, 1, fake.destroyCalls)
+			default:
+				require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+				require.Equal(t, 1, fake.destroyCalls)
+			}
+		})
+	}
+}
+
+func TestVolumeHTTP_DeleteCanRetryAfterPluginFailsToStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires /bin/sh")
+	}
+	r, db, _ := newVolumeTestEngine(t)
+	path := filepath.Join(t.TempDir(), "controller")
+	driver := binary.New("test-binary-destroy", path)
+	plugin.Register(driver)
+	t.Cleanup(func() { plugin.UnregisterForTest(driver.Name()) })
+
+	record := models.VolumeRecord{VolumeID: "vol-missing-binary", Name: "vol-missing-binary", Driver: driver.Name()}
+	require.NoError(t, db.Create(&record).Error)
+	url := "/cube/volume/" + record.VolumeID
+	_, first := doVolumeRequest(t, r, http.MethodDelete, url, "")
+	require.Equal(t, int(errorcode.ErrorCode_MasterInternalError), first.Ret.RetCode)
+	require.NoError(t, db.First(&record, record.ID).Error)
+	require.False(t, record.Deleting)
+
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf '{}\\n'\n"), 0700))
+	_, retry := doVolumeRequest(t, r, http.MethodDelete, url, "")
+	require.Zero(t, retry.Ret.RetCode)
+	require.ErrorIs(t, db.First(&record, record.ID).Error, gorm.ErrRecordNotFound)
+}
+
+func TestVolumeHTTP_DeleteRetriesOnlySQLAfterConfirmedDestroy(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failures  int
+		wantCode  int
+		wantTries int
+	}{
+		{"transient SQL failure", 1, 0, 2},
+		{"persistent SQL failure", 3, int(errorcode.ErrorCode_DBError), 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db, fake := newVolumeTestEngine(t)
+			const volumeID = "vol-confirmed-destroy"
+			record := models.VolumeRecord{VolumeID: volumeID, Name: volumeID, Driver: fake.Name()}
+			require.NoError(t, db.Create(&record).Error)
+			other := models.VolumeRecord{VolumeID: "vol-other-delete", Name: "other", Driver: fake.Name(), Deleting: true}
+			require.NoError(t, db.Create(&other).Error)
+			const callbackName = "test:fail_volume_delete"
+			tries := 0
+			require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(callbackName, func(tx *gorm.DB) {
+				if tx.Statement.Table == models.VolumeTableName {
+					tries++
+					if tries <= tc.failures {
+						tx.AddError(errors.New("injected SQL failure"))
+					}
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, db.Callback().Delete().Remove(callbackName)) })
+
+			_, res := doVolumeRequest(t, r, http.MethodDelete, "/cube/volume/"+volumeID, "")
+			require.Equal(t, tc.wantCode, res.Ret.RetCode)
+			require.Equal(t, tc.wantTries, tries)
+			require.Equal(t, 1, fake.destroyCalls)
+			err := db.First(&record, record.ID).Error
+			if tc.wantCode == 0 {
+				require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+			} else {
+				require.NoError(t, err)
+				require.True(t, record.Deleting)
+			}
+			require.NoError(t, db.First(&other, other.ID).Error)
+		})
+	}
+}
+
+func TestVolumeHTTP_DeleteRetryKeepsCreateBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires /bin/sh")
+	}
+	for _, tc := range []struct {
+		name     string
+		response string
+		want     bool
+	}{
+		{"partial delete confirmed stopped", `{"error":"one object rejected","error_kind":"destroy_retryable"}`, true},
+		{"generic not found", `{"error":"not found"}`, false},
+		{"unconfirmed half reply", `{"error":"one object rejected","error_kind":"destroy_retryable"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db, _ := newVolumeTestEngine(t)
+			path := filepath.Join(t.TempDir(), "controller")
+			require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+tc.response+"'\nexit 1\n"), 0700))
+			driver := binary.New("test-destroy-outcome", path)
+			plugin.Register(driver)
+			t.Cleanup(func() { plugin.UnregisterForTest(driver.Name()) })
+			record := models.VolumeRecord{VolumeID: "retry-delete", Name: "retry-delete", Driver: driver.Name()}
+			require.NoError(t, db.Create(&record).Error)
+			url := "/cube/volume/" + record.VolumeID
+			read := func(deleting, retryable bool) {
+				t.Helper()
+				require.NoError(t, db.Take(&record, record.ID).Error)
+				require.Equal(t, deleting, record.Deleting)
+				require.Equal(t, retryable, record.DeleteRetryable)
+				_, _, err := admission.BeginCreate(t.Context(), db, []string{record.VolumeID})
+				require.ErrorIs(t, err, admission.ErrBusy)
+			}
+
+			_, first := doVolumeRequest(t, r, http.MethodDelete, url, "")
+			require.EqualValues(t, errorcode.ErrorCode_MasterInternalError, first.Ret.RetCode)
+			read(true, tc.want)
+
+			require.NoError(t, os.Remove(path))
+			_, unstarted := doVolumeRequest(t, r, http.MethodDelete, url, "")
+			if !tc.want {
+				require.EqualValues(t, errorcode.ErrorCode_Conflict, unstarted.Ret.RetCode)
+				return
+			}
+			require.EqualValues(t, errorcode.ErrorCode_MasterInternalError, unstarted.Ret.RetCode)
+			read(true, true)
+
+			require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf '{}\\n'\n"), 0700))
+			_, retry := doVolumeRequest(t, r, http.MethodDelete, url, "")
+			require.Zero(t, retry.Ret.RetCode)
+			require.ErrorIs(t, db.Take(&record, record.ID).Error, gorm.ErrRecordNotFound)
+		})
+	}
 }
 
 func TestVolumeHTTP_ReservationFailureDoesNotCallPlugin(t *testing.T) {

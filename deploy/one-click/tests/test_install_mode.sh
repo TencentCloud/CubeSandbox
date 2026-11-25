@@ -584,6 +584,10 @@ test_install_sh_wires_upgrade_flow() {
   if grep -Fq 'wipe_custom_install_prefix_contents "${INSTALL_PREFIX}"' "${f}"; then
     fail "install.sh should not invoke custom-prefix wipe"
   fi
+  # The net unit reads only .one-click.env, so these knobs must be persisted.
+  assert_contains "${f}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_NET_WAIT_TIMEOUT"'
+  assert_contains "${f}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_NET_POLL_INTERVAL"'
+  assert_contains "${f}" 'upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_EGRESS_NET_INIT_RETRIES"'
   # env.example baseline is installed for future three-way merges
   assert_contains "${f}" 'cp -f "${SCRIPT_DIR}/env.example" "${INSTALL_PREFIX}/env.example"'
   # upgrade writes the merged env as the runtime env

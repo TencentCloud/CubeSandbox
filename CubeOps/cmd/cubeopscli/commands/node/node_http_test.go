@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -63,6 +64,32 @@ var listFlags = []cli.Flag{
 	cli.BoolFlag{Name: "json"},
 	cli.StringFlag{Name: "hostid"},
 	cli.BoolFlag{Name: "score-only"},
+	cli.StringFlag{Name: "machine-type"},
+	cli.BoolFlag{Name: "unassigned-machine-type"},
+}
+
+// capturedRequest records the path and query of the last request.
+type capturedRequest struct {
+	path  string
+	query url.Values
+}
+
+// setupCaptureServer starts a stub server that records request details and
+// returns body. It also wires the package-level serverList/port.
+func setupCaptureServer(t *testing.T, body interface{}) (*httptest.Server, *capturedRequest, string, string) {
+	t.Helper()
+	cap := &capturedRequest{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cap.path = r.URL.Path
+		cap.query = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		data, _ := json.Marshal(body)
+		_, _ = w.Write(data)
+	}))
+	host, p, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	serverList = []string{host}
+	port = p
+	return srv, cap, host, p
 }
 
 var isolateFlags = []cli.Flag{cli.BoolFlag{Name: "json"}}
@@ -97,6 +124,89 @@ func TestListAction_HTTPError(t *testing.T) {
 	err := listAction(ctx)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
+}
+
+func TestListAction_ScoreOnlySendsMachineType(t *testing.T) {
+	body := []*model.SchedulerNode{{InsID: "node-1", Score: 0.5}}
+	srv, cap, h, p := setupCaptureServer(t, body)
+	defer srv.Close()
+	ctx := newCommandContext(t, "list", listFlags, h, p,
+		[]string{"--score-only", "--machine-type", "intel-k66", "--json"})
+
+	var err error
+	out := captureStdout(t, func() { err = listAction(ctx) })
+	assert.NoError(t, err)
+	assert.Equal(t, "true", cap.query.Get("score_only"))
+	assert.Equal(t, "intel-k66", cap.query.Get("machineType"))
+	// The score view has no NodeLabels: it must not be filtered again locally.
+	assert.Contains(t, out, "node-1")
+}
+
+func TestListAction_ScoreOnlyUnassignedSendsMachineType(t *testing.T) {
+	body := []*model.SchedulerNode{{InsID: "node-2", Score: 0.25}}
+	srv, cap, h, p := setupCaptureServer(t, body)
+	defer srv.Close()
+	ctx := newCommandContext(t, "list", listFlags, h, p,
+		[]string{"--score-only", "--unassigned-machine-type", "--json"})
+
+	var err error
+	out := captureStdout(t, func() { err = listAction(ctx) })
+	assert.NoError(t, err)
+	assert.Equal(t, model.MachineTypeUnassigned, cap.query.Get("machineType"))
+	assert.Contains(t, out, "node-2")
+}
+
+func TestListAction_HostIDWithMachineTypeUsesIDsListAndKeepsScore(t *testing.T) {
+	body := []*model.SchedulerNode{{InsID: "node-1", Score: 0.42}}
+	srv, cap, h, p := setupCaptureServer(t, body)
+	defer srv.Close()
+	ctx := newCommandContext(t, "list", listFlags, h, p,
+		[]string{"--hostid", "node-1", "--score-only", "--machine-type", "intel-k66", "--json"})
+
+	var err error
+	out := captureStdout(t, func() { err = listAction(ctx) })
+	assert.NoError(t, err)
+	assert.Equal(t, "/internal/v1/nodes", cap.path)
+	assert.Equal(t, "node-1", cap.query.Get("ids"))
+	assert.Equal(t, "intel-k66", cap.query.Get("machineType"))
+	assert.Equal(t, "true", cap.query.Get("score_only"))
+
+	var got []*model.SchedulerNode
+	assert.NoError(t, json.Unmarshal([]byte(out), &got))
+	assert.Len(t, got, 1)
+	assert.Equal(t, 0.42, got[0].Score)
+}
+
+func TestListAction_HostIDWithoutFilterStillUsesGetNode(t *testing.T) {
+	body := &model.SchedulerNode{InsID: "node-1", Score: 0.42}
+	srv, cap, h, p := setupCaptureServer(t, body)
+	defer srv.Close()
+	ctx := newCommandContext(t, "list", listFlags, h, p, []string{"--hostid", "node-1", "--score-only"})
+
+	var err error
+	captureStdout(t, func() { err = listAction(ctx) })
+	assert.NoError(t, err)
+	assert.Equal(t, "/internal/v1/nodes/node-1", cap.path)
+	assert.Equal(t, "true", cap.query.Get("score_only"))
+}
+
+func TestListAction_MachineTypeFlagsConflictBeforeRequest(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, p, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	serverList = []string{host}
+	port = p
+	ctx := newCommandContext(t, "list", listFlags, host, p,
+		[]string{"--machine-type", "intel-k66", "--unassigned-machine-type"})
+
+	err := listAction(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "use only one of")
+	assert.Zero(t, hits)
 }
 
 func TestIsolate_Success(t *testing.T) {

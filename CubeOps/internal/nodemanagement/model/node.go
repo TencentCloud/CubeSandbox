@@ -173,6 +173,7 @@ type NodeSnapshot struct {
 	LocalTemplates      []LocalTemplate    `json:"local_templates,omitempty"`
 	Versions            []ComponentVersion `json:"versions,omitempty"`
 	HeartbeatTime       time.Time          `json:"heartbeat_time,omitempty"`
+	HeartbeatReceivedAt time.Time          `json:"heartbeat_received_at,omitempty"`
 	HostFacts           *HostFacts         `json:"host_facts,omitempty"`
 	ReportedReady       bool               `json:"reported_ready,omitempty"`
 	Healthy             bool               `json:"healthy"`
@@ -284,6 +285,7 @@ type SchedulerNode struct {
 	QuotaCpu              int64              `json:"QuotaCpu,omitempty"`
 	QuotaMem              int64              `json:"QuotaMem,omitempty"`
 	MetaDataUpdateAt      time.Time          `json:"MetaDataUpdateAt,omitempty"`
+	HeartbeatReceivedAt   time.Time          `json:"HeartbeatReceivedAt,omitempty"`
 	ReportedReady         bool               `json:"ReportedReady,omitempty"`
 	Healthy               bool               `json:"Healthy"`
 	UnhealthyReason       string             `json:"UnhealthyReason,omitempty"`

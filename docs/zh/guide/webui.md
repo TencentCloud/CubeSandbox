@@ -96,7 +96,7 @@ Dashboard 对键盘很友好。最常用的三个：
 打开左侧栏的 **Settings**：
 
 - **Appearance → Theme** — 浅色 / 深色 / 跟随系统
-- **Appearance → Language** — English 或 简体中文
+- **Appearance → Language** — English、简体中文 或 繁體中文（台灣）
 - **Cluster** — 只读展示 CubeAPI 端点、沙箱域名、默认实例类型、速率限制、鉴权开关
 
 顶栏右上角和 ⌘K 输入框里也有同样的快捷开关。

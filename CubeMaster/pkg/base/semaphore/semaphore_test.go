@@ -53,6 +53,10 @@ func TestSetLimitDown(t *testing.T) {
 }
 
 func TestSetLimitConurrent(t *testing.T) {
+	runFor, maxJobSleepMs := 30*time.Second, 1000
+	if testing.Short() {
+		runFor, maxJobSleepMs = 3*time.Second, 100
+	}
 	sem := NewWeighted(100)
 	worked := int32(0)
 	job := func(t time.Duration) {
@@ -68,14 +72,14 @@ func TestSetLimitConurrent(t *testing.T) {
 		time.Sleep(t)
 		sem.Release(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), runFor)
 	defer cancel()
 	var wg sync.WaitGroup
 	reqCnt := int32(0)
 	for {
 		reqCnt++
 		recov.GoWithWaitGroup(&wg, func() {
-			job(time.Duration(rand.Intn(1000)) * time.Millisecond)
+			job(time.Duration(rand.Intn(maxJobSleepMs)) * time.Millisecond)
 		})
 		if reqCnt%2 == 0 {
 			size := int64(rand.Intn(100))

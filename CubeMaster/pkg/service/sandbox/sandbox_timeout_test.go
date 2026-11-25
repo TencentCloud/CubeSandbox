@@ -124,6 +124,7 @@ type mockTimeoutProvider struct {
 	lastTimeoutSeconds int
 	returnEndAt        int64
 	returnEndAts       map[string]int64
+	returnDeadlines    map[string]DeadlineInfo
 	returnErr          error
 	lookupCalls        int
 	batchLookupCalls   int
@@ -153,6 +154,25 @@ func (m *mockTimeoutProvider) LookupEndAts(ctx context.Context, sandboxIDs []str
 		endAts[sandboxID] = m.returnEndAt
 	}
 	return endAts, m.returnErr
+}
+
+func (m *mockTimeoutProvider) LookupDeadlines(ctx context.Context, sandboxIDs []string) (map[string]DeadlineInfo, error) {
+	m.batchLookupCalls++
+	m.lastLookupIDs = append([]string(nil), sandboxIDs...)
+	if m.returnDeadlines != nil {
+		return m.returnDeadlines, m.returnErr
+	}
+	out := make(map[string]DeadlineInfo, len(sandboxIDs))
+	for _, sandboxID := range sandboxIDs {
+		if m.returnEndAts != nil {
+			if v, ok := m.returnEndAts[sandboxID]; ok {
+				out[sandboxID] = DeadlineInfo{EndAtMs: v, Found: true}
+			}
+			continue
+		}
+		out[sandboxID] = DeadlineInfo{EndAtMs: m.returnEndAt, Found: true}
+	}
+	return out, m.returnErr
 }
 
 func TestSetTimeoutWithInstalledProviderAllowsNeverTimeout(t *testing.T) {

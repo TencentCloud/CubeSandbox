@@ -32,6 +32,15 @@ type Config struct {
 	VmSnapshotSpecsConfig            string `toml:"vm_snapshot_specs_config"`
 	dynamicDisableMemoryReparentFile bool   `toml:"-"`
 	SnapshotDiskDir                  string `toml:"snapshot_disk_dir"`
+
+	// EnableNumaAffinity opts into the per-NUMA cgroup pool. When true, every
+	// sandbox cgroup is created under numa<N> and inherits that node's
+	// cpuset.cpus / cpuset.mems, so the NUMA node chosen at create time binds
+	// CPU cores and memory instead of only labelling the sandbox.
+	//
+	// Default false: an upgrade never changes sandbox placement behind the
+	// operator's back. Ignored on single-NUMA hosts, where the v1 pool is kept.
+	EnableNumaAffinity bool `toml:"enable_numa_affinity"`
 }
 
 func init() {

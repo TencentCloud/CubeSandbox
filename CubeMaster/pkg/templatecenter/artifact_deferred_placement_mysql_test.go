@@ -46,6 +46,12 @@ func newPlacementCleanupHarness(t *testing.T) *placementCleanupHarness {
 	); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)
 	}
+	return newPlacementCleanupHarnessOn(t, gormDB)
+}
+
+// newPlacementCleanupHarnessOn installs the stubs on an already-migrated db.
+func newPlacementCleanupHarnessOn(t *testing.T, gormDB *gorm.DB) *placementCleanupHarness {
+	t.Helper()
 	origDB := store.db
 	store.db = gormDB
 	resetDeferredScanCursor()
@@ -62,7 +68,7 @@ func newPlacementCleanupHarness(t *testing.T) *placementCleanupHarness {
 
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(localcache.AbsentSince, func(id string) (time.Time, bool) {
+	patches.ApplyFunc(localcache.UnreachableSince, func(id string) (time.Time, bool) {
 		since, ok := h.absent[id]
 		return since, ok
 	})
@@ -181,6 +187,19 @@ func TestCleanupArtifactFullyAbsentNodeMySQL(t *testing.T) {
 		}
 		if h.notifies != 1 {
 			t.Fatalf("TC notifies = %d, want 1 (pin released)", h.notifies)
+		}
+	})
+
+	t.Run("registered heartbeat-expired node defers without RPC", func(t *testing.T) {
+		h.destroys, h.notifies = map[string]int{}, 0
+		h.absent = map[string]time.Time{"expired": longAgo}
+		h.present = map[string]string{"expired": "10.0.0.4"}
+		h.seed(t, art, models.ArtifactNodePlacement{NodeID: "expired", NodeIP: "10.0.0.4", InstanceType: "test"})
+		if err := cleanupArtifactFully(ctx, art, "", ""); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if len(h.destroys) != 0 || h.notifies != 1 || h.deferredAt(t, art, "expired") == 0 {
+			t.Fatalf("registered expired node must defer and finalise: destroys=%v notifies=%d", h.destroys, h.notifies)
 		}
 	})
 
@@ -311,6 +330,17 @@ func TestReconcileDeferredArtifactPlacementsMySQL(t *testing.T) {
 		if len(h.destroys) != 0 || len(h.placementIDs(t, art)) != 1 {
 			t.Fatalf("absent node must be left alone (destroys=%v)", h.destroys)
 		}
+	})
+
+	t.Run("registered but still heartbeat-expired: row kept, no RPC", func(t *testing.T) {
+		h.present = map[string]string{"back": "10.1.9.9"}
+		h.absent = map[string]time.Time{"back": time.Now().Add(-placementAbsenceGrace - time.Minute)}
+		reset(deferred)
+		reconcileDeferredArtifactPlacements(ctx)
+		if len(h.destroys) != 0 || len(h.placementIDs(t, art)) != 1 {
+			t.Fatalf("unreachable node must not be retried: destroys=%v", h.destroys)
+		}
+		h.absent = map[string]time.Time{}
 	})
 
 	t.Run("node back: destroyed with its CURRENT address and row removed", func(t *testing.T) {

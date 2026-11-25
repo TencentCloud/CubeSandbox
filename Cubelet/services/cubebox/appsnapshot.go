@@ -176,6 +176,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	})
 
 	stepLog.Info("Step 1: Creating cubebox...")
+	ctx, releaseMetadataWrite, err := storage.BeginS3PackageWrite(ctx, backend, templateID)
+	if err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
+	}
+	defer releaseMetadataWrite()
 	createRsp, err := s.Create(ctx, createReq)
 	if err != nil {
 		stepLog.Errorf("Failed to create cubebox: %v", err)
@@ -397,6 +404,9 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 				frozenCtx, cb, templateID, layout.MetaWork,
 				memoryObject.DevPath, snapshotTypeFull, "", snapshotmode.Full,
 			)
+			if captureErr == nil {
+				captureErr = recordWritableLayer(layout.MetaWork, effectiveSandboxWritableLayer(cb))
+			}
 			if shimSnapshotUnsupported(captureErr) {
 				captureStarted = false
 			}
@@ -474,6 +484,12 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
 	stepLog.Infof("Step 5: Destroying temporary cubebox (templateID=%s)...", templateID)
+	if err := storage.ValidateS3PackageMetadata(backend, layout.MetaWork); err != nil {
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshot metadata: %v", err)
+		return rsp, nil
+	}
 	destroyCtx, destroyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer destroyCancel()
 	destroyCtx = inheritIncomingMetadata(destroyCtx, ctx)
@@ -638,6 +654,12 @@ func validateAppSnapshotAnnotations(req *cubebox.RunCubeSandboxRequest) error {
 }
 
 func (s *service) getCubeboxSnapshotSpec(ctx context.Context, sandboxID string) (*CubeboxSnapshotSpec, error) {
+	if s == nil || s.cubeboxMgr == nil || s.cubeboxMgr.cubeboxManger == nil {
+		return nil, fmt.Errorf("cubebox manager is not initialized")
+	}
+	if s.cubeboxMgr.client == nil {
+		return nil, fmt.Errorf("containerd client is not initialized")
+	}
 
 	cb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
 	if err != nil {

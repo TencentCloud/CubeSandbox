@@ -42,8 +42,14 @@ type local struct {
 	emptySyncStreak atomic.Int32
 
 	// synced is set once any node-view sync succeeded (an empty view is valid).
-	synced  atomic.Bool
-	absence absenceTracker
+	synced atomic.Bool
+	// syncedAt is the last successful sync in UnixNano; stored before synced.
+	syncedAt atomic.Int64
+	// resumedAt is the first successful sync after a gap over viewStaleAfter.
+	resumedAt atomic.Int64
+	// stallWarnedAt rate-limits the mass heartbeat-stall warning (UnixNano).
+	stallWarnedAt atomic.Int64
+	absence       absenceTracker
 }
 
 // The node and template-locality stores exist from package load so nodemeta
@@ -230,6 +236,10 @@ func (l *local) addNodeCache(n *node.Node) {
 		CubeLog.WithContext(context.Background()).Warnf("node is nil")
 		return
 	}
+	// A node first seen here starts aging from CubeMaster's own clock.
+	if n.HeartbeatObservedAt.IsZero() {
+		n.HeartbeatObservedAt = time.Now()
+	}
 	// Same lock as AbsentSince, so no concurrent reader sees "not present"
 	// mid-transition and records a bogus absence start for a present node.
 	l.absence.withLock(func() {
@@ -289,6 +299,11 @@ func (l *local) getInstanceTypeName(n *node.Node) string {
 	return product
 }
 
+// Sorted buckets are traversed by readers after they release the lock, so
+// writers build a new slice and swap the map entry instead of editing in place.
+// Cost: every add/update copies the bucket, i.e. O(n^2) allocation per full
+// sync round (500 nodes ≈ 2 MB, 2000 nodes ≈ 33 MB at the default 1s
+// SyncMetaDataInterval). Re-evaluate before scaling the cluster much further.
 func (l *local) appendSortedNodes(n *node.Node) {
 	if n == nil || !n.Healthy {
 		return
@@ -298,12 +313,23 @@ func (l *local) appendSortedNodes(n *node.Node) {
 	defer l.lockSortedNodes.Unlock()
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
+	updated := make(node.NodeList, 0, len(ref)+1)
+	updated = append(updated, ref...)
+	updated = append(updated, n)
+	updated.AllSortByIndex()
+	l.sortedNodesByClusters[product] = updated
+}
+
+// filterOutByID returns a copy of ref without the node carrying id, so callers
+// never mutate a slice a reader may still hold after the lock is released.
+func filterOutByID(ref node.NodeList, id string) node.NodeList {
+	updated := make(node.NodeList, 0, len(ref))
+	for _, item := range ref {
+		if item.ID() != id {
+			updated = append(updated, item)
+		}
 	}
-	ref.Append(n)
-	ref.AllSortByIndex()
-	l.sortedNodesByClusters[product] = ref
+	return updated
 }
 
 func (l *local) delSortedNodes(n *node.Node) {
@@ -311,31 +337,39 @@ func (l *local) delSortedNodes(n *node.Node) {
 	defer l.lockSortedNodes.Unlock()
 
 	product := l.getInstanceTypeName(n)
-	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
-	}
-	ref.Remove(n)
-	l.sortedNodesByClusters[product] = ref
+	l.sortedNodesByClusters[product] = filterOutByID(l.sortedNodesByClusters[product], n.ID())
 }
 
+// updateSortedNodes replaces the bucket entry for n, or appends it when absent.
+// n must be the *node.Node currently held by the cache: the bucket is expected
+// to hold pointers to cached objects, and a copy would leave the old pointer
+// orphaned in the bucket.
 func (l *local) updateSortedNodes(n *node.Node) {
 	l.lockSortedNodes.Lock()
 	defer l.lockSortedNodes.Unlock()
 	product := l.getInstanceTypeName(n)
 	ref := l.sortedNodesByClusters[product]
-	if ref == nil {
-		ref = node.NodeList{}
-	}
+
 	if !n.Healthy {
-		ref.Remove(n)
-	} else {
-
-		ref.Add(n)
-
-		ref.AllSortByIndex()
+		l.sortedNodesByClusters[product] = filterOutByID(ref, n.ID())
+		return
 	}
-	l.sortedNodesByClusters[product] = ref
+
+	updated := make(node.NodeList, 0, len(ref))
+	exists := false
+	for _, item := range ref {
+		if item.ID() == n.ID() {
+			updated = append(updated, n)
+			exists = true
+		} else {
+			updated = append(updated, item)
+		}
+	}
+	if !exists {
+		updated = append(updated, n)
+	}
+	updated.AllSortByIndex()
+	l.sortedNodesByClusters[product] = updated
 }
 
 func (l *local) updateNodeFromMetaData(n *node.Node) error {
@@ -364,6 +398,12 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		old.CreateConcurrentNum = n.CreateConcurrentNum
 		old.MaxMvmLimit = n.MaxMvmLimit
 		old.MetaDataUpdateAt = n.MetaDataUpdateAt
+		// Compare whole seconds: CubeOps serves nanoseconds from Redis but seconds
+		// after a DB rebuild, which must not count as a new heartbeat.
+		if old.HeartbeatObservedAt.IsZero() || old.HeartbeatReceivedAt.Unix() != n.HeartbeatReceivedAt.Unix() {
+			old.HeartbeatObservedAt = time.Now()
+		}
+		old.HeartbeatReceivedAt = n.HeartbeatReceivedAt
 		old.DeviceClass = n.DeviceClass
 		old.DeviceID = n.DeviceID
 		old.MachineHostIP = n.MachineHostIP

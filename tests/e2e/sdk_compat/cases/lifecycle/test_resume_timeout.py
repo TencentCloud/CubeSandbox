@@ -57,8 +57,9 @@ def test_resume_never_timeout(sdk_sandbox, sdk_backend, sdk_e2e_config):
     resumed = sdk_sandbox.resume_idle_timeout(NEVER_TIMEOUT)
     try:
         wait_until_running(resumed, timeout=sdk_e2e_config.default_timeout)
-        assert _optional_end_at(resumed.info().raw) is None, (
-            "resume(NEVER_TIMEOUT) should clear endAt"
+        end_at = _optional_end_at(resumed.info().raw)
+        assert end_at is not None and end_at >= datetime(9999, 1, 1, tzinfo=timezone.utc), (
+            "resume(NEVER_TIMEOUT) should send the 9999-12-31 endAt sentinel"
         )
         wait_until_data_plane_ready(
             resumed,

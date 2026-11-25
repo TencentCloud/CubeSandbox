@@ -166,6 +166,38 @@ func TestPostBackendCacheDeleteHTTP(t *testing.T) {
 	}
 }
 
+func TestResolveAdminTokenPrefersEnvironment(t *testing.T) {
+	cfg := &config.Config{CubeProxyConf: &config.CubeProxyConf{AdminToken: "yaml-token"}}
+	if got := resolveAdminToken("  env-token  ", cfg); got != "env-token" {
+		t.Fatalf("env token = %q, want env-token", got)
+	}
+	if got := resolveAdminToken("", cfg); got != "yaml-token" {
+		t.Fatalf("yaml fallback = %q, want yaml-token", got)
+	}
+	if got := resolveAdminToken("", nil); got != "" {
+		t.Fatalf("nil config = %q, want empty", got)
+	}
+}
+
+// A fresh Helm install cannot share a generated yaml value across templates.
+// The chart therefore supplies the release Secret through the environment, and
+// that value must be the one CubeProxy receives.
+func TestPostBackendCacheDeleteSendsEnvAdminToken(t *testing.T) {
+	t.Setenv(envAdminToken, "env-token")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Cube-Admin-Token"); got != "env-token" {
+			t.Fatalf("X-Cube-Admin-Token = %q, want env-token", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	if err := postBackendCacheDelete(context.Background(), srv.URL, "sb-9"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestListAdminURLsStaticConfig(t *testing.T) {
 	cfg, err := config.Init()
 	if err != nil {

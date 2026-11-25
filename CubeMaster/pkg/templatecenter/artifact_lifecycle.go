@@ -45,11 +45,10 @@ var requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID s
 	return tcclient.NewClient(endpoint).DeleteArtifact(callCtx, artifactID)
 }
 
-// countArtifactReferencesTx counts the live references to artifactID inside the
-// given transaction: surviving template replicas, active (PENDING/RUNNING)
-// build jobs, template definitions, and snapshots indexed by rootfs_artifact_id. When
-// excludeTemplateID is non-empty its own rows are excluded so the caller can
-// decide based on "everyone else" while deleting that template.
+// countArtifactReferencesTx counts live references to artifactID: replicas,
+// in-flight jobs (PENDING/RUNNING/BUILT), definitions, and snapshots. Rows of
+// excludeTemplateID are ignored. BUILT counts because registration and
+// distribution are still pending.
 func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, excludeTemplateID string) (int64, error) {
 	_ = ctx
 	artifactID = strings.TrimSpace(artifactID)
@@ -61,10 +60,15 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 	}
 	excludeTemplateID = strings.TrimSpace(excludeTemplateID)
 
+	// A cleanup tombstone (cleanup_required, template record already gone) only
+	// tracks node-side data for the orphan sweep; it no longer owns the artifact.
 	var replicaCount int64
-	q := tx.Table(constants.TemplateReplicaTableName).Where("artifact_id = ?", artifactID)
+	q := tx.Table(constants.TemplateReplicaTableName+" AS r").Where("r.artifact_id = ?", artifactID).
+		Where("NOT (r.cleanup_required = ? AND NOT EXISTS (SELECT 1 FROM "+constants.TemplateDefinitionTableName+
+			" d WHERE d.template_id = r.template_id AND d.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM "+
+			constants.SnapshotTableName+" s WHERE s.snapshot_id = r.template_id AND s.deleted_at IS NULL))", true)
 	if excludeTemplateID != "" {
-		q = q.Where("template_id <> ?", excludeTemplateID)
+		q = q.Where("r.template_id <> ?", excludeTemplateID)
 	}
 	if err := q.Count(&replicaCount).Error; err != nil {
 		return 0, err
@@ -72,7 +76,8 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 
 	var jobCount int64
 	jq := tx.Table(constants.TemplateImageJobTableName).
-		Where("artifact_id = ? AND status IN ?", artifactID, []string{JobStatusPending, JobStatusRunning})
+		Where("artifact_id = ? AND status IN ?", artifactID,
+			[]string{JobStatusPending, JobStatusRunning, JobStatusBuilt})
 	if excludeTemplateID != "" {
 		jq = jq.Where("template_id <> ?", excludeTemplateID)
 	}
@@ -149,8 +154,8 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			return err
 		}
 		if excludeTemplateID != "" {
-			// Rows with cleanup_required=true are kept: they are the only
-			// durable record that a node may still hold this template's data.
+			// Flagged rows are kept: they are the only record that a node may
+			// still hold this template's data awaiting confirmed cleanup.
 			if err := tx.Unscoped().Table(constants.TemplateReplicaTableName).
 				Where("template_id = ? AND artifact_id = ? AND cleanup_required = ?", excludeTemplateID, artifactID, false).
 				Delete(&models.TemplateReplica{}).Error; err != nil {
@@ -203,9 +208,9 @@ func cleanupArtifactFully(ctx context.Context, artifactID, instanceType, exclude
 			logger.Infof("artifact cleanup: node %s already deferred, GC will retry it", nodes[i].NodeID)
 			continue
 		}
-		if since, absent := placementNodeAbsentLongEnough(&nodes[i], phase2Now); absent {
+		if since, unreachable := placementNodeUnreachableLongEnough(&nodes[i], phase2Now); unreachable {
 			deferredNodeIDs = append(deferredNodeIDs, nodes[i].NodeID)
-			logger.Warnf("artifact cleanup: node %s absent past grace (since=%s absent_for=%s), node-side destroy deferred",
+			logger.Warnf("artifact cleanup: node %s unreachable past grace (since=%s unreachable_for=%s), node-side destroy deferred",
 				nodes[i].NodeID, since.UTC().Format(time.RFC3339), phase2Now.Sub(since).Round(time.Second))
 			continue
 		}

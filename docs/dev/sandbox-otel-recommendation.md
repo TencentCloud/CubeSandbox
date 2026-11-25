@@ -155,4 +155,4 @@ is structured metadata.
 Every new source must update Collector configuration, the field contract,
 bilingual documentation, Grafana dashboards, and regression tests. Component
 log receivers, fields, mounts, and cardinality constraints are documented in
-section 4.5 of the [observability guide](../guide/observability.md).
+the [Extending Collection to Component Logs](../guide/observability.md#extending-collection-to-component-logs) section of the observability guide.

@@ -47,7 +47,10 @@ func (s *service) captureLegacyMemory(
 	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, workDir, memoryVol, snapshotType); err != nil {
 		return err
 	}
-	return correctLegacySnapshotMetadataVersions(cb, workDir)
+	if err := correctLegacySnapshotMetadataVersions(cb, workDir); err != nil {
+		return err
+	}
+	return recordWritableLayer(workDir, effectiveSandboxWritableLayer(cb))
 }
 
 func captureLegacyCommitMemory(cb *cubeboxstore.CubeBox, snapshotID string, invalidate, capture func() error) error {

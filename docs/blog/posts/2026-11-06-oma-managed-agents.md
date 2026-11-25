@@ -3,8 +3,7 @@ title: "OMA: A Cloud Managed Agents Platform — From Getting Agents Running to 
 date: 2026-11-06
 author: Master Zhang's Blog (张师傅的博客)
 description: "OMA is a self-hosted cloud managed-agents platform. Referencing Anthropic's managed agents design, it implements session management, inference/execution decoupling, credential custody, and a filesystem on its own infrastructure — with Tencent's open-source CubeSandbox as the cloud sandbox. This article covers its overall architecture and design trade-offs."
-featured: true
-weight: 3
+featured: false
 ---
 
 # OMA: A Cloud Managed Agents Platform — From Getting Agents Running to Delivering Reliably

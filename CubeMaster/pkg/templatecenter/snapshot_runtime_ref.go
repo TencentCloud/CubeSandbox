@@ -669,7 +669,11 @@ func acquireCreatedSandboxRuntimeRef(ctx context.Context, snapshotID, sandboxID,
 	if snapshotID == "" {
 		return nil
 	}
-	return withSnapshotWriteLocks([]string{snapshotResourceLockKey(snapshotID)}, func() error {
+	// Each sandbox writes its own runtime-ref rows. The durable create_pending
+	// reservation fences deletion across Masters while its create is in flight;
+	// a shared local lock is enough to exclude same-process snapshot deletion
+	// without serializing registrations for the same source snapshot.
+	return withTemplateReadLock(snapshotResourceLockKey(snapshotID), func() error {
 		allowInFlight := false
 		if rec, err := getSnapshotRecord(ctx, snapshotID); err == nil && rec != nil {
 			allowInFlight = snapshotRejectsNewUse(rec.Status)

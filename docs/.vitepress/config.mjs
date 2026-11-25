@@ -173,7 +173,8 @@ export default withMermaid(defineConfig({
               text: 'Getting Started',
               items: [
                 { text: 'Introduction', link: '/guide/introduction' },
-                { text: 'Quick Start', link: '/guide/quickstart' }
+                { text: 'Quick Start', link: '/guide/quickstart' },
+                { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' }
               ]
             },
             {
@@ -228,7 +229,6 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
-                    { text: 'E2B Compatibility', link: '/guide/e2b-compatibility' },
                     { text: 'Python', link: '/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/guide/tutorials/sdk/nodejs' }
@@ -254,7 +254,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: 'Network Policy', link: '/guide/network-policy' },
                 { text: 'Route-Aware Egress', link: '/guide/route-aware-egress' },
-                { text: 'Security Proxy', link: '/guide/security-proxy' },
+                { text: 'Egress Proxy (Filtering & Secrets)', link: '/guide/security-proxy' },
                 { text: 'Sandbox-to-Sandbox Access', link: '/guide/sandbox-to-sandbox' },
                 { text: 'Restrict Public Access', link: '/guide/restrict-public-access' },
                 { text: 'Authentication', link: '/guide/authentication' },
@@ -265,8 +265,7 @@ export default withMermaid(defineConfig({
             {
               text: 'Storage',
               items: [
-                { text: 'S3 Volumes', link: '/guide/s3-volume' },
-                { text: 'Persistent Storage (Host Mount)', link: '/guide/persistent-storage' },
+                { text: 'Using Volumes', link: '/guide/volume' },
                 { text: 'Volume Plugin Development', link: '/guide/volume-plugin' }
               ]
             },
@@ -301,6 +300,7 @@ export default withMermaid(defineConfig({
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Network Metrics', link: '/guide/network-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
+                { text: 'Distributed Tracing', link: '/guide/tracing' },
                 { text: 'Performance Benchmark', link: '/guide/performance-benchmark' }
               ]
             },
@@ -313,9 +313,7 @@ export default withMermaid(defineConfig({
                 { text: 'Templates', link: '/guide/troubleshooting/templates' },
                 { text: 'Network CIDR Conflicts', link: '/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount Permissions', link: '/guide/troubleshooting/host-mount-permissions' },
-                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' },
-                { text: 'HeartbeatExpired (Clock Skew)', link: '/guide/troubleshooting/node-heartbeat-expired-clock-skew' },
-                { text: 'Go SDK Connect Stream Routing', link: '/guide/troubleshooting/sdk-connect-stream-routing' }
+                { text: 'Component Log Locations', link: '/guide/troubleshooting/component-log-locations' }
               ]
             },
             {
@@ -330,6 +328,7 @@ export default withMermaid(defineConfig({
                     { text: 'Claude Code', link: '/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/guide/integrations/pi-agent' },
+                    { text: 'LangGraph', link: '/guide/integrations/langgraph' },
                     { text: 'OpenAI Agents SDK', link: '/guide/integrations/openai-agents-sdk' },
                     { text: 'Ubuntu Desktop', link: '/guide/integrations/ubuntu-desktop' }
                   ]
@@ -353,7 +352,9 @@ export default withMermaid(defineConfig({
                     { text: 'LambChat', link: '/guide/usecases/lambchat' },
                     { text: 'ouc-online', link: '/guide/usecases/ouc-online' },
                     { text: 'KakuriZai', link: '/guide/usecases/kakurizai' },
-                    { text: 'OMA', link: '/guide/usecases/oma' }
+                    { text: 'OMA', link: '/guide/usecases/oma' },
+                    { text: 'Yuxi', link: '/guide/usecases/yuxi' },
+                    { text: 'AnyDev', link: '/guide/usecases/anydev' }
                   ]
                 }
               ]
@@ -420,7 +421,8 @@ export default withMermaid(defineConfig({
               text: '入门',
               items: [
                 { text: '产品简介', link: '/zh/guide/introduction' },
-                { text: '快速开始', link: '/zh/guide/quickstart' }
+                { text: '快速开始', link: '/zh/guide/quickstart' },
+                { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' }
               ]
             },
             {
@@ -475,7 +477,6 @@ export default withMermaid(defineConfig({
                   text: 'SDK',
                   collapsed: true,
                   items: [
-                    { text: 'E2B 兼容性与差异', link: '/zh/guide/e2b-compatibility' },
                     { text: 'Python', link: '/zh/guide/tutorials/sdk/python' },
                     { text: 'Go', link: '/zh/guide/tutorials/sdk/go' },
                     { text: 'Node.js', link: '/zh/guide/tutorials/sdk/nodejs' }
@@ -501,7 +502,7 @@ export default withMermaid(defineConfig({
               items: [
                 { text: '网络策略', link: '/zh/guide/network-policy' },
                 { text: '路由感知出网', link: '/zh/guide/route-aware-egress' },
-                { text: '安全代理', link: '/zh/guide/security-proxy' },
+                { text: '出网安全代理（过滤与凭证注入）', link: '/zh/guide/security-proxy' },
                 { text: '沙箱间互访', link: '/zh/guide/sandbox-to-sandbox' },
                 { text: '限制公开访问', link: '/zh/guide/restrict-public-access' },
                 { text: 'API 鉴权', link: '/zh/guide/authentication' },
@@ -512,8 +513,7 @@ export default withMermaid(defineConfig({
             {
               text: '存储',
               items: [
-                { text: 'S3 持久卷', link: '/zh/guide/s3-volume' },
-                { text: '持久化存储（Host Mount）', link: '/zh/guide/persistent-storage' },
+                { text: 'Volume 使用', link: '/zh/guide/volume' },
                 { text: 'Volume 插件开发', link: '/zh/guide/volume-plugin' }
               ]
             },
@@ -548,6 +548,7 @@ export default withMermaid(defineConfig({
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱网络指标', link: '/zh/guide/network-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },
+                { text: '分布式链路追踪', link: '/zh/guide/tracing' },
                 { text: '性能基准', link: '/zh/guide/performance-benchmark' }
               ]
             },
@@ -560,9 +561,7 @@ export default withMermaid(defineConfig({
                 { text: '模板问题', link: '/zh/guide/troubleshooting/templates' },
                 { text: '网络 CIDR 冲突', link: '/zh/guide/troubleshooting/local-network-cidr-conflict' },
                 { text: 'Host Mount 权限', link: '/zh/guide/troubleshooting/host-mount-permissions' },
-                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' },
-                { text: 'HeartbeatExpired（时钟偏移）', link: '/zh/guide/troubleshooting/node-heartbeat-expired-clock-skew' },
-                { text: 'Go SDK Connect 流路由', link: '/zh/guide/troubleshooting/sdk-connect-stream-routing' }
+                { text: '组件日志位置', link: '/zh/guide/troubleshooting/component-log-locations' }
               ]
             },
             {
@@ -577,6 +576,7 @@ export default withMermaid(defineConfig({
                     { text: 'Claude Code', link: '/zh/guide/integrations/claude-code' },
                     { text: 'LangChain', link: '/zh/guide/integrations/langchain' },
                     { text: 'Pi Agent', link: '/zh/guide/integrations/pi-agent' },
+                    { text: 'LangGraph', link: '/zh/guide/integrations/langgraph' },
                     { text: 'OpenAI Agents SDK', link: '/zh/guide/integrations/openai-agents-sdk' },
                     { text: 'Ubuntu 桌面沙箱', link: '/zh/guide/integrations/ubuntu-desktop' }
                   ]
@@ -600,7 +600,9 @@ export default withMermaid(defineConfig({
                     { text: 'LambChat', link: '/zh/guide/usecases/lambchat' },
                     { text: 'ouc-online', link: '/zh/guide/usecases/ouc-online' },
                     { text: 'KakuriZai', link: '/zh/guide/usecases/kakurizai' },
-                    { text: 'OMA', link: '/zh/guide/usecases/oma' }
+                    { text: 'OMA', link: '/zh/guide/usecases/oma' },
+                    { text: 'Yuxi', link: '/zh/guide/usecases/yuxi' },
+                    { text: 'AnyDev', link: '/zh/guide/usecases/anydev' }
                   ]
                 }
               ]

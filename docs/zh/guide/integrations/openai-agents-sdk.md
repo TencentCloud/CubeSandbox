@@ -196,7 +196,7 @@ python simple_demo.py \
   中的示例。通用执行需要 `49983` 端口的 envd；Jupyter 模式还要求模板镜像在 `49999`
   端口提供 Code Interpreter 服务。
 - **网络与存储控制：**通过[网络策略](/zh/guide/network-policy)、
-  [安全代理](/zh/guide/security-proxy)和[持久化存储](/zh/guide/persistent-storage)配置 Cube
+  [出网安全代理（过滤与凭证注入）](/zh/guide/security-proxy)和[持久卷（Volume）](/zh/guide/volume)配置 Cube
   专有能力。E2B 兼容层未覆盖的能力可以预先写入模板，或通过 CubeSandbox 原生 API 管理。
 
 ## 注意事项

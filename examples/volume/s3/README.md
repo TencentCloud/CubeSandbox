@@ -4,7 +4,7 @@ Bring any S3-compatible object store (AWS S3, Tencent Cloud COS, Cloudflare R2, 
 
 > **This page is an operator reference** for those who need to **deploy the plugin manually / connect external S3**.
 >
-> **If you're on the default install (one-click or Helm defaults)** — the installer already started MinIO, installed the plugin, and wrote the credentials. **You don't need this page** — see the user tutorial: [S3 Volumes](../../../docs/guide/s3-volume.md).
+> **If you're on the default install (one-click or Helm defaults)** — the installer already started MinIO, installed the plugin, and wrote the credentials. **You don't need this page** — see the user tutorial: [S3 Volumes](../../../docs/guide/volume.md).
 
 中文文档：[README.zh.md](README.zh.md)
 
@@ -27,7 +27,7 @@ The plugin is a single static Go binary with a built-in S3 client, so the contro
 
 | Your situation | Go to |
 |----------------|-------|
-| Default install (one-click / Helm defaults), want to use S3 Volume | [User tutorial](../../../docs/guide/s3-volume.md) — just use the SDK, no config |
+| Default install (one-click / Helm defaults), want to use S3 Volume | [User tutorial](../../../docs/guide/volume.md) — just use the SDK, no config |
 | Want to swap the bundled MinIO for external S3 | This page from [§2](#2-install-plugin-and-credentials) — just edit `volume-s3.conf` |
 | Each user brings their own bucket / credentials, no redeploy | [Dynamic buckets and credential references](#dynamic-buckets-and-credential-references) |
 | Deploying the S3 Volume plugin from scratch | This whole page |
@@ -513,7 +513,7 @@ make cube-volume-s3-test
 
 | Doc | Content |
 |-----|---------|
-| [S3 Volumes (user tutorial)](../../../docs/guide/s3-volume.md) | End-user quick start |
+| [S3 Volumes (user tutorial)](../../../docs/guide/volume.md) | End-user quick start |
 | [Volume Plugin framework](../../../docs/guide/volume-plugin.md) | Protocol, RefCount, Hook semantics |
 | [COS example](../cos/README.md) | The reference plugin this one is modelled on |
 | [s3fs-fuse](https://github.com/s3fs-fuse/s3fs-fuse) | Mount driver options and behavior |

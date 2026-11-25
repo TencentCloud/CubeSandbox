@@ -27,6 +27,7 @@ func resetPlacementSeams(t *testing.T) {
 	origList := listCompatibleFn
 	origColdBoot := listColdBootFn
 	origQuery := queryHostFactCandidatesFn
+	origMachineType := listMachineTypeCandidatesFn
 	t.Cleanup(func() {
 		lookupNodeFn = origLookup
 		selectNodeFn = origSelect
@@ -34,6 +35,7 @@ func resetPlacementSeams(t *testing.T) {
 		listCompatibleFn = origList
 		listColdBootFn = origColdBoot
 		queryHostFactCandidatesFn = origQuery
+		listMachineTypeCandidatesFn = origMachineType
 	})
 }
 
@@ -526,5 +528,131 @@ func TestDecideMemoryRestoreStillRequiresHostFacts(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "cpuid_hash/host_kernel_release unknown") {
 		t.Fatalf("want host-fact failure, got %v", err)
+	}
+}
+
+// --- machine type candidate path ---
+
+func TestDecideMachineTypeSameCpuidDifferentKernelAllowed(t *testing.T) {
+	resetPlacementSeams(t)
+	lookupNodeFn = func(id, ip string) *node.Node { return nil }
+	selectNodeFn = func(_ context.Context, _ string, _ *selctx.RequestResource, scope []string) (*node.Node, error) {
+		return &node.Node{InsID: "node-b", IP: "10.0.0.2"}, nil
+	}
+	listMachineTypeCandidatesFn = func(_ context.Context, cpuid, machineType string) ([]compatibleCandidate, error) {
+		if cpuid != "sha256:cpu" {
+			t.Fatalf("cpuid = %s", cpuid)
+		}
+		if machineType != "intel-k66" {
+			t.Fatalf("machineType = %s", machineType)
+		}
+		return []compatibleCandidate{{NodeID: "node-b", NodeIP: "10.0.0.2"}}, nil
+	}
+	listCompatibleFn = func(context.Context, *nodemeta.HostFacts) ([]compatibleCandidate, error) {
+		t.Fatal("host facts path must not run when machine type is set")
+		return nil, nil
+	}
+
+	in := s3ReadyInput("node-a")
+	in.SourceMachineType = "intel-k66"
+	got, err := Decide(context.Background(), in)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if !got.CrossNode || got.NodeID != "node-b" {
+		t.Fatalf("placement = %+v", got)
+	}
+}
+
+func TestDecideMachineTypeNoCandidateDoesNotFallBack(t *testing.T) {
+	resetPlacementSeams(t)
+	lookupNodeFn = func(id, ip string) *node.Node { return nil }
+	listMachineTypeCandidatesFn = func(context.Context, string, string) ([]compatibleCandidate, error) {
+		return nil, nil
+	}
+	listCompatibleFn = func(context.Context, *nodemeta.HostFacts) ([]compatibleCandidate, error) {
+		t.Fatal("must not fall back to host facts candidates")
+		return nil, nil
+	}
+
+	in := s3ReadyInput("node-a")
+	in.SourceMachineType = "intel-k66"
+	_, err := Decide(context.Background(), in)
+	if err == nil || !strings.Contains(err.Error(), "machine type") {
+		t.Fatalf("want machine-type candidate error, got %v", err)
+	}
+}
+
+func TestDecideMachineTypeRequiresOriginCpuid(t *testing.T) {
+	resetPlacementSeams(t)
+	lookupNodeFn = func(id, ip string) *node.Node { return nil }
+
+	in := s3ReadyInput("node-a")
+	in.OriginHostFactsJSON = `{"host_kernel_release":"5.15.0"}`
+	in.SourceMachineType = "intel-k66"
+	_, err := Decide(context.Background(), in)
+	if err == nil || !strings.Contains(err.Error(), "cpuid_hash") {
+		t.Fatalf("want cpuid error, got %v", err)
+	}
+}
+
+func TestMachineTypeLabelExtraction(t *testing.T) {
+	if got := MachineTypeLabel(map[string]string{MachineTypeLabelKey: " intel-k66 "}); got != "intel-k66" {
+		t.Fatalf("got %q", got)
+	}
+	if got := MachineTypeLabel(nil); got != "" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDefaultListMachineTypeCandidates_FiltersByLabelAndCPUID(t *testing.T) {
+	prev := queryHostFactCandidatesFn
+	t.Cleanup(func() { queryHostFactCandidatesFn = prev })
+	queryHostFactCandidatesFn = func(_ context.Context, cpuid, kernel string, matchAll bool) ([]*nodemeta.CandidateNode, error) {
+		if !matchAll || kernel != "" || cpuid != "" {
+			t.Fatalf("expected a match-all query, got cpuid=%q kernel=%q matchAll=%v", cpuid, kernel, matchAll)
+		}
+		same := &nodemeta.HostFacts{CPUIDHash: "sha256:cpu"}
+		return []*nodemeta.CandidateNode{
+			{NodeID: "ok", HostIP: "10.0.0.1", HostFacts: same, NodeLabels: map[string]string{MachineTypeLabelKey: "intel-k66"}},
+			{NodeID: "other-label", HostIP: "10.0.0.2", HostFacts: same, NodeLabels: map[string]string{MachineTypeLabelKey: "amd-k66"}},
+			{NodeID: "no-label", HostIP: "10.0.0.3", HostFacts: same},
+			{NodeID: "other-cpu", HostIP: "10.0.0.4", HostFacts: &nodemeta.HostFacts{CPUIDHash: "sha256:other"}, NodeLabels: map[string]string{MachineTypeLabelKey: "intel-k66"}},
+			// Different kernel release is what the label is allowed to ignore.
+			{NodeID: "other-kernel", HostIP: "10.0.0.5", HostFacts: &nodemeta.HostFacts{CPUIDHash: "sha256:cpu", HostKernelRelease: "6.6.other"}, NodeLabels: map[string]string{MachineTypeLabelKey: "intel-k66"}},
+		}, nil
+	}
+	got, err := defaultListMachineTypeCandidates(context.Background(), "sha256:cpu", "intel-k66")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	ids := make([]string, 0, len(got))
+	for _, c := range got {
+		ids = append(ids, c.NodeID)
+	}
+	if len(ids) != 2 || ids[0] != "ok" || ids[1] != "other-kernel" {
+		t.Fatalf("candidates = %v, want [ok other-kernel]", ids)
+	}
+}
+
+// The label path must not add a target-side kvm-taint filter: the only
+// dimension it replaces is host_kernel_release.
+func TestMachineTypeCandidatesDoNotAddExtraGates(t *testing.T) {
+	prev := queryHostFactCandidatesFn
+	t.Cleanup(func() { queryHostFactCandidatesFn = prev })
+	queryHostFactCandidatesFn = func(context.Context, string, string, bool) ([]*nodemeta.CandidateNode, error) {
+		return []*nodemeta.CandidateNode{{
+			NodeID:     "tainted",
+			HostIP:     "10.0.0.9",
+			HostFacts:  &nodemeta.HostFacts{CPUIDHash: "sha256:cpu", KVMModuleTaint: "E"},
+			NodeLabels: map[string]string{MachineTypeLabelKey: "intel-k66"},
+		}}, nil
+	}
+	got, err := defaultListMachineTypeCandidates(context.Background(), "sha256:cpu", "intel-k66")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].NodeID != "tainted" {
+		t.Fatalf("label path must not filter on kvm taint, got %+v", got)
 	}
 }

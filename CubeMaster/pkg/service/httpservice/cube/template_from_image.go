@@ -59,9 +59,15 @@ func handleRedoTemplateAction(c *gin.Context) {
 		})
 		return
 	}
-	rt.RequestID = req.RequestID
+	// req.Request is an embedded pointer: a body without request_id leaves it
+	// nil, and the uses below would nil-deref before validation runs.
+	requestID := ""
+	if req.Request != nil {
+		requestID = req.RequestID
+	}
+	rt.RequestID = requestID
 	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
-		"RequestId":  req.RequestID,
+		"RequestId":  requestID,
 		"Action":     "RedoTemplate",
 		"TemplateID": req.TemplateID,
 	}))
@@ -71,7 +77,7 @@ func handleRedoTemplateAction(c *gin.Context) {
 	job, err := redoTemplateFromImageFn(ctx, req, requestBaseURL(c.Request))
 	if err != nil {
 		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
-			RequestID: req.RequestID,
+			RequestID: requestID,
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
@@ -80,14 +86,15 @@ func handleRedoTemplateAction(c *gin.Context) {
 		return
 	}
 	// Redo may be a full rebuild (needs TC) or a redistribution-only (no build).
-	// SubmitRedoTemplateFromImage already decided: full-rebuild jobs stay
-	// PENDING and must be forwarded to TC; redistribution-only jobs run locally.
-	if job != nil && templatecenter.RedoNeedsFullRebuild(c.Request.Context(), job.JobID) {
+	// SubmitRedoTemplateFromImage captures this decision before launching any
+	// local goroutine; use job.NeedsFullRebuild instead of re-reading mutable
+	// DB state via RedoNeedsFullRebuild.
+	if job != nil && job.NeedsFullRebuild {
 		go forwardRedoBuildJobToTemplateCenter(job.JobID, requestBaseURL(c.Request))
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	common.WriteAPI(c, &types.CreateTemplateFromImageRes{
-		RequestID: req.RequestID,
+		RequestID: requestID,
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  "success",

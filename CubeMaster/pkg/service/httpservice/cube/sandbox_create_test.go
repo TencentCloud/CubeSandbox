@@ -107,6 +107,35 @@ func TestRegisterCreatedSandboxRuntimeRefEmitsSpanOnlyWhenRegistering(t *testing
 	}
 }
 
+func TestRegisterCreatedSandboxPromotesReservation(t *testing.T) {
+	previous := createSandboxPromoteReservedSnapshotRefFn
+	previousKind := createSandboxGetTemplateKindFn
+	t.Cleanup(func() {
+		createSandboxPromoteReservedSnapshotRefFn = previous
+		createSandboxGetTemplateKindFn = previousKind
+	})
+	createSandboxGetTemplateKindFn = func(context.Context, string) (string, error) {
+		return templatecenter.TemplateKindSnapshot, nil
+	}
+	called := false
+	createSandboxPromoteReservedSnapshotRefFn = func(_ context.Context, snapshotID, sandboxID, nodeID, nodeIP string) error {
+		called = true
+		assert.Equal(t, "snap-promote", snapshotID)
+		assert.Equal(t, "sb-promote", sandboxID)
+		assert.Equal(t, "node-a", nodeID)
+		assert.Equal(t, "10.0.0.1", nodeIP)
+		return nil
+	}
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{
+		constants.CubeAnnotationAppSnapshotTemplateID: "snap-promote",
+		constants.CubeAnnotationRuntimeSnapshotID:     "snap-promote",
+		constants.CubeAnnotationDesiredSandboxID:      "sb-promote",
+	}}
+	ret := &types.CreateCubeSandboxRes{SandboxID: "sb-promote", HostID: "node-a", HostIP: "10.0.0.1"}
+	assert.NoError(t, registerCreatedSandboxRuntimeRef(context.Background(), req, ret))
+	assert.True(t, called)
+}
+
 func TestCreateSandboxMapsMissingTemplateToNotFound(t *testing.T) {
 	origDealFn := createSandboxDealCubeboxCreateReqWithTemplateFn
 	origCreateFn := createSandboxRunFn

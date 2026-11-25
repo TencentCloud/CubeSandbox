@@ -133,7 +133,7 @@ test-race:
 			-gcflags=all=-l -timeout=20m $$pkg || exit 1 ;\
 	done )
 
-DOCKER_TEST_PATTERN=^(TestAliasStoreMySQL|TestAliasStorePostgreSQL|TestUpsertReplicaPostgreSQLUpdatePath|TestTrySessionLockPostgreSQL|TestArtifactGCSessionLockMySQL|TestInitReturnsDaoDefaultOnPostgreSQL|TestCleanupArtifactFullyAbsentNodeMySQL|TestReconcileDeferredArtifactPlacementsMySQL|TestUpsertArtifactNodePlacementResetsDeferred)$$
+DOCKER_TEST_PATTERN=^(TestAliasStoreMySQL|TestAliasStorePostgreSQL|TestUpsertReplicaPostgreSQLUpdatePath|TestTrySessionLockPostgreSQL|TestArtifactGCSessionLockMySQL|TestInitReturnsDaoDefaultOnPostgreSQL|TestCleanupArtifactFullyAbsentNodeMySQL|TestReconcileDeferredArtifactPlacementsMySQL|TestUpsertArtifactNodePlacementResetsDeferred|TestSnapshotReadsPostgreSQLAddColumn)$$
 
 .PHONY: test-docker
 test-docker:

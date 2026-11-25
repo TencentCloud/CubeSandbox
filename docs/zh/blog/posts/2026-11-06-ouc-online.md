@@ -3,8 +3,7 @@ title: "在 Cube Sandbox 中构建 Agent 代码执行层：从会话隔离、三
 date: 2026-11-06
 author: 陆昊洋（国开在线人工智能研发工程师）
 description: "国开在线正在开发一款面向教育与办公场景的 Agent 平台，支持用户自定义 Agent、Skill、Tool、知识库和 MCP。平台目前处于评估期，这篇记录保留了大量一手的过程细节：执行边界如何设计、沙箱生命周期如何管理，以及按文档部署时遇到的服务器资源问题。"
-featured: true
-weight: 2
+featured: false
 ---
 
 # 在 Cube Sandbox 中构建 Agent 代码执行层：从会话隔离、三段式生命周期到部署资源排障的工程实践

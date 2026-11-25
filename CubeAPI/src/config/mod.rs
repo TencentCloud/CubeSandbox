@@ -18,7 +18,7 @@ pub struct ServerConfig {
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
 
-    /// Shared rate limit: max requests per second per API key for requests
+    /// Shared rate limit: max requests per second per authenticated credential for requests
     /// without a dedicated class quota. Once `rate_limit_read_per_sec` and
     /// `rate_limit_write_per_sec` are both configured, this value only
     /// applies to unclassified methods (anything outside GET/HEAD and
@@ -29,13 +29,13 @@ pub struct ServerConfig {
     pub rate_limit_per_sec: u32,
 
     /// Optional rate limit for read requests (GET/HEAD): max requests per
-    /// second per API key. Env var: RATE_LIMIT_READ_PER_SEC.
+    /// second per authenticated credential. Env var: RATE_LIMIT_READ_PER_SEC.
     /// When unset, read requests use `rate_limit_per_sec`.
     #[serde(default)]
     pub rate_limit_read_per_sec: Option<u32>,
 
     /// Optional rate limit for write requests (POST/PUT/PATCH/DELETE): max
-    /// requests per second per API key. Env var: RATE_LIMIT_WRITE_PER_SEC.
+    /// requests per second per authenticated credential. Env var: RATE_LIMIT_WRITE_PER_SEC.
     /// When unset, write requests use `rate_limit_per_sec`.
     #[serde(default)]
     pub rate_limit_write_per_sec: Option<u32>,

@@ -5,10 +5,15 @@ Wants=network-online.target
 Requires=cube-sandbox-cubelet.service
 ConditionPathExists=/usr/local/services/cubetoolbox/.one-click.env
 PartOf=cube-sandbox-control.target cube-sandbox-compute.target
+# No Restart=/StartLimit: refused at load time on systemd < 244 (RHEL/CentOS/
+# OpenCloudOS 8). Init retries live in the start wrapper.
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# After=cubelet does not imply cube-dev exists; the start script waits for it,
+# bounded by CUBE_EGRESS_NET_WAIT_TIMEOUT. Type=oneshot already disables the
+# start timeout, so no TimeoutStartSec is set.
 User=root
 WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
