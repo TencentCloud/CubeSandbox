@@ -41,8 +41,9 @@ type Store interface {
 	// Prepare makes the namespace usable and must be idempotent.
 	Prepare(ctx context.Context) error
 
-	// GC reclaims backend-specific partial state and applies Retention
-	// rules on backends with no native lifecycle support.
+	// GC reclaims backend-specific partial state and applies Retention rules
+	// enforced by the driver (fs and memory also expire objects; s3 aborts
+	// stale multipart uploads and leaves bucket lifecycle to the bucket admin).
 	GC(ctx context.Context, opts GCOptions) (GCResult, error)
 
 	Close() error
@@ -58,10 +59,9 @@ type Capabilities struct {
 	// a deploy-time concern (the Helm chart rejects replicas>1 without
 	// ReadWriteMany); the fs driver only warns, because write-once instance
 	// marks would otherwise fail a crash-restart inside the 2-minute window.
-	Shared          bool
-	RangeRead       bool
-	ConditionalPut  bool
-	NativeRetention bool
+	Shared         bool
+	RangeRead      bool
+	ConditionalPut bool
 }
 
 // ObjectInfo describes one stored object.
@@ -112,8 +112,10 @@ type Object struct {
 	ContentRange *ByteRange
 }
 
-// RetentionRule is a declarative prefix policy. The s3 driver turns it into
-// bucket lifecycle rules; the fs driver enforces it from GC.
+// RetentionRule is a declarative prefix policy. Drivers never mutate
+// bucket-level lifecycle configuration: fs and memory enforce both fields
+// in GC, while s3 only applies AbortIncompleteAfter in GC and leaves
+// bucket lifecycle policies to the bucket administrator.
 type RetentionRule struct {
 	Prefix               string
 	ExpireAfter          time.Duration
