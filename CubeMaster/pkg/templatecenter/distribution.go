@@ -50,6 +50,36 @@ func buildReplicaForDistribution(target *node.Node, req *types.CreateCubeSandbox
 	}
 }
 
+// replicaWrite selects how a distribution persists per-node replica rows.
+type replicaWrite int
+
+const (
+	// replicaWriteNone skips replica rows (jfs: placement rows carry coverage).
+	replicaWriteNone replicaWrite = iota
+	// replicaWriteOwner is create/redo/resume: the job owns its rows.
+	replicaWriteOwner
+	// replicaWriteRepair is the backfill sweep: never downgrade a clean READY row.
+	replicaWriteRepair
+)
+
+// persist records the replica row for one distribution outcome; write errors are
+// logged, since distribution already reports per-node failures via its results.
+func (w replicaWrite) persist(ctx context.Context, templateID string, req *types.CreateCubeSandboxReq, replica ReplicaStatus) {
+	if templateID == "" || req == nil {
+		return
+	}
+	var err error
+	switch w {
+	case replicaWriteOwner:
+		err = UpsertReplica(ctx, templateID, req.InstanceType, replica)
+	case replicaWriteRepair:
+		err = upsertReplicaKeepingReady(ctx, templateID, req.InstanceType, replica)
+	}
+	if err != nil {
+		log.G(ctx).Warnf("persist template replica %s on node %s failed: %v", templateID, replica.NodeID, err)
+	}
+}
+
 func cleanupArtifactOnNodes(ctx context.Context, artifactID, instanceType string, targets []*node.Node) error {
 	if artifactID == "" {
 		return nil
@@ -212,16 +242,15 @@ func distributeRootfsArtifact(ctx context.Context, req *types.CreateTemplateFrom
 	// scope, the locality caches, and the UI all read those rows. Artifact
 	// placement rows are still recorded for every node so cleanup reaches
 	// all ext4 copies and the backfill sweep can tell coverage from gaps.
-	trackReplicas := distributionTracksReplicas(backend)
-	return distributeRootfsArtifactToNodesCore(ctx, req, generatedReq, artifact, templateID, jobID, targets, trackReplicas)
+	return distributeRootfsArtifactToNodesCore(ctx, req, generatedReq, artifact, templateID, jobID, targets, jobReplicaWrite(backend))
 }
 
-// distributionTracksReplicas reports whether a distribution should write
-// per-node replica rows. On jfs a replica row means "built the shared
-// package", which only the build step does; every other backend equates
-// "holds the ext4 artifact" with "has the replica" and keeps both rows.
-func distributionTracksReplicas(backend string) bool {
-	return !constants.IsJFSBackend(backend)
+// jobReplicaWrite maps a backend to the job pipeline's replica write mode.
+func jobReplicaWrite(backend string) replicaWrite {
+	if constants.IsJFSBackend(backend) {
+		return replicaWriteNone
+	}
+	return replicaWriteOwner
 }
 
 func distributeSpanAttrs(artifact *models.RootfsArtifact, templateID, jobID string) []attribute.KeyValue {
@@ -288,18 +317,16 @@ func distributionWorkerCount() int {
 // exactly the nodes that lack a READY replica instead of re-resolving the
 // full healthy-node set. Callers must run ensureArtifactDistributable first.
 //
-// trackReplicas=false (jfs) skips the per-node replica bookkeeping: on jfs a
-// replica row means "built the shared package", which only the build step
-// writes. Artifact placement rows are still recorded for every node either
-// way, so cleanup and the backfill sweep see the true ext4 coverage.
-func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
+// write selects how per-node replica rows are persisted; placement rows are always
+// recorded, so cleanup and the sweep see the real ext4 coverage.
+func distributeRootfsArtifactToNodes(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, write replicaWrite) ([]*node.Node, int32, int32, int32, error) {
 	ctx, span := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateDistribute, trace.WithAttributes(distributeSpanAttrs(artifact, templateID, jobID)...))
-	readyTargets, expected, ready, failed, err := distributeRootfsArtifactToNodesCore(ctx, req, generatedReq, artifact, templateID, jobID, targets, trackReplicas)
+	readyTargets, expected, ready, failed, err := distributeRootfsArtifactToNodesCore(ctx, req, generatedReq, artifact, templateID, jobID, targets, write)
 	telemetry.End(span, err)
 	return readyTargets, expected, ready, failed, err
 }
 
-func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
+func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, write replicaWrite) ([]*node.Node, int32, int32, int32, error) {
 	// Always give Cubelets the CubeMaster download endpoint. That keeps the
 	// node-facing address uniform across local-disk and S3-backed artifacts and
 	// avoids per-node dependence on the object-store endpoint's reachability.
@@ -349,7 +376,7 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 					attribute.String(telemetry.AttrTemplateID, templateID),
 				))
 			var replica ReplicaStatus
-			if trackReplicas {
+			if write != replicaWriteNone {
 				replica = buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
 			}
 			rsp, err := cubelet.CreateImage(rpcCtx, cubelet.GetCubeletAddr(target.HostIP()), &imagev1.CreateImageRequest{
@@ -370,9 +397,7 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 				if firstErr == nil {
 					firstErr = err
 				}
-				if trackReplicas && templateID != "" && generatedReq != nil {
-					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
-				}
+				write.persist(ctx, templateID, generatedReq, replica)
 				return
 			}
 			if rsp.GetRet() == nil || int(rsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
@@ -390,9 +415,7 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 				} else {
 					replica.ErrorMessage = "empty create image response"
 				}
-				if trackReplicas && templateID != "" && generatedReq != nil {
-					_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
-				}
+				write.persist(ctx, templateID, generatedReq, replica)
 				return
 			}
 			replica.Phase = ReplicaPhaseDistributed
@@ -401,9 +424,7 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 			replica.ErrorMessage = ""
 			ready++
 			readyTargets = append(readyTargets, target)
-			if trackReplicas && templateID != "" && generatedReq != nil {
-				_ = UpsertReplica(ctx, templateID, generatedReq.InstanceType, replica)
-			}
+			write.persist(ctx, templateID, generatedReq, replica)
 			// Record physical placement independently of the replica lifecycle so
 			// last-owner-cleanup / GC can later reach this node even after the
 			// replica row is removed (FIX-1).

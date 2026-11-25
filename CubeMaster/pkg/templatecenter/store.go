@@ -2308,6 +2308,8 @@ func replicaStatusUpdateFields(instanceType string, replica ReplicaStatus) map[s
 	return fields
 }
 
+// UpsertReplica is the owner write path (create/redo/resume) and overwrites
+// unconditionally; repairers must use upsertReplicaKeepingReady.
 func UpsertReplica(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
 	if !isReady() {
 		return ErrTemplateStoreNotInitialized
@@ -2328,6 +2330,42 @@ func UpsertReplica(ctx context.Context, templateID, instanceType string, replica
 	return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
 		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
 		Updates(replicaStatusUpdateFields(instanceType, replica)).Error
+}
+
+// upsertReplicaKeepingReady is the repairer write path (backfill sweep): it may
+// create and upgrade rows, never overwrite a clean READY one. The guard is in the
+// UPDATE predicate, so check-and-write is one atomic statement.
+func upsertReplicaKeepingReady(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
+	if !isReady() {
+		return ErrTemplateStoreNotInitialized
+	}
+	// Fresh chain per statement: reusing one after a read emits UPDATE ... FROM on
+	// PostgreSQL (42712). Model() keeps the soft-delete scope of the read/insert.
+	update := store.db.WithContext(ctx).Model(&models.TemplateReplica{}).
+		Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+		Where("NOT (status = ? AND cleanup_required = ?)", ReplicaStatusReady, false).
+		Updates(replicaStatusUpdateFields(instanceType, replica))
+	if update.Error != nil {
+		return update.Error
+	}
+	if update.RowsAffected > 0 {
+		return nil
+	}
+
+	// MySQL reports changed rows, so 0 also means "matched but unchanged".
+	stored := models.TemplateReplica{}
+	err := store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+		Where("template_id = ? AND node_id = ?", templateID, replica.NodeID).
+		First(&stored).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return store.db.WithContext(ctx).Table(constants.TemplateReplicaTableName).
+			Create(replicaStatusToModel(templateID, instanceType, replica)).Error
+	case err != nil:
+		return err
+	}
+	return nil
 }
 
 func EnsureReadyReplica(ctx context.Context, templateID string) error {

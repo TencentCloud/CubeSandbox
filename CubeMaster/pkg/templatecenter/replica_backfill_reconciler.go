@@ -69,7 +69,7 @@ var (
 	backfillDistribute      = distributeRootfsArtifactToNodes
 	backfillPlacements      = listArtifactNodePlacements
 	backfillCreateReplica   = createReplicaOnNode
-	backfillUpsertReplica   = UpsertReplica
+	backfillUpsertReplica   = upsertReplicaKeepingReady
 	backfillGetDefinition   = GetDefinition
 	backfillCleanupReplicas = cleanupTemplateReplicasOnNodes
 )
@@ -149,15 +149,12 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		if len(missing) == 0 {
 			return nil
 		}
-		release := acquireResumeArtifactLock(artifact.ArtifactID)
-		defer release()
 		logger := log.G(ctx).WithFields(map[string]any{
 			"component":   "image_job_reconcile",
 			"template_id": def.TemplateID,
 			"artifact_id": artifact.ArtifactID,
 		})
-		// trackReplicas=false: a placement push must not fabricate replica
-		// rows on nodes that only hold the ext4 cache.
+		// Placement push only: no replica rows.
 		missingTotal := len(missing)
 		if len(missing) > backfillMaxTargetsPerSweep {
 			// jfs pushes leave no row behind on failure, so there is no
@@ -168,7 +165,7 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 			missing = backfillRotateWindow(missing, tick*backfillMaxTargetsPerSweep)
 			missing = missing[:backfillMaxTargetsPerSweep]
 		}
-		_, _, ready, failed, distErr := backfillDistribute(ctx, req, nil, artifact, def.TemplateID, job.JobID, missing, false)
+		_, _, ready, failed, distErr := backfillDistribute(ctx, req, nil, artifact, def.TemplateID, job.JobID, missing, replicaWriteNone)
 		logger.Infof("jfs artifact backfill: %d node(s) missing the ext4 artifact, distributed ready=%d failed=%d err=%v",
 			missingTotal, ready, failed, distErr)
 		return distErr
@@ -214,23 +211,7 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		return nil
 	}
 
-	// Best-effort dedup against the remote-build BUILT callback: same
-	// in-process lock table, but a live redo takes no lock, so interleavings
-	// are still possible and converge via AlreadyExists + FAILED rows.
-	release := acquireResumeArtifactLock(artifact.ArtifactID)
-	defer release()
-
-	// The pre-lock listing can go stale while we wait: re-derive the work
-	// set under the lock.
-	replicas, err = backfillReplicas(ctx, def.TemplateID)
-	if err != nil {
-		return fmt.Errorf("list replicas after resume lock: %w", err)
-	}
-	missing = nodesWithoutReadyReplica(replicas, targets)
-	if len(missing) == 0 {
-		return nil
-	}
-
+	// No artifact lock: replica-row safety is enforced at the write.
 	logger := log.G(ctx).WithFields(map[string]any{
 		"component":   "image_job_reconcile",
 		"template_id": def.TemplateID,
@@ -247,6 +228,10 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		}
 		return fmt.Errorf("recheck definition before cleanup: %w", err)
 	}
+	if definition.Status != StatusReady {
+		logger.Infof("template replica backfill: definition status is %s, skipping this pass", definition.Status)
+		return nil
+	}
 	if want := strings.TrimSpace(definition.RootfsArtifactID); want != "" && want != artifact.ArtifactID {
 		logger.Infof("template replica backfill: definition switched artifact (%s -> %s), skipping this pass", artifact.ArtifactID, want)
 		return nil
@@ -256,7 +241,7 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		logger.Infof("template replica backfill: %d node(s) missing, capping this sweep at %d", len(missing), backfillMaxTargetsPerSweep)
 		missing = missing[:backfillMaxTargetsPerSweep]
 	}
-	readyTargets, _, ready, failed, distErr := backfillDistribute(ctx, req, generatedReq, artifact, def.TemplateID, job.JobID, missing, true)
+	readyTargets, _, ready, failed, distErr := backfillDistribute(ctx, req, generatedReq, artifact, def.TemplateID, job.JobID, missing, replicaWriteRepair)
 	logger.Infof("template replica backfill: %d node(s) missing a READY replica, distributed ready=%d failed=%d err=%v",
 		len(missing), ready, failed, distErr)
 
@@ -397,8 +382,13 @@ func backfillPrioritizeFresh(replicas []models.TemplateReplica, missing []*node.
 }
 
 // backfillPrepareReplicaOnNode prepares one target and persists the outcome
-// (FAILED rows included — they are what the next sweep retries). The
-// definition is re-checked before every persist: a DeleteTemplate
+// (FAILED rows included — they are what the next sweep retries).
+//
+// It returns (replica, true) only when a READY row is in place (written by this
+// pass or kept from a concurrent job); failed and skipped outcomes are both
+// (replica, false).
+//
+// The definition is re-checked before every persist: a DeleteTemplate
 // mid-prepare must not be resurrected as a fresh READY row, and a redo that
 // switched the artifact must not have its fresh row clobbered by our stale
 // result.
@@ -435,6 +425,15 @@ func backfillPrepareReplicaOnNode(ctx context.Context, def backfillDefinition, i
 		}
 		return replica, false
 	}
+	if definition.Status != StatusReady && definition.Status != StatusPartiallyReady {
+		// Terminal status: the template is going away, so reclaim the package.
+		// A transitional one belongs to a concurrent build — leave it alone.
+		if backfillDefinitionTerminal(definition.Status) && replica.Status == ReplicaStatusReady {
+			dropNodePackage()
+		}
+		logger.Infof("template replica backfill: definition status is %s, dropped prepare outcome, node=%s", definition.Status, target.ID())
+		return replica, false
+	}
 	if want := strings.TrimSpace(definition.RootfsArtifactID); want != "" && want != artifact.ArtifactID {
 		// Redo switched the definition to a new artifact mid-prepare:
 		// persist nothing, or our stale-artifact outcome would clobber
@@ -444,8 +443,8 @@ func backfillPrepareReplicaOnNode(ctx context.Context, def backfillDefinition, i
 		logger.Warnf("template replica backfill: definition points at artifact %s now, dropped stale prepare outcome, node=%s", want, target.ID())
 		return replica, false
 	}
-	if upsertErr := backfillUpsertReplica(ctx, def.TemplateID, instanceType, replica); upsertErr != nil {
-		logger.Warnf("template replica backfill: persist prepare result fail, node=%s err=%v", target.ID(), upsertErr)
+	if err := backfillUpsertReplica(ctx, def.TemplateID, instanceType, replica); err != nil {
+		logger.Warnf("template replica backfill: persist prepare result fail, node=%s err=%v", target.ID(), err)
 		return replica, false
 	}
 	if replica.Status != ReplicaStatusReady {
@@ -453,6 +452,16 @@ func backfillPrepareReplicaOnNode(ctx context.Context, def backfillDefinition, i
 		return replica, false
 	}
 	return replica, true
+}
+
+// backfillDefinitionTerminal reports whether the template is going away.
+func backfillDefinitionTerminal(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case StatusFailed, StatusDeleting:
+		return true
+	default:
+		return false
+	}
 }
 
 // nodesWithoutReadyReplica returns the targets that do not hold a READY,

@@ -25,28 +25,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// resumeArtifactLocks serializes concurrent resume attempts for the same
-// template-spec fingerprint. A resume can be triggered from two sources at
-// once: the internal status callback goroutine (TC reports BUILT) and the
-// image-job reconciler (which replays jobs stuck in BUILT). Without a mutex
-// both would run the register/distribute pipeline concurrently and
-// regenerate the artifact's DownloadToken -- the in-flight download from the
-// first attempt then 404s.
-//
-// Keyed by FINGERPRINT, not artifact_id or job_id: buildArtifactID mints a
-// UUID-suffixed artifact_id per build, so two concurrent same-spec builds
-// report BUILT with DIFFERENT artifact_ids, and the resource they collide on
-// is the fingerprint unique index (idx_artifact_fingerprint) — the second
-// registration's insert fails with Error 1062. Locking by fingerprint
-// serializes exactly that collision (and matches the cluster-wide DB lock
-// withArtifactRegisterLock takes inside registerRemoteBuiltArtifact, which
-// covers the cross-process case this mutex cannot).
-//
-// Entries are reference-counted and removed once no goroutine holds/awaits
-// the lock for that artifact_id. Without this, resumeArtifactLocks used to
-// grow by one entry for EVERY artifact_id ever processed over the process
-// lifetime and never shrink -- an unbounded map (memory leak) on a
-// long-running Master.
+// resumeArtifactLocks serializes in-process artifact registration per
+// template-spec fingerprint. Two sources can resume the same spec at once
+// (BUILT callback and image-job reconciler); without the mutex they re-register
+// concurrently, regenerating DownloadToken and 404ing the in-flight download.
+// Keyed by fingerprint because concurrent same-spec builds mint different
+// artifact_ids but collide on idx_artifact_fingerprint; the cross-process case
+// is covered by withArtifactRegisterLock. Entries are reference-counted, so the
+// map stays bounded.
 var (
 	resumeArtifactLocksMu sync.Mutex
 	resumeArtifactLocks   = map[string]*refCountedMutex{}
@@ -60,12 +46,12 @@ type refCountedMutex struct {
 // acquireResumeArtifactLock locks (creating the entry on first use) and
 // returns a release function that must be called exactly once to unlock and,
 // once no other goroutine references the entry, remove it from the map.
-func acquireResumeArtifactLock(artifactID string) func() {
+func acquireResumeArtifactLock(fingerprint string) func() {
 	resumeArtifactLocksMu.Lock()
-	entry, ok := resumeArtifactLocks[artifactID]
+	entry, ok := resumeArtifactLocks[fingerprint]
 	if !ok {
 		entry = &refCountedMutex{}
-		resumeArtifactLocks[artifactID] = entry
+		resumeArtifactLocks[fingerprint] = entry
 	}
 	entry.ref++
 	resumeArtifactLocksMu.Unlock()
@@ -83,7 +69,7 @@ func acquireResumeArtifactLock(artifactID string) func() {
 		resumeArtifactLocksMu.Lock()
 		entry.ref--
 		if entry.ref == 0 {
-			delete(resumeArtifactLocks, artifactID)
+			delete(resumeArtifactLocks, fingerprint)
 		}
 		resumeArtifactLocksMu.Unlock()
 	}
