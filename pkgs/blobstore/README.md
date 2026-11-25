@@ -36,3 +36,11 @@ store, err := blobstore.Open(ctx, cfg)
 needs a normal HTTP GET, so nodes do not change when switching backends.
 Production defaults stay on `s3`; opt in to `fs` via
 `CUBE_OPS_STORE_BACKEND` / `CUBE_ARTIFACT_STORE_BACKEND`.
+
+`driver/s3` never writes bucket-level lifecycle configuration during `Prepare`.
+Bucket lifecycle policies remain owned by the bucket administrator: configure
+object-expiration rules externally on the bucket (or delete objects explicitly)
+if needed. `driver/s3`'s `GC` only aborts stale multipart uploads (on MinIO,
+stale multipart cleanup relies on MinIO's built-in `api stale_uploads_expiry`,
+default 24h). When upgrading an existing bucket, review any lifecycle rules
+(such as `blobstore-0`, `blobstore-1`) that older versions may have installed.

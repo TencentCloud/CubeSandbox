@@ -20,7 +20,6 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/minio/minio-go/v7/pkg/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 )
 
@@ -161,6 +160,12 @@ func open(cfg blobstore.Config) (*store, error) {
 			presignExp = d
 		}
 	}
+	for _, r := range cfg.Retention {
+		if r.ExpireAfter > 0 {
+			slog.Warn("blobstore/s3: RetentionRule.ExpireAfter is not enforced by s3 driver; configure bucket lifecycle externally or delete objects explicitly",
+				"bucket", bucket, "prefix", r.Prefix, "expire_after", r.ExpireAfter)
+		}
+	}
 	return &store{
 		client:     client,
 		presign:    presign,
@@ -242,11 +247,10 @@ func (s *store) objKey(key string) string {
 
 func (s *store) Capabilities() blobstore.Capabilities {
 	return blobstore.Capabilities{
-		DirectURL:       true,
-		Shared:          true,
-		RangeRead:       true,
-		ConditionalPut:  true,
-		NativeRetention: true,
+		DirectURL:      true,
+		Shared:         true,
+		RangeRead:      true,
+		ConditionalPut: true,
 	}
 }
 
@@ -467,74 +471,7 @@ func (s *store) Prepare(ctx context.Context) error {
 			return fmt.Errorf("blobstore/s3: create bucket %q: %w", s.bucket, err)
 		}
 	}
-	return s.ensureLifecycle(ctx)
-}
-
-func (s *store) ensureLifecycle(ctx context.Context) error {
-	rules := s.lifecycleRules()
-	if len(rules) == 0 {
-		return nil
-	}
-	if err := s.setLifecycle(ctx, rules); err != nil {
-		if !isLifecycleUnsupported(err) {
-			return fmt.Errorf("blobstore/s3: set lifecycle: %w", err)
-		}
-		slog.Warn("blobstore/s3: abort-incomplete lifecycle unsupported; applying expire rules only", "error", err)
-		var expire []lifecycle.Rule
-		for _, r := range rules {
-			if r.Expiration.Days > 0 {
-				expire = append(expire, lifecycle.Rule{
-					ID:         r.ID,
-					Status:     r.Status,
-					RuleFilter: r.RuleFilter,
-					Expiration: r.Expiration,
-				})
-			}
-		}
-		if len(expire) == 0 {
-			return nil
-		}
-		if err := s.setLifecycle(ctx, expire); err != nil {
-			return fmt.Errorf("blobstore/s3: set lifecycle: %w", err)
-		}
-	}
 	return nil
-}
-
-func (s *store) lifecycleRules() []lifecycle.Rule {
-	var rules []lifecycle.Rule
-	for i, r := range s.retention {
-		id := fmt.Sprintf("blobstore-%d", i)
-		prefix := blobstore.JoinKey(s.prefix, r.Prefix)
-		rule := lifecycle.Rule{ID: id, Status: "Enabled", RuleFilter: lifecycle.Filter{Prefix: prefix}}
-		has := false
-		if r.ExpireAfter > 0 {
-			days := int(r.ExpireAfter / (24 * time.Hour))
-			if days < 1 {
-				days = 1
-			}
-			rule.Expiration = lifecycle.Expiration{Days: lifecycle.ExpirationDays(days)}
-			has = true
-		}
-		if r.AbortIncompleteAfter > 0 {
-			days := int(r.AbortIncompleteAfter / (24 * time.Hour))
-			if days < 1 {
-				days = 1
-			}
-			rule.AbortIncompleteMultipartUpload = lifecycle.AbortIncompleteMultipartUpload{DaysAfterInitiation: lifecycle.ExpirationDays(days)}
-			has = true
-		}
-		if has {
-			rules = append(rules, rule)
-		}
-	}
-	return rules
-}
-
-func (s *store) setLifecycle(ctx context.Context, rules []lifecycle.Rule) error {
-	cfg := lifecycle.NewConfiguration()
-	cfg.Rules = rules
-	return s.client.SetBucketLifecycle(ctx, s.bucket, cfg)
 }
 
 func (s *store) GC(ctx context.Context, opts blobstore.GCOptions) (blobstore.GCResult, error) {
@@ -637,15 +574,6 @@ func isBucketAlreadyExists(err error) bool {
 func isPreconditionFailed(err error) bool {
 	resp := minio.ToErrorResponse(err)
 	return resp.Code == "PreconditionFailed" || resp.StatusCode == http.StatusPreconditionFailed
-}
-
-func isLifecycleUnsupported(err error) bool {
-	switch minio.ToErrorResponse(err).Code {
-	case "MalformedXML", "InvalidRequest", "InvalidArgument":
-		return true
-	default:
-		return false
-	}
 }
 
 func bucketCreateRegion(region string) string {

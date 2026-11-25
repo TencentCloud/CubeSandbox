@@ -6,11 +6,12 @@ package s3
 
 import (
 	"context"
-	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v7"
 	"github.com/tencentcloud/CubeSandbox/pkgs/blobstore"
 )
 
@@ -64,18 +65,41 @@ func TestPutContextSurvivesCallerCancel(t *testing.T) {
 	}
 }
 
-func TestIsLifecycleUnsupported(t *testing.T) {
-	for _, code := range []string{"MalformedXML", "InvalidRequest", "InvalidArgument"} {
-		err := minio.ErrorResponse{Code: code, StatusCode: 400, Message: "schema"}
-		if !isLifecycleUnsupported(err) {
-			t.Fatalf("code %s should be unsupported", code)
+func TestPrepareDoesNotWriteBucketLifecycle(t *testing.T) {
+	var headCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == "/shared-bucket/" && r.URL.RawQuery == "" {
+			headCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+			return
 		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	cfg := Options{
+		Endpoint:        server.URL,
+		AccessKeyID:     "test-ak",
+		SecretAccessKey: "test-sk",
+		Bucket:          "shared-bucket",
+		Region:          "us-east-1",
+		PathStyle:       true,
+	}.Config("warehouse")
+	cfg.Retention = []blobstore.RetentionRule{
+		{Prefix: "", AbortIncompleteAfter: 24 * time.Hour},
+		{Prefix: "uploads/", ExpireAfter: 24 * time.Hour},
 	}
-	if isLifecycleUnsupported(minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}) {
-		t.Fatal("AccessDenied must not be treated as unsupported lifecycle")
+
+	st, err := blobstore.Open(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if isLifecycleUnsupported(errors.New("connection refused")) {
-		t.Fatal("transport error must not be treated as unsupported lifecycle")
+	if err := st.Prepare(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := headCalls.Load(); got != 1 {
+		t.Fatalf("HEAD bucket calls = %d, want 1", got)
 	}
 }
 
