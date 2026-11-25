@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
+	"gorm.io/gorm"
 )
 
 // Template replica backfill sweep.
@@ -62,6 +63,22 @@ var (
 	}
 	backfillLatestJob = func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
 		return getLatestCreateRedoImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
+	}
+	// backfillCreateScope returns the distribution scope of the template's
+	// latest create job, or nil (every in-scope node) when none is on record.
+	backfillCreateScope = func(ctx context.Context, templateID string) ([]string, error) {
+		record, err := getLatestCreateImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		req, err := unmarshalTemplateImageJobRequest(record.RequestJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode create job request: %w", err)
+		}
+		return req.DistributionScope, nil
 	}
 	backfillArtifact        = getRootfsArtifactByID
 	backfillReplicas        = ListReplicas
@@ -125,6 +142,16 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	req, err := unmarshalTemplateImageJobRequest(job.RequestJSON)
 	if err != nil {
 		return fmt.Errorf("decode job request snapshot: %w", err)
+	}
+	// A redo persists the nodes it rebuilt on as its scope. That is a
+	// one-off target list, not the template's placement: keeping it would
+	// stop every node that joins after the redo from being backfilled.
+	if strings.EqualFold(job.Operation, JobOperationRedo) {
+		scope, scopeErr := backfillCreateScope(ctx, def.TemplateID)
+		if scopeErr != nil {
+			return fmt.Errorf("load create scope: %w", scopeErr)
+		}
+		req.DistributionScope = scope
 	}
 	// jfs templates live on the shared volume: nodes never build their own
 	// replica, so replica rows say nothing about ext4 coverage — only the
