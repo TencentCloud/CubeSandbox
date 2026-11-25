@@ -77,22 +77,34 @@ var (
 // reconcileTemplateReplicaBackfill pushes READY templates to healthy nodes
 // that lack a READY replica. Runs inside the image-job reconcile pass.
 func reconcileTemplateReplicaBackfill(ctx context.Context) error {
+	_, err := sweepTemplateReplicaBackfill(ctx)
+	return err
+}
+
+// sweepTemplateReplicaBackfill is one backfill pass. It returns how many
+// templates failed to backfill so the new-node trigger can retry early.
+// A template whose instance type has no healthy node is not a failure:
+// there is nothing to push it to.
+func sweepTemplateReplicaBackfill(ctx context.Context) (failed int, err error) {
 	if !isReady() {
-		return nil
+		return 0, nil
 	}
 	defs, err := listBackfillDefinitions(ctx, imageJobReconcileBatch)
 	if err != nil {
-		return fmt.Errorf("scan ready definitions: %w", err)
+		return 0, fmt.Errorf("scan ready definitions: %w", err)
 	}
 	logger := log.G(ctx).WithFields(map[string]any{"component": "image_job_reconcile"})
 	for _, def := range defs {
 		if err := backfillTemplateReplicas(ctx, def); err != nil {
+			if !errors.Is(err, ErrNoTemplateNodes) {
+				failed++
+			}
 			// Per-template failures must not stop the pass; the next tick
 			// retries this template anyway.
 			logger.Warnf("template replica backfill: template=%s err=%v", def.TemplateID, err)
 		}
 	}
-	return nil
+	return failed, nil
 }
 
 // backfillTemplateReplicas distributes one template's artifact to the
