@@ -88,6 +88,11 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 		rsp.Ret.RetMsg = "sandbox is paused"
 		return rsp, restartStop, nil
 	}
+	if old.UserMarkDeletedTime != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+		rsp.Ret.RetMsg = "sandbox is being deleted"
+		return rsp, restartStop, nil
+	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
@@ -161,6 +166,10 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 		if stderrors.Is(err, storage.ErrExt4RepairUnrecoverable) {
 			class = restartDestroyUnrecoverable
 		}
+		if isConcurrencyRejection(rerr.Code()) {
+			// Concurrency limit rejection must not spend the destroy retry budget.
+			class = restartLockBusy
+		}
 		return rsp, class, nil
 	}
 
@@ -191,6 +200,11 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
 		rsp.Ret.RetCode = rerr.Code()
+		if isConcurrencyRejection(rerr.Code()) {
+			// Concurrency limit rejection must not spend maxRestarts.
+			log.G(base).Warnf("restart create %s deferred by the node create limit: %s", sandboxID, rerr.Message())
+			return rsp, restartLockBusy, nil
+		}
 		// Destroy already finished. A guest that did not become ready used
 		// this restart attempt.
 		s.noteRestartFailure(sandboxID, oldCount)
@@ -199,6 +213,11 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 	s.noteRestartSuccess(sandboxID)
 	log.G(ctx).Infof("restarted sandbox %s", sandboxID)
 	return rsp, restartOK, nil
+}
+
+// isConcurrencyRejection reports whether the workflow engine rejected the call due to concurrency limits.
+func isConcurrencyRejection(code errorcode.ErrorCode) bool {
+	return code == errorcode.ErrorCode_ConcurrentFailed
 }
 
 func restartRequestTrace(req *cubebox.RunCubeSandboxRequest, sandboxID, callee, action string) *CubeLog.RequestTrace {

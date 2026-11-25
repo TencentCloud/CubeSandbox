@@ -531,6 +531,7 @@ func convergeResumeStateAfterOpaqueRestore(sb *cubeboxstore.CubeBox, attachedAt 
 		c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 			status.PausedAt = 0
 			status.PausingAt = 0
+			status.ExitUnobserved = false
 			// A paused task restored after Cubelet restart may have only
 			// PausedAt persisted. Once the shim proves it resumed, restore the
 			// running marker so normal destroy does not treat it as terminated.

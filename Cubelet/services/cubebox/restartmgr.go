@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
+	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telnet"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -38,7 +39,12 @@ type restartMgr struct {
 	abandoned map[string]struct{}
 	httpC     *http.Client
 	reporter  *statusReporter
+	// slots limits concurrent restart rebuilds; nil means unbounded.
+	slots chan struct{}
 }
+
+// defaultRestartConcurrency caps concurrent restart rebuilds well below workflow limits.
+const defaultRestartConcurrency = 16
 
 type queuedExit struct {
 	code   int32
@@ -67,6 +73,30 @@ func newRestartMgr(store cubes.CubeboxAPI) *restartMgr {
 		runs:      map[string]*restartRun{},
 		abandoned: map[string]struct{}{},
 		httpC:     newEnvdHTTPClient(),
+		slots:     make(chan struct{}, defaultRestartConcurrency),
+	}
+}
+
+// acquireRestartSlot blocks until a rebuild slot is available or ctx is canceled.
+func (m *restartMgr) acquireRestartSlot(ctx context.Context) bool {
+	if m == nil || m.slots == nil {
+		return true
+	}
+	select {
+	case m.slots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (m *restartMgr) releaseRestartSlot() {
+	if m == nil || m.slots == nil {
+		return
+	}
+	select {
+	case <-m.slots:
+	default:
 	}
 }
 
@@ -398,32 +428,66 @@ func (m *restartMgr) Recover() {
 		if cb == nil || cb.IsPaused() {
 			continue
 		}
+		if cb.UserMarkDeletedTime != nil {
+			continue
+		}
 		req, err := cb.CopyOriginalRequest()
 		if err != nil || req == nil || !restartpolicy.KeepsRequest(req.GetRestartPolicy()) {
 			continue
 		}
-		if cb.RestartState == restartpolicy.StateGaveUp {
+		// Skip terminal restart states.
+		switch cb.RestartState {
+		case restartpolicy.StateGaveUp, restartpolicy.StateSucceeded, restartpolicy.StateFailed:
 			continue
 		}
-		m.backfillStableAnchor(cb)
 		// A crash between restart-destroy and create leaves the cubebox row
 		// with no containers. Treat that the same as an exited sandbox.
 		dead := (cb.MainStatus() != nil && cb.MainStatus().IsTerminated()) ||
 			(len(cb.AllContainers()) == 0 && cb.LastExitReason != "")
 		if dead {
-			reason := restartpolicy.Reason(cb.LastExitReason)
-			if reason == "" {
-				reason = restartpolicy.ReasonForExit(cb.LastExitCode)
-			}
+			exitCode, reason := recoveredExit(cb)
 			m.Start(cb.ID, req)
-			m.OnExit(cb.ID, cb.LastExitCode, reason)
+			m.OnExit(cb.ID, exitCode, reason)
 			continue
 		}
+		// Only backfill the stability anchor for live sandboxes (avoid persisting invented FinishedAt before exit handling).
+		m.backfillStableAnchor(cb)
 		if config.RecoverLivenessProbesDisabled() {
 			continue
 		}
 		m.Start(cb.ID, req)
 	}
+}
+
+// recoveredExit resolves the exit code and reason for a sandbox found stopped at recovery:
+// BackOff/Restarting keeps LastExit*; otherwise uses current MainStatus
+// (Unknown/ExitUnobserved maps to SandboxCrashed).
+func recoveredExit(cb *cubeboxstore.CubeBox) (int32, restartpolicy.Reason) {
+	if cb == nil {
+		return 0, restartpolicy.ReasonSandboxCrashed
+	}
+	switch cb.RestartState {
+	case restartpolicy.StateBackOff, restartpolicy.StateRestarting:
+		if r := restartpolicy.Reason(cb.LastExitReason); r != "" {
+			return cb.LastExitCode, r
+		}
+	}
+	if len(cb.AllContainers()) > 0 {
+		if st := cb.MainStatus(); st != nil {
+			s := st.Get()
+			if s.Unknown || s.ExitUnobserved {
+				return 0, restartpolicy.ReasonSandboxCrashed
+			}
+			if r := restartpolicy.Reason(s.Reason); restartpolicy.IsExitReason(r) {
+				return s.ExitCode, r
+			}
+			return s.ExitCode, restartpolicy.ReasonForExit(s.ExitCode)
+		}
+	}
+	if r := restartpolicy.Reason(cb.LastExitReason); r != "" {
+		return cb.LastExitCode, r
+	}
+	return 0, restartpolicy.ReasonSandboxCrashed
 }
 
 func (m *restartMgr) restartLoop(ctx context.Context, sandboxID string, req *cubebox.RunCubeSandboxRequest, backoff restartpolicy.Backoff, exitCode int32, reason restartpolicy.Reason) {
@@ -472,66 +536,94 @@ func (m *restartMgr) restartLoop(ctx context.Context, sandboxID string, req *cub
 		if cb2, err := m.store.Get(ctx, sandboxID); err == nil && cb2 != nil && cb2.IsPaused() {
 			return
 		}
-		m.setState(sandboxID, restartpolicy.StateRestarting, 0)
-		if m.restarter == nil {
-			log.G(ctx).Errorf("restart: sandbox %s has no restarter", sandboxID)
+		// Acquire a rebuild slot before transitioning to Restarting.
+		if !m.acquireRestartSlot(ctx) {
 			return
 		}
-		rsp, class, err := m.restarter.restartClassified(ctx, req)
-		if err != nil {
-			m.dropQueued(sandboxID)
-			log.G(ctx).Errorf("restart: sandbox %s failed: %v", sandboxID, err)
-			continue
-		}
-		switch class {
-		case restartStop:
+		result := m.runOneRestart(ctx, sandboxID, req)
+		m.releaseRestartSlot()
+		if result == restartLoopDone {
 			return
-		case restartLockBusy:
-			m.dropQueued(sandboxID)
-			continue
-		case restartDestroyUnrecoverable:
-			m.dropQueued(sandboxID)
+		}
+	}
+}
+
+// restartLoopStep tells restartLoop whether it still owns the sandbox.
+type restartLoopStep int
+
+const (
+	restartLoopAgain restartLoopStep = iota
+	restartLoopDone
+)
+
+// runOneRestart runs a single rebuild attempt. Caller must hold a restart slot.
+func (m *restartMgr) runOneRestart(ctx context.Context, sandboxID string, req *cubebox.RunCubeSandboxRequest) restartLoopStep {
+	// Re-check pause/delete state after waiting for a slot.
+	if cb, err := m.store.Get(ctx, sandboxID); err == nil && cb != nil {
+		if cb.IsPaused() || cb.UserMarkDeletedTime != nil {
+			return restartLoopDone
+		}
+	}
+	m.setState(sandboxID, restartpolicy.StateRestarting, 0)
+	if m.restarter == nil {
+		log.G(ctx).Errorf("restart: sandbox %s has no restarter", sandboxID)
+		return restartLoopDone
+	}
+	rsp, class, err := m.restarter.restartClassified(ctx, req)
+	if err != nil {
+		m.dropQueued(sandboxID)
+		log.G(ctx).Errorf("restart: sandbox %s failed: %v", sandboxID, err)
+		return restartLoopAgain
+	}
+	switch class {
+	case restartStop:
+		return restartLoopDone
+	case restartLockBusy:
+		// Busy or concurrency-limited; retry without spending retry budgets.
+		m.dropQueued(sandboxID)
+		return restartLoopAgain
+	case restartDestroyUnrecoverable:
+		m.dropQueued(sandboxID)
+		m.setState(sandboxID, restartpolicy.StateGaveUp, 0)
+		m.Stop(sandboxID)
+		return restartLoopDone
+	case restartDestroyRetryable:
+		m.dropQueued(sandboxID)
+		if m.addDestroyFail(sandboxID) >= maxRetainedDestroyAttempts {
 			m.setState(sandboxID, restartpolicy.StateGaveUp, 0)
 			m.Stop(sandboxID)
-			return
-		case restartDestroyRetryable:
-			m.dropQueued(sandboxID)
-			if m.addDestroyFail(sandboxID) >= maxRetainedDestroyAttempts {
-				m.setState(sandboxID, restartpolicy.StateGaveUp, 0)
-				m.Stop(sandboxID)
-				return
-			}
-			msg := ""
-			if rsp != nil && rsp.GetRet() != nil {
-				msg = rsp.GetRet().GetRetMsg()
-			}
-			log.G(ctx).Errorf("restart: sandbox %s destroy failed: %s", sandboxID, msg)
-			continue
-		case restartOK:
-			if q := m.takeQueued(sandboxID); q != nil {
-				if !restartpolicy.ShouldRestart(req.GetRestartPolicy(), q.reason) {
-					m.clearDestroySuppress(sandboxID)
-					m.writeTerminal(sandboxID, q.code, q.reason, true)
-					m.Stop(sandboxID)
-					return
-				}
-				exitCode, reason = q.code, q.reason
-				m.noteExit(sandboxID, exitCode, reason)
-				continue
-			}
-			m.clearDestroySuppress(sandboxID)
-			m.setState(sandboxID, restartpolicy.StateRunning, 0)
-			m.Start(sandboxID, req)
-			return
-		default:
-			m.dropQueued(sandboxID)
-			msg := ""
-			if rsp != nil && rsp.GetRet() != nil {
-				msg = rsp.GetRet().GetRetMsg()
-			}
-			log.G(ctx).Errorf("restart: sandbox %s failed: %s", sandboxID, msg)
-			continue
+			return restartLoopDone
 		}
+		msg := ""
+		if rsp != nil && rsp.GetRet() != nil {
+			msg = rsp.GetRet().GetRetMsg()
+		}
+		log.G(ctx).Errorf("restart: sandbox %s destroy failed: %s", sandboxID, msg)
+		return restartLoopAgain
+	case restartOK:
+		if q := m.takeQueued(sandboxID); q != nil {
+			if !restartpolicy.ShouldRestart(req.GetRestartPolicy(), q.reason) {
+				m.clearDestroySuppress(sandboxID)
+				m.writeTerminal(sandboxID, q.code, q.reason, true)
+				m.Stop(sandboxID)
+				return restartLoopDone
+			}
+			// Keep destroy suppression armed until the next attempt finishes.
+			m.noteExit(sandboxID, q.code, q.reason)
+			return restartLoopAgain
+		}
+		m.clearDestroySuppress(sandboxID)
+		m.setState(sandboxID, restartpolicy.StateRunning, 0)
+		m.Start(sandboxID, req)
+		return restartLoopDone
+	default:
+		m.dropQueued(sandboxID)
+		msg := ""
+		if rsp != nil && rsp.GetRet() != nil {
+			msg = rsp.GetRet().GetRetMsg()
+		}
+		log.G(ctx).Errorf("restart: sandbox %s failed: %s", sandboxID, msg)
+		return restartLoopAgain
 	}
 }
 

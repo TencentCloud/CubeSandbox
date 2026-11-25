@@ -562,6 +562,7 @@ func resetSandboxStatusAfterRollback(cb *cubeboxstore.CubeBox) {
 			s.Reason = ""
 			s.Message = ""
 			s.Unknown = false
+			s.ExitUnobserved = false
 			s.PausedAt = 0
 			s.PausingAt = 0
 			if s.StartedAt == 0 {
