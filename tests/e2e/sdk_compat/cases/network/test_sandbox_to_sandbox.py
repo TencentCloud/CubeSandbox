@@ -30,15 +30,16 @@ paths. No public internet is needed.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import shlex
+import socket
 import time
 from dataclasses import replace
 from urllib.parse import urlparse
 
 import pytest
-
 from adapters import create_adapter_with_capacity_retry
 from framework.assertions import assert_command_ok
 from framework.build_throttle import template_build_slot
@@ -204,19 +205,28 @@ def _first_non_loopback_ipv4() -> str:
 
 
 def _proxy_node_ip(config: SdkE2EConfig) -> str:
-    """CubeProxy address as seen from INSIDE a sandbox."""
+    """CubeProxy IP address as seen from INSIDE a sandbox."""
     # A loopback CUBE_PROXY_NODE_IP is meaningful only for host-side clients
     # (e.g. test_mask_request_host); inside a sandbox it points at the sandbox
     # itself, so treat it as unset and fall through to derivation.
-    if config.cube_proxy_node_ip and config.cube_proxy_node_ip not in (
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    ):
-        return config.cube_proxy_node_ip
-    host = urlparse(config.cube_api_url).hostname or ""
-    if host and host not in ("127.0.0.1", "localhost", "::1"):
-        return host
+    candidate = config.cube_proxy_node_ip or ""
+    if candidate in ("127.0.0.1", "localhost", "::1"):
+        candidate = ""
+    if not candidate:
+        host = urlparse(config.cube_api_url).hostname or ""
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            candidate = host
+    if candidate:
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            try:
+                return socket.gethostbyname(candidate)
+            except OSError:
+                pytest.skip(
+                    f"CubeProxy hostname {candidate!r} could not be resolved to "
+                    "an IPv4 address for the sandbox egress allow-list"
+                )
     # Same fallback as the quickstart scripts: a loopback API URL means the
     # runner is on the node itself, so its egress IP is the proxy address.
     try:
@@ -341,86 +351,110 @@ def _sandbox_host_id(sandbox) -> str:
 
 
 def test_cubeproxy_host_routing_between_sandboxes(
-    sdk_sandbox, sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
+    sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
 ):
     """A reaches B's HTTP service through CubeProxy Host-header routing."""
     if not s2s_expose_template_id:
         pytest.skip("CubeProxy cases require a CubeSandbox template build")
     proxy_ip = _proxy_node_ip(sdk_e2e_config)
-    # B carries SERVICE_PORT in --expose-port so the route also resolves when
-    # A and B land on different nodes (CubeProxy's cross-host path dials the
-    # host-port mapping, which only exists for declared ports).
-    sandbox_b = _create_sandbox(
-        sdk_backend, sdk_e2e_config, request, template_id=s2s_expose_template_id
+    # The proxy node IP may fall inside the built-in always-denied private
+    # ranges, so make this test independent of the deployment's address space.
+    sandbox_a = _create_sandbox(
+        sdk_backend,
+        sdk_e2e_config,
+        request,
+        create_options={"network": {"allow_out": [proxy_ip]}},
     )
     try:
-        _start_marker_http_server(sandbox_b, sdk_e2e_config)
+        # B carries SERVICE_PORT in --expose-port so the route also resolves
+        # when A and B land on different nodes (CubeProxy's cross-host path
+        # dials the host-port mapping, which only exists for declared ports).
+        sandbox_b = _create_sandbox(
+            sdk_backend, sdk_e2e_config, request, template_id=s2s_expose_template_id
+        )
+        try:
+            _start_marker_http_server(sandbox_b, sdk_e2e_config)
 
-        host = sandbox_b.get_host(SERVICE_PORT)
-        url = f"http://{host}:{sdk_e2e_config.cube_proxy_port_http}/"
-        rc, code, body = _curl_until_ready(
-            sdk_sandbox,
-            sdk_e2e_config,
-            url,
-            resolve=(host, sdk_e2e_config.cube_proxy_port_http, proxy_ip),
-        )
-        assert code == "200", (
-            f"CubeProxy should route {host} to B's service; rc={rc} code={code!r} "
-            f"body={body[:120]!r}"
-        )
-        assert SERVICE_BODY in body, (
-            f"response should come from B's service; body={body[:120]!r}"
-        )
+            host = sandbox_b.get_host(SERVICE_PORT)
+            url = f"http://{host}:{sdk_e2e_config.cube_proxy_port_http}/"
+            rc, code, body = _curl_until_ready(
+                sandbox_a,
+                sdk_e2e_config,
+                url,
+                resolve=(host, sdk_e2e_config.cube_proxy_port_http, proxy_ip),
+            )
+            assert code == "200", (
+                f"CubeProxy should route {host} to B's service; rc={rc} "
+                f"code={code!r} body={body[:120]!r}"
+            )
+            assert SERVICE_BODY in body, (
+                f"response should come from B's service; body={body[:120]!r}"
+            )
+        finally:
+            safe_kill(sandbox_b, sdk_e2e_config)
     finally:
-        safe_kill(sandbox_b, sdk_e2e_config)
+        safe_kill(sandbox_a, sdk_e2e_config)
 
 
 def test_cubeproxy_host_routing_requires_token_when_public_access_restricted(
-    sdk_sandbox, sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
+    sdk_backend, sdk_e2e_config, s2s_expose_template_id, request
 ):
     """B with allow_public_traffic=False: no token gets 403, B's token gets 200."""
     if not s2s_expose_template_id:
         pytest.skip("CubeProxy cases require a CubeSandbox template build")
     proxy_ip = _proxy_node_ip(sdk_e2e_config)
-    sandbox_b = _create_sandbox(
+    sandbox_a = _create_sandbox(
         sdk_backend,
         sdk_e2e_config,
         request,
-        template_id=s2s_expose_template_id,
-        create_options={"network": {"allow_public_traffic": False}},
+        create_options={"network": {"allow_out": [proxy_ip]}},
     )
     try:
-        token = sandbox_b.traffic_access_token()
-        assert token, "restricted public access should issue a traffic token"
-        _start_marker_http_server(sandbox_b, sdk_e2e_config)
-
-        host = sandbox_b.get_host(SERVICE_PORT)
-        url = f"http://{host}:{sdk_e2e_config.cube_proxy_port_http}/"
-        resolve = (host, sdk_e2e_config.cube_proxy_port_http, proxy_ip)
-
-        # Retry until the proxy's token gate answers 403 (a 502 would mean
-        # B's service is still starting and says nothing about auth).
-        rc, code, _ = _curl_until_ready(
-            sdk_sandbox, sdk_e2e_config, url, resolve=resolve, expected_codes=("403",)
-        )
-        assert code == "403", (
-            f"request without a traffic token should be rejected with 403; "
-            f"rc={rc} code={code!r}"
-        )
-
-        rc, code, body = _curl_until_ready(
-            sdk_sandbox,
+        sandbox_b = _create_sandbox(
+            sdk_backend,
             sdk_e2e_config,
-            url,
-            resolve=resolve,
-            headers=(f"e2b-traffic-access-token: {token}",),
+            request,
+            template_id=s2s_expose_template_id,
+            create_options={"network": {"allow_public_traffic": False}},
         )
-        assert rc == 0 and code == "200" and SERVICE_BODY in body, (
-            f"request with B's traffic token should succeed; "
-            f"rc={rc} code={code!r} body={body[:120]!r}"
-        )
+        try:
+            token = sandbox_b.traffic_access_token()
+            assert token, "restricted public access should issue a traffic token"
+            _start_marker_http_server(sandbox_b, sdk_e2e_config)
+
+            host = sandbox_b.get_host(SERVICE_PORT)
+            url = f"http://{host}:{sdk_e2e_config.cube_proxy_port_http}/"
+            resolve = (host, sdk_e2e_config.cube_proxy_port_http, proxy_ip)
+
+            # Retry until the proxy's token gate answers 403 (a 502 would mean
+            # B's service is still starting and says nothing about auth).
+            rc, code, _ = _curl_until_ready(
+                sandbox_a,
+                sdk_e2e_config,
+                url,
+                resolve=resolve,
+                expected_codes=("403",),
+            )
+            assert code == "403", (
+                f"request without a traffic token should be rejected with 403; "
+                f"rc={rc} code={code!r}"
+            )
+
+            rc, code, body = _curl_until_ready(
+                sandbox_a,
+                sdk_e2e_config,
+                url,
+                resolve=resolve,
+                headers=(f"e2b-traffic-access-token: {token}",),
+            )
+            assert rc == 0 and code == "200" and SERVICE_BODY in body, (
+                f"request with B's traffic token should succeed; "
+                f"rc={rc} code={code!r} body={body[:120]!r}"
+            )
+        finally:
+            safe_kill(sandbox_b, sdk_e2e_config)
     finally:
-        safe_kill(sandbox_b, sdk_e2e_config)
+        safe_kill(sandbox_a, sdk_e2e_config)
 
 
 def test_host_port_mapping_between_sandboxes(
@@ -473,7 +507,16 @@ def test_host_port_mapping_same_node_hairpin(
         sdk_backend, sdk_e2e_config, request, template_id=s2s_expose_template_id
     )
     try:
-        sandbox_a = _create_sandbox(sdk_backend, sdk_e2e_config, request)
+        _start_marker_http_server(sandbox_b, sdk_e2e_config)
+        endpoint = _wait_host_port_endpoint(sandbox_b, sdk_e2e_config)
+        node_ip = endpoint.split(":")[0]
+        sandbox_a = _create_sandbox(
+            sdk_backend,
+            sdk_e2e_config,
+            request,
+            # Private node address spaces are denied by default.
+            create_options={"network": {"allow_out": [node_ip]}},
+        )
         try:
             a_host = _sandbox_host_id(sandbox_a)
             b_host = _sandbox_host_id(sandbox_b)
@@ -484,8 +527,6 @@ def test_host_port_mapping_same_node_hairpin(
                     f"same-node hairpin requires co-located A/B; got A={a_host} B={b_host}"
                 )
 
-            _start_marker_http_server(sandbox_b, sdk_e2e_config)
-            endpoint = _wait_host_port_endpoint(sandbox_b, sdk_e2e_config)
             rc, code, body = _curl_until_ready(
                 sandbox_a, sdk_e2e_config, f"http://{endpoint}/"
             )
