@@ -38,7 +38,7 @@ type pauseSnapshotConfig struct {
 	DestinationURL string  `json:"destination_url"`
 	MemoryVolURL   *string `json:"memory_vol_url,omitempty"`
 	// SnapshotType is the same wire value CommitSandbox passes to
-	// cube-runtime (--snapshot-type): soft-dirty, incremental, or full.
+	// cube-runtime (--snapshot-type): soft-dirty, incremental, sparse-full, or full.
 	SnapshotType string `json:"snapshot_type,omitempty"`
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 // TestErrNoBaseMemoryForIncrementalIsSentinel locks in that
@@ -428,7 +429,7 @@ func TestPrepareCommitMemoryArtifactFullWhenImportedEmpty(t *testing.T) {
 
 	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
 	require.NoError(t, err)
-	assert.Equal(t, snapshotTypeFull, snapType)
+	assert.Equal(t, snapshotTypeSparseFull, snapType)
 	assert.Equal(t, "empty-snap-new", obj.Name)
 }
 
@@ -447,6 +448,48 @@ func TestPrepareCommitMemoryArtifact2bCloneFailFallsToFull(t *testing.T) {
 
 	obj, snapType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "snap-new", 4096, "s3")
 	require.NoError(t, err)
-	assert.Equal(t, snapshotTypeFull, snapType, "2b clone failure must fall through like Pause")
+	assert.Equal(t, snapshotTypeSparseFull, snapType, "2b clone failure must fall through like Pause")
 	assert.Equal(t, "empty-snap-new", obj.Name)
+}
+
+func TestPrepareCommitAndPauseFallbackUseSparseFullAcrossBackends(t *testing.T) {
+	for _, backend := range []string{cow.BackendXFS, cow.BackendJFS, cow.BackendS3} {
+		t.Run(backend, func(t *testing.T) {
+			installCommitMemoryTestHooks(t)
+			cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb-cold-" + backend}}
+			resolveBaseMemoryObjectFn = func(context.Context, *cubeboxstore.CubeBox, string) (*storage.CowSnapshotObject, error) {
+				return nil, ErrNoBaseMemoryForIncremental
+			}
+			resolveRestoreBaseMemoryObjectFn = func(context.Context, *cubeboxstore.CubeBox, string) (*storage.CowSnapshotObject, error) {
+				return nil, ErrNoBaseMemoryForIncremental
+			}
+			getImportedSandboxMemoryFor = func(context.Context, string, string) (*storage.CowSnapshotObject, error) {
+				return nil, nil
+			}
+			commitMemoryFromBaseFor = func(context.Context, string, *storage.CowSnapshotObject, string, uint64) (*storage.CowSnapshotObject, error) {
+				t.Fatalf("cold sandbox on %s must not clone base memory", backend)
+				return nil, nil
+			}
+			var backendsSeen []string
+			createMemoryVolumeFor = func(_ context.Context, gotBackend, id string, _ uint64) (*storage.CowSnapshotObject, error) {
+				backendsSeen = append(backendsSeen, gotBackend)
+				return &storage.CowSnapshotObject{Name: "sparse-" + id, Kind: storage.CowKindVolume}, nil
+			}
+
+			commitObj, commitType, err := prepareCommitMemoryArtifact(
+				context.Background(), log.G(context.Background()), cb, "snap-commit-"+backend, 4096, backend,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, snapshotTypeSparseFull, commitType)
+			assert.Equal(t, "sparse-snap-commit-"+backend, commitObj.Name)
+
+			pauseObj, pauseType, err := preparePauseMemoryArtifact(
+				context.Background(), log.G(context.Background()), cb, "snap-pause-"+backend, "", 4096, backend,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, snapshotTypeSparseFull, pauseType)
+			assert.Equal(t, "sparse-snap-pause-"+backend, pauseObj.Name)
+			assert.Equal(t, []string{backend, backend}, backendsSeen)
+		})
+	}
 }

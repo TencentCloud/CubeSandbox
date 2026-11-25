@@ -111,6 +111,14 @@ pub enum SnapshotType {
     /// Full snapshot - saves complete VM memory
     #[default]
     Full,
+    /// Sparse full snapshot - captures a full standalone snapshot without a base
+    /// image by scanning residency/backing data and skipping large zero holes.
+    ///
+    /// Precondition: the destination file or external `memory_vol_url` target
+    /// must be freshly created / zero-initialized because skipped zero ranges
+    /// are not overwritten.
+    #[serde(rename = "sparse-full")]
+    SparseFull,
     /// Incremental snapshot - only saves CoW anonymous pages, classified from
     /// pagemap bit 61 (`PM_FILE`)
     Incremental,
@@ -127,6 +135,7 @@ impl std::fmt::Display for SnapshotType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SnapshotType::Full => write!(f, "full"),
+            SnapshotType::SparseFull => write!(f, "sparse-full"),
             SnapshotType::Incremental => write!(f, "incremental"),
             SnapshotType::SoftDirty => write!(f, "soft-dirty"),
         }
@@ -139,10 +148,11 @@ impl std::str::FromStr for SnapshotType {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "full" => Ok(SnapshotType::Full),
+            "sparse-full" => Ok(SnapshotType::SparseFull),
             "incremental" => Ok(SnapshotType::Incremental),
             "soft-dirty" => Ok(SnapshotType::SoftDirty),
             _ => Err(format!(
-                "Invalid snapshot type: '{}'. Valid values are 'full', 'incremental' or 'soft-dirty'",
+                "Invalid snapshot type: '{}'. Valid values are 'full', 'sparse-full', 'incremental' or 'soft-dirty'",
                 s
             )),
         }
@@ -385,5 +395,31 @@ mod snapshot_config_tests {
         )
         .unwrap();
         assert!(!config.include_memory);
+    }
+
+    #[test]
+    fn snapshot_type_sparse_full_display_fromstr_and_serde_roundtrip() {
+        use std::str::FromStr;
+
+        assert_eq!(SnapshotType::SparseFull.to_string(), "sparse-full");
+        assert_eq!(
+            SnapshotType::from_str("sparse-full").unwrap(),
+            SnapshotType::SparseFull
+        );
+        assert_eq!(
+            SnapshotType::from_str("SPARSE-FULL").unwrap(),
+            SnapshotType::SparseFull
+        );
+
+        let json = serde_json::to_string(&SnapshotType::SparseFull).unwrap();
+        assert_eq!(json, r#""sparse-full""#);
+        let parsed: SnapshotType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SnapshotType::SparseFull);
+
+        let cfg: SnapshotConfig = serde_json::from_str(
+            r#"{"destination_url":"file:///tmp/snap","snapshot_type":"sparse-full"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.snapshot_type, SnapshotType::SparseFull);
     }
 }

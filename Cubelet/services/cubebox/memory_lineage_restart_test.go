@@ -52,7 +52,7 @@ func TestRestartedSandboxHasNoMemoryBase(t *testing.T) {
 		context.Background(), log.G(context.Background()), restarted, "snap-after", 4096, "xfs",
 	)
 	require.NoError(t, err)
-	assert.Equal(t, snapshotTypeFull, snapType)
+	assert.Equal(t, snapshotTypeSparseFull, snapType)
 	assert.Equal(t, "full-snap-after", obj.Name)
 }
 
@@ -109,7 +109,7 @@ func TestRestartThenPauseDoesNotClonePreRestartOwnVolume(t *testing.T) {
 		"snap-pause-after-restart", priorPause, 4096, "s3",
 	)
 	require.NoError(t, err)
-	assert.Equal(t, snapshotTypeFull, snapType)
+	assert.Equal(t, snapshotTypeSparseFull, snapType)
 	assert.Equal(t, "full-snap-pause-after-restart", obj.Name)
 }
 
@@ -346,7 +346,7 @@ func TestPauseRejectsImportedVolumeWhenRestoreBaseIsNotLiveBase(t *testing.T) {
 				"snap-pause-reject", tc.priorPause, 4096, "s3",
 			)
 			require.NoError(t, err)
-			assert.Equal(t, snapshotTypeFull, snapType, tc.description)
+			assert.Equal(t, snapshotTypeSparseFull, snapType, tc.description)
 			assert.Equal(t, "full-snap-pause-reject", obj.Name)
 		})
 	}
@@ -380,7 +380,7 @@ func TestPauseRejectsRolledBackSandboxEvenWhenRestoreMatchesPause(t *testing.T) 
 		target, target, 4096, "s3",
 	)
 	require.NoError(t, err)
-	assert.Equal(t, snapshotTypeFull, snapType)
+	assert.Equal(t, snapshotTypeSparseFull, snapType)
 	assert.Equal(t, "full-"+target, obj.Name)
 }
 

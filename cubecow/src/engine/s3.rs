@@ -387,16 +387,39 @@ impl Engine for S3Engine {
             },
         );
 
-        let rpc_res = self.rpc.call_typed(
-            "rcow_create_lvol",
-            &serde_json::json!({
-                "lvol_name": name,
-                "size_gib": size_gib,
-            }),
-        );
-        let rpc_res = match rpc_res {
+        // Never adopt an orphan SPDK lvol when `cubecow`'s index had no entry for `name`:
+        // an orphan may contain stale blocks, whereas callers (including sparse-full
+        // memory snapshots) rely on freshly created volumes reading back as zero.
+        // Because `idx` is write-locked and verified absent for `name`, perform one
+        // bounded deactivate + delete + recreate retry on `AlreadyExists` so a crash
+        // orphan does not permanently wedge subsequent retries for the same name.
+        let create_params = serde_json::json!({
+            "lvol_name": name,
+            "size_gib": size_gib,
+        });
+        let rpc_res = match self.rpc.call_typed("rcow_create_lvol", &create_params) {
             Ok(v) => Ok(v),
-            Err(CubecowError::AlreadyExists(_)) => Ok(serde_json::Value::Null),
+            Err(CubecowError::AlreadyExists(_)) => {
+                warn!(
+                    volume = name,
+                    "orphan SPDK lvol detected outside cubecow index; deleting and recreating"
+                );
+                let _ = self.rpc.call_typed(
+                    "rcow_deactive_bdev",
+                    &serde_json::json!({ "device_name": name }),
+                );
+                match self.rpc.call_typed(
+                    "rcow_delete_lvol",
+                    &serde_json::json!({ "lvol_name": name }),
+                ) {
+                    Ok(_) | Err(CubecowError::NotFound(_)) => {
+                        self.rpc.call_typed("rcow_create_lvol", &create_params)
+                    }
+                    Err(del_err) => Err(CubecowError::AlreadyExists(format!(
+                        "orphan SPDK lvol '{name}' exists outside cubecow index and could not be deleted: {del_err}"
+                    ))),
+                }
+            }
             Err(e) => Err(e),
         };
         if let Err(e) = rpc_res {
@@ -2072,5 +2095,204 @@ mod tests {
             server.join().unwrap();
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn create_volume_recreates_orphan_lvol_on_already_exists_without_adopting() {
+        use crate::engine::Engine;
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("cc-create-recreate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("rpc");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let cfg = S3Config {
+            socket_path: sock.clone(),
+            state_dir: dir.clone(),
+            rpc_timeout_ms: 2_000,
+            rpc_connect_budget_ms: 2_000,
+            size_policy: "round_up".into(),
+        };
+        let engine = S3Engine {
+            rpc: Arc::new(JsonRpcClient::new(
+                sock,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )),
+            cfg,
+            name_index: RwLock::new(HashMap::new()),
+            metrics: Arc::new(MetricsCollector::new()),
+        };
+
+        let server = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            let mut create_calls = 0usize;
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let method = request["method"].as_str().unwrap_or("").to_string();
+                methods.push(method.clone());
+                let reply = match method.as_str() {
+                    "rcow_create_lvol" if create_calls == 0 => {
+                        create_calls += 1;
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "error": {"code": -17, "message": "lvol already exists"},
+                        })
+                    }
+                    "rcow_create_lvol" => {
+                        create_calls += 1;
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "result": "uuid-fresh",
+                        })
+                    }
+                    "rcow_deactive_bdev" | "rcow_delete_lvol" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": true,
+                    }),
+                    "rcow_active_bdev" | "rcow_get_bdev" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {
+                            "string_value": r#"{"device_name":"orphan-vol","uuid":"u","nqn":"nqn.test","subsys":1,"nsid":1,"device_path":"/dev/nvme0n1"}"#,
+                        },
+                    }),
+                    _ => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": true,
+                    }),
+                };
+                writeln!(stream, "{reply}").unwrap();
+                stream.flush().unwrap();
+            }
+            methods
+        });
+
+        let vol = engine.create_volume("orphan-vol", BYTES_PER_GIB).unwrap();
+        assert_eq!(vol.name, "orphan-vol");
+        assert_eq!(vol.device_path, "/dev/nvme0n1");
+        assert!(engine.name_index.read().unwrap().contains_key("orphan-vol"));
+        assert!(load_index_file(&dir).unwrap().contains_key("orphan-vol"));
+
+        drop(engine);
+        let methods = server.join().unwrap();
+        assert_eq!(
+            methods,
+            vec![
+                "rcow_create_lvol".to_string(),
+                "rcow_deactive_bdev".to_string(),
+                "rcow_delete_lvol".to_string(),
+                "rcow_create_lvol".to_string(),
+                "rcow_active_bdev".to_string(),
+                "rcow_get_bdev".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn create_volume_fails_cleanly_when_orphan_lvol_cannot_be_deleted() {
+        use crate::engine::Engine;
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("cc-create-dup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("rpc");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let cfg = S3Config {
+            socket_path: sock.clone(),
+            state_dir: dir.clone(),
+            rpc_timeout_ms: 2_000,
+            rpc_connect_budget_ms: 2_000,
+            size_policy: "round_up".into(),
+        };
+        let engine = S3Engine {
+            rpc: Arc::new(JsonRpcClient::new(
+                sock,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )),
+            cfg,
+            name_index: RwLock::new(HashMap::new()),
+            metrics: Arc::new(MetricsCollector::new()),
+        };
+
+        let server = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let method = request["method"].as_str().unwrap_or("").to_string();
+                methods.push(method.clone());
+                let reply = match method.as_str() {
+                    "rcow_create_lvol" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -17, "message": "lvol already exists"},
+                    }),
+                    "rcow_deactive_bdev" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": true,
+                    }),
+                    _ => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -16, "message": "device or resource busy"},
+                    }),
+                };
+                writeln!(stream, "{reply}").unwrap();
+                stream.flush().unwrap();
+            }
+            methods
+        });
+
+        let res = engine.create_volume("orphan-vol", BYTES_PER_GIB);
+        match res {
+            Err(CubecowError::AlreadyExists(msg)) => {
+                assert!(
+                    msg.contains("orphan-vol"),
+                    "error message should name orphan lvol, got: {msg}"
+                );
+            }
+            other => panic!("expected AlreadyExists naming orphan lvol, got {other:?}"),
+        }
+        assert!(!engine.name_index.read().unwrap().contains_key("orphan-vol"));
+        assert!(!load_index_file(&dir).unwrap().contains_key("orphan-vol"));
+
+        drop(engine);
+        let methods = server.join().unwrap();
+        assert_eq!(
+            methods,
+            vec![
+                "rcow_create_lvol".to_string(),
+                "rcow_deactive_bdev".to_string(),
+                "rcow_delete_lvol".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

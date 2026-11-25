@@ -200,8 +200,9 @@ func resolveMemoryObjectFromSnapshotID(ctx context.Context, backend, snapshotID 
 //  3. Last-restore catalog. Resume keeps the pause package so this Pause
 //     can incremental-overlay onto that image; Cubelet GCs the old
 //     package after this Pause succeeds (or on Destroy).
-//  4. Full dump into an empty volume when no catalog/volume base is
-//     left (template gone, or an S3 own-volume clone that failed).
+//  4. Sparse-full dump into an empty volume when no catalog/volume base is
+//     left (template gone, cold boot, restart, or an S3 own-volume clone
+//     that failed).
 func preparePauseMemoryArtifact(
 	ctx context.Context,
 	stepLog *log.CubeWrapperLogEntry,
@@ -287,8 +288,8 @@ func preparePauseMemoryArtifact(
 		return nil, "", createErr
 	}
 	stepLog.Infof("pause memory artifact: created empty memory volume %s/%s, snapshot type=%s",
-		memoryObject.Name, memoryObject.Kind, snapshotTypeFull)
-	return memoryObject, snapshotTypeFull, nil
+		memoryObject.Name, memoryObject.Kind, snapshotTypeSparseFull)
+	return memoryObject, snapshotTypeSparseFull, nil
 }
 
 // prepareCommitMemoryArtifact returns the cubecow memory object that
@@ -329,11 +330,11 @@ func preparePauseMemoryArtifact(
 // restore-base and opaque resume clears it; both leave a stale import that
 // must not become a pagemap_anon dest.
 //
-// Tier 3 — full + fresh empty volume. The last-resort fallback when even
-// the last-restore base file is gone (e.g. the source template was deleted
-// while the VM kept running). cube-runtime writes the entire memory image
-// onto a fresh sparse file; correct in all cases but the costliest, hence
-// only used when neither delta path can resolve a base.
+// Tier 3 — sparse-full + fresh empty volume. The last-resort fallback when
+// even the last-restore base file is gone (e.g. fs-only cold boot, restart,
+// or deleted source template). VMM skips unmapped and all-zero chunks when
+// writing into the fresh empty volume, avoiding full-quota writes while
+// producing the same logical memory image.
 //
 // Non-sentinel errors propagate unchanged so genuine infrastructure
 // failures surface to the caller.
@@ -407,16 +408,16 @@ func prepareCommitMemoryArtifact(
 			live.Name, err)
 	}
 
-	// ─── Tier 3: full + fresh empty volume ────────────────────────────
+	// ─── Tier 3: sparse-full + fresh empty volume ─────────────────────
 	stepLog.Warnf("memory artifact: both previous-snapshot base (%v) and last-restore base (%v) "+
-		"unavailable; falling back to full snapshot", baseErr, restoreErr)
+		"unavailable; falling back to sparse-full snapshot", baseErr, restoreErr)
 	memoryObject, err := createMemoryVolumeFor(ctx, backend, templateID, memorySizeBytes)
 	if err != nil {
 		return nil, "", err
 	}
 	stepLog.Infof("memory artifact: created empty memory volume %s/%s, snapshot type=%s",
-		memoryObject.Name, memoryObject.Kind, snapshotTypeFull)
-	return memoryObject, snapshotTypeFull, nil
+		memoryObject.Name, memoryObject.Kind, snapshotTypeSparseFull)
+	return memoryObject, snapshotTypeSparseFull, nil
 }
 
 func snapshotBaseDisappeared(err error) bool {

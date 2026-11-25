@@ -447,6 +447,11 @@ func TestNewPauseSnapshotConfigCarriesSnapshotType(t *testing.T) {
 		t.Fatalf("roundtrip snapshot_type=%q", got.SnapshotType)
 	}
 
+	sparse := newPauseSnapshotConfig("/data/snap/pause-1", "file:///dev/cubecow/mem1", snapshotTypeSparseFull)
+	if sparse.SnapshotType != snapshotTypeSparseFull {
+		t.Fatalf("sparse snapshot_type=%q", sparse.SnapshotType)
+	}
+
 	empty := newPauseSnapshotConfig("/data/snap/pause-1", "", "")
 	if empty.MemoryVolURL != nil {
 		t.Fatalf("empty mem url should omit pointer, got %v", empty.MemoryVolURL)

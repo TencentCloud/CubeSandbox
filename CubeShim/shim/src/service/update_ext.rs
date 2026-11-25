@@ -111,9 +111,9 @@ struct PauseSnapshotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_vol_url: Option<String>,
 
-    /// Same values as cube-runtime `--snapshot-type`: `full`, `incremental`,
-    /// `soft-dirty`. Missing / empty / unknown defaults to Full so older
-    /// Cubelets keep the historical full dump.
+    /// Same values as cube-runtime `--snapshot-type`: `full`, `sparse-full`,
+    /// `incremental`, `soft-dirty`. Missing / empty / unknown defaults to Full
+    /// so older Cubelets keep the historical full dump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_type: Option<String>,
 }
@@ -497,6 +497,10 @@ mod tests {
         assert_eq!(
             parse_pause_snapshot_type(cfg.snapshot_type.as_deref()),
             SnapshotType::SoftDirty
+        );
+        assert_eq!(
+            parse_pause_snapshot_type(Some("sparse-full")),
+            SnapshotType::SparseFull
         );
         assert_eq!(
             parse_pause_snapshot_type(Some("incremental")),

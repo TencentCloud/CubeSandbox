@@ -105,7 +105,8 @@ subcommands selects how guest RAM is captured. The other snapshot artifacts
 
 | Type | What gets saved to `memory-ranges` | When to use |
 |------|------------------------------------|-------------|
-| `full` | Every byte of guest RAM. | First snapshot after VM start, or any time you need a self-contained image. |
+| `full` | Every byte of guest RAM. | First snapshot after VM start, or any time you need a legacy full sequential write. |
+| `sparse-full` | Non-zero guest RAM chunks; unallocated pages and `>= 64 KiB` all-zero chunks are skipped on freshly zero-initialized targets (preserving `SEEK_DATA` baseline regions on restored `MAP_PRIVATE` VMs). | Standalone full snapshots without a reflink base (e.g. cold-booted / `fs-only` VMs) to avoid full-quota zero allocation. |
 | `incremental` | Only **CoW anonymous** pages (pages the guest has written to since the original `MAP_PRIVATE` mmap was set up). Detected from `/proc/self/pagemap` bit 61 (`PM_FILE`). | Cheap "second" snapshot when a base file already exists. The set of saved pages monotonically grows over the VM's lifetime — every page ever touched is in the delta. |
 | `soft-dirty` | Only the pages written **since the previous `soft-dirty` snapshot** (a true delta). Detected via `/proc/self/clear_refs` + pagemap bit 55. | Repeated incremental snapshots on a long-running VM, where most pages are not touched between cycles. |
 

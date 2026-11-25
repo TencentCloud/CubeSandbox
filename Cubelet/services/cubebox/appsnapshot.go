@@ -734,6 +734,11 @@ func (s *service) getCubeboxSnapshotSpec(ctx context.Context, sandboxID string) 
 // (the historical default).
 const snapshotTypeFull = "full"
 
+// snapshotTypeSparseFull asks the VM to capture a standalone memory image
+// without a base by scanning residency/backing data and skipping large
+// zero holes on a freshly zero-initialized destination.
+const snapshotTypeSparseFull = "sparse-full"
+
 // snapshotTypeIncremental asks the VM to write only CoW anonymous pages
 // into the destination memory file, leaving non-anonymous regions to whatever
 // the destination file already contains (i.e. the reflink-cloned base).
@@ -746,7 +751,7 @@ const snapshotTypeIncremental = "incremental"
 // untouched-since-last-clear would read back as zero on restore. Cubelet
 // guarantees this precondition by reflink-cloning the binding base before
 // invoking the shim; if the base cannot be resolved, the caller falls
-// back to snapshotTypeFull instead.
+// back to snapshotTypeSparseFull instead.
 //
 // The host kernel needs CONFIG_MEM_SOFT_DIRTY=y for soft-dirty to do
 // anything useful; on kernels without it the hypervisor silently downgrades
@@ -759,6 +764,8 @@ const snapshotTypeSoftDirty = "soft-dirty"
 // snapshots.
 func normalizeSnapshotType(snapshotType string) string {
 	switch strings.TrimSpace(strings.ToLower(snapshotType)) {
+	case snapshotTypeSparseFull:
+		return snapshotTypeSparseFull
 	case snapshotTypeIncremental:
 		return snapshotTypeIncremental
 	case snapshotTypeSoftDirty:
@@ -768,6 +775,19 @@ func normalizeSnapshotType(snapshotType string) string {
 	default:
 		return snapshotTypeFull
 	}
+}
+
+// legacyCubeRuntimeSnapshotType unconditionally downgrades sparse-full to full
+// on the legacy `cube-runtime snapshot` CLI path (without probing the binary
+// version), keeping compatibility with older `cube-runtime` binaries that reject
+// unknown `--snapshot-type` values. The coordinated shim RPC path passes
+// `sparse-full` through directly.
+func legacyCubeRuntimeSnapshotType(snapshotType string) string {
+	normalized := normalizeSnapshotType(snapshotType)
+	if normalized == snapshotTypeSparseFull {
+		return snapshotTypeFull
+	}
+	return normalized
 }
 
 // buildCubeRuntimeSnapshotArgs is split out from executeCubeRuntimeSnapshot
@@ -780,7 +800,7 @@ func buildCubeRuntimeSnapshotArgs(sandboxID string, spec *CubeboxSnapshotSpec, s
 		"--vm-id", sandboxID,
 		"--path", snapshotPath,
 		"--force",
-		"--snapshot-type", normalizeSnapshotType(snapshotType),
+		"--snapshot-type", legacyCubeRuntimeSnapshotType(snapshotType),
 	}
 	if spec != nil {
 		if len(spec.Resource) > 0 {
@@ -806,7 +826,7 @@ func buildCubeRuntimeSnapshotArgs(sandboxID string, spec *CubeboxSnapshotSpec, s
 }
 
 func (s *service) executeCubeRuntimeSnapshot(ctx context.Context, sandboxID string, spec *CubeboxSnapshotSpec, snapshotPath, memoryVol, snapshotType string) error {
-	snapshotType = normalizeSnapshotType(snapshotType)
+	snapshotType = legacyCubeRuntimeSnapshotType(snapshotType)
 	stepLog := log.G(ctx).WithFields(CubeLog.Fields{
 		"sandboxID":    sandboxID,
 		"snapshotPath": snapshotPath,

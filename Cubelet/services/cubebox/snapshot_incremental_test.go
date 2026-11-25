@@ -16,6 +16,7 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 func TestNormalizeSnapshotTypeAcceptsKnownValues(t *testing.T) {
@@ -27,6 +28,10 @@ func TestNormalizeSnapshotTypeAcceptsKnownValues(t *testing.T) {
 		{"full", snapshotTypeFull},
 		{"FULL", snapshotTypeFull},
 		{" Full ", snapshotTypeFull},
+		{"sparse-full", snapshotTypeSparseFull},
+		{"Sparse-Full", snapshotTypeSparseFull},
+		{"SPARSE-FULL", snapshotTypeSparseFull},
+		{" sparse-full ", snapshotTypeSparseFull},
 		{"incremental", snapshotTypeIncremental},
 		{"INCREMENTAL", snapshotTypeIncremental},
 		{"soft-dirty", snapshotTypeSoftDirty},
@@ -81,6 +86,32 @@ func TestBuildCubeRuntimeSnapshotArgsAlwaysIncludesSnapshotType(t *testing.T) {
 		require.GreaterOrEqual(t, idx, 0)
 		assert.Equal(t, snapshotTypeFull, args[idx+1])
 	})
+
+	t.Run("sparse-full downgraded to full for legacy cube-runtime CLI", func(t *testing.T) {
+		args := buildCubeRuntimeSnapshotArgs("sb-1", spec, "/tmp/s.tmp", "/dev/mapper/mem", snapshotTypeSparseFull)
+		idx := indexOf(args, "--snapshot-type")
+		require.GreaterOrEqual(t, idx, 0)
+		assert.Equal(t, snapshotTypeFull, args[idx+1])
+	})
+}
+
+func TestBuildFrozenSnapshotConfigPreservesSparseFull(t *testing.T) {
+	raw, err := buildFrozenSnapshotConfig(
+		"snap-sparse-1",
+		"/tmp/snap",
+		"/dev/cubecow/mem1",
+		snapshotTypeSparseFull,
+		"",
+		snapshotmode.Full,
+	)
+	require.NoError(t, err)
+
+	var cfg frozenSnapshotConfig
+	require.NoError(t, json.Unmarshal(raw, &cfg))
+	assert.Equal(t, "snap-sparse-1", cfg.SnapshotID)
+	assert.Equal(t, "/tmp/snap", cfg.DestinationURL)
+	assert.Equal(t, snapshotTypeSparseFull, cfg.SnapshotType)
+	assert.Equal(t, "file:///dev/cubecow/mem1", cfg.MemoryVolURL)
 }
 
 func TestBuildCubeRuntimeSnapshotArgsOmitsMemoryVolWhenEmpty(t *testing.T) {
