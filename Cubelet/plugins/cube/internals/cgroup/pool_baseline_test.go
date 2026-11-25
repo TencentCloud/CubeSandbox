@@ -66,8 +66,10 @@ func newBaselineTestPool(t *testing.T, size int, h handle.Interface) *cgPool {
 		poolV1Handle: h,
 		poolV2Handle: h,
 		poolV1: cgPoolV1{
-			allocator: allocator.NewAllocator[uint16](ranger),
-			cgRanger:  ranger,
+			enabled:     true,
+			prewarmSize: size + 1,
+			allocator:   allocator.NewAllocator[uint16](ranger),
+			cgRanger:    ranger,
 		},
 		dirtySet:            make(map[uint32]struct{}),
 		pendingSet:          make(map[uint32]struct{}),

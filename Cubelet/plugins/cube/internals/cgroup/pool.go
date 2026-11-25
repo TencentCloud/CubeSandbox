@@ -129,75 +129,103 @@ func (p *cgPool) init() error {
 	if p.triggerInterval <= 0 {
 		p.triggerInterval = time.Duration(defaultPoolTriggerIntervalInMs) * time.Millisecond
 	}
-	err = p.initPoolV1()
-	if err != nil {
-		p.mutex.Unlock()
-		return fmt.Errorf("init pool v1 failed: %w", err)
-	}
-
-	// The per-NUMA pool is bootstrapped only when Create can hand it out;
-	// otherwise the pre-created slots would never be used.
+	// Bootstrap only the pool that serves new sandboxes. Assignments from
+	// the other pool are tracked without touching their cgroups (#2393).
 	poolV2Enabled := p.isPoolV2Enabled()
+	p.poolV1.enabled = !poolV2Enabled
 	p.poolV2.enabled = poolV2Enabled
 	if poolV2Enabled {
-		if err := p.initPoolV2(); err != nil {
-			p.mutex.Unlock()
-			return fmt.Errorf("init pool v2 failed: %w", err)
-		}
+		err = p.initPoolV2()
+	} else {
+		err = p.initPoolV1()
+	}
+	if err != nil {
+		p.mutex.Unlock()
+		return fmt.Errorf("init active cgroup pool: %w", err)
 	}
 
-	var inUseV2 []uint32
 	for _, inuseCgIdBytes := range allUse {
-		inuseCgIdInt, err := strconv.Atoi(string(inuseCgIdBytes))
-		if err != nil || inuseCgIdInt < 0 {
+		id, parseErr := strconv.ParseUint(string(inuseCgIdBytes), 10, 32)
+		if parseErr != nil {
 			continue
 		}
-		inUse[uint32(inuseCgIdInt)] = struct{}{}
-		if inuseCgIdInt < CgPoolV1IdLimit {
-			p.poolV1.initialAssign(uint32(inuseCgIdInt))
+		fullID := uint32(id)
+		inUse[fullID] = struct{}{}
+		if fullID < CgPoolV1IdLimit {
+			if p.poolV1.enabled {
+				err = p.poolV1.initialAssign(fullID)
+			} else {
+				p.poolV1.trackLegacy(fullID)
+			}
 		} else if poolV2Enabled {
-			p.poolV2.initialAssign(uint32(inuseCgIdInt))
+			err = p.poolV2.initialAssign(fullID)
 		} else {
-			inUseV2 = append(inUseV2, uint32(inuseCgIdInt))
+			p.poolV2.trackLegacy(fullID)
+		}
+		if err != nil {
+			p.mutex.Unlock()
+			return fmt.Errorf("recover cgroup %d: %w", fullID, err)
 		}
 	}
-	for _, fullCgID := range inUseV2 {
-		p.poolV2.trackLegacy(fullCgID)
-	}
-	poolV1ActualSize := p.poolV1.cgRanger.Cap()
 	p.mutex.Unlock()
 
-	if !poolV2Enabled && len(inUseV2) > 0 {
-		log.G(context.Background()).Infof("cgroup pool v2 disabled: skipping pre-provisioning; "+
-			"keeping bookkeeping for %d sandbox slot(s) created by a previous run", len(inUseV2))
-	}
-
-	err = p.initPoolV1Late(poolV1ActualSize)
-	if err != nil {
-		return fmt.Errorf("init pool v1 late failed: %w", err)
-	}
-
 	if poolV2Enabled {
-		if err := p.initPoolV2Late(); err != nil {
-			return fmt.Errorf("init pool v2 late failed: %w", err)
-		}
+		err = p.initPoolV2Late()
+	} else {
+		err = p.initPoolV1Late(p.poolV1.prewarmSize)
+	}
+	if err != nil {
+		return fmt.Errorf("prewarm active cgroup pool: %w", err)
 	}
 
+	// Recovery may expand the ranger, but must not precreate the holes up
+	// to a high ID. Only restore assigned slots in the active pool.
+	for fullID := range inUse {
+		if IsPoolV2ID(fullID) != poolV2Enabled {
+			continue
+		}
+		if poolV2Enabled {
+			nodeID, _ := CgroupID2NumaID(fullID)
+			if int(fullID%CgPoolIdLimit) < p.poolV2.numaPools[nodeID].prewarmSize {
+				continue
+			}
+		} else if int(fullID) < p.poolV1.prewarmSize {
+			continue
+		}
+		if err := p.createCgroup(context.Background(), fullID); err != nil {
+			return fmt.Errorf("restore cgroup %d: %w", fullID, err)
+		}
+		_ = setupMemoryReparentFileFn(context.Background(), fullID, p.reparentFileEnabled())
+	}
 	p.sweepBaselines(inUse)
 	p.start()
 	return nil
 }
 
+func newCgroupRanger(size int) (*allocator.SimpleLinearRanger, error) {
+	if size < 0 || size > CgPoolIdLimit {
+		return nil, fmt.Errorf("invalid cgroup capacity %d", size)
+	}
+	if size == 0 {
+		return allocator.NewEmptySimpleLinearRanger(), nil
+	}
+	return allocator.NewSimpleLinearRanger(0, uint16(size-1))
+}
+
 func (p *cgPool) initPoolV1() error {
-	cgRanger, err := allocator.NewSimpleLinearRanger(0, uint16(p.initialSize))
+	// Preserve the active poolV1's quota-based, inclusive sizing semantics.
+	if p.initialSize < 0 || p.initialSize >= CgPoolIdLimit {
+		return fmt.Errorf("invalid cgroup pool v1 initial size %d", p.initialSize)
+	}
+	p.poolV1.prewarmSize = p.initialSize + 1
+	cgRanger, err := newCgroupRanger(p.poolV1.prewarmSize)
 	if err != nil {
 		return fmt.Errorf("create cg ranger error: %w", err)
 	}
-	alloc := allocator.NewAllocator[uint16](cgRanger)
-	p.poolV1.allocator = alloc
+	p.poolV1.enabled = true
+	p.poolV1.allocator = allocator.NewAllocator[uint16](cgRanger)
 	p.poolV1.cgRanger = cgRanger
 	p.poolV1.handle = p.poolV1Handle
-
 	return nil
 }
 
@@ -256,6 +284,9 @@ func (p *cgPool) isPoolV2Enabled() bool {
 
 func (p *cgPool) initPoolV2() error {
 	numaNodes := getAllNumaNodes()
+	if p.initialSize < 0 || len(numaNodes) == 0 {
+		return fmt.Errorf("invalid cgroup pool v2 budget %d or empty NUMA topology", p.initialSize)
+	}
 	maxNumaNodeID := 0
 	for _, node := range numaNodes {
 		if node.NodeId > maxNumaNodeID {
@@ -274,11 +305,18 @@ func (p *cgPool) initPoolV2() error {
 	// the directories it lists against that ranger - so it would delete in-use
 	// slots of the wrong node once a node grows past the initial pool size.
 	for _, nd := range numaNodes {
-		cgRanger, err := allocator.NewSimpleLinearRanger(0, uint16(p.initialSize))
+		// The effective budget is node-wide, with the remainder assigned by
+		// node ID independently of the sysfs enumeration order.
+		size := p.initialSize / len(numaNodes)
+		if nd.NodeId < p.initialSize%len(numaNodes) {
+			size++
+		}
+		cgRanger, err := newCgroupRanger(size)
 		if err != nil {
 			return fmt.Errorf("create cg ranger error: %w", err)
 		}
 		alloc := allocator.NewAllocator[uint16](cgRanger)
+		p.poolV2.numaPools[nd.NodeId].prewarmSize = size
 		p.poolV2.numaPools[nd.NodeId].allocator = alloc
 		p.poolV2.numaPools[nd.NodeId].cgRanger = cgRanger
 		p.poolV2.numaPools[nd.NodeId].numaNode = nd
@@ -438,9 +476,9 @@ func applyCpusetFiles(dir, cpulist string, nodeID int) error {
 }
 
 // initPoolV2Late creates and validates the per-NUMA pool: one node directory per
-// node plus initialSize slots under it. Called only with the switch on, so any
-// failure is fatal - a node reporting ready with an unbound pool would place
-// every sandbox there without affinity.
+// node plus its share of prewarmed slots under it. Called only with the switch
+// on, so any failure is fatal: a node reporting ready with an unbound pool
+// would place every sandbox there without affinity.
 func (p *cgPool) initPoolV2Late() error {
 	ctx := context.Background()
 	for i := 0; i < len(p.poolV2.numaPools); i++ {
@@ -478,11 +516,11 @@ func (p *cgPool) initPoolV2Late() error {
 		if createErr != nil {
 			log.G(ctx).Warnf("cgroup pool v2 init: numa%d slot create: %v", numaNode.NodeId, createErr)
 		}
-		cap := uint16(numaPool.cgRanger.Cap())
+		cap := numaPool.prewarmSize
 		var slotMaskFails int
 		var firstSlotMaskErr error
-		for shortCgId := uint16(0); shortCgId < cap; shortCgId++ {
-			fullCgID := MakeFullCgID(shortCgId, true, int32(numaNode.NodeId))
+		for shortCgId := 0; shortCgId < cap; shortCgId++ {
+			fullCgID := MakeFullCgID(uint16(shortCgId), true, int32(numaNode.NodeId))
 			if err := p.createCgroup(ctx, fullCgID); err != nil {
 				log.G(ctx).Errorf("cgroup pool v2 init: create fullCgID: %d failed: %v", fullCgID, err)
 				continue
@@ -530,6 +568,17 @@ func (p *cgPool) Get(ctx context.Context, sandboxID string, usePoolV2 bool, numa
 		return nil, fmt.Errorf("failed to create cgroup %v in slow path: %w", cg, err)
 	}
 
+	if usePoolV2 {
+		// Existing slots outside prewarmSize (including holes below recovered
+		// IDs) were not patched at startup. On v1 they retain a copied mask.
+		node := p.poolV2.numaPools[numaNode].numaNode
+		if err := ensureSandboxSlotCpuset(p.poolV2Handle, MakeCgroupPathByID(fullCgID), node.Cpulist, node.NodeId); err != nil {
+			// Match startup's best-effort slot repair: keep the previous mask
+			// and the allocation. Releasing it would repeatedly select the
+			// same broken slot instead of exhausting the range and growing.
+			log.G(ctx).Warnf("cgroup %d kept its previous cpuset: %v", fullCgID, err)
+		}
+	}
 	return &fullCgID, nil
 
 }
@@ -539,10 +588,10 @@ func IsPoolV2ID(fullCgID uint32) bool {
 }
 
 // Put cleans a returned cgroup synchronously, then defers its release until the
-// background baseline read completes. A per-NUMA slot returned while the pool is
+// background baseline read completes. A slot returned while its pool is
 // disabled is only dropped from the bookkeeping; its cgroup is left as it is.
 func (p *cgPool) Put(ctx context.Context, fullCgID uint32) {
-	if IsPoolV2ID(fullCgID) && !p.isPoolV2Enabled() {
+	if IsPoolV2ID(fullCgID) != p.isPoolV2Enabled() {
 		p.allocatorReleaseCgroup(fullCgID)
 		return
 	}
@@ -598,6 +647,9 @@ func (p *cgPool) Tidy() []error {
 }
 
 func (p *cgPool) tidyPoolV1(dirtyWork map[uint32]struct{}) error {
+	if p.isPoolV2Enabled() {
+		return nil
+	}
 	all, err := p.poolV1Handle.List()
 	if err != nil {
 
@@ -614,7 +666,7 @@ func (p *cgPool) tidyPoolV1(dirtyWork map[uint32]struct{}) error {
 			continue
 		}
 		id, err := strconv.Atoi(cg)
-		if err != nil {
+		if err != nil || id < 0 || id >= CgPoolIdLimit {
 			path := MakeCgroupPoolV1PathByString(cg)
 
 			toDelete = append(toDelete, path)
@@ -627,12 +679,10 @@ func (p *cgPool) tidyPoolV1(dirtyWork map[uint32]struct{}) error {
 			p.Put(context.Background(), cgId)
 			continue
 		}
-		if p.poolV1.cgRanger.Contains(uint16(id)) {
-			continue
-		}
-		path := MakeCgroupPoolV1PathByString(cg)
-
-		toDelete = append(toDelete, path)
+		// A smaller prewarming budget does not prove that an existing slot
+		// is unused: its DB assignment may be absent after a restart. Keep
+		// valid pool IDs out of Delete, which can SIGKILL resident processes.
+		// Explicitly dirty returned slots still take the cleanup path above.
 	}
 
 	for _, cg := range toDelete {
@@ -645,9 +695,10 @@ func (p *cgPool) tidyPoolV1(dirtyWork map[uint32]struct{}) error {
 	return nil
 }
 
-// tidyPoolV2 retries dirty slots and deletes unknown directories of the per-NUMA
-// pool. While the pool is disabled there is nothing to do: Put never marks a v2
-// slot dirty in that mode, and the subtree is not ours to walk.
+// tidyPoolV2 retries dirty slots and deletes malformed directories of the
+// per-NUMA pool. Existing valid slots survive prewarming budget reductions.
+// While the pool is disabled there is nothing to do: Put never marks a v2 slot
+// dirty in that mode, and the subtree is not ours to walk.
 func (p *cgPool) tidyPoolV2(dirtyWork map[uint32]struct{}) error {
 	if !p.isPoolV2Enabled() {
 		return nil
@@ -665,7 +716,7 @@ func (p *cgPool) tidyPoolV2(dirtyWork map[uint32]struct{}) error {
 				continue
 			}
 			id, err := strconv.Atoi(cg)
-			if err != nil || id >= CgPoolIdLimit {
+			if err != nil || id < 0 || id >= CgPoolIdLimit {
 				path := MakeCgroupPoolV2PathByString(path.Join(cgPath, cg))
 
 				toDelete = append(toDelete, path)
@@ -679,13 +730,8 @@ func (p *cgPool) tidyPoolV2(dirtyWork map[uint32]struct{}) error {
 				continue
 			}
 
-			if numaPool.cgRanger.Contains(uint16(id)) {
-				continue
-			}
-
-			path := MakeCgroupPoolV2PathByString(path.Join(cgPath, cg))
-
-			toDelete = append(toDelete, path)
+			// Retain historical slots regardless of the current ranger or
+			// prewarmSize. Neither is evidence that their processes are gone.
 		}
 
 		for _, path := range toDelete {

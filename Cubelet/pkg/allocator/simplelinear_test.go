@@ -113,3 +113,29 @@ func TestIterator(t *testing.T) {
 
 	assert.Nil(t, iter.Next())
 }
+
+func TestEmptyRangerGrowthAndRecovery(t *testing.T) {
+	r := NewEmptySimpleLinearRanger()
+	a := NewAllocator[uint16](r)
+	assert.Equal(t, 0, r.Cap())
+	assert.False(t, r.Contains(0))
+	assert.ErrorIs(t, a.Assign(0), ErrOutOfRange)
+	for want := uint16(0); want < 3; want++ {
+		id, err := a.Allocate(func() error { _, err := r.Expand(); return err })
+		assert.NoError(t, err)
+		assert.Equal(t, want, id)
+	}
+	a.Release(1)
+	id, err := a.Allocate(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, uint16(1), id)
+
+	recovered := NewEmptySimpleLinearRanger()
+	recovered.ExpandTo(0)
+	assert.Equal(t, 1, recovered.Cap())
+	assert.True(t, recovered.Contains(0))
+	recovered.ExpandTo(65535)
+	assert.Equal(t, 65536, recovered.Cap())
+	_, err = recovered.Expand()
+	assert.ErrorIs(t, err, ErrExhausted)
+}

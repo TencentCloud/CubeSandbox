@@ -9,15 +9,47 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/allocator"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cgroup/handle"
 )
 
 type cgPoolV1 struct {
-	handle    handle.Interface
-	allocator allocator.Allocator[uint16]
-	cgRanger  *allocator.SimpleLinearRanger
+	enabled     bool
+	prewarmSize int
+	legacyMutex sync.Mutex
+	legacyInUse map[uint32]struct{}
+	handle      handle.Interface
+	allocator   allocator.Allocator[uint16]
+	cgRanger    *allocator.SimpleLinearRanger
+}
+
+// Disabled pools retain only the DB assignments from a previous run. Their
+// directories, limits and cpusets are left untouched, matching poolV2.
+func (cgp1 *cgPoolV1) trackLegacy(id uint32) {
+	cgp1.legacyMutex.Lock()
+	defer cgp1.legacyMutex.Unlock()
+	if cgp1.legacyInUse == nil {
+		cgp1.legacyInUse = make(map[uint32]struct{})
+	}
+	cgp1.legacyInUse[id] = struct{}{}
+}
+
+func (cgp1 *cgPoolV1) forgetLegacy(id uint32) {
+	cgp1.legacyMutex.Lock()
+	defer cgp1.legacyMutex.Unlock()
+	delete(cgp1.legacyInUse, id)
+}
+
+func (cgp1 *cgPoolV1) legacyAll() []uint32 {
+	cgp1.legacyMutex.Lock()
+	defer cgp1.legacyMutex.Unlock()
+	ids := make([]uint32, 0, len(cgp1.legacyInUse))
+	for id := range cgp1.legacyInUse {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (cgp1 *cgPoolV1) initialAssign(inuseCgIdInt uint32) error {
@@ -41,6 +73,9 @@ func (cgp1 *cgPoolV1) initialAssign(inuseCgIdInt uint32) error {
 }
 
 func (cgp1 *cgPoolV1) Get(ctx context.Context, sandboxID string) (*uint16, error) {
+	if !cgp1.enabled {
+		return nil, fmt.Errorf("cgroup pool v1 is not enabled")
+	}
 	cgId, err := cgp1.allocator.Allocate(func() error {
 		_, err0 := cgp1.cgRanger.Expand()
 		if err0 != nil {
@@ -56,10 +91,17 @@ func (cgp1 *cgPoolV1) Get(ctx context.Context, sandboxID string) (*uint16, error
 }
 
 func (cgp1 *cgPoolV1) allocatorRelease(id uint16) {
+	if !cgp1.enabled {
+		cgp1.forgetLegacy(uint32(id))
+		return
+	}
 	cgp1.allocator.Release(id)
 }
 
 func (cgp1 *cgPoolV1) All() []uint32 {
+	if !cgp1.enabled {
+		return cgp1.legacyAll()
+	}
 	allV1 := cgp1.allocator.All()
 	all := make([]uint32, len(allV1))
 	for i, v := range allV1 {
@@ -69,6 +111,9 @@ func (cgp1 *cgPoolV1) All() []uint32 {
 }
 
 func (cgp1 *cgPoolV1) AllGroups() ([]uint32, error) {
+	if !cgp1.enabled {
+		return cgp1.legacyAll(), nil
+	}
 	groups, err := cgp1.handle.List()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list cgPoolV1: %w", err)

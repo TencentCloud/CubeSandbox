@@ -32,9 +32,10 @@ type cgPoolV2 struct {
 }
 
 type cgPoolV2Numa struct {
-	allocator allocator.Allocator[uint16]
-	cgRanger  *allocator.SimpleLinearRanger
-	numaNode  numa.NumaNode
+	prewarmSize int
+	allocator   allocator.Allocator[uint16]
+	cgRanger    *allocator.SimpleLinearRanger
+	numaNode    numa.NumaNode
 }
 
 func (cgp2n *cgPoolV2Numa) All() []uint32 {

@@ -56,14 +56,20 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     #mount -t tmpfs -o size=100m none /data/cubelet/cleanup
     root_path = "/data/cubelet/cleanup"
   [plugins."io.cubelet.internal.v1.cgroup"]
-    pool_size = 3000
+    # Only the selected pool is prewarmed. The effective initial budget
+    # (host.quota.mvm_limit when positive, otherwise pool_size) is shared
+    # across NUMA nodes for poolV2. Historical assignments remain tracked.
+    # To tune prewarming, edit pool_size in this section of the Cubelet config
+    # and restart Cubelet. The pool grows on demand; this is not a sandbox limit.
+    # Reducing this budget retains existing slots; it only reduces prewarming.
+    pool_size = 1000
     pool_workers = 1
     # Pin each sandbox's CPUs and memory to one NUMA node by placing it under
     # cube_sandbox_v2/sandbox/numa<N>. Off by default.
     #
     # The pool is pre-provisioned only when this is on AND the host has more
-    # than one NUMA node, as pool_size slots per node. Otherwise it is not
-    # created at all, and sandboxes from an earlier run stay untouched until
+    # than one NUMA node, dividing the effective budget across nodes. Otherwise
+    # it is not created at all, and sandboxes from an earlier run stay untouched until
     # they are destroyed. Requires a usable cpuset controller; cubelet refuses
     # to start if any node has no CPUs (memory-only CXL/PMEM, or all CPUs listed
     # in cgroup_disable_cpuset_list).
