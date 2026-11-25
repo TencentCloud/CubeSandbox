@@ -246,6 +246,7 @@ impl VmmInstance {
             vmm_config.sandbox_id,
             wait_vcpu_started,
             Some(barrier.clone()),
+            vmm_config.guest_reset_shutdown,
         )
         .map_err(Error::StartVmm)?;
 

@@ -8886,16 +8886,16 @@ mod vmm_instance {
     }
 
     #[cfg(feature = "lib_support")]
-    #[test]
-    fn test_get_shutdown_notifier() {
+    fn test_guest_shutdown_notifier(command: &str, guest_reset_shutdown: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         dummy_vmm_setup();
         let mut vmm_config = default_vmm_config();
+        vmm_config.guest_reset_shutdown = guest_reset_shutdown;
         let (sender, receiver) = channel();
         vmm_config.event_notifier = Some(EventNotifyConfig { notifier: sender });
-        let vmm = DummyVmm::new(vmm_config);
+        let mut vmm = DummyVmm::new(vmm_config);
 
         // Verify VMM service is running
         assert!(vmm.send_request(ApiRequest::VmmPing));
@@ -8930,8 +8930,7 @@ mod vmm_instance {
 
         // Then boot it
         assert!(vmm.send_request(ApiRequest::VmBoot));
-
-        guest.ssh_command("sudo poweroff").unwrap();
+        guest.ssh_command(command).unwrap();
 
         let mut recv_evt_flag = false;
         for _ in 0..3 {
@@ -8942,6 +8941,20 @@ mod vmm_instance {
             }
         }
         assert!(recv_evt_flag);
+        vmm.join_timeout(Some(Duration::from_secs(5)));
+    }
+
+    #[cfg(feature = "lib_support")]
+    #[test]
+    fn test_get_shutdown_notifier() {
+        test_guest_shutdown_notifier("sudo poweroff", false);
+    }
+
+    #[cfg(feature = "lib_support")]
+    #[test]
+    fn test_guest_reset_shutdown_notifier_and_vmm_exit() {
+        // A kernel panic with panic=1 reaches the same reset path as a guest reboot.
+        test_guest_shutdown_notifier("sudo reboot", true);
     }
 }
 

@@ -49,6 +49,7 @@ impl HypConfig {
             sandbox_id: self.sandbox_id.clone(),
             log_level: self.log_level,
             http_path: self.ch_http_api.clone(),
+            guest_reset_shutdown: true,
             ..Default::default()
         }
     }
@@ -481,15 +482,28 @@ pub struct PciDeviceInfo {
 #[cfg(test)]
 mod tests {
     use cube_hypervisor::vm_config::ConsoleOutputMode;
+    use log::LevelFilter;
     use std::path::PathBuf;
 
     use crate::common::utils::Utils;
     use crate::{
         common::utils::DISK_DEVICE_ID_PRE,
-        hypervisor::config::{VmConfig, DEFAULT_AGENT_PATH, IMAGE_PATH},
+        hypervisor::config::{HypConfig, VmConfig, DEFAULT_AGENT_PATH, IMAGE_PATH},
         sandbox::disk::Disk,
         sandbox::pmem::{HYP_AGENT_ID, HYP_OS_IMAGE_ID},
     };
+    #[test]
+    fn shim_vmm_config_shuts_down_on_guest_reset() {
+        let config = HypConfig {
+            debug: false,
+            log_level: LevelFilter::Info,
+            sandbox_id: "test-sandbox".to_string(),
+            ch_http_api: None,
+        };
+
+        assert!(config.to_vmm_config().guest_reset_shutdown);
+    }
+
     #[test]
     fn utils_config_dft() {
         let config = VmConfig::default();

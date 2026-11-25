@@ -20,6 +20,11 @@ pub struct VmmConfig {
     pub seccomp: SeccompAction,
     pub event_notifier: Option<EventNotifyConfig>,
     pub http_path: Option<String>,
+    /// Shut the VMM down instead of rebooting when the guest requests a reset
+    /// (vCPU reset/triple fault, ACPI, i8042, CMOS, or watchdog). A cold reboot boots a fresh kernel
+    /// in place of a restored guest, which an embedder tracking guest state
+    /// cannot tell apart from the original VM.
+    pub guest_reset_shutdown: bool,
 }
 
 impl Default for VmmConfig {
@@ -36,6 +41,7 @@ impl Default for VmmConfig {
             seccomp: SeccompAction::KillProcess,
             event_notifier: None,
             http_path: None,
+            guest_reset_shutdown: false,
         }
     }
 }

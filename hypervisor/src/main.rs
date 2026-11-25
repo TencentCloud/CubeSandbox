@@ -729,6 +729,7 @@ fn start_vmm(
         sandbox_id,
         wait_vcpu_started,
         None,
+        true,
     )
     .map_err(Error::StartVmmThread)?;
 

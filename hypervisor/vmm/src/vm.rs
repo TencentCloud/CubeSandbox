@@ -594,6 +594,7 @@ impl Vm {
         snapshot: Option<&Snapshot>,
         sandbox_id: String,
         vcpu_started: Arc<AtomicBool>,
+        guest_reset_shutdown: bool,
     ) -> Result<Self> {
         trace_scoped!("Vm::new_from_memory_manager");
 
@@ -643,6 +644,7 @@ impl Vm {
             timestamp,
             snapshot_from_id(snapshot, DEVICE_MANAGER_SNAPSHOT_ID),
             sandbox_id,
+            guest_reset_shutdown,
         )
         .map_err(Error::DeviceManager)?;
 
@@ -681,6 +683,7 @@ impl Vm {
             tdx_enabled,
             &numa_nodes,
             vcpu_started,
+            guest_reset_shutdown,
         )
         .map_err(Error::CpuManager)?;
 
@@ -825,6 +828,7 @@ impl Vm {
         console_resize_pipe: Option<File>,
         sandbox_id: String,
         vcpu_started: Arc<AtomicBool>,
+        guest_reset_shutdown: bool,
     ) -> Result<Self> {
         trace_scoped!("Vm::new");
 
@@ -878,6 +882,7 @@ impl Vm {
             None,
             sandbox_id,
             vcpu_started,
+            guest_reset_shutdown,
         )?;
 
         // The device manager must create the devices from here as it is part
@@ -906,6 +911,7 @@ impl Vm {
         sandbox_id: String,
         vcpu_started: Arc<AtomicBool>,
         memory_vol_url: Option<&str>,
+        guest_reset_shutdown: bool,
     ) -> Result<Self> {
         let timestamp = Instant::now();
 
@@ -954,6 +960,7 @@ impl Vm {
             Some(snapshot),
             sandbox_id,
             vcpu_started,
+            guest_reset_shutdown,
         )
     }
 
