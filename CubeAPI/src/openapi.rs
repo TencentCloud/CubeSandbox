@@ -201,4 +201,20 @@ mod tests {
             schema["type"] == "object" && schema["additionalProperties"]["type"] == "array"
         }));
     }
+
+    #[test]
+    fn sandbox_logs_v2_documents_legacy_and_composite_cursor_params() {
+        let document = serde_json::to_value(build_openapi()).expect("serialize OpenAPI document");
+        let params = document["paths"]["/v2/sandboxes/{sandboxID}/logs"]["get"]["parameters"]
+            .as_array()
+            .expect("v2 logs should document its query parameters");
+        let names: Vec<&str> = params.iter().filter_map(|p| p["name"].as_str()).collect();
+
+        for expected in ["cursor", "cursorSeq", "limit", "tail", "direction"] {
+            assert!(
+                names.contains(&expected),
+                "missing `{expected}` in {names:?}"
+            );
+        }
+    }
 }

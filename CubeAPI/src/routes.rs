@@ -1257,6 +1257,59 @@ mod tests {
         );
     }
 
+    /// An invalid log cursor combination is a 400 before CubeMaster is contacted (the test
+    /// server points at an unreachable address), so it can never degrade to a lossy read.
+    #[tokio::test]
+    async fn sandbox_logs_v2_rejects_malformed_cursors_with_400() {
+        let server = test_server().await;
+
+        for params in [
+            vec![("cursorSeq", "0")],
+            vec![("cursor", "1000"), ("cursorSeq", "-1")],
+            vec![("cursor", "1000"), ("cursorSeq", "abc")],
+            vec![("cursor", "1000"), ("cursorSeq", "1.5")],
+            vec![("cursor", "1000"), ("cursorSeq", "99999999999999999999")],
+            vec![("tail", "true"), ("cursor", "1000")],
+            vec![("tail", "true"), ("cursor", "1000"), ("cursorSeq", "0")],
+            vec![("tail", "true"), ("cursorSeq", "0")],
+        ] {
+            let mut request = server.get("/v2/sandboxes/sb-1/logs");
+            for (key, value) in &params {
+                request = request.add_query_param(key, value);
+            }
+            let response = request.await;
+            assert_eq!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "{params:?} must be rejected with 400"
+            );
+        }
+    }
+
+    /// A bare `cursor` and the legacy `direction` pass validation and reach CubeMaster, which
+    /// is unreachable here, so the failure must be a backend error and not a 400.
+    #[tokio::test]
+    async fn sandbox_logs_v2_accepts_legacy_cursor_and_direction() {
+        let server = test_server().await;
+
+        for params in [
+            vec![("cursor", "1000")],
+            vec![("direction", "desc")],
+            vec![("cursor", "1000"), ("direction", "asc")],
+        ] {
+            let mut request = server.get("/v2/sandboxes/sb-1/logs");
+            for (key, value) in &params {
+                request = request.add_query_param(key, value);
+            }
+            let response = request.await;
+            assert_ne!(
+                response.status_code(),
+                StatusCode::BAD_REQUEST,
+                "{params:?} must not be rejected as a bad request"
+            );
+        }
+    }
+
     /// A cursor the client could not have obtained from us is a client mistake,
     /// not a reason to silently restart from the first page — which is exactly
     /// the behaviour being replaced.

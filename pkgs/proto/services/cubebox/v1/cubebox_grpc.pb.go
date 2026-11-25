@@ -38,6 +38,7 @@ const (
 	CubeboxMgr_GetStorageMetrics_FullMethodName         = "/cubelet.services.cubebox.v1.CubeboxMgr/GetStorageMetrics"
 	CubeboxMgr_InspectStorageVolumes_FullMethodName     = "/cubelet.services.cubebox.v1.CubeboxMgr/InspectStorageVolumes"
 	CubeboxMgr_CleanupOrphanStorageFiles_FullMethodName = "/cubelet.services.cubebox.v1.CubeboxMgr/CleanupOrphanStorageFiles"
+	CubeboxMgr_GetSandboxEvents_FullMethodName          = "/cubelet.services.cubebox.v1.CubeboxMgr/GetSandboxEvents"
 )
 
 // CubeboxMgrClient is the client API for CubeboxMgr service.
@@ -80,6 +81,8 @@ type CubeboxMgrClient interface {
 	// CleanupOrphanStorageFiles scans configured emptydir format roots, drops
 	// files that have no live sandbox owner, and reports the action taken.
 	CleanupOrphanStorageFiles(ctx context.Context, in *CleanupOrphanStorageFilesRequest, opts ...grpc.CallOption) (*CleanupOrphanStorageFilesResponse, error)
+	// GetSandboxEvents returns events from the Cubelet owning the sandbox.
+	GetSandboxEvents(ctx context.Context, in *GetSandboxEventsRequest, opts ...grpc.CallOption) (*GetSandboxEventsResponse, error)
 }
 
 type cubeboxMgrClient struct {
@@ -240,6 +243,16 @@ func (c *cubeboxMgrClient) CleanupOrphanStorageFiles(ctx context.Context, in *Cl
 	return out, nil
 }
 
+func (c *cubeboxMgrClient) GetSandboxEvents(ctx context.Context, in *GetSandboxEventsRequest, opts ...grpc.CallOption) (*GetSandboxEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSandboxEventsResponse)
+	err := c.cc.Invoke(ctx, CubeboxMgr_GetSandboxEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CubeboxMgrServer is the server API for CubeboxMgr service.
 // All implementations must embed UnimplementedCubeboxMgrServer
 // for forward compatibility.
@@ -280,6 +293,8 @@ type CubeboxMgrServer interface {
 	// CleanupOrphanStorageFiles scans configured emptydir format roots, drops
 	// files that have no live sandbox owner, and reports the action taken.
 	CleanupOrphanStorageFiles(context.Context, *CleanupOrphanStorageFilesRequest) (*CleanupOrphanStorageFilesResponse, error)
+	// GetSandboxEvents returns events from the Cubelet owning the sandbox.
+	GetSandboxEvents(context.Context, *GetSandboxEventsRequest) (*GetSandboxEventsResponse, error)
 	mustEmbedUnimplementedCubeboxMgrServer()
 }
 
@@ -334,6 +349,9 @@ func (UnimplementedCubeboxMgrServer) InspectStorageVolumes(context.Context, *Ins
 }
 func (UnimplementedCubeboxMgrServer) CleanupOrphanStorageFiles(context.Context, *CleanupOrphanStorageFilesRequest) (*CleanupOrphanStorageFilesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CleanupOrphanStorageFiles not implemented")
+}
+func (UnimplementedCubeboxMgrServer) GetSandboxEvents(context.Context, *GetSandboxEventsRequest) (*GetSandboxEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSandboxEvents not implemented")
 }
 func (UnimplementedCubeboxMgrServer) mustEmbedUnimplementedCubeboxMgrServer() {}
 func (UnimplementedCubeboxMgrServer) testEmbeddedByValue()                    {}
@@ -626,6 +644,24 @@ func _CubeboxMgr_CleanupOrphanStorageFiles_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CubeboxMgr_GetSandboxEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSandboxEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CubeboxMgrServer).GetSandboxEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CubeboxMgr_GetSandboxEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CubeboxMgrServer).GetSandboxEvents(ctx, req.(*GetSandboxEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CubeboxMgr_ServiceDesc is the grpc.ServiceDesc for CubeboxMgr service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -692,6 +728,10 @@ var CubeboxMgr_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CleanupOrphanStorageFiles",
 			Handler:    _CubeboxMgr_CleanupOrphanStorageFiles_Handler,
+		},
+		{
+			MethodName: "GetSandboxEvents",
+			Handler:    _CubeboxMgr_GetSandboxEvents_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

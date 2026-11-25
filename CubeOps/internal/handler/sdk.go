@@ -476,8 +476,10 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 	sandboxID := c.Param("id")
 	body := map[string]interface{}{
 		"sandboxID": sandboxID,
-		"limit":     100,
+		// 200 matches CubeMaster's defaultLogLimit and Cubelet's defaultEventLimit.
+		"limit": 200,
 	}
+	// limit and cursor stay lenient (unparsable values are ignored) to keep existing callers working.
 	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			body["limit"] = n
@@ -488,9 +490,38 @@ func (h *SDKHandler) GetSandboxLogs(c *gin.Context) {
 			body["cursor"] = n
 		}
 	}
+	if v := c.Query("cursorSeq"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			httputil.WriteError(c, http.StatusBadRequest, "invalid cursorSeq")
+			return
+		}
+		body["cursorSeq"] = n
+	}
+	if v := c.Query("tail"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			httputil.WriteError(c, http.StatusBadRequest, "invalid tail")
+			return
+		}
+		body["tail"] = b
+	}
 	raw, err := h.cm.GetSandboxLogs(c.Request.Context(), body)
 	if err != nil {
 		writeCMError(c, err)
+		return
+	}
+	writeSandboxLogsResponse(c, raw)
+}
+
+// writeSandboxLogsResponse maps CubeMaster's 130400 to 400: on this read-only endpoint it only
+// reports bad request parameters. Other routes keep it as 502 because it is also a catch-all.
+func writeSandboxLogsResponse(c *gin.Context, raw json.RawMessage) {
+	var env cmEnvelope
+	if err := json.Unmarshal(raw, &env); err == nil && env.Ret != nil && env.Ret.RetCode == 130400 {
+		ctx := updateTraceAndLogger(c.Request.Context(), cubelog.GetTraceInfo(c.Request.Context()), "", sdkInstanceType, env.Ret.RetCode)
+		logging.G(ctx).Errorf("sdk: cubemaster bad request: %s", env.Ret.RetMsg)
+		httputil.WriteError(c, http.StatusBadRequest, env.Ret.RetMsg)
 		return
 	}
 	writeSDKResponse(c, raw)

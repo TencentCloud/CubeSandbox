@@ -9,18 +9,59 @@ lang: en-US
 Log retrieval is still being actively iterated. The `cubecli logs` command described here is a **temporary solution** — the interface and underlying storage layout may change in future releases.
 :::
 
-CubeSandbox exposes two complementary logging layers:
+CubeSandbox exposes three complementary logging layers:
 
 | Layer | What it captures | How to access |
 |---|---|---|
 | **Sandbox log** | stdout/stderr of the container init process (the main entrypoint) | `cubecli logs` (this page) |
+| **Sandbox events** | CubeShim request log lines for the sandbox: lifecycle and forwarded output | [Events API](#events-api) (this page) |
 | **`envd` task log** | stdout/stderr of individual `exec` sub-tasks spawned inside the sandbox | E2B SDK (`on_stdout` / `on_stderr` callbacks) |
 
-This page covers the **sandbox-level log** only. For `envd` sub-task logs, refer to the [E2B SDK documentation](https://e2b.dev/docs).
+This page covers the **sandbox log** and **sandbox events**. For `envd` sub-task logs, refer to the [E2B SDK documentation](https://e2b.dev/docs).
+
+## Events API
+
+Sandbox events come from the CubeShim request log, not from the stdout/stderr files that `cubecli logs` reads. Unlike `cubecli`, they can be fetched remotely through the API on any deployment (single-node, multi-node, or K8s). CubeAPI forwards the request through CubeMaster to the Cubelet that owns the sandbox:
+
+```bash
+# Newest events (polling/tail mode)
+curl "/cubeapi/v1/v2/sandboxes/<sandbox-id>/logs?tail=true"
+
+# Paginate from the beginning, 200 per page
+curl "/cubeapi/v1/v2/sandboxes/<sandbox-id>/logs?limit=200"
+
+# Next page: pass back both nextCursor and nextCursorSeq from the previous response
+curl "/cubeapi/v1/v2/sandboxes/<sandbox-id>/logs?cursor=<nextCursor>&cursorSeq=<nextCursorSeq>&limit=200"
+```
+
+Parameters:
+
+- `limit` (default 1000, max 2000) is a hard cap on entries per page.
+- `cursor` and `cursorSeq` (the previous `nextCursor` and `nextCursorSeq`) should be sent together. The pair returns only entries after that position, none repeated and none skipped. `cursorSeq` may be `0`, so always send it. `cursorSeq` without `cursor` is rejected with 400.
+- `cursor` alone is still accepted for compatibility with earlier callers. A millisecond timestamp cannot tell apart events that share a millisecond, so this form skips every event sharing the cursor's millisecond; use the pair when completeness matters.
+- `tail` returns the newest `limit` entries instead of paginating and is mutually exclusive with `cursor` and `cursorSeq`. Its `nextCursor`/`nextCursorSeq` can be passed back to read what arrives next.
+- `direction` is accepted and ignored.
+
+The response carries `logs` and `hasMore`. `nextCursor` and `nextCursorSeq` appear only when the backend returned a non-zero `nextCursor`; both are omitted otherwise, such as on an empty result.
+
+::: warning Limitations
+- The cursor is only valid within the active shim log file; it does not span log rotation (hourly).
+- `tail` reads at most the last 16 MiB of the log. If the newest events' millisecond straddles that boundary, `nextCursorSeq` is undercounted and a follow-up read may repeat a few events, never skip any.
+- Position is derived from log timestamps, so events written with a clock that moves backwards may be skipped.
+- Internal endpoints (`/cube/sandbox/logs`, `/api/v1/sdk/sandboxes/{id}/logs`) accept `cursor` alone too, with the same lossy millisecond-skip semantics. Only this API documents `direction`; the internal endpoints do not support it.
+:::
+
+::: warning Upgrade order for this feature
+Upgrade Cubelet first, then CubeMaster, then CubeAPI and CubeOps (the WebUI backend).
+
+- If CubeMaster is upgraded before the sandbox's node Cubelet, events fail with "upgrade cubelet on the owning node first".
+- If CubeAPI or CubeOps is upgraded before CubeMaster, the new parameters are ignored: `tail=true` returns the oldest page instead of the newest, and a composite cursor degrades to `cursor` alone, skipping events that share its millisecond. On Kubernetes the old CubeMaster has no local shim log, so the request fails or returns nothing.
+- If the cluster mixes Cubelet versions, events work only for sandboxes on upgraded nodes.
+:::
 
 ## Prerequisites
 
-`cubecli` is built alongside Cubelet and installed as part of the standard one-click deployment. The `logs` sub-command accesses log files that live inside the **Cubelet mount namespace**, so it must be run **directly on the compute node** — it cannot be executed remotely via the API or from a non-node host.
+`cubecli` is built alongside Cubelet and installed as part of the standard one-click deployment. The `logs` sub-command accesses log files that live inside the **Cubelet mount namespace**, so it must be run **directly on the compute node** — `cubecli logs` cannot be executed remotely via the API or from a non-node host. For remote access to sandbox events, use the [Events API](#events-api).
 
 ## Reading sandbox logs
 

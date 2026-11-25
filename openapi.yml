@@ -1352,18 +1352,34 @@ paths:
           type: string
       - name: cursor
         in: query
+        description: Previous `nextCursor`; without `cursorSeq` it skips every event in that millisecond.
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: cursorSeq
+        in: query
+        description: Previous `nextCursorSeq`; send with `cursor` so same-ms events are not skipped.
         required: false
         schema:
           type: integer
           format: int64
       - name: limit
         in: query
+        description: Max entries per page (default 1000, max 2000).
         required: false
         schema:
           type: integer
           format: int32
+      - name: tail
+        in: query
+        description: tail returns the newest entries; mutually exclusive with cursor and cursorSeq.
+        required: false
+        schema:
+          type: boolean
       - name: direction
         in: query
+        description: Accepted and ignored; kept so existing clients and generated types keep working.
         required: false
         schema:
           type: string
@@ -1374,6 +1390,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SandboxLogsV2Response'
+        '400':
+          description: Invalid cursor, cursorSeq or tail combination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
           description: Sandbox not found
           content:
@@ -3057,10 +3079,25 @@ components:
       required:
       - logs
       properties:
+        hasMore:
+          type: boolean
+          description: True when more matching entries exist beyond the returned page.
         logs:
           type: array
           items:
             $ref: '#/components/schemas/SandboxLogEntry'
+        nextCursor:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Last entry's ms timestamp; pass back as `cursor` with `nextCursorSeq`.
+        nextCursorSeq:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Last entry's index within its millisecond; pass back as `cursorSeq`. 0 is valid.
     SandboxNetworkConfig:
       type: object
       description: Network configuration for sandbox egress/ingress control.
