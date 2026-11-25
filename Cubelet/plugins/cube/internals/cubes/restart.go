@@ -164,7 +164,9 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 		}
 		ctr.Status.Update(func(s cubeboxstore.Status) (cubeboxstore.Status, error) {
 			if s.FinishedAt == 0 {
+				// Container vanished without a recorded exit; mark FinishedAt as unobserved.
 				s.FinishedAt = time.Now().UnixNano()
+				s.ExitUnobserved = true
 			}
 			return s, nil
 		})
@@ -189,7 +191,9 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 			newStatus = &cubeboxstore.Status{}
 		}
 		if newStatus.FinishedAt == 0 {
+			// Task status could not be loaded without a recorded exit; mark FinishedAt as unobserved.
 			newStatus.FinishedAt = time.Now().UnixNano()
+			newStatus.ExitUnobserved = true
 		}
 		newStatus.Unknown = true
 	}
@@ -197,13 +201,13 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 	if ctr.SandboxID == "" {
 		ctr.SandboxID = cb.ID
 	}
-	newStatus.Reason = oldStatus.Reason
+	// Prefer the fresh reason derived by loadStatus over the previously stored one.
+	if newStatus.Reason == "" {
+		newStatus.Reason = oldStatus.Reason
+	}
 	// Exit reasons belong to a finished run; non-exit reasons such as PauseFailed can remain live.
-	if newStatus.FinishedAt == 0 {
-		switch restartpolicy.Reason(oldStatus.Reason) {
-		case restartpolicy.ReasonCompleted, restartpolicy.ReasonError, restartpolicy.ReasonOOMKilled, restartpolicy.ReasonSandboxCrashed:
-			newStatus.Reason = ""
-		}
+	if newStatus.FinishedAt == 0 && restartpolicy.IsExitReason(restartpolicy.Reason(newStatus.Reason)) {
+		newStatus.Reason = ""
 	}
 	ctr.Status = cubeboxstore.StoreStatus(*newStatus)
 	ctr.Container = cntr
@@ -241,7 +245,10 @@ func loadStatus(ctx context.Context, cntr containerd.Container, status *cubeboxs
 	if notFound {
 
 		if status.FinishedAt != 0 {
+			// Preserve the already-recorded exit metadata when the task is gone.
 			newStatus.FinishedAt = status.FinishedAt
+			newStatus.ExitCode = status.ExitCode
+			newStatus.ExitUnobserved = status.ExitUnobserved
 		} else {
 			newStatus.Unknown = true
 		}
@@ -272,8 +279,20 @@ func loadStatus(ctx context.Context, cntr containerd.Container, status *cubeboxs
 					return nil, fmt.Errorf("failed to delete task: %w", err)
 				}
 			}
-			newStatus.FinishedAt = s.ExitTime.UnixNano()
+			finishedAt := s.ExitTime.UnixNano()
+			if finishedAt <= 0 {
+				// Backfill zero ExitTime so State() recognizes the container as exited.
+				finishedAt = time.Now().UnixNano()
+			}
+			newStatus.FinishedAt = finishedAt
 			newStatus.ExitCode = int32(s.ExitStatus)
+			// Derive exit reason from the stopped task, preserving same-run OOMKilled.
+			if status.Reason == string(restartpolicy.ReasonOOMKilled) &&
+				status.FinishedAt != 0 && status.FinishedAt >= status.StartedAt {
+				newStatus.Reason = string(restartpolicy.ReasonOOMKilled)
+			} else {
+				newStatus.Reason = string(restartpolicy.ReasonForExit(newStatus.ExitCode))
+			}
 		case containerd.Paused:
 			if status.PausedAt != 0 {
 				newStatus.PausedAt = status.PausedAt

@@ -26,6 +26,19 @@ func TestReasonForTaskExit(t *testing.T) {
 	}
 }
 
+func TestIsExitReason(t *testing.T) {
+	for _, r := range []Reason{ReasonCompleted, ReasonError, ReasonOOMKilled, ReasonSandboxCrashed} {
+		if !IsExitReason(r) {
+			t.Errorf("%q must count as an observed exit", r)
+		}
+	}
+	for _, r := range []Reason{ReasonLivenessFailed, "PauseFailed", ""} {
+		if IsExitReason(r) {
+			t.Errorf("%q must not count as an observed exit", r)
+		}
+	}
+}
+
 func TestShouldRestart(t *testing.T) {
 	cases := []struct {
 		policy string
@@ -38,6 +51,7 @@ func TestShouldRestart(t *testing.T) {
 		{OnFailure, ReasonError, true},
 		{OnFailure, ReasonOOMKilled, true},
 		{OnFailure, ReasonLivenessFailed, true},
+		{OnFailure, ReasonSandboxCrashed, true},
 		{Always, ReasonCompleted, true},
 		{Always, ReasonError, true},
 		{"OnFailure", ReasonError, true},

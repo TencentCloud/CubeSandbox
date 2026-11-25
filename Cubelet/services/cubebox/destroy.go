@@ -359,6 +359,7 @@ func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) e
 			status.Pid = 0
 			status.FinishedAt = 0
 			status.Unknown = false
+			status.ExitUnobserved = false
 			status.PausingAt = 0
 			if status.PausedAt == 0 {
 				status.PausedAt = now
@@ -372,6 +373,7 @@ func (l *local) finalizePausedTombstone(ctx context.Context, sandboxID string) e
 			status.Pid = 0
 			status.FinishedAt = 0
 			status.Unknown = false
+			status.ExitUnobserved = false
 			status.PausingAt = 0
 			if status.PausedAt == 0 {
 				status.PausedAt = now

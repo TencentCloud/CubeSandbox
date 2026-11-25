@@ -86,6 +86,16 @@ func ReasonForExit(exitCode int32) Reason {
 	return ReasonError
 }
 
+// IsExitReason reports whether r is an observed process/container exit reason.
+func IsExitReason(r Reason) bool {
+	switch r {
+	case ReasonCompleted, ReasonError, ReasonOOMKilled, ReasonSandboxCrashed:
+		return true
+	default:
+		return false
+	}
+}
+
 // ReasonForTaskExit maps a containerd TaskExit. A shim that disappears
 // reports pid 0 and exit status 0. That is a crash, not a guest that
 // finished successfully. A real zero exit always carries the shim pid.

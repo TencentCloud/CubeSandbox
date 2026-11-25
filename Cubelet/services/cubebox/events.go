@@ -286,6 +286,7 @@ func (em *eventMonitor) handleEvent(ctx context.Context, any interface{}) error 
 			status.ExitCode = 137
 			status.Reason = string(restartpolicy.ReasonOOMKilled)
 			status.FinishedAt = time.Now().UnixNano()
+			status.ExitUnobserved = false
 			return status, nil
 		})
 		if err := em.c.cubeboxManger.SyncByID(ctx, cb.ID); err != nil {
@@ -443,6 +444,7 @@ func (em *eventMonitor) handleContainerExit(ctx context.Context, e *eventtypes.T
 			status.Reason = string(restartpolicy.ReasonForTaskExit(e.Pid, e.ExitStatus))
 		}
 		status.FinishedAt = exitTime
+		status.ExitUnobserved = false
 		return status, nil
 	})
 

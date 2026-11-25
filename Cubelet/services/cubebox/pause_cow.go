@@ -631,6 +631,7 @@ func (s *service) updateWithPauseCow(
 				// FinishedAt while PausingAt is set (State prefers PausingAt).
 				status.FinishedAt = 0
 				status.Unknown = false
+				status.ExitUnobserved = false
 				status.Reason = ""
 				status.Message = ""
 				return status, nil
@@ -787,6 +788,7 @@ func (s *service) updateWithPauseCow(
 				status.PausingAt = 0
 				status.FinishedAt = 0
 				status.Unknown = false
+				status.ExitUnobserved = false
 				return status, nil
 			})
 		}
@@ -1012,6 +1014,7 @@ func clearLocalPauseAttempt(sb *cubeboxstore.CubeBox) {
 			status.PausingAt = 0
 			status.PausedAt = 0
 			status.Unknown = false
+			status.ExitUnobserved = false
 			if status.Reason == pauseFailedReason {
 				status.Reason = ""
 				status.Message = ""
