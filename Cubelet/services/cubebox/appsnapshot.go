@@ -367,7 +367,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 	var snapshotErr, rootfsErr, resumeErr error
-	shimCapability := resolveShimSnapshotCapability(cb)
+	shimCapability := s.resolveSandboxShimCapabilities(frozenCtx, cb)
 
 	// Run the template's declared readiness probe immediately before the
 	// snapshot transaction. Templates without a probe preserve the existing
@@ -395,7 +395,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		)
 	}
 
-	if shimCapability.Coordinated {
+	if capturePathDecision(stepLog, shimCapability) {
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() error {
@@ -407,13 +407,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 			if captureErr == nil {
 				captureErr = recordWritableLayer(layout.MetaWork, effectiveSandboxWritableLayer(cb))
 			}
-			if shimSnapshotUnsupported(captureErr) {
+			if shimRejectsCapture(captureErr, shimCapability) {
 				captureStarted = false
 			}
 			if captureErr == nil {
 				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, templateID, frozenCancel)
 			}
-			return snapshotCaptureError(captureErr)
+			return snapshotCaptureError(captureErr, shimCapability)
 		}, func() error {
 			var commitErr error
 			rootfsObject, commitErr = storage.CommitRootfsFromBuildFor(frozenCtx, backend, templateID)
@@ -433,19 +433,14 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 			defer cancel()
 			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeCtx, cb, templateID))
 		})
-		// A shim whose recorded pin is at or above the boundary but which rejects
-		// the action means the version gate guessed wrong about it. The shim
-		// rejects an unknown action at update_route's match arm, before entering
-		// any handler (CubeShim/shim/src/service/update_ext.rs), so the VM was
-		// never frozen and no artifact was committed -- the whole transaction can
-		// safely be redone on the legacy path. The legacy path never re-enters
-		// the coordinated one, so this retries at most once.
-		if shouldRetryWithLegacy(snapshotErr, rootfsErr, snapshotmode.Full) {
-			logShimDegradedToLegacy(stepLog, shimCapability.Version)
+		// The declaration was wrong for this shim: it rejected the action before
+		// freezing the VM, so the transaction can be redone on the legacy path.
+		// The legacy path never re-enters the coordinated one, so this retries once.
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr, snapshotmode.Full, shimCapability) {
+			logShimDegradedToLegacy(stepLog, shimCapability)
 			snapshotErr, rootfsErr = runLegacy()
 		}
 	} else {
-		logSnapshotPathSelection(stepLog, shimCapability)
 		snapshotErr, rootfsErr = runLegacy()
 	}
 	if snapshotErr != nil || rootfsErr != nil {

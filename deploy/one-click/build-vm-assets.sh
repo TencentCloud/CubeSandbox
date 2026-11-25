@@ -117,6 +117,12 @@ log "copying runtime binaries"
 copy_file "${CUBESHIM_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs"
 copy_file "${CUBE_RUNTIME_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
 chmod +x "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
+
+# Generate and validate the capability declaration from the copied binary.
+log "generating cube-shim capability declaration"
+"${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" --print-capabilities \
+  > "${RUNTIME_LAYOUT_DIR}/cube-shim/capabilities.json"
+assert_shim_capabilities "${RUNTIME_LAYOUT_DIR}/cube-shim/capabilities.json"
 prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 
 log "building guest image artifacts via build-guest-image.sh"

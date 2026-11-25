@@ -139,6 +139,8 @@ func (cb *CubeBox) DeepCopy() *CubeBox {
 	copied.HostMetricsBaseline = cb.HostMetricsBaselineCopy()
 	copied.GuestMetricsEpoch = cb.GuestMetricsEpochCopy()
 	copied.MemoryLineage = cb.MemoryLineageCopy()
+	// Take the record through its own lock and deep-copy it.
+	copied.ShimCapabilities = cb.ShimCapabilitiesCopy()
 
 	return copied
 }

@@ -163,7 +163,9 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # 从快照恢复，
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
-未关闭的 `cubecli exec` / 交互会话会阻止 Pause。Cubelet 仍返回 `TaskPauseFailed`（130588）和 “pause forbidding / terminate exec tasks first” 类错误，但沙箱保持 `running`（不会落成 `unknown(failed)`）。会话结束后 auto-pause 会重试。该 busy-reject 处理需要 Cubelet、CubeMaster 与 CubeShim 一起升级（`CheckPauseAllowed` 预检在 CubeShim）；只升一侧可能导致状态展示或快照血缘短暂不对。
+未关闭的 `cubecli exec` / 交互会话会阻止 Pause。Cubelet 仍返回 `TaskPauseFailed`（130588）和 “pause forbidding / terminate exec tasks first” 类错误，但沙箱保持 `running`（不会落成 `unknown(failed)`）。会话结束后 auto-pause 会重试。
+
+Cubelet 只有在 shim 声明支持 `CheckPauseAllowed`（shim 能力声明中的 `update.check_pause_allowed`）时才会先做该预检——见[快照能力声明](#快照能力声明)。没有声明的 shim 不再被调用，Pause 直接走 `PauseToSnapshot`，由它在冻结前做同样的检查。该 busy-reject 处理仍需要 Cubelet、CubeMaster 与 CubeShim 一起升级：分类发生在 CubeMaster，只升一侧可能导致状态展示或快照血缘短暂不对。新版 CubeShim 会在拒绝信息前加 `shim_error_pause_busy` 错误码，CubeMaster 同时识别该错误码与历史文案，因此无论滚动升级的先后顺序如何，分类都不会失效。
 
 `pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
 
@@ -197,6 +199,22 @@ Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由�
 **CubeMaster 与 CubeProxy 必须配置相同的 admin token**：Helm 安装由 Chart 自动完成，手写部署需自行对齐。两端不一致时清理会返回 **403**，旧路由不会自行过期，沙箱将一直不可达。
 
 轮换 `lifecycleManager.adminToken` 时，master、proxy、lifecycle-manager 会在同一次 `helm upgrade` 中依次滚动；滚动完成前发起的 Resume 可能因旧 token 仍被校验而失败。请等滚动结束后重试。
+
+## 快照能力声明
+
+快照走哪条捕获路径取决于**沙箱所在 shim** 的能力，因此 Cubelet 直接询问 shim，而不是靠推断。shim 用一份能力声明文档（见 `CubeShim/docs/shimapi/README.md`）声明自己支持什么，该文档会出现在两个位置：
+
+* `<bundle>/cube-shim-capabilities.json`——由正在运行的 shim 自己写入，描述的就是将要处理该请求的那个进程。Cubelet 在重启之后、以及每次捕获之后都优先读它。
+* `<组件根目录>/capabilities.json`——随发布制品一起分发，与 `version.json` 同级。用于还没有运行中沙箱的场景。
+
+早于该机制的发布版本由 Cubelet 内一张冻结的历史表覆盖，其沙箱行为与升级前完全一致。对于 Cubelet 完全无法识别的沙箱，仍沿用历史上的 best-effort 路径——**未知不会被当作“不支持”**。
+
+对用户可感知的影响：
+
+* **没有固定 shim 版本的沙箱，在运行中的 shim 支持时，full 快照改走协调一致的路径**。此前这类沙箱会被静默降级到 legacy best-effort 路径，其 rootfs 捕获在 `jfs` 上可能出现撕裂。快照仍然是 full 快照，改变的只是捕获方式，一致性严格更好。
+* **注定失败的 fs-only 快照会被提前拒绝**：当 shim 或其背后的 guest agent 明确表示无法在不捕获内存的情况下捕获时，Cubelet 会在暂停 VM 之前返回 `409 snapshot_filesystem_only_unsupported_node`。此前同一个请求会先暂停 guest 再失败。
+* **不对未声明预检的 shim 调用 Pause 预检**：这只是省掉一次无用的往返；存在 exec 会话时 Pause 仍会被拒绝。
+* 完全无法识别 shim 的沙箱行为不变，与升级前一致。
 
 ## 平台自动暂停 / 自动恢复
 

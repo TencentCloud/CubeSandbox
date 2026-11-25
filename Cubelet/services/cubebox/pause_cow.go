@@ -463,18 +463,18 @@ func (s *service) updateWithPauseCow(
 	// Cheap exec preflight before layout / memory clone / preStop. Open exec
 	// sessions make PauseToSnapshot fail with the same busy wording; CLM
 	// retries about every 5s and must not redo JuiceFS clone work each cycle.
-	// Only early-return on the busy string: an older shim that rejects
-	// CheckPauseAllowed as an unknown action must fall through so Pause still
-	// works until CubeShim rolls out.
-	if busyErr := s.preflightPauseNotBusy(ctx, sb); busyErr != nil {
-		if isPauseBusyReject(busyErr.Error()) {
-			restorePauseSnapshotStamp(sb, prevLiveSnap)
-			_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
-			rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
-			rsp.Ret.RetMsg = busyErr.Error()
-			return rsp, nil
+	// Skip the preflight when the shim declares it does not route the action.
+	if shimSupportsCheckPauseAllowed(s.shimCapabilitiesForPause(ctx, sb)) {
+		if busyErr := s.preflightPauseNotBusy(ctx, sb); busyErr != nil {
+			if isPauseBusyReject(busyErr.Error()) {
+				restorePauseSnapshotStamp(sb, prevLiveSnap)
+				_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
+				rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
+				rsp.Ret.RetMsg = busyErr.Error()
+				return rsp, nil
+			}
+			stepLog.Warnf("CheckPauseAllowed preflight unavailable; continuing to PauseToSnapshot: %v", busyErr)
 		}
-		stepLog.Warnf("CheckPauseAllowed preflight unavailable; continuing to PauseToSnapshot: %v", busyErr)
 	}
 
 	spec, err := pauseSnapshotSpec(s, ctx, req.SandboxID)
@@ -923,9 +923,8 @@ func markPauseDestroyPending(sb *cubeboxstore.CubeBox, requestID string) bool {
 	return true
 }
 
-// pauseBusyRejectMessage is the Shim wording for an open-exec Pause reject.
-// CheckPauseAllowed and PauseToSnapshot both return this string; keep the
-// Cubelet/Master matchers in sync with it.
+// pauseBusyRejectMessage is the pre-capability pause-busy wording.
+// Coded messages emit it behind shim_error_pause_busy.
 const pauseBusyRejectMessage = "sandbox pause forbidding, terminate exec tasks first"
 
 // pauseFailedReason is stamped by markLocalPauseFailed and cleared by
@@ -963,15 +962,6 @@ func (s *service) preflightPauseNotBusy(ctx context.Context, sb *cubeboxstore.Cu
 // preflightPauseNotBusyForTest, when set, replaces the shim Update preflight
 // so busy-path unit tests do not need a live containerd task.
 var preflightPauseNotBusyForTest func(ctx context.Context, sb *cubeboxstore.CubeBox) error
-
-// isPauseBusyReject reports a Shim preflight reject: open exec sessions
-// forbid Pause, and the MicroVM is still running. Matching the Shim wording
-// keeps Cubelet/Master aligned without a new wire error code.
-func isPauseBusyReject(msg string) bool {
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "pause forbidding") ||
-		strings.Contains(lower, "terminate exec tasks first")
-}
 
 // applyPauseBusyRejectLocalState rolls local pause bookkeeping back after a
 // pre-freeze busy reject. cleanupOK false means CoW/catalog delete failed, so

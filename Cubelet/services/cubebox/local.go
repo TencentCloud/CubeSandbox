@@ -220,6 +220,8 @@ func init() {
 
 			cbriManager.SetCubeRuntimeImplementation(l)
 			afterRecover := func(tmpCtx context.Context, cb *cubeboxstore.CubeBox) error {
+				// Re-read the shim's declaration after a restart: the bundle file is authoritative.
+				l.refreshShimCapabilitiesAfterRestart(tmpCtx, cb)
 				return storageRecoverer.RecoverSandboxStorage(tmpCtx, cb.ID)
 			}
 

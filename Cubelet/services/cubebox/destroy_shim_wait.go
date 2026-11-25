@@ -463,10 +463,33 @@ func recordedSandboxPIDs(sb *cubeboxstore.CubeBox) []recordedPID {
 	return pids
 }
 
+// shimLookupContext returns ctx with a namespace attached when it has none.
+// The shim manager requires a namespaced context.
+func shimLookupContext(ctx context.Context, sb *cubeboxstore.CubeBox) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := namespaces.Namespace(ctx); ok {
+		return ctx
+	}
+	// CubeBox.Namespace is create-time; Metadata.Namespace is what older rows carry.
+	ns := namespaces.Default
+	if sb != nil {
+		if sb.Namespace != "" {
+			ns = sb.Namespace
+		} else if sb.Metadata.Namespace != "" {
+			ns = sb.Metadata.Namespace
+		}
+	}
+	return namespaces.WithNamespace(ctx, ns)
+}
+
 func (l *local) shimBundlePaths(ctx context.Context, sb *cubeboxstore.CubeBox) []string {
 	if l == nil || l.shims == nil || sb == nil {
 		return nil
 	}
+	// Attach the sandbox's namespace before the lookup.
+	ctx = shimLookupContext(ctx, sb)
 	seen := map[string]struct{}{}
 	var bundles []string
 	for _, id := range sandboxShimLookupIDs(sb) {

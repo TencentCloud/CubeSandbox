@@ -15,6 +15,8 @@ on:
       - 'deploy/one-click/**'
       - 'deploy/scripts/docker-install-volume-deps.sh'
       - 'CubeProxy/Dockerfile'
+      # Covered by deploy/one-click/tests/test_shim_capabilities.sh.
+      - 'CubeShim/scripts/check-shim-capabilities.py'
       # bump-image.sh is the single source of truth for the hard-coded image
       # tags this deployer bakes in; test_bump_image.sh guards it.
       - 'scripts/bump-image.sh'

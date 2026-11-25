@@ -995,6 +995,16 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
+# assert_shim_capabilities FILE: validate a shim capability declaration.
+assert_shim_capabilities() {
+  local path="$1"
+  local validator="${ONE_CLICK_DIR}/../../CubeShim/scripts/check-shim-capabilities.py"
+  ensure_file "${path}"
+  ensure_file "${validator}"
+  python3 "${validator}" "${path}" \
+    || die "invalid shim capability declaration: ${path}"
+}
+
 # sha256 hex of a file (no "sha256:" prefix).
 file_sha256_hex() {
   local path="$1"

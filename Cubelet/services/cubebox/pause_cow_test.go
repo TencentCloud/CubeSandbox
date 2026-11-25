@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/capability"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -211,6 +212,47 @@ func TestUpdateWithPauseCowPreflightUnknownActionFallsThrough(t *testing.T) {
 	require.Contains(t, rsp.Ret.RetMsg, "failed to get cubebox")
 	require.NotContains(t, rsp.Ret.RetMsg, "CheckPauseAllowed")
 	require.Equal(t, attempt, stampedPauseSnapshotID(sb), "fall-through keeps the in-flight stamp")
+}
+
+func TestUpdateWithPauseCowSkipsPreflightTheShimDoesNotRoute(t *testing.T) {
+	// A shim that declares no CheckPauseAllowed action must not be asked.
+	sb := newCubeboxWithStatusForTest("sb-no-preflight-capability", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	})
+	sb.RecordResolvedShimCapabilities(capability.Resolved{
+		Source: capability.SourceRuntime,
+		// snapshot_capture present, check_pause_allowed absent.
+		Capabilities: capability.Set{capability.CapUpdateSnapshotCapture: 1},
+	})
+	first := sb.FirstContainer()
+	first.Config = &cubebox.ContainerConfig{
+		VolumeMounts: []*cubebox.VolumeMounts{{Name: "root", ContainerPath: "/"}},
+	}
+
+	called := false
+	preflightPauseNotBusyForTest = func(context.Context, *cubeboxstore.CubeBox) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { preflightPauseNotBusyForTest = nil })
+
+	// getErr stops getCubeboxSnapshotSpec before the nil containerd client.
+	s := &service{cubeboxMgr: &local{cubeboxManger: &fakeCubeboxAPI{
+		cb:     sb,
+		getErr: errors.New("runtime unavailable"),
+	}}}
+	rsp, err := s.updateWithPauseCow(context.Background(), &cubebox.UpdateCubeSandboxRequest{
+		RequestID: "req-no-preflight",
+		SandboxID: sb.ID,
+		Annotations: map[string]string{
+			constants.MasterAnnotationPauseSnapshotID: "snap-nopreflight0000000000000001",
+			constants.MasterAnnotationStorageBackend:  "xfs",
+		},
+	}, sb)
+	require.NoError(t, err)
+	require.False(t, called, "the preflight must not be called when the shim declares it is absent")
+	require.Contains(t, rsp.Ret.RetMsg, "failed to get cubebox",
+		"Pause proceeds past the skipped preflight to the next step")
 }
 
 func TestGetCubeboxSnapshotSpecRejectsUninitializedDependencies(t *testing.T) {

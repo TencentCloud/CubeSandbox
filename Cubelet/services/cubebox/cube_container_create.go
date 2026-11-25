@@ -480,6 +480,9 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		return err
 	}
 
+	// Record what the shim declared it can do.
+	l.resolveSandboxShimCapabilities(ctx, sandBox)
+
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
 		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
 		if cleanupErr == nil {

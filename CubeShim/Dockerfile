@@ -23,12 +23,15 @@ COPY CubeShim/ /workspace/CubeShim/
 COPY hypervisor/ /workspace/hypervisor/
 
 # Same as root Makefile `shim`: cargo build --release --locked in CubeShim.
+# Generate and validate the capability declaration shipped with the binary.
 RUN set -eux; \
     mkdir -p /out/cube-shim/bin /out/cube-shim/conf; \
     cd /workspace/CubeShim; \
     cargo build --release --locked; \
     install -m 0755 target/release/containerd-shim-cube-rs /out/cube-shim/bin/containerd-shim-cube-rs; \
-    install -m 0755 target/release/cube-runtime /out/cube-shim/bin/cube-runtime
+    install -m 0755 target/release/cube-runtime /out/cube-shim/bin/cube-runtime; \
+    /out/cube-shim/bin/containerd-shim-cube-rs --print-capabilities > /out/cube-shim/capabilities.json; \
+    python3 scripts/check-shim-capabilities.py /out/cube-shim/capabilities.json
 
 COPY deploy/one-click/config-cube.toml /out/cube-shim/conf/config-cube.toml
 
