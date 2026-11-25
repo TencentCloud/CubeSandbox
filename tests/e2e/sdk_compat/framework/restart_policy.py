@@ -10,6 +10,7 @@ from the data plane with sysrq so the suite does not need host access.
 from __future__ import annotations
 
 import shlex
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -148,6 +149,12 @@ _STATUS_ALIASES = {
     "lastExitReason": ("lastExitReason", "last_exit_reason"),
     "lastExitCode": ("lastExitCode", "last_exit_code"),
     "nextRestartAt": ("nextRestartAt", "next_restart_at"),
+    # restartCount is the consumed retry budget, not the number of successful
+    # rebuilds (lifecycle.md: a failed attempt still spends maxRestarts). These
+    # timestamps are what tell the two apart in a failure message.
+    "lastRestartAt": ("lastRestartAt", "last_restart_at"),
+    "lastSuccessfulRestartAt": ("lastSuccessfulRestartAt", "last_successful_restart_at"),
+    "lastFailedRestartAt": ("lastFailedRestartAt", "last_failed_restart_at"),
 }
 
 
@@ -175,18 +182,36 @@ def wait_for_restart_status(
     *,
     timeout: float,
     interval: float = 2,
+    hold: float = 0,
 ) -> dict[str, Any] | None:
-    """Poll info() until predicate(status) is true. info() errors keep waiting."""
+    """Poll info() until predicate(status) is true. info() errors keep waiting.
+
+    With ``hold`` > 0 the predicate must also stay true for that many seconds
+    without a false sample, which restarts the window. A restart can queue the
+    next attempt the moment a rebuild succeeds, so a status that is only
+    momentarily true does not prove the sandbox settled.
+    """
     last: dict[str, Any] | None = None
+    stable_since: float | None = None
 
     def _matches() -> bool:
-        nonlocal last
+        nonlocal last, stable_since
         try:
             last = restart_status(adapter.info().raw)
         except Exception:
             last = None
+            stable_since = None
             return False
-        return predicate(last)
+        if not predicate(last):
+            stable_since = None
+            return False
+        if hold <= 0:
+            return True
+        now = time.monotonic()
+        if stable_since is None:
+            stable_since = now
+            return False
+        return now - stable_since >= hold
 
     try:
         wait_until(
