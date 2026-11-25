@@ -44,12 +44,19 @@ scheduler:
   priority_select_num: 1
 `
 
-func init() {
+func TestMain(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+// runTests sets up the config fixture, runs the tests and removes the fixture;
+// split from TestMain so the deferred cleanup runs before os.Exit.
+func runTests(m *testing.M) int {
 	if os.Getenv("CUBE_MASTER_CONFIG_PATH") == "" {
 		file, err := os.CreateTemp("", "cubemaster-test-conf-*.yaml")
 		if err != nil {
 			panic(fmt.Sprintf("cannot create test config: %v", err))
 		}
+		defer os.Remove(file.Name())
 		if _, err := file.WriteString(minimalTestConfig); err != nil {
 			_ = file.Close()
 			panic(fmt.Sprintf("cannot write test config: %v", err))
@@ -61,5 +68,8 @@ func init() {
 			panic(fmt.Sprintf("cannot set test config path: %v", err))
 		}
 	}
-	config.Init()
+	if _, err := config.Init(); err != nil {
+		panic(fmt.Sprintf("cannot init test config: %v", err))
+	}
+	return m.Run()
 }
