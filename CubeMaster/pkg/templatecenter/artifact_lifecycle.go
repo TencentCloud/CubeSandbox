@@ -45,11 +45,10 @@ var requestTemplateCenterArtifactDelete = func(ctx context.Context, artifactID s
 	return tcclient.NewClient(endpoint).DeleteArtifact(callCtx, artifactID)
 }
 
-// countArtifactReferencesTx counts the live references to artifactID inside the
-// given transaction: surviving template replicas, active (PENDING/RUNNING)
-// build jobs, template definitions, and snapshots indexed by rootfs_artifact_id. When
-// excludeTemplateID is non-empty its own rows are excluded so the caller can
-// decide based on "everyone else" while deleting that template.
+// countArtifactReferencesTx counts live references to artifactID: replicas,
+// in-flight jobs (PENDING/RUNNING/BUILT), definitions, and snapshots. Rows of
+// excludeTemplateID are ignored. BUILT counts because registration and
+// distribution are still pending.
 func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, excludeTemplateID string) (int64, error) {
 	_ = ctx
 	artifactID = strings.TrimSpace(artifactID)
@@ -77,7 +76,8 @@ func countArtifactReferencesTx(ctx context.Context, tx *gorm.DB, artifactID, exc
 
 	var jobCount int64
 	jq := tx.Table(constants.TemplateImageJobTableName).
-		Where("artifact_id = ? AND status IN ?", artifactID, []string{JobStatusPending, JobStatusRunning})
+		Where("artifact_id = ? AND status IN ?", artifactID,
+			[]string{JobStatusPending, JobStatusRunning, JobStatusBuilt})
 	if excludeTemplateID != "" {
 		jq = jq.Where("template_id <> ?", excludeTemplateID)
 	}
