@@ -1108,9 +1108,11 @@ dependencies = [
 name = "nbd"
 version = "0.1.0"
 dependencies = [
+ "io-uring",
  "libc",
  "log",
  "thiserror",
+ "vmm-sys-util",
 ]
 
 [[package]]

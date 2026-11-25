@@ -5,6 +5,8 @@ authors = ["CubeSandbox Authors"]
 edition = "2021"
 
 [dependencies]
+io-uring = "0.5.8"
 libc = "0.2.137"
 log = "0.4.17"
 thiserror = "1.0.37"
+vmm-sys-util = "0.12.1"

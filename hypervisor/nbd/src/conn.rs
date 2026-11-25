@@ -387,6 +387,14 @@ impl NbdConn {
         self.stream.as_raw_fd()
     }
 
+    pub(crate) fn socket_timeout(&self) -> Option<Duration> {
+        self.options.socket_timeout
+    }
+
+    pub(crate) fn reconnect_timeout(&self) -> Option<Duration> {
+        self.options.reconnect_timeout
+    }
+
     pub(crate) fn timeout_error(&self) -> io::Error {
         io::Error::new(
             io::ErrorKind::TimedOut,
