@@ -8,19 +8,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"gorm.io/gorm"
 )
 
 type triggerHarness struct {
-	nodes  []string
-	runs   int
-	ran    bool
-	failed int
-	err    error
+	nodes   []string
+	runs    int
+	targets []string // node IDs of the last pass, sorted
+	ran     bool
+	failed  int
+	err     error
 }
 
 func installTriggerHarness(t *testing.T) *triggerHarness {
@@ -28,8 +32,13 @@ func installTriggerHarness(t *testing.T) *triggerHarness {
 	h := &triggerHarness{ran: true}
 	origNodes, origRun := backfillWatchNodeIDs, runTriggeredBackfill
 	backfillWatchNodeIDs = func() []string { return append([]string(nil), h.nodes...) }
-	runTriggeredBackfill = func(context.Context) (bool, int, error) {
+	runTriggeredBackfill = func(_ context.Context, nodeIDs map[string]struct{}) (bool, int, error) {
 		h.runs++
+		h.targets = h.targets[:0]
+		for id := range nodeIDs {
+			h.targets = append(h.targets, id)
+		}
+		sort.Strings(h.targets)
 		return h.ran, h.failed, h.err
 	}
 	t.Cleanup(func() { backfillWatchNodeIDs, runTriggeredBackfill = origNodes, origRun })
@@ -61,8 +70,9 @@ func TestBackfillTriggerRunsOnceForNewNode(t *testing.T) {
 	}
 }
 
-// A node leaving the healthy/schedulable set and returning (recovered,
-// uncordoned) is backfilled again.
+// A node that leaves the healthy/schedulable set for longer than a periodic
+// interval and comes back (recovered, uncordoned, re-imaged) is backfilled
+// again; a short flap is not.
 func TestBackfillTriggerRecoveredNodeRetriggers(t *testing.T) {
 	h := installTriggerHarness(t)
 	ctx, now := context.Background(), time.Unix(1000, 0)
@@ -74,8 +84,60 @@ func TestBackfillTriggerRecoveredNodeRetriggers(t *testing.T) {
 	trigger.step(ctx, now.Add(10*time.Second))
 	h.nodes = []string{"node-a", "node-b"}
 	trigger.step(ctx, now.Add(20*time.Second))
+	if h.runs != 0 {
+		t.Fatalf("short flap re-triggered: runs = %d", h.runs)
+	}
+
+	h.nodes = []string{"node-a"}
+	trigger.step(ctx, now.Add(30*time.Second))
+	trigger.step(ctx, now.Add(30*time.Second+backfillNodeForgetAfter))
+	h.nodes = []string{"node-a", "node-b"}
+	trigger.step(ctx, now.Add(40*time.Second+backfillNodeForgetAfter))
+	if h.runs != 1 || !reflect.DeepEqual(h.targets, []string{"node-b"}) {
+		t.Fatalf("returning node: runs=%d targets=%v, want 1 pass for node-b", h.runs, h.targets)
+	}
+}
+
+// A pending node that flaps keeps its attempt count, so the cap still bounds
+// it; while it is away it is not part of the pass.
+func TestBackfillTriggerFlappingNodeKeepsBudget(t *testing.T) {
+	h := installTriggerHarness(t)
+	ctx, now := context.Background(), time.Unix(1000, 0)
+	trigger := newBackfillNodeTrigger()
+	trigger.step(ctx, now)
+
+	h.nodes = []string{"node-new"}
+	h.failed = 1
+	trigger.step(ctx, now)
+	if trigger.pending["node-new"] != 1 {
+		t.Fatalf("attempts = %d, want 1", trigger.pending["node-new"])
+	}
+	h.nodes = nil
+	now = now.Add(backfillNodeRetryInterval)
+	trigger.step(ctx, now)
 	if h.runs != 1 {
-		t.Fatalf("recovered node runs = %d, want 1", h.runs)
+		t.Fatalf("absent node was pushed: runs = %d", h.runs)
+	}
+	h.nodes = []string{"node-new"}
+	now = now.Add(backfillNodeWatchInterval)
+	trigger.step(ctx, now)
+	if h.runs != 2 || trigger.pending["node-new"] != 2 {
+		t.Fatalf("flap reset the budget: runs=%d attempts=%d, want 2, 2", h.runs, trigger.pending["node-new"])
+	}
+}
+
+// A pass is limited to the pending nodes that are present.
+func TestBackfillTriggerPassTargetsPendingNodes(t *testing.T) {
+	h := installTriggerHarness(t)
+	ctx, now := context.Background(), time.Unix(1000, 0)
+	trigger := newBackfillNodeTrigger()
+	h.nodes = []string{"node-a"}
+	trigger.step(ctx, now)
+
+	h.nodes = []string{"node-a", "node-x", "node-y"}
+	trigger.step(ctx, now.Add(backfillNodeWatchInterval))
+	if h.runs != 1 || !reflect.DeepEqual(h.targets, []string{"node-x", "node-y"}) {
+		t.Fatalf("runs=%d targets=%v, want one pass for node-x and node-y", h.runs, h.targets)
 	}
 }
 
@@ -145,6 +207,31 @@ func TestBackfillTriggerLockContentionKeepsNodePending(t *testing.T) {
 	}
 }
 
+// Failing to reach the database for the lock is not an attempt either, but it
+// backs off instead of retrying on every check.
+func TestBackfillTriggerLockErrorBacksOffWithoutAttempt(t *testing.T) {
+	h := installTriggerHarness(t)
+	ctx, now := context.Background(), time.Unix(1000, 0)
+	trigger := newBackfillNodeTrigger()
+	trigger.step(ctx, now)
+
+	h.nodes = []string{"node-new"}
+	h.ran, h.err = false, errors.New("pin connection: db down")
+	trigger.step(ctx, now)
+	if trigger.pending["node-new"] != 0 || h.runs != 1 {
+		t.Fatalf("lock error counted as attempt: pending=%v runs=%d", trigger.pending, h.runs)
+	}
+	trigger.step(ctx, now.Add(backfillNodeWatchInterval))
+	if h.runs != 1 {
+		t.Fatalf("retried inside backoff after lock error: runs = %d", h.runs)
+	}
+	h.ran, h.err = true, nil
+	trigger.step(ctx, now.Add(backfillNodeRetryInterval))
+	if h.runs != 2 || len(trigger.pending) != 0 {
+		t.Fatalf("not retried after backoff: runs=%d pending=%v", h.runs, trigger.pending)
+	}
+}
+
 // A node joining while an earlier node is in retry backoff is pushed at
 // once instead of waiting out that backoff.
 func TestBackfillTriggerNewNodeSkipsBackoff(t *testing.T) {
@@ -183,8 +270,30 @@ func TestSweepTemplateReplicaBackfillCountsFailures(t *testing.T) {
 		}
 		return nil, errors.New("db down")
 	}
-	failed, err := sweepTemplateReplicaBackfill(context.Background())
+	failed, err := sweepTemplateReplicaBackfill(context.Background(), nil)
 	if err != nil || failed != 1 {
 		t.Fatalf("failed=%d err=%v, want 1 failure", failed, err)
+	}
+}
+
+// A node-limited pass keeps only the listed nodes; a template none of them is
+// in scope for has no target, which the sweep does not count as a failure.
+func TestResolveBackfillTargetsLimitsToNodes(t *testing.T) {
+	orig := backfillResolveNodes
+	t.Cleanup(func() { backfillResolveNodes = orig })
+	backfillResolveNodes = func(string, []string) ([]*node.Node, error) {
+		return []*node.Node{testNode("node-a", "10.0.0.1"), testNode("node-b", "10.0.0.2")}, nil
+	}
+
+	all, err := resolveBackfillTargets("cubebox", nil, nil)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("unlimited: %d node(s), err=%v; want 2", len(all), err)
+	}
+	got, err := resolveBackfillTargets("cubebox", nil, map[string]struct{}{"node-b": {}, "node-z": {}})
+	if err != nil || len(got) != 1 || got[0].ID() != "node-b" {
+		t.Fatalf("limited: %v, err=%v; want node-b", got, err)
+	}
+	if _, err := resolveBackfillTargets("cubebox", nil, map[string]struct{}{"node-z": {}}); !errors.Is(err, ErrNoTemplateNodes) {
+		t.Fatalf("no listed node in scope: err=%v, want ErrNoTemplateNodes", err)
 	}
 }

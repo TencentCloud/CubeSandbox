@@ -77,15 +77,17 @@ var (
 // reconcileTemplateReplicaBackfill pushes READY templates to healthy nodes
 // that lack a READY replica. Runs inside the image-job reconcile pass.
 func reconcileTemplateReplicaBackfill(ctx context.Context) error {
-	_, err := sweepTemplateReplicaBackfill(ctx)
+	_, err := sweepTemplateReplicaBackfill(ctx, nil)
 	return err
 }
 
-// sweepTemplateReplicaBackfill is one backfill pass. It returns how many
-// templates failed to backfill so the new-node trigger can retry early.
-// A template whose instance type has no healthy node is not a failure:
-// there is nothing to push it to.
-func sweepTemplateReplicaBackfill(ctx context.Context) (failed int, err error) {
+// sweepTemplateReplicaBackfill is one backfill pass. With onlyNodes set it
+// pushes to those node IDs alone (the new-node trigger); nil means every
+// in-scope node. It returns how many templates failed to backfill so the
+// trigger can retry early. A template with no target is not a failure:
+// no healthy node of its instance type, or none of onlyNodes in its scope,
+// leaves nothing to push it to.
+func sweepTemplateReplicaBackfill(ctx context.Context, onlyNodes map[string]struct{}) (failed int, err error) {
 	if !isReady() {
 		return 0, nil
 	}
@@ -95,13 +97,17 @@ func sweepTemplateReplicaBackfill(ctx context.Context) (failed int, err error) {
 	}
 	logger := log.G(ctx).WithFields(map[string]any{"component": "image_job_reconcile"})
 	for _, def := range defs {
-		if err := backfillTemplateReplicas(ctx, def); err != nil {
-			if !errors.Is(err, ErrNoTemplateNodes) {
+		if err := backfillTemplateReplicasOn(ctx, def, onlyNodes); err != nil {
+			noTargets := errors.Is(err, ErrNoTemplateNodes)
+			if !noTargets {
 				failed++
 			}
 			// Per-template failures must not stop the pass; the next tick
-			// retries this template anyway.
-			logger.Warnf("template replica backfill: template=%s err=%v", def.TemplateID, err)
+			// retries this template anyway. A node-limited pass skips most
+			// templates for lack of targets; that is expected, not news.
+			if !noTargets || onlyNodes == nil {
+				logger.Warnf("template replica backfill: template=%s err=%v", def.TemplateID, err)
+			}
 		}
 	}
 	return failed, nil
@@ -110,6 +116,12 @@ func sweepTemplateReplicaBackfill(ctx context.Context) (failed int, err error) {
 // backfillTemplateReplicas distributes one template's artifact to the
 // healthy in-scope nodes that do not already hold a READY replica.
 func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error {
+	return backfillTemplateReplicasOn(ctx, def, nil)
+}
+
+// backfillTemplateReplicasOn is backfillTemplateReplicas limited to the node
+// IDs in onlyNodes; nil means every in-scope node.
+func backfillTemplateReplicasOn(ctx context.Context, def backfillDefinition, onlyNodes map[string]struct{}) error {
 	job, err := backfillLatestJob(ctx, def.TemplateID)
 	if err != nil {
 		// No create/redo job: the definition predates job bookkeeping or the
@@ -149,7 +161,7 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		if instanceType == "" {
 			instanceType = req.InstanceType
 		}
-		targets, err := backfillResolveNodes(instanceType, req.DistributionScope)
+		targets, err := resolveBackfillTargets(instanceType, req.DistributionScope, onlyNodes)
 		if err != nil {
 			return err
 		}
@@ -210,7 +222,7 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	if instanceType == "" {
 		instanceType = req.InstanceType
 	}
-	targets, err := backfillResolveNodes(instanceType, req.DistributionScope)
+	targets, err := resolveBackfillTargets(instanceType, req.DistributionScope, onlyNodes)
 	if err != nil {
 		return err
 	}
@@ -507,6 +519,28 @@ func nodesWithoutReadyReplica(replicas []models.TemplateReplica, targets []*node
 		missing = append(missing, target)
 	}
 	return missing
+}
+
+// resolveBackfillTargets resolves the template's in-scope nodes and, when
+// onlyNodes is set, keeps just those. An empty result is ErrNoTemplateNodes.
+func resolveBackfillTargets(instanceType string, scope []string, onlyNodes map[string]struct{}) ([]*node.Node, error) {
+	targets, err := backfillResolveNodes(instanceType, scope)
+	if err != nil || onlyNodes == nil {
+		return targets, err
+	}
+	kept := make([]*node.Node, 0, len(onlyNodes))
+	for _, target := range targets {
+		if target == nil {
+			continue
+		}
+		if _, ok := onlyNodes[target.ID()]; ok {
+			kept = append(kept, target)
+		}
+	}
+	if len(kept) == 0 {
+		return nil, ErrNoTemplateNodes
+	}
+	return kept, nil
 }
 
 // nodesWithoutArtifactPlacement returns the in-scope targets without a
