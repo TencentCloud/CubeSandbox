@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -825,6 +827,14 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
+	}
+	if volumes, err := pausePackagePluginVolumes(pauseSpec); err != nil {
+		stepLog.Warnf("read plugin volumes from pause spec: %v", err)
+	} else if len(volumes) != 0 {
+		if rsp.ExtInfo == nil {
+			rsp.ExtInfo = make(map[string][]byte)
+		}
+		rsp.ExtInfo[cubebox.ExtPausePluginVolumeIDs], _ = json.Marshal(slices.Sorted(maps.Keys(volumes)))
 	}
 	stageTimings.CubeletTotalMS = durationMS(time.Since(pauseStarted))
 	stageTimings.RecordedAt = time.Now().UTC().Format(time.RFC3339Nano)

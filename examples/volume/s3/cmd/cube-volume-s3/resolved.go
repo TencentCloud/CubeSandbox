@@ -38,11 +38,12 @@ func resolveVolume(cfg *config.Config, state binding.Binding) (resolvedVolume, e
 	return resolvedVolume{state: state, credentials: creds}, nil
 }
 
-func (v resolvedVolume) client(ctx context.Context) (*s3api.Client, error) {
+func (v resolvedVolume) client(ctx context.Context, maxAttempts int) (*s3api.Client, error) {
 	c := v.credentials
 	return s3api.NewFor(ctx, s3api.Options{
 		Bucket: v.state.Bucket, Endpoint: c.Endpoint, Region: c.Region, Addressing: c.Addressing,
 		AccessKeyID: c.AccessKeyID, SecretAccessKey: c.SecretAccessKey, InstanceRole: c.InstanceRole,
+		MaxAttempts: maxAttempts,
 	})
 }
 

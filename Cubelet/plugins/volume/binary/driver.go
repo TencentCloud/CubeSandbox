@@ -45,6 +45,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -81,7 +82,9 @@ func (p *Plugin) Init(_ context.Context, cfg volume.PluginConfig) error {
 // Attach forks the binary with --op attach and the request fields as flags.
 func (p *Plugin) Attach(ctx context.Context, req *volume.AttachRequest) (*volume.AttachResult, error) {
 	if strings.ContainsRune(req.PrivateData, '\x00') {
-		return nil, fmt.Errorf("binary volume plugin %q attach: volume %q private_data must not contain NUL", p.name, req.VolumeID)
+		return nil, &volume.AttachNotStartedError{
+			Cause: fmt.Errorf("binary volume plugin %q attach: volume %q private_data must not contain NUL", p.name, req.VolumeID),
+		}
 	}
 	args := []string{
 		"--op", "attach",
@@ -103,6 +106,18 @@ func (p *Plugin) Attach(ctx context.Context, req *volume.AttachRequest) (*volume
 		Error    string            `json:"error"`
 	}
 	if err := p.run(ctx, &resp, args...); err != nil {
+		if startErr, ok := err.(*startError); ok {
+			err = &volume.AttachNotStartedError{Cause: startErr.error}
+		} else if exitErr, ok := err.(*processError); ok && (ctx == nil || ctx.Err() == nil) {
+			var status struct {
+				Error     string
+				ErrorKind string `json:"error_kind"`
+			}
+			if exitErr.exitCode > 0 && json.Unmarshal(exitErr.stdout, &status) == nil &&
+				status.Error != "" && status.ErrorKind == "attach_rolled_back" {
+				err = &volume.AttachRolledBackError{Cause: err}
+			}
+		}
 		return nil, fmt.Errorf("binary volume plugin %q attach: %w", p.name, err)
 	}
 	if resp.Error != "" {
@@ -150,6 +165,18 @@ func (p *Plugin) Close() error { return nil }
 // internal helpers
 // ---------------------------------------------------------------------------
 
+type startError struct{ error }
+
+func (e *startError) Unwrap() error { return e.error }
+
+type processError struct {
+	error
+	stdout   []byte
+	exitCode int
+}
+
+func (e *processError) Unwrap() error { return e.error }
+
 // run forks binaryPath with args, waits for it to exit, decodes stdout JSON
 // into out, and returns an error if the process exits non-zero.
 // ctx cancellation is forwarded to the child process.
@@ -165,12 +192,20 @@ func (p *Plugin) run(ctx context.Context, out any, args ...string) error {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return &startError{fmt.Errorf("exit error: %w", err)}
+	}
+	if err := cmd.Wait(); err != nil {
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
 			detail = strings.TrimSpace(stdout.String())
 		}
-		return fmt.Errorf("exit error: %w: %s", err, detail)
+		cause := fmt.Errorf("exit error: %w: %s", err, detail)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &processError{error: cause, stdout: stdout.Bytes(), exitCode: exitErr.ExitCode()}
+		}
+		return cause
 	}
 
 	if out != nil {

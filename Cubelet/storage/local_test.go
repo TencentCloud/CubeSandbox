@@ -1359,7 +1359,7 @@ func TestCleanupCreateResultRemovesHostDirSandboxPath(t *testing.T) {
 				BindPath:   sandboxDir,
 			},
 		},
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.NoDirExists(t, filepath.Join(hostDirBasePath, "hostdir-sb"))
 }

@@ -45,9 +45,15 @@ type VolumeRecord struct {
 	PrivateData string `gorm:"column:private_data;not null;default:'';size:1024"`
 	// RefCount tracks how many nodes currently have the volume attached
 	// (mounted by at least one sandbox). It is maintained from the node-level
-	// 0→1 / 1→0 transitions Cubelet reports on sandbox create/destroy. A volume
-	// with RefCount > 0 must not be deleted.
-	RefCount int64 `gorm:"column:refcount;not null;default:0"`
+	// 0→1 / 1→0 transitions Cubelet reports on sandbox create/destroy. A
+	// negative balance holds an early last detach until its +1 settles.
+	// Delete requires a zero balance and no in-flight creates.
+	RefCount        int64 `gorm:"column:refcount;not null;default:0"`
+	InFlightCreates int64 `gorm:"column:in_flight_creates;not null;default:0"`
+	Deleting        bool  `gorm:"column:deleting;not null;default:false"`
+	// DeleteRetryable allows another Delete to claim a deleting row. A
+	// possibly partially deleted volume stays blocked from Create.
+	DeleteRetryable bool `gorm:"column:delete_retryable;not null;default:false"`
 }
 
 // TableName implements schema.Tabler so GORM uses the canonical table name.

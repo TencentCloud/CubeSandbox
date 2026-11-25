@@ -14,8 +14,8 @@ use axum::{
 use crate::{
     error::{AppError, AppResult},
     models::{
-        ApiError, NewVolume, NewVolumeV2, Volume, VolumeAndToken, MAX_VOLUME_NAME_LEN,
-        MAX_VOLUME_PRIVATE_DATA_LEN,
+        ApiError, NewVolume, NewVolumeV2, Volume, VolumeAndToken, VolumeDetails,
+        MAX_VOLUME_NAME_LEN, MAX_VOLUME_PRIVATE_DATA_LEN,
     },
     state::AppState,
 };
@@ -152,7 +152,7 @@ fn validate_volume_name(body: &NewVolume) -> AppResult<()> {
 
 /// Get info for a single volume (includes auth token).
 ///
-/// Returns `200 OK` with `VolumeAndToken` on success.
+/// Returns `200 OK` with `VolumeDetails` on success.
 #[utoipa::path(
     get,
     path = "/volumes/{volumeID}",
@@ -160,7 +160,7 @@ fn validate_volume_name(body: &NewVolume) -> AppResult<()> {
         ("volumeID" = String, Path, description = "Identifier of the volume")
     ),
     responses(
-        (status = 200, description = "Successfully retrieved a volume", body = VolumeAndToken),
+        (status = 200, description = "Successfully retrieved a volume", body = VolumeDetails),
         (status = 401, description = "Authentication error",            body = ApiError),
         (status = 404, description = "Not found",                       body = ApiError),
         (status = 500, description = "Server error",                    body = ApiError),
@@ -211,7 +211,10 @@ mod tests {
         config::ServerConfig,
         logging::{arc, noop::NoopLogger},
     };
-    use axum::{routing::post, Router};
+    use axum::{
+        routing::{get, post},
+        Router,
+    };
     use axum_test::TestServer;
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
@@ -260,6 +263,42 @@ mod tests {
             document["paths"]["/volumes"]["post"]["responses"]["201"],
             document["paths"]["/v2/volumes"]["post"]["responses"]["201"]
         );
+        assert_eq!(
+            document["paths"]["/volumes/{volumeID}"]["get"]["responses"]["200"]["content"]
+                ["application/json"]["schema"]["$ref"],
+            "#/components/schemas/VolumeDetails"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_volume_get_forwards_master_admission_state() {
+        for diagnostic in [false, true] {
+            let mut volume = json!({"volumeID": "v1", "name": "v1", "token": "test-token"});
+            let mut expected = volume.clone();
+            if diagnostic {
+                volume["in_flight_creates"] = json!(2);
+                volume["deleting"] = json!(false);
+                volume["delete_retryable"] = json!(true);
+                expected["in_flight_creates"] = json!(2);
+                expected["deleting"] = json!(false);
+            }
+            let (server, _) = volume_server_with_master_response(
+                None,
+                StatusCode::OK,
+                json!({"ret": {"ret_code": 0, "ret_msg": "ok"}, "volume": volume}),
+            )
+            .await;
+            let response = server.get("/volumes/v1").await;
+            assert_eq!(response.status_code(), StatusCode::OK);
+            assert_eq!(response.json::<Value>(), expected);
+
+            let response = server.post("/volumes").json(&json!({"name": "v1"})).await;
+            assert_eq!(response.status_code(), StatusCode::CREATED);
+            assert_eq!(
+                response.json::<Value>(),
+                json!({"volumeID": "v1", "name": "v1", "token": "test-token"})
+            );
+        }
     }
 
     // Exercise the public route, service, HTTP client and serialized Master
@@ -303,6 +342,9 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let master = Router::new()
             .route("/cube/volume", post(create))
+            .route("/cube/volume/:id", get(|State((_, status, response)): State<(Requests, StatusCode, Value)>| async move {
+                (status, Json(response))
+            }))
             .with_state((requests.clone(), status, response));
         tokio::spawn(async move { axum::serve(listener, master).await.unwrap() });
         let config = ServerConfig {

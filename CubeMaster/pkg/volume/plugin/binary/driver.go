@@ -12,8 +12,9 @@
 // Exit code 0 + empty "error" field without "error_kind" = success.
 // Exit code != 0 or non-empty "error" field = failure.
 // Create accepts error_kind="invalid_argument" with a non-empty public error
-// message on normal exits, including non-zero exits. Other kinds remain generic
-// failures; Destroy does not interpret error_kind.
+// message on normal exits, including non-zero exits. A normally exiting
+// Destroy may return destroy_not_started or destroy_retryable with a non-empty
+// error field. An already absent target is a successful Destroy.
 //
 // # Operations and flags
 //
@@ -133,10 +134,13 @@ func (p *Plugin) Create(
 // Destroy forks the binary with --op destroy.
 func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) error {
 	if strings.ContainsRune(privateData, '\x00') {
-		return fmt.Errorf("binary plugin %q destroy: volume %q private_data must not contain NUL", p.name, volumeID)
+		return &plugin.NotStartedError{
+			Cause: fmt.Errorf("binary plugin %q destroy: volume %q private_data must not contain NUL", p.name, volumeID),
+		}
 	}
 	var resp struct {
-		Error string `json:"error"`
+		Error     string          `json:"error"`
+		ErrorKind json.RawMessage `json:"error_kind"`
 	}
 	args := []string{
 		"--op", "destroy",
@@ -145,8 +149,29 @@ func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) erro
 	if privateData != "" {
 		args = append(args, "--private-data", privateData)
 	}
-	if err := p.run(ctx, &resp, args...); err != nil {
-		return fmt.Errorf("binary plugin %q destroy: %w", p.name, err)
+	stdout, stderr, runErr := p.execute(ctx, args...)
+	decodeErr := json.Unmarshal(stdout, &resp)
+	var kind string
+	_ = json.Unmarshal(resp.ErrorKind, &kind)
+	knownFailure := kind == "destroy_not_started" || kind == "destroy_retryable"
+	if runErr == nil && decodeErr == nil && knownFailure && resp.Error == "" {
+		return fmt.Errorf("binary plugin %q destroy: missing error for %q", p.name, kind)
+	}
+	var exitErr *exec.ExitError
+	if ctx.Err() == nil && (runErr == nil || (errors.As(runErr, &exitErr) && exitErr.ExitCode() > 0)) &&
+		decodeErr == nil && resp.Error != "" {
+		switch kind {
+		case "destroy_not_started":
+			return &plugin.NotStartedError{Cause: errors.New(resp.Error)}
+		case "destroy_retryable":
+			return fmt.Errorf("%w: %s", plugin.ErrDestroyRetryable, resp.Error)
+		}
+	}
+	if runErr != nil {
+		return fmt.Errorf("binary plugin %q destroy: %w", p.name, executionError(runErr, stdout, stderr))
+	}
+	if decodeErr != nil {
+		return fmt.Errorf("binary plugin %q destroy: decode stdout: %w (raw: %s)", p.name, decodeErr, strings.TrimSpace(string(stdout)))
 	}
 	if resp.Error != "" {
 		return fmt.Errorf("binary plugin %q destroy: %s", p.name, resp.Error)
@@ -158,14 +183,16 @@ func (p *Plugin) Destroy(ctx context.Context, volumeID, privateData string) erro
 // helpers
 // ---------------------------------------------------------------------------
 
-// execute only captures process output. Each operation keeps its own response
-// interpretation; in particular, Destroy retains its original exit-first rule.
+// execute only captures process output. Each operation interprets its reply.
 func (p *Plugin) execute(ctx context.Context, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, p.binaryPath, args...) //nolint:gosec
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, nil, &plugin.NotStartedError{Cause: err}
+	}
+	err := cmd.Wait()
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
@@ -175,17 +202,4 @@ func executionError(err error, stdout, stderr []byte) error {
 		detail = strings.TrimSpace(string(stdout))
 	}
 	return fmt.Errorf("exit error: %w: %s", err, detail)
-}
-
-func (p *Plugin) run(ctx context.Context, out any, args ...string) error {
-	stdout, stderr, err := p.execute(ctx, args...)
-	if err != nil {
-		return executionError(err, stdout, stderr)
-	}
-	if out != nil {
-		if err := json.Unmarshal(stdout, out); err != nil {
-			return fmt.Errorf("decode stdout: %w (raw: %s)", err, strings.TrimSpace(string(stdout)))
-		}
-	}
-	return nil
 }

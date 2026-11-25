@@ -251,6 +251,10 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 			log.G(ctx).Errorf("delete paused sandbox fail:%+v", err)
 			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
 		}
+		if t.CreateFailover && !handled && !nodeOK {
+			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError,
+				"create failover node %s is missing from cache for sandbox %s", hostIP, req.GetSandboxID())
+		}
 		if !handled && nodeOK {
 			rsp, err := cubelet.Destroy(ctx, t.CallEp, req)
 			defer func() {

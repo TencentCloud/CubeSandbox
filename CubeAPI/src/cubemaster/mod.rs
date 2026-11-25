@@ -3250,7 +3250,15 @@ pub struct GetVolumeResponse {
     #[serde(rename = "RequestID", alias = "requestID", default)]
     pub request_id: String,
     pub ret: RetCode,
+    pub volume: CubeMasterVolumeDetails,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CubeMasterVolumeDetails {
+    #[serde(flatten)]
     pub volume: CubeMasterVolume,
+    pub in_flight_creates: Option<i64>,
+    pub deleting: Option<bool>,
 }
 
 /// DELETE /cube/volume/{volume_id} — response.
