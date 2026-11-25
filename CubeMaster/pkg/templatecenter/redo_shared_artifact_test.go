@@ -33,6 +33,25 @@ func TestRedoArtifactSharedChecksPeerReferences(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, shared)
 
+	// BUILT is in-flight and still owns the artifact.
+	require.NoError(t, db.Create(&models.TemplateImageJob{
+		JobID:      "job-built",
+		TemplateID: "tpl-c",
+		ArtifactID: artifactID,
+		Status:     JobStatusBuilt,
+	}).Error)
+	shared, err = redoArtifactShared(context.Background(), artifactID, "tpl-a")
+	require.NoError(t, err)
+	require.True(t, shared, "BUILT job must count as a reference")
+
+	// After BUILT, the job no longer pins the artifact.
+	require.NoError(t, db.Model(&models.TemplateImageJob{}).
+		Where("job_id = ?", "job-built").
+		Update("status", JobStatusFailed).Error)
+	shared, err = redoArtifactShared(context.Background(), artifactID, "tpl-a")
+	require.NoError(t, err)
+	require.False(t, shared)
+
 	// Adding a second template referencing the same artifact marks it shared.
 	require.NoError(t, db.Create(&models.TemplateDefinition{
 		TemplateID:       "tpl-b",

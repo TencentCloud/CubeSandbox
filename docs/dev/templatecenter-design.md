@@ -256,7 +256,7 @@ stage of the three-phase cleanup in §9.5) and download locality.
 Deleting an artifact means telling every node that holds a copy to remove its
 local ext4. A node that is already gone can never acknowledge that request, so
 the whole deletion would sit in CLEANUP_PENDING and keep both the artifact row
-and the template fingerprint it pins alive.
+and the artifact fingerprint it pins alive.
 
 A node absent from the node view, or still registered with a heartbeat expired
 for 15 minutes (the async operation timeout), therefore stops taking part in the

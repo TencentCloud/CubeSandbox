@@ -27,7 +27,7 @@ var (
 	redoTemplateInUse  = isTemplateInUseFailClosed
 	redoArtifactShared = func(ctx context.Context, artifactID, excludeTemplateID string) (bool, error) {
 		if !isReady() {
-			return false, nil
+			return false, ErrTemplateStoreNotInitialized
 		}
 		var refs int64
 		err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

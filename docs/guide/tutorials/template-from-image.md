@@ -103,7 +103,7 @@ Key output fields:
 | `distribution` | `N/M ready` — how many cluster nodes have received the artifact. |
 | `artifact_id` | Stable ID of the built rootfs artifact. |
 | `artifact_sha256` | SHA-256 digest of the rootfs artifact for integrity verification. |
-| `template_spec_fingerprint` | Deterministic fingerprint of the build-time template spec (image + rootfs-affecting flags, excluding runtime-only overrides such as `--cpu`/`--memory`, `--cmd`/`--arg`, `--env`, and `--probe`). Same input always produces the same fingerprint, so templates with different runtime specs from the same image reuse the same rootfs artifact. |
+| `template_spec_fingerprint` | Deterministic key for artifact reuse. Excludes runtime-only overrides (`--cpu`/`--memory`, `--cmd`/`--arg`, `--env`, `--probe`, working dir, volume mounts, rlimit); templates differing only in these fields share one artifact (`artifact_id`). `--expose-port`, `--network-type`, `--dns`, `--writable-layer-size`, `--instance-type` and `--user` still change the key. |
 
 ### Status (single snapshot)
 
@@ -222,6 +222,9 @@ template deleted: tpl-748094d2f2374b0a8a37e6ec
 
 > ⚠️ A successful delete removes the template metadata and the replicas on every
 > reachable node. New sandboxes can no longer be created from the template.
+
+If a template's rootfs artifact is shared with other templates, deleting this
+template keeps the artifact until the last template referencing it is deleted.
 
 **Unreachable nodes.** A node CubeMaster has not heard from for more than 15
 minutes does not block the delete: it is recorded for later cleanup and the
