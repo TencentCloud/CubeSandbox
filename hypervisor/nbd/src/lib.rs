@@ -9,6 +9,8 @@
 //! - [`NbdClient`] — multi-queue client factory managing probe connection reuse and per-queue engines
 //! - [`NbdSyncEngine`] & [`NbdUringEngine`] — eventfd-notified scatter/gather engines with transparent reconnect
 
+#[cfg(feature = "block-backend")]
+pub mod block_backend;
 pub mod conn;
 pub mod handshake;
 pub mod proto;

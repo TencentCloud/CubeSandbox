@@ -4,7 +4,12 @@ version = "0.1.0"
 authors = ["CubeSandbox Authors"]
 edition = "2021"
 
+[features]
+default = []
+block-backend = ["dep:block_util"]
+
 [dependencies]
+block_util = { path = "../block_util", optional = true }
 io-uring = "0.5.8"
 libc = "0.2.137"
 log = "0.4.17"

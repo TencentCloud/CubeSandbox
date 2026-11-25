@@ -36,6 +36,7 @@ linux-loader = { workspace = true, features = ["elf", "bzimage", "pe"] }
 logging = { path = "../logging" }
 log = "0.4.17"
 micro_http = { git = "https://github.com/firecracker-microvm/micro-http", branch = "main" }
+nbd = { path = "../nbd", features = ["block-backend"] }
 net_util = { path = "../net_util" }
 once_cell = "1.16.0"
 option_parser = { path = "../option_parser" }
