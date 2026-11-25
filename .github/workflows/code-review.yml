@@ -85,6 +85,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
+          allow_fork_prs: "true"
           allowed_non_write_users: "*"
           show_full_output: false
           classify_inline_comments: true
