@@ -98,6 +98,10 @@ func TestCreateFromPauseRollsBackSynchronouslyAndRestoresTombstone(t *testing.T)
 		hostConf.Quota.Mem = ""
 	}()
 
+	// The thin Create now carries the annotation pair, so expansion reads the
+	// seeded pause package before the gate and admission run.
+	seedPausePackageForTest(t, "snap-test", resumePackedSpecForTest())
+
 	// A PAUSED tombstone whose shim is provably gone, so the gate passes and
 	// the failure happens later, inside the create flow.
 	tomb := sandboxWithResourceForTest("sb-syncrollback", cubeboxstore.Status{
@@ -155,6 +159,7 @@ func TestCreateFromPausePreConditionFailedSkipsRollback(t *testing.T) {
 		hostConf.Quota.Mem = ""
 	}()
 
+	seedPausePackageForTest(t, "snap-test", resumePackedSpecForTest())
 	tomb := sandboxWithResourceForTest("sb-precond", cubeboxstore.Status{
 		StartedAt: 1,
 		PausedAt:  time.Now().Add(-time.Hour).UnixNano(),

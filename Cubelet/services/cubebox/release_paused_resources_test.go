@@ -523,6 +523,8 @@ func TestCreateRejectsResumeOverQuotaBeforeTheFlowRuns(t *testing.T) {
 		hostConf.Quota.Mem = ""
 	}()
 
+	seedPausePackageForTest(t, "snap-test", resumePackedSpecForTest())
+
 	// A PAUSED tombstone whose shim is provably gone, so gatePausedReplace
 	// passes and only the quota admission can stop the resume.
 	sb := sandboxWithResourceForTest("sb-resume-create", cubeboxstore.Status{

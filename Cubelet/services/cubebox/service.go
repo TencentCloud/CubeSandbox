@@ -363,6 +363,13 @@ func pausedReplaceTarget(
 // engine.run skips the failover for PreConditionFailed and the allocations
 // wait for a late rollback.
 //
+// A paused collision is only replaceable through the full Create-from-pause
+// shape (desired-id + pause-snapshot annotations), because that pair is what
+// service.Create keys the lifecycle lock on — and the replacement, the
+// synchronous rollback and the tombstone restore all run under that lock. A
+// desired-id-only create that lands on a tombstone is rejected here rather
+// than replaced without the serialization everything downstream assumes.
+//
 // The returned deep copy is the tombstone this create is replacing — nil when
 // there is nothing to replace — and is exactly what the synchronous rollback
 // of a failed attempt restores (see rollbackPausedReplace).
@@ -387,14 +394,16 @@ func (s *service) gatePausedReplace(ctx context.Context, req *cubebox.RunCubeSan
 			sb.SandboxID, state)
 	}
 	if resumeFromPauseSandboxID(req) == "" {
-		// The lifecycle lock — and with it the serialization every same-id
-		// lifecycle operation depends on — is keyed on the annotation pair
-		// Master always sends for a same-node resume. A desired-id-only create
-		// that lands on a tombstone is still replaced and admitted, but
-		// without that lock; surface the shape instead of silently depending
-		// on it.
-		log.G(ctx).Warnf("replacing paused tombstone %s for a create without the %s annotation: the sandbox lifecycle lock is NOT held for this request shape",
-			sb.SandboxID, constants.MasterAnnotationPauseSnapshotID)
+		// A desired-id-only create that lands on a tombstone is NOT the
+		// Create-from-pause shape Master sends (which always carries the
+		// pause-snapshot annotation), and service.Create only takes the
+		// lifecycle lock for that pair. Everything downstream — the
+		// replacement, the synchronous rollback and its tombstone restore —
+		// assumes that lock, so this shape must not proceed: reject it here,
+		// before any allocation, instead of running it with guarantees that
+		// do not hold.
+		return nil, fmt.Errorf("sandbox %s is paused locally but this request carries %s without %s: only a create-from-pause may replace a paused sandbox; a create that pins this id must wait for the pause binding to be resumed or deleted",
+			sb.SandboxID, constants.MasterAnnotationDesiredSandboxID, constants.MasterAnnotationPauseSnapshotID)
 	}
 	if err := s.cubeboxMgr.waitReplacedSandboxGone(ctx, sb); err != nil {
 		return nil, fmt.Errorf("cannot replace paused sandbox %s: %w", desired, err)
@@ -601,12 +610,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		return rsp, nil
 	}
 	if pausedTombstone != nil || resumeSID != "" {
-		// This create is a Create-from-pause (or replaces a local tombstone
-		// for a desired-id-only request): its rollback is owned synchronously
-		// by this function, so the engine's async failover must stay off and
-		// the rollback destroy must keep the store row for the tombstone
-		// restore instead of deleting it (see rollbackPausedReplace and
-		// workflow.DestroyContext.RollbackKeepsRow).
+		// This create is a Create-from-pause: its rollback is owned
+		// synchronously by this function, so the engine's async failover must
+		// stay off and the rollback destroy must keep the store row for the
+		// tombstone restore instead of deleting it (see rollbackPausedReplace
+		// and workflow.DestroyContext.RollbackKeepsRow). The gate above only
+		// hands back a tombstone for the annotation-pair shape, which is also
+		// the shape the lifecycle lock at the top of this function keys on —
+		// so the rollback below always runs serialized. resumeSID alone (no
+		// tombstone) is the cross-node restore: it still rolls back
+		// synchronously, with nothing to restore.
 		createInfo.Failover = false
 		createInfo.RollbackKeepsRow = pausedTombstone != nil
 	}

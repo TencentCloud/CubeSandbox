@@ -145,8 +145,9 @@ func (l *local) aggregateAllocated() aggregatedSandboxView {
 const aggregateCacheTTL = 10 * time.Millisecond
 
 // aggregateCache memoizes one aggregateAllocated view for aggregateCacheTTL.
-// Its mutex is a leaf: it is taken (briefly) while the ledger lock is held
-// and never the other way around.
+// Its mutex is a leaf: admitResume takes it BEFORE acquiring the ledger lock,
+// and no code path takes the ledger lock while holding it, so the two can
+// never deadlock.
 type aggregateCache struct {
 	mu    sync.Mutex
 	view  aggregatedSandboxView

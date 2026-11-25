@@ -57,12 +57,13 @@ import (
 // supported" — resume is a Master-driven Create-from-pause), and it holds the
 // sandbox's lifecycle lock for the whole RPC whenever the request carries
 // cube.master.desired.sandbox.id together with cube.master.pause.snapshot.id,
-// which Master always sends as a pair for a same-node resume. The admission
-// predicate is one annotation wider (desired-id + a local PAUSED row); for
-// that hypothetical shape — no caller sends it today, restart-armed creates
-// reuse the annotation but skip the replacement branch via ReuseFor and the
-// restart manager refuses PAUSED rows — gatePausedReplace logs a warning, and
-// registering over a live entry overwrites with a warning rather than
+// which Master always sends as a pair for a same-node resume. A desired-id-only
+// create that lands on a local PAUSED row — the one annotation wider than the
+// lock's predicate — is rejected by gatePausedReplace before it can reach
+// admission (no caller sends that shape today; restart-armed creates reuse the
+// annotation but skip the replacement branch via ReuseFor and the restart
+// manager refuses PAUSED rows), so every admission here runs under the lock.
+// Registering over a live entry still overwrites with a warning rather than
 // silently degrading from double-counting protection to single-counting.
 type resumeReservationLedger struct {
 	mu      sync.Mutex

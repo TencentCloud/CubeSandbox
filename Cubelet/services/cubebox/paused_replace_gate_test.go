@@ -37,9 +37,46 @@ func pausedForReplace(id string, endpoint sandboxstore.Endpoint) *cubeboxstore.C
 	return sb
 }
 
+// resumeReplaceRequest builds the full Create-from-pause request shape: the
+// annotation PAIR Master always sends for a same-node resume. The pair is
+// what service.Create keys the lifecycle lock on, and what the gate requires
+// before it will replace a local tombstone.
 func resumeReplaceRequest(desired string) *cubeboxpb.RunCubeSandboxRequest {
 	req := &cubeboxpb.RunCubeSandboxRequest{
 		RequestID: "resume-request",
+		Containers: []*cubeboxpb.ContainerConfig{{
+			Name:      "main",
+			Resources: &cubeboxpb.Resource{Cpu: "1", Mem: "512Mi"},
+		}},
+	}
+	if desired != "" {
+		req.Annotations = map[string]string{
+			constants.MasterAnnotationDesiredSandboxID: desired,
+			constants.MasterAnnotationPauseSnapshotID:  "snap-test",
+		}
+	}
+	return req
+}
+
+// resumePackedSpecForTest is the sandbox_spec.json content the seeded pause
+// package holds: the sandbox as it ran. The thin Create's annotations are
+// re-stamped onto it by pauseRestoreBinding.applyTo during expansion.
+func resumePackedSpecForTest() *cubeboxpb.RunCubeSandboxRequest {
+	return &cubeboxpb.RunCubeSandboxRequest{
+		RequestID: "original-create",
+		Containers: []*cubeboxpb.ContainerConfig{{
+			Name:      "main",
+			Resources: &cubeboxpb.Resource{Cpu: "1", Mem: "512Mi"},
+		}},
+	}
+}
+
+// desiredOnlyRequest is the lock-less shape: it pins the desired id but omits
+// the pause-snapshot annotation, so service.Create would not take the
+// lifecycle lock for it. The gate must reject it over a local tombstone.
+func desiredOnlyRequest(desired string) *cubeboxpb.RunCubeSandboxRequest {
+	req := &cubeboxpb.RunCubeSandboxRequest{
+		RequestID: "desired-only-request",
 		Containers: []*cubeboxpb.ContainerConfig{{
 			Name:      "main",
 			Resources: &cubeboxpb.Resource{Cpu: "1", Mem: "512Mi"},
@@ -173,6 +210,30 @@ func TestGatePausedReplaceRejectsNonPausedCollision(t *testing.T) {
 	assert.Contains(t, err.Error(), "DELETE the sandbox first")
 }
 
+// A desired-id-only create that lands on a local tombstone must be rejected:
+// service.Create keys the lifecycle lock on the annotation pair, so this shape
+// would run the replacement — and the synchronous rollback's tombstone
+// restore — without the serialization everything downstream assumes.
+func TestGatePausedReplaceRejectsLocklessDesiredIDOnlyShape(t *testing.T) {
+	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{
+		ShimSpawned:   true,
+		ShimSpawnedAt: time.Now().Add(-time.Hour),
+	})
+	s := gateOnlyService(sb, 10*time.Minute)
+
+	snapshot, err := s.gatePausedReplace(context.Background(), desiredOnlyRequest("sb-resume"))
+	require.Error(t, err,
+		"a tombstone may only be replaced through the annotation-pair shape the lifecycle lock keys on")
+	assert.Nil(t, snapshot)
+	assert.Contains(t, err.Error(), constants.MasterAnnotationPauseSnapshotID,
+		"the message must name the missing annotation")
+
+	// The same request with the pair completes normally.
+	snapshot, err = s.gatePausedReplace(context.Background(), resumeReplaceRequest("sb-resume"))
+	assert.NoError(t, err)
+	assert.NotNil(t, snapshot)
+}
+
 // A refusal has to happen before the create flow runs. That is the whole point
 // of moving the gate: the flow allocates network and volume, and the only way
 // to fail after that without stranding them was a code that triggers the
@@ -181,6 +242,7 @@ func TestCreateRefusesPausedReplacementBeforeTheFlowRuns(t *testing.T) {
 	_, err := config.Init("", true)
 	require.NoError(t, err)
 
+	seedPausePackageForTest(t, "snap-test", resumePackedSpecForTest())
 	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{ShimSpawned: true, ShimSpawnedAt: time.Now()})
 	flow := &fakeCreateFlow{}
 	s := createServiceForTest(sb, flow, 10*time.Minute)
@@ -199,6 +261,7 @@ func TestCreateReachesTheFlowOnceTheOldRuntimeIsGone(t *testing.T) {
 	_, err := config.Init("", true)
 	require.NoError(t, err)
 
+	seedPausePackageForTest(t, "snap-test", resumePackedSpecForTest())
 	sb := pausedForReplace("sb-resume", sandboxstore.Endpoint{
 		ShimSpawned:   true,
 		ShimSpawnedAt: time.Now().Add(-time.Hour),
