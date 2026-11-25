@@ -145,32 +145,63 @@ func (l *local) aggregateAllocated() aggregatedSandboxView {
 const aggregateCacheTTL = 10 * time.Millisecond
 
 // aggregateCache memoizes one aggregateAllocated view for aggregateCacheTTL.
-// Its mutex is a leaf: admitResume takes it BEFORE acquiring the ledger lock,
-// and no code path takes the ledger lock while holding it, so the two can
-// never deadlock.
+// Its mutex is a leaf: admitResume takes it outside the ledger lock and no
+// path takes the ledger lock while holding it, so the two can never deadlock.
+//
+// A resume release invalidates the cache (invalidateAggregateCache) BEFORE
+// dropping its ledger entry: by release time the flow's Save has folded the
+// demand into the store, so a view cached before that Save (still showing the
+// sandbox as a T-fraction tombstone) must never be served to an admission
+// that no longer sees the reservation either — that pair would under-count
+// the node by r·F. gen counts the invalidations so admitResume, which reads
+// the view outside the ledger lock, can revalidate under it: a view whose gen
+// is stale is re-read inside the critical section, closing the interleaving
+// where the release lands between the two reads.
 type aggregateCache struct {
 	mu    sync.Mutex
 	view  aggregatedSandboxView
 	at    time.Time
 	valid bool
+	gen   uint64
+}
+
+// aggregateCacheGeneration is the invalidation counter admitResume
+// revalidates against under the ledger lock.
+func (l *local) aggregateCacheGeneration() uint64 {
+	l.aggregateCache.mu.Lock()
+	defer l.aggregateCache.mu.Unlock()
+	return l.aggregateCache.gen
+}
+
+// invalidateAggregateCache drops the cached view so the next read rescans the
+// store. Called by the resume release closure; see aggregateCache.
+func (l *local) invalidateAggregateCache() {
+	c := &l.aggregateCache
+	c.mu.Lock()
+	c.valid = false
+	c.gen++
+	c.mu.Unlock()
 }
 
 // aggregateAllocatedCached is aggregateAllocated with a TTL cache, for the
-// resume-admission critical section. Heartbeat and metric collectors keep
-// calling aggregateAllocated directly: they run once a second and report to
+// resume-admission critical section. It also returns the cache's invalidation
+// generation: a caller that reads the view outside a lock can revalidate
+// under it (see admitResume). Heartbeat and metric collectors keep calling
+// aggregateAllocated directly: they run once a second and report to
 // CubeMaster, where a fresher view is worth the scan.
-func (l *local) aggregateAllocatedCached() aggregatedSandboxView {
-	l.aggregateCache.mu.Lock()
-	defer l.aggregateCache.mu.Unlock()
+func (l *local) aggregateAllocatedCached() (aggregatedSandboxView, uint64) {
+	c := &l.aggregateCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := time.Now()
-	if l.aggregateCache.valid && now.Sub(l.aggregateCache.at) < aggregateCacheTTL {
-		return l.aggregateCache.view
+	if c.valid && now.Sub(c.at) < aggregateCacheTTL {
+		return c.view, c.gen
 	}
 	view := l.aggregateAllocated()
-	l.aggregateCache.view = view
-	l.aggregateCache.at = now
-	l.aggregateCache.valid = true
-	return view
+	c.view = view
+	c.at = now
+	c.valid = true
+	return view, c.gen
 }
 
 // clampRatio bounds the release ratio to [0,1], the operator's

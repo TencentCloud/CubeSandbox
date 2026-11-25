@@ -989,3 +989,122 @@ func TestGetStatusConcurrentWithAggregateScanIsRaceFree(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestResumeReleaseInvalidatesAggregateCache pins the Save→release
+// transition's consistency: the release closure must invalidate the TTL
+// aggregate cache (and bump its generation) BEFORE dropping the ledger
+// entry, so no later admission can pair a pre-Save cached view — which still
+// shows the resumed sandbox as a T-fraction tombstone — with a ledger that no
+// longer carries its reservation. That pair would under-count the node by
+// r·F, the same over-admission class #2042 exists to close.
+func TestResumeReleaseInvalidatesAggregateCache(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 0 // isolate the memory dimension
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	tombX := sandboxWithResourceForTest("sb-x", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tombX.SandboxID = "sb-x"
+	tombB := sandboxWithResourceForTest("sb-b", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tombB.SandboxID = "sb-b"
+	mgr := &fakeCubeboxAPI{list: []*cubeboxstore.CubeBox{tombX, tombB}}
+	s := &service{cubeboxMgr: &local{cubeboxManger: mgr}}
+
+	// X is admitted; the admission warmed the cache with a view where both
+	// rows are tombstones (r=1 → contribute 0).
+	releaseX, rejected := s.admitResume(context.Background(), tombX)
+	require.Nil(t, rejected)
+	view, gen := s.cubeboxMgr.aggregateAllocatedCached()
+	require.Zero(t, view.MemoryMB, "pre-Save view counts both rows as released tombstones")
+
+	// X's flow Saves its row (full 4 GiB now visible in the store)...
+	savedX := sandboxWithResourceForTest("sb-x", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	savedX.SandboxID = "sb-x"
+	mgr.list[0] = savedX
+	// ...and the deferred release drops the reservation.
+	releaseX()
+
+	// The release must have invalidated the cache and bumped its generation:
+	// the next read rescans (sees the saved row) and the admission's
+	// under-the-lock generation check refuses the stale view.
+	view2, gen2 := s.cubeboxMgr.aggregateAllocatedCached()
+	assert.NotEqual(t, gen, gen2, "release must bump the cache generation")
+	assert.Equal(t, int64(4096), view2.MemoryMB,
+		"the post-release view must reflect the saved row, not the stale tombstone view")
+
+	// End to end: B's admission now sees 4096 used + 4096 need >= 8192 and
+	// is rejected — with the stale view still cached (pre-invalidation) it
+	// would have been admitted onto a full node.
+	releaseB, rejectedB := s.admitResume(context.Background(), tombB)
+	defer releaseB()
+	require.NotNil(t, rejectedB, "the second resume must see the first's saved row")
+	assert.Equal(t, errorcode.ErrorCode_Conflict, rejectedB.RetCode)
+	assert.Contains(t, rejectedB.RetMsg, "mem quota")
+}
+
+// TestAdmitResumeRevalidatesStaleViewUnderLedgerLock walks admitResume's
+// critical-section contract directly: a view whose generation went stale
+// before the ledger lock is re-read under the lock, so the decision never
+// pairs a pre-Save aggregate with a post-release ledger.
+func TestAdmitResumeRevalidatesStaleViewUnderLedgerLock(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 0
+	hostConf.Quota.Mem = "8Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	tomb := sandboxWithResourceForTest("sb-gen", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tomb.SandboxID = "sb-gen"
+	mgr := &fakeCubeboxAPI{list: []*cubeboxstore.CubeBox{tomb}}
+	s := &service{cubeboxMgr: &local{cubeboxManger: mgr}}
+
+	// A stale outside-the-lock read, then an invalidation before the ledger
+	// lock — the exact interleaving the generation check exists for.
+	staleView, staleGen := s.cubeboxMgr.aggregateAllocatedCached()
+	require.Zero(t, staleView.MemoryMB)
+	s.cubeboxMgr.invalidateAggregateCache()
+
+	// The row the store now holds (post-Save shape) must drive the decision,
+	// not the stale view.
+	saved := sandboxWithResourceForTest("sb-gen", cubeboxstore.Status{
+		StartedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	saved.SandboxID = "sb-gen"
+	mgr.list[0] = saved
+
+	assert.NotEqual(t, staleGen, s.cubeboxMgr.aggregateCacheGeneration(),
+		"invalidate must bump the generation the admission revalidates against")
+
+	// A second 4 GiB resume must now be rejected: re-read under the lock
+	// sees 4096 used, +4096 need >= 8192.
+	tomb2 := sandboxWithResourceForTest("sb-gen2", cubeboxstore.Status{
+		PausedAt: time.Now().UnixNano(),
+	}, "0m", "4Gi", 0, 0, 0)
+	tomb2.SandboxID = "sb-gen2"
+	mgr.list = append(mgr.list, tomb2)
+	release, rejected := s.admitResume(context.Background(), tomb2)
+	defer release()
+	require.NotNil(t, rejected, "the stale view must not admit onto a full node")
+	assert.Contains(t, rejected.RetMsg, "mem quota")
+}

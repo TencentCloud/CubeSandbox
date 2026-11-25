@@ -48,9 +48,14 @@ import (
 // Lifecycle of an entry: registered at admission, dropped by the release func
 // the caller defers — on success after the flow's Save has folded the demand
 // into aggregateAllocated, on failure/panic/cancellation after the rollback
-// has restored the tombstone. Entries are pure in-memory state: if the cubelet
-// dies the unsaved rows die with it, and the store rebuilt at startup agrees
-// with an empty ledger, so there is nothing to persist or recover.
+// has restored the tombstone. The release admitResume hands out also
+// invalidates the aggregate TTL cache before dropping the entry: the cached
+// view may predate this resume's Save (which shows it as a T-fraction
+// tombstone), and serving that view after the reservation is gone would
+// under-count the node by r·F for the rest of the TTL window. Entries are
+// pure in-memory state: if the cubelet dies the unsaved rows die with it, and
+// the store rebuilt at startup agrees with an empty ledger, so there is
+// nothing to persist or recover.
 //
 // Serialization of admissions for one sandbox ID is structural, not assumed:
 // service.Create is the only production entry (Update(resume) answers "not

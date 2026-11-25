@@ -187,11 +187,12 @@ func addPauseResumeMetaData(ctx context.Context, req *cubebox.UpdateCubeSandboxR
 // and registers this sandbox's demand under the ledger lock, so concurrent
 // resumes of different sandboxes serialize at the gate and cannot both pass
 // on a stale snapshot (#2042). The aggregate itself is served from a short
-// TTL cache (aggregateAllocatedCached) read just before the lock, keeping the
-// critical section O(1) in the common case; the reservations, which are the
-// part that must be exact between concurrent admissions, are always read
-// live under the lock. See resumeReservationLedger for what the reservation
-// covers and why every window over- (never under-)counts.
+// TTL cache (aggregateAllocatedCached) read outside the ledger lock; a
+// release invalidates it before dropping its entry, and the admission
+// revalidates the cache generation under the lock, so no decision can pair a
+// pre-Save view with a post-release ledger and under-count the node. See
+// resumeReservationLedger for what the reservation covers and why every
+// window over- (never under-)counts.
 //
 // Under a release ratio r the still-paused sandbox already contributes (1-r)
 // of its quota to the aggregate, so resuming it only adds the remaining r
@@ -246,7 +247,7 @@ func (s *service) admitResume(
 	cpuQuotaMilli := cubelethost.ResolveHostQuotaCPUMilli(hostConf)
 	// Only the released fraction is the incremental demand of resuming.
 	needMemMB, needCPUMilli := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
-	alloc := s.cubeboxMgr.aggregateAllocatedCached()
+	alloc, allocGen := s.cubeboxMgr.aggregateAllocatedCached()
 
 	id := sb.SandboxID
 	if id == "" {
@@ -259,6 +260,16 @@ func (s *service) admitResume(
 	// slip between observing and registering.
 	ledger := &s.cubeboxMgr.reservations
 	ledger.mu.Lock()
+	if s.cubeboxMgr.aggregateCacheGeneration() != allocGen {
+		// A release invalidated the cache between the read above and this
+		// lock: its Save (or rollback restore) moved the store past the view
+		// in hand, and its reservation may already be gone from the totals.
+		// Re-read under the lock so the decision never pairs a pre-Save view
+		// with a post-release ledger (an r·F under-count). Rare — only when a
+		// release lands inside this admission's own critical path — and the
+		// rescan happens at most once per invalidation, not per admission.
+		alloc, _ = s.cubeboxMgr.aggregateAllocatedCached()
+	}
 	reservedMemMB, reservedCPUMilli := ledger.totalsLocked()
 	reason := resumeQuotaRejection(resumeQuotaCheck{
 		// In-flight reservations count as used: they are admitted demand the
@@ -273,7 +284,23 @@ func (s *service) admitResume(
 	var release func()
 	var replaced *resumeReservation
 	if reason == "" {
-		release, replaced = ledger.reserveLocked(id, needMemMB, needCPUMilli)
+		dropReservation, replacedEntry := ledger.reserveLocked(id, needMemMB, needCPUMilli)
+		replaced = replacedEntry
+		// The release invalidates the aggregate cache BEFORE dropping the
+		// reservation, which is what makes reading the cached aggregate
+		// outside the ledger lock safe. Whichever order an admission and this
+		// release interleave in, at least one of the two terms covers this
+		// sandbox: invalidate-first means a cache miss rescans a store that
+		// already holds the saved row (or the rollback-restored tombstone)
+		// while the reservation still counts — momentarily over-counting,
+		// never under-counting. Dropping first would re-open the Save→release
+		// window: a view cached before the Save shows this sandbox as a
+		// T-fraction tombstone, and with the entry gone too the next
+		// admission would miss r·F of it for the rest of the TTL window.
+		release = func() {
+			s.cubeboxMgr.invalidateAggregateCache()
+			dropReservation()
+		}
 	}
 	ledger.mu.Unlock()
 

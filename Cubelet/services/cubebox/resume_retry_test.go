@@ -102,11 +102,9 @@ func TestRetryAfterFailedResumeIsStillQuotaGated(t *testing.T) {
 	}, "0m", "6Gi", 0, 0, 0)
 	other.SandboxID = "sb-other"
 	mgr.list = append(mgr.list, other)
-	// Drop the admission aggregate cache so the retry's check sees the new
-	// row (the TTL window would otherwise serve the first attempt's view).
-	s.cubeboxMgr.aggregateCache = aggregateCache{}
 
-	// Attempt 2: the same thin Create must now be refused — 6 GiB used plus
+	// Attempt 2 — the first attempt's release invalidated the aggregate
+	// cache, so this admission rescans and sees the new row.: the same thin Create must now be refused — 6 GiB used plus
 	// the 4 GiB the resume re-adds no longer fits the 8 GiB node. With the
 	// tombstone deleted (the old timing) this retry resolved to "not a
 	// replacement" and was admitted with no quota check at all.
@@ -180,9 +178,8 @@ func TestRetryAfterPostSaveFailureIsStillQuotaGated(t *testing.T) {
 	}, "0m", "6Gi", 0, 0, 0)
 	other.SandboxID = "sb-other2"
 	mgr.list = append(mgr.list, other)
-	s.cubeboxMgr.aggregateCache = aggregateCache{} // as above: the retry must see the new row
 
-	// Attempt 2: the same thin Create, gated on the restored tombstone.
+	// Attempt 2 — as above, the release invalidated the aggregate cache.: the same thin Create, gated on the restored tombstone.
 	release2, rejected2 := s.admitPausedReplace(ctx, pausedReplaceRequest("sb-postsaveretry"))
 	require.NotNil(t, rejected2, "the post-Save-failure retry must be gated on the restored tombstone")
 	assert.Equal(t, errorcode.ErrorCode_Conflict, rejected2.RetCode)
