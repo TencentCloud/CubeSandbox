@@ -74,6 +74,16 @@ func (r *ResourceLocks) Lock(resource string) func() {
 	return r.unlock(resource, l)
 }
 
+// TryLock acquires the resource only if it is immediately available.
+func (r *ResourceLocks) TryLock(resource string) (func(), bool) {
+	l := r.retain(resource)
+	if !l.mtx.TryLock() {
+		r.release(resource, l)
+		return nil, false
+	}
+	return r.unlock(resource, l), true
+}
+
 // LockContext waits for a resource lock until ctx expires. It uses TryLock
 // polling because sync.Mutex has no context-aware wait primitive; the retained
 // reference is released on cancellation so a timed-out waiter cannot leak a

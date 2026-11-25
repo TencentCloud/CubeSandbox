@@ -74,7 +74,9 @@ impl SnapshotInfo {
         let mut file = fs::File::create(target)
             .map_err(|e| format!("open {} failed:{}", target.display(), e))?;
         file.write_all(data.as_bytes())
-            .map_err(|e| format!("write {} failed:{}", target.display(), e))
+            .map_err(|e| format!("write {} failed:{}", target.display(), e))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {} failed:{}", target.display(), e))
     }
 
     pub fn new(cpu: u32, memory: u64) -> Self {

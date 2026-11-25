@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -37,7 +38,7 @@ type pauseFailureTask struct {
 func (*pauseFailureTask) Update(context.Context, ...containerd.UpdateTaskOpts) error { return nil }
 
 func TestPauseFailureCleansPackageUnderWriteGuard(t *testing.T) {
-	for _, stage := range []string{"memory-prepare", "memory-validation", "finalize"} {
+	for _, stage := range []string{"memory-prepare", "memory-validation", "finalize", "capture-timeout"} {
 		t.Run(stage, func(t *testing.T) {
 			installCleanupTemplateTestHooks(t)
 			origSpec, origLayout, origRootfs := pauseSnapshotSpec, pauseSnapshotLayout, pauseSnapshotRootfs
@@ -145,16 +146,48 @@ func TestPauseFailureCleansPackageUnderWriteGuard(t *testing.T) {
 				return os.RemoveAll(home)
 			}
 			requestCtx := trace.ContextWithSpanContext(context.Background(), parentTrace)
-			rsp, err := s.updateWithPauseCow(requestCtx, &cubebox.UpdateCubeSandboxRequest{
+			req := &cubebox.UpdateCubeSandboxRequest{
 				SandboxID: sb.ID, RequestID: "pause-failure",
 				Annotations: map[string]string{
 					constants.MasterAnnotationPauseSnapshotID: id,
 					constants.MasterAnnotationStorageBackend:  cow.BackendS3,
 				},
-			}, sb)
+			}
+			var rsp *cubebox.UpdateCubeSandboxResponse
+			var err error
+			if stage == "capture-timeout" {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(requestCtx, 120*time.Second)
+					defer cancel()
+					task := &blockingPauseTask{started: make(chan context.Context), saved: make(chan struct{}, 2)}
+					defer close(task.saved)
+					sb.FirstContainer().Container = &pauseFailureContainer{fakeDestroyContainer{task: task}}
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						rsp, err = s.updateWithPauseCow(ctx, req, sb)
+					}()
+
+					<-task.started // CheckPauseAllowed preflight
+					task.saved <- struct{}{}
+					<-task.started // PauseToSnapshot is now writing
+					<-ctx.Done()
+					synctest.Wait()
+					require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+					assertExternalOperationsBlocked()
+					require.False(t, metadataCleaned)
+					require.False(t, objectsCleaned)
+					require.DirExists(t, home)
+
+					task.saved <- struct{}{}
+					<-done
+				})
+			} else {
+				rsp, err = s.updateWithPauseCow(requestCtx, req, sb)
+			}
 			require.NoError(t, err)
 			require.Equal(t, errorcode.ErrorCode_Unknown, rsp.GetRet().GetRetCode(), rsp.GetRet().GetRetMsg())
-			require.Equal(t, stage == "finalize", finalizeCalled)
+			require.Equal(t, stage == "finalize" || stage == "capture-timeout", finalizeCalled)
 			require.True(t, metadataCleaned, "pause failure must reach metadata cleanup")
 			require.True(t, objectsCleaned, "pause failure must sweep sealed object names")
 			require.True(t, localCleaned)

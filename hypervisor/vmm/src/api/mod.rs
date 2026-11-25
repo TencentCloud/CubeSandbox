@@ -313,6 +313,9 @@ pub enum ApiRequest {
     /// Pause a VM to snapshot
     VmPauseToSnapshot(Arc<SnapshotConfig>),
 
+    /// Release a paused VM after its snapshot has been saved.
+    VmFinishPauseSnapshot,
+
     /// Resume a VM from snapshot
     VmResumeFromSnapshot(Arc<RestoreConfig>),
 

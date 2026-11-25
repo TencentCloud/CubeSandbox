@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
@@ -358,7 +359,7 @@ func TestScanDeadContainerSkipsRollingBack(t *testing.T) {
 		RollingBack: true,
 	})
 
-	scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{cb}, nil, time.Hour)
+	scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{cb}, nil, time.Hour, utils.NewResourceLocks())
 
 	got := cb.GetStatus().Get()
 	assert.True(t, got.RollingBack, "RollingBack flag must survive the scan")
@@ -381,7 +382,7 @@ func TestScanDeadContainerSkipsCreatingSandbox(t *testing.T) {
 	// dereferences the nil *containerd.Client and panics. NotPanics therefore
 	// proves the create-window guard short-circuited before reaching it.
 	assert.NotPanics(t, func() {
-		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{cb}, nil, time.Hour)
+		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{cb}, nil, time.Hour, utils.NewResourceLocks())
 	}, "DeadGC must skip a creating sandbox before touching the containerd client")
 
 	assert.False(t, cb.GetStatus().IsTerminated(), "a creating sandbox must not read as terminated")
@@ -403,6 +404,6 @@ func TestScanDeadContainerCreateSkipIsBounded(t *testing.T) {
 	})
 
 	assert.Panics(t, func() {
-		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{stuck}, nil, time.Hour)
+		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{stuck}, nil, time.Hour, utils.NewResourceLocks())
 	}, "a long-stuck creating sandbox must fall out of the skip window and be probed")
 }

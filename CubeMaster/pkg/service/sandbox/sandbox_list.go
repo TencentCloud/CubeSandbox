@@ -207,11 +207,8 @@ func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, re
 			continue
 		}
 		if item, ok := known[rec.SandboxID]; ok {
-			// Always record the binding. Status stays RUNNING for a stale READY, and
-			// for a CREATING binding older than the pause RPC budget, when the
-			// node reports RUNNING. PauseStatus stays as recorded so the leftover
-			// is visible. FAILED over RUNNING still overrides Status to UNKNOWN
-			// so List matches Info.
+			// Preserve the recorded PauseStatus and use the same node-state
+			// reconciliation as Info for stale pause bindings.
 			applyPauseBinding(item, rec)
 			view := decidePauseView(rec, item.Status, true)
 			switch {

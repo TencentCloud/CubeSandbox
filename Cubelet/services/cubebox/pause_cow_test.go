@@ -11,14 +11,84 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
+
+type blockingPauseTask struct {
+	containerd.Task
+	started chan context.Context
+	saved   chan struct{}
+}
+
+func (task *blockingPauseTask) Update(ctx context.Context, _ ...containerd.UpdateTaskOpts) error {
+	task.started <- ctx
+	select {
+	case <-task.saved:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestCapturePauseSnapshotFinishesAfterCallerDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := namespaces.WithNamespace(context.Background(), "cube-ns")
+		ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		defer cancel()
+		task := &blockingPauseTask{started: make(chan context.Context), saved: make(chan struct{}, 1)}
+		defer close(task.saved)
+		result := make(chan error, 1)
+		go func() { result <- capturePauseSnapshot(ctx, task, "{}") }()
+
+		shimCtx := <-task.started
+		<-ctx.Done()
+		synctest.Wait()
+		require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+		select {
+		case err := <-result:
+			t.Fatalf("pause capture returned before the writer finished: %v", err)
+		default:
+		}
+
+		namespace, err := namespaces.NamespaceRequired(shimCtx)
+		require.NoError(t, err)
+		require.Equal(t, "cube-ns", namespace)
+		task.saved <- struct{}{}
+		require.NoError(t, <-result)
+	})
+}
+
+func TestScanDeadContainerSkipsActivePause(t *testing.T) {
+	pausingAt := time.Now().Add(-2 * pausingStuckThreshold).UnixNano()
+	box := newCubeboxWithStatusForTest("sb-slow-pause", cubeboxstore.Status{
+		StartedAt: pausingAt - 1,
+		PausingAt: pausingAt,
+	})
+	task := &fakeResumeTask{status: containerd.Paused}
+	box.FirstContainer().Container = &stubContainer{task: task}
+	boxes := []*cubeboxstore.CubeBox{box}
+	lifecycleLocks := utils.NewResourceLocks()
+
+	unlock := lifecycleLocks.Lock(box.ID)
+	scanDeadContainer(context.Background(), boxes, nil, time.Hour, lifecycleLocks)
+	unlock()
+	require.Zero(t, task.statusCalls)
+	require.Equal(t, pausingAt, box.GetStatus().Get().PausingAt)
+
+	scanDeadContainer(context.Background(), boxes, nil, time.Hour, lifecycleLocks)
+	require.Equal(t, 1, task.statusCalls)
+	require.Equal(t, cubebox.ContainerState_CONTAINER_PAUSED, box.GetStatus().Get().State())
+}
 
 func TestResolvePauseSnapshotID(t *testing.T) {
 	t.Parallel()
@@ -97,7 +167,14 @@ func TestIsPauseBusyReject(t *testing.T) {
 	}
 }
 
-func TestApplyPauseBusyRejectLocalState(t *testing.T) {
+func TestPauseCaptureLeftVMRunning(t *testing.T) {
+	t.Parallel()
+	require.True(t, pauseCaptureLeftVMRunning(pauseBusyRejectMessage))
+	require.True(t, pauseCaptureLeftVMRunning("update sandbox failed: pause snapshot failed; original VM is running: no space left on device"))
+	require.False(t, pauseCaptureLeftVMRunning("pause snapshot failed: no space left on device; resume original VM failed: device unavailable"))
+}
+
+func TestRollBackLocalPauseAttempt(t *testing.T) {
 	t.Parallel()
 	prev := "snap-prev000000000000000000000001"
 	aborted := "snap-abort00000000000000000000001"
@@ -110,9 +187,10 @@ func TestApplyPauseBusyRejectLocalState(t *testing.T) {
 	})
 	stampPauseSnapshotID(sb, aborted)
 
-	applyPauseBusyRejectLocalState(sb, prev, aborted, true)
+	rollBackLocalPauseAttempt(sb, prev, aborted, true)
 	st := sb.GetStatus().Get()
 	require.Equal(t, int64(0), st.PausingAt)
+	require.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, st.State())
 	require.False(t, st.Unknown)
 	require.Empty(t, st.Reason)
 	require.Equal(t, prev, stampedPauseSnapshotID(sb))
@@ -125,7 +203,7 @@ func TestApplyPauseBusyRejectLocalState(t *testing.T) {
 		status.Reason = pauseFailedReason
 		return status, nil
 	})
-	applyPauseBusyRejectLocalState(sb, prev, aborted, false)
+	rollBackLocalPauseAttempt(sb, prev, aborted, false)
 	require.Equal(t, prev, stampedPauseSnapshotID(sb))
 	require.Equal(t, aborted, abortedPauseSnapshotID(sb))
 	require.False(t, sb.GetStatus().Get().Unknown)

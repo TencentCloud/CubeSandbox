@@ -56,6 +56,9 @@ const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const ANNO_CGROUP_MODE: &str = "cube.master.cgroup_mode";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
+// Cubelet uses this prefix to roll back the pause binding to RUNNING.
+const ERR_PAUSE_SNAPSHOT_VM_RUNNING: &str = "pause snapshot failed; original VM is running:";
+
 /// Bounded reconnects for the restore-thaw window: a freshly restored guest
 /// transiently refuses or resets the first connections until its runtime
 /// settles. Both steps are safe to repeat (fresh channel; idempotent RPCs).
@@ -1919,9 +1922,8 @@ impl SandBox {
     /// * `snapshot_type` – same Full / Incremental / SoftDirty choice as
     ///   CommitSandbox (`--snapshot-type`).
     ///
-    /// On success the MicroVM is deleted (`pause2snapshot`) and state stays
-    /// `Paused`. Cubelet then reaps this shim via task Delete. On failure after
-    /// entering pause, state becomes `Exited` (not left as misleading `Paused`).
+    /// Keep the original VM and its agent connections until the snapshot is
+    /// saved. Cubelet can discard a failed snapshot once the VM is running again.
     pub async fn pause_vm_to_snapshot(
         &mut self,
         destination_path: &str,
@@ -1929,7 +1931,7 @@ impl SandBox {
         snapshot_type: SnapshotType,
     ) -> CResult<()> {
         {
-            let mut state = self.state.lock().await;
+            let state = self.state.lock().await;
             if *state != SandBoxState::Normal {
                 return Err(format!("sandbox not running").into());
             };
@@ -1937,19 +1939,45 @@ impl SandBox {
             if self.pause_vm_forbidding().await {
                 return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
             }
+        }
+
+        let ch = self.ch.as_ref().ok_or("hypervisor is unavailable")?.clone();
+        let destination_url = self
+            .prepare_pause_snapshot(destination_path)
+            .await
+            .map_err(|e| format!("{ERR_PAUSE_SNAPSHOT_VM_RUNNING} {e}"))?;
+        {
+            let mut state = self.state.lock().await;
             *state = SandBoxState::Paused;
         }
 
-        if let Err(e) = self
-            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
+        let pause_result = ch.lock().await.pause_vm().await;
+        if let Err(error) = pause_result {
+            return self.fail_pause_snapshot(error).await;
+        }
+        let capture_result = ch
+            .lock()
             .await
-        {
-            // A failed pause leaves the sandbox unusable (no resume will
-            // follow), so run the full teardown.
-            let _ = self.disconnect_agent().await;
-            let mut state = self.state.lock().await;
-            *state = SandBoxState::Exited;
-            return Err(e);
+            .snapshot_vm_with_memory(&destination_url, memory_vol_url, snapshot_type, true)
+            .await;
+        if let Err(capture_error) = capture_result {
+            let resume_result = ch.lock().await.resume_vm().await;
+            return self
+                .finish_failed_pause_capture(capture_error, resume_result)
+                .await;
+        }
+
+        self.quiesce_agent_for_pause().await;
+        let finish_result = async {
+            let ch = ch.lock().await;
+            ch.finish_pause_snapshot().await?;
+            ch.wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
+                .await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = finish_result {
+            return self.fail_pause_snapshot(error).await;
         }
         self.stop_log_forward_detached().await;
         // The connections only had to survive the freeze; the VM is gone now,
@@ -1964,16 +1992,32 @@ impl SandBox {
         Ok(())
     }
 
-    async fn pause_vm_to_snapshot_inner(
+    async fn finish_failed_pause_capture(
         &mut self,
-        destination_path: &str,
-        memory_vol_url: Option<String>,
-        snapshot_type: SnapshotType,
+        capture_error: String,
+        resume_result: CResult<()>,
     ) -> CResult<()> {
-        self.quiesce_agent_for_pause().await;
+        match resume_result {
+            Ok(()) => {
+                *self.state.lock().await = SandBoxState::Normal;
+                Err(format!("{ERR_PAUSE_SNAPSHOT_VM_RUNNING} {capture_error}"))
+            }
+            Err(resume_error) => {
+                self.fail_pause_snapshot(format!(
+                    "pause snapshot failed: {capture_error}; resume original VM failed: {resume_error}"
+                ))
+                .await
+            }
+        }
+    }
 
-        let ch = self.ch.as_mut().unwrap().lock().await;
+    async fn fail_pause_snapshot(&mut self, error: String) -> CResult<()> {
+        let _ = self.disconnect_agent().await;
+        *self.state.lock().await = SandBoxState::Exited;
+        Err(error)
+    }
 
+    async fn prepare_pause_snapshot(&self, destination_path: &str) -> CResult<String> {
         let spec_dir = destination_path
             .strip_prefix("file://")
             .unwrap_or(destination_path);
@@ -1989,22 +2033,10 @@ impl SandBox {
             )
         })?;
 
-        let destination_url = format!("file://{}", snapshot_dir.display());
-        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
-            .await?;
-
-        // vmshutdown event after pause2snapshot deletes the MicroVM
-        let _ = ch
-            .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
-            .await?;
-        drop(ch);
-
-        // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
-        // Guest container id (often tpl-*_0) must be preserved so Resume create
-        // matches the restored agent process table.
+        // Write metadata before freezing so a directory or metadata error
+        // leaves the original VM running with its agent connections intact.
         self.store_pause_snapshot_metadata(spec_dir).await?;
-
-        Ok(())
+        Ok(format!("file://{}", snapshot_dir.display()))
     }
 
     async fn store_pause_snapshot_metadata(&self, spec_dir: &str) -> CResult<()> {
@@ -2307,6 +2339,40 @@ mod tests {
         sb.client = Some(Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(
             client,
         ))));
+    }
+
+    #[tokio::test]
+    async fn pause_snapshot_directory_failure_keeps_the_sandbox_running() {
+        let mut sb = new_ut_sandbox();
+        attach_dead_agent(&mut sb);
+        let client = sb.client.clone().unwrap();
+
+        let error = sb
+            .pause_vm_to_snapshot("/dev/null/snapshot", None, SnapshotType::Full)
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with(super::ERR_PAUSE_SNAPSHOT_VM_RUNNING));
+        assert!(sb.normal().await);
+        assert!(Arc::ptr_eq(sb.client.as_ref().unwrap(), &client));
+    }
+
+    #[tokio::test]
+    async fn pause_snapshot_write_failure_restores_running_state_after_resume() {
+        let mut sb = new_ut_sandbox();
+        attach_dead_agent(&mut sb);
+        let client = sb.client.clone().unwrap();
+        *sb.state.lock().await = SandBoxState::Paused;
+
+        let error = sb
+            .finish_failed_pause_capture("no space left on device".into(), Ok(()))
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with(super::ERR_PAUSE_SNAPSHOT_VM_RUNNING));
+        assert!(error.contains("no space left on device"));
+        assert!(sb.normal().await);
+        assert!(Arc::ptr_eq(sb.client.as_ref().unwrap(), &client));
     }
 
     #[tokio::test]

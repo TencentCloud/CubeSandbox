@@ -1301,11 +1301,11 @@ func (s *service) destroyDeadContainers() {
 			continue
 		}
 
-		scanDeadContainer(ctx, dc, s.cubeboxMgr.client, s.cleaner.TTL)
+		scanDeadContainer(ctx, dc, s.cubeboxMgr.client, s.cleaner.TTL, s.sandboxLifecycleLocks)
 	}
 }
 
-func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *containerd.Client, ttl time.Duration) {
+func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *containerd.Client, ttl time.Duration, lifecycleLocks *utils.ResourceLocks) {
 	now := time.Now()
 	var tmpDeadCount = 0
 	for _, cb := range dc {
@@ -1356,20 +1356,14 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 				// Nothing for DeadGC to do.
 				continue
 			case cubebox.ContainerState_CONTAINER_PAUSING:
-				// PAUSING is meant to be a short transient. While a pause is
-				// genuinely in flight the shim holds its sandbox mutex, so a
-				// state() query would time out and stamp Unknown=true (see
-				// above) -- within the safety window we still skip. Past
-				// pausingStuckThreshold the pause is no longer running (e.g. the
-				// cubelet restarted mid-pause and missed both the RPC and
-				// /tasks/paused reconcile windows); reconcile once against the
-				// shim's real status so the sandbox never stays stuck at PAUSING
-				// forever.
+				// Allow recovery of stale PAUSING state after a Cubelet restart.
+				// A slow capture can outlive this threshold, so reconciliation
+				// also takes the lifecycle lock before consulting the shim.
 				if st.PausingAt == 0 ||
 					time.Since(time.Unix(0, st.PausingAt)) < pausingStuckThreshold {
 					continue
 				}
-				reconcileStuckPausingSandbox(ctx, client, cb)
+				reconcileStuckPausingSandbox(ctx, client, cb, lifecycleLocks)
 				continue
 			}
 		}

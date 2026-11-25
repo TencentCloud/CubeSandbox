@@ -312,6 +312,8 @@ pub struct MemoryManager {
     /// pagemap bit-55 set this cycle reflects only writes that happened
     /// since then).
     soft_dirty_armed: AtomicBool,
+    // A failed snapshot may already have consumed bits from the VMM and KVM.
+    dirty_snapshot_needs_full: AtomicBool,
     memory_zones: MemoryZones,
     log_dirty: bool, // Enable dirty logging for created RAM regions
     arch_mem_regions: Vec<ArchMemRegion>,
@@ -1295,6 +1297,7 @@ impl MemoryManager {
             user_provided_zones,
             snapshot_memory_ranges: MemoryRangeTable::default(),
             soft_dirty_armed: AtomicBool::new(false),
+            dirty_snapshot_needs_full: AtomicBool::new(false),
             memory_zones,
             guest_ram_mappings: Vec::new(),
             acpi_address,
@@ -2332,6 +2335,12 @@ impl MemoryManager {
         Ok(())
     }
 
+    pub(crate) fn discard_snapshot_tracking(&self) {
+        self.soft_dirty_armed.store(false, Ordering::Release);
+        self.dirty_snapshot_needs_full
+            .store(true, Ordering::Release);
+    }
+
     pub fn save_range_to_file(
         &self,
         mut memory_file: &File,
@@ -2448,6 +2457,9 @@ impl MemoryManager {
         {
             self.save_range_to_file(&memory_file, &range, file_off)?;
         }
+        memory_file
+            .sync_all()
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
         info!(
             "PagemapAnon snapshot saved: {} anon bytes written to {:?}",
@@ -2596,6 +2608,9 @@ impl MemoryManager {
         {
             self.save_range_to_file(&memory_file, &range, file_off)?;
         }
+        memory_file
+            .sync_all()
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
         info!(
             "Soft-dirty snapshot saved: {} dirty bytes written to {:?}",
             stats.saved_bytes,
@@ -3209,7 +3224,8 @@ impl Transportable for MemoryManager {
             config.memory_vol_url.as_deref(),
         )?;
 
-        if self.dirty_log {
+        let retry_full = self.dirty_log && self.dirty_snapshot_needs_full.load(Ordering::Acquire);
+        if self.dirty_log && !retry_full {
             let guest_memory = self.guest_memory.memory();
             let memory_file = memory_file_target.open_for_fresh_write()?;
             info!("Saving dirty guest memory to snapshot image file.");
@@ -3279,10 +3295,17 @@ impl Transportable for MemoryManager {
                 // Move to next range.
                 offset += range.length;
             }
-            return Ok(());
+            return memory_file
+                .sync_all()
+                .map_err(|e| MigratableError::MigrateSend(e.into()));
         }
 
-        match config.snapshot_type {
+        let snapshot_type = if retry_full {
+            SnapshotType::Full
+        } else {
+            config.snapshot_type
+        };
+        match snapshot_type {
             SnapshotType::Incremental => {
                 self.send_pagemap_anon_memory(destination_url, &config.memory_vol_url)?;
             }
@@ -3298,6 +3321,11 @@ impl Transportable for MemoryManager {
                     self.save_range_to_file(&memory_file, range, file_offset)?;
                     file_offset += range.length;
                 }
+                memory_file
+                    .sync_all()
+                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+                self.dirty_snapshot_needs_full
+                    .store(false, Ordering::Release);
             }
         }
         Ok(())

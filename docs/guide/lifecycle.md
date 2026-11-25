@@ -175,6 +175,8 @@ sandbox.run_code("print('back!')")    # carry on as if never paused
 
 Open `cubecli exec` / interactive sessions block Pause. Cubelet returns `TaskPauseFailed` (130588) with a "pause forbidding / terminate exec tasks first" message while the sandbox stays `running` (not `unknown(failed)`). Auto-pause retries after the session ends. Cubelet, CubeMaster, and CubeShim must ship this busy-reject handling together (CubeShim owns the `CheckPauseAllowed` preflight) — a one-sided upgrade can leave the wrong status or snapshot lineage until all three land.
 
+The pause request can time out after 120 seconds while the node is still saving the snapshot. If the save completes, the sandbox can be resumed on the original node with the same ID. If a snapshot write or flush fails and the original VM resumes, the pause request fails and the sandbox stays `running`.
+
 `pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
 
 `connect(timeout=...)` can update the idle timeout whether the sandbox is already running or must first resume from a pause. For a running sandbox, a positive timeout only extends the deadline when the requested window is longer; use `set_timeout(...)` when you intentionally need to shorten it:

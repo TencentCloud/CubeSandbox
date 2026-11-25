@@ -172,7 +172,7 @@ func TestIsPauseBusyReject(t *testing.T) {
 	}
 }
 
-func TestFinalizePauseCubeletFailureBusyAborts(t *testing.T) {
+func TestFinalizePauseCubeletFailureAbortsWhenVMRunning(t *testing.T) {
 	var aborted, failed []string
 	patches := gomonkey.ApplyFunc(pausesnap.Abort, func(_ context.Context, sandboxID, snapshotID string) {
 		aborted = append(aborted, sandboxID+"/"+snapshotID)
@@ -183,8 +183,10 @@ func TestFinalizePauseCubeletFailureBusyAborts(t *testing.T) {
 	})
 
 	finalizePauseCubeletFailure(context.Background(), "sb-1", "snap-1",
-		`Others("Other: update sandbox failed:sandbox pause forbidding, terminate exec tasks first")`)
-	require.Equal(t, []string{"sb-1/snap-1"}, aborted)
+		`Others("Other: update sandbox failed:sandbox pause forbidding, terminate exec tasks first")`, false)
+	finalizePauseCubeletFailure(context.Background(), "sb-2", "snap-2",
+		"pause snapshot failed; original VM is running: no space left on device", true)
+	require.Equal(t, []string{"sb-1/snap-1", "sb-2/snap-2"}, aborted)
 	require.Empty(t, failed)
 }
 
@@ -198,7 +200,7 @@ func TestFinalizePauseCubeletFailureOtherMarksFailed(t *testing.T) {
 		failed = append(failed, sandboxID+"/"+snapshotID)
 	})
 
-	finalizePauseCubeletFailure(context.Background(), "sb-2", "snap-2", "rootfs commit failed")
+	finalizePauseCubeletFailure(context.Background(), "sb-2", "snap-2", "rootfs commit failed", false)
 	require.Empty(t, aborted)
 	require.Equal(t, []string{"sb-2/snap-2"}, failed)
 }

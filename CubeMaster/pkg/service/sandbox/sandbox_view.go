@@ -65,6 +65,10 @@ func decidePauseView(rec *pausesnap.Record, observed int32, hasObserved bool) pa
 		if nodePausing {
 			return pauseView{}
 		}
+		// A timed-out pause can finish with the original VM back in RUNNING.
+		if nodeRunning && isPauseTimeoutFailure(rec) {
+			return pauseView{stale: true}
+		}
 		return pauseView{override: true, status: unknown, pauseErr: pauseFailureMessage(rec)}
 	case pausesnap.StatusDeleteFailed:
 		if nodeRunning {
