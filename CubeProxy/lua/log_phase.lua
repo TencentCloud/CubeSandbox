@@ -1,7 +1,8 @@
 -- log_phase.lua — runs after the response is sent.
 --
 -- 1. Records the access time for the access log (preserved).
--- 2. Stamps the per-sandbox "last active" timestamp (see activity.lua).
+-- 2. Finishes per-sandbox activity tracking (see activity.lua): decrements
+--    the in-flight counter opened in rewrite and restamps last_active.
 --    All paths are non-blocking; this phase MUST NOT delay log emission.
 
 local activity = require "activity"
@@ -20,7 +21,7 @@ end
 
 ngx.var.access_time = get_currtime()
 
--- Record per-sandbox activity for CLM's auto-pause sweeper. Sandboxes that
--- haven't opted into auto_pause are still cheap to record here — CLM
--- simply ignores their entries when computing pause decisions.
-activity.touch(ngx.var.ins_id)
+-- Close out the in-flight request opened at rewrite. Sandboxes that haven't
+-- opted into auto_pause are still cheap to record here — CLM simply ignores
+-- their entries when computing pause decisions.
+activity.finish(ngx.var.ins_id)

@@ -14,10 +14,12 @@
 
 local cjson = require "cjson.safe"
 local backend_cache = require "backend_cache"
+local activity = require "activity"
 
 local META  = ngx.shared.cube_sandbox_meta
 local STATE = ngx.shared.cube_sandbox_state
 local LAST  = ngx.shared.cube_sandbox_last_active
+local INFLIGHT = ngx.shared.cube_sandbox_inflight
 
 -- ── helpers ────────────────────────────────────────────────────────────────
 
@@ -98,8 +100,8 @@ end
 
 -- POST /admin/meta/delete
 --   body: {"sandbox_id": "..."}
---   semantics: removes meta + state + last_active in one shot, matching the
---              "sandbox is gone" lifecycle event.
+--   semantics: removes meta + state + last_active + inflight in one shot,
+--              matching the "sandbox is gone" lifecycle event.
 local function handle_meta_delete()
     local obj, err = read_json_body()
     if not obj then return reply_error(ngx.HTTP_BAD_REQUEST, err) end
@@ -111,7 +113,7 @@ local function handle_meta_delete()
     local deleted = backend_cache.invalidate_sandbox(sid)
     META:delete(sid)
     STATE:delete(sid)
-    LAST:delete(sid)
+    activity.clear(sid)
     return reply(ngx.HTTP_OK, { ok = true, backend_cache_deleted = deleted })
 end
 
@@ -162,29 +164,52 @@ end
 -- GET /admin/last_active
 -- GET /admin/last_active?since=<unix_ms>
 --   Returns {"now": <unix_ms>, "entries": {"<sandbox_id>": <ts_ms>, ...}}.
---   `since` filters: only entries with ts > since are included. Useful for
---   CLM's incremental polling loop.
+--   Sandboxes with open dataplane requests (inflight > 0) report `now` so
+--   long-lived traffic stays non-idle for CLM. `since` filters: only entries
+--   with ts > since are included. Useful for CLM's incremental polling loop.
 local function handle_last_active()
     local args = ngx.req.get_uri_args(2)
     local since = tonumber(args.since) or 0
+    local now_ms = math.floor(ngx.now() * 1000)
 
     local entries = {}
+    local seen = {}
+    local key_count = 0
     -- get_keys(0) returns up to 1024 keys; we iterate until exhausted.
     -- For the dict size we set (8m → ~10w entries) CLM should pull often
     -- enough that any single response stays bounded; if not, CLM must use
     -- ?since= incrementally.
+    --
+    -- Also merge inflight keys: touch() can fail or be LRU-evicted from LAST
+    -- while a long-lived request still holds an inflight slot.
     local keys = LAST:get_keys(0)
     for _, k in ipairs(keys) do
+        seen[k] = true
+        key_count = key_count + 1
         local v = LAST:get(k)
-        if v and v > since then
-            entries[k] = v
+        local reported = activity.reported_active_ms(k, v, now_ms)
+        if reported and reported > since then
+            entries[k] = reported
+        end
+    end
+    if INFLIGHT then
+        local inflight_keys = INFLIGHT:get_keys(0)
+        for _, k in ipairs(inflight_keys) do
+            if not seen[k] then
+                seen[k] = true
+                key_count = key_count + 1
+                local reported = activity.reported_active_ms(k, nil, now_ms)
+                if reported and reported > since then
+                    entries[k] = reported
+                end
+            end
         end
     end
 
     return reply(ngx.HTTP_OK, {
-        now     = math.floor(ngx.now() * 1000),
+        now     = now_ms,
         since   = since,
-        count   = #keys,
+        count   = key_count,
         entries = entries,
     })
 end
@@ -202,6 +227,7 @@ local function handle_healthz()
         meta                        = META and META:free_space() or nil,
         state                       = STATE and STATE:free_space() or nil,
         last                        = LAST and LAST:free_space() or nil,
+        inflight                    = INFLIGHT and INFLIGHT:free_space() or nil,
         heartbeat_last_pushed_ms    = hb_ms,
     })
 end
