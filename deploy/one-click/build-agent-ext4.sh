@@ -54,6 +54,13 @@ build_agent_ext4_artifacts \
   "${OUTPUT_DIR}/cube-agent.ext4" \
   "${OUTPUT_DIR}/version"
 
+# Generate the declaration from the binary that went into the image, then validate
+# it: the agent's freeze support is fixed at build time.
+log "generating cube-agent capability declaration"
+"${AGENT_BIN}" --print-capabilities > "${OUTPUT_DIR}/capabilities.json" \
+  || die "cube-agent --print-capabilities failed"
+assert_component_capabilities "${OUTPUT_DIR}/capabilities.json" cube-agent
+
 # Verify 2 MiB alignment.
 img_size="$(stat -c '%s' "${OUTPUT_DIR}/cube-agent.ext4" 2>/dev/null || stat -f '%z' "${OUTPUT_DIR}/cube-agent.ext4")"
 if (( img_size % (2 * 1024 * 1024) != 0 )); then

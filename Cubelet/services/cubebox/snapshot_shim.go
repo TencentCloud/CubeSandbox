@@ -17,6 +17,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/capability"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
@@ -71,8 +72,8 @@ func capturedGuestMemory(specDir string) (bool, error) {
 	}
 }
 
-func snapshotCaptureError(err error) error {
-	if shimSnapshotUnsupported(err) {
+func snapshotCaptureError(err error, resolved capability.Resolved) error {
+	if shimRejectsCapture(err, resolved) {
 		return fmt.Errorf("%w: %v", errSnapshotShimIncompatible, err)
 	}
 	return err
@@ -224,15 +225,10 @@ func (s *service) startSnapshotLeaseRenewal(ctx context.Context, cb *cubeboxstor
 	}, invalidate)
 }
 
-func shimSnapshotUnsupported(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "unknown update ext action: "+shimSnapshotCaptureAction)
-}
-
-// filesystemOnlyUnsupportedMessage reports the stable, user-facing rejection
-// for a sandbox whose shim cannot capture without guest memory, or "" when err
-// is not that case. Shim capability is judged by the artifact and error
-// identity, never by a version comparison.
-func filesystemOnlyUnsupportedMessage(err error, shimVersion string, mode snapshotmode.Mode) string {
+// filesystemOnlyUnsupportedMessage reports the stable user-facing rejection for
+// a sandbox whose shim cannot capture without guest memory, or empty otherwise.
+// Capability declarations decide this, never a version comparison.
+func filesystemOnlyUnsupportedMessage(err error, resolved capability.Resolved, mode snapshotmode.Mode) string {
 	if err == nil || !mode.IsFsOnly() {
 		return ""
 	}
@@ -242,7 +238,7 @@ func filesystemOnlyUnsupportedMessage(err error, shimVersion string, mode snapsh
 		return ""
 	}
 	return fmt.Sprintf("%s: shim %q does not support filesystem-only snapshots",
-		snapshotmode.ErrFilesystemOnlyUnsupported, shimVersion)
+		snapshotmode.ErrFilesystemOnlyUnsupported, resolved.Version)
 }
 
 // filesystemOnlyPrecondition reports a filesystem-only rejection that happened

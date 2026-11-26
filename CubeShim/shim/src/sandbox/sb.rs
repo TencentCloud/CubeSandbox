@@ -33,6 +33,7 @@ use super::snapshot_mode::{
     SnapshotMode, ERR_FREEZE_FAILED, ERR_FREEZE_UNSUPPORTED, ERR_ROOTFS_UNSUPPORTED,
     ERR_THAW_FAILED,
 };
+use crate::capabilities;
 use crate::common::types::PropagationMount;
 use crate::common::utils::{self, AsyncUtils, CPath, Utils};
 use crate::common::{
@@ -1935,7 +1936,7 @@ impl SandBox {
             };
 
             if self.pause_vm_forbidding().await {
-                return Err(format!("sandbox pause forbidding, terminate exec tasks first").into());
+                return Err(capabilities::coded_pause_busy().into());
             }
             *state = SandBoxState::Paused;
         }
@@ -2062,10 +2063,7 @@ impl SandBox {
                         return Err(format!("sandbox not running, cannot rollback").into());
                     }
                     if self.pause_vm_forbidding().await {
-                        return Err(format!(
-                            "sandbox pause forbidding, terminate exec tasks first"
-                        )
-                        .into());
+                        return Err(capabilities::coded_pause_busy().into());
                     }
                     *state = SandBoxState::Paused;
                 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+pub mod capabilities;
 pub mod common;
 pub mod container;
 pub mod cube;

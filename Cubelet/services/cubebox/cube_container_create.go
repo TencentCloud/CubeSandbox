@@ -480,6 +480,11 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		return err
 	}
 
+	// Record what the components backing this sandbox declared they can do. Both
+	// answers come from the artifacts of the versions it was started with.
+	l.resolveSandboxShimCapabilities(ctx, sandBox)
+	l.resolveSandboxGuestCapabilities(ctx, sandBox)
+
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
 		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
 		if cleanupErr == nil {

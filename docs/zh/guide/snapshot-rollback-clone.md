@@ -137,7 +137,7 @@ assert out.strip() == "hello"
 
 | HTTP | 错误码 | 触发条件 | 处理建议 |
 |---|---|---|---|
-| 409 | `snapshot_filesystem_only_unsupported_node` | 控制面或节点 agent 不支持 fs-only 模式 | 升级版本较旧的一侧；不会静默退回 full 快照 |
+| 409 | `snapshot_filesystem_only_unsupported_node` | 控制面或节点 agent 不支持 fs-only 模式 | 升级版本较旧的一侧；不会静默退回 full 快照。自 shim 能力声明机制上线后，该错误也可能在 **guest 被暂停之前** 返回：shim（或其背后的 guest agent）明确声明无法在不捕获内存的情况下捕获时会被提前拒绝，沙箱保持运行 |
 | 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | 节点不支持冻结文件系统 / 该 rootfs 类型 | 集群侧能力缺口，重试前先确认节点状态 |
 | 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | 冻结或解冻在捕获过程中失败 | 集群侧问题，重试前先确认节点状态 |
 | 409 | `snapshot_filesystem_only_shared_volume_unsupported` | 源沙箱挂了**可写** plugin volume | 可写 plugin volume 不属于被捕获的根文件系统；请先用不含该卷的沙箱再打快照 |

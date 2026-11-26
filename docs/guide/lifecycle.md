@@ -173,7 +173,9 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # restore and reset 
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
-Open `cubecli exec` / interactive sessions block Pause. Cubelet returns `TaskPauseFailed` (130588) with a "pause forbidding / terminate exec tasks first" message while the sandbox stays `running` (not `unknown(failed)`). Auto-pause retries after the session ends. Cubelet, CubeMaster, and CubeShim must ship this busy-reject handling together (CubeShim owns the `CheckPauseAllowed` preflight) — a one-sided upgrade can leave the wrong status or snapshot lineage until all three land.
+Open `cubecli exec` / interactive sessions block Pause. Cubelet returns `TaskPauseFailed` (130588) with a "pause forbidding / terminate exec tasks first" message while the sandbox stays `running` (not `unknown(failed)`). Auto-pause retries after the session ends.
+
+Cubelet asks the shim whether a Pause is allowed only when the shim declares it routes `CheckPauseAllowed` (`update.check_pause_allowed` in the shim's capability declaration) — see [Snapshot capability declaration](#snapshot-capability-declaration). A shim that does not declare it is not asked, and Pause goes straight to `PauseToSnapshot`, which performs the same check before freezing. Cubelet, CubeMaster, and CubeShim must still ship the busy-reject handling together: CubeMaster classifies the refusal, and a one-sided upgrade can leave the wrong status or snapshot lineage until all three land. A new CubeShim prefixes the refusal with `shim_error_pause_busy`, and CubeMaster recognises both that code and the historical wording, so the classification survives a rolling upgrade in either direction.
 
 `pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
 
@@ -207,6 +209,24 @@ Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy
 **CubeMaster and CubeProxy must share the same admin token**: on a Helm install the chart wires both sides automatically; hand-written deployments must align them. If the two tokens differ, the purge returns **403**, the stale route never expires on its own, and the sandbox stays unreachable.
 
 Rotating `lifecycleManager.adminToken` rolls the master, proxy and lifecycle-manager Pods in sequence during the same `helm upgrade`; a Resume issued before the rollout finishes can fail while the old token is still being validated. Wait for the rollout to complete and retry the Resume.
+
+## Snapshot capability declaration
+
+A snapshot's capture path depends on what the **components backing that sandbox** can do, so each component declares it instead of Cubelet inferring it. Every component publishes a `capabilities.json` next to its `version` marker (`CubeShim/docs/shimapi/README.md`):
+
+* `cube-shim` declares which capture actions it routes.
+* `cube-agent` declares whether the guest can freeze a filesystem.
+
+Cubelet reads these from the versioned component directories it already keeps for every installed version, so nothing is written or probed per sandbox, and a sandbox is always judged by the exact builds it was created with.
+
+Releases that predate the mechanism are covered by a frozen table inside Cubelet, so their sandboxes keep exactly the behaviour they had. A sandbox Cubelet learns nothing about keeps the historical best-effort path — **unknown is never treated as "cannot"**.
+
+What this means for you:
+
+* **Full snapshots of a sandbox with no pinned shim version now take the consistent (coordinated) path** when the shim running it supports it. Previously such a sandbox was silently downgraded to the legacy best-effort path, whose rootfs capture can tear on `jfs`. The snapshot is still a full snapshot; only how it is captured changed, and the result is strictly more consistent.
+* **A filesystem-only snapshot that cannot work is refused up front**: when the shim, or the guest agent behind it, positively reports that it cannot capture without memory, Cubelet returns `409 snapshot_filesystem_only_unsupported_node` before pausing the VM. Previously the same request paused the guest and then failed.
+* **Pause preflight is skipped for shims that do not route it.** This only removes a wasted round trip; Pause still refuses while exec sessions are open.
+* Nothing changes for a sandbox whose components cannot be identified at all: it behaves exactly as it did before the upgrade.
 
 ## Platform-managed Auto-pause / Auto-resume
 
