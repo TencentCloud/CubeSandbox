@@ -1452,7 +1452,7 @@ resources.
 
 The default logging level was changed to include warnings which should make it
 easier to see potential issues. New [logging
-documentation](docs/logging) was also added.
+documentation](docs/logging.md) was also added.
 
 ### New `--balloon` Parameter Added
 
