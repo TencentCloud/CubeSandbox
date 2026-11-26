@@ -49,6 +49,9 @@ type CgPlugin struct {
 	pool         *cgPool
 	db           *utils.CubeStore
 
+	// resolvedPoolSize is the startup-resolved pool size reused by initPool.
+	resolvedPoolSize int
+
 	vmSnapshotSpecs VMSnapshotSpecsByProduct
 	vmSpecLock      sync.RWMutex
 }
@@ -84,14 +87,15 @@ var (
 func (l *CgPlugin) init() error {
 	l.poolV1Handle = getDefaultCgroupHandle(1)
 	l.poolV2Handle = getDefaultCgroupHandle(2)
-	if l.config.PoolSize <= 0 {
-		l.config.PoolSize = defaultPoolSize
+	poolSize, err := l.config.resolvePoolSize(log.L)
+	if err != nil {
+		return err
 	}
+	l.resolvedPoolSize = poolSize
 	if l.config.PoolTriggerIntervalInMs <= 0 {
 		l.config.PoolTriggerIntervalInMs = defaultPoolTriggerIntervalInMs
 	}
 
-	var err error
 	l.overhead, err = parseOverheadConfig(l.config)
 	if err != nil {
 		return err
@@ -235,7 +239,7 @@ func (l *CgPlugin) initPool() error {
 		l.pool.stop()
 	}
 	p := &cgPool{
-		initialSize:         dynamConf.GetPoolSizeForInit(l.config.PoolSize),
+		initialSize:         dynamConf.GetPoolSizeForInit(l.resolvedPoolSize),
 		db:                  l.db,
 		poolV1Handle:        l.poolV1Handle,
 		poolV2Handle:        l.poolV2Handle,

@@ -204,6 +204,71 @@ sed_escape_replacement() {
   printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g' -e 's/[/]/\\\//g'
 }
 
+# patch_int_key_in_section <cfg> <section> <key> <int-value>
+#
+# Sets <key> = <value> in exactly one TOML table, replacing a live or
+# commented-out line. Fails if the table or key is missing or ambiguous.
+patch_int_key_in_section() {
+  local cfg="$1"
+  local section="$2"
+  local key="$3"
+  local value="$4"
+  local header="[plugins.\"${section}\"]"
+  local tmp
+  local section_count
+  local key_count
+
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  awk -v header="${header}" -v key="${key}" -v value="${value}" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function flush() {
+      if (in_section && !written) {
+        print "    " key " = " value
+        written = 1
+      }
+    }
+    {
+      t = trim($0)
+      if (t == header) {
+        in_section = 1
+        written = 0
+        print
+        next
+      }
+      if (in_section && substr(t, 1, 1) == "[") {
+        flush()
+        in_section = 0
+      }
+      if (in_section) {
+        candidate = t
+        sub(/^#[[:space:]]*/, "", candidate)
+        if (candidate ~ ("^" key "[[:space:]]*=")) {
+          if (!written) {
+            print "    " key " = " value
+            written = 1
+          }
+          next
+        }
+      }
+      print
+    }
+    END { flush() }
+  ' "${cfg}" > "${tmp}"
+
+  section_count="$(awk -v header="${header}" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    trim($0) == header { n++ }
+    END { print n + 0 }
+  ' "${tmp}")"
+  key_count="$(grep -Exc "^[[:space:]]*${key}[[:space:]]*=[[:space:]]*${value}[[:space:]]*$" "${tmp}" || true)"
+  if [[ "${section_count}" -ne 1 || "${key_count}" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "cannot set ${key} in ${header}: section_count=${section_count} key_count=${key_count}"
+  fi
+  cat "${tmp}" > "${cfg}"
+  rm -f "${tmp}"
+}
+
 [[ -n "${CUBE_OPS_ENDPOINT:-}" ]] || fail "CUBE_OPS_ENDPOINT is required"
 [[ -n "${CUBE_MASTER_HTTP_ADDR:-}" ]] || fail "CUBE_MASTER_HTTP_ADDR is required"
 CUBE_OPS_ESC="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"
@@ -250,11 +315,11 @@ if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
   # Reject anything that is not an integer so operators cannot inject
   # replacement content via numeric-looking env variables.
   [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"
-  sed -i "s/tap_init_num = [0-9]\+/tap_init_num = ${CUBE_TAP_INIT_NUM}/" "${CUBELET_CONFIG}"
+  patch_int_key_in_section "${CUBELET_CONFIG}" "io.cubelet.internal.v1.network" "tap_init_num" "${CUBE_TAP_INIT_NUM}"
 fi
 if [[ -n "${CUBE_CGROUP_POOL_SIZE:-}" ]]; then
   [[ "${CUBE_CGROUP_POOL_SIZE}" =~ ^[0-9]+$ ]] || fail "CUBE_CGROUP_POOL_SIZE must be a non-negative integer"
-  sed -i "s/pool_size = [0-9]\+/pool_size = ${CUBE_CGROUP_POOL_SIZE}/" "${CUBELET_CONFIG}"
+  patch_int_key_in_section "${CUBELET_CONFIG}" "io.cubelet.internal.v1.cgroup" "pool_size" "${CUBE_CGROUP_POOL_SIZE}"
 fi
 if [[ -n "${CUBE_WORKFLOW_CONCURRENT:-}" ]]; then
   [[ "${CUBE_WORKFLOW_CONCURRENT}" =~ ^[0-9]+$ ]] || fail "CUBE_WORKFLOW_CONCURRENT must be a non-negative integer"

@@ -5,15 +5,12 @@
 package cubelet
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"math"
 	"math/rand/v2"
-	"os"
 	goruntime "runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/versioninfo"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/masterclient"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pooltier"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -818,37 +816,5 @@ func cloneResourceList(in map[corev1.ResourceName]resource.Quantity) map[corev1.
 }
 
 func detectHostMemoryTotalMB() (int64, error) {
-	file, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "MemTotal:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			return 0, fmt.Errorf("unexpected MemTotal format: %q", line)
-		}
-		memKB, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("parse MemTotal failed: %w", err)
-		}
-		return roundUpFraction(memKB, 1, 1024), nil
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, err
-	}
-	return 0, fmt.Errorf("MemTotal not found in /proc/meminfo")
-}
-
-func roundUpFraction(value int64, numerator int64, denominator int64) int64 {
-	if value <= 0 || numerator <= 0 || denominator <= 0 {
-		return 0
-	}
-	return (value*numerator + denominator - 1) / denominator
+	return pooltier.DetectMemTotalMB()
 }

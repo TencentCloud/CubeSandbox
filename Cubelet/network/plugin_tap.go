@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pooltier"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -38,16 +39,21 @@ const (
 )
 
 type Config struct {
-	EthName      string `toml:"eth_name"`
-	TapInitNum   int    `toml:"tap_init_num"`
-	CIDR         string `toml:"cidr"`
-	ObjectDir    string `toml:"object_dir"`
-	MVMInnerIP   string `toml:"mvm_inner_ip"`
-	MVMMacAddr   string `toml:"mvm_mac_addr"`
-	MvmGwDestIP  string `toml:"mvm_gw_dest_ip"`
-	MvmGwMacAddr string `toml:"mvm_gw_mac_addr"`
-	MvmMask      int    `toml:"mvm_mask"`
-	MvmMtu       int    `toml:"mvm_mtu"`
+	EthName string `toml:"eth_name"`
+	// TapInitNum is the number of TAP devices to pre-create.
+	// Nil defers to AutoTapInitNum; 0 disables warmup.
+	TapInitNum *int `toml:"tap_init_num"`
+	// AutoTapInitNum enables host-based sizing when TapInitNum is nil.
+	// Nil behaves like true.
+	AutoTapInitNum *bool  `toml:"auto_tap_init_num"`
+	CIDR           string `toml:"cidr"`
+	ObjectDir      string `toml:"object_dir"`
+	MVMInnerIP     string `toml:"mvm_inner_ip"`
+	MVMMacAddr     string `toml:"mvm_mac_addr"`
+	MvmGwDestIP    string `toml:"mvm_gw_dest_ip"`
+	MvmGwMacAddr   string `toml:"mvm_gw_mac_addr"`
+	MvmMask        int    `toml:"mvm_mask"`
+	MvmMtu         int    `toml:"mvm_mtu"`
 
 	CheckIntervalTime      tomlext.Duration `toml:"check_interval_in_sec"`
 	ReportStatIntervalTime tomlext.Duration `toml:"report_stat_interval_in_sec"`
@@ -111,7 +117,13 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 
 	log.G(ic.Context).Info("network plugin init begin")
 
-	networkRuntime, err := networkruntime.NewNetworkController(networkRuntimeConfigFromPluginConfig(config))
+	tapInitNum, err := config.resolveTapInitNum(log.G(ic.Context))
+	if err != nil {
+		return nil, err
+	}
+
+	networkRuntime, err := networkruntime.NewNetworkController(
+		networkRuntimeConfigFromPluginConfig(config, tapInitNum))
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +143,48 @@ func (l *local) Init(ctx context.Context, _ *workflow.InitInfo) error {
 	return nil
 }
 
-func networkRuntimeConfigFromPluginConfig(config *Config) networkruntime.Config {
+// resolveTapInitNum returns the TAP warmup target.
+// An explicit tap_init_num wins, including 0 (disable warmup); otherwise
+// auto_tap_init_num selects a host tier. Tiering off disables warmup.
+func (c *Config) resolveTapInitNum(logger *log.CubeWrapperLogEntry) (int, error) {
+	if c.TapInitNum != nil {
+		if *c.TapInitNum < 0 {
+			return 0, fmt.Errorf("tap_init_num must not be negative, got %d", *c.TapInitNum)
+		}
+		if c.autoTieringEnabled() {
+			logger.Infof("network tap pool: tap_init_num=%d is configured explicitly, "+
+				"auto_tap_init_num is ignored", *c.TapInitNum)
+		} else {
+			logger.Infof("network tap pool: tap_init_num=%d is configured explicitly", *c.TapInitNum)
+		}
+		return *c.TapInitNum, nil
+	}
+
+	if !c.autoTieringEnabled() {
+		logger.Infof("network tap pool: auto_tap_init_num is off and tap_init_num is unset, " +
+			"tap warmup is disabled")
+		return 0, nil
+	}
+
+	tier, spec, err := selectTierForHost()
+	if err != nil {
+		logger.Warnf("network tap pool: host capacity detection failed (%v), "+
+			"using the %s tier: tap_init_num=%d", err, tier.Name, tier.TapInitNum)
+		return tier.TapInitNum, nil
+	}
+	logger.Infof("network tap pool: auto_tap_init_num picked tier=%s (cpus=%d mem_total_mb=%d): tap_init_num=%d",
+		tier.Name, spec.CPUs, spec.MemTotalMB, tier.TapInitNum)
+	return tier.TapInitNum, nil
+}
+
+// autoTieringEnabled reports whether auto sizing is enabled; unset is enabled.
+func (c *Config) autoTieringEnabled() bool {
+	return c.AutoTapInitNum == nil || *c.AutoTapInitNum
+}
+
+var selectTierForHost = pooltier.SelectForHost
+
+func networkRuntimeConfigFromPluginConfig(config *Config, tapInitNum int) networkruntime.Config {
 	cfg := networkruntime.DefaultConfig()
 	if current := cubeletconfig.GetConfig(); current != nil && current.Common != nil {
 		cfg.OperatorAllowOut = append([]string(nil), current.Common.OperatorAllowOut...)
@@ -145,7 +198,7 @@ func networkRuntimeConfigFromPluginConfig(config *Config) networkruntime.Config 
 	cfg.MvmGwMacAddr = config.MvmGwMacAddr
 	cfg.MvmMask = config.MvmMask
 	cfg.MvmMtu = config.MvmMtu
-	cfg.TapInitNum = config.TapInitNum
+	cfg.TapInitNum = tapInitNum
 	// Empty explicitly disables CubeEgress integration. Production config writes
 	// the default loopback URL, so silently restoring a hidden default here would
 	// make an intentional empty value impossible to express.

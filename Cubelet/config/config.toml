@@ -56,7 +56,13 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     #mount -t tmpfs -o size=100m none /data/cubelet/cleanup
     root_path = "/data/cubelet/cleanup"
   [plugins."io.cubelet.internal.v1.cgroup"]
-    pool_size = 3000
+    # Cgroup slots pre-created per pool. Unset uses auto_pool_size:
+    #   128c/690G+: 5000, 96c/345G+: 3000, 32c/115G+: 1800,
+    #   16c/28G+: 1000, otherwise: 500.
+    # A positive pool_size overrides auto_pool_size. With auto_pool_size=false
+    # and no pool_size, the built-in default is 50.
+    auto_pool_size = true
+    # pool_size = 3000
     pool_workers = 1
     # Pin each sandbox's CPUs and memory to one NUMA node by placing it under
     # cube_sandbox_v2/sandbox/numa<N>. Off by default.
@@ -91,7 +97,14 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
   [plugins."io.cubelet.internal.v1.network"]
     object_dir = "/usr/local/services/cubetoolbox/cube-vs/network"
     eth_name = "eth0"
-    tap_init_num = 500
+    # TAP devices pre-created to avoid on-demand creation. Unset uses
+    # auto_tap_init_num with the same host tiers:
+    #   128c/690G+: 1000, 96c/345G+: 500, 32c/115G+: 400,
+    #   16c/28G+: 300, otherwise: 200.
+    # An explicit tap_init_num wins; 0 disables warmup. With
+    # auto_tap_init_num=false and no tap_init_num, warmup is disabled.
+    auto_tap_init_num = true
+    # tap_init_num = 500
     cidr = "192.168.0.0/18"
     mvm_inner_ip = "169.254.68.6"
     mvm_mac_addr = "20:90:6f:fc:fc:fc"

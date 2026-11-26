@@ -52,14 +52,15 @@ create HTTP 500: {"code":500,"message":"CubeMaster returned error code 130595: c
 
 On a bare-metal or local physical-machine deployment, Cube creates many persistent TAP devices named like `z192.168.0.x` or `z192.168.1.x`.
 
-The default configuration is in `Cubelet/config/config.toml`. By default, Cube creates 500 TAP devices from the `192.168.0.0/18` CIDR:
+The default configuration is in `Cubelet/config/config.toml`. TAP devices are pre-created from the `192.168.0.0/18` CIDR.
 
 ```toml
 [plugins]
   [plugins."io.cubelet.internal.v1.network"]
     object_dir = "/usr/local/services/cubetoolbox/cube-vs/network"
     eth_name = "eth0"
-    tap_init_num = 500
+    auto_tap_init_num = true
+    # tap_init_num = 500
     cidr = "192.168.0.0/18"
 ```
 
