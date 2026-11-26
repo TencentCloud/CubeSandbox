@@ -95,6 +95,89 @@ def test_filesystem_snapshot_restart_waits_for_a_new_restart(monkeypatch):
     assert events == ["wait", "crash", "wait", "ready"]
 
 
+@pytest.mark.parametrize("missing_during", ["info", "kill"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "sandbox expired-sandbox not found",
+        'sandbox id not found: "expired-sandbox"',
+    ],
+)
+def test_safe_kill_treats_missing_sandbox_as_released(monkeypatch, missing_during, message):
+    class Sandbox:
+        backend = "cubesandbox"
+        sandbox_id = "expired-sandbox"
+
+        def __init__(self):
+            self.closed = False
+            self.kill_count = 0
+
+        def info(self):
+            if missing_during == "info":
+                raise RuntimeError(message)
+            return SimpleNamespace(state="running")
+
+        def kill(self):
+            self.kill_count += 1
+            raise RuntimeError(message)
+
+        def close(self):
+            self.closed = True
+
+    rest_delete_calls = []
+    monkeypatch.setattr(cleanup, "_rest_delete", lambda *args: rest_delete_calls.append(args))
+    sandbox = Sandbox()
+
+    errors = cleanup.safe_kill(sandbox, SimpleNamespace(default_timeout=1))
+
+    assert errors == []
+    assert sandbox.kill_count == (missing_during == "kill")
+    assert sandbox.closed
+    assert rest_delete_calls == []
+
+
+class _HttpNotFoundError(RuntimeError):
+    status_code = 404
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("sandbox live-sandbox: service endpoint not found"),
+        _HttpNotFoundError("service endpoint not found"),
+        RuntimeError("sandbox other-sandbox not found"),
+    ],
+)
+def test_safe_kill_reports_unrelated_not_found(monkeypatch, failure):
+    class Sandbox:
+        backend = "cubesandbox"
+        sandbox_id = "live-sandbox"
+
+        def __init__(self):
+            self.closed = False
+
+        def info(self):
+            raise failure
+
+        def kill(self):
+            raise failure
+
+        def close(self):
+            self.closed = True
+
+    rest_delete_calls = []
+    monkeypatch.setattr(cleanup, "_rest_delete", lambda *args: rest_delete_calls.append(args))
+    sandbox = Sandbox()
+
+    errors = cleanup.safe_kill(sandbox, SimpleNamespace(default_timeout=1))
+
+    assert len(errors) == 2
+    assert errors[0].startswith("cubesandbox.info failed")
+    assert errors[1].startswith("cubesandbox.kill failed")
+    assert sandbox.closed
+    assert len(rest_delete_calls) == 1
+
+
 @pytest.mark.parametrize("delete_before_capture", [False, True])
 @pytest.mark.parametrize("restore_failure", [False, True])
 def test_snapshot_chain_releases_each_sandbox_once(

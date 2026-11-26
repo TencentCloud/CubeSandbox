@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from adapters.api_adapter import ApiClient
@@ -10,23 +11,49 @@ from adapters.base import SandboxAdapter
 from framework.config import SdkE2EConfig
 
 
+def _is_sandbox_not_found(exc: Exception, sandbox_id: str) -> bool:
+    """Return whether *exc* specifically says that *sandbox_id* is absent."""
+    if type(exc).__name__ in {"SandboxNotFoundError", "SandboxNotFoundException"}:
+        return True
+
+    message = str(exc).lower()
+    escaped_id = re.escape(str(sandbox_id).lower())
+    quoted_id = rf'["\']?{escaped_id}["\']?'
+    absence = r"(?:not found|does not exist)"
+    separator = r"\s*(?::|=|-)?\s*"
+    return bool(
+        re.search(rf"\bsandbox\b\s+(?:id\s+)?{quoted_id}{separator}{absence}", message)
+        or re.search(rf"\bsandbox\b\s+(?:id\s+)?{absence}{separator}{quoted_id}", message)
+        or re.search(rf"{absence}\s+\bsandbox\b\s+(?:id\s+)?{quoted_id}", message)
+    )
+
+
 def safe_kill(adapter: SandboxAdapter, config: SdkE2EConfig) -> list[str]:
     """Best-effort sandbox cleanup.
 
     Returns diagnostic messages instead of raising, so teardown never hides the
-    original test failure.
+    original test failure. A sandbox that is already absent is successfully
+    cleaned up.
     """
 
     errors: list[str] = []
     kill_adapter = adapter
     kill_completed = False
+    already_absent = False
     interrupt: BaseException | None = None
     try:
         try:
             state = adapter.info().state
         except Exception as exc:  # noqa: BLE001 - cleanup must continue
             state = None
-            errors.append(f"{adapter.backend}.info failed for {adapter.sandbox_id}: {exc}")
+            if _is_sandbox_not_found(exc, adapter.sandbox_id):
+                already_absent = True
+            else:
+                errors.append(f"{adapter.backend}.info failed for {adapter.sandbox_id}: {exc}")
+
+        if already_absent:
+            kill_completed = True
+            return errors
 
         normalized_state = str(state).lower() if state is not None else None
         if normalized_state == "paused":
@@ -48,8 +75,9 @@ def safe_kill(adapter: SandboxAdapter, config: SdkE2EConfig) -> list[str]:
         interrupt = exc
         errors.append(f"{kill_adapter.backend}.kill interrupted for {adapter.sandbox_id}: {exc}")
     except Exception as exc:  # noqa: BLE001 - teardown must be best-effort
-        errors.append(f"{kill_adapter.backend}.kill failed for {adapter.sandbox_id}: {exc}")
-        _rest_delete(adapter, config, errors)
+        if not _is_sandbox_not_found(exc, adapter.sandbox_id):
+            errors.append(f"{kill_adapter.backend}.kill failed for {adapter.sandbox_id}: {exc}")
+            _rest_delete(adapter, config, errors)
     finally:
         if not kill_completed and interrupt is not None:
             _rest_delete(adapter, config, errors)
