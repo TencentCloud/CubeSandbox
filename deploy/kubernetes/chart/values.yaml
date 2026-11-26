@@ -394,6 +394,18 @@ controlPlane:
     # bypass a real content drift (a migration edited after being applied), which
     # stays fatal by design.
     skipMigrationFingerprintCheck: false
+    # Address Cubelet nodes use to download artifacts straight from TC, skipping
+    # CubeMaster's streaming proxy. Empty (the default) means "reuse the
+    # in-cluster Service DNS already rendered into template_center_addr", which
+    # is reachable from Big Pods in the same cluster, so TC direct-download
+    # works out of the box and this value exists only for overrides.
+    #
+    # Set it when TC is reached through something the Service DNS does not
+    # cover: a dedicated NodePort/LB, a different cluster domain, or compute
+    # nodes outside the cluster network. A loopback or wildcard address is
+    # rejected at startup (it has no listener from another node) and CubeMaster
+    # falls back to serving artifacts itself.
+    nodeAddr: ""
     command: []
     args: []
     env: []

@@ -636,16 +636,17 @@ func reportArtifactBuilt(
 	return nil
 }
 
-// artifactS3Ops is the subset of s3store.Client artifactPresignedURL needs;
+// artifactS3Ops is the subset of s3store.Client artifactDownloadURL needs;
 // an interface so tests can fake the bucket.
 type artifactS3Ops interface {
 	Stat(ctx context.Context, artifactID string) (bool, error)
 	PresignedGetURL(ctx context.Context, artifactID string) (string, error)
 }
 
-// artifactPresignedURL returns a presigned URL for an S3-backed artifact, or
-// an empty string when S3 is disabled, the object is missing, or URL
-// generation fails.
+// artifactDownloadURL returns a presigned URL for an S3-backed artifact, or an
+// empty string when S3 is disabled, the object is missing, or URL generation
+// fails. It distinguishes a confirmed missing object from a failed HEAD or
+// presign request: only a confirmed absence contradicts a successful PUT.
 //
 // The Stat guard matters on the REUSE path: reuseExistingArtifact can match a
 // legacy artifact that predates S3 (built local-only, artifact_url empty,
@@ -654,13 +655,6 @@ type artifactS3Ops interface {
 // all, because the row then looks S3-backed and the local-file serving path
 // is skipped. Returning "" keeps the artifact on the local-disk download path
 // (and `tpl merge` can migrate it to S3 later).
-func artifactPresignedURL(ctx context.Context, s3CfgEnabled bool, s3Client artifactS3Ops, artifactID string, logger *cubelog.Entry) string {
-	url, _ := artifactDownloadURL(ctx, s3CfgEnabled, s3Client, artifactID, logger)
-	return url
-}
-
-// artifactDownloadURL distinguishes a confirmed missing object from a failed
-// HEAD or presign request. Only a confirmed absence contradicts a successful PUT.
 func artifactDownloadURL(ctx context.Context, s3CfgEnabled bool, s3Client artifactS3Ops, artifactID string, logger *cubelog.Entry) (url string, missing bool) {
 	if !s3CfgEnabled || s3Client == nil {
 		return "", false

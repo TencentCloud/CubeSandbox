@@ -348,6 +348,20 @@ func distributeRootfsArtifactToNodesCore(ctx context.Context, req *types.CreateT
 			if trackReplicas {
 				replica = buildReplicaForDistribution(target, generatedReq, artifact.ArtifactID, jobID)
 			}
+			// Issued per node, but NOT a per-node credential: the capability
+			// binds artifact id + expiry only, so every node whose request is
+			// issued in the same second legitimately carries an identical
+			// token. Scoping it per node would need the node identity inside
+			// the HMAC message on both signer and verifier -- deliberately
+			// not done, because the artifact bytes are the same for every
+			// node and a node-scoped token buys nothing here.
+			//
+			// Signing stays inside the loop because `sem` bounds concurrency
+			// to distributionWorkerCount(): with a large target set a node at
+			// the back of the queue can wait a long time, and a single token
+			// minted up front would already be close to (or past) its TTL by
+			// the time that node is served. Signing is ~1.4us of pure CPU
+			// (no network), so doing it per node costs nothing measurable.
 			downloadSource, sourceErr := IssueArtifactDownloadSource(rpcCtx, artifact, masterArtifactBaseURL, time.Now())
 			if sourceErr != nil {
 				lock.Lock()

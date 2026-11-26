@@ -173,19 +173,56 @@ loopback by default).
 
 ### 6.3 Cubelet artifact delivery
 
-Before each per-node `CreateImage`, CubeMaster selects exactly one data source
-and puts only that source's URL into the node request. S3-backed artifacts use a
-fresh presigned GET URL when Master can sign the object. TC direct-download is
-an optional rollout-gated source; when disabled/unavailable, Master serves the
-artifact through its compatible download endpoint. S3/TC/Master direct URLs use
-a configurable short-lived authorization. `common.artifact_download_capability_ttl`
-defaults to one hour and is bounded to 24 hours; the one-hour default allows
-large artifacts on slower node links while keeping leaked links time-limited.
-If TC's node-facing address is configured and the artifact is eligible for TC,
-CubeMaster selects that direct endpoint after S3 presigning is unavailable. The
-TC/Master HMAC capability is bound to artifact ID and expiry, uses the shared
-callback secret with a separate domain separator, and is sent only in
-`X-Cube-Artifact-Token`, never in the URL.
+Before each per-node `CreateImage`, CubeMaster selects exactly one *direct*
+data source, and sends it **alongside** the stable CubeMaster URL — not
+instead of it. Both sets of annotations are always present (the legacy pair
+plus, when a direct source was selected, the direct pair); a new Cubelet
+prefers the direct one and falls back to the legacy one, and an old Cubelet
+only ever sees the legacy one. That redundancy is what makes the fallback in
+"Direct failure fallback" below and the mixed-version rollout possible.
+
+S3-backed artifacts use a fresh presigned GET URL when Master can sign the
+object. When TC's node-facing address is configured and the artifact is
+eligible for TC, CubeMaster selects that direct endpoint after S3 presigning
+turns out to be unavailable. Otherwise the selected source is Master's own
+compatible download endpoint.
+
+S3/TC/Master direct URLs use a configurable short-lived authorization.
+`common.artifact_download_capability_ttl` defaults to one hour and is bounded
+to 24 hours; the one-hour default allows large artifacts on slower node links
+while keeping leaked links time-limited. The TC/Master HMAC capability is
+bound to artifact ID and expiry, uses the shared callback secret with a
+separate domain separator, and is sent only in `X-Cube-Artifact-Token`, never
+in the URL.
+
+It is therefore **not** a per-node credential: the HMAC message covers the
+artifact id and the expiry, nothing else, so all nodes served within the same
+second carry an identical token. Signing still happens inside the per-node
+loop, because distribution concurrency is bounded by
+`common.distribution_workers`: a node at the back of the queue would otherwise
+receive a token minted when the distribution started and already near its TTL.
+
+#### Direct failure fallback
+
+A direct endpoint is an optimization, never the only way to reach the bytes.
+When a direct attempt fails for a reason attributable to the endpoint itself,
+Cubelet retries once against the legacy CubeMaster URL from the same spec:
+
+- connection/DNS failure, or HTTP 401, 403, 404, 408, 429 and any 5xx;
+- a capability whose `expires_at` has already passed — detected before the
+  request is sent, so a spent capability does not surface as an opaque 403 or
+  as a size mismatch once an error page is counted as artifact bytes.
+
+An integrity failure (sha256 or size mismatch) deliberately does **not** fall
+back: the endpoint answered, and retrying elsewhere would mask a corrupt
+artifact. Credentials follow the selected source, so the Cube capability is
+never sent to S3.
+
+Without this, a node whose egress to S3/TC is blocked, a mixed-version 404 or
+an expired TTL would each turn a previously working deployment into "template
+creation fails", with a rollback as the only remedy.
+
+#### Route credentials
 
 The two download routes accept deliberately different credentials, because
 they sit on different sides of the user API-key middleware:
@@ -232,10 +269,23 @@ deletable without inheriting the current deployment's bucket.
 
 Cubelet downloads the ext4 directly from the selected source, then verifies
 both the expected SHA-256 and byte size before atomically publishing the cache
-file. Direct S3 requires node egress to the object endpoint; direct TC requires
-Cubelet reachability to the node-facing TC address. Expired presigns/capability
-tokens are renewed by a new Master distribution attempt. Legacy persisted
-requests keep the stable Master download path for compatibility.
+file. Expired presigns/capability tokens are renewed by a new Master
+distribution attempt. Legacy persisted requests keep the stable Master
+download path for compatibility.
+
+#### Operational prerequisites
+
+Three environment facts decide whether the direct path is *usable*. None of
+them is required for correctness — each one only costs the optimization,
+because the proxied route stays valid and the fallback above catches the
+failure. Treat them as "what to fix if downloads are still going through
+CubeMaster", not as install blockers:
+
+| Fact | If absent |
+| --- | --- |
+| CubeMaster holds the `CUBE_S3_*` credentials for the artifact bucket | Master cannot presign, so S3 direct is never selected. Normalization of a TC report degrades to a warning instead of failing the job, so builds still succeed (this is why the old "Master must hold S3 credentials" requirement no longer applies). |
+| Every Cubelet can reach TC's node-facing address (`common.template_center_node_addr` / `CUBE_TEMPLATE_CENTER_NODE_ADDR`) | The TC endpoint is handed out but unreachable; each node fails once and falls back to CubeMaster. A loopback/wildcard address is detected up front and TC direct is not offered at all. |
+| Master and TC agree on `CUBE_S3_*` when **both** have S3 configured | A reported bucket that differs from Master's configured bucket is a definite mismatch and still rejects the callback. Only this case is fatal; an *unverifiable* bucket (Master has no S3 config) is recorded as reported. |
 
 ## 7. Reconciliation
 

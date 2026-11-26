@@ -880,6 +880,15 @@ func reclaimAdoptedArtifactUpload(ctx context.Context, winner *models.RootfsArti
 // finalizeRemoteArtifact mirrors finalizeArtifact but sources its values from
 // TC's report rather than a local *image.PreparedSource. Keep the persisted
 // column set identical to finalizeArtifact.
+//
+// PRECONDITION: result must already have gone through
+// NormalizeRemoteBuildArtifactStore. Both registration paths
+// (registerRemoteBuiltArtifact and registerRemoteBuiltArtifactWhileTCBuildLocked)
+// reach this only via prepareTemplateImageJobAfterRemoteBuild, which
+// normalizes before invoking the registrar. Normalizing again here would be a
+// no-op for an already-normalized payload, but in the degraded path (a store
+// this Master cannot verify) it repeats the S3 HEAD on the template-creation
+// critical path.
 func finalizeRemoteArtifact(
 	ctx context.Context,
 	record *models.RootfsArtifact,
@@ -887,9 +896,6 @@ func finalizeRemoteArtifact(
 	result *RemoteBuildResult,
 	imageCfg DockerImageConfig,
 ) (*models.RootfsArtifact, *types.CreateCubeSandboxReq, error) {
-	if err := NormalizeRemoteBuildArtifactStore(ctx, result); err != nil {
-		return nil, nil, err
-	}
 	record.SourceImageDigest = result.SourceImageDigest
 	record.MasterNodeIP = result.MasterNodeIP
 	record.Ext4Path = result.Ext4Path

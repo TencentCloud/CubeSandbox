@@ -351,6 +351,16 @@ adds the selected direct endpoint in a separate annotation; new Cubelets use the
 direct endpoint, while older Cubelets ignore it and continue through CubeMaster.
 No Cubelet version threshold is needed.
 
+The "TC node-facing address" above needs no configuration under this chart:
+left empty, CubeMaster reuses the in-cluster Service DNS it already renders
+into `template_center_addr`, which Big Pods on compute nodes can reach. Set
+`controlPlane.templateCenter.nodeAddr` only when TC is reached through
+something that DNS name does not cover — a dedicated NodePort/LB, a different
+cluster domain, or compute nodes outside the cluster network. A loopback or
+wildcard address is refused (it has no listener as seen from another node) and
+CubeMaster keeps serving the artifact itself, so a wrong value degrades to the
+proxied path instead of failing template creation.
+
 `artifactDownloadDirectEnabled` (default `true`) is the rollout kill switch.
 Setting it to `false` makes CubeMaster stop issuing any direct endpoint and hand
 every Cubelet the proxied URL again — the route that predates this feature — so

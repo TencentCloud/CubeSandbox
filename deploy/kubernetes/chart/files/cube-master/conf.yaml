@@ -30,6 +30,12 @@ common:
   {{- if .Values.controlPlane.enabled }}
   template_center_addr: "{{ include "cube.templateCenterEndpoint" . }}"
   {{- end }}
+  {{- /* Only emit the node-facing address when overridden. Left out, CubeMaster
+         falls back to template_center_addr above, whose in-cluster Service DNS
+         is already reachable from Big Pods on compute nodes. */}}
+  {{- with .Values.controlPlane.templateCenter.nodeAddr }}
+  template_center_node_addr: {{ . | quote }}
+  {{- end }}
 
 log:
   module: "cubemaster"
