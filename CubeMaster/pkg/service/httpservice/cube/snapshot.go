@@ -782,6 +782,8 @@ func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string
 // maps it to NotFound so fork / create-snapshot return 404 instead of 400.
 var errSandboxNotFound = errors.New("sandbox not found")
 
+var errSandboxWorkerUnavailable = errors.New("sandbox worker unavailable")
+
 func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (string, string, error) {
 	hostIP := ""
 	if cache := localcache.GetSandboxCache(sandboxID); cache != nil {
@@ -800,6 +802,12 @@ func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (strin
 			msg := "sandbox not found"
 			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetMsg != "" {
 				msg = infoRsp.Ret.RetMsg
+			}
+			if infoRsp != nil && infoRsp.Ret != nil && infoRsp.Ret.RetCode == int(errorcode.ErrorCode_CubeletUnHealthy) {
+				if strings.TrimSpace(infoRsp.Ret.RetMsg) == "" {
+					return "", "", errSandboxWorkerUnavailable
+				}
+				return "", "", fmt.Errorf("%w: %s", errSandboxWorkerUnavailable, msg)
 			}
 			return "", "", errors.New(msg)
 		}
@@ -831,6 +839,8 @@ func snapshotErrorCode(err error) int {
 		return int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
 		return int(errorcode.ErrorCode_DBError)
+	case errors.Is(err, errSandboxWorkerUnavailable):
+		return int(errorcode.ErrorCode_CubeletUnHealthy)
 	case isMySQLLockError(err):
 		return int(errorcode.ErrorCode_DBError)
 	case errors.Is(err, context.DeadlineExceeded):
