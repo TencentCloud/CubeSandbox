@@ -297,6 +297,7 @@ export default withMermaid(defineConfig({
               text: 'Observability & Performance',
               items: [
                 { text: 'Sandbox Observability Deployment', link: '/guide/observability' },
+                { text: 'CubeProxy Request Metrics', link: '/guide/cubeproxy-metrics' },
                 { text: 'Sandbox Resource Metrics', link: '/guide/resource-metrics' },
                 { text: 'Sandbox Network Metrics', link: '/guide/network-metrics' },
                 { text: 'Sandbox Logs', link: '/guide/sandbox-logs' },
@@ -545,6 +546,7 @@ export default withMermaid(defineConfig({
               text: '可观测性与性能',
               items: [
                 { text: '沙箱可观测性部署', link: '/zh/guide/observability' },
+                { text: 'CubeProxy 请求指标', link: '/zh/guide/cubeproxy-metrics' },
                 { text: '沙箱资源指标', link: '/zh/guide/resource-metrics' },
                 { text: '沙箱网络指标', link: '/zh/guide/network-metrics' },
                 { text: '沙箱日志', link: '/zh/guide/sandbox-logs' },

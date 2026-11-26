@@ -521,6 +521,165 @@ test_cube_proxy_start_propagates_resolver_discovery_failure() {
     || fail "prepare_resolver_include should not render an include after resolver discovery fails"
 }
 
+test_cube_proxy_start_build_metrics_include() {
+  local output=""
+
+  # Enabled: emit the whole metrics server block with the configured listener,
+  # the /metrics location and a catch-all 404.
+  output="$(
+    CUBE_PROXY_METRICS_ENABLE='1' \
+    CUBE_PROXY_METRICS_LISTEN='127.0.0.1:18082' \
+      bash -c '
+        set -euo pipefail
+        source "'"${CUBE_PROXY_START_SH}"'"
+        build_cube_proxy_metrics_include
+      '
+  )"
+  grep -Fq 'server {' <<<"${output}" \
+    || fail "enabled metrics should render a server block (got: ${output})"
+  grep -Fq 'listen 127.0.0.1:18082;' <<<"${output}" \
+    || fail "enabled metrics should render the configured listener (got: ${output})"
+  grep -Fq 'location = /metrics' <<<"${output}" \
+    || fail "enabled metrics should expose /metrics (got: ${output})"
+  grep -Fq 'return 404;' <<<"${output}" \
+    || fail "enabled metrics should 404 other paths (got: ${output})"
+
+  # Bracketed IPv6 listener is rendered verbatim.
+  output="$(
+    CUBE_PROXY_METRICS_ENABLE='1' \
+    CUBE_PROXY_METRICS_LISTEN='[2001:db8::1]:18082' \
+      bash -c '
+        set -euo pipefail
+        source "'"${CUBE_PROXY_START_SH}"'"
+        build_cube_proxy_metrics_include
+      '
+  )"
+  grep -Fq 'listen [2001:db8::1]:18082;' <<<"${output}" \
+    || fail "enabled metrics should render bracketed IPv6 listeners (got: ${output})"
+}
+
+test_cube_proxy_start_metrics_disabled_emits_no_server_block() {
+  local output=""
+
+  for value in '' 0 off false no 2 enable; do
+    output="$(
+      CUBE_PROXY_METRICS_ENABLE="${value}" \
+      CUBE_PROXY_METRICS_LISTEN='0.0.0.0:18082' \
+        bash -c '
+          set -euo pipefail
+          source "'"${CUBE_PROXY_START_SH}"'"
+          build_cube_proxy_metrics_include
+        '
+    )"
+    if grep -Eq 'server \{|listen ' <<<"${output}"; then
+      fail "disabled metrics (value='${value}') must emit no server block (got: ${output})"
+    fi
+  done
+
+  # Unset variable also defaults to disabled -> no server block.
+  output="$(
+    CUBE_PROXY_METRICS_LISTEN='0.0.0.0:18082' \
+      bash -c '
+        set -euo pipefail
+        unset CUBE_PROXY_METRICS_ENABLE
+        source "'"${CUBE_PROXY_START_SH}"'"
+        build_cube_proxy_metrics_include
+      '
+  )"
+  if grep -Eq 'server \{|listen ' <<<"${output}"; then
+    fail "unset metrics toggle must emit no server block (got: ${output})"
+  fi
+}
+
+test_cube_proxy_start_render_metrics_include_replaces_previous_value() {
+  local metrics_inc="${TMP_DIR}/metrics_server.inc"
+
+  # Enabled with one listener, then re-rendered with another: the include must
+  # reflect the latest value and not retain the previous one.
+  CUBE_PROXY_METRICS_INCLUDE_PATH="${metrics_inc}" \
+  CUBE_PROXY_METRICS_ENABLE='1' \
+  CUBE_PROXY_METRICS_LISTEN='127.0.0.1:18082' \
+    bash -c '
+      set -euo pipefail
+      source "'"${CUBE_PROXY_START_SH}"'"
+      render_metrics_include
+    '
+  assert_contains "${metrics_inc}" "listen 127.0.0.1:18082;"
+
+  CUBE_PROXY_METRICS_INCLUDE_PATH="${metrics_inc}" \
+  CUBE_PROXY_METRICS_ENABLE='1' \
+  CUBE_PROXY_METRICS_LISTEN='0.0.0.0:18082' \
+    bash -c '
+      set -euo pipefail
+      source "'"${CUBE_PROXY_START_SH}"'"
+      render_metrics_include
+    '
+  assert_contains "${metrics_inc}" "listen 0.0.0.0:18082;"
+  if grep -Fq '127.0.0.1:18082' "${metrics_inc}"; then
+    fail "render_metrics_include should replace the previous listener value"
+  fi
+
+  # Re-rendering with metrics disabled must clear the server block entirely.
+  CUBE_PROXY_METRICS_INCLUDE_PATH="${metrics_inc}" \
+  CUBE_PROXY_METRICS_ENABLE='0' \
+    bash -c '
+      set -euo pipefail
+      source "'"${CUBE_PROXY_START_SH}"'"
+      render_metrics_include
+    '
+  if grep -Eq 'server \{|listen ' "${metrics_inc}"; then
+    fail "disabling metrics should clear the rendered server block"
+  fi
+}
+
+test_cube_proxy_start_rejects_invalid_metrics_listen() {
+  local metrics_inc="${TMP_DIR}/invalid-metrics.inc"
+  local err="${TMP_DIR}/invalid-metrics.err"
+
+  if CUBE_PROXY_METRICS_INCLUDE_PATH="${metrics_inc}" \
+    CUBE_PROXY_METRICS_ENABLE='1' \
+    CUBE_PROXY_METRICS_LISTEN='0.0.0.0:18082; worker_processes 1;' \
+      bash -c '
+        set -euo pipefail
+        source "'"${CUBE_PROXY_START_SH}"'"
+        render_metrics_include
+      ' >/dev/null 2>"${err}"; then
+    fail "render_metrics_include should reject nginx directive injection"
+  fi
+  assert_contains "${err}" "invalid CUBE_PROXY_METRICS_LISTEN"
+  [[ ! -e "${metrics_inc}" ]] \
+    || fail "render_metrics_include should not leave an include after validation fails"
+
+  if CUBE_PROXY_METRICS_INCLUDE_PATH="${metrics_inc}" \
+    CUBE_PROXY_METRICS_ENABLE='1' \
+    CUBE_PROXY_METRICS_LISTEN='127.0.0.1:0' \
+      bash -c '
+        set -euo pipefail
+        source "'"${CUBE_PROXY_START_SH}"'"
+        render_metrics_include
+      ' >/dev/null 2>"${err}"; then
+    fail "render_metrics_include should reject port zero"
+  fi
+  assert_contains "${err}" "invalid CUBE_PROXY_METRICS_LISTEN"
+}
+
+test_cube_proxy_start_metrics_include_does_not_modify_nginx_conf() {
+  local nginx_conf="${TMP_DIR}/nginx.conf"
+  local metrics_inc="${TMP_DIR}/metrics_server.inc"
+
+  printf 'include metrics_server.inc;\n' > "${nginx_conf}"
+  CUBE_PROXY_NGINX_CONF_PATH="${nginx_conf}" \
+  CUBE_PROXY_METRICS_INCLUDE_PATH="${metrics_inc}" \
+  CUBE_PROXY_METRICS_ENABLE='1' \
+  CUBE_PROXY_METRICS_LISTEN='127.0.0.1:18082' \
+    bash -c '
+      set -euo pipefail
+      source "'"${CUBE_PROXY_START_SH}"'"
+      render_metrics_include
+    '
+  assert_contains "${nginx_conf}" 'include metrics_server.inc;'
+}
+
 test_cube_proxy_start_discover_resolver_addresses
 test_cube_proxy_start_build_resolver_include
 test_cube_proxy_start_prepare_resolver_include_for_hostname
@@ -540,5 +699,10 @@ test_cube_proxy_start_ignores_overridden_unparseable_redis_host
 test_cube_proxy_start_main_exits_when_resolver_preparation_fails
 test_cube_proxy_start_discover_resolver_addresses_empty_and_missing
 test_cube_proxy_start_propagates_resolver_discovery_failure
+test_cube_proxy_start_build_metrics_include
+test_cube_proxy_start_metrics_disabled_emits_no_server_block
+test_cube_proxy_start_render_metrics_include_replaces_previous_value
+test_cube_proxy_start_rejects_invalid_metrics_listen
+test_cube_proxy_start_metrics_include_does_not_modify_nginx_conf
 
 echo "CubeProxy resolver tests OK"

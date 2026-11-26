@@ -51,6 +51,7 @@ test:
 		lua tests/rewrite_phase_route_test.lua; \
 		lua tests/path_rewrite_phase_route_test.lua; \
 		lua tests/activity_test.lua; \
+		lua tests/metrics_test.lua; \
 	elif command -v luajit >/dev/null 2>&1; then \
 		luajit tests/redis_iresty_sentinel_test.lua; \
 		luajit tests/redis_cluster_test.lua; \
@@ -61,8 +62,9 @@ test:
 		luajit tests/rewrite_phase_route_test.lua; \
 		luajit tests/path_rewrite_phase_route_test.lua; \
 		luajit tests/activity_test.lua; \
+		luajit tests/metrics_test.lua; \
 	else \
-		echo "lua or luajit is required: redis_iresty_sentinel_test.lua redis_cluster_test.lua backend_cache_test.lua sandbox_backend_cache_test.lua sandbox_route_lookup_test.lua request_host_test.lua rewrite_phase_route_test.lua path_rewrite_phase_route_test.lua activity_test.lua" >&2; \
+		echo "lua or luajit is required: redis_iresty_sentinel_test.lua redis_cluster_test.lua backend_cache_test.lua sandbox_backend_cache_test.lua sandbox_route_lookup_test.lua request_host_test.lua rewrite_phase_route_test.lua path_rewrite_phase_route_test.lua activity_test.lua metrics_test.lua" >&2; \
 		exit 1; \
 	fi
 

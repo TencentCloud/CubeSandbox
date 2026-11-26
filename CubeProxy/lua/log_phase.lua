@@ -5,6 +5,7 @@
 --    All paths are non-blocking; this phase MUST NOT delay log emission.
 
 local activity = require "activity"
+local metrics = require "metrics"
 
 local function get_currtime()
     -- ngx.var.msec = 1663839717.105
@@ -24,3 +25,5 @@ ngx.var.access_time = get_currtime()
 -- haven't opted into auto_pause are still cheap to record here — CLM
 -- simply ignores their entries when computing pause decisions.
 activity.touch(ngx.var.ins_id)
+
+metrics.finish_current_request()
