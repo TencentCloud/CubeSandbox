@@ -110,25 +110,24 @@ impl Drop for TraceGuard {
     }
 }
 
-/// Enable REST tracing when an OTLP endpoint is configured.
+/// Enable REST tracing when a guest-reachable OTLP/HTTP traces URL is configured.
 pub fn init_tracing() -> Option<TraceGuard> {
-    let endpoint = [
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-    ]
-    .into_iter()
-    .filter_map(|key| std::env::var(key).ok())
-    .find(|value| !value.trim().is_empty())?;
+    let endpoint = std::env::var("CUBE_ENVD_OTEL_ENDPOINT").ok()?;
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
     if !endpoint.parse::<http::Uri>().is_ok_and(|uri| {
         matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
     }) {
-        tracing::warn!("invalid OTLP endpoint, tracing disabled");
+        tracing::warn!("invalid CUBE_ENVD_OTEL_ENDPOINT, tracing disabled");
         return None;
     }
 
     let exporter = match SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
+        .with_endpoint(endpoint)
         .build()
     {
         Ok(exporter) => exporter,

@@ -33,7 +33,7 @@ memchr = "2"
 opentelemetry = { version = "0.30", default-features = false, features = ["trace"] }
 opentelemetry-http = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls-webpki-roots"] }
-opentelemetry_sdk = { version = "0.30", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.30", default-features = false, features = ["trace", "internal-logs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"

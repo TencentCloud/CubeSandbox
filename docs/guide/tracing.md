@@ -59,6 +59,18 @@ Cubelet launches a fresh CubeShim process per sandbox; the process lives alongsi
 
 Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
 
+### Rust envd REST tracing
+
+To enable tracing in Rust envd, set `CUBE_ENVD_OTEL_ENDPOINT` in the guest
+environment where envd starts. Use a full OTLP/HTTP protobuf traces URL
+reachable from the sandbox, such as `http://<receiver>:4318/v1/traces`. The
+control-plane OTLP endpoint variables do not enable envd tracing.
+
+A REST request carrying a sampled W3C `traceparent` produces an `envd` server
+span under that parent. CubeProxy can supply the parent context. Configure a
+receiver address the guest network can reach. Background export failures
+are logged by envd independently of the REST response.
+
 ## Querying and interpreting durations
 
 Find a trace by trace ID, or by an ID your API returned. The identifier in a response is not always the same string as the span attribute, and none of them is the trace ID:

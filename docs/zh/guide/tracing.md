@@ -59,6 +59,17 @@ Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启�
 
 Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后，等待会有意持续到任务退出；创建请求取消或超时不会丢失退出事件。等待上下文只保留 containerd 命名空间，不继承请求取消、日志字段或已结束的创建 Span。若任务启动失败，则取消等待。
 
+### Rust envd REST 追踪
+
+要启用 Rust envd 追踪，请在 envd 启动时读取的沙箱环境中设置
+`CUBE_ENVD_OTEL_ENDPOINT`。取值是沙箱内可访问的完整 OTLP/HTTP protobuf
+追踪地址，例如 `http://<receiver>:4318/v1/traces`。控制面的 OTLP 地址变量
+不会启用 envd 追踪。
+
+携带已采样 W3C `traceparent` 的 REST 请求会生成 `envd` Server Span，
+并接在对应的父 Span 下。父上下文可以由 CubeProxy 传入。后台上报失败会写入
+envd 日志，REST 请求照常处理。
+
 ## 查询与解读耗时
 
 可以按 trace ID 查询，也可以用接口返回的某个 ID。响应里的标识与 span 属性并不总是同一个字符串，而且它们都不是 trace ID：
