@@ -71,30 +71,41 @@ func (rr *ociRuntime) Destroy(ctx context.Context, opts *workflow.DestroyContext
 	}
 	ctx = namespaces.WithNamespace(ctx, sb.Namespace)
 
-	sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-		status.Removing = true
-		return status, nil
-	})
-
 	var containers []*cubeboxstore.Container
-	for _, ci := range sb.All() {
-		containers = append(containers, ci)
-	}
+	// Protect metadata lookup and removal markers, not the slow task APIs or
+	// runc.Clean. This path is creation-failure cleanup, not a user hook delete.
+	func() {
+		sb.Lock()
+		defer sb.Unlock()
+		sb.GetStatus().Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.Removing = true
+			return status, nil
+		})
+		for _, ci := range sb.All() {
+			containers = append(containers, ci)
+		}
+		containers = append(containers, sb.FirstContainer())
+		for _, ci := range containers {
+			if ci != nil {
+				ci.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+					status.Removing = true
+					return status, nil
+				})
+			}
+		}
+	}()
 
-	containers = append(containers, sb.FirstContainer())
 	for i, cntr := range containers {
+		if cntr == nil {
+			continue
+		}
 		tmpCtx := log.WithLogger(ctx, log.G(ctx).WithFields(map[string]interface{}{
 			"ContainerId": cntr.ID,
 		}))
 		tmpCtx = context.WithValue(tmpCtx, constants.KCubeIndexContext, fmt.Sprint(i))
 		tmpCtx = context.WithValue(tmpCtx, "sandboxID", sandBoxID)
 
-		cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-			status.Removing = true
-			return status, nil
-		})
-
-		if er := l.destroyContainer(tmpCtx, cntr); er != nil {
+		if er := l.destroyContainer(tmpCtx, sb, cntr, opts); er != nil {
 			result = multierror.Append(result, fmt.Errorf("destroy container [%s] fail: %w", cntr.ID, er))
 			log.G(tmpCtx).Warnf("Destroy container [%s] fail: %s", cntr.ID, er)
 			continue
@@ -164,6 +175,7 @@ func (rr *ociRuntime) Create(ctx context.Context, flowOpts *workflow.CreateConte
 		return ret.Errorf(errorcode.ErrorCode_NewContainerMetaDataFailed, "create cubebox container fail: %v", err)
 	}
 
+	postStartBudget := templatePostStartTimeout
 	for i, realC := range realReq.Containers {
 		ctxTmp := context.WithValue(ctx, constants.KCubeIndexContext, fmt.Sprint(i))
 		ci, err := sandBox.Get(realC.Id)
@@ -184,6 +196,9 @@ func (rr *ociRuntime) Create(ctx context.Context, flowOpts *workflow.CreateConte
 		if err := l.cubeboxManger.Save(ctxTmp, sandBox); err != nil {
 			log.Warnf("saveSandBoxInfo failed.%s", err.Error())
 			return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
+		}
+		if err := runTemplatePostStart(ctxTmp, flowOpts, ci, &postStartBudget); err != nil {
+			return err
 		}
 		if err := l.doProbe(ctxTmp, realC, ci); err != nil {
 			return err

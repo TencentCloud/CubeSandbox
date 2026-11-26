@@ -63,6 +63,44 @@ cubemastercli tpl create-from-image \
 
 `POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
+### 配置容器生命周期钩子
+
+通过 CubeAPI 的 `POST /templates` 请求体中的可选字段 `lifecycle`，可以在沙箱启动或优雅删除时执行命令。可以只配置一个钩子，也可以同时配置两个。`exec.command` 数组的首项是镜像中可用的可执行程序，其余各项是传给该程序的参数。命令以容器用户身份运行。
+
+```json
+{
+  "image": "registry.example.com/my-app:latest",
+  "writableLayerSize": "1G",
+  "lifecycle": {
+    "postStart": {
+      "exec": { "command": ["/usr/local/bin/init-workspace"] }
+    },
+    "preStop": {
+      "exec": { "command": ["/usr/local/bin/flush-workspace"] }
+    }
+  }
+}
+```
+
+命令会直接执行，不会隐式启动 shell。可执行文件（`command[0]`）不能为空或包含首尾空白，其他参数保持原样。如果需要使用 `&&`、管道、重定向或环境变量展开等 shell 功能，请显式调用 shell。例如，当镜像包含 `/bin/sh` 时，`postStart` 钩子可以这样配置：
+
+```json
+{
+  "postStart": {
+    "exec": {
+      "command": ["/bin/sh", "-c", "mkdir -p /tmp/workspace-cache && echo ready > /tmp/workspace-ready"]
+    }
+  }
+}
+```
+
+- `postStart` 在每个新沙箱就绪前执行，包括从模板快照创建的沙箱。同一沙箱的所有容器共用 10 秒钩子执行预算，容器启动时间不计入该预算。如果命令返回非零退出码或超时，沙箱创建失败并开始清理。
+- `preStop` 在优雅删除期间、guest 仍可执行命令时运行。钩子执行和发送 `SIGTERM` 后等待主进程退出共用最多 5 秒。旧有 HTTP `Poststop` 钩子在 `SIGTERM` 之前执行，其耗时可能用尽剩余终止宽限时间。删除请求剩余时间较短时，这个时限也会缩短。Cubelet 会记录钩子的失败和超时，并继续删除。重试删除时会跳过已尝试执行的钩子。超时钩子进程会获得一次独立且有时限的清理尝试。
+
+构建模板快照或暂停、恢复、重启已有沙箱时会跳过这两个钩子。
+
+`POST /sandboxes` 接受的沙箱级 `lifecycle` 对象通过 `onTimeout` 和 `autoResume` 控制空闲时的行为，与 `POST /templates` 接受的模板容器生命周期钩子是不同的配置。
+
 ## 第三步 — 监控进度
 
 有两种方式跟踪构建任务。
