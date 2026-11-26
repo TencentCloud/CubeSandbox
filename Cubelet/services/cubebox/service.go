@@ -674,11 +674,21 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	// queue on the same lock — the guarantee the async failover could only
 	// approximate. A cross-node restore (no local tombstone: the snapshot is
 	// nil) still rolls back synchronously to release its allocations; it just
-	// has nothing to restore. PreConditionFailed is excluded exactly as
-	// engine.run excludes it from the async failover: it marks a state the
-	// flow refused to act on, not a half-built sandbox.
+	// has nothing to restore.
+	//
+	// Two error shapes are excluded, both meaning "not a half-built sandbox":
+	// PreConditionFailed — exactly as engine.run excludes it from the async
+	// failover, it marks a state the flow refused to act on — and any failure
+	// that left createInfo.SandboxID unset. The createid step pins that id
+	// before the allocating steps run, so an empty id means the flow never
+	// started: the workflow limiter rejected it (ConcurrentFailed — a busy
+	// node's cheap, retriable backpressure, which the async failover also
+	// never saw) or createid itself failed. There is nothing to tear down,
+	// and rolling back would run the whole destroy workflow against an empty
+	// sandbox id.
 	if createErr != nil && constants.IsCubeRuntime(ctx) &&
 		(pausedTombstone != nil || resumeSID != "") &&
+		createInfo.SandboxID != "" &&
 		!ret.IsErrorCode(createErr, errorcode.ErrorCode_PreConditionFailed) {
 		s.rollbackPausedReplace(ctx, createInfo, pausedTombstone)
 	}
