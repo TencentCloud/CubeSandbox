@@ -205,9 +205,9 @@ func TestBackfillTemplateReplicasJFSSkipsFullyPlaced(t *testing.T) {
 }
 
 // A redo records the nodes it rebuilt on as its request scope. The sweep must
-// keep using the template's create scope, or a node that joins after the redo
-// is never backfilled.
-func TestBackfillAfterRedoUsesCreateScope(t *testing.T) {
+// use the template's placement scope (create scope plus redo nodes), or a node
+// that joins after the redo is never backfilled.
+func TestBackfillAfterRedoUsesPlacementScope(t *testing.T) {
 	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
 	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{
 		Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi",
@@ -237,9 +237,9 @@ func TestBackfillAfterRedoUsesCreateScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			job := &models.TemplateImageJob{JobID: "job-1", Operation: tc.operation, RequestJSON: string(raw)}
 			stubBackfillSeams(t, job, artifact, nodes, placements)
-			origScope, origResolve := backfillCreateScope, backfillResolveNodes
-			t.Cleanup(func() { backfillCreateScope, backfillResolveNodes = origScope, origResolve })
-			backfillCreateScope = func(context.Context, string) ([]string, error) { return tc.create, nil }
+			origScope, origResolve := backfillPlacementScope, backfillResolveNodes
+			t.Cleanup(func() { backfillPlacementScope, backfillResolveNodes = origScope, origResolve })
+			backfillPlacementScope = func(context.Context, string) ([]string, error) { return tc.create, nil }
 			var gotScope []string
 			backfillResolveNodes = func(_ string, scope []string) ([]*node.Node, error) {
 				gotScope = scope

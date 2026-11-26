@@ -108,17 +108,6 @@ func getLatestCreateRedoImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (
 	return record, nil
 }
 
-func getLatestCreateImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {
-	record := &models.TemplateImageJob{}
-	err := tx.Table(constants.TemplateImageJobTableName).
-		Where("template_id = ? AND operation = ?", templateID, JobOperationCreate).
-		Order("attempt_no desc, id desc").First(record).Error
-	if err != nil {
-		return nil, err
-	}
-	return record, nil
-}
-
 // getNewestCreateRedoImageJobByTemplateIDTx uses the global row ID rather
 // than attempt_no because alias arbitration follows persisted submission order.
 func getNewestCreateRedoImageJobByTemplateIDTx(tx *gorm.DB, templateID string) (*models.TemplateImageJob, error) {

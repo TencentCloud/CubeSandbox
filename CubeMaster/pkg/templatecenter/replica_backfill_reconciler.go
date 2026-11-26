@@ -17,7 +17,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
-	"gorm.io/gorm"
 )
 
 // Template replica backfill sweep.
@@ -64,21 +63,12 @@ var (
 	backfillLatestJob = func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
 		return getLatestCreateRedoImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
 	}
-	// backfillCreateScope returns the distribution scope of the template's
-	// latest create job, or nil (every in-scope node) when none is on record.
-	backfillCreateScope = func(ctx context.Context, templateID string) ([]string, error) {
-		record, err := getLatestCreateImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
+	backfillPlacementScope = func(ctx context.Context, templateID string) ([]string, error) {
+		records, err := listCreateRedoImageJobsByTemplateIDTx(store.db.WithContext(ctx), templateID)
 		if err != nil {
 			return nil, err
 		}
-		req, err := unmarshalTemplateImageJobRequest(record.RequestJSON)
-		if err != nil {
-			return nil, fmt.Errorf("decode create job request: %w", err)
-		}
-		return req.DistributionScope, nil
+		return placementScopeFromJobs(records)
 	}
 	backfillArtifact        = getRootfsArtifactByID
 	backfillReplicas        = ListReplicas
@@ -90,6 +80,47 @@ var (
 	backfillGetDefinition   = GetDefinition
 	backfillCleanupReplicas = cleanupTemplateReplicasOnNodes
 )
+
+// placementScopeFromJobs derives where a redone template belongs from its
+// create/redo jobs, newest first: the latest create's scope plus the nodes of
+// every redo after it. A create without a scope, or no create on record,
+// means every in-scope node (nil).
+func placementScopeFromJobs(records []models.TemplateImageJob) ([]string, error) {
+	var redoScopes [][]string
+	for _, record := range records {
+		req, err := unmarshalTemplateImageJobRequest(record.RequestJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s job %s request: %w", strings.ToLower(record.Operation), record.JobID, err)
+		}
+		if !strings.EqualFold(record.Operation, JobOperationCreate) {
+			redoScopes = append(redoScopes, req.DistributionScope)
+			continue
+		}
+		if len(req.DistributionScope) == 0 {
+			return nil, nil
+		}
+		seen := make(map[string]struct{})
+		var scope []string
+		add := func(items []string) {
+			for _, item := range items {
+				if item = strings.TrimSpace(item); item == "" {
+					continue
+				}
+				if _, ok := seen[item]; ok {
+					continue
+				}
+				seen[item] = struct{}{}
+				scope = append(scope, item)
+			}
+		}
+		add(req.DistributionScope)
+		for i := len(redoScopes) - 1; i >= 0; i-- {
+			add(redoScopes[i])
+		}
+		return scope, nil
+	}
+	return nil, nil
+}
 
 // resolveBackfillNodes is resolveTemplateNodes without the all-or-nothing
 // scope check. A stored scope is a snapshot of the nodes that existed when
@@ -180,12 +211,13 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		return fmt.Errorf("decode job request snapshot: %w", err)
 	}
 	// A redo persists the nodes it rebuilt on as its scope. That is a
-	// one-off target list, not the template's placement: keeping it would
-	// stop every node that joins after the redo from being backfilled.
+	// one-off target list, not the template's placement: keeping it alone
+	// would stop every node that joins after the redo from being backfilled.
+	// Dropping it would lose the nodes a redo moved the template to.
 	if strings.EqualFold(job.Operation, JobOperationRedo) {
-		scope, scopeErr := backfillCreateScope(ctx, def.TemplateID)
+		scope, scopeErr := backfillPlacementScope(ctx, def.TemplateID)
 		if scopeErr != nil {
-			return fmt.Errorf("load create scope: %w", scopeErr)
+			return fmt.Errorf("load placement scope: %w", scopeErr)
 		}
 		req.DistributionScope = scope
 	}

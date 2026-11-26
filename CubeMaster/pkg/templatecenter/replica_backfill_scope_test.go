@@ -76,9 +76,11 @@ func TestResolveBackfillNodesNoHealthyNodes(t *testing.T) {
 	}
 }
 
-// backfillCreateScope reads the latest CREATE job (highest attempt), ignores
-// redo jobs, and treats a template without a create job as unscoped.
-func TestBackfillCreateScopeFromJobTable(t *testing.T) {
+// backfillPlacementScope starts from the latest CREATE job (highest attempt)
+// and adds the nodes of every REDO after it. Redos before that create, a
+// create without a scope and a template without a create job leave it
+// unscoped (nil).
+func TestBackfillPlacementScopeFromJobTable(t *testing.T) {
 	dbName := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
 	db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
@@ -100,29 +102,52 @@ func TestBackfillCreateScopeFromJobTable(t *testing.T) {
 		}
 		return string(raw)
 	}
+	job := func(id, tpl, op string, attempt int32, requestJSON string) models.TemplateImageJob {
+		return models.TemplateImageJob{JobID: id, TemplateID: tpl, Operation: op, AttemptNo: attempt, RequestJSON: requestJSON}
+	}
 	rows := []models.TemplateImageJob{
-		{JobID: "create-1", TemplateID: "tpl-1", Operation: JobOperationCreate, AttemptNo: 1, RequestJSON: request("node-old")},
-		{JobID: "create-2", TemplateID: "tpl-1", Operation: JobOperationCreate, AttemptNo: 2, RequestJSON: request("node-a", "node-b")},
-		{JobID: "redo-3", TemplateID: "tpl-1", Operation: JobOperationRedo, AttemptNo: 3, RequestJSON: request("node-a")},
-		{JobID: "redo-only", TemplateID: "tpl-2", Operation: JobOperationRedo, AttemptNo: 1, RequestJSON: request("node-a")},
-		{JobID: "create-bad", TemplateID: "tpl-3", Operation: JobOperationCreate, AttemptNo: 1, RequestJSON: "{not json"},
+		// tpl-1: an older create and the redo before the latest create do
+		// not count; the redos after it add their nodes.
+		job("t1-create-1", "tpl-1", JobOperationCreate, 1, request("node-old")),
+		job("t1-redo-2", "tpl-1", JobOperationRedo, 2, request("node-stale")),
+		job("t1-create-3", "tpl-1", JobOperationCreate, 3, request("node-a", "node-b")),
+		job("t1-redo-4", "tpl-1", JobOperationRedo, 4, request("node-c", "node-a")),
+		job("t1-redo-5", "tpl-1", JobOperationRedo, 5, request("node-d")),
+		// tpl-2: the create's only node is gone and a redo moved the
+		// template; the redo node must stay in scope.
+		job("t2-create-1", "tpl-2", JobOperationCreate, 1, request("node-gone")),
+		job("t2-redo-2", "tpl-2", JobOperationRedo, 2, request("node-b")),
+		// tpl-3: unscoped create stays unscoped.
+		job("t3-create-1", "tpl-3", JobOperationCreate, 1, request()),
+		job("t3-redo-2", "tpl-3", JobOperationRedo, 2, request("node-a")),
+		// tpl-4: no create on record.
+		job("t4-redo-1", "tpl-4", JobOperationRedo, 1, request("node-a")),
+		// tpl-5: malformed create request.
+		job("t5-create-1", "tpl-5", JobOperationCreate, 1, "{not json"),
 	}
 	if err := db.Create(&rows).Error; err != nil {
 		t.Fatalf("insert jobs: %v", err)
 	}
 
 	ctx := context.Background()
-	got, err := backfillCreateScope(ctx, "tpl-1")
-	if err != nil {
-		t.Fatalf("tpl-1: %v", err)
+	for _, tc := range []struct {
+		tpl  string
+		want []string
+	}{
+		{tpl: "tpl-1", want: []string{"node-a", "node-b", "node-c", "node-d"}},
+		{tpl: "tpl-2", want: []string{"node-gone", "node-b"}},
+		{tpl: "tpl-3", want: nil},
+		{tpl: "tpl-4", want: nil},
+	} {
+		got, err := backfillPlacementScope(ctx, tc.tpl)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.tpl, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s scope = %v, want %v", tc.tpl, got, tc.want)
+		}
 	}
-	if want := []string{"node-a", "node-b"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("tpl-1 scope = %v, want %v (latest create, not the redo)", got, want)
-	}
-	if got, err := backfillCreateScope(ctx, "tpl-2"); err != nil || got != nil {
-		t.Fatalf("tpl-2 scope = %v, err = %v; want nil, nil (no create job)", got, err)
-	}
-	if _, err := backfillCreateScope(ctx, "tpl-3"); err == nil {
-		t.Fatal("tpl-3: want a decode error for a malformed create request")
+	if _, err := backfillPlacementScope(ctx, "tpl-5"); err == nil {
+		t.Fatal("tpl-5: want a decode error for a malformed create request")
 	}
 }
