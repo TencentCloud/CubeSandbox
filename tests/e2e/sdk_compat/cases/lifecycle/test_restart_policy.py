@@ -478,7 +478,16 @@ def test_max_restarts_gives_up(sdk_sandbox, sdk_e2e_config):
     )
 
 
-def _assert_restarted(sdk_sandbox, sdk_e2e_config, sandbox_id: str, address: str, *, reason: str, code: int | None, count: int = 1):
+def _assert_restarted(
+    sdk_sandbox,
+    sdk_e2e_config,
+    sandbox_id: str,
+    address: str,
+    *,
+    reason: str,
+    code: int | None,
+    count: int = 1,
+):
     # count is a floor, not an equality: restartCount is the retry budget already
     # spent, so a rebuild that failed still leaves one behind (lifecycle.md).
     # The hold rejects a status that is only momentarily true because the next
@@ -1026,7 +1035,7 @@ def test_delete_during_backoff_does_not_restart(sdk_sandbox, sdk_backend, sdk_e2
         ),
     ],
 )
-def test_liveness_probe_failure_restarts(sdk_sandbox, sdk_e2e_config, policy):
+def test_liveness_probe_failure_recovers_in_one_restart(sdk_sandbox, sdk_e2e_config, policy):
     """Stop envd and let the default probe restart the sandbox.
 
     This case intentionally keeps the default liveness probe so it covers the
@@ -1042,7 +1051,9 @@ def test_liveness_probe_failure_restarts(sdk_sandbox, sdk_e2e_config, policy):
     address = guest_ipv4(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
     write_durable_marker(sdk_sandbox, _MARKER, timeout=sdk_e2e_config.command_timeout)
     stop_liveness_endpoint(sdk_sandbox, timeout=sdk_e2e_config.command_timeout)
-    _assert_restarted(
+    # One induced probe failure must consume exactly one restart. A failed
+    # replacement is a production regression, not test variance to accept.
+    status = _assert_restarted(
         sdk_sandbox,
         sdk_e2e_config,
         sandbox_id,
@@ -1050,3 +1061,4 @@ def test_liveness_probe_failure_restarts(sdk_sandbox, sdk_e2e_config, policy):
         reason="LivenessProbeFailed",
         code=None,
     )
+    assert _count(status) == 1, f"sandbox={sandbox_id} status={status!r}"
