@@ -25,9 +25,7 @@ use crate::passthrough::device_state::preserialization::{HandleMigrationInfo, In
 use crate::passthrough::inode_store::{
     Inode, InodeData, InodeFile, InodeIds, InodeStore, StrongInodeReference,
 };
-use crate::passthrough::util::{
-    ebadf, is_safe_inode, openat, reopen_fd_through_proc, validate_dentry_name,
-};
+use crate::passthrough::util::{ebadf, openat, reopen_fd_through_proc, validate_dentry_name};
 use crate::read_dir::ReadDir;
 use crate::{fuse, oslib};
 use file_handle::{FileHandle, FileOrHandle, OpenableFileHandle};
@@ -2377,31 +2375,12 @@ impl FileSystem for PassthroughFs {
             (None, None)
         };
 
-        let res = if is_safe_inode(data.mode) {
-            // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
-            // need to get a new fd.
-            let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let file = data.get_file()?;
+        self.clear_file_capabilities(file.as_raw_fd(), true)?;
+        let procname = CString::new(format!("{}", file.as_raw_fd()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            self.clear_file_capabilities(file.as_raw_fd(), false)?;
-
-            // Safe because this doesn't modify any memory and we check the return value.
-            unsafe {
-                libc::fsetxattr(
-                    file.as_raw_fd(),
-                    name.as_ptr(),
-                    value.as_ptr() as *const libc::c_void,
-                    value.len(),
-                    flags as libc::c_int,
-                )
-            }
-        } else {
-            let file = data.get_file()?;
-
-            self.clear_file_capabilities(file.as_raw_fd(), true)?;
-
-            let procname = CString::new(format!("{}", file.as_raw_fd()))
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
+        let res = {
             let _working_dir_guard =
                 set_working_directory(self.proc_self_fd.as_raw_fd(), self.root_fd.as_raw_fd());
 
@@ -2486,25 +2465,11 @@ impl FileSystem for PassthroughFs {
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
         let mut buf = vec![0; size as usize];
 
-        let res = if is_safe_inode(data.mode) {
-            // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
-            // need to get a new fd.
-            let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let file = data.get_file()?;
+        let procname = CString::new(format!("{}", file.as_raw_fd()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            // Safe because this will only modify the contents of `buf`.
-            unsafe {
-                libc::flistxattr(
-                    file.as_raw_fd(),
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    size as libc::size_t,
-                )
-            }
-        } else {
-            let file = data.get_file()?;
-
-            let procname = CString::new(format!("{}", file.as_raw_fd()))
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
+        let res = {
             let _working_dir_guard =
                 set_working_directory(self.proc_self_fd.as_raw_fd(), self.root_fd.as_raw_fd());
 
@@ -2538,19 +2503,11 @@ impl FileSystem for PassthroughFs {
         let data = self.inodes.get(inode).ok_or_else(ebadf)?;
         let name = self.map_client_xattrname(name)?;
 
-        let res = if is_safe_inode(data.mode) {
-            // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
-            // need to get a new fd.
-            let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let file = data.get_file()?;
+        let procname = CString::new(format!("{}", file.as_raw_fd()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            // Safe because this doesn't modify any memory and we check the return value.
-            unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr()) }
-        } else {
-            let file = data.get_file()?;
-
-            let procname = CString::new(format!("{}", file.as_raw_fd()))
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
+        let res = {
             let _working_dir_guard =
                 set_working_directory(self.proc_self_fd.as_raw_fd(), self.root_fd.as_raw_fd());
 
