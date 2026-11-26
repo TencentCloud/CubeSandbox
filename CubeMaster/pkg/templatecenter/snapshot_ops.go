@@ -23,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -32,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -121,6 +123,93 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	return SubmitSandboxSnapshotWithTTL(ctx, requestID, sandboxID, hostID, hostIP, displayName, backend, mode, 0)
 }
 
+// LookupReadySnapshotCreateReplay finds a completed request using its client
+// arguments. HTTP callers can reuse the original result before routing to the
+// current sandbox host. Requests without complete replay metadata fall back.
+func LookupReadySnapshotCreateReplay(ctx context.Context, requestID, sandboxID, displayName string, mode snapshotmode.Mode, ttlSeconds int64) (*sandboxtypes.TemplateImageJobInfo, error) {
+	job, _, err := lookupReadySnapshotCreateReplay(ctx, requestID, sandboxID, displayName, mode, ttlSeconds)
+	if err != nil || job == nil {
+		return nil, err
+	}
+	return resolveExistingSnapshotJobByID(ctx, job.JobID)
+}
+
+func lookupReadySnapshotCreateReplay(ctx context.Context, requestID, sandboxID, displayName string, mode snapshotmode.Mode, ttlSeconds int64) (*models.TemplateImageJob, *snapshotCreateJobRequest, error) {
+	if !isReady() {
+		return nil, nil, nil
+	}
+	job, err := getTemplateImageJobByRequestID(ctx, requestID)
+	if err != nil {
+		// The submission path rechecks under its write locks.
+		return nil, nil, nil
+	}
+	saved, err := readySnapshotCreateRequest(job, requestID, sandboxID, displayName, mode, ttlSeconds)
+	if err != nil || saved == nil {
+		return nil, nil, err
+	}
+	return job, saved, nil
+}
+
+func readySnapshotCreateRequest(job *models.TemplateImageJob, requestID, sandboxID, displayName string, mode snapshotmode.Mode, ttlSeconds int64) (*snapshotCreateJobRequest, error) {
+	if job.Operation != JobOperationSnapshotCreate || job.Status != JobStatusReady || strings.TrimSpace(job.RequestJSON) == "" {
+		return nil, nil
+	}
+	var saved snapshotCreateJobRequest
+	if err := json.Unmarshal([]byte(job.RequestJSON), &saved); err != nil ||
+		!saved.matchesIdentity(requestID, sandboxID, displayName, mode, ttlSeconds) ||
+		(saved.SnapshotID != "" && saved.SnapshotID != job.TemplateID) {
+		return nil, snapshotCreateRequestConflict(requestID)
+	}
+	if saved.SnapshotID == "" {
+		return nil, nil
+	}
+	return &saved, nil
+}
+
+func snapshotCreateRequestConflict(requestID string) error {
+	return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
+}
+
+func withSnapshotLifecycleLock(ctx context.Context, sandboxID string, fn func(context.Context) error) error {
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelAcquire()
+	err := sandboxlock.WithLock(acquireCtx, sandboxID, sandboxlock.Options{
+		Value: "snapshot", TTL: snapshotOperationTimeout + time.Minute,
+	}, func(lockCtx context.Context) error {
+		if err := lockCtx.Err(); err != nil {
+			return fmt.Errorf("%w: %w", sandboxlock.ErrLockNotAcquired, err)
+		}
+		workCtx, cancel := context.WithTimeout(context.WithoutCancel(lockCtx), snapshotOperationTimeout)
+		defer cancel()
+		return fn(workCtx)
+	})
+	if errors.Is(err, sandboxlock.ErrLockNotAcquired) {
+		return fmt.Errorf("%w: %w", ErrTemplateAttemptInProgress, err)
+	}
+	return err
+}
+
+// EnsureNoActiveSnapshotJobInTx checks durable work while the Attach
+// admission transaction holds the sandbox spec row lock.
+func EnsureNoActiveSnapshotJobInTx(tx *gorm.DB, sandboxID string) error {
+	return ensureNoActiveCaptureInTx(tx, sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback, JobOperationCommit)
+}
+
+func ensureNoActiveCaptureInTx(tx *gorm.DB, sandboxID string, operations ...string) error {
+	// Use a current read after taking the spec lock on MySQL.
+	_, err := getActiveSnapshotJobBySandboxIDTx(tx.Clauses(clause.Locking{Strength: "UPDATE"}), sandboxID, operations...)
+	return activeSnapshotJobError(err, sandboxID)
+}
+
+func activeSnapshotJobError(err error, sandboxID string) error {
+	if err == nil {
+		return fmt.Errorf("%w: sandbox %s already has an active snapshot operation", ErrTemplateAttemptInProgress, sandboxID)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
+}
+
 func SubmitSandboxSnapshotWithTTL(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode, ttlSeconds int64) (info *sandboxtypes.TemplateImageJobInfo, err error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
@@ -142,6 +231,28 @@ func SubmitSandboxSnapshotWithTTL(ctx context.Context, requestID, sandboxID, hos
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
 	mode = snapshotmode.Normalize(mode.String())
+	replay, saved, err := lookupReadySnapshotCreateReplay(ctx, requestID, sandboxID, displayName, mode, ttlSeconds)
+	if err != nil {
+		return nil, err
+	}
+	if replay != nil {
+		if saved.NodeID != nodeID || saved.NodeIP != nodeIP {
+			return nil, snapshotCreateRequestConflict(requestID)
+		}
+		_, span := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotCreatePrepare,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrRequestID, requestID),
+				attribute.String(telemetry.AttrSandboxID, sandboxID),
+				attribute.String(telemetry.AttrNodeID, nodeID),
+				attribute.String(telemetry.AttrNodeIP, nodeIP),
+				attribute.String(telemetry.AttrBackend, saved.Backend),
+				attribute.String(telemetry.AttrJobID, replay.JobID),
+				attribute.String(telemetry.AttrSnapshotID, saved.SnapshotID),
+				attribute.Bool(telemetry.AttrReused, true),
+			))
+		span.End()
+		return resolveExistingSnapshotJobByID(ctx, replay.JobID)
+	}
 	// Division of labor: this submit-time expires_at only backstops FAILED
 	// snapshots (reconcileExpiredSnapshots covers READY and FAILED, and a
 	// FAILED snapshot never reaches the READY transition); the CREATING→READY
@@ -159,18 +270,28 @@ func SubmitSandboxSnapshotWithTTL(ctx context.Context, requestID, sandboxID, hos
 		endSnapshotStageSpan(stage.span, err, recover())
 	}()
 
-	jobID, reusedExistingJob, originReq, err := prepareSnapshotCreateJob(ctx, requestID, sandboxID, nodeID, nodeIP, displayName, backend, mode, ttlSeconds, expiresAt)
-	if err != nil {
-		return nil, err
-	}
-	info, err = GetTemplateImageJobInfo(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	if reusedExistingJob {
-		return resumeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
-	}
-	return executeSnapshotCreateJob(ctx, info, originReq, sandboxID, nodeID, nodeIP, displayName)
+	err = withSnapshotLifecycleLock(ctx, sandboxID, func(workCtx context.Context) error {
+		jobID, reused, originReq, prepErr := prepareSnapshotCreateJob(workCtx, requestID, sandboxID, nodeID, nodeIP, displayName, backend, mode, ttlSeconds, expiresAt)
+		if prepErr != nil {
+			return prepErr
+		}
+		jobInfo, lookupErr := GetTemplateImageJobInfo(workCtx, jobID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		var runErr error
+		switch {
+		case reused && originReq == nil:
+			stage.end(nil)
+			info, runErr = resolveExistingSnapshotJob(jobInfo)
+		case reused:
+			info, runErr = resumeSnapshotCreateJob(workCtx, jobInfo, originReq, sandboxID, nodeID, nodeIP, displayName)
+		default:
+			info, runErr = executeSnapshotCreateJob(workCtx, jobInfo, originReq, sandboxID, nodeID, nodeIP, displayName)
+		}
+		return runErr
+	})
+	return info, err
 }
 
 // r must come from a recover() called directly by the deferred closure, never via a helper.
@@ -255,65 +376,90 @@ func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID,
 		endSnapshotStageSpan(span, err, r)
 	}()
 
-	originReq, err = loadSandboxCreateRequestFn(ctx, sandboxID)
-	if err != nil {
-		return "", false, nil, err
-	}
-	if mode.IsFsOnly() {
-		writable, err := sandbox.WritablePluginVolumeMounts(originReq)
-		if err != nil {
-			return "", false, nil, err
-		}
-		if len(writable) > 0 {
-			return "", false, nil, fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
-				ErrFilesystemOnlySharedVolume, strings.Join(writable, ", "))
-		}
-	}
-	// Client-supplied backend is ignored. Ordinary snapshot follows the
-	// sandbox spec Master persisted at create (itself inherited from the
-	// template).
-	normalizedBackend, err := resolvePersistedCreateBackend(originReq)
-	if err != nil {
-		return "", false, nil, err
-	}
-	span.SetAttributes(attribute.String(telemetry.AttrBackend, normalizedBackend))
-	if client := strings.TrimSpace(backend); client != "" && !strings.EqualFold(client, normalizedBackend) {
-		log.G(ctx).Infof("snapshot create ignores client backend=%s; using persisted backend=%s sandbox=%s", client, normalizedBackend, sandboxID)
-	}
-	if originReq.Request == nil {
-		originReq.Request = &sandboxtypes.Request{RequestID: requestID}
-	} else {
-		originReq.Request.RequestID = requestID
-	}
-
 	if err := withSnapshotWriteLocks([]string{
 		snapshotSandboxLockKey(sandboxID),
 		snapshotRequestLockKey(requestID),
 	}, func() error {
-		if existing, err := getTemplateImageJobByRequestID(ctx, requestID); err == nil {
+		existing, err := getTemplateImageJobByRequestID(ctx, requestID)
+		if err == nil {
 			if existing.Operation != JobOperationSnapshotCreate {
 				return fmt.Errorf("%w: request %s is already bound to %s", ErrTemplateAttemptInProgress, requestID, existing.Operation)
 			}
+			saved, err := readySnapshotCreateRequest(existing, requestID, sandboxID, displayName, mode, ttlSeconds)
+			if err != nil {
+				return err
+			}
+			if saved != nil {
+				if saved.NodeID != nodeID || saved.NodeIP != nodeIP {
+					return snapshotCreateRequestConflict(requestID)
+				}
+				jobID, snapshotID, reusedExistingJob = existing.JobID, saved.SnapshotID, true
+				span.SetAttributes(attribute.String(telemetry.AttrBackend, saved.Backend))
+				return nil
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		if err := sandboxspec.EnsureNoPendingRuntimeAttach(ctx, sandboxID); err != nil {
+			if errors.Is(err, sandboxspec.ErrRuntimeAttachPending) {
+				return fmt.Errorf("%w: %w", ErrTemplateAttemptInProgress, err)
+			}
+			return err
+		}
+		originReq, err = loadSnapshotOriginRequestFn(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if mode.IsFsOnly() {
+			writable, err := sandbox.WritablePluginVolumeMounts(originReq)
+			if err != nil {
+				return err
+			}
+			if len(writable) > 0 {
+				return fmt.Errorf("%s: %w: %s", snapshotmode.ErrFilesystemOnlySharedVolume,
+					ErrFilesystemOnlySharedVolume, strings.Join(writable, ", "))
+			}
+		}
+		// Ordinary snapshot follows the persisted storage backend.
+		normalizedBackend, err := resolvePersistedCreateBackend(originReq)
+		if err != nil {
+			return err
+		}
+		span.SetAttributes(attribute.String(telemetry.AttrBackend, normalizedBackend))
+		if client := strings.TrimSpace(backend); client != "" && !strings.EqualFold(client, normalizedBackend) {
+			log.G(ctx).Infof("snapshot create ignores client backend=%s; using persisted backend=%s sandbox=%s", client, normalizedBackend, sandboxID)
+		}
+		if originReq.Request == nil {
+			originReq.Request = &sandboxtypes.Request{RequestID: requestID}
+		} else {
+			originReq.Request.RequestID = requestID
+		}
+
+		if existing != nil {
 			_, storedReq, err := buildSnapshotRequests(originReq, existing.TemplateID, displayName)
 			if err != nil {
 				return err
 			}
 			storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
 			storedReq.Backend = normalizedBackend
+			// A legacy pending job without a fingerprint cannot capture newly
+			// attached volumes on behalf of a previously recorded request.
+			if existing.Status == JobStatusPending && storedReq.Annotations[constants.CubeAnnotationSnapshotRuntimeVolumeMounts] != "" &&
+				existing.TemplateSpecFingerprint != buildCommitTemplateSpecFingerprint(storedReq) {
+				return snapshotCreateRequestConflict(requestID)
+			}
 			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, mode, ttlSeconds, storedReq) {
-				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
+				return snapshotCreateRequestConflict(requestID)
 			}
 			jobID = existing.JobID
 			snapshotID = existing.TemplateID
 			reusedExistingJob = true
 			return nil
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
 		}
 
-		if _, err := getActiveSnapshotJobBySandboxID(ctx, sandboxID); err == nil {
-			return fmt.Errorf("%w: sandbox %s already has an active snapshot operation", ErrTemplateAttemptInProgress, sandboxID)
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		_, activeErr := getActiveSnapshotJobBySandboxID(ctx, sandboxID)
+		if err := activeSnapshotJobError(activeErr, sandboxID); err != nil {
 			return err
 		}
 
@@ -381,6 +527,12 @@ func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID,
 			ExpiresAt:                 expiresAt,
 		}
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := lockSnapshotCaptureMounts(tx, sandboxID, storedReq); err != nil {
+				return err
+			}
+			if err := ensureNoActiveCaptureInTx(tx, sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback); err != nil {
+				return err
+			}
 			if err := createSnapshotTx(ctx, tx, snapshotID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), snapRec); err != nil {
 				return err
 			}
@@ -392,11 +544,27 @@ func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID,
 	return jobID, reusedExistingJob, originReq, nil
 }
 
-// loadSandboxCreateRequestFn is the indirection point used by
-// SubmitSandboxSnapshot so tests can swap in a deterministic spec without
-// going through the sandboxspec table or sandbox info RPC. Production code
-// should not reassign it.
+var loadSnapshotOriginRequestFn = loadSnapshotOriginRequest
 var loadSandboxCreateRequestFn = loadSandboxCreateRequest
+
+func loadSnapshotOriginRequest(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	req, mounts, err := sandbox.GetEffectiveSandboxSpec(ctx, sandboxID)
+	if errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) {
+		req, err = loadLegacySandboxCreateRequest(ctx, sandboxID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load sandbox spec: %w", err)
+	}
+	delete(req.Annotations, constants.CubeAnnotationSnapshotRuntimeVolumeMounts)
+	if len(mounts) > 0 {
+		payload, err := json.Marshal(mounts)
+		if err != nil {
+			return nil, err
+		}
+		req.Annotations[constants.CubeAnnotationSnapshotRuntimeVolumeMounts] = string(payload)
+	}
+	return req, nil
+}
 
 // registerTemplateReplicaForSnapshot wraps localcache.RegisterTemplateReplica
 // so tests can patch the indirection (the one-liner wrapper in localcache is
@@ -421,6 +589,10 @@ func loadSandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxty
 	if !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) {
 		return nil, fmt.Errorf("load sandbox spec: %w", err)
 	}
+	return loadLegacySandboxCreateRequest(ctx, sandboxID)
+}
+
+func loadLegacySandboxCreateRequest(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 	info, infoErr := getSandboxData(ctx, sandboxID, "")
 	if infoErr != nil {
 		return nil, fmt.Errorf("sandbox spec missing and sandbox info lookup failed: %w", infoErr)
@@ -668,6 +840,33 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 	if strings.TrimSpace(requestID) == "" {
 		return nil, errors.New("requestID is required")
 	}
+	// Only a complete, matching READY result can bypass the write path.
+	if job, lookupErr := getTemplateImageJobByRequestID(ctx, requestID); lookupErr == nil &&
+		job.Status == JobStatusReady && job.Operation == JobOperationSnapshotRollback &&
+		strings.TrimSpace(job.RequestJSON) != "" &&
+		snapshotRollbackRequestMatches(job.RequestJSON, requestID, sandboxID, snapshotID) {
+		_, span := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotRollbackPrepare,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrRequestID, requestID),
+				attribute.String(telemetry.AttrSandboxID, sandboxID),
+				attribute.String(telemetry.AttrSnapshotID, snapshotID),
+				attribute.String(telemetry.AttrJobID, job.JobID),
+				attribute.Bool(telemetry.AttrReused, true),
+			))
+		defer func() {
+			endSnapshotStageSpan(span, err, recover())
+		}()
+		return resolveExistingSnapshotJobByID(ctx, job.JobID)
+	}
+	err = withSnapshotLifecycleLock(ctx, sandboxID, func(lockedCtx context.Context) error {
+		var rollbackErr error
+		info, rollbackErr = rollbackSandboxToSnapshot(lockedCtx, ctx, requestID, sandboxID, snapshotID, instanceType, backend)
+		return rollbackErr
+	})
+	return info, err
+}
+
+func rollbackSandboxToSnapshot(ctx, callerCtx context.Context, requestID, sandboxID, snapshotID, instanceType, backend string) (info *sandboxtypes.TemplateImageJobInfo, err error) {
 	stage := &snapshotPrepareStage{}
 	prepareCtx, prepareSpan := telemetry.StartIfTraced(ctx, telemetry.SpanSnapshotRollbackPrepare,
 		trace.WithAttributes(
@@ -741,6 +940,9 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		}
 		if rec.OriginSandboxID != sandboxID {
 			return fmt.Errorf("%w: snapshot %s does not belong to sandbox %s", ErrTemplateAttemptInProgress, snapshotID, sandboxID)
+		}
+		if err := checkRuntimeVolumeRollback(ctx, sandboxID, rec); err != nil {
+			return err
 		}
 		sandboxInfo, err := getSandboxData(ctx, sandboxID, instanceType)
 		if err != nil {
@@ -817,11 +1019,17 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 			RequestJSON:  payload,
 		}
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := lockSnapshotCaptureMounts(tx, sandboxID, nil); err != nil {
+				return err
+			}
 			current, err := lockSnapshotRecordTx(tx, snapshotID)
 			if err != nil {
 				return err
 			}
 			if err := validateSnapshotNewUse(current, time.Now()); err != nil {
+				return err
+			}
+			if err := ensureNoActiveCaptureInTx(tx, sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback); err != nil {
 				return err
 			}
 			if err := rejectActiveSnapshotJobTx(tx, snapshotID); err != nil {
@@ -837,13 +1045,25 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		return nil, err
 	}
 	if reusedExistingJob {
+		if info.Status == JobStatusReady {
+			return resolveExistingSnapshotJob(info)
+		}
+		if strings.EqualFold(info.Status, JobStatusPending) {
+			rec, err := getSnapshotRecord(ctx, existingRequest.SnapshotID)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkRuntimeVolumeRollback(ctx, sandboxID, rec); err != nil {
+				return nil, err
+			}
+		}
 		replica, err = getSnapshotReadyReplica(ctx, existingRequest.SnapshotID, existingRequest.NodeID)
 		if err != nil {
 			return nil, err
 		}
-		return resumeSnapshotRollbackJob(ctx, info, existingRequest, replica)
+		return resumeSnapshotRollbackJob(ctx, callerCtx, info, existingRequest, replica)
 	}
-	return executeSnapshotRollbackJob(ctx, info, sandboxID, snapshotID, nodeID, nodeIP, replica, newGen, desiredSize, backend)
+	return executeSnapshotRollbackJob(ctx, callerCtx, info, sandboxID, snapshotID, nodeID, nodeIP, replica, newGen, desiredSize, backend)
 }
 
 func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) (err error) {
@@ -1678,7 +1898,7 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	if !claimed {
 		return resolveExistingSnapshotJobByID(ctx, info.JobID)
 	}
-	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_create", map[string]any{
+	jobCtx, cancel := synchronousLockedSnapshotJobContext(ctx, "snapshot_create", map[string]any{
 		"job_id":      info.JobID,
 		"snapshot_id": info.TemplateID,
 		"sandbox_id":  sandboxID,
@@ -1699,17 +1919,17 @@ func executeSnapshotCreateJob(ctx context.Context, info *sandboxtypes.TemplateIm
 	return finalizeSnapshotJobByID(ctx, info.JobID)
 }
 
-func resumeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, payload snapshotRollbackJobRequest, replica ReplicaStatus) (*sandboxtypes.TemplateImageJobInfo, error) {
+func resumeSnapshotRollbackJob(ctx, callerCtx context.Context, info *sandboxtypes.TemplateImageJobInfo, payload snapshotRollbackJobRequest, replica ReplicaStatus) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if info == nil {
 		return nil, errors.New("snapshot job info is nil")
 	}
 	if strings.ToUpper(strings.TrimSpace(info.Status)) != JobStatusPending {
 		return resolveExistingSnapshotJob(info)
 	}
-	return executeSnapshotRollbackJob(ctx, info, payload.SandboxID, payload.SnapshotID, payload.NodeID, payload.NodeIP, replica, payload.NewGen, payload.DesiredSize, payload.Backend)
+	return executeSnapshotRollbackJob(ctx, callerCtx, info, payload.SandboxID, payload.SnapshotID, payload.NodeID, payload.NodeIP, replica, payload.NewGen, payload.DesiredSize, payload.Backend)
 }
 
-func executeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.TemplateImageJobInfo, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
+func executeSnapshotRollbackJob(ctx, callerCtx context.Context, info *sandboxtypes.TemplateImageJobInfo, sandboxID, snapshotID, nodeID, nodeIP string, replica ReplicaStatus, newGen uint32, desiredSize uint64, backend string) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if info == nil {
 		return nil, errors.New("snapshot job info is nil")
 	}
@@ -1723,7 +1943,7 @@ func executeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.Template
 	if !claimed {
 		return resolveExistingSnapshotJobByID(ctx, info.JobID)
 	}
-	jobCtx, cancel := synchronousSnapshotJobContext(ctx, "snapshot_rollback", map[string]any{
+	jobCtx, cancel := synchronousLockedSnapshotJobContext(ctx, "snapshot_rollback", map[string]any{
 		"job_id":      info.JobID,
 		"snapshot_id": snapshotID,
 		"sandbox_id":  sandboxID,
@@ -1742,9 +1962,9 @@ func executeSnapshotRollbackJob(ctx context.Context, info *sandboxtypes.Template
 		registerStage.end(err)
 		return nil, err
 	}
-	finalCtx := ctx
+	finalCtx := callerCtx
 	if registerStage.span != nil {
-		finalCtx = trace.ContextWithSpan(ctx, registerStage.span)
+		finalCtx = trace.ContextWithSpan(callerCtx, registerStage.span)
 	}
 	finalInfo, finalErr := finalizeSnapshotJobByID(finalCtx, info.JobID)
 	registerStage.end(finalErr)
@@ -1802,6 +2022,14 @@ func resolveExistingSnapshotJobByID(ctx context.Context, jobID string) (*sandbox
 
 func synchronousSnapshotJobContext(ctx context.Context, name string, fields map[string]any) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(detachTemplateImageJobContext(ctx, name, fields), snapshotOperationTimeout)
+}
+
+func synchronousLockedSnapshotJobContext(ctx context.Context, name string, fields map[string]any) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(snapshotOperationTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	return context.WithDeadline(detachTemplateImageJobContext(ctx, name, fields), deadline)
 }
 
 func finalizeSnapshotJobByID(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -1887,22 +2115,21 @@ func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, dis
 	if err := json.Unmarshal([]byte(raw), &existing); err != nil {
 		return false
 	}
-	if existing.RequestID != requestID || existing.SandboxID != sandboxID || existing.NodeID != nodeID || existing.NodeIP != nodeIP || existing.DisplayName != displayName {
+	if !existing.matchesIdentity(requestID, sandboxID, displayName, mode, ttlSeconds) || existing.NodeID != nodeID || existing.NodeIP != nodeIP {
 		return false
 	}
 	if existing.Backend != "" && backend != "" && !strings.EqualFold(existing.Backend, backend) {
-		return false
-	}
-	if snapshotmode.Normalize(existing.Mode) != mode {
-		return false
-	}
-	if existing.TTLSeconds != ttlSeconds {
 		return false
 	}
 	if existing.SpecFingerprint == "" {
 		return true
 	}
 	return existing.SpecFingerprint == buildCommitTemplateSpecFingerprint(currentSpec)
+}
+
+func (r snapshotCreateJobRequest) matchesIdentity(requestID, sandboxID, displayName string, mode snapshotmode.Mode, ttlSeconds int64) bool {
+	return r.RequestID == requestID && r.SandboxID == sandboxID && r.DisplayName == displayName &&
+		snapshotmode.Normalize(r.Mode) == mode && r.TTLSeconds == ttlSeconds
 }
 
 func snapshotRollbackRequestMatches(raw, requestID, sandboxID, snapshotID string) bool {

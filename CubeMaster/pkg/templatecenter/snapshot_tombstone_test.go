@@ -154,6 +154,7 @@ func TestGetSnapshotRestoreSourceRejectsTombstone(t *testing.T) {
 }
 
 func TestRollbackSandboxToSnapshotRejectsTombstone(t *testing.T) {
+	stubSnapshotLifecycleLock(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -174,6 +175,7 @@ func TestRollbackSandboxToSnapshotRejectsTombstone(t *testing.T) {
 }
 
 func TestRollbackSandboxToSnapshotRejectsExpired(t *testing.T) {
+	stubSnapshotLifecycleLock(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -876,6 +878,7 @@ func stubListTemplatesDB(t *testing.T, defs []models.TemplateDefinition, jobs []
 }
 
 func TestRollbackSandboxToSnapshotRejectsFilesystemOnlyTarget(t *testing.T) {
+	stubSnapshotLifecycleLock(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -901,6 +904,7 @@ func TestRollbackSandboxToSnapshotRejectsFilesystemOnlyTarget(t *testing.T) {
 }
 
 func TestRollbackSandboxToSnapshotAcceptsLegacyEmptyMode(t *testing.T) {
+	stubSnapshotLifecycleLock(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -917,9 +921,10 @@ func TestRollbackSandboxToSnapshotAcceptsLegacyEmptyMode(t *testing.T) {
 	patches.ApplyFunc(getSandboxData, func(ctx context.Context, sandboxID, instanceType string) (*sandboxtypes.SandboxData, error) {
 		return nil, errors.New("stop after mode check")
 	})
+	patches.ApplyFunc(checkRuntimeVolumeRollback, func(context.Context, string, *models.SnapshotRecord) error { return nil })
 
 	_, err := RollbackSandboxToSnapshot(context.Background(), "req-rb", "sb-1", "snap-legacy", "cubebox", "")
-	if errors.Is(err, ErrFilesystemOnlyRollback) {
+	if err == nil || err.Error() != "stop after mode check" {
 		t.Fatalf("legacy empty mode must be treated as full, got %v", err)
 	}
 }

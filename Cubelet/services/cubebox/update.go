@@ -61,7 +61,9 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 		InstanceID:   req.SandboxID,
 	}
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
-	log.G(ctx).Errorf("Update:%s", utils.InterfaceToString(req))
+	if action != constants.UpdateActionAttachRuntimeVolume {
+		log.G(ctx).Errorf("Update:%s", utils.InterfaceToString(req))
+	}
 	start := time.Now()
 	defer func() {
 		if !ret.IsSuccessCode(rsp.Ret.RetCode) {
@@ -109,6 +111,9 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 	})
 
+	if action == constants.UpdateActionAttachRuntimeVolume {
+		return s.attachRuntimeVolumeLocked(ctx, req, rsp), nil
+	}
 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
 	if err != nil {
 		if action == constants.UpdateActionResume {

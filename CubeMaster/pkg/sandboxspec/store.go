@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package sandboxspec persists the canonical create-time spec of a sandbox.
+// Package sandboxspec persists a sandbox's canonical create-time spec and
+// confirmed runtime volume mounts.
 //
 // Motivation: when control-plane flows (e.g. snapshot create) need to act on
 // a running sandbox, they previously required the caller to re-supply the
@@ -184,23 +185,35 @@ func persistFailureReason(err error) string {
 
 // Get returns a deep copy of the canonical request for sandboxID.
 func Get(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	rec, err := getSpecRow(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSpec(rec)
+}
+
+func getSpecRow(ctx context.Context, sandboxID string) (*models.SandboxSpec, error) {
 	client := getDB()
 	if client == nil {
 		return nil, ErrSandboxSpecStoreNotReady
 	}
+	return getSpecRowWithDB(client.WithContext(ctx), sandboxID)
+}
+
+func getSpecRowWithDB(client *gorm.DB, sandboxID string) (*models.SandboxSpec, error) {
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" {
 		return nil, errors.New("sandboxspec.Get: sandbox_id is required")
 	}
 	var rec models.SandboxSpec
-	if err := client.WithContext(ctx).Table(constants.SandboxSpecTableName).
+	if err := client.Table(constants.SandboxSpecTableName).
 		Where("sandbox_id = ?", sandboxID).First(&rec).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrSandboxSpecNotFound
 		}
 		return nil, err
 	}
-	return decodeSpec(&rec)
+	return &rec, nil
 }
 
 // GetCreatedAt returns the durable creation time of the sandbox spec. The

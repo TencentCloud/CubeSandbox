@@ -121,8 +121,9 @@ func TestRunSnapshotRollbackJobBusinessFailureMarksRestoreError(t *testing.T) {
 	}
 }
 
-func stubRollbackSubmission(t *testing.T, infoFn func(ctx context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error)) {
+func stubRollbackSubmission(t *testing.T, status string, infoFn func(ctx context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error)) {
 	t.Helper()
+	stubSnapshotLifecycleLock(t)
 	payload, err := marshalSnapshotRollbackRequest("req-rb", "sb-1", "snap-1", "node-1", "10.0.0.1", 1, 0, "xfs")
 	if err != nil {
 		t.Fatalf("marshalSnapshotRollbackRequest: %v", err)
@@ -134,10 +135,15 @@ func stubRollbackSubmission(t *testing.T, infoFn func(ctx context.Context, call 
 			JobID:       "job-rb",
 			Operation:   JobOperationSnapshotRollback,
 			TemplateID:  "snap-1",
+			Status:      status,
 			RequestJSON: payload,
 		}, nil
 	})
 	patches.ApplyFunc(snapshotRollbackRequestMatches, func(string, string, string, string) bool { return true })
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: "snap-1", Status: StatusReady}, nil
+	})
+	patches.ApplyFunc(checkRuntimeVolumeRollback, func(context.Context, string, *models.SnapshotRecord) error { return nil })
 	patches.ApplyFunc(getSnapshotReadyReplica, func(context.Context, string, string) (ReplicaStatus, error) {
 		return ReplicaStatus{}, nil
 	})
@@ -169,7 +175,7 @@ func TestRollbackSubmissionEmitsPrepareRestoreRegisterSiblings(t *testing.T) {
 	rec, flush := installSpanRecorder(t)
 	stubSnapshotRollbackRun(t, errorcodev1.ErrorCode_Success, nil)
 	var finalInfoAt time.Time
-	stubRollbackSubmission(t, func(_ context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error) {
+	stubRollbackSubmission(t, JobStatusPending, func(_ context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error) {
 		if call > 1 {
 			finalInfoAt = time.Now()
 			return rollbackJobInfo(JobStatusReady), nil
@@ -218,22 +224,23 @@ func TestRollbackFinalReadKeepsCallerContext(t *testing.T) {
 	stubSnapshotRollbackRun(t, errorcodev1.ErrorCode_Success, nil)
 
 	wantDeadline := time.Now().Add(time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), wantDeadline)
+	defer cancel()
 	var (
 		gotErr         error
 		gotDeadline    time.Time
 		gotHasDeadline bool
 	)
-	stubRollbackSubmission(t, func(ctx context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error) {
+	stubRollbackSubmission(t, JobStatusPending, func(ctx context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error) {
 		if call > 1 {
 			gotErr = ctx.Err()
 			gotDeadline, gotHasDeadline = ctx.Deadline()
 			return rollbackJobInfo(JobStatusReady), nil
 		}
+		cancel()
 		return rollbackJobInfo(JobStatusPending), nil
 	})
 
-	ctx, cancel := context.WithDeadline(context.Background(), wantDeadline)
-	cancel()
 	if _, err := RollbackSandboxToSnapshot(ctx, "req-rb", "sb-1", "snap-1", "cubebox", "xfs"); err != nil {
 		t.Fatalf("RollbackSandboxToSnapshot: %v", err)
 	}
@@ -252,7 +259,7 @@ func TestRollbackSubmissionReadyReplayEmitsPrepareOnly(t *testing.T) {
 
 	rec, flush := installSpanRecorder(t)
 	stubSnapshotRollbackRun(t, errorcodev1.ErrorCode_Success, nil)
-	stubRollbackSubmission(t, func(context.Context, int) (*sandboxtypes.TemplateImageJobInfo, error) {
+	stubRollbackSubmission(t, JobStatusReady, func(context.Context, int) (*sandboxtypes.TemplateImageJobInfo, error) {
 		return rollbackJobInfo(JobStatusReady), nil
 	})
 
@@ -266,6 +273,12 @@ func TestRollbackSubmissionReadyReplayEmitsPrepareOnly(t *testing.T) {
 	prepare := spanNamed(t, rec, telemetry.SpanSnapshotRollbackPrepare)
 	if prepare.EndTime().IsZero() {
 		t.Error("prepare span was left open on a ready replay")
+	}
+	if kv, ok := attrOf(prepare, telemetry.AttrReused); !ok || !kv.Value.AsBool() {
+		t.Errorf("prepare %s = %v (present=%v), want true on a ready replay", telemetry.AttrReused, kv.Value.AsBool(), ok)
+	}
+	if got := spanStringAttr(t, prepare, telemetry.AttrJobID); got != "job-rb" {
+		t.Errorf("prepare %s = %q, want job-rb", telemetry.AttrJobID, got)
 	}
 	if got := spanCount(rec, telemetry.SpanSnapshotRollbackRestore); got != 0 {
 		t.Errorf("ready replay emitted %d restore span(s), want 0", got)
@@ -329,6 +342,7 @@ func installRollbackPrepareCapture(t *testing.T, name string) *rollbackPrepareCa
 }
 
 func TestRollbackPrepareSpanCoversLockWait(t *testing.T) {
+	stubSnapshotLifecycleLock(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -342,7 +356,12 @@ func TestRollbackPrepareSpanCoversLockWait(t *testing.T) {
 	insideLock := make(chan struct{})
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
+	checkedForReady := false
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
+		if !checkedForReady {
+			checkedForReady = true
+			return nil, gorm.ErrRecordNotFound
+		}
 		close(insideLock)
 		return &models.TemplateImageJob{
 			JobID:       "job-lock",
@@ -466,7 +485,7 @@ func TestRollbackSubmissionFinalReadPanicClosesRegisterSpanWithError(t *testing.
 
 	rec, flush := installSpanRecorder(t)
 	stubSnapshotRollbackRun(t, errorcodev1.ErrorCode_Success, nil)
-	stubRollbackSubmission(t, func(_ context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error) {
+	stubRollbackSubmission(t, JobStatusPending, func(_ context.Context, call int) (*sandboxtypes.TemplateImageJobInfo, error) {
 		if call > 1 {
 			panic("final job read exploded")
 		}

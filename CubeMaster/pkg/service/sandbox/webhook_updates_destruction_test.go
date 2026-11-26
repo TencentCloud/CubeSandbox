@@ -16,7 +16,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/queueworker"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
@@ -116,6 +118,7 @@ type destroyFixture struct {
 	spec                      *types.CreateCubeSandboxReq
 	node                      bool
 	rpcErr, specErr, proxyErr error
+	pendingAttachErr          error
 	enqueueErr                error
 	nilReply                  bool
 	pending                   *task.Task
@@ -151,6 +154,7 @@ func setupDestroyFixture(t *testing.T) *destroyFixture {
 	p.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
+	p.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return f.pendingAttachErr })
 	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
 		f.specReads++
 		f.order = append(f.order, "spec-get")
@@ -487,6 +491,32 @@ func TestProducerFailureBoundaries(t *testing.T) {
 			require.Empty(t, p.Events())
 		})
 	}
+}
+
+func TestPendingRuntimeAttachBlocksSandboxLifecycleEntryPoints(t *testing.T) {
+	f := setupDestroyFixture(t)
+	f.pendingAttachErr = sandboxspec.ErrRuntimeAttachPending
+	f.patches.ApplyFunc(pausesnap.TryDeletePaused, func(context.Context, string, string, string) (bool, error) {
+		t.Fatal("pending Attach must prevent pause package deletion")
+		return false, nil
+	})
+
+	ctx := t.Context()
+	for _, action := range []string{"pause", "resume"} {
+		rsp := Update(ctx, &types.UpdateRequest{SandboxID: "sb-destroy", InstanceType: "cubebox", Action: action})
+		require.Equal(t, int(errorcode.ErrorCode_Conflict), rsp.Ret.RetCode, action)
+	}
+	syncRsp := DestroySandbox(ctx, &types.DeleteCubeSandboxReq{SandboxID: "sb-destroy", InstanceType: "cubebox", Sync: true})
+	require.Equal(t, int(errorcode.ErrorCode_Conflict), syncRsp.Ret.RetCode)
+
+	asyncRsp := DestroySandbox(ctx, &types.DeleteCubeSandboxReq{SandboxID: "sb-destroy", InstanceType: "cubebox"})
+	require.Equal(t, int(errorcode.ErrorCode_Success), asyncRsp.Ret.RetCode)
+	require.NotNil(t, f.pending)
+	status, ok := ret.FromError((&task.DestroySandboxTaskHandler{}).HandleTask(f.pending.Ctx, f.pending))
+	require.True(t, ok)
+	require.Equal(t, errorcode.ErrorCode_MasterRateLimitedError, status.Code())
+	require.Zero(t, f.nodeCalls)
+	require.NotContains(t, f.order, "proxy-delete")
 }
 
 func TestAsyncPausedWarnOnlyBindingFailurePublishesKilled(t *testing.T) {

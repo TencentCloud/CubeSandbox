@@ -379,6 +379,8 @@ const (
 	PreStopTypeDestroy       = "destroy"
 )
 
+const UpdateActionAttachRuntimeVolume = "attachRuntimeVolume"
+
 type contextKey string
 
 const (

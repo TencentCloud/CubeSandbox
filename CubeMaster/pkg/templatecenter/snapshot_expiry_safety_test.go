@@ -73,7 +73,7 @@ func TestSnapshotTTLReadFailureStopsCapture(t *testing.T) {
 func snapshotReservationTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := newMigrateSharedStoreTestDB(t)
-	require.NoError(t, db.AutoMigrate(&models.SnapshotRecord{}, &models.TemplateImageJob{}, &models.SnapshotRuntimeActive{}, &models.SnapshotRuntimeRef{}))
+	require.NoError(t, db.AutoMigrate(&models.SnapshotRecord{}, &models.TemplateImageJob{}, &models.SnapshotRuntimeActive{}, &models.SnapshotRuntimeRef{}, &models.SandboxSpec{}))
 	return db
 }
 

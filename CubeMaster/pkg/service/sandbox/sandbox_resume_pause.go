@@ -85,6 +85,10 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	}
 	snapID, err := pausesnap.Begin(ctx, req.SandboxID, nodeID, hostIP, req.InstanceType, req.Backend)
 	if err != nil {
+		if errors.Is(err, sandboxspec.ErrRuntimeAttachPending) {
+			applyLifecycleLockError(rsp, err)
+			return rsp
+		}
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = fmt.Sprintf("begin pause snapshot: %v", err)
 		return rsp
@@ -456,7 +460,29 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	}
 	snapID := rec.SnapshotID
 
-	createReq := loadResumeSandboxSpec(ctx, req.SandboxID)
+	stored, err := sandboxspec.GetWithRuntimeVolumeMounts(ctx, req.SandboxID)
+	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) {
+		log.G(ctx).Warnf("resume: load sandboxspec for %s: %v", req.SandboxID, err)
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
+		rsp.Ret.RetMsg = "cannot resume: load sandbox spec"
+		return rsp
+	}
+	var createReq *types.CreateCubeSandboxReq
+	var expectedRows map[string]uint
+	if stored != nil {
+		createReq = stored.Request
+		if len(stored.Mounts) > 0 {
+			expectedRows = make(map[string]uint, len(stored.Mounts))
+			for _, mount := range stored.Mounts {
+				if previous, found := expectedRows[mount.VolumeID]; found && previous != mount.VolumeRecordID {
+					rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
+					rsp.Ret.RetMsg = "cannot resume: inconsistent runtime volume mount records"
+					return rsp
+				}
+				expectedRows[mount.VolumeID] = mount.VolumeRecordID
+			}
+		}
+	}
 	volumeIDs, err := resumePluginVolumeIDs(rec.PluginVolumeIDs, createReq)
 	if err == nil {
 		err = validatePauseResumeVolumes(volumeIDs)
@@ -557,7 +583,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		s.annotate(resumeAttrs...)
 		ctx = s.enter(ctx, s.runtime, resumeAttrs...)
 	}
-	result, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs)
+	result, err := createWithVolumeAdmission(ctx, calleeEndpoint, cubeletReq, volumeIDs, expectedRows)
 	cubeRsp, guarded := result.rsp, result.guarded
 	if guarded && result.createdSandboxID != "" && (err != nil || volumeCreateReportFailed(cubeRsp)) {
 		originIP := strings.TrimSpace(rec.NodeIP)
@@ -705,19 +731,6 @@ var cleanupPausePackageAfterResume = func(ctx context.Context, requestID, sandbo
 				sandboxID, snapshotID, nodeIP, err)
 		}
 	}()
-}
-
-// loadResumeSandboxSpec is the single sandboxspec.Get on the Resume path.
-// Placement (host-mount pin) and thin-Create network fallback share the result.
-func loadResumeSandboxSpec(ctx context.Context, sandboxID string) *types.CreateCubeSandboxReq {
-	createReq, err := sandboxspec.Get(ctx, sandboxID)
-	if err != nil {
-		if !errors.Is(err, sandboxspec.ErrSandboxSpecNotFound) && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
-			log.G(ctx).Warnf("resume: load sandboxspec for %s: %v", sandboxID, err)
-		}
-		return nil
-	}
-	return createReq
 }
 
 func fillResumeRecreateFields(ctx context.Context, sandboxID string, out *cubebox.RunCubeSandboxRequest, createReq *types.CreateCubeSandboxReq) {

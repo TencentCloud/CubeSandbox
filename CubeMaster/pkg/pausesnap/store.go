@@ -22,7 +22,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -130,6 +132,21 @@ func List(ctx context.Context, opts ListOptions) ([]*Record, error) {
 	return out, nil
 }
 
+// EnsureNoBindingInTx checks for a Pause binding while the caller holds the
+// sandbox spec row lock.
+func EnsureNoBindingInTx(tx *gorm.DB, sandboxID string) error {
+	var existing models.PauseSnapshotRecord
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("snapshot_id").
+		Where("sandbox_id = ?", sandboxID).Take(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("sandbox %s already has pause snapshot %s", sandboxID, existing.SnapshotID)
+}
+
 // Begin allocates snapshotID and inserts a CREATING pause binding.
 func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend string) (string, error) {
 	client := getDB()
@@ -145,12 +162,6 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend
 	if err != nil {
 		return "", err
 	}
-	if existing, err := GetBySandbox(ctx, sandboxID); err == nil && existing != nil {
-		return "", fmt.Errorf("sandbox %s already has pause snapshot %s", sandboxID, existing.SnapshotID)
-	} else if err != nil && !errors.Is(err, ErrNotFound) {
-		return "", err
-	}
-
 	snapID := GenerateSnapshotID()
 	row := &models.PauseSnapshotRecord{
 		SnapshotID:          snapID,
@@ -163,7 +174,15 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend
 		RemoteStatus:        constants.SnapshotRemoteStatus(normalized),
 		OriginHostFactsJSON: freezeOriginHostFacts(ctx, nodeID),
 	}
-	if err := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).Create(row).Error; err != nil {
+	if err := client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := sandboxspec.LockNoPendingRuntimeAttachInTx(tx, sandboxID); err != nil {
+			return err
+		}
+		if err := EnsureNoBindingInTx(tx, sandboxID); err != nil {
+			return err
+		}
+		return tx.Create(row).Error
+	}); err != nil {
 		return "", err
 	}
 	return snapID, nil

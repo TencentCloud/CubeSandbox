@@ -483,6 +483,10 @@ func cleanupTemplateReplicas(ctx context.Context, templateID string) error {
 	if err != nil {
 		return err
 	}
+	return cleanupDiscoveredTemplateReplicas(ctx, templateID, targets)
+}
+
+func cleanupDiscoveredTemplateReplicas(ctx context.Context, templateID string, targets *templateCleanupTargets) error {
 	if err := cleanupTemplateReplicasWithLocators(ctx, templateID, targets.Locators, cleanupBackendFromTargets(targets)); err != nil {
 		return err
 	}

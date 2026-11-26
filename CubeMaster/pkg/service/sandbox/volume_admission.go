@@ -57,9 +57,9 @@ func createResultFromRPC(req *cubebox.RunCubeSandboxRequest, rsp *cubebox.RunCub
 	return result
 }
 
-// createWithVolumeAdmission covers both normal create and thin Pause Resume
-// (whose volume IDs are saved in the pause binding rather than the request).
-func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebox.RunCubeSandboxRequest, savedIDs []string) (volumeCreateResult, error) {
+// createWithVolumeAdmission covers normal Create and thin Pause Resume, which
+// also supplies volume IDs from the Pause binding and confirmed mount records.
+func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebox.RunCubeSandboxRequest, savedIDs []string, expectedRows map[string]uint) (volumeCreateResult, error) {
 	var sources []volumeSource
 	if raw := req.GetAnnotations()[AnnotationPluginVolumeSources]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &sources); err != nil {
@@ -75,7 +75,7 @@ func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebo
 			ids = append(ids, v.GetName())
 		}
 	}
-	if len(ids) == 0 {
+	if len(ids) == 0 && len(expectedRows) == 0 {
 		rsp, err := cubelet.Create(ctx, endpoint, req)
 		return createResultFromRPC(req, rsp, err), err
 	}
@@ -84,9 +84,9 @@ func createWithVolumeAdmission(ctx context.Context, endpoint string, req *cubebo
 	admissionAttempted := false
 	rsp, err := cubelet.CreatePrepared(ctx, endpoint, req, func() error {
 		admissionAttempted = true
-		attempt, rows, err := admission.BeginCreate(ctx, dao.Default(), ids)
+		attempt, rows, err := admission.BeginCreateWithExpectedRows(ctx, dao.Default(), ids, expectedRows)
 		switch {
-		case errors.Is(err, admission.ErrBusy):
+		case errors.Is(err, admission.ErrBusy), errors.Is(err, admission.ErrVolumeReplaced):
 			return ret.Err(errorcode.ErrorCode_Conflict, err.Error())
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			return ret.Err(errorcode.ErrorCode_NotFound, "plugin volume not found")

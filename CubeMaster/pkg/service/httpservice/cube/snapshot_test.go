@@ -103,6 +103,47 @@ func TestCreateSnapshotSuccessResponse(t *testing.T) {
 	assert.Equal(t, int64(errorcode.ErrorCode_Success), rt.RetCode)
 }
 
+func TestCreateSnapshotReadyReplaySkipsLiveHost(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandbox.NormalizeSandboxIDParam, func(context.Context, string) (string, *types.Ret) {
+		t.Fatal("READY replay by full ID attempted live sandbox lookup")
+		return "", nil
+	})
+	oldLookup, oldResolve, oldCreate, oldInfo := lookupSnapshotReplayFn, resolveSnapshotHostFn, createSnapshotFn, getSnapshotInfoFn
+	t.Cleanup(func() {
+		lookupSnapshotReplayFn, resolveSnapshotHostFn, createSnapshotFn, getSnapshotInfoFn = oldLookup, oldResolve, oldCreate, oldInfo
+	})
+	lookupSnapshotReplayFn = func(_ context.Context, reqID, sandboxID, name string, mode snapshotmode.Mode, ttl int64) (*types.TemplateImageJobInfo, error) {
+		require.Equal(t, "req-replay", reqID)
+		require.Equal(t, knownSandboxTestID, sandboxID)
+		require.Equal(t, "example", name)
+		require.Equal(t, snapshotmode.FsOnly, mode)
+		require.EqualValues(t, 60, ttl)
+		return &types.TemplateImageJobInfo{JobID: "old-job", TemplateID: "old-snap", Status: "READY"}, nil
+	}
+	resolveSnapshotHostFn = func(context.Context, string, string) (string, string, error) {
+		t.Fatal("READY replay attempted live host resolution")
+		return "", "", nil
+	}
+	createSnapshotFn = func(context.Context, string, string, string, string, string, string, snapshotmode.Mode, int64) (*types.TemplateImageJobInfo, error) {
+		t.Fatal("READY replay attempted snapshot capture")
+		return nil, nil
+	}
+	getSnapshotInfoFn = func(_ context.Context, id string, _ bool) (*templatecenter.SnapshotInfo, error) {
+		require.Equal(t, "old-snap", id)
+		return &templatecenter.SnapshotInfo{SnapshotID: id, Status: "READY"}, nil
+	}
+	req := httptest.NewRequest(http.MethodPost, "/cube/snapshot", strings.NewReader(`{
+		"request_id":"req-replay", "sandbox_id":"`+knownSandboxTestID+`",
+		"display_name":"example", "mode":"filesystem", "ttl_seconds":60
+	}`))
+	got := createSnapshot(req, &CubeLog.RequestTrace{}).(*snapshotResponse)
+	require.Equal(t, int(errorcode.ErrorCode_Success), got.Ret.RetCode, got.Ret.RetMsg)
+	require.Equal(t, "old-job", got.Operation.OperationID)
+	require.Equal(t, "old-snap", got.Snapshot.SnapshotID)
+}
+
 func TestCreateSnapshotRejectsReservedPrefixNameAsParamsError(t *testing.T) {
 	registerKnownSandboxTestID(t)
 
@@ -473,10 +514,11 @@ func TestGetSnapshotListSupportsFiltersAndPagination(t *testing.T) {
 	}
 }
 
-func TestSnapshotResourceHidesInternalNetworkQosAnnotation(t *testing.T) {
+func TestSnapshotResourceHidesInternalAnnotations(t *testing.T) {
 	annotations := map[string]string{
-		constants.CubeAnnotationsNetWork:              `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`,
-		constants.CubeAnnotationAppSnapshotTemplateID: "tpl-1",
+		constants.CubeAnnotationsNetWork:                    `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`,
+		constants.CubeAnnotationAppSnapshotTemplateID:       "tpl-1",
+		constants.CubeAnnotationSnapshotRuntimeVolumeMounts: `[{"volume_id":"data","volume_record_id":7}]`,
 	}
 	resource := snapshotResourceFromInfo(&templatecenter.SnapshotInfo{
 		SnapshotID: "snap-1",
@@ -487,9 +529,11 @@ func TestSnapshotResourceHidesInternalNetworkQosAnnotation(t *testing.T) {
 
 	if assert.NotNil(t, resource.CreateRequest) {
 		assert.NotContains(t, resource.CreateRequest.Annotations, constants.CubeAnnotationsNetWork)
+		assert.NotContains(t, resource.CreateRequest.Annotations, constants.CubeAnnotationSnapshotRuntimeVolumeMounts)
 		assert.Equal(t, "tpl-1", resource.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 	}
 	assert.Contains(t, annotations, constants.CubeAnnotationsNetWork)
+	assert.Contains(t, annotations, constants.CubeAnnotationSnapshotRuntimeVolumeMounts)
 }
 
 func TestHandleSandboxRollbackActionUsesPathSandboxID(t *testing.T) {

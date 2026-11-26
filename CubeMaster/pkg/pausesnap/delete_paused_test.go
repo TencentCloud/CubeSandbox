@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"gorm.io/gorm"
@@ -36,7 +37,7 @@ func setupPauseDeleteTest(t *testing.T) *gorm.DB {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.PauseSnapshotRecord{}))
+	require.NoError(t, db.AutoMigrate(&models.PauseSnapshotRecord{}, &models.SandboxSpec{}))
 
 	origDB := getDB()
 	origDestroy := destroyOnCubelet
@@ -135,6 +136,25 @@ func TestBeginCompletePersistsBackendAndRemoteStatus(t *testing.T) {
 
 	_, err = Begin(ctx, "sb-bad", "node-1", "10.0.0.9", "cubebox", "nfs")
 	require.Error(t, err)
+}
+
+func TestBeginRejectsPendingRuntimeAttachBeforeWritingBinding(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	ctx := t.Context()
+	spec := models.SandboxSpec{SandboxID: "sb-runtime", RequestJSON: "{}"}
+	require.NoError(t, db.Create(&spec).Error)
+	require.NoError(t, sandboxspec.ClaimRuntimeAttachInTx(db, spec.SandboxID, spec.ID, "attach-token"))
+
+	snapID, err := Begin(ctx, spec.SandboxID, "node-1", "10.0.0.9", "cubebox", "xfs")
+	require.ErrorIs(t, err, sandboxspec.ErrRuntimeAttachPending)
+	require.Empty(t, snapID)
+	_, err = GetBySandbox(ctx, spec.SandboxID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, sandboxspec.ClearRuntimeAttachInTx(db, spec.SandboxID, spec.ID, "attach-token"))
+	snapID, err = Begin(ctx, spec.SandboxID, "node-1", "10.0.0.9", "cubebox", "xfs")
+	require.NoError(t, err)
+	require.NotEmpty(t, snapID)
 }
 
 func TestTryDeletePausedNoBinding(t *testing.T) {

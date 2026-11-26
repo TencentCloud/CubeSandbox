@@ -25,6 +25,9 @@ type SandboxSpec struct {
 	RequestJSON  string `json:"request_json" gorm:"column:request_json"`
 	Backend      string `json:"backend" gorm:"column:backend"`
 	Backfilled   bool   `json:"backfilled" gorm:"column:backfilled"`
+
+	RuntimeVolumeMounts  *string `json:"-" gorm:"column:runtime_volume_mounts;type:text;<-:update"`
+	PendingRuntimeAttach *string `json:"-" gorm:"column:pending_runtime_attach;type:varchar(36);<-:update"`
 }
 
 func (SandboxSpec) TableName() string {

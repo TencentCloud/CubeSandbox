@@ -6,6 +6,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -202,6 +203,12 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
 		TTL:   sandboxlock.DeleteTTL,
 	}, func(ctx context.Context) error {
 		ctx = context.WithoutCancel(ctx)
+		if err := sandboxspec.EnsureNoPendingRuntimeAttach(ctx, req.GetSandboxID()); err != nil {
+			if errors.Is(err, sandboxspec.ErrRuntimeAttachPending) {
+				return ret.Errorf(errorcode.ErrorCode_Conflict, "sandbox runtime attach is pending; retry later")
+			}
+			return err
+		}
 		hostIP := strings.Split(callEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
 		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)

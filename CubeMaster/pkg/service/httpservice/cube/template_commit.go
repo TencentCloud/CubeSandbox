@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -195,6 +196,9 @@ func handleSandboxCommitAction(c *gin.Context) {
 
 func commitTemplateErrorCode(err error) int {
 	switch {
+	case errors.Is(err, sandboxspec.ErrRuntimeAttachPending),
+		errors.Is(err, templatecenter.ErrTemplateCommitRuntimeMounts):
+		return int(errorcode.ErrorCode_Conflict)
 	case errors.Is(err, templatecenter.ErrTemplateIDRequired),
 		errors.Is(err, templatecenter.ErrDuplicateTemplate),
 		errors.Is(err, templatecenter.ErrTemplateAttemptInProgress):
@@ -210,6 +214,10 @@ func commitTemplateErrorCode(err error) int {
 
 func commitTemplateErrorMessage(err error) string {
 	switch {
+	case errors.Is(err, sandboxspec.ErrRuntimeAttachPending):
+		return "retry the template commit after the pending volume attach finishes"
+	case errors.Is(err, templatecenter.ErrTemplateCommitRuntimeMounts):
+		return templatecenter.ErrTemplateCommitRuntimeMounts.Error()
 	case errors.Is(err, templatecenter.ErrTemplateIDRequired):
 		return templatecenter.ErrTemplateIDRequired.Error()
 	case errors.Is(err, templatecenter.ErrDuplicateTemplate):

@@ -434,7 +434,7 @@ func (c *createSandboxContext) callCubelet() bool {
 			attribute.String(telemetry.AttrNodeID, c.selectHost.ID()),
 		))
 	c.cubeletStartTime = time.Now()
-	result, err := createWithVolumeAdmission(rpcCtx, calleeEndpoint, c.cubeletReq, nil)
+	result, err := createWithVolumeAdmission(rpcCtx, calleeEndpoint, c.cubeletReq, nil, nil)
 	c.cubeletRsp, c.volumeGuarded = result.rsp, result.guarded
 	reportFailed := volumeCreateReportFailed(c.cubeletRsp)
 	if result.createdSandboxID != "" && (err != nil || reportFailed) {

@@ -439,12 +439,19 @@ func recoverSnapshotStagePanic(t *testing.T, fn func()) (recovered any) {
 }
 
 func TestPrepareSnapshotCreateJobPanicEndsPrepareSpanAndRepanics(t *testing.T) {
+	stubSnapshotCreateLifecycle(t)
 	rec, flush := installSpanRecorder(t)
 
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
+		return nil, gorm.ErrRecordNotFound
+	})
+
 	sentinel := errors.New("prepare loader exploded")
-	origLoad := loadSandboxCreateRequestFn
-	t.Cleanup(func() { loadSandboxCreateRequestFn = origLoad })
-	loadSandboxCreateRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	t.Cleanup(func() { loadSnapshotOriginRequestFn = origLoad })
+	loadSnapshotOriginRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		panic(sentinel)
 	}
 
@@ -499,16 +506,16 @@ func submitSnapshotReplayStubs(t *testing.T, status string) {
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 
-	origLoad := loadSandboxCreateRequestFn
-	t.Cleanup(func() { loadSandboxCreateRequestFn = origLoad })
-	loadSandboxCreateRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	t.Cleanup(func() { loadSnapshotOriginRequestFn = origLoad })
+	loadSnapshotOriginRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return &sandboxtypes.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{}}, nil
 	}
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
-		return &models.TemplateImageJob{JobID: "job-existing", Operation: JobOperationSnapshotCreate, TemplateID: "snap-existing"}, nil
-	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
-		return true
+		return &models.TemplateImageJob{
+			JobID: "job-existing", Operation: JobOperationSnapshotCreate, TemplateID: "snap-existing", Status: status,
+			RequestJSON: `{"request_id":"req-existing","sandbox_id":"sb-1","node_id":"node-1","node_ip":"10.0.0.1","display_name":"snap","snapshot_id":"snap-existing"}`,
+		}, nil
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(_ context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
 		return &sandboxtypes.TemplateImageJobInfo{
@@ -566,6 +573,7 @@ func TestSubmitSandboxSnapshotReadyReplayEmitsPrepareOnly(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotPrepareIsSiblingOfCaptureAndRegister(t *testing.T) {
+	stubSnapshotCreateLifecycle(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -576,9 +584,9 @@ func TestSubmitSandboxSnapshotPrepareIsSiblingOfCaptureAndRegister(t *testing.T)
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 
-	origLoad := loadSandboxCreateRequestFn
-	t.Cleanup(func() { loadSandboxCreateRequestFn = origLoad })
-	loadSandboxCreateRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	t.Cleanup(func() { loadSnapshotOriginRequestFn = origLoad })
+	loadSnapshotOriginRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return &sandboxtypes.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{}}, nil
 	}
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {
@@ -644,12 +652,13 @@ func TestSubmitSandboxSnapshotPrepareIsSiblingOfCaptureAndRegister(t *testing.T)
 
 func stubSnapshotCreateSubmitResolution(t *testing.T, infoFn func(call int) (*sandboxtypes.TemplateImageJobInfo, error), claimFn func() (bool, error)) {
 	t.Helper()
+	stubSnapshotCreateLifecycle(t)
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
 
-	origLoad := loadSandboxCreateRequestFn
-	t.Cleanup(func() { loadSandboxCreateRequestFn = origLoad })
-	loadSandboxCreateRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	t.Cleanup(func() { loadSnapshotOriginRequestFn = origLoad })
+	loadSnapshotOriginRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return &sandboxtypes.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{}}, nil
 	}
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(context.Context, string) (*models.TemplateImageJob, error) {

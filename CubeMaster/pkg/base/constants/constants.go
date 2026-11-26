@@ -93,6 +93,8 @@ const (
 	// last restored from. User Create must not set it.
 	CubeAnnotationRuntimeRestoreSnapshotID         = "cube.master.runtime.restore.snapshot.id"
 	CubeAnnotationRuntimeRestoreSnapshotAttachedAt = "cube.master.runtime.restore.snapshot.attached_at"
+	// CubeAnnotationSnapshotRuntimeVolumeMounts stores hot-attached bindings in the frozen snapshot request.
+	CubeAnnotationSnapshotRuntimeVolumeMounts = "cube.master.snapshot.runtime-volume-mounts"
 	// CubeAnnotationStorageBackend is the CoW backend Master passes to Cubelet
 	// on Pause / Commit (xfs｜s3). Empty means xfs.
 	CubeAnnotationStorageBackend = "cube.master.storage.backend"

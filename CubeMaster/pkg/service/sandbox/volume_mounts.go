@@ -5,12 +5,91 @@
 package sandbox
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
+
+func enrichSandboxInfoVolumeMounts(ctx context.Context, items []*types.SandboxData) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	mounts := loadConfirmedVolumeMounts(ctx, ids)
+	for _, item := range items {
+		if item != nil {
+			item.VolumeMounts = mergeConfirmedVolumeMounts(item.VolumeMounts, mounts[item.SandboxID])
+		}
+	}
+}
+
+func enrichSandboxListVolumeMounts(ctx context.Context, items []*types.SandboxBriefData) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	mounts := loadConfirmedVolumeMounts(ctx, ids)
+	for _, item := range items {
+		if item != nil {
+			item.VolumeMounts = mergeConfirmedVolumeMounts(item.VolumeMounts, mounts[item.SandboxID])
+		}
+	}
+}
+
+func loadConfirmedVolumeMounts(ctx context.Context, ids []string) map[string][]sandboxspec.RuntimeVolumeMount {
+	mounts, err := sandboxspec.GetRuntimeVolumeMountsMany(ctx, ids)
+	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+		log.G(ctx).Warnf("read confirmed runtime volume mounts: %v", err)
+	}
+	return mounts
+}
+
+func mergeConfirmedVolumeMounts(existing []*types.VolumeMountInfo, confirmed []sandboxspec.RuntimeVolumeMount) []*types.VolumeMountInfo {
+	if len(confirmed) == 0 {
+		return existing
+	}
+	type binding struct{ name, target string }
+	byBinding := make(map[binding]*types.VolumeMountInfo, len(confirmed))
+	for _, mount := range confirmed {
+		key := binding{mount.VolumeID, mount.ContainerPath}
+		if _, exists := byBinding[key]; !exists {
+			byBinding[key] = &types.VolumeMountInfo{Name: mount.VolumeID, ContainerPath: mount.ContainerPath, Readonly: mount.Readonly}
+		}
+	}
+	out := make([]*types.VolumeMountInfo, 0, len(existing)+len(byBinding))
+	for _, mount := range existing {
+		if mount == nil {
+			continue
+		}
+		key := binding{mount.Name, mount.ContainerPath}
+		if authoritative, exists := byBinding[key]; exists {
+			if authoritative != nil {
+				out = append(out, authoritative)
+				byBinding[key] = nil
+			}
+		} else {
+			out = append(out, mount)
+		}
+	}
+	for _, mount := range confirmed {
+		key := binding{mount.VolumeID, mount.ContainerPath}
+		if authoritative := byBinding[key]; authoritative != nil {
+			out = append(out, authoritative)
+			byBinding[key] = nil
+		}
+	}
+	return out
+}
 
 // collectVolumeMountsFromContainers gathers mounts from every reported
 // container. Template sandboxes often only have a type=sandbox container, and

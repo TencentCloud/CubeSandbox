@@ -65,10 +65,11 @@ func TestUpdateResumeSuccessEmitsSiblingStagesWithRealWorker(t *testing.T) {
 		opts sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
+	patches.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
 	patches.ApplyFunc(config.GetConfig, func() *config.Config {
 		return &config.Config{Common: &config.CommonConf{}}
 	})
-	patches.ApplyFunc(sandboxspec.Get, func(ctx context.Context, id string) (*types.CreateCubeSandboxReq, error) {
+	patches.ApplyFunc(sandboxspec.GetWithRuntimeVolumeMounts, func(ctx context.Context, id string) (*sandboxspec.SpecWithRuntimeVolumeMounts, error) {
 		return nil, sandboxspec.ErrSandboxSpecNotFound
 	})
 	patches.ApplyFunc(pausesnap.GetBySandbox, func(ctx context.Context, id string) (*pausesnap.Record, error) {
@@ -203,6 +204,7 @@ func TestUpdatePauseFailureMarksRuntimeStage(t *testing.T) {
 		opts sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
+	patches.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
 	patches.ApplyFunc(config.GetConfig, func() *config.Config {
 		return &config.Config{Common: &config.CommonConf{}}
 	})
@@ -266,6 +268,7 @@ func TestUpdatePanicMarksActiveStageAndPropagates(t *testing.T) {
 		opts sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
+	patches.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
 	patches.ApplyFunc(config.GetConfig, func() *config.Config {
 		return &config.Config{Common: &config.CommonConf{}}
 	})

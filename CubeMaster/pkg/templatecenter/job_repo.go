@@ -168,10 +168,13 @@ func getTemplateImageJobByRequestID(ctx context.Context, requestID string) (*mod
 }
 
 func getActiveSnapshotJobBySandboxID(ctx context.Context, sandboxID string) (*models.TemplateImageJob, error) {
+	return getActiveSnapshotJobBySandboxIDTx(store.db.WithContext(ctx), sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback)
+}
+
+func getActiveSnapshotJobBySandboxIDTx(tx *gorm.DB, sandboxID string, operations ...string) (*models.TemplateImageJob, error) {
 	record := &models.TemplateImageJob{}
-	err := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).
-		Where("sandbox_id = ? AND operation IN ? AND status IN ?", sandboxID,
-			[]string{JobOperationSnapshotCreate, JobOperationSnapshotRollback},
+	err := tx.Table(constants.TemplateImageJobTableName).
+		Where("sandbox_id = ? AND operation IN ? AND status IN ?", sandboxID, operations,
 			[]string{JobStatusPending, JobStatusRunning}).
 		Order("id desc").First(record).Error
 	if err != nil {

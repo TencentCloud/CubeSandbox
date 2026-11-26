@@ -562,9 +562,15 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 			// external mounts cannot be honoured. Drop them; the caller's own
 			// declarations are mounted on the guest by Cubelet.
 			stripSnapshotExternalMounts(templateReq)
-		} else if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
-			return err
+		} else {
+			if err := templatecenter.CheckSnapshotRuntimeVolumeRestore(templateReq); err != nil {
+				return err
+			}
+			if err := reconcileSnapshotPluginVolumes(templateID, reqInOut, templateReq); err != nil {
+				return err
+			}
 		}
+		delete(templateReq.Annotations, constants.CubeAnnotationSnapshotRuntimeVolumeMounts)
 	}
 	if log.IsDebug() {
 		log.G(ctx).Debugf("getTemplateParam success:%s", utils.InterfaceToString(templateReq))
@@ -582,6 +588,7 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantID)
 	delete(reqInOut.Annotations, constants.CubeAnnotationJFSTemplateVariantPolicy)
+	delete(reqInOut.Annotations, constants.CubeAnnotationSnapshotRuntimeVolumeMounts)
 	if policy := strings.TrimSpace(templateReq.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy]); policy != "" {
 		reqInOut.Annotations[constants.CubeAnnotationJFSTemplateVariantPolicy] = policy
 	}

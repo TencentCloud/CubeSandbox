@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -289,6 +290,16 @@ func TestCommitTemplateErrorCode(t *testing.T) {
 		want int
 	}{
 		{
+			name: "pending volume attach is a conflict",
+			err:  fmt.Errorf("%w: %w", templatecenter.ErrTemplateAttemptInProgress, sandboxspec.ErrRuntimeAttachPending),
+			want: int(errorcode.ErrorCode_Conflict),
+		},
+		{
+			name: "confirmed runtime mount is a conflict",
+			err:  fmt.Errorf("%w: %w", templatecenter.ErrTemplateAttemptInProgress, templatecenter.ErrTemplateCommitRuntimeMounts),
+			want: int(errorcode.ErrorCode_Conflict),
+		},
+		{
 			name: "template id required is params error",
 			err:  templatecenter.ErrTemplateIDRequired,
 			want: int(errorcode.ErrorCode_MasterParamsError),
@@ -332,6 +343,16 @@ func TestCommitTemplateErrorMessage(t *testing.T) {
 		err  error
 		want string
 	}{
+		{
+			name: "pending attach can be retried",
+			err:  fmt.Errorf("%w: %w", templatecenter.ErrTemplateAttemptInProgress, sandboxspec.ErrRuntimeAttachPending),
+			want: "retry the template commit after the pending volume attach finishes",
+		},
+		{
+			name: "confirmed runtime mount reports the template limitation",
+			err:  fmt.Errorf("%w: %w", templatecenter.ErrTemplateAttemptInProgress, templatecenter.ErrTemplateCommitRuntimeMounts),
+			want: templatecenter.ErrTemplateCommitRuntimeMounts.Error(),
+		},
 		{
 			name: "attempt details are sanitized",
 			err:  fmt.Errorf("%w: template tpl-secret is building as job-secret", templatecenter.ErrTemplateAttemptInProgress),

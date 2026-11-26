@@ -29,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	volrefcount "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
@@ -244,6 +245,9 @@ func (h *DestroySandboxTaskHandler) HandleTask(ctx context.Context, t *Task) err
 		TTL:   sandboxlock.DeleteTTL,
 	}, func(ctx context.Context) error {
 		ctx = context.WithoutCancel(ctx)
+		if err := sandboxspec.EnsureNoPendingRuntimeAttach(ctx, req.GetSandboxID()); err != nil {
+			return ret.Errorf(errorcode.ErrorCode_MasterRateLimitedError, "%s", err.Error())
+		}
 		hostIP := strings.Split(t.CallEp, ":")[0]
 		_, nodeOK := localcache.GetNodesByIp(hostIP)
 		handled, err := pausesnap.TryDeletePaused(ctx, req.GetRequestID(), req.GetSandboxID(), hostIP)
