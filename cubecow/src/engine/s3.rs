@@ -332,6 +332,74 @@ impl S3Engine {
         }
     }
 
+    // Resolve authoritative geometry, including for closed blobs. The target's
+    // stable bdev size must not be confused with its optional allocation bitmap.
+    fn query_size_bytes(&self, name: &str) -> CubecowResult<u64> {
+        let response = self
+            .rpc
+            .call_raw("rcow_get_lvol", &serde_json::json!({"lvol_name": name}))?;
+        let geometry: serde_json::Value = serde_json::from_str(&extract_string_value(&response)?)
+            .map_err(|e| {
+            CubecowError::PreconditionFailed(format!("invalid geometry for {name}: {e}"))
+        })?;
+        let size = geometry
+            .get("size_bytes")
+            .and_then(|v| v.as_u64())
+            .filter(|v| *v > 0)
+            .or_else(|| {
+                geometry
+                    .get("total_clusters")?
+                    .as_u64()?
+                    .checked_mul(geometry.get("cluster_size")?.as_u64()?)
+            })
+            .filter(|v| *v > 0)
+            .ok_or_else(|| {
+                CubecowError::PreconditionFailed(format!(
+                    "size of {name} is unknown, refusing zero-sized metadata"
+                ))
+            })?;
+        Ok(size)
+    }
+
+    // Repair legacy imports lazily before returning or inheriting their size.
+    fn refresh_unknown_size(&self, name: &str) -> CubecowResult<()> {
+        let unknown = {
+            let idx = self.name_index.read().expect("s3 name_index lock poisoned");
+            match idx.get(name) {
+                Some(
+                    NameKind::Volume { size_bytes, .. } | NameKind::Snapshot { size_bytes, .. },
+                ) => *size_bytes == 0,
+                None => {
+                    return Err(CubecowError::NotFound(format!(
+                        "volume or snapshot '{name}'"
+                    )))
+                }
+            }
+        };
+        if !unknown {
+            return Ok(());
+        }
+        let actual = self.query_size_bytes(name)?;
+        let mut idx = self
+            .name_index
+            .write()
+            .expect("s3 name_index lock poisoned");
+        match idx.get_mut(name) {
+            Some(NameKind::Volume { size_bytes, .. } | NameKind::Snapshot { size_bytes, .. }) => {
+                // A concurrent resize may already have replaced the sentinel.
+                if *size_bytes == 0 {
+                    *size_bytes = actual;
+                }
+            }
+            None => {
+                return Err(CubecowError::NotFound(format!(
+                    "volume or snapshot '{name}'"
+                )))
+            }
+        }
+        self.persist(&idx)
+    }
+
     fn call_activate(&self, name: &str) -> CubecowResult<BdevInfo> {
         let resp = self.rpc.call_raw(
             "rcow_active_bdev",
@@ -548,6 +616,7 @@ impl Engine for S3Engine {
     }
 
     fn get_volume_info(&self, name: &str) -> CubecowResult<Volume> {
+        self.refresh_unknown_size(name)?;
         // Step 1: build the base projection under the read lock and
         // capture the snapshot's `export_uuid` (if any) so we can
         // query upload status outside the lock.
@@ -608,6 +677,28 @@ impl Engine for S3Engine {
                         "s3 rcow_get_snapshot_status missing nested string_value"
                     ),
                 },
+                // A UUID returned by export_snapshot is registered while in
+                // flight. Explicit absence after acceptance is terminal; a
+                // transport failure remains unknown and may be polled again.
+                Err(CubecowError::NotFound(_)) => {
+                    // Runtime RPC is available before lvstore reattach/WAL
+                    // replay finishes. Absence is authoritative only while
+                    // this snapshot's owning store is loaded and queryable.
+                    // Ask snapshot state atomically: reattach may finish
+                    // between the UUID miss and this second request.
+                    let missing = self
+                        .rpc
+                        .call_raw(
+                            "rcow_get_snapshot_status",
+                            &serde_json::json!({"snapshot_name":name}),
+                        )
+                        .and_then(|r| extract_string_value(&r))
+                        .and_then(|nested| parse_snapshot_status(&nested))
+                        .is_ok_and(|(status, _)| status == "NONE");
+                    if missing {
+                        view.export_status = "FAILED".to_owned();
+                    }
+                }
                 Err(e) => warn!(
                     snapshot = name,
                     export_uuid = %uuid,
@@ -676,6 +767,7 @@ impl Engine for S3Engine {
         activate: bool,
     ) -> CubecowResult<Snapshot> {
         Self::validate_name(snapshot_name, "snapshot")?;
+        self.refresh_unknown_size(source_name)?;
 
         let (ultimate_origin, size_bytes) = {
             let idx = self.name_index.read().expect("s3 name_index lock poisoned");
@@ -789,6 +881,7 @@ impl Engine for S3Engine {
         volume_name: &str,
     ) -> CubecowResult<Volume> {
         Self::validate_name(volume_name, "volume")?;
+        self.refresh_unknown_size(source_snapshot)?;
 
         let mut idx = self
             .name_index
@@ -1180,8 +1273,43 @@ impl Engine for S3Engine {
             }
         };
 
+        let size_bytes = match self.query_size_bytes(lvol_name) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = self.rpc.call_typed(
+                    "rcow_deactive_bdev",
+                    &serde_json::json!({"device_name": lvol_name}),
+                );
+                match self.rpc.call_typed(
+                    "rcow_delete_lvol",
+                    &serde_json::json!({"lvol_name": lvol_name}),
+                ) {
+                    Ok(_) | Err(CubecowError::NotFound(_)) => {
+                        idx.remove(lvol_name);
+                        self.persist(&idx)?;
+                        return Err(e);
+                    }
+                    Err(cleanup) => {
+                        // Keep the import addressable for cleanup/recovery if
+                        // the same outage prevented deleting native resources.
+                        idx.insert(
+                            lvol_name.to_owned(),
+                            NameKind::Volume {
+                                size_bytes: 0,
+                                created_at,
+                                activated: Some(bdev),
+                            },
+                        );
+                        self.persist(&idx)?;
+                        return Err(CubecowError::PreconditionFailed(format!(
+                            "{e}; rollback failed: {cleanup}; import retained for recovery"
+                        )));
+                    }
+                }
+            }
+        };
         let entry = NameKind::Volume {
-            size_bytes: 0,
+            size_bytes,
             created_at,
             activated: Some(bdev),
         };
@@ -1554,7 +1682,10 @@ fn map_rpc_error(msg: &str) -> CubecowError {
     let lower = msg.to_lowercase();
     if lower.contains("already exists") || lower.contains("already exist") {
         CubecowError::AlreadyExists(msg.to_string())
-    } else if lower.contains("not found") || lower.contains("no such") {
+    } else if lower.contains("not found")
+        || lower.contains("no such")
+        || lower.contains("does not exist")
+    {
         CubecowError::NotFound(msg.to_string())
     } else {
         CubecowError::PreconditionFailed(format!("s3lvol rpc: {msg}"))
@@ -1641,6 +1772,250 @@ fn persist_index(state_dir: &Path, idx: &HashMap<String, NameKind>) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Drive the actual import/clone/status implementation over a Unix RPC socket.
+    fn crossnode_rpc_case(label: &'static str, fail_size: bool, body: impl FnOnce(&S3Engine)) {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("cow-cross-{}-{}", std::process::id(), label));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rpc.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let method = req["method"].as_str().unwrap();
+                let mut ok = true;
+                let value = match method {
+                    "rcow_get_lvol" if label == "zero-geometry" => serde_json::json!({"size_bytes":0,"total_clusters":0,"cluster_size":1048576}).to_string(),
+                    "rcow_get_lvol" if label == "overflow-geometry" => serde_json::json!({"size_bytes":0,"total_clusters":u64::MAX,"cluster_size":2}).to_string(),
+                    "rcow_get_lvol" if label == "loading" => {ok=false; "lvol not found".to_owned()},
+                    "rcow_deactive_bdev" | "rcow_delete_lvol" if label == "cleanup-fails" => {ok=false; "target temporarily busy".to_owned()},
+                    "rcow_get_lvol" if fail_size => { ok = false; "geometry unavailable".to_owned() },
+                    // Stable bdev geometry remains available when the blob is closed.
+                    "rcow_get_lvol" => serde_json::json!({"size_bytes":4*BYTES_PER_GIB,"cluster_size":1048576,"total_clusters":0}).to_string(),
+                    "rcow_active_bdev" | "rcow_get_bdev" => serde_json::json!({"device_name":"import","uuid":"u","nqn":"n","subsys":1,"nsid":1,"device_path":"/dev/test"}).to_string(),
+                    "rcow_get_snapshot_status" if req["params"].get("snapshot_name").is_some() => {
+                        if label == "loading" { ok=false; "snapshot not found".to_owned() }
+                        else { serde_json::json!({"export_status":if label == "reattach-race" {"DONE"} else {"NONE"}}).to_string() }
+                    },
+                    "rcow_get_snapshot_status" => { ok = false; if label == "transient" { "temporarily busy".to_owned() } else { "export 'gone-export' does not exist".to_owned() } },
+                    _ => "ok".to_owned(),
+                };
+                let reply = serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{"bool_value":ok,"string_value":value}});
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        let cfg = S3Config {
+            socket_path: path,
+            state_dir: dir.clone(),
+            rpc_timeout_ms: 1000,
+            rpc_connect_budget_ms: 1000,
+            ..S3Config::default()
+        };
+        let engine = S3Engine {
+            rpc: Arc::new(JsonRpcClient::new(
+                cfg.socket_path.clone(),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )),
+            cfg,
+            name_index: RwLock::new(HashMap::new()),
+            metrics: Arc::new(MetricsCollector::new()),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&engine)));
+        drop(engine);
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    #[test]
+    fn crossnode_import_preserves_geometry_through_memory_clone() {
+        crossnode_rpc_case("import", false, |e| {
+            let imported = e.import_lvol("memory", "remote-export").unwrap();
+            assert_eq!(
+                imported.size_bytes,
+                4 * BYTES_PER_GIB,
+                "import must report actual size"
+            );
+            let snap = e
+                .create_snapshot_from_volume("memory", "memory-src", false)
+                .unwrap();
+            assert_eq!(snap.size_bytes, 4 * BYTES_PER_GIB);
+            let clone = e
+                .create_volume_from_snapshot("memory-src", "next-pause")
+                .unwrap();
+            assert_eq!(clone.size_bytes, 4 * BYTES_PER_GIB);
+            let disk = load_index_file(&e.cfg.state_dir).unwrap();
+            assert_eq!(
+                S3Engine::project_volume("memory", &disk["memory"]).size_bytes,
+                4 * BYTES_PER_GIB
+            );
+        });
+    }
+
+    #[test]
+    fn crossnode_legacy_zero_geometry_is_repaired_before_snapshot() {
+        crossnode_rpc_case("legacy", false, |e| {
+            e.name_index.write().unwrap().insert(
+                "legacy".into(),
+                NameKind::Volume {
+                    size_bytes: 0,
+                    created_at: "now".into(),
+                    activated: None,
+                },
+            );
+            let snap = e
+                .create_snapshot_from_volume("legacy", "snap", false)
+                .unwrap();
+            assert_eq!(snap.size_bytes, 4 * BYTES_PER_GIB);
+            assert_eq!(
+                e.get_volume_info("legacy").unwrap().size_bytes,
+                4 * BYTES_PER_GIB
+            );
+        });
+    }
+
+    #[test]
+    fn crossnode_unknown_geometry_does_not_return_zero_sized_success() {
+        crossnode_rpc_case("unknown", true, |e| {
+            assert!(e.import_lvol("memory", "remote-export").is_err());
+            assert!(
+                !e.name_index.read().unwrap().contains_key("memory"),
+                "failed import must be rolled back"
+            );
+        });
+    }
+
+    #[test]
+    fn crossnode_missing_accepted_export_reports_failure() {
+        crossnode_rpc_case("status", false, |e| {
+            e.name_index.write().unwrap().insert(
+                "snap".into(),
+                NameKind::Snapshot {
+                    origin_volume: "v".into(),
+                    size_bytes: BYTES_PER_GIB,
+                    created_at: "now".into(),
+                    activated: None,
+                    export_uuid: "gone-export".into(),
+                },
+            );
+            assert_eq!(e.get_volume_info("snap").unwrap().export_status, "FAILED");
+        });
+    }
+
+    #[test]
+    fn crossnode_transient_status_error_remains_unknown() {
+        crossnode_rpc_case("transient", false, |e| {
+            e.name_index.write().unwrap().insert(
+                "snap".into(),
+                NameKind::Snapshot {
+                    origin_volume: "v".into(),
+                    size_bytes: BYTES_PER_GIB,
+                    created_at: "now".into(),
+                    activated: None,
+                    export_uuid: "accepted".into(),
+                },
+            );
+            assert_eq!(e.get_volume_info("snap").unwrap().export_status, "");
+        });
+    }
+
+    #[test]
+    fn crossnode_legacy_closed_snapshot_has_stable_clone_geometry() {
+        crossnode_rpc_case("closed", false, |e| {
+            e.name_index.write().unwrap().insert(
+                "legacy".into(),
+                NameKind::Snapshot {
+                    origin_volume: "v".into(),
+                    size_bytes: 0,
+                    created_at: "now".into(),
+                    activated: None,
+                    export_uuid: "".into(),
+                },
+            );
+            assert_eq!(
+                e.create_volume_from_snapshot("legacy", "next-pause")
+                    .unwrap()
+                    .size_bytes,
+                4 * BYTES_PER_GIB
+            );
+        });
+    }
+
+    #[test]
+    fn crossnode_export_absence_during_reattach_remains_unknown() {
+        crossnode_rpc_case("loading", false, |e| {
+            e.name_index.write().unwrap().insert(
+                "snap".into(),
+                NameKind::Snapshot {
+                    origin_volume: "v".into(),
+                    size_bytes: BYTES_PER_GIB,
+                    created_at: "now".into(),
+                    activated: None,
+                    export_uuid: "accepted".into(),
+                },
+            );
+            assert_eq!(e.get_volume_info("snap").unwrap().export_status, "");
+        });
+    }
+
+    #[test]
+    fn crossnode_failed_geometry_rollback_retains_recoverable_import() {
+        crossnode_rpc_case("cleanup-fails", true, |e| {
+            assert!(e.import_lvol("memory", "remote-export").is_err());
+            assert!(e.name_index.read().unwrap().contains_key("memory"));
+            let disk = load_index_file(&e.cfg.state_dir).unwrap();
+            assert!(matches!(
+                &disk["memory"],
+                NameKind::Volume {
+                    size_bytes: 0,
+                    activated: Some(_),
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn crossnode_malformed_geometry_does_not_persist_zero_sized_imports() {
+        for label in ["zero-geometry", "overflow-geometry"] {
+            crossnode_rpc_case(label, false, |e| {
+                assert!(e.import_lvol("memory", "remote-export").is_err());
+                assert!(!e.name_index.read().unwrap().contains_key("memory"));
+            });
+        }
+    }
+
+    #[test]
+    fn crossnode_export_reattach_between_queries_is_not_failed() {
+        crossnode_rpc_case("reattach-race", false, |e| {
+            e.name_index.write().unwrap().insert(
+                "snap".into(),
+                NameKind::Snapshot {
+                    origin_volume: "v".into(),
+                    size_bytes: BYTES_PER_GIB,
+                    created_at: "now".into(),
+                    activated: None,
+                    export_uuid: "accepted".into(),
+                },
+            );
+            assert_ne!(e.get_volume_info("snap").unwrap().export_status, "FAILED");
+        });
+    }
 
     #[test]
     fn validate_name_rejects_reserved_prefix() {

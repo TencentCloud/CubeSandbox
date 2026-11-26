@@ -645,3 +645,13 @@ of `make check` / `make check-rules`.
   stale binary**: do the `make` it tells you to. Note the top-level default
   target now builds the binary too; `make shared` builds only the libraries and
   does not update `s3lvol_tgt`.
+
+
+## 导出刷出的进度期限回归
+
+`s3_flush_test` 使用真实 overlay 和 flusher（写入覆盖层与刷出调度器），模拟总耗时超过期限但逐批成功的传输，验证导出可以完成；同时验证后续无关写入不延长等待、部分完成后停滞以及迟到回调不能复活已超时操作；没有成功完成待上传数据时会超时，失败的数据仍为脏数据，正在执行的回调安全结束。原有总时限与暂停、恢复调度器的用例继续覆盖关闭路径。编译测试前先构建静态库，避免链接旧实现。
+
+```sh
+AWS_BUILD_TYPE=RelWithDebInfo make S3LVOL_BUILD_TYPE=release -j8
+AWS_BUILD_TYPE=RelWithDebInfo make -C test/integration check
+```

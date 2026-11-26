@@ -1459,6 +1459,53 @@ s3_overlay_min_seq(const struct s3_overlay *ov)
 	return min;
 }
 
+uint64_t
+s3_overlay_max_seq(const struct s3_overlay *ov)
+{
+	struct overlay_chunk *c;
+	uint64_t max = 0;
+	if (!ov) { return 0; }
+	TAILQ_FOREACH(c, &ov->live_q, live_link) {
+		for (uint32_t i = 0; i < ov->blocks_per_chunk; i++) {
+			if (c->blocks[i].state != OVERLAY_ABSENT && c->blocks[i].seq > max) {
+				max = c->blocks[i].seq;
+			}
+		}
+	}
+	return max;
+}
+
+uint32_t
+s3_overlay_chunk_before_seq(const struct s3_overlay *ov, uint64_t chunk,
+			     uint64_t cutoff)
+{
+	if (!ov || chunk >= ov->num_chunks || !ov->chunks[chunk]) { return 0; }
+	struct overlay_chunk *c = ov->chunks[chunk];
+	uint32_t count = 0;
+	for (uint32_t i = 0; i < ov->blocks_per_chunk; i++) {
+		if (c->blocks[i].state != OVERLAY_ABSENT &&
+		    c->blocks[i].durable_floor_seq <= cutoff) { count++; }
+	}
+	return count;
+}
+
+int
+s3_overlay_next_dirty_before_seq(struct s3_overlay *ov, uint64_t cutoff,
+				  uint64_t *chunk_index)
+{
+	struct overlay_chunk *c;
+	if (!ov || !chunk_index) { return -EINVAL; }
+	TAILQ_FOREACH(c, &ov->live_q, live_link) {
+		if (c->queued && c->min_seq <= cutoff) {
+			*chunk_index = c->index;
+			overlay_chunk_dequeue(ov, c);
+			ov->stats.flushed_forced++;
+			return 0;
+		}
+	}
+	return -ENOENT;
+}
+
 /* ==========================================================================
  * Accessors
  * ========================================================================== */

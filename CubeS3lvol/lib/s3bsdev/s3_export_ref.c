@@ -162,6 +162,12 @@ walk_layer(struct ref_walk *w, struct spdk_blob *blob, const char *uuid_str,
 		}
 
 		device_chunk = s3_lba_to_chunk_index(lba, w->chunk_shift);
+		/* A read-only ancestor can be materialised after the drain fence.
+		 * Never publish a stale/partial mapping for such a physical chunk;
+		 * the caller's copy path reads its current content through blobstore. */
+		if (s3_bs_dev_chunk_is_live(w->bs_dev, device_chunk)) {
+			return -ENOTSUP;
+		}
 
 		rc = s3_chunk_map_lookup(w->map, device_chunk, &uuid, &valid_bytes);
 		if (rc != 0) {
