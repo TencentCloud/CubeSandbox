@@ -192,8 +192,12 @@ func withSnapshotLifecycleLock(ctx context.Context, sandboxID string, fn func(co
 // EnsureNoActiveSnapshotJobInTx checks durable work while the Attach
 // admission transaction holds the sandbox spec row lock.
 func EnsureNoActiveSnapshotJobInTx(tx *gorm.DB, sandboxID string) error {
+	return ensureNoActiveCaptureInTx(tx, sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback, JobOperationCommit)
+}
+
+func ensureNoActiveCaptureInTx(tx *gorm.DB, sandboxID string, operations ...string) error {
 	// Use a current read after taking the spec lock on MySQL.
-	_, err := getActiveSnapshotJobBySandboxIDTx(tx.Clauses(clause.Locking{Strength: "UPDATE"}), sandboxID)
+	_, err := getActiveSnapshotJobBySandboxIDTx(tx.Clauses(clause.Locking{Strength: "UPDATE"}), sandboxID, operations...)
 	return activeSnapshotJobError(err, sandboxID)
 }
 
@@ -526,7 +530,7 @@ func prepareSnapshotCreateJob(ctx context.Context, requestID, sandboxID, nodeID,
 			if err := lockSnapshotCaptureMounts(tx, sandboxID, storedReq); err != nil {
 				return err
 			}
-			if err := EnsureNoActiveSnapshotJobInTx(tx, sandboxID); err != nil {
+			if err := ensureNoActiveCaptureInTx(tx, sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback); err != nil {
 				return err
 			}
 			if err := createSnapshotTx(ctx, tx, snapshotID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), snapRec); err != nil {
@@ -1025,7 +1029,7 @@ func rollbackSandboxToSnapshot(ctx, callerCtx context.Context, requestID, sandbo
 			if err := validateSnapshotNewUse(current, time.Now()); err != nil {
 				return err
 			}
-			if err := EnsureNoActiveSnapshotJobInTx(tx, sandboxID); err != nil {
+			if err := ensureNoActiveCaptureInTx(tx, sandboxID, JobOperationSnapshotCreate, JobOperationSnapshotRollback); err != nil {
 				return err
 			}
 			if err := rejectActiveSnapshotJobTx(tx, snapshotID); err != nil {

@@ -11,7 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -43,6 +47,7 @@ func TestNewCommitTemplateImageJobRecordPersistsIdentityFields(t *testing.T) {
 		"job-commit-1",
 		"req-123",
 		"tpl-commit-1",
+		"sb-source",
 		"node-a",
 		"10.0.0.1",
 		createReq,
@@ -52,6 +57,9 @@ func TestNewCommitTemplateImageJobRecordPersistsIdentityFields(t *testing.T) {
 	)
 	if record.RequestID != "req-123" {
 		t.Fatalf("RequestID=%q, want %q", record.RequestID, "req-123")
+	}
+	if record.SandboxID != "sb-source" {
+		t.Fatalf("SandboxID=%q, want sb-source", record.SandboxID)
 	}
 	if record.Operation != JobOperationCommit {
 		t.Fatalf("Operation=%q, want %q", record.Operation, JobOperationCommit)
@@ -70,6 +78,56 @@ func TestNewCommitTemplateImageJobRecordPersistsIdentityFields(t *testing.T) {
 	}
 	if record.Status != JobStatusPending || record.Phase != JobPhaseSnapshotting {
 		t.Fatalf("unexpected initial state: status=%q phase=%q", record.Status, record.Phase)
+	}
+}
+
+func TestTemplateCommitWorkerSettlesDatabaseErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		failPhase  string
+		unreadable bool
+		captures   int
+		cleanups   int
+	}{
+		{"claim", JobPhaseSnapshotting, false, 0, 0},
+		{"register while owned", JobPhaseRegistering, false, 1, 1},
+		{"register with unknown ownership", JobPhaseRegistering, true, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := snapshotReservationTestDB(t)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+			createReq, storedReq := newCommitFixtureRequests()
+			job := newCommitTemplateImageJobRecord("job", "req", "tpl-commit-1", "sb", "node", "127.0.0.1", createReq, "{}", 1, "")
+			require.NoError(t, db.Create(job).Error)
+			require.NoError(t, db.Exec(fmt.Sprintf(`CREATE TRIGGER fail_commit_phase BEFORE UPDATE ON %s
+				WHEN NEW.status = '%s' AND NEW.phase = '%s'
+				BEGIN SELECT RAISE(FAIL, 'injected phase failure'); END`, constants.TemplateImageJobTableName, JobStatusRunning, tc.failPhase)).Error)
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			var captures, cleanups int
+			patches.ApplyFunc(cubelet.GetCubeletAddr, func(ip string) string { return ip })
+			patches.ApplyFunc(cubelet.CommitSandbox, func(_ context.Context, ip string, _ *cubeboxv1.CommitSandboxRequest) (*cubeboxv1.CommitSandboxResponse, error) {
+				captures++
+				return okCommit(ip)
+			})
+			patches.ApplyFunc(cubelet.CleanupTemplate, func(context.Context, string, *cubeboxv1.CleanupTemplateRequest) (*cubeboxv1.CleanupTemplateResponse, error) {
+				cleanups++
+				return successCleanup(), nil
+			})
+			if tc.unreadable {
+				patches.ApplyFunc(getTemplateImageJobRecordByID, func(context.Context, string) (*models.TemplateImageJob, error) {
+					return nil, errors.New("ownership read failed")
+				})
+			}
+			runTemplateCommitJob(t.Context(), job.JobID, job.SandboxID, job.NodeID, job.NodeIP, createReq, storedReq)
+			require.NoError(t, db.First(job, job.ID).Error)
+			require.Equal(t, JobStatusFailed, job.Status)
+			require.Contains(t, job.ErrorMessage, "injected phase failure")
+			require.Equal(t, tc.captures, captures)
+			require.Equal(t, tc.cleanups, cleanups)
+		})
 	}
 }
 

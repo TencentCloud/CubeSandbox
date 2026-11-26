@@ -85,12 +85,20 @@ func stubCommitJob(t *testing.T, stubs commitJobStubs) *jobWriteLog {
 	writes := &jobWriteLog{}
 	patches := gomonkey.NewPatches()
 	t.Cleanup(patches.Reset)
-	patches.ApplyFunc(updateTemplateImageJob, func(_ context.Context, _ string, fields map[string]any) error {
+	update := func(_ context.Context, _ string, fields map[string]any) error {
 		writes.record(fields)
 		if stubs.updateJob != nil {
 			return stubs.updateJob(fields)
 		}
 		return nil
+	}
+	patches.ApplyFunc(updateTemplateImageJob, update)
+	patches.ApplyFunc(claimSnapshotJobExecution, func(ctx context.Context, jobID, phase string, progress int32) (bool, error) {
+		err := update(ctx, jobID, map[string]any{"status": JobStatusRunning, "phase": phase, "progress": int(progress)})
+		return err == nil, err
+	})
+	patches.ApplyFunc(UpdateTemplateImageJobIfTransitionAllowed, func(ctx context.Context, jobID string, fields map[string]any, _ string) error {
+		return update(ctx, jobID, fields)
 	})
 	patches.ApplyFunc(cubelet.GetCubeletAddr, func(ip string) string { return ip })
 	patches.ApplyFunc(cubelet.CommitSandbox, func(_ context.Context, ep string, _ *cubeboxv1.CommitSandboxRequest) (*cubeboxv1.CommitSandboxResponse, error) {

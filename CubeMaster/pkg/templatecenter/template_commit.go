@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	cubeboxv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"go.opentelemetry.io/otel/attribute"
@@ -38,6 +39,8 @@ const commitSandboxRPCTimeout = 5 * time.Minute
 // cleanupTemplateRPCTimeout bounds the best-effort cleanup RPC used when the
 // commit job rolls back after a partial success.
 const cleanupTemplateRPCTimeout = 1 * time.Minute
+
+var ErrTemplateCommitRuntimeMounts = errors.New("template commit cannot capture runtime-attached volumes until template restore supports device reattachment")
 
 // JobPhaseSnapshotting / JobPhaseRegistering are declared with the rest of
 // the JobPhase* set in template_image.go; they are referenced here without
@@ -86,6 +89,10 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 	if err != nil {
 		return nil, err
 	}
+	matches := func(job *models.TemplateImageJob) bool {
+		// Older COMMIT rows did not record the source sandbox.
+		return job.RequestJSON == requestSnapshot && (job.SandboxID == "" || job.SandboxID == sandboxID)
+	}
 	jobID = uuid.New().String()
 	attemptNo := int32(1)
 	retryOfJobID := ""
@@ -93,7 +100,7 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 		// Idempotency: the same (request_id, COMMIT) tuple uniquely identifies a
 		// commit attempt. Reuse a prior job when payload matches; reject on drift.
 		if job, err := getTemplateImageJobByRequestOperation(ctx, requestID, JobOperationCommit); err == nil {
-			if job.RequestJSON == requestSnapshot {
+			if matches(job) {
 				jobID = job.JobID
 				reusedExistingJob = true
 				return nil
@@ -115,7 +122,7 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 		}
 
 		if job, err := getActiveTemplateImageJobByTemplateID(ctx, templateID); err == nil {
-			if job.RequestJSON == requestSnapshot {
+			if matches(job) {
 				jobID = job.JobID
 				reusedExistingJob = true
 				return nil
@@ -132,26 +139,36 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 			return err
 		}
 
-		if definitionFailed {
-			if err := cleanupTemplateReplicas(ctx, templateID); err != nil {
-				return err
-			}
-			if err := cleanupTemplateMetadata(ctx, templateID); err != nil {
-				return err
-			}
-		}
-
 		if latestJob != nil {
 			attemptNo = nextAttemptNoFromLatest(latestJob.AttemptNo)
 			retryOfJobID = latestJob.JobID
 		}
-		record := newCommitTemplateImageJobRecord(jobID, requestID, templateID, nodeID, nodeIP, createReq, requestSnapshot, attemptNo, retryOfJobID)
-		if createErr := store.db.WithContext(ctx).Table(constants.TemplateImageJobTableName).Create(record).Error; createErr != nil {
+		var oldTargets *templateCleanupTargets
+		if definitionFailed {
+			// Jobs are cleanup locators too. Exclude the node of the attempt about to be inserted.
+			var err error
+			oldTargets, err = discoverTemplateCleanupTargets(ctx, templateID, "")
+			if err != nil {
+				return err
+			}
+		}
+		record := newCommitTemplateImageJobRecord(jobID, requestID, templateID, sandboxID, nodeID, nodeIP, createReq, requestSnapshot, attemptNo, retryOfJobID)
+		createErr := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// A reusable template restores guest memory without reconnecting hot-plugged devices.
+			if err := lockSnapshotCaptureMounts(tx, sandboxID, nil); err != nil {
+				if errors.Is(err, sandboxspec.ErrRuntimeMountsChanged) {
+					return fmt.Errorf("%w: %w", ErrTemplateAttemptInProgress, ErrTemplateCommitRuntimeMounts)
+				}
+				return err
+			}
+			return tx.Table(constants.TemplateImageJobTableName).Create(record).Error
+		})
+		if createErr != nil {
 			// Concurrent writer may have inserted the same (request_id, COMMIT)
 			// tuple between our lookup and create. Fall back to idempotent reuse.
-			if isDuplicateKeyError(createErr) {
+			if isDuplicateKeyError(createErr) || errors.Is(createErr, ErrTemplateAttemptInProgress) {
 				if job, lookupErr := getTemplateImageJobByRequestOperation(ctx, requestID, JobOperationCommit); lookupErr == nil {
-					if job.RequestJSON == requestSnapshot {
+					if matches(job) {
 						jobID = job.JobID
 						reusedExistingJob = true
 						return nil
@@ -160,6 +177,15 @@ func SubmitTemplateCommit(ctx context.Context, requestID, sandboxID, nodeID, nod
 				}
 			}
 			return createErr
+		}
+		if oldTargets != nil {
+			cleanupErr := cleanupDiscoveredTemplateReplicas(ctx, templateID, oldTargets)
+			if cleanupErr == nil {
+				cleanupErr = cleanupTemplateMetadata(ctx, templateID)
+			}
+			if cleanupErr != nil {
+				return errors.Join(cleanupErr, failActiveTemplateCommit(ctx, jobID, cleanupErr))
+			}
 		}
 		return nil
 	}); err != nil {
@@ -243,6 +269,19 @@ func inheritTemplateManagedQosAnnotations(dst, src *sandboxtypes.CreateCubeSandb
 	}
 }
 
+func failActiveTemplateCommit(ctx context.Context, jobID string, cause error) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTemplateRPCTimeout)
+	defer cancel()
+	tx := store.db.WithContext(writeCtx).Where("status IN ?", []string{JobStatusPending, JobStatusRunning})
+	err := updateTemplateImageJobTx(tx, jobID, map[string]any{
+		"status": JobStatusFailed, "progress": 100, "error_message": cause.Error(),
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil // The worker no longer owns an active job.
+	}
+	return err
+}
+
 func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP string, createReq, storedReq *sandboxtypes.CreateCubeSandboxReq) {
 	var jobErr error
 	templateID := createReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID]
@@ -286,14 +325,17 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 			attribute.String(telemetry.AttrTemplateID, templateID),
 			attribute.String(telemetry.AttrNodeIP, nodeIP),
 		))
-	_ = updateTemplateImageJob(snapshotCtx, jobID, map[string]any{
-		"status":   JobStatusRunning,
-		"phase":    JobPhaseSnapshotting,
-		"progress": 10,
-	})
-
 	commitCtx, commitCancel := context.WithTimeout(snapshotCtx, commitSandboxRPCTimeout)
 	defer commitCancel()
+	claimed, err := claimSnapshotJobExecution(commitCtx, jobID, JobPhaseSnapshotting, 10)
+	if err != nil {
+		jobErr = errors.Join(err, failActiveTemplateCommit(snapshotCtx, jobID, err))
+		logger.Errorf("cannot claim template commit: %v", jobErr)
+		return
+	}
+	if !claimed {
+		return
+	}
 	commitRsp, err := cubelet.CommitSandbox(commitCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CommitSandboxRequest{
 		RequestID:   uuid.NewString(),
 		SandboxID:   sandboxID,
@@ -342,13 +384,6 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 			attribute.String(telemetry.AttrTemplateID, templateID),
 		))
 	snapshotPath := commitRsp.GetSnapshotPath()
-	_ = updateTemplateImageJob(registerCtx, jobID, map[string]any{
-		"phase":         JobPhaseRegistering,
-		"progress":      70,
-		"node_id":       nodeID,
-		"node_ip":       nodeIP,
-		"snapshot_path": snapshotPath,
-	})
 
 	definitionCreated := false
 	cleanupOnFailure := func(cause error) {
@@ -410,6 +445,29 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		jobErr = cause
 	}
 
+	if err := UpdateTemplateImageJobIfTransitionAllowed(registerCtx, jobID, map[string]any{
+		"phase":         JobPhaseRegistering,
+		"progress":      70,
+		"node_id":       nodeID,
+		"node_ip":       nodeIP,
+		"snapshot_path": snapshotPath,
+	}, JobStatusRunning); err != nil {
+		jobErr = err
+		if !errors.Is(err, ErrTerminalJobStatusFlip) && !errors.Is(err, gorm.ErrRecordNotFound) {
+			readCtx, cancel := context.WithTimeout(registerCtx, cleanupTemplateRPCTimeout)
+			job, readErr := getTemplateImageJobRecordByID(readCtx, jobID)
+			cancel()
+			if readErr == nil && job.Status == JobStatusRunning {
+				cleanupOnFailure(err)
+				return
+			}
+			jobErr = errors.Join(err, readErr, failActiveTemplateCommit(registerCtx, jobID, err))
+		}
+		// An obsolete or unverified worker cannot clean a template ID another attempt may own.
+		logger.Errorf("cannot register template commit result: %v", jobErr)
+		return
+	}
+
 	if err := createDefinition(registerCtx, templateID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations)); err != nil {
 		cleanupOnFailure(err)
 		return
@@ -444,7 +502,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 
 	localcache.RegisterTemplateReplica(templateID, nodeID, 1)
-	if writeErr := updateTemplateImageJob(registerCtx, jobID, map[string]any{
+	if writeErr := UpdateTemplateImageJobIfTransitionAllowed(registerCtx, jobID, map[string]any{
 		"status":              JobStatusReady,
 		"phase":               JobPhaseRegistering,
 		"progress":            100,
@@ -453,7 +511,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"failed_node_count":   max(expectedNodes-1, 0),
 		"template_status":     templateStatus,
 		"error_message":       "",
-	}); writeErr != nil {
+	}, JobStatusReady); writeErr != nil {
 		jobErr = writeErr
 	}
 	logger.Infof("template commit job finished successfully")
@@ -488,7 +546,7 @@ func buildCommitFailureMessage(commitRsp *cubeboxv1.CommitSandboxResponse) strin
 }
 
 func newCommitTemplateImageJobRecord(
-	jobID, requestID, templateID, nodeID, nodeIP string,
+	jobID, requestID, templateID, sandboxID, nodeID, nodeIP string,
 	createReq *sandboxtypes.CreateCubeSandboxReq,
 	requestSnapshot string,
 	attemptNo int32,
@@ -497,6 +555,7 @@ func newCommitTemplateImageJobRecord(
 	return &models.TemplateImageJob{
 		JobID:                   jobID,
 		TemplateID:              templateID,
+		SandboxID:               sandboxID,
 		RequestID:               requestID,
 		AttemptNo:               attemptNo,
 		RetryOfJobID:            retryOfJobID,
