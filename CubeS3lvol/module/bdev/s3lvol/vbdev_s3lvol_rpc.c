@@ -20,7 +20,7 @@
  *
  *     rcow_create_lvstore / rcow_attach_lvstore / rcow_delete_lvstore
  *     rcow_unload_lvstore / rcow_flush_lvstore / rcow_checkpoint_lvstore
- *     rcow_get_lvstores / rcow_add_s3_config
+ *     rcow_get_lvstores / rcow_lvstore_attached / rcow_add_s3_config
  *     rcow_create_lvol / rcow_delete_lvol / rcow_resize_lvol
  *     rcow_create_snapshot / rcow_create_clone
  *     rcow_export_snapshot / rcow_get_snapshot_status / rcow_import_lvol
@@ -2186,6 +2186,45 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 	spdk_jsonrpc_end_result(request, w);
 }
 SPDK_RPC_REGISTER("rcow_get_lvstores", rpc_rcow_get_lvstores,
+		  SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
+ * rcow_lvstore_attached
+ *
+ * Whether the named lvstore is attached, as a bare JSON boolean. true from the
+ * moment the create/attach chain publishes it -- after the journal and WAL
+ * replays -- until an unload starts; false for any other name or state.
+ *
+ * This is the readiness check of the Kubernetes sidecar. It costs one lookup by
+ * name, where rcow_get_lvstores walks every lvol on this thread, and the answer
+ * is a value rather than the wording of an error.
+ * ========================================================================== */
+
+static void
+rpc_rcow_lvstore_attached(struct spdk_jsonrpc_request *request,
+			  const struct spdk_json_val *params)
+{
+	struct rpc_lvstore_name req = {0};
+	struct s3lvol_lvstore *lvs;
+	struct spdk_json_write_ctx *w;
+
+	if (spdk_json_decode_object(params, rpc_lvstore_name_decoders,
+				    SPDK_COUNTOF(rpc_lvstore_name_decoders), &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		goto cleanup;
+	}
+
+	lvs = s3lvol_lvstore_find(req.lvs_name);
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, lvs != NULL && !s3lvol_lvstore_is_unloading(lvs));
+	spdk_jsonrpc_end_result(request, w);
+
+cleanup:
+	free(req.lvs_name);
+}
+SPDK_RPC_REGISTER("rcow_lvstore_attached", rpc_rcow_lvstore_attached,
 		  SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
