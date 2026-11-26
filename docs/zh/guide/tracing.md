@@ -91,6 +91,14 @@ Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后�
 
 查不到时，先确认查询时间范围覆盖了操作时间。失败请求可能尚未生成沙箱或快照 ID，这时可用已有的 `cube.request_id` 查询。
 
+### 可选的 Grafana Tempo 看板
+
+如果 Grafana 已配置 Tempo 数据源，下载并导入 [CubeSandbox Sandbox Traces 看板 JSON](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/grafana/cubesandbox-sandbox-trace.json)。选择 **Tempo datasource**，填写 **Sandbox ID**，再选择覆盖操作时间的查询范围。点击结果中的 Trace ID，即可在同一看板查看瀑布图。已有 Trace ID 时也可以直接填写。
+
+搜索会返回至少一个 Span 带有 `cube.sandbox_id` 属性的 Trace。同一沙箱的不同操作可能有不同的 Trace ID。
+
+### 解读 Span 耗时
+
 拿到 trace 后，按以下规则解读耗时：
 
 - 父 span 的耗时一般**包含**其嵌套工作，因此不要在它之上再累加嵌套耗时。脱离请求生命周期的异步子 span 可能超出父 span；父子重叠属于正常的嵌套——只有时间上重叠的兄弟任务才提示存在并行。

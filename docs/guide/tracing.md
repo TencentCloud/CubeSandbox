@@ -91,6 +91,14 @@ One sandbox ID may match several traced operations within the backend retention 
 
 If a lookup returns no results, check that the time window includes the operation. A failed request may not have generated a sandbox or snapshot ID yet; use its `cube.request_id` when available.
 
+### Optional Grafana Tempo dashboard
+
+If you already have a Grafana Tempo data source, download and import the [CubeSandbox Sandbox Traces dashboard JSON](https://github.com/TencentCloud/CubeSandbox/blob/master/docs/grafana/cubesandbox-sandbox-trace.json). Select the **Tempo datasource**, enter a **Sandbox ID**, and choose a time range that includes your operation. Select a Trace ID in the results to open its waterfall on the same dashboard. If you already have a Trace ID, enter it directly.
+
+The search returns traces that have `cube.sandbox_id` on at least one span. Operations on the same sandbox can have separate Trace IDs.
+
+### Reading span durations
+
 Once you have the trace, read durations with these rules in mind:
 
 - A parent span's duration generally includes its nested work, so nested durations are not added on top of it. A detached async child can extend past its parent, and parent–child overlap is normal nesting — only sibling tasks that overlap in time suggest parallel work.
