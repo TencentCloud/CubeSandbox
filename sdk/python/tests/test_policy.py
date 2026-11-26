@@ -177,3 +177,41 @@ class TestE2BPerHostRulesCompat:
         # drop the host the caller keyed in — must raise, not no-op.
         with pytest.raises(ValueError, match="empty list"):
             _convert_e2b_per_host_rules({"api.example.com": []})
+
+
+class TestInjectRenderMatchesDataPlane:
+    """`Inject.render()` must preview exactly what the data plane will send.
+
+    CubeEgress substitutes only the *first* `${SECRET}` in an inject format
+    (`CubeEgress/lua/access_phase.lua`: `string.gsub(fmt, "%${SECRET}",
+    escaped, 1)` — note the trailing `1`). Python's `str.replace` with no
+    count substitutes every occurrence, so an operator previewing
+    `Basic ${SECRET}:${SECRET}` was shown a fully-substituted credential
+    while the sandbox's upstream received one that still contained a literal
+    `${SECRET}` — a broken credential plus a leaked placeholder.
+    """
+
+    @pytest.mark.parametrize(
+        "fmt,secret,expected",
+        [
+            ("${SECRET}", "tok", "tok"),
+            ("Bearer ${SECRET}", "tok", "Bearer tok"),
+            ("Basic ${SECRET}:${SECRET}", "tok", "Basic tok:${SECRET}"),
+            (
+                "${SECRET}-${SECRET}-${SECRET}",
+                "tok",
+                "tok-${SECRET}-${SECRET}",
+            ),
+            # The data plane escapes "%" in the replacement so secrets
+            # containing it round-trip; the preview must agree.
+            ("Bearer ${SECRET}", "a%2Fb", "Bearer a%2Fb"),
+        ],
+    )
+    def test_render_substitutes_only_the_first_placeholder(
+        self, fmt: str, secret: str, expected: str
+    ) -> None:
+        rendered = Inject(header="Authorization", secret=secret, format=fmt).render()
+        assert rendered == expected
+
+    def test_render_defaults_to_bare_secret_when_format_absent(self) -> None:
+        assert Inject(header="Authorization", secret="tok").render() == "tok"
