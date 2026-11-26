@@ -202,8 +202,23 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 
 	var lastErr error
 	for i, attempt := range attempts {
+		startedAt := time.Now()
 		err := downloadArtifactFromSource(ctx, imagePath, attempt, expectedSHA, expectedSize)
 		if err == nil {
+			// The source actually used is otherwise unobservable: it is chosen
+			// by CubeMaster, carried in annotations, and a silent fallback to
+			// the legacy URL looks exactly like a successful direct download.
+			// Without this line a direct-vs-proxy measurement cannot attribute
+			// its own numbers, and "direct is no faster" is indistinguishable
+			// from "direct was never used".
+			elapsed := time.Since(startedAt)
+			var rate string
+			if expectedSize > 0 && elapsed > 0 {
+				rate = fmt.Sprintf(", %.1f MiB/s",
+					float64(expectedSize)/(1024*1024)/elapsed.Seconds())
+			}
+			log.G(ctx).Infof("artifact downloaded from source %s in %s (%d bytes%s)",
+				attempt.source, elapsed.Truncate(time.Millisecond), expectedSize, rate)
 			return nil
 		}
 		lastErr = err
