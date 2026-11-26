@@ -86,10 +86,8 @@ func (s *Store) bootstrapMasterKey(ctx context.Context) error {
 	}
 
 	if b64 == "" {
-		// 2. Fallback: read from the old agenthub settings table.
-		//    This covers the upgrade window where the migration has run
-		//    (key copied to t_system_setting) but also the case where
-		//    CubeOps starts against a DB that hasn't been migrated yet.
+		// 2. Fallback: during an upgrade the key may still live only in the legacy
+		//    table. An unmigrated DB fails fast on the read above with a clear error.
 		b64, err = s.GetSetting(ctx, "secret_master_key")
 		if err != nil {
 			return fmt.Errorf("read master key from t_agenthub_setting: %w", err)

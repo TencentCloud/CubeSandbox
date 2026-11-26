@@ -63,8 +63,11 @@ func (h *Handler) Login(c *gin.Context) {
 			httputil.WriteError(c, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
+		if writeClientError(c, err) {
+			return
+		}
 		logging.G(c.Request.Context()).Errorf("login failed: internal error: username=%q client_ip=%s error=%q", req.Username, c.ClientIP(), err.Error())
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	httputil.WriteJSON(c, http.StatusOK, model.LoginResponse{
@@ -110,18 +113,21 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	case err == nil:
 		logging.G(c.Request.Context()).Infof("password changed: operator=%q result=success", username)
 		httputil.WriteNoContent(c)
+		return
 	case errors.Is(err, service.ErrUnauthenticated):
 		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=unauthenticated", username)
 		httputil.WriteError(c, http.StatusUnauthorized, "authentication required")
+		return
 	case errors.Is(err, service.ErrInvalidOldPassword):
 		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=invalid_old_password", username)
 		httputil.WriteError(c, http.StatusUnauthorized, "current password is incorrect or user not found")
-	default:
-		logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=error error=%q", username, err.Error())
-		// Validation errors and DB errors share the 500 path here; finer
-		// mapping can be added by wrapping with sentinel errors if needed.
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		return
 	}
+	if writeClientError(c, err) {
+		return
+	}
+	logging.G(c.Request.Context()).Errorf("password change failed: operator=%q result=error error=%q", username, err.Error())
+	httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 }
 
 // Refresh handles POST /auth/refresh.
@@ -137,11 +143,26 @@ func (h *Handler) Refresh(c *gin.Context) {
 			httputil.WriteError(c, http.StatusUnauthorized, "invalid or expired refresh token")
 			return
 		}
-		httputil.WriteError(c, http.StatusInternalServerError, err.Error())
+		if writeClientError(c, err) {
+			return
+		}
+		logging.G(c.Request.Context()).Errorf("token refresh failed: internal error: client_ip=%s error=%q", c.ClientIP(), err.Error())
+		httputil.WriteError(c, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	httputil.WriteJSON(c, http.StatusOK, model.RefreshResponse{
 		AccessToken:  accessToken,
 		RefreshToken: newRefreshToken,
 	})
+}
+
+// writeClientError writes a 4xx *service.Error with its own message and reports
+// whether it did; anything else is left for the caller's generic 500 path.
+func writeClientError(c *gin.Context, err error) bool {
+	var svcErr *service.Error
+	if !errors.As(err, &svcErr) || svcErr.Status < 400 || svcErr.Status >= 500 {
+		return false
+	}
+	httputil.WriteError(c, svcErr.Status, svcErr.Message)
+	return true
 }

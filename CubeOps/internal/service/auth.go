@@ -11,7 +11,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -72,24 +71,17 @@ type LoginResult struct {
 //
 // To prevent user enumeration, a missing user and a wrong password are both
 // surfaced as ErrInvalidCredentials — the caller cannot tell them apart from
-// the response. Genuine infrastructure errors (DB down, etc.) are still
-// returned verbatim so the operator can diagnose them.
+// the response. Infra errors are wrapped; the handler logs the detail
+// and returns a generic body to the client.
 func (s *AuthService) Login(ctx context.Context, username, password string) (*LoginResult, error) {
 	if username == "" || password == "" {
-		return nil, errors.New("username and password are required")
+		return nil, NewBadRequest("username and password are required")
 	}
 	stored, err := s.store.GetUserPassword(ctx, username)
 	if err != nil {
-		// Distinguish "user not found" (→ ErrInvalidCredentials, safe to
-		// expose) from infrastructure errors (→ return verbatim). We do this
-		// by checking whether stored is empty — the store layer returns "" +
-		// a "not found" error when the row is missing.
-		if stored == "" {
-			return nil, ErrInvalidCredentials
-		}
 		return nil, fmt.Errorf("failed to read user: %w", err)
 	}
-	if !crypto.VerifyPassword(stored, password) {
+	if stored == "" || !crypto.VerifyPassword(stored, password) {
 		return nil, ErrInvalidCredentials
 	}
 	accessToken, err := s.jm.GenerateAccessToken(username)
@@ -125,7 +117,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*Lo
 // invalidates the previous token.
 func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (string, string, error) {
 	if refreshToken == "" {
-		return "", "", errors.New("refreshToken is required")
+		return "", "", NewBadRequest("refreshToken is required")
 	}
 	claims, err := s.jm.VerifyRefreshToken(refreshToken)
 	if err != nil {
@@ -171,16 +163,16 @@ func (s *AuthService) ChangePassword(ctx context.Context, username, oldPassword,
 		return ErrUnauthenticated
 	}
 	if oldPassword == "" || newPassword == "" {
-		return errors.New("oldPassword and newPassword are required")
+		return NewBadRequest("oldPassword and newPassword are required")
 	}
 	if len(newPassword) < 4 {
-		return errors.New("new password must be at least 4 characters")
+		return NewBadRequest("new password must be at least 4 characters")
 	}
 	stored, err := s.store.GetUserPassword(ctx, username)
 	if err != nil {
 		return fmt.Errorf("failed to read user: %w", err)
 	}
-	if !crypto.VerifyPassword(stored, oldPassword) {
+	if stored == "" || !crypto.VerifyPassword(stored, oldPassword) {
 		return ErrInvalidOldPassword
 	}
 	newHash, err := crypto.HashPassword(newPassword)
