@@ -15,11 +15,14 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v7"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/telemetry"
 )
 
 // Options bundles dependencies for the Resumer. Concrete production wiring
@@ -130,8 +133,13 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 	// resuming) live in the same key. SETNX alone can't distinguish "I'm
 	// resuming this" from "this sandbox is parked at terminal-paused waiting
 	// for someone to resume it" — we need to peek first.
-	switch ownErr := r.acquireResumeOwnership(ctx, sandboxID); {
+	ownershipCtx, span := telemetry.Start(ctx, telemetry.SpanResumeOwnership,
+		trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, sandboxID)))
+	ownErr := r.acquireResumeOwnership(ownershipCtx, sandboxID)
+	switch {
 	case ownErr == nil:
+		span.SetAttributes(attribute.String(telemetry.AttrAction, "acquired"))
+		telemetry.End(span, nil)
 		// We took the "resuming" lock; we're on the hook to drive the RPC.
 		// AutoResume gate lives here (the only path that would call
 		// CubeMaster.Resume) — return early if the sandbox opted out of
@@ -145,6 +153,8 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 			return err
 		}
 	case errors.Is(ownErr, errAlreadyRunning):
+		span.SetAttributes(attribute.String(telemetry.AttrAction, "already_running"))
+		telemetry.End(span, nil)
 		// Sandbox is already running per Redis. Skip the RPC and run the
 		// success bookkeeping below so we re-assert state to the proxy.
 		// This covers two important cases:
@@ -156,6 +166,8 @@ func (r *Resumer) doResume(ctx context.Context, sandboxID string) error {
 		//      well be false — that's fine; the sandbox is running and the
 		//      request should be forwarded.
 	default:
+		span.SetAttributes(attribute.String(telemetry.AttrAction, "refused"))
+		telemetry.End(span, ownErr)
 		return ownErr
 	}
 

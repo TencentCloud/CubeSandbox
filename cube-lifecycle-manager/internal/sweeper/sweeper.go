@@ -181,7 +181,13 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 				zap.String("sandbox_id", e.Meta.SandboxID),
 				zap.Duration("idle_for", idleFor),
 				zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds))
-			if err := s.tryPause(ctx, e); err != nil {
+			pauseCtx, span := telemetry.Start(ctx, telemetry.SpanSweepPause,
+				trace.WithNewRoot(),
+				trace.WithAttributes(sweepAttributes(e, idleFor, timeout)...),
+			)
+			err := s.tryPause(pauseCtx, e)
+			telemetry.End(span, err)
+			if err != nil {
 				s.pauseFailed.Add(1)
 				s.o.Log.Warn("auto-pause failed",
 					zap.String("sandbox_id", e.Meta.SandboxID),
@@ -198,13 +204,9 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 		// Each timeout action has its own trace. Empty sweeps emit no spans.
 		killCtx, span := telemetry.Start(ctx, telemetry.SpanSweepKill,
 			trace.WithNewRoot(),
-			trace.WithAttributes(
-				attribute.String(telemetry.AttrSandboxID, e.Meta.SandboxID),
-				attribute.String(telemetry.AttrInstanceType, e.Meta.InstanceType),
+			trace.WithAttributes(append(sweepAttributes(e, idleFor, timeout),
 				attribute.String(telemetry.AttrKillReason, cubemasterclient.KillReasonTimeout),
-				attribute.Int64(telemetry.AttrIdleMS, idleFor.Milliseconds()),
-				attribute.Int64(telemetry.AttrTimeoutMS, timeout.Milliseconds()),
-			),
+			)...),
 		)
 		err := s.tryKill(killCtx, e)
 		telemetry.End(span, err)
@@ -215,6 +217,15 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 				zap.Duration("idle_for", idleFor),
 				zap.Error(err))
 		}
+	}
+}
+
+func sweepAttributes(e registry.Entry, idleFor, timeout time.Duration) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(telemetry.AttrSandboxID, e.Meta.SandboxID),
+		attribute.String(telemetry.AttrInstanceType, e.Meta.InstanceType),
+		attribute.Int64(telemetry.AttrIdleMS, idleFor.Milliseconds()),
+		attribute.Int64(telemetry.AttrTimeoutMS, timeout.Milliseconds()),
 	}
 }
 

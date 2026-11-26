@@ -59,11 +59,13 @@ Cubelet launches a fresh CubeShim process per sandbox; the process lives alongsi
 
 Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
 
-### Lifecycle Manager timeout cleanup
+### Lifecycle Manager automatic actions
 
-To trace idle-timeout deletion, set an OTLP/gRPC endpoint on the Lifecycle Manager process. For Helm, add `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) under `lifecycleManager.env`.
+To trace automatic pause, resume, and timeout deletion, set an OTLP/gRPC endpoint on the Lifecycle Manager process. For Helm, add `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) under `lifecycleManager.env`.
 
 The `clm.sweep.kill` span records the sandbox ID, idle duration, and configured timeout. Its `clm.cubemaster.kill` child records CubeMaster's business return code and sends the trace context with `DELETE /cube/sandbox`. A complete trace into CubeMaster and Cubelet also requires deletion tracing on those components.
+
+Automatic pause starts a `clm.sweep.pause` trace with the sandbox ID, idle duration, and timeout. When a data-plane request wakes a paused sandbox, CubeProxy forwards the W3C trace context to Lifecycle Manager. The `clm.sandbox.resume` span covers the resume request, and `clm.sandbox.resume.ownership` records the ownership result. Both actions use `clm.cubemaster.update` for the downstream request, with `cube.action` distinguishing `pause` and `resume`.
 
 ### Rust envd REST tracing
 

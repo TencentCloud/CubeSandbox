@@ -20,9 +20,15 @@ import (
 )
 
 const (
-	SpanSweepKill      = "clm.sweep.kill"
-	SpanCubeMasterKill = "clm.cubemaster.kill"
+	SpanSweepPause       = "clm.sweep.pause"
+	SpanResume           = "clm.sandbox.resume"
+	SpanResumeOwnership  = "clm.sandbox.resume.ownership"
+	SpanCubeMasterUpdate = "clm.cubemaster.update"
+	SpanSweepKill        = "clm.sweep.kill"
+	SpanCubeMasterKill   = "clm.cubemaster.kill"
 
+	AttrAction       = "cube.action"
+	AttrRequestID    = "cube.request_id"
 	AttrSandboxID    = "cube.sandbox_id"
 	AttrInstanceType = "cube.instance_type"
 	AttrKillReason   = "cube.kill_reason"
