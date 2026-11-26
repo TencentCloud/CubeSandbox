@@ -386,6 +386,7 @@ run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh
 run_suite replay_registry bash ./test/tools/test_replay_registry.sh
 run_suite lvs_identity ./test/tools/test_lvs_identity.sh
 run_suite bstore_recovery ./test/tools/test_bstore_recovery.sh
+run_suite writeback_shm_purge bash ./test/tools/test_writeback_shm_purge.sh
 run_suite tgt_cpumask ./test/tools/test_tgt_cpumask.sh
 echo ""
 
