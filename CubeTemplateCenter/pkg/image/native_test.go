@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -823,7 +824,7 @@ func TestStripSelinuxXattrsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()))
+	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()), nil, nil)
 	got, err := io.ReadAll(filtered)
 	if err != nil {
 		t.Fatalf("read filtered stream: %v", err)
@@ -893,7 +894,7 @@ func TestStripSelinuxXattrsClosesCleanlyOnEarlyClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()))
+	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()), nil, nil)
 	if _, err := io.CopyN(io.Discard, filtered, 4096); err != nil {
 		t.Fatalf("partial read: %v", err)
 	}
@@ -907,4 +908,89 @@ func TestStripSelinuxXattrsClosesCleanlyOnEarlyClose(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked: filter goroutine does not observe early close")
 	}
+}
+
+func TestStripSelinuxXattrsCloseClosesDecoderLast(t *testing.T) {
+	// Regression for the shutdown order: Close must drain pipe → underlying
+	// file → filter goroutine → decompress stream. The goroutine parks
+	// mid-read on the blocking source (no tar trailer), so the join can
+	// only complete via the file close; a spy decoder close asserts it
+	// runs after that file close, never before.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pw.Close()
+
+	// One tar header + payload WITHOUT the closing trailer: the goroutine
+	// consumes the entry and parks in tar.Reader.Next waiting for more.
+	// No need to read any filtered output — Close is tested from cold.
+	var src bytes.Buffer
+	tw := tar.NewWriter(&src)
+	if err := tw.WriteHeader(&tar.Header{Name: "a", Mode: 0o644, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write(src.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	spy := &decoderSpy{f: pr}
+	filtered := stripSelinuxXattrs(pr, pr, spy)
+	// Give the goroutine a moment to consume the entry and park.
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		_ = filtered.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked: the parked filter read must be unblocked by the file close")
+	}
+	if !spy.fileClosedAtDecoderClose() {
+		t.Fatal("decoder close must run after the underlying file close")
+	}
+	if spy.closeCount() != 1 {
+		t.Fatalf("decoder must be closed exactly once, got %d", spy.closeCount())
+	}
+}
+
+// decoderSpy records when the decompress stream is closed relative to the
+// underlying file. If Close's file step has not run yet, a read on the pipe
+// blocks (producer still open) and the 5 s test timeout fires; once the
+// file is closed the read returns immediately with ErrFileClosed.
+type decoderSpy struct {
+	mu     sync.Mutex
+	f      *os.File
+	closed bool
+	count  int
+}
+
+func (d *decoderSpy) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.count++
+	_, err := d.f.Read(make([]byte, 1))
+	if err == nil {
+		return errors.New("decoder spy read should fail on the closed source file")
+	}
+	d.closed = true
+	return nil
+}
+
+func (d *decoderSpy) fileClosedAtDecoderClose() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closed
+}
+
+func (d *decoderSpy) closeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.count
 }

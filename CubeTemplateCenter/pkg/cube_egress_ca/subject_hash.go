@@ -142,11 +142,21 @@ func isCanonicalizableString(class int, tag int) bool {
 
 // stringToUTF8 converts the raw content bytes of an ASN.1 string value to
 // UTF-8, mirroring OpenSSL's ASN1_STRING_to_UTF8 for the canonicalizable
-// types. ASCII-compatible encodings (UTF8, Printable, IA5, Visible, T61 as
-// Latin-1) pass through or expand per byte; BMP is UTF-16BE and Universal is
-// UTF-32.
+// types. UTF8/Printable/IA5/Visible pass through (ASCII by definition);
+// T61 is decoded as Latin-1 — bytes >= 0x80 widen to their multi-byte
+// UTF-8 sequence, exactly like ASN1_STRING_to_UTF8, so the hashed bytes
+// match OpenSSL's; BMP is UTF-16BE and Universal is UTF-32.
 func stringToUTF8(tag int, raw []byte) ([]byte, error) {
 	switch tag {
+	case 20: // T61String: OpenSSL decodes it as ISO-8859-1 (Latin-1).
+		// A raw pass-through would leave byte 0xE9 as a single byte
+		// where OpenSSL hashes 0xC3 0xA9, producing a different
+		// subject-hash for any non-ASCII T61 attribute.
+		out := make([]byte, 0, len(raw))
+		for _, b := range raw {
+			out = utf8.AppendRune(out, rune(b))
+		}
+		return out, nil
 	case 30: // BMPString: UTF-16 big endian
 		if len(raw)%2 != 0 {
 			return nil, errors.New("cube_egress_ca: BMPString has odd length")
@@ -168,8 +178,8 @@ func stringToUTF8(tag int, raw []byte) ([]byte, error) {
 		return out, nil
 	default:
 		// UTF8String passes through; Printable/IA5/Visible are ASCII
-		// subsets and T61 is treated as Latin-1, so a byte-wise widening is
-		// byte-identical to OpenSSL's conversion for valid inputs.
+		// subsets, so a byte-wise widening is byte-identical to
+		// OpenSSL's conversion for valid inputs.
 		return raw, nil
 	}
 }

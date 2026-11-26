@@ -268,17 +268,29 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	return res, nil
 }
 
-// resolveUnderRootfs joins rel onto rootfsDir and resolves symlinks in the
-// parent chain, verifying the result stays inside rootfsDir.
+// resolveUnderRootfs joins rel onto rootfsDir and resolves the path
+// component by component, verifying every existing component — including
+// the final one — stays inside rootfsDir.
 //
-// Image rootfs trees may legitimately contain absolute symlinks (Android:
-// etc -> /system/etc) whose targets only exist inside the guest; resolving
-// them against the *build host* would read or write host files outside
-// rootfsDir. When the resolved parent does not exist on the host (the usual
-// case for such symlinks) the original joined path is returned unchanged so
-// callers keep treating the target as "missing"; a symlink chain that
-// resolves to an existing location outside rootfsDir is an error, so the
-// bake fails loudly instead of touching build-host files.
+// Resolution semantics:
+//
+//   - An existing symlink component is resolved through. A chain landing
+//     outside rootfsDir is an error, so the bake fails loudly instead of
+//     reading or writing build-host files. This includes the final
+//     component: the previous Dir()+Base() re-join left the leaf
+//     unresolved, letting Stat/ReadFile/Rename reach host files through a
+//     leaf symlink whose parent chain was clean.
+//   - A missing component ends the walk: the remainder is joined onto the
+//     already-verified prefix instead of the raw path. Callers create the
+//     remainder fresh (MkdirAll/WriteFile), and a raw join could let
+//     MkdirAll traverse an earlier symlink into a host location that only
+//     partially exists, creating directories on the build host.
+//   - A dangling symlink (e.g. Android's /etc -> /system/etc, whose target
+//     only exists inside the guest) is treated like a missing path: the
+//     raw joined path is returned, readers see "missing" (Stat fails
+//     through the dangling link) and writers fail on it (MkdirAll cannot
+//     traverse a dangling link; the EEXIST is handled by seedBundle's
+//     skip logic).
 func resolveUnderRootfs(rootfsDir, rel string) (string, error) {
 	full := filepath.Join(rootfsDir, rel)
 	cleanRoot, err := filepath.EvalSymlinks(rootfsDir)
@@ -287,17 +299,55 @@ func resolveUnderRootfs(rootfsDir, rel string) (string, error) {
 		// failure as "cannot resolve" and fall through to the raw path.
 		return full, nil
 	}
-	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(full))
-	if err != nil {
-		// Missing parents are "missing", not errors — mirror the ENOENT
-		// handling of the underlying ReadFile/Stat callers.
-		return full, nil
+	if full != cleanRoot && !strings.HasPrefix(full, cleanRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q escapes rootfs %q lexically", rel, cleanRoot)
 	}
-	resolved := filepath.Join(resolvedParent, filepath.Base(full))
-	if resolved != cleanRoot && !strings.HasPrefix(resolved, cleanRoot+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path %q resolves to %q, outside the rootfs (symlink escape)", rel, resolved)
+	relParts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
+	resolved := cleanRoot
+	for i, part := range relParts {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return "", fmt.Errorf("path %q escapes rootfs %q lexically", rel, cleanRoot)
+		}
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// First missing component: the remainder is created fresh
+				// by the caller under the already-verified prefix.
+				return filepath.Join(append([]string{resolved}, relParts[i:]...)...), nil
+			}
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(next)
+			if err != nil {
+				// Dangling symlink: unreachable from the build host.
+				// Missing semantics for readers; writers fail on it.
+				return full, nil
+			}
+			next = target
+		}
+		if next != cleanRoot && !strings.HasPrefix(next, cleanRoot+string(os.PathSeparator)) {
+			return "", fmt.Errorf("path %q resolves to %q, outside the rootfs (symlink escape)", rel, next)
+		}
+		resolved = next
 	}
 	return resolved, nil
+}
+
+// writeFileNotThroughSymlink writes data to path, refusing when path itself
+// is a symlink: an image could ship <target>.cube-egress-tmp as a symlink
+// to a build-host file, and os.WriteFile would follow it out of the rootfs.
+// The Lstat/Write pair is not atomic, but the extracted rootfs is a static
+// artifact during the bake, so no concurrent mutation races it.
+func writeFileNotThroughSymlink(path string, data []byte, perm os.FileMode) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("cube_egress_ca: refusing to write through symlink %q", path)
+	}
+	return os.WriteFile(path, data, perm)
 }
 
 // parseCA validates that caPEM contains exactly one CERTIFICATE PEM
@@ -370,7 +420,7 @@ func appendBundle(full string, canonical, derNeedle []byte) (bool, string, error
 	merged = append(merged, existing...)
 	merged = append(merged, separator...)
 	merged = append(merged, canonical...)
-	if err := os.WriteFile(tmp, merged, 0o644); err != nil {
+	if err := writeFileNotThroughSymlink(tmp, merged, 0o644); err != nil {
 		return false, "", err
 	}
 	if err := os.Rename(tmp, full); err != nil {
@@ -407,7 +457,7 @@ func dropAnchor(dir, fileName string, canonical []byte) (bool, string, error) {
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"
-	if err := os.WriteFile(tmp, canonical, 0o644); err != nil {
+	if err := writeFileNotThroughSymlink(tmp, canonical, 0o644); err != nil {
 		return false, "", err
 	}
 	if err := os.Rename(tmp, full); err != nil {
@@ -449,7 +499,7 @@ func seedBundle(full string, canonical []byte) (bool, string, error) {
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"
-	if err := os.WriteFile(tmp, canonical, 0o644); err != nil {
+	if err := writeFileNotThroughSymlink(tmp, canonical, 0o644); err != nil {
 		return false, "", err
 	}
 	if err := os.Rename(tmp, full); err != nil {

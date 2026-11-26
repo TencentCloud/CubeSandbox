@@ -392,12 +392,13 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 			}
 			// WithNoSameOwner,it squashes all uid/gid to the
 			// unpacking user (root), breaking images with non-root-owned files.
-			stripped := stripSelinuxXattrs(decompressed)
+			stripped := stripSelinuxXattrs(decompressed, f, decompressed)
 			_, applyErr := archive.Apply(egCtx, destDir, stripped)
-			// Close unblocks the filter goroutine when Apply stopped reading
-			// before EOF (apply error or cancelled context); a no-op otherwise.
+			// Close drains the whole chain deterministically (pipe → layer
+			// file → join the filter goroutine → decompress stream) so an
+			// early-exiting Apply cannot race the decoder's buffer. A no-op
+			// close on the success path.
 			_ = stripped.Close()
-			_ = decompressed.Close()
 			_ = f.Close() // safe to double close, ensures FD is freed immediately
 
 			if applyErr != nil {
@@ -420,12 +421,21 @@ func StreamRegistryToDir(ctx context.Context, source *PreparedSource, destDir st
 // importing node; the guest manages its own security labels, so the build
 // environment's selinux xattrs must not be applied.
 //
-// The caller must Close the returned reader when done; closing it before EOF
-// unblocks the filter goroutine, so a consumer that stops reading early
-// (archive.Apply failing mid-layer, a cancelled context) cannot leak it.
-func stripSelinuxXattrs(r io.Reader) *io.PipeReader {
+// The returned stripResult owns the shutdown order: Close drains the
+// pipeline deterministically (pipe → underlying file → join the filter
+// goroutine → decompress stream) so that closing the decompress stream can
+// never race the goroutine's in-flight read. The 1 MiB write buffer lets
+// the goroutine read ahead of what archive.Apply consumed, so it may still
+// be blocked reading the decompressor when Apply returns early (apply
+// error, cancelled context): PipeReader.Close alone does not unblock that
+// read, and closing the decoder underneath it would race the shared peek
+// buffer. Consumers must call Close in every path.
+func stripSelinuxXattrs(r io.Reader, f *os.File, dc io.Closer) *stripResult {
+	res := &stripResult{done: make(chan struct{}), f: f, dc: dc}
 	pr, pw := io.Pipe()
+	res.r = pr
 	go func() {
+		defer close(res.done)
 		defer pw.Close()
 		// Buffer the pipe so the tar writer hands off ~1 MiB chunks instead
 		// of io.Copy's 32 KiB default, matching the buffer size the rest of
@@ -478,7 +488,38 @@ func stripSelinuxXattrs(r io.Reader) *io.PipeReader {
 			return
 		}
 	}()
-	return pr
+	return res
+}
+
+// stripResult is the reader archive.Apply consumes, paired with the
+// resources the filter goroutine runs on.
+type stripResult struct {
+	r    *io.PipeReader
+	done chan struct{}
+	f    *os.File
+	dc   io.Closer
+}
+
+func (s *stripResult) Read(p []byte) (int, error) { return s.r.Read(p) }
+
+// Close drains the pipeline in a deterministic order:
+//
+//  1. the pipe reader — unblocks the goroutine's pending pipe writes;
+//  2. the underlying layer file — *os.File closes are concurrent-safe and
+//     unblock a goroutine still stuck reading through the decompressor;
+//  3. join the goroutine — nobody touches the decoder after this point;
+//  4. the decompress stream — its readCloser mutates decoder state (and may
+//     recycle its pooled peek buffer), so it must be closed last.
+func (s *stripResult) Close() error {
+	_ = s.r.Close()
+	if s.f != nil {
+		_ = s.f.Close()
+	}
+	<-s.done
+	if s.dc != nil {
+		return s.dc.Close()
+	}
+	return nil
 }
 
 func nativeImageForSource(ctx context.Context, source *PreparedSource) (v1.Image, error) {

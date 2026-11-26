@@ -5,11 +5,13 @@
 package cube_egress_ca
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -488,6 +490,40 @@ atzG+Xu+JPNiwGGsLfkNFxpunyXJ
 	},
 }
 
+// TestStringToUTF8T61DecodesLatin1 verifies that T61String bytes >= 0x80
+// decode as Latin-1 into their multi-byte UTF-8 sequence (0xE9 -> 0xC3 0xA9),
+// mirroring OpenSSL's ASN1_STRING_to_UTF8. A raw byte pass-through would
+// hash different bytes and produce a different subject-hash.
+func TestStringToUTF8T61DecodesLatin1(t *testing.T) {
+	// "Café" in Latin-1: C,a,f,0xE9
+	raw := []byte{'C', 'a', 'f', 0xE9}
+	got, err := stringToUTF8(20, raw)
+	if err != nil {
+		t.Fatalf("stringToUTF8(T61): %v", err)
+	}
+	want := []byte{'C', 'a', 'f', 0xC3, 0xA9}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("T61 Latin-1 decoding mismatch: got %x, want %x", got, want)
+	}
+	// Canonical bytes must equal the UTF8-encoded form so the subject hash
+	// is identical for T61 and UTF-8 encodings of the same string.
+	utf8Form, err := stringToUTF8(asn1.TagUTF8String, want)
+	if err != nil {
+		t.Fatalf("stringToUTF8(UTF8): %v", err)
+	}
+	a := canonicalStringBytes(got)
+	b := canonicalStringBytes(utf8Form)
+	if !bytes.Equal(a, b) {
+		t.Fatalf("canonical(T61) != canonical(UTF8) for the same string: %x vs %x", a, b)
+	}
+	// ASCII-only T61 passes through unchanged.
+	ascii := []byte("plain-ascii")
+	got2, err := stringToUTF8(20, ascii)
+	if err != nil || !bytes.Equal(got2, ascii) {
+		t.Fatalf("ASCII T61 should be unchanged: got %x err %v", got2, err)
+	}
+}
+
 func TestOpenSSLSubjectHashVectors(t *testing.T) {
 	for _, tc := range subjectHashVectors {
 		t.Run(tc.name, func(t *testing.T) {
@@ -556,5 +592,107 @@ func TestBakeSymlinkEscapeBlocked(t *testing.T) {
 	}
 	if got := mustReadFile(t, hostBundle); got != "existing host content" {
 		t.Fatalf("host file was modified through the symlink: %q", got)
+	}
+}
+
+func TestBakeDanglingSymlinkTreatedAsMissing(t *testing.T) {
+	// Android-style: etc -> /system/etc (absolute, target does NOT exist on
+	// the build host, only inside the guest). The symlink is dangling on
+	// the host, so bundle paths under it are "missing" — the bake must
+	// still succeed via the anchor dirs and never touch the build host.
+	root := t.TempDir()
+	// Point at a path guaranteed not to exist: t.TempDir creates fresh
+	// unique dirs, so a subpath of it that was never created is safe.
+	dangling := filepath.Join(t.TempDir(), "nonexistent", "sub", "path")
+	if err := os.Symlink(dangling, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	// The anchor dirs exist as plain dirs inside the rootfs so something
+	// gets written and the bake is not a distroless seed.
+	mustMkdir(t, root, "usr/local/share/ca-certificates")
+
+	caPEM, _ := makeCA(t, "Dangling Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("dangling symlink must be treated as missing, got: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true via anchor dir, got %+v", res)
+	}
+}
+
+func TestBakeSeedBlockedWhenSymlinkTargetPartial(t *testing.T) {
+	// etc -> <host dir that exists but has no ssl/certs under it>: the
+	// parent chain resolves fine, so the append path correctly fails
+	// containment. The old code's fallback then handed the raw joined
+	// path to seedBundle, whose MkdirAll created directories on the
+	// build host through the symlink. The rewritten walk must still
+	// report a symlink escape, not fall back to the raw path.
+	root := t.TempDir()
+	outside := t.TempDir() // exists on the host, empty
+	if err := os.Symlink(outside, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	// No other trust store: the seed path must be reachable.
+	caPEM, _ := makeCA(t, "Seed Escape Test CA")
+	_, err := Bake(root, caPEM)
+	if err == nil || !strings.Contains(err.Error(), "outside the rootfs") {
+		t.Fatalf("expected symlink-escape error (no raw fallback), got %v", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("directories were created on the build host: %v", entries)
+	}
+}
+
+func TestBakeSeedNotThroughSymlinkedLeaf(t *testing.T) {
+	// The seed bundle leaf itself is a symlink to a host file; writing
+	// through it would create/modify the host file.
+	root := t.TempDir()
+	outside := t.TempDir()
+	hostFile := filepath.Join(outside, "host-bundle")
+	if err := os.WriteFile(hostFile, []byte("existing host content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, root, "etc/ssl/certs")
+	if err := os.Symlink(hostFile, filepath.Join(root, "etc/ssl/certs/ca-certificates.crt")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Leaf Escape Test CA")
+	_, err := Bake(root, caPEM)
+	if err == nil || !strings.Contains(err.Error(), "outside the rootfs") {
+		t.Fatalf("expected leaf symlink-escape error, got %v", err)
+	}
+	if got := mustReadFile(t, hostFile); got != "existing host content" {
+		t.Fatalf("host file was modified through the leaf symlink: %q", got)
+	}
+}
+
+func TestBakeRefusesWriteThroughSymlinkedTmp(t *testing.T) {
+	// appendBundle writes the merged bundle to a tmp path before renaming.
+	// An image could ship that exact tmp path as a symlink to a host file;
+	// writeFileNotThroughSymlink must refuse.
+	root := t.TempDir()
+	outside := t.TempDir()
+	hostFile := filepath.Join(outside, "host-tmp-target")
+	if err := os.WriteFile(hostFile, []byte("host target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, root, "etc/ssl/certs")
+	bundle := filepath.Join(root, "etc/ssl/certs/ca-certificates.crt")
+	if err := os.WriteFile(bundle, []byte("-----BEGIN CERTIFICATE-----\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(hostFile, bundle+".cube-egress-tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Tmp Escape Test CA")
+	_, err := Bake(root, caPEM)
+	if err == nil || !strings.Contains(err.Error(), "refusing to write through symlink") {
+		t.Fatalf("expected tmp-symlink refusal, got %v", err)
+	}
+	if got := mustReadFile(t, hostFile); got != "host target" {
+		t.Fatalf("host file was modified through the tmp symlink: %q", got)
 	}
 }
