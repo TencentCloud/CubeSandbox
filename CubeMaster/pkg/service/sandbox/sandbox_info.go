@@ -82,6 +82,7 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 	// identity fields. A shimless binding whose node cannot be asked is
 	// rendered from the persisted create spec.
 	if applyPauseBindingToInfo(ctx, req, rsp, rec, locatedHost) {
+		enrichSandboxInfoVolumeMounts(ctx, rsp.Data)
 		return
 	}
 	if len(rsp.Data) == 0 {
@@ -93,6 +94,7 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 		rsp.Ret.RetMsg = err.Error()
 		return
 	}
+	enrichSandboxInfoVolumeMounts(ctx, rsp.Data)
 	return
 }
 

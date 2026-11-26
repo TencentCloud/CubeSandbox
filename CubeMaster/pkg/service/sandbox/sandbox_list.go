@@ -124,6 +124,7 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 
 	enrichSandboxList(ctx, rsp.Data)
 	mergePauseBindings(ctx, req, rsp)
+	enrichSandboxListVolumeMounts(ctx, rsp.Data)
 	enrichSandboxListEndAts(ctx, rsp.Data)
 	enrichSandboxListRestart(ctx, rsp.Data)
 	types.SortSandboxList(rsp.Data)

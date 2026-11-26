@@ -23,6 +23,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -128,6 +129,21 @@ func List(ctx context.Context, opts ListOptions) ([]*Record, error) {
 		out = append(out, recordFromModel(&rows[i]))
 	}
 	return out, nil
+}
+
+// EnsureNoBindingInTx checks for a Pause binding while the caller holds the
+// sandbox spec row lock.
+func EnsureNoBindingInTx(tx *gorm.DB, sandboxID string) error {
+	var existing models.PauseSnapshotRecord
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("snapshot_id").
+		Where("sandbox_id = ?", sandboxID).Take(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("sandbox %s already has pause snapshot %s", sandboxID, existing.SnapshotID)
 }
 
 // Begin allocates snapshotID and inserts a CREATING pause binding.
