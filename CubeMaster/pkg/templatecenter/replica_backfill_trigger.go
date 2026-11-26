@@ -151,7 +151,11 @@ func (t *backfillNodeTrigger) step(ctx context.Context, now time.Time) {
 		return
 	}
 	if err == nil && failed == 0 {
-		logger.Infof("new-node template backfill done for %d node(s)", len(targets))
+		// Covered means no push to these nodes failed. It does not mean every
+		// template is prepared on them: a failed AppSnapshot prepare, or a
+		// template that is broken for every node, is logged by the pass and
+		// left to the periodic sweep.
+		logger.Infof("new-node template backfill distributed to %d node(s)", len(targets))
 		for id := range targets {
 			t.covered[id] = struct{}{}
 			delete(t.pending, id)

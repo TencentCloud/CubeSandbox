@@ -86,7 +86,10 @@ func reconcileTemplateReplicaBackfill(ctx context.Context) error {
 // in-scope node. It returns how many templates failed to backfill so the
 // trigger can retry early. A template with no target is not a failure:
 // no healthy node of its instance type, or none of onlyNodes in its scope,
-// leaves nothing to push it to.
+// leaves nothing to push it to. A node-limited pass counts only failures
+// after it found a node to push to (backfillTargetError): a template that
+// is broken for every node is the periodic sweep's to report, and must not
+// keep a new node retrying.
 func sweepTemplateReplicaBackfill(ctx context.Context, onlyNodes map[string]struct{}) (failed int, err error) {
 	if !isReady() {
 		return 0, nil
@@ -99,7 +102,8 @@ func sweepTemplateReplicaBackfill(ctx context.Context, onlyNodes map[string]stru
 	for _, def := range defs {
 		if err := backfillTemplateReplicasOn(ctx, def, onlyNodes); err != nil {
 			noTargets := errors.Is(err, ErrNoTemplateNodes)
-			if !noTargets {
+			var targetErr *backfillTargetError
+			if !noTargets && (onlyNodes == nil || errors.As(err, &targetErr)) {
 				failed++
 			}
 			// Per-template failures must not stop the pass; the next tick
@@ -111,6 +115,21 @@ func sweepTemplateReplicaBackfill(ctx context.Context, onlyNodes map[string]stru
 		}
 	}
 	return failed, nil
+}
+
+// backfillTargetError marks a failure that happened after the pass found
+// nodes missing the template, as opposed to one that affects the template on
+// every node (no job, artifact unavailable, undecodable request).
+type backfillTargetError struct{ err error }
+
+func (e *backfillTargetError) Error() string { return e.err.Error() }
+func (e *backfillTargetError) Unwrap() error { return e.err }
+
+func asBackfillTargetError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &backfillTargetError{err: err}
 }
 
 // backfillTemplateReplicas distributes one template's artifact to the
@@ -192,7 +211,7 @@ func backfillTemplateReplicasOn(ctx context.Context, def backfillDefinition, onl
 		_, _, ready, failed, distErr := backfillDistribute(ctx, req, nil, artifact, def.TemplateID, job.JobID, missing, replicaWriteNone)
 		logger.Infof("jfs artifact backfill: %d node(s) missing the ext4 artifact, distributed ready=%d failed=%d err=%v",
 			missingTotal, ready, failed, distErr)
-		return distErr
+		return asBackfillTargetError(distErr)
 	}
 	// The artifact row may be SHARED between templates (identical
 	// fingerprint): GeneratedRequestJSON carries the FIRST builder's
@@ -250,7 +269,7 @@ func backfillTemplateReplicasOn(ctx context.Context, def backfillDefinition, onl
 		if errors.Is(err, ErrTemplateNotFound) {
 			return nil
 		}
-		return fmt.Errorf("recheck definition before cleanup: %w", err)
+		return asBackfillTargetError(fmt.Errorf("recheck definition before cleanup: %w", err))
 	}
 	if definition.Status != StatusReady {
 		logger.Infof("template replica backfill: definition status is %s, skipping this pass", definition.Status)
@@ -341,7 +360,7 @@ func backfillTemplateReplicasOn(ctx context.Context, def backfillDefinition, onl
 			registerReadyTemplateReplicas(def.TemplateID, current)
 		}
 	}
-	return distErr
+	return asBackfillTargetError(distErr)
 }
 
 // backfillCleanupTimeout bounds one cleanup batch (one RPC per node,

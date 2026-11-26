@@ -6,8 +6,10 @@ package templatecenter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sort"
 	"testing"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
+	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"gorm.io/gorm"
 )
 
@@ -273,6 +276,63 @@ func TestSweepTemplateReplicaBackfillCountsFailures(t *testing.T) {
 	failed, err := sweepTemplateReplicaBackfill(context.Background(), nil)
 	if err != nil || failed != 1 {
 		t.Fatalf("failed=%d err=%v, want 1 failure", failed, err)
+	}
+}
+
+// A node-limited pass counts only failures that happen after it found one of
+// its nodes missing the template. A template broken for every node (here: no
+// job on record) is left to the periodic sweep and must not keep the new node
+// retrying; a failed push to the node is counted.
+func TestSweepNodeLimitedCountsOnlyTargetFailures(t *testing.T) {
+	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
+	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi"})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	job := &models.TemplateImageJob{JobID: "job-1", RequestJSON: string(raw)}
+	artifact := &models.RootfsArtifact{
+		ArtifactID: "rfs-jfs", Status: ArtifactStatusReady, Ext4SHA256: "deadbeef",
+		Ext4SizeBytes: 1024, DownloadToken: "tok", MasterNodeIP: "http://cube-master:8089",
+	}
+	nodes := []*node.Node{testNode("node-a", "10.0.0.1"), testNode("node-new", "10.0.0.4")}
+	placements := []models.ArtifactNodePlacement{{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1"}}
+	stubBackfillSeams(t, job, artifact, nodes, placements)
+
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	origList := listBackfillDefinitions
+	t.Cleanup(func() {
+		store.db = oldDB
+		listBackfillDefinitions = origList
+	})
+	listBackfillDefinitions = func(context.Context, int) ([]backfillDefinition, error) {
+		return []backfillDefinition{
+			{TemplateID: "tpl-no-job", InstanceType: "cubebox"},
+			{TemplateID: "tpl-jfs", InstanceType: "cubebox", RootfsArtifactID: "rfs-jfs"},
+		}, nil
+	}
+	backfillLatestJob = func(_ context.Context, id string) (*models.TemplateImageJob, error) {
+		if id == "tpl-no-job" {
+			return nil, gorm.ErrRecordNotFound
+		}
+		return job, nil
+	}
+	only := map[string]struct{}{"node-new": {}}
+
+	failed, err := sweepTemplateReplicaBackfill(context.Background(), only)
+	if err != nil || failed != 0 {
+		t.Fatalf("push succeeded: failed=%d err=%v; want 0 (tpl-no-job is not the node's)", failed, err)
+	}
+	if failed, _ := sweepTemplateReplicaBackfill(context.Background(), nil); failed != 1 {
+		t.Fatalf("periodic sweep: failed=%d, want 1 (tpl-no-job)", failed)
+	}
+
+	pushErr := errors.New("push to node-new failed")
+	backfillDistribute = func(_ context.Context, _ *sandboxtypes.CreateTemplateFromImageReq, _ *sandboxtypes.CreateCubeSandboxReq, _ *models.RootfsArtifact, _, _ string, targets []*node.Node, _ replicaWrite) ([]*node.Node, int32, int32, int32, error) {
+		return nil, int32(len(targets)), 0, int32(len(targets)), pushErr
+	}
+	if failed, _ := sweepTemplateReplicaBackfill(context.Background(), only); failed != 1 {
+		t.Fatalf("push failed: failed=%d, want 1", failed)
 	}
 }
 
