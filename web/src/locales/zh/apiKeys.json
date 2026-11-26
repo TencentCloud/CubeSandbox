@@ -1,0 +1,51 @@
+{
+  "title": "API Keys",
+  "subtitle": "由 e2b 兼容网关签发的 SDK key。每个 key 绑定一组模板：只能用这些模板创建沙箱，也只能看到 / 操作这些模板的沙箱。",
+  "newKey": "新建 key",
+  "empty": "还没有 key。先建一个给 SDK 客户端用。",
+  "col": {
+    "name": "名称",
+    "key": "Key",
+    "templates": "允许的模板",
+    "state": "状态",
+    "created": "创建时间",
+    "actions": "操作"
+  },
+  "allTemplates": "全部模板（管理员）",
+  "noTemplates": "未绑定模板——无法创建沙箱",
+  "enabled": "启用",
+  "disabled": "停用",
+  "enable": "启用",
+  "disable": "停用",
+  "delete": "删除",
+  "editTemplates": "编辑模板",
+  "viewAudit": "查看该 key 的审计记录",
+  "save": "保存",
+  "copy": "复制",
+  "copied": "已复制 key",
+  "reveal": "显示",
+  "hide": "隐藏",
+  "confirmDelete": "删除 key「{{name}}」？使用它的客户端会立刻收到 401。",
+  "form": {
+    "title": "新建 API key",
+    "desc": "key 由网关生成（e2b_ + 40 位 hex，e2b SDK 会校验这个格式）。",
+    "name": "名称",
+    "namePlaceholder": "例如 harness-prod",
+    "note": "备注",
+    "notePlaceholder": "谁在用 / 用途",
+    "templates": "允许的模板",
+    "templatesHint": "按别名匹配模板列表；不绑模板的 key 无法创建沙箱。",
+    "noTemplates": "集群里还没有模板。",
+    "admin": "管理员 key",
+    "adminHint": "不受模板限制，可管理模板 / 快照",
+    "create": "创建",
+    "cancel": "取消",
+    "createdTitle": "key「{{name}}」已创建",
+    "createdDesc": "现在复制交给客户端；列表里也可随时显示。",
+    "done": "完成"
+  },
+  "howto": {
+    "title": "客户端配置",
+    "desc": "任何 e2b SDK / harness 只需这三个变量指向网关；模板别名决定沙箱镜像。"
+  }
+}
