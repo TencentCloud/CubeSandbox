@@ -5,6 +5,7 @@
 package cube
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -221,4 +222,71 @@ func TestMergeCubeNetworkConfigsClonesTemplateRulesWhenRequestRulesEmpty(t *test
 
 func strPtr(s string) *string {
 	return &s
+}
+
+func TestApplyTemplateToContainerSecurityContext(t *testing.T) {
+	privileged := func() *types.ContainerSecurityContext {
+		return &types.ContainerSecurityContext{
+			Privileged:   true,
+			Capabilities: &types.Capability{AddCapabilities: []string{"SYS_ADMIN"}},
+		}
+	}
+	tests := []struct {
+		name     string
+		template *types.ContainerSecurityContext
+		request  *types.ContainerSecurityContext
+		want     *types.ContainerSecurityContext
+	}{
+		{
+			name:     "request omitted inherits template",
+			template: privileged(),
+			want:     privileged(),
+		},
+		{
+			name:     "full request replaces template",
+			template: privileged(),
+			request: &types.ContainerSecurityContext{
+				NoNewPrivs:     true,
+				ReadonlyRootfs: true,
+				Capabilities:   &types.Capability{DropCapabilities: []string{"ALL"}},
+			},
+			want: &types.ContainerSecurityContext{
+				NoNewPrivs:     true,
+				ReadonlyRootfs: true,
+				Capabilities:   &types.Capability{DropCapabilities: []string{"ALL"}},
+			},
+		},
+		{
+			name:     "partial request replaces template as a whole",
+			template: privileged(),
+			request:  &types.ContainerSecurityContext{RunAsUser: &types.Int64Value{Value: 1000}},
+			want:     &types.ContainerSecurityContext{RunAsUser: &types.Int64Value{Value: 1000}},
+		},
+		{
+			name:     "empty request replaces template",
+			template: privileged(),
+			request:  &types.ContainerSecurityContext{},
+			want:     &types.ContainerSecurityContext{},
+		},
+		{
+			name:    "template without security context keeps request",
+			request: &types.ContainerSecurityContext{NoNewPrivs: true},
+			want:    &types.ContainerSecurityContext{NoNewPrivs: true},
+		},
+		{
+			name: "neither side sets security context",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateCtr := &types.Container{Name: "cubebox-default", SecurityContext: tt.template}
+			ctr := &types.Container{Name: "cubebox-default", SecurityContext: tt.request}
+			if err := applyTemplateToContainer(ctr, templateCtr, 0); err != nil {
+				t.Fatalf("applyTemplateToContainer: %v", err)
+			}
+			if !reflect.DeepEqual(ctr.SecurityContext, tt.want) {
+				t.Fatalf("security context = %+v, want %+v", ctr.SecurityContext, tt.want)
+			}
+		})
+	}
 }

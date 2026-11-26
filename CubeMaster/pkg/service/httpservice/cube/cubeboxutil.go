@@ -138,7 +138,11 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 
 	ctr.Syscalls = templateCtr.Syscalls
 	ctr.Sysctls = templateCtr.Sysctls
-	ctr.SecurityContext = templateCtr.SecurityContext
+	// A request's security context replaces the template's as a whole: its bool
+	// fields cannot tell "unset" from false, so a field-level merge is unsound.
+	if ctr.SecurityContext == nil {
+		ctr.SecurityContext = templateCtr.SecurityContext
+	}
 
 	ctr.Envs = append(ctr.Envs, templateCtr.Envs...)
 	applyTemplateVolumeMounts(templateCtr, ctr)
