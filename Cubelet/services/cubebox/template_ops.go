@@ -192,10 +192,10 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	shimCapability := s.resolveSandboxShimCapabilities(prepareCtx, cb)
 
 	// Refuse fs-only up front only on a positive cannot (see fsOnlyRefusal).
-	if refusal := fsOnlyRefusal(shimCapability, s.resolveSandboxGuestCapabilities(prepareCtx, cb), mode); refusal != "" {
+	guestCapability := s.resolveSandboxGuestCapabilities(prepareCtx, cb)
+	if refusal := fsOnlyRefusal(shimCapability, guestCapability, mode); refusal != "" {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
-		rsp.Ret.RetMsg = fmt.Sprintf("%s: shim %q does not support filesystem-only snapshots",
-			refusal, shimCapability.Version)
+		rsp.Ret.RetMsg = fsOnlyRefusalMessage(refusal, shimCapability, guestCapability)
 		return rsp, nil
 	}
 
@@ -421,7 +421,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			snapshotErr, rootfsErr = runLegacy()
 		}
 	} else {
-		recordShimCapabilityDecision(decisionLegacyCapture, shimCapability)
+		_ = capturePathDecision(stepLog, shimCapability)
 		snapshotErr, rootfsErr = runLegacy()
 	}
 	if snapshotErr != nil {

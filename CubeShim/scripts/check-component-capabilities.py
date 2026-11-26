@@ -23,10 +23,19 @@ Exit status 0 when the file is usable, 1 with a reason on stderr otherwise.
 """
 
 import json
+import re
 import sys
 
 # Cubelet refuses any other schema rather than guessing at its meaning.
 EXPECTED_SCHEMA = 1
+
+# Bounds mirrored from Cubelet's reader, which rejects a declaration that
+# exceeds one of them at runtime.
+MAX_DOCUMENT_BYTES = 64 * 1024
+MAX_ENTRIES = 128
+MAX_NAME_LENGTH = 128
+VALID_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+MAX_LEVEL = 0xFFFFFFFF
 
 
 def fail(message):
@@ -49,6 +58,10 @@ def main(argv):
     if not raw.strip():
         return fail(f"{path} is empty")
 
+    # A larger document is refused before parsing.
+    if len(raw.encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        return fail(f"{path} exceeds {MAX_DOCUMENT_BYTES} bytes")
+
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as err:
@@ -57,10 +70,13 @@ def main(argv):
     if not isinstance(doc, dict):
         return fail(f"{path} is not a JSON object")
 
-    if doc.get("schema") != EXPECTED_SCHEMA:
-        return fail(
-            f"{path} has schema {doc.get('schema')!r}, expected {EXPECTED_SCHEMA}"
-        )
+    # bool is a subclass of int and 1.0 == 1 in Python; the reader's Go int
+    # accepts neither.
+    schema = doc.get("schema")
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        return fail(f"{path} has schema {schema!r}, expected {EXPECTED_SCHEMA}")
+    if schema != EXPECTED_SCHEMA:
+        return fail(f"{path} has schema {schema!r}, expected {EXPECTED_SCHEMA}")
 
     component = doc.get("component")
     if not isinstance(component, str) or not component:
@@ -73,17 +89,31 @@ def main(argv):
     capabilities = doc.get("capabilities")
     if not isinstance(capabilities, dict) or not capabilities:
         return fail(f"{path} declares no capabilities")
+    if len(capabilities) > MAX_ENTRIES:
+        return fail(
+            f"{path} declares {len(capabilities)} capabilities, limit is {MAX_ENTRIES}"
+        )
 
-    # Every level must be a positive integer. Level 0 is a real statement about a
-    # runtime probe, but no build should make it about a capability it ships.
     for name, level in capabilities.items():
         if not isinstance(name, str) or not name:
             return fail(f"{path} has a non-string capability name: {name!r}")
-        # bool is a subclass of int; `true` here would be a malformed document.
+        if len(name.encode("utf-8")) > MAX_NAME_LENGTH:
+            return fail(
+                f"{path} has a capability name longer than {MAX_NAME_LENGTH} bytes: {name!r}"
+            )
+        if not VALID_NAME.match(name):
+            return fail(f"{path} has capability name {name!r}, expected a lower-case dotted path")
+        # A level decodes into uint32 and must be positive: 0 states a runtime
+        # probe, never a shipped capability.
         if not isinstance(level, int) or isinstance(level, bool) or level < 1:
             return fail(
                 f"{path} declares {name} at level {level!r}, "
                 "expected a positive integer"
+            )
+        if level > MAX_LEVEL:
+            return fail(
+                f"{path} declares {name} at level {level!r}, "
+                f"expected an integer in [1, {MAX_LEVEL}]"
             )
 
     return 0

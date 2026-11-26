@@ -5,6 +5,7 @@ package cubebox
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/docker/go-metrics"
@@ -51,7 +52,6 @@ const (
 	decisionCoordinatedCapture = "coordinated_capture"
 	decisionLegacyCapture      = "legacy_capture"
 	decisionFsOnlyRefused      = "fs_only_refused"
-	decisionPausePreflight     = "pause_preflight"
 )
 
 // Component labels for the resolution counter.
@@ -260,6 +260,15 @@ func fsOnlyRefusal(shim capability.Resolved, guest capability.Resolved, mode sna
 	return ""
 }
 
+// fsOnlyRefusalMessage renders the refusal from fsOnlyRefusal, naming the
+// component that actually refused.
+func fsOnlyRefusalMessage(refusal string, shim, guest capability.Resolved) string {
+	if refusal == snapshotmode.ErrFilesystemOnlyFreezeUnsupported {
+		return fmt.Sprintf("%s: guest agent %q cannot freeze a filesystem", refusal, guest.Version)
+	}
+	return fmt.Sprintf("%s: shim %q does not support filesystem-only snapshots", refusal, shim.Version)
+}
+
 // shimSupportsCheckPauseAllowed reports whether the pause preflight may be called.
 // Nothing known means attempt it: an older shim rejects the action and falls through
 // to PauseToSnapshot at the cost of one round trip.
@@ -271,9 +280,8 @@ func shimSupportsCheckPauseAllowed(resolved capability.Resolved) bool {
 }
 
 // classifyShimError reports how err should be classified. With `errors.coded` the
-// code decides and the prose is never read; the code is matched anywhere because
-// Cubelet wraps the error before this sees it. Without it, the wording match below
-// is the only option and is confined to this function.
+// code decides; an unrecognised code falls through to the prose match, so a build
+// that misses a code on one path still gets the retry it triggers.
 func classifyShimError(err error, resolved capability.Resolved) shimErrorKind {
 	if err == nil {
 		return shimErrorNone
@@ -285,11 +293,9 @@ func classifyShimError(err error, resolved capability.Resolved) shimErrorKind {
 			return shimErrorPauseBusy
 		case strings.Contains(message, capability.ErrCodeUnknownAction):
 			return shimErrorUnknownAction
-		default:
-			return shimErrorOther
 		}
 	}
-	// Legacy adapter: the only place that matches prose.
+	// Prose fallback: the only wording match in Cubelet.
 	if strings.Contains(message, capability.LegacyUnknownActionFragment+shimSnapshotCaptureAction) {
 		return shimErrorUnknownAction
 	}

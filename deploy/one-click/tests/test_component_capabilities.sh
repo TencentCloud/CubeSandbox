@@ -94,6 +94,34 @@ expect_reject "$(write string-level.json \
 expect_reject "$(write empty-name.json \
   '{"schema":1,"component":"cube-shim","capabilities":{"":1}}')" "capability name"
 
+# The reader decodes schema into a Go int, so Python's True == 1 and 1.0 == 1
+# would pass here and fail at runtime.
+expect_reject "$(write bool-schema.json \
+  '{"schema":true,"component":"cube-shim","capabilities":{"errors.coded":1}}')" "schema"
+expect_reject "$(write float-schema.json \
+  '{"schema":1.0,"component":"cube-shim","capabilities":{"errors.coded":1}}')" "schema"
+
+# Levels decode into uint32; names into a validated dotted path.
+expect_reject "$(write overflow-level.json \
+  '{"schema":1,"component":"cube-shim","capabilities":{"errors.coded":4294967296}}')" "expected an integer in"
+expect_reject "$(write bad-name.json \
+  '{"schema":1,"component":"cube-shim","capabilities":{"Update.Bad":1}}')" "lower-case dotted path"
+expect_reject "$(write long-name.json \
+  "{\"schema\":1,\"component\":\"cube-shim\",\"capabilities\":{\"$(printf 'a%.0s' {1..200})\":1}}")" "longer than"
+
+# Both reader-enforced bounds: document size and set size.
+expect_reject "$(write oversized.json \
+  "{\"schema\":1,\"component\":\"cube-shim\",\"capabilities\":{\"errors.coded\":1},\"padding\":\"$(printf 'x%.0s' {1..70000})\"}")" "exceeds"
+{
+  printf '{"schema":1,"component":"cube-shim","capabilities":{'
+  for i in $(seq 1 129); do
+    (( i > 1 )) && printf ','
+    printf '"update.cap_%d":1' "${i}"
+  done
+  printf '}}'
+} > "${TMP_DIR}/too-many.json"
+expect_reject "${TMP_DIR}/too-many.json" "limit is"
+
 # Missing file and wrong argument count are build errors too.
 expect_reject "${TMP_DIR}/does-not-exist.json" "cannot read"
 if python3 "${VALIDATOR}" >/dev/null 2>&1; then

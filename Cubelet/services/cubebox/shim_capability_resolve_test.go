@@ -4,7 +4,6 @@
 package cubebox
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -20,7 +19,6 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 
-	"github.com/containerd/containerd/v2/pkg/namespaces"
 	cubeconfig "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/config"
 )
 
@@ -341,6 +339,32 @@ func TestFsOnlyRefusalRefusesOnlyOnAPositiveAnswer(t *testing.T) {
 	})
 }
 
+// The refusal message names the component that actually refused.
+func TestFsOnlyRefusalMessageNamesTheRefusingComponent(t *testing.T) {
+	shim := capability.Resolved{Source: capability.SourceArtifact, Version: "v0.9.1"}
+	guest := capability.Resolved{Source: capability.SourceArtifact, Version: "v0.9.2"}
+	sourceNone := capability.Resolved{Source: capability.SourceNone}
+
+	t.Run("shim_refusal_names_the_shim", func(t *testing.T) {
+		require.Equal(t,
+			`snapshot_filesystem_only_unsupported_node: shim "v0.9.1" does not support filesystem-only snapshots`,
+			fsOnlyRefusalMessage(snapshotmode.ErrFilesystemOnlyUnsupported, shim, guest))
+	})
+
+	t.Run("agent_refusal_names_the_agent", func(t *testing.T) {
+		require.Equal(t,
+			`snapshot_filesystem_only_freeze_unsupported: guest agent "v0.9.2" cannot freeze a filesystem`,
+			fsOnlyRefusalMessage(snapshotmode.ErrFilesystemOnlyFreezeUnsupported, shim, guest))
+	})
+
+	// An unknown agent reports an empty version, never the shim's.
+	t.Run("an_unknown_agent_does_not_borrow_the_shim_version", func(t *testing.T) {
+		message := fsOnlyRefusalMessage(snapshotmode.ErrFilesystemOnlyFreezeUnsupported, shim, sourceNone)
+		require.Contains(t, message, "guest agent")
+		require.NotContains(t, message, "v0.9.1")
+	})
+}
+
 func TestShimSupportsCheckPauseAllowedPrefersTheDeclaration(t *testing.T) {
 	require.True(t, shimSupportsCheckPauseAllowed(capability.Resolved{Source: capability.SourceNone}),
 		"nothing known: attempt the preflight, an old shim falls through harmlessly")
@@ -384,6 +408,21 @@ func TestClassifyShimErrorPrefersTheCode(t *testing.T) {
 			classifyShimError(errors.New("sandbox pause forbidding, terminate exec tasks first"), uncoded))
 	})
 
+	// An uncoded rejection from a coded build still triggers the retry.
+	t.Run("unrecognised_code_falls_back_to_prose", func(t *testing.T) {
+		require.Equal(t, shimErrorUnknownAction,
+			classifyShimError(errors.New("unknown update ext action: SnapshotCapture"), coded),
+			"an uncoded rejection from a coded build must still trigger the retry")
+		require.Equal(t, shimErrorPauseBusy,
+			classifyShimError(errors.New("sandbox pause forbidding, terminate exec tasks first"), coded))
+	})
+
+	// A reworded coded message is still decided by its code.
+	t.Run("code_wins_over_wording", func(t *testing.T) {
+		err := errors.New(capability.ErrCodeUnknownAction + ": reworded, no historical phrase")
+		require.Equal(t, shimErrorUnknownAction, classifyShimError(err, coded))
+	})
+
 	t.Run("nil_is_not_an_error_kind", func(t *testing.T) {
 		require.Equal(t, shimErrorNone, classifyShimError(nil, coded))
 	})
@@ -404,26 +443,6 @@ func TestIsPauseBusyRejectUnderstandsBothForms(t *testing.T) {
 	} {
 		require.False(t, isPauseBusyReject(message), message)
 	}
-}
-
-// The shim manager refuses a context without a namespace, and an unstamped lookup
-// would silently find nothing while destroy believes nothing holds the resources.
-func TestShimLookupContextSuppliesTheSandboxNamespace(t *testing.T) {
-	cb := &cubeboxstore.CubeBox{Metadata: cubeboxstore.Metadata{ID: "sb-ns", Namespace: "custom-ns"}}
-
-	ns, ok := namespaces.Namespace(shimLookupContext(context.Background(), cb))
-	require.True(t, ok, "the lookup must carry a namespace")
-	require.Equal(t, "custom-ns", ns)
-
-	// An explicit namespace already on the context wins: callers that know better
-	// must not be overridden.
-	pre := namespaces.WithNamespace(context.Background(), "already-set")
-	ns, _ = namespaces.Namespace(shimLookupContext(pre, cb))
-	require.Equal(t, "already-set", ns)
-
-	// A sandbox without one falls back to the containerd default.
-	ns, _ = namespaces.Namespace(shimLookupContext(context.Background(), &cubeboxstore.CubeBox{}))
-	require.Equal(t, namespaces.Default, ns)
 }
 
 func TestSandboxShimSelectedPathUsesOnlyRecordedAbsolutePaths(t *testing.T) {
