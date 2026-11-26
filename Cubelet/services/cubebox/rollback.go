@@ -125,7 +125,12 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 
 	startStage(telemetry.SpanRollbackLock, attribute.String(telemetry.AttrSandboxID, req.GetSandboxID()))
-	unlock := s.sandboxLifecycleLocks.Lock(req.GetSandboxID())
+	unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, req.GetSandboxID())
+	if lockErr != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+		rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress"
+		return rsp, nil
+	}
 	defer unlock()
 	defer s.holdProbes(req.GetSandboxID())()
 	prepareCtx := startStage(telemetry.SpanRollbackPrepare,

@@ -265,6 +265,8 @@ type service struct {
 	sandboxLifecycleLocks *utils.ResourceLocks
 	restarts              *restartMgr
 
+	resolveRuntimeVolumeAttach runtimeVolumeAttachResolver
+
 	otherRuntime *ociRuntime
 }
 

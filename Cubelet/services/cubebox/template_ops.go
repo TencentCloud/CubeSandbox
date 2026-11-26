@@ -119,7 +119,12 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	span.SetAttributes(attribute.String(telemetry.AttrBackend, backend))
 
 	startPhase(telemetry.SpanTemplateCommitLock, attribute.String(telemetry.AttrSandboxID, rsp.SandboxID))
-	unlock := s.sandboxLifecycleLocks.Lock(rsp.SandboxID)
+	unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, rsp.SandboxID)
+	if lockErr != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+		rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress"
+		return rsp, nil
+	}
 	defer unlock()
 	prepareCtx := startPhase(telemetry.SpanTemplateCommitPrepare,
 		attribute.String(telemetry.AttrSandboxID, rsp.SandboxID),

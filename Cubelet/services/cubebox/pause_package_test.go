@@ -6,6 +6,7 @@ package cubebox
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,8 +14,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	volumeplugin "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/volumeplugin/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestResumeFromPauseSandboxID(t *testing.T) {
@@ -31,6 +34,91 @@ func TestResumeFromPauseSandboxID(t *testing.T) {
 			constants.MasterAnnotationDesiredSandboxID: "sb-1",
 		},
 	}))
+}
+
+func TestExpandPausePackageRestoresCapturedVolumeMounts(t *testing.T) {
+	const (
+		beforeID = "snap-before-data-mount"
+		afterID  = "snap-after-data-mount"
+		sources  = cubebox.AnnotationPluginVolumeSources
+	)
+	root := &cubebox.Volume{Name: "root", VolumeSource: &cubebox.VolumeSource{EmptyDir: &cubebox.EmptyDirVolumeSource{}}}
+	work := &cubebox.Volume{Name: "work", VolumeSource: &cubebox.VolumeSource{}}
+	rootMount := &cubebox.VolumeMounts{Name: "root", ContainerPath: "/"}
+	workMount := &cubebox.VolumeMounts{Name: "work", ContainerPath: "/work"}
+	beforeVolumes := []*cubebox.Volume{root, work}
+	beforeMounts := map[string][]*cubebox.VolumeMounts{"main": {rootMount, workMount}, "worker": {workMount}}
+	sb := newRunningCommitSandboxForTest(beforeVolumes, beforeMounts["main"])
+	sb.FirstContainer().Config.Name = "main"
+	sb.AddContainer(&cubeboxstore.Container{Metadata: cubeboxstore.Metadata{
+		ID: "worker", Config: &cubebox.ContainerConfig{Name: "worker", VolumeMounts: beforeMounts["worker"]},
+	}})
+	sb.Annotations = map[string]string{
+		sources: `[{"name":"work","driver":"cos-rpc","private_data":"packed-work"}]`,
+	}
+	capture := func(snapshotID string) {
+		t.Helper()
+		entry := &storage.SnapshotCatalogEntry{SnapshotID: snapshotID, Kind: storage.CatalogKindPauseSnapshot}
+		seedCatalogForTest(t, entry)
+		require.NoError(t, writePauseSandboxSpec(entry.MetaDir, buildPauseSandboxSpec(sb, "req-pause")))
+	}
+	thinCreate := func(snapshotID, freshSources string) *cubebox.RunCubeSandboxRequest {
+		return &cubebox.RunCubeSandboxRequest{Annotations: map[string]string{
+			constants.MasterAnnotationPauseSnapshotID: snapshotID,
+			sources: freshSources,
+		}}
+	}
+	checkPackage := func(snapshotID, freshSources string, volumes []*cubebox.Volume, mounts map[string][]*cubebox.VolumeMounts) {
+		t.Helper()
+		req := thinCreate(snapshotID, freshSources)
+		require.NoError(t, expandPauseSnapshotPackage(req))
+		require.Equal(t, freshSources, req.GetAnnotations()[sources])
+		require.Len(t, req.GetVolumes(), len(volumes))
+		for _, volume := range volumes {
+			require.True(t, slices.ContainsFunc(req.GetVolumes(), func(got *cubebox.Volume) bool {
+				return proto.Equal(volume, got)
+			}), "missing volume %v", volume)
+		}
+		require.Len(t, req.GetContainers(), len(mounts))
+		seen := make(map[string]bool, len(mounts))
+		for _, container := range req.GetContainers() {
+			name := container.GetName()
+			wantMounts, ok := mounts[name]
+			require.True(t, ok, "unexpected container %s", name)
+			require.False(t, seen[name], "duplicate container %s", name)
+			seen[name] = true
+			gotMounts := container.GetVolumeMounts()
+			require.Len(t, gotMounts, len(wantMounts), "container %s", name)
+			for _, mount := range wantMounts {
+				require.True(t, slices.ContainsFunc(gotMounts, func(got *cubebox.VolumeMounts) bool {
+					return proto.Equal(mount, got)
+				}), "container %s is missing mount %v", name, mount)
+			}
+		}
+	}
+
+	const freshBefore = `[{"name":"work","driver":"cos-rpc","private_data":"fresh-work-before"}]`
+	const freshAfter = `[{"name":"work","driver":"cos-rpc","private_data":"fresh-work-after"},{"name":"data","driver":"cos-rpc","private_data":"fresh-data"}]`
+	capture(beforeID)
+	checkPackage(beforeID, freshBefore, beforeVolumes, beforeMounts)
+
+	// Seed the state that a confirmed runtime attachment would leave for Pause.
+	data := &cubebox.Volume{Name: "data", VolumeSource: &cubebox.VolumeSource{}}
+	dataMount := &cubebox.VolumeMounts{Name: "data", ContainerPath: "/data", Readonly: true}
+	sb.Volumes = append(sb.Volumes, data)
+	for _, container := range sb.AllContainers() {
+		container.Config.VolumeMounts = append(container.Config.VolumeMounts, dataMount)
+	}
+	sb.Annotations[sources] = `[{"name":"work","driver":"cos-rpc","private_data":"packed-work"},{"name":"data","driver":"cos-rpc","private_data":"packed-data"}]`
+	capture(afterID)
+	checkPackage(afterID, freshAfter, []*cubebox.Volume{root, work, data},
+		map[string][]*cubebox.VolumeMounts{"main": {rootMount, workMount, dataMount}, "worker": {workMount, dataMount}})
+	checkPackage(beforeID, freshBefore, beforeVolumes, beforeMounts)
+
+	wrongSources := thinCreate(beforeID, freshAfter)
+	beforeExpand := proto.Clone(wrongSources)
+	require.ErrorContains(t, expandPauseSnapshotPackage(wrongSources), "pause package plugin volumes do not match the reserved volumes")
+	require.True(t, proto.Equal(beforeExpand, wrongSources), "failed expansion changed the thin Create request")
 }
 
 func TestBuildPauseSandboxSpecIncludesNetworkRecreateFields(t *testing.T) {
