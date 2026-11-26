@@ -81,3 +81,18 @@ func TestObjectLocator(t *testing.T) {
 		t.Fatal("IsObjectLocator")
 	}
 }
+
+func TestJoinPrefix(t *testing.T) {
+	for _, tc := range []struct{ namespace, prefix, want string }{
+		{"", "", ""},
+		{"", "/", ""},
+		{"", "warehouse/", "warehouse/"},
+		{"tenant", "warehouse/uploads/", "tenant/warehouse/uploads/"},
+		{"tenant", "warehouse/uploads", "tenant/warehouse/uploads"},
+		{"tenant", "", "tenant/"},
+	} {
+		if got := JoinPrefix(tc.namespace, tc.prefix); got != tc.want {
+			t.Errorf("JoinPrefix(%q, %q) = %q, want %q", tc.namespace, tc.prefix, got, tc.want)
+		}
+	}
+}
