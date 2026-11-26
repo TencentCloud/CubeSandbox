@@ -7,7 +7,7 @@
 SELECT cubemaster_acquire_migration_lock('cubemaster_migration_20261121120000_runtime_attach', 60);
 
 CREATE TABLE IF NOT EXISTS t_cube_runtime_volume_attach (
-  request_key char(64) NOT NULL,
+  request_key varchar(64) NOT NULL,
   sandbox_id varchar(128) NOT NULL,
   request_id varchar(256) NOT NULL,
   execution_id varchar(256) NOT NULL,
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS t_cube_runtime_volume_attach (
   readonly boolean NOT NULL,
   spec_row_id bigint NOT NULL,
   volume_record_id bigint NOT NULL,
-  claim_token char(36) NOT NULL,
+  claim_token varchar(36) NOT NULL,
   outcome varchar(16) NOT NULL,
   PRIMARY KEY (request_key)
 );
