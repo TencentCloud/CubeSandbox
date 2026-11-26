@@ -63,19 +63,21 @@ Purchase an **x86_64** cloud server from any cloud provider — no special requi
 The PVM host kernel package is published on dedicated `kernel-release-*` Releases — download the latest main package from the release page:
 
 1. Open the [GitHub Releases page](https://github.com/TencentCloud/CubeSandbox/releases?q=kernel-release-&expanded=true) (or the [CNB mirror](https://cnb.cool/CubeSandbox/CubeSandbox/-/releases) for mainland China — filter by `kernel-release` there), and open the newest `kernel-release-*` release
-2. Download the **main package** for your distribution:
-   - RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora): `kernel-*opencloudos9.cubesandbox.pvm.host*.x86_64.rpm`
+2. Download the **main packages** for your distribution:
+   - RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora): `kernel-*`, `kernel-core-*`, `kernel-modules-*`, `kernel-devel-*` and `kernel-headers-*` (all `*.cubesandbox.oc9.x86_64.rpm`)
    - DEB-based (Ubuntu, Debian): `linux-image-*opencloudos9.cubesandbox.pvm.host*_amd64.deb`
 
-<small>Optional assets like `kernel-headers-*` and `-dbg` are not needed.</small>
+<small>Other assets such as `bpftool-*`, `kernel-debuginfo-*`, `kernel-signing-keys-*`, `kernel-tools-*`, `perf-*`, `python3-perf-*`, and DEB `-dbg` packages are optional and not needed.</small>
 
 ### RPM-based (OpenCloudOS, RHEL, CentOS, TencentOS, Fedora)
 
-Install the downloaded package:
+Install the downloaded packages:
 
 ```bash
-# --oldpackage skips the version check if a newer kernel is already installed
-rpm -ivh --oldpackage kernel-*.rpm
+# Install the complete set in one transaction so versioned dependencies resolve.
+# -U replaces the non-installonly kernel-headers package; --oldpackage permits
+# installation when the host already has a newer kernel version.
+rpm -Uvh --oldpackage kernel-[0-9]*.rpm kernel-core-*.rpm kernel-modules-*.rpm kernel-devel-*.rpm kernel-headers-*.rpm
 ```
 
 Set the PVM kernel as the default boot entry:
@@ -136,7 +138,8 @@ After rebooting, confirm you are running the PVM kernel and that the KVM module 
 ```bash
 # Confirm the kernel version
 uname -r
-# Expected output contains: opencloudos9.cubesandbox.pvm.host
+# Expected output contains: cubesandbox
+# (RPM: e.g. 6.6.117-45.16.cubesandbox.oc9.x86_64; DEB: *-opencloudos9.cubesandbox.pvm.host*)
 
 # Load the PVM KVM module
 modprobe kvm_pvm
@@ -268,12 +271,12 @@ sudo rm -rf /usr/local/services/cubetoolbox
 
 **Q2: `lsmod | grep kvm_pvm` returns no output, or `/dev/kvm` does not exist**
 
-**A:** Run `uname -r` to confirm you rebooted into the PVM kernel (the version string should contain `opencloudos9.cubesandbox.pvm.host`). Once confirmed, run `modprobe kvm_pvm` manually. If it still fails, verify the kernel packages are installed correctly:
+**A:** Run `uname -r` to confirm you rebooted into the PVM kernel (the version string should contain `cubesandbox`). Once confirmed, run `modprobe kvm_pvm` manually. If it still fails, verify the kernel packages are installed correctly:
 
 ```bash
-# RPM-based
-rpm -qa | grep cube.pvm
+# RPM-based (expect kernel, kernel-core, kernel-modules, kernel-devel and kernel-headers)
+rpm -qa | grep cubesandbox
 
 # DEB-based
-dpkg -l | grep cube.pvm
+dpkg -l | grep cubesandbox
 ```
