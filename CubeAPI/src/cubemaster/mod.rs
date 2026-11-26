@@ -82,9 +82,12 @@ impl CubeMasterClient {
         req: &DeleteSandboxRequest,
     ) -> Result<DeleteSandboxResponse, CubeMasterError> {
         let url = format!("{}/cube/sandbox", self.base_url);
+        let mut headers = reqwest::header::HeaderMap::new();
+        crate::telemetry::inject(&mut headers);
         let resp = self
             .inner
             .delete(&url)
+            .headers(headers)
             .json(req)
             .send()
             .await

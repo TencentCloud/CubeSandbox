@@ -10,10 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -39,6 +42,19 @@ func DestroySandbox(ctx context.Context, req *types.DeleteCubeSandboxReq) (rsp *
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
 	}
+	ctx, span := telemetry.StartIfTraced(ctx, "cubemaster.sandbox.delete")
+	defer func() {
+		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, req.SandboxID))
+		if p := recover(); p != nil {
+			telemetry.EndWithCode(span, -1)
+			panic(p)
+		}
+		code := -1
+		if rsp != nil && rsp.Ret != nil {
+			code = rsp.Ret.RetCode
+		}
+		telemetry.EndWithCode(span, code)
+	}()
 	if req.SandboxID == "" {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "should provide sandbox id"

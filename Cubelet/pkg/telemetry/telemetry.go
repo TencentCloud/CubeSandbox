@@ -36,6 +36,7 @@ const (
 const SuccessCode = int(errorcode.ErrorCode_Success)
 
 const (
+	SpanDelete           = "cubelet.sandbox.delete"
 	SpanCreate           = "cubelet.create"
 	SpanCreateLock       = "cubelet.create.lifecycle_lock"
 	SpanWorkflow         = "cubelet.workflow"

@@ -27,9 +27,10 @@ const DEFAULT_SERVICE_NAME: &str = "cube-api";
 
 const SCOPE: &str = "github.com/tencentcloud/CubeSandbox/CubeAPI";
 
-const CREATE_METHOD: &str = "POST";
 const CREATE_PATH: &str = "/sandboxes";
 const CREATE_SPAN: &str = "POST /sandboxes";
+const DELETE_PATH: &str = "/sandboxes/:sandboxID";
+const DELETE_SPAN: &str = "DELETE /sandboxes/:sandboxID";
 const V2_CREATE_PATH: &str = "/v2/sandboxes";
 const V2_CREATE_SPAN: &str = "POST /v2/sandboxes";
 const TEMPLATE_PATH: &str = "/templates";
@@ -136,19 +137,20 @@ impl Drop for RequestSpanGuard {
 }
 
 pub async fn layer(req: Request, next: Next) -> Response {
-    if req.method().as_str() != CREATE_METHOD {
-        return next.run(req).await;
-    }
     let matched = req
         .extensions()
         .get::<MatchedPath>()
         .map(MatchedPath::as_str)
         .unwrap_or_else(|| req.uri().path());
-    let Some(span_name) = TRACED_ROUTES
-        .iter()
-        .find(|(path, _)| *path == matched)
-        .map(|(_, span)| *span)
-    else {
+    let span_name = match req.method().as_str() {
+        "POST" => TRACED_ROUTES
+            .iter()
+            .find(|(path, _)| *path == matched)
+            .map(|(_, span)| *span),
+        "DELETE" if matched == DELETE_PATH => Some(DELETE_SPAN),
+        _ => None,
+    };
+    let Some(span_name) = span_name else {
         return next.run(req).await;
     };
 
@@ -170,6 +172,7 @@ pub async fn layer(req: Request, next: Next) -> Response {
         ));
     }
     let sandbox_suffix = match span_name {
+        DELETE_SPAN => Some(""),
         SNAPSHOT_SPAN => Some("/snapshots"),
         ROLLBACK_SPAN => Some("/rollback"),
         PAUSE_SPAN => Some("/pause"),
@@ -282,7 +285,9 @@ mod tests {
         let app = Router::new()
             .route("/sandboxes", post(ok).get(ok))
             .route("/v2/sandboxes", post(injected_headers).get(ok))
+            .route(DELETE_PATH, axum::routing::delete(injected_headers).get(ok))
             .route("/templates", post(ok).get(ok))
+            .route("/templates/:templateID", axum::routing::delete(ok))
             .route("/sandboxes/:sandboxID/snapshots", post(ok).get(ok))
             .route("/sandboxes/:sandboxID/rollback", post(ok).get(ok))
             .route("/sandboxes/:sandboxID/pause", post(ok).get(ok))
@@ -295,22 +300,23 @@ mod tests {
             .route("/untraced", post(ok).get(ok))
             .layer(axum::middleware::from_fn(layer));
 
-        for (uri, request_id) in [
-            ("/sandboxes", "req-1"),
-            ("/v2/sandboxes", "req-v2-create"),
-            ("/templates", "req-2"),
-            ("/sandboxes/sb-1/snapshots", "req-3"),
-            ("/sandboxes/sb-1/rollback", "req-4"),
-            ("/sandboxes/sb-1/pause", "req-5"),
-            ("/sandboxes/sb-1/resume", "req-6"),
-            ("/sandboxes/sb-1/connect", "req-7"),
-            ("/v2/sandboxes/sb-1/connect", "req-v2-connect"),
+        for (method, uri, request_id) in [
+            ("POST", "/sandboxes", "req-1"),
+            ("POST", "/v2/sandboxes", "req-v2-create"),
+            ("POST", "/templates", "req-2"),
+            ("POST", "/sandboxes/sb-1/snapshots", "req-3"),
+            ("POST", "/sandboxes/sb-1/rollback", "req-4"),
+            ("POST", "/sandboxes/sb-1/pause", "req-5"),
+            ("POST", "/sandboxes/sb-1/resume", "req-6"),
+            ("POST", "/sandboxes/sb-1/connect", "req-7"),
+            ("POST", "/v2/sandboxes/sb-1/connect", "req-v2-connect"),
+            ("DELETE", "/sandboxes/sb-1", "req-delete"),
         ] {
             let response = app
                 .clone()
                 .oneshot(
                     HttpRequest::builder()
-                        .method("POST")
+                        .method(method)
                         .uri(uri)
                         .header(TRACEPARENT_HEADER, INBOUND)
                         .header(REQUEST_ID_HEADER, request_id)
@@ -320,11 +326,11 @@ mod tests {
                 .await
                 .expect("infallible");
             assert_eq!(response.status(), 200);
-            if uri.starts_with("/v2/") {
+            if uri.starts_with("/v2/") || method == "DELETE" {
                 let outbound = response
                     .headers()
                     .get(TRACEPARENT_HEADER)
-                    .expect("v2 handler must receive a trace to inject")
+                    .expect("handler must receive a trace to inject")
                     .to_str()
                     .expect("traceparent is ASCII");
                 assert!(outbound.contains(INBOUND_TRACE_ID));
@@ -337,6 +343,8 @@ mod tests {
 
         for (method, uri) in [
             ("GET", "/sandboxes"),
+            ("GET", "/sandboxes/sb-1"),
+            ("DELETE", "/templates/tpl-1"),
             ("GET", "/v2/sandboxes"),
             ("GET", "/templates"),
             ("GET", "/sandboxes/sb-1/snapshots"),
@@ -422,7 +430,15 @@ mod tests {
             "the v2 connect route must be spanned once"
         );
 
+        let deletes: Vec<_> = spans.iter().filter(|s| s.name == DELETE_SPAN).collect();
+        assert_eq!(
+            deletes.len(),
+            1,
+            "the sandbox delete route must be spanned once"
+        );
+
         for span in [
+            deletes[0],
             created[0],
             v2_created[0],
             templates[0],
@@ -446,6 +462,7 @@ mod tests {
             );
         }
         for span in [
+            deletes[0],
             snapshots[0],
             rollbacks[0],
             pauses[0],
@@ -463,6 +480,7 @@ mod tests {
         }
         assert!(
             spans.iter().all(|s| s.name == CREATE_SPAN
+                || s.name == DELETE_SPAN
                 || s.name == V2_CREATE_SPAN
                 || s.name == TEMPLATE_SPAN
                 || s.name == SNAPSHOT_SPAN

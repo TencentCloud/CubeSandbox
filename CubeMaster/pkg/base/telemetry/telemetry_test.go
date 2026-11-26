@@ -186,6 +186,37 @@ func TestGinMiddlewareContinuesTraceAndNamesRoute(t *testing.T) {
 	}
 }
 
+func TestGinMiddlewareTracesSandboxDelete(t *testing.T) {
+	exp, flush := setupTest(t)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(GinMiddleware())
+	r.DELETE("/cube/sandbox", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	r.DELETE("/cube/template", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	for _, path := range []string{"/cube/sandbox", "/cube/template"} {
+		req := httptest.NewRequest(http.MethodDelete, path, nil)
+		req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+		r.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	flush()
+
+	spans := exp.snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("want one sandbox delete span, got %d", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "DELETE /cube/sandbox" || span.SpanKind() != trace.SpanKindServer {
+		t.Fatalf("unexpected span %q (%v)", span.Name(), span.SpanKind())
+	}
+	if got := span.Parent().SpanID().String(); got != "00f067aa0ba902b7" {
+		t.Errorf("parent span ID = %q, want incoming traceparent span ID", got)
+	}
+	if got := attr(t, span, "http.response.status_code").AsInt64(); got != http.StatusNoContent {
+		t.Errorf("HTTP response status = %d, want %d", got, http.StatusNoContent)
+	}
+}
+
 func TestGinMiddlewareTracesSnapshotCreateRoute(t *testing.T) {
 	exp, flush := setupTest(t)
 

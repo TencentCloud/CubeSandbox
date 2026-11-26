@@ -40,9 +40,9 @@ func DestroyWithTimeout(ctx context.Context, calleeEp string,
 	if timeout <= 0 {
 		timeout = time.Duration(config.GetConfig().CubeletConf.CommonTimeoutInsec) * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	rpcCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return c.Destroy(ctx, req)
+	return c.Destroy(telemetry.InjectGRPC(telemetry.DetachTrace(rpcCtx, ctx)), req)
 }
 
 func Create(ctx context.Context, calleeEp string,
