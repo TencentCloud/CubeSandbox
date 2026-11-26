@@ -63,7 +63,89 @@ jobs:
           gh pr view "$PR_NUMBER" \
             --json title,body,author,baseRefName,headRefName,headRefOid,files,additions,deletions \
             > review-input/meta.json
-          gh pr diff "$PR_NUMBER" > review-input/pr.diff.tmp
+          # GitHub refuses diffs above 20 000 lines with HTTP 406, so a large PR
+          # would never reach review at all. Rebuild the diff from git objects
+          # instead: fetch the PR head and its merge base (objects only --
+          # nothing is checked out, so the trusted workspace stays clean) and
+          # restrict the diff to the files this PR touches.
+          #
+          # The merge base is resolved through the compare API rather than
+          # diffing against the base tip directly. The base tip is not the fork
+          # point, so a two-dot diff against it would also replay the base
+          # branch's own commits as if the PR had reverted them.
+          FILELIST_TRUNCATED=0
+          if ! gh pr diff "$PR_NUMBER" > review-input/pr.diff.tmp 2>review-input/pr.diff.err; then
+            echo "gh pr diff failed; rebuilding the diff from git objects instead:" >&2
+            cat review-input/pr.diff.err >&2
+
+            # One JSON object per changed file: include previous_filename so
+            # renames keep both sides and are not rendered as whole-file
+            # additions. Project only those two fields so the files endpoint
+            # does not also hand back every file's `patch`, which is the payload
+            # this fallback exists to avoid; one object per line keeps the entry
+            # count exact and a filename with a newline in it on one line.
+            # 100 per page rather than the endpoint's default of 30, so a
+            # capped list costs 30 requests instead of 100. The query string is
+            # part of the path because `gh api -F` would switch the request to
+            # POST and 404.
+            if ! gh api --paginate \
+                 "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+                 --jq '.[] | {filename, previous_filename}' \
+                 > review-input/pr.files.json; then
+              echo "failed to list the PR's files; cannot rebuild the diff" >&2
+              exit 1
+            fi
+            PR_FILE_ENTRIES=$(grep -c '^{' review-input/pr.files.json || true)
+            # NUL-delimited pathspecs, so a newline in a filename cannot split
+            # it into two paths the way a line-based list would, and
+            # :(top,literal) keeps it from being read as a glob.
+            jq -j '. | ":(top,literal)\(.filename)\u0000",
+                     (select(.previous_filename != null) |
+                      ":(top,literal)\(.previous_filename)\u0000")' \
+              review-input/pr.files.json > review-input/pr.pathspecs
+            mapfile -t -d '' PR_FILES < review-input/pr.pathspecs
+            if [ "${#PR_FILES[@]}" -eq 0 ]; then
+              echo "PR files list is empty; cannot rebuild the diff" >&2
+              exit 1
+            fi
+            # The endpoint stops at 3000 entries, so a list at the cap may be
+            # partial, and a partial diff must not reach the reviewer as if it
+            # were the whole change. Default to the cap: a test that cannot be
+            # evaluated only makes an `if` false, it does not abort under
+            # `set -e`, so an unknown count has to warn rather than pass.
+            if [ "${PR_FILE_ENTRIES:-3000}" -ge 3000 ]; then
+              FILELIST_TRUNCATED=1
+            fi
+
+            git fetch --no-tags --depth=1 origin "refs/pull/${PR_NUMBER}/head"
+            pr_head="$(git rev-parse FETCH_HEAD)"
+            # The event payload is frozen in the run that triggered it and a
+            # re-run replays it, so its base.sha can be older than the fork
+            # point the file list above was computed against. Read the live base
+            # instead.
+            live_base="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
+            pr_base="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/compare/${live_base}...${pr_head}" \
+              --jq '.merge_base_commit.sha')"
+            git fetch --no-tags --depth=1 origin "${pr_base}"
+
+            git diff --no-color --no-ext-diff --no-textconv \
+              "${pr_base}" "${pr_head}" \
+              -- "${PR_FILES[@]}" > review-input/pr.diff.tmp
+            # git diff exits 0 with no output when nothing matched, and the file
+            # list was read one API call before the head was resolved, so a push
+            # landing in between can leave the pathspecs describing a revision
+            # that is no longer the one fetched. An empty rebuild must not be
+            # installed and reviewed behind a green check.
+            if [ ! -s review-input/pr.diff.tmp ]; then
+              echo "rebuilt diff is empty for ${#PR_FILES[@]} paths; refusing to review nothing" >&2
+              exit 1
+            fi
+          fi
+          # The redirect above creates pr.diff.err on the success path too, and
+          # only the failure path reads it.
+          rm -f review-input/pr.diff.err
           MAX_BYTES=2000000
           SIZE=$(wc -c < review-input/pr.diff.tmp)
           if [ "$SIZE" -gt "$MAX_BYTES" ]; then
@@ -74,6 +156,11 @@ jobs:
             rm -f review-input/pr.diff.tmp
           else
             mv review-input/pr.diff.tmp review-input/pr.diff
+          fi
+          if [ "$FILELIST_TRUNCATED" -eq 1 ]; then
+            printf '\n... [WARNING: the file list reached the files API cap of 3000 entries; this diff may be partial] ...\n' \
+              >> review-input/pr.diff
+            echo filelist-truncated >> review-input/TRUNCATED
           fi
 
       - name: Run Claude review
