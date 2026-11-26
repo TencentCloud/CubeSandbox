@@ -4258,7 +4258,7 @@ REMOTE_CUBELET_FREQ
 				echo -e "  ${YELLOW}⚠ Not enough healthy nodes (<1), skipping template creation${NC}"
 			else
 				local tpl_count tpl_image="cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest"
-				tpl_count=$(_jump_exec "cubemastercli --address ${cm_clb_ip} --port 8089 tpl ls 2>&1 | tail -n +2 | wc -l" 2>&1) || true
+				tpl_count=$(_jump_exec "cubemastercli --address ${cm_clb_ip} --port 8089 tpl ls --json 2>/dev/null | jq -r '.total // (.data | length)'" 2>&1) || true
 				tpl_count=$(echo "$tpl_count" | tr -d ' \n\r')
 				echo -e "  ${CYAN}Existing templates: ${tpl_count:-0}${NC}"
 
