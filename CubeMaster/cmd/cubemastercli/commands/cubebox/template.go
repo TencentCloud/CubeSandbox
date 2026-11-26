@@ -919,7 +919,7 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.IntFlag{Name: "probe", Usage: "enable readiness probe on the specified port (e.g. --probe 9000); sets period_ms=100"},
 		cli.StringFlag{Name: "probe-type", Value: "http", Usage: "readiness probe transport for --probe: http (GET probe-path) or tcp (raw connect, e.g. adbd :5555); case-insensitive"},
 		cli.IntFlag{Name: "probe-timeout", Value: 30000, Usage: "total readiness probe window in ms (default 30000, one attempt every 100ms); raise for slow-booting guests like full-OS containers; must be 100-3600000 when set explicitly, and is effectively capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)"},
-		cli.IntFlag{Name: "probe-initial-delay", Value: 0, Usage: "delay before the readiness probe starts polling, in ms (default 0); let slow-booting full-OS guests finish booting before probing. Applies to the template build sandbox only: sandboxes restored from the snapshot resume with services already running and start probing immediately"},
+		cli.IntFlag{Name: "probe-initial-delay", Value: 0, Usage: "delay before the readiness probe starts polling, in ms (default 0); let slow-booting full-OS guests finish booting before probing. Must be 0-3600000 when set explicitly, and the effective window is capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s). Applies to the template build sandbox only: sandboxes restored from the snapshot resume with services already running and start probing immediately"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set with --probe-type http"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
@@ -1754,7 +1754,12 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	enableInjectEnvd := c.Bool("enable-inject-envd")
 	user := strings.TrimSpace(c.String("user"))
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" {
+	// The probe flags are part of the guard: without them, passing only
+	// --probe-type/--probe-timeout/--probe-initial-delay/--probe-path would
+	// take the "no overrides" shortcut and silently produce a template with
+	// no readiness probe instead of the "requires --probe" warning below.
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" &&
+		!c.IsSet("probe-type") && !c.IsSet("probe-timeout") && !c.IsSet("probe-initial-delay") && !c.IsSet("probe-path") {
 		return nil, nil
 	}
 
@@ -1827,8 +1832,16 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			probeTimeoutMs = 30000
 		}
 		probeInitialDelayMs := c.Int("probe-initial-delay")
-		if c.IsSet("probe-initial-delay") && probeInitialDelayMs < 0 {
-			return nil, fmt.Errorf("invalid --probe-initial-delay %d: must be >= 0", probeInitialDelayMs)
+		if c.IsSet("probe-initial-delay") {
+			if probeInitialDelayMs < 0 {
+				return nil, fmt.Errorf("invalid --probe-initial-delay %d: must be >= 0", probeInitialDelayMs)
+			}
+			// Bound before the int32 cast below: on 64-bit builds
+			// 4294967296 casts to 0 and 2147483648 to a negative value,
+			// silently dropping the delay instead of rejecting it.
+			if probeInitialDelayMs > 3600000 {
+				return nil, fmt.Errorf("invalid --probe-initial-delay %d: must be at most 3600000 ms (1h); the probe never gets to finish above the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)", probeInitialDelayMs)
+			}
 		}
 		overrides.Probe = &types.Probe{
 			ProbeHandler:     handler,

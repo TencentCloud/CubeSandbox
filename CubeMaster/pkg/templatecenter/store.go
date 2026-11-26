@@ -571,18 +571,6 @@ func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.Cre
 	if err != nil {
 		return nil, "", err
 	}
-	// The probe initial delay is a template-build concern: the build sandbox
-	// boots the image for the first time and may need to wait for full boot
-	// (e.g. full-OS containers). Sandboxes restored from the snapshot resume
-	// with services already running, so the stored probe must not inherit it.
-	for _, c := range cloned.Containers {
-		if c != nil && c.Probe != nil {
-			p := *c.Probe
-			p.InitialDelayMs = 0
-			p.InitialDelaySeconds = 0
-			c.Probe = &p
-		}
-	}
 	if cloned.Annotations == nil {
 		cloned.Annotations = make(map[string]string)
 	}
@@ -641,6 +629,20 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq, enab
 	cloned, templateID, err := NormalizeRequest(req)
 	if err != nil {
 		return nil, err
+	}
+	// The probe initial delay is a template-build concern: the build sandbox
+	// boots the image for the first time and may need to wait for full boot
+	// (e.g. full-OS containers). Sandboxes restored from the snapshot resume
+	// with services already running, so the stored probe must not inherit it.
+	// Strip it here — from the persisted definition only — so the build
+	// request generated in CreateTemplate keeps the caller-supplied delay.
+	for _, c := range cloned.Containers {
+		if c != nil && c.Probe != nil {
+			p := *c.Probe
+			p.InitialDelayMs = 0
+			p.InitialDelaySeconds = 0
+			c.Probe = &p
+		}
 	}
 	jfsVariantTemplate := enableJFSVariants && constants.IsJFSBackend(storageBackendFromCreate(cloned))
 	delete(cloned.Annotations, constants.CubeAnnotationsAppSnapshotCreate)

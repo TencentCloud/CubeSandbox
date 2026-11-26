@@ -1305,3 +1305,31 @@ func TestParseContainerOverridesProbeInitialDelayNegative(t *testing.T) {
 		t.Fatalf("expected invalid --probe-initial-delay error, got %v", err)
 	}
 }
+
+func TestParseContainerOverridesProbeInitialDelayTooLarge(t *testing.T) {
+	// 4294967296 must be rejected before the int32 cast instead of
+	// silently wrapping to 0 and dropping the delay.
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-initial-delay", "4294967296"})
+	_, err := parseContainerOverrides(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid --probe-initial-delay") {
+		t.Fatalf("expected invalid --probe-initial-delay error for oversized value, got %v", err)
+	}
+}
+
+func TestParseContainerOverridesProbeFlagsAloneReachWarningPath(t *testing.T) {
+	// --probe-type without --probe used to hit the "no overrides" early
+	// return and silently produce a template without a readiness probe.
+	// It must now reach the "requires --probe" branch: non-nil overrides
+	// with no probe configured.
+	ctx := newCreateFromImageContext(t, []string{"--probe-type", "tcp"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil {
+		t.Fatal("expected the probe-flag warning path, got the no-overrides early return (probe flags missing from its guard)")
+	}
+	if overrides.Probe != nil {
+		t.Fatalf("expected no probe without --probe, got %+v", overrides.Probe)
+	}
+}

@@ -363,7 +363,11 @@ func TestNormalizeRequestAcceptsTemplateAndSnapshotPrefixes(t *testing.T) {
 	}
 }
 
-func TestNormalizeRequestStripsProbeInitialDelay(t *testing.T) {
+func TestNormalizeRequestKeepsProbeInitialDelay(t *testing.T) {
+	// NormalizeRequest feeds the build request in CreateTemplate, and the
+	// build sandbox boots the image for the first time — it may legitimately
+	// need the caller's initial delay. Only the persisted definition is
+	// stripped (see TestNormalizeStoredRequestStripsProbeInitialDelay).
 	req, _, err := NormalizeRequest(&types.CreateCubeSandboxReq{
 		Request: &types.Request{RequestID: "req-1"},
 		Annotations: map[string]string{
@@ -389,6 +393,40 @@ func TestNormalizeRequestStripsProbeInitialDelay(t *testing.T) {
 		t.Fatalf("expected one container with a probe, got %+v", req.Containers)
 	}
 	probe := req.Containers[0].Probe
+	if probe.InitialDelayMs != 5000 || probe.InitialDelaySeconds != 5 {
+		t.Fatalf("build request probe must keep the initial delay, got %+v", probe)
+	}
+}
+
+func TestNormalizeStoredRequestStripsProbeInitialDelay(t *testing.T) {
+	// The stored definition is what future restores replay. Sandboxes
+	// restored from the snapshot resume with services already running, so
+	// the persisted probe must not inherit the build-only initial delay.
+	out, err := normalizeStoredTemplateRequest(&types.CreateCubeSandboxReq{
+		Request: &types.Request{RequestID: "req-1"},
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+		},
+		Containers: []*types.Container{
+			{
+				Probe: &types.Probe{
+					InitialDelayMs:      5000,
+					InitialDelaySeconds: 5,
+					TimeoutMs:           30000,
+					PeriodMs:            100,
+					SuccessThreshold:    1,
+					FailureThreshold:    300,
+				},
+			},
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("normalizeStoredTemplateRequest failed: %v", err)
+	}
+	if len(out.Containers) != 1 || out.Containers[0] == nil || out.Containers[0].Probe == nil {
+		t.Fatalf("expected one container with a probe, got %+v", out.Containers)
+	}
+	probe := out.Containers[0].Probe
 	if probe.InitialDelayMs != 0 || probe.InitialDelaySeconds != 0 {
 		t.Fatalf("stored probe must not inherit the build-only initial delay, got %+v", probe)
 	}
