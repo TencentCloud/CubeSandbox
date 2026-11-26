@@ -353,6 +353,30 @@ func TestDeleteTemplateWithTargetsForceFailedDefinitionWithReadyReplicaChecksInU
 	}
 }
 
+// The path this change is meant to allow: a FAILED definition with a READY
+// replica that no sandbox uses runs the in-use check and is then cleaned up.
+func TestDeleteTemplateWithTargetsFailedDefinitionWithReadyReplicaNotInUseCleansUp(t *testing.T) {
+	rec := stubDeleteFlow(t, false)
+
+	err := deleteTemplateWithTargets(context.Background(), "tpl-failed-ready", &templateCleanupTargets{
+		Definition:   &models.TemplateDefinition{TemplateID: "tpl-failed-ready", Status: StatusFailed},
+		Replicas:     []models.TemplateReplica{{TemplateID: "tpl-failed-ready", NodeID: "node-a", Status: ReplicaStatusReady}},
+		InstanceType: cubeboxv1.InstanceType_cubebox.String(),
+	}, DeleteTemplateOptions{})
+
+	if err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+	if !rec.inUseCalled {
+		t.Fatal("the in-use check must run while a READY replica remains")
+	}
+	for _, stage := range []string{"replica", "artifact", "metadata", "job"} {
+		if !rec.stages[stage] {
+			t.Fatalf("cleanup stage %q did not run, ran=%v", stage, rec.stages)
+		}
+	}
+}
+
 // A FAILED definition whose replicas are all non-READY keeps skipping the
 // in-use check, as before.
 func TestShouldCheckInUseFailedDefinitionWithoutReadyReplica(t *testing.T) {

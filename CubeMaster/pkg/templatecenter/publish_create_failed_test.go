@@ -49,12 +49,32 @@ func TestPublishCreateFailedIfJobActive_ActiveCreatePublishes(t *testing.T) {
 		JobID: "job-old", TemplateID: "tpl-1", Operation: JobOperationCreate, Status: JobStatusRunning,
 	}).Error)
 
+	seedTemplateCaches(t, "tpl-1")
+
 	published, err := publishCreateFailedIfJobActive(context.Background(), "tpl-1", "job-old", "sanitized")
 	require.NoError(t, err)
 	require.True(t, published)
 	status, lastErr := definitionStatus(t, db, "tpl-1")
 	require.Equal(t, StatusFailed, status)
 	require.Equal(t, "sanitized", lastErr)
+	_, ok := getCachedTemplateList()
+	require.False(t, ok, "list cache must be dropped after a FAILED publish")
+	_, ok = getCachedTemplateInfo("tpl-1")
+	require.False(t, ok, "info cache must be dropped after a FAILED publish")
+}
+
+// seedTemplateCaches fills the list and info caches for templateID, so a test
+// can tell whether the writer invalidated them.
+func seedTemplateCaches(t *testing.T, templateID string) {
+	t.Helper()
+	templateListCache.Flush()
+	templateInfoCache.Flush()
+	t.Cleanup(func() {
+		templateListCache.Flush()
+		templateInfoCache.Flush()
+	})
+	setTemplateListCache([]TemplateInfo{{TemplateID: templateID}})
+	setTemplateInfoCache(templateID, &TemplateInfo{TemplateID: templateID})
 }
 
 // Force delete + re-create under the same template_id while the old job was
@@ -84,12 +104,16 @@ func TestPublishCreateFailedIfJobActive_DoesNotDemoteNewGeneration(t *testing.T)
 				require.NoError(t, db.Create(tc.oldJob).Error)
 			}
 
+			seedTemplateCaches(t, "tpl-1")
+
 			published, err := publishCreateFailedIfJobActive(context.Background(), "tpl-1", "job-old", "sanitized")
 			require.NoError(t, err)
 			require.False(t, published)
 			status, lastErr := definitionStatus(t, db, "tpl-1")
 			require.Equal(t, StatusReady, status)
 			require.Empty(t, lastErr)
+			_, ok := getCachedTemplateInfo("tpl-1")
+			require.True(t, ok, "caches must be kept when nothing was written")
 		})
 	}
 }

@@ -68,6 +68,40 @@ func TestMarkDefinitionFailedOnPersistErr_PublishesFailed(t *testing.T) {
 	}
 }
 
+// TestMarkDefinitionFailedOnPersistErr_NotActiveJob covers published=false
+// with a nil error (the job is no longer the template's active CREATE): the
+// definition is left alone, the job row still gets the plain sanitized
+// message, the returned error is persistErr alone, and no cache is dropped.
+func TestMarkDefinitionFailedOnPersistErr_NotActiveJob(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	persistErr := errors.New("upsert template replica fail: invalid connection")
+	patches.ApplyFunc(publishCreateFailedIfJobActive,
+		func(ctx context.Context, templateID, jobID, lastError string) (bool, error) {
+			return false, nil
+		})
+	invalidated := 0
+	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) { invalidated++ })
+
+	userMsg, err := markDefinitionFailedOnPersistErr(
+		context.Background(), "tpl-1", "job-1", 2, persistErr,
+	)
+
+	if err != persistErr {
+		t.Fatalf("returned error = %v, want persistErr only", err)
+	}
+	if strings.Contains(userMsg, "invalid connection") || strings.Contains(userMsg, "could not be updated") {
+		t.Fatalf("userMsg = %q, want the plain sanitized message", userMsg)
+	}
+	if !strings.Contains(userMsg, "job-1") {
+		t.Fatalf("userMsg missing job ID: %q", userMsg)
+	}
+	if invalidated != 0 {
+		t.Fatalf("caches invalidated %d times, want 0 when nothing was written", invalidated)
+	}
+}
+
 // TestMarkDefinitionFailedOnPersistErr_TemplateNotFound verifies that when
 // publishCreateFailedIfJobActive returns ErrTemplateNotFound (concurrent
 // delete removed the definition row), the update error is suppressed and

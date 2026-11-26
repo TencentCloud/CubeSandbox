@@ -430,7 +430,7 @@ func (t *templateCleanupTargets) shouldCheckInUse() bool {
 	// cleaned up), and sandbox scheduling only needs a READY replica, so keep
 	// the check while any READY row remains.
 	for _, replica := range t.Replicas {
-		if replica.Status == ReplicaStatusReady {
+		if strings.EqualFold(strings.TrimSpace(replica.Status), ReplicaStatusReady) {
 			return true
 		}
 	}

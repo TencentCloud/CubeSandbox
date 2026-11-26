@@ -1686,7 +1686,11 @@ func claimTemplateAliasByJobOrderTx(tx *gorm.DB, templateID string, claimantJobR
 // builds.
 //
 // published is false (with a nil error) when the job row is gone, terminal or
-// not a CREATE: the definition is left alone. A missing definition (hard
+// not a CREATE: the definition is left alone. Known residual (follow-up): the
+// TC stale-job sweep (failStaleJobs) marks a RUNNING job FAILED after an hour
+// without progress, whatever its phase. If distribution / replica creation
+// runs past that and then hits a persist error, the job is already terminal
+// here and the definition stays PENDING. A missing definition (hard
 // deleted by a concurrent delete) returns ErrTemplateNotFound. FAILED never
 // claims an alias, so no alias handling is needed here.
 func publishCreateFailedIfJobActive(ctx context.Context, templateID, jobID, lastError string) (published bool, err error) {

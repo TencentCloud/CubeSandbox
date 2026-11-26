@@ -71,13 +71,14 @@ func distributionFailure(expected, ready int32, distErr error) error {
 //
 // builtFreshArtifact tells the failure paths whether this call owns the
 // artifact (and may therefore delete it) or merely reused an existing one.
-// The job status is always persisted, so callers may simply log the returned
-// error. The returned error can wrap the raw cause (driver errors with
+// Every terminal branch attempts to write the job row; if that write fails,
+// the job can remain RUNNING and is handled by the reconciler, so callers may
+// simply log the returned error. The returned error can wrap the raw cause (driver errors with
 // internal hosts, table names): callers must only log it and never surface it
 // to users. On the create persistErr path the job row's error_message carries
 // a sanitized message instead (see markDefinitionFailedOnPersistErr); the
 // other failure branches in this function still write the raw error to the
-// job row, which is exposed through the build-status API.
+// job row, which the build-status API returns as `message`.
 func finishTemplateImageJobAfterArtifact(
 	ctx context.Context,
 	jobID string,
@@ -284,10 +285,11 @@ func finishTemplateImageJobAfterArtifact(
 // meantime, the definition belongs to a newer generation and is left alone.
 //
 // It returns two values:
-//   - userMsg: a sanitized, user-readable message. Both the definition's
-//     last_error and the job row's error_message are exposed through the API
-//     (GET /templates/:id and GET /templates/:id/builds/:bid), so callers must
-//     write only userMsg to the job row.
+//   - userMsg: a sanitized, user-readable message. The definition's
+//     last_error is returned by GET /templates/:id, and the job row's
+//     error_message column is returned as `message` by
+//     GET /templates/:id/builds/:bid/status, so callers must write only
+//     userMsg to the job row.
 //   - err: the raw error chain (persistErr, joined with the publish error if
 //     any) for logs and for the caller's return value only.
 //
