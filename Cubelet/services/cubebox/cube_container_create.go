@@ -519,13 +519,20 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
 		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
 		if cleanupErr == nil {
-			// The sandbox has already been torn down synchronously, so neither
-			// rollback owner may repeat the same destroy: the outer workflow
-			// failover of an ordinary create (Failover), nor the synchronous
-			// Create-from-pause rollback in service.Create (RollbackDone — it
-			// still restores the tombstone over the cleaned-up row).
+			// The runtime has been torn down synchronously, so an ordinary
+			// create's async failover must not repeat that destroy: Master
+			// compensates the ordinary path with a full DELETE, which also
+			// releases what the earlier create steps allocated. A failed
+			// Create-from-pause gets NO Master compensation, so its
+			// synchronous rollback in service.Create must still run the full
+			// destroy workflow: this cleanup only ran the cubebox step, and
+			// the workflow's remaining steps (images/volume/storage/cgroup/
+			// network/netfile) are what release the earlier steps'
+			// allocations. Re-running the cubebox destroy is the routine
+			// idempotent shape (Master's compensating DELETE does exactly
+			// that on the ordinary path), and the tombstone restore runs
+			// after the whole workflow, over the kept row.
 			flowOpts.Failover = false
-			flowOpts.RollbackDone = true
 		} else {
 			sanboxlog.Errorf("cleanup sandbox after envd init failure failed: %v", cleanupErr)
 		}

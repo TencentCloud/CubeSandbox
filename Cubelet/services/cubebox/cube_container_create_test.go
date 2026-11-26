@@ -324,7 +324,7 @@ func TestAppendExt4NetfileMounts(t *testing.T) {
 }
 
 func TestCleanupAfterEnvdInitFailurePassesExpectedContextAndRequest(t *testing.T) {
-	flowOpts := &workflow.CreateContext{CubeBoxCreated: true}
+	flowOpts := &workflow.CreateContext{CubeBoxCreated: true, RollbackKeepsRow: true}
 	req := &cubebox.RunCubeSandboxRequest{RequestID: "req-cleanup"}
 	sb := &cubeboxstore.CubeBox{
 		Namespace: "ns-cleanup",
@@ -347,6 +347,8 @@ func TestCleanupAfterEnvdInitFailurePassesExpectedContextAndRequest(t *testing.T
 			require.NotNil(t, opts.DestroyInfo)
 			assert.Equal(t, "sb-cleanup", opts.DestroyInfo.SandboxID)
 			assert.Equal(t, "req-cleanup", opts.DestroyInfo.RequestID)
+			assert.True(t, opts.RollbackKeepsRow,
+				"the envd cleanup of a Create-from-pause must keep the row for the tombstone restore")
 			return nil
 		},
 	}

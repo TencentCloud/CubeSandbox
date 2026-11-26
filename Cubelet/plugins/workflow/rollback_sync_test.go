@@ -114,27 +114,6 @@ func TestRollbackAfterDestroyRunsBeforeCleanupHandoff(t *testing.T) {
 	}
 }
 
-// TestRollbackSkippedWhenAlreadyDone pins the RollbackDone short-circuit: the
-// envd-init failure path cleans up inside the create flow itself and marks the
-// context, so the engine must not run a second destroy over the first one's
-// debris — but the tombstone restore (afterDestroy) must still run.
-func TestRollbackSkippedWhenAlreadyDone(t *testing.T) {
-	flow := &destroyRecordingStepFlow{id: "destroy-skip"}
-	e := rollbackTestEngine(flow)
-
-	afterRan := false
-	opts := &CreateContext{}
-	opts.RollbackDone = true
-	e.Rollback(rollbackTestCtx(), opts, func() { afterRan = true })
-
-	if flow.destroyCall != 0 {
-		t.Fatalf("destroy calls = %d, want 0 when the flow already rolled back", flow.destroyCall)
-	}
-	if !afterRan {
-		t.Fatal("afterDestroy must still run when the destroy is skipped")
-	}
-}
-
 // TestRollbackPropagatesKeepsRow pins the CreateContext→DestroyContext
 // handoff: the rollback destroy of a Create-from-pause must carry
 // RollbackKeepsRow so the cubebox destroy keeps the store row for the

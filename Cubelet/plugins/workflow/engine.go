@@ -174,13 +174,6 @@ type CreateContext struct {
 	SavedContainerIDs map[int]string
 	RestartPrior      *RestartPrior
 
-	// RollbackDone reports that the create flow already tore this attempt
-	// down synchronously itself (the envd-init cleanup). Rollback must not
-	// repeat the same destroy against records that are already gone; its
-	// afterDestroy hook still runs, so the Create-from-pause caller restores
-	// the tombstone over the cleaned-up row.
-	RollbackDone bool
-
 	// RollbackKeepsRow tells the rollback destroy to leave the cubebox store
 	// row in place: service.Create's synchronous Create-from-pause rollback
 	// restores the paused tombstone over it right after the teardown, and a
@@ -746,13 +739,6 @@ func volumeReleaseMustBeReported(opts *CreateContext) bool {
 func (e *Engine) Rollback(ctx context.Context, opts ReqContext, afterDestroy func()) {
 	rOpts, ok := opts.(*CreateContext)
 	if !ok {
-		return
-	}
-	if rOpts.RollbackDone {
-		log.G(ctx).Warnf("rollback skipped for %v: the create flow already rolled back", opts.GetSandboxID())
-		if afterDestroy != nil {
-			afterDestroy()
-		}
 		return
 	}
 	sandboxID := opts.GetSandboxID()
