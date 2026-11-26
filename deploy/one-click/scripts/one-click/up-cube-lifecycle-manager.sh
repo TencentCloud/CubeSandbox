@@ -130,17 +130,14 @@ if command_output_contains_fixed_string "LISTEN" ss -lnt "( sport = :${CUBE_LCM_
   die "port ${CUBE_LCM_LISTEN_PORT} is already in use; cube-lifecycle-manager uses host networking and requires it to be free"
 fi
 
-# Pull explicitly so the failure mode (registry unreachable / not logged in /
-# image not pushed yet) surfaces here instead of midway through `compose up`.
-# If the image already exists locally and the registry is unreachable, fall
-# back to the cached copy (airgap / CUBE_SANDBOX_CUBE_LCM_IMAGE preload).
-log "pulling ${CUBE_LCM_IMAGE}"
-if ! docker pull "${CUBE_LCM_IMAGE}" >/dev/null; then
-  if docker_image_exists "${CUBE_LCM_IMAGE}"; then
-    log "WARN: pull failed but local image exists; using cached copy"
-  else
+# Prefer an exact local image reference. This supports preloaded/offline images
+# and avoids unnecessary registry access for CUBE_SANDBOX_CUBE_LCM_IMAGE.
+if docker_image_exists "${CUBE_LCM_IMAGE}"; then
+  log "using local image ${CUBE_LCM_IMAGE}"
+else
+  log "local image not found; pulling ${CUBE_LCM_IMAGE}"
+  docker pull "${CUBE_LCM_IMAGE}" >/dev/null || \
     die "pull failed for ${CUBE_LCM_IMAGE} and no local copy is cached; check registry reachability and credentials (or set MIRROR=cn / CUBE_SANDBOX_CUBE_LCM_IMAGE)"
-  fi
 fi
 
 if [[ "${COMPOSE_DETACH}" == "0" ]]; then

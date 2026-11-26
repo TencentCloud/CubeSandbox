@@ -1163,6 +1163,23 @@ SH
     || fail "webui-postcheck must exit 0 when WEB_UI_ENABLE is disabled"
 }
 
+test_cube_runtime_images_prefer_local_cache() {
+  local proxy="${ONE_CLICK_DIR}/scripts/one-click/up-cube-proxy.sh"
+  local lcm="${ONE_CLICK_DIR}/scripts/one-click/up-cube-lifecycle-manager.sh"
+  local egress="${ONE_CLICK_DIR}/scripts/systemd/cube-egress-start.sh"
+  local path
+
+  for path in "${proxy}" "${lcm}" "${egress}"; do
+    assert_contains "${path}" 'if docker_image_exists "${'
+    assert_contains "${path}" 'log "using local image ${'
+    assert_contains "${path}" 'log "local image not found; pulling ${'
+  done
+
+  assert_not_contains "${proxy}" 'log "pulling ${CUBE_PROXY_IMAGE}"'
+  assert_not_contains "${lcm}" 'log "pulling ${CUBE_LCM_IMAGE}"'
+  assert_not_contains "${egress}" 'log "pulling image ${CUBE_EGRESS_IMAGE}"'
+}
+
 test_mask_external_dep_services_remove_then_mask() {
   local path="${ONE_CLICK_DIR}/install.sh"
 
@@ -1232,6 +1249,7 @@ test_cube_proxy_postcheck_follows_grpc_port
 test_cube_proxy_postcheck_fails_when_grpc_port_not_ready
 test_postcheck_skips_when_external_host_set
 test_webui_postcheck_skips_when_disabled
+test_cube_runtime_images_prefer_local_cache
 test_external_redis_sentinel_wiring
 test_mask_external_dep_services_remove_then_mask
 
