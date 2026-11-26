@@ -135,6 +135,39 @@
  * again, so this can be larger than the disk-fill window above. */
 #define S3_CACHE_PREHEAT_MAX 32
 
+/* How long the cache device must see no foreground read before background
+ * template preheat may issue new work.
+ *
+ * Preheat writes whole objects to the device every reader of this lvstore
+ * shares. A restoring guest faults its memory in serially, one read behind the
+ * other, so a read that queues behind a window of 1 MiB preheat writes costs
+ * the guest that whole wait on every fault -- on a rotational device that
+ * turned a sub-second restore into one that outlasted its reconnect deadline.
+ * Nothing waits for preheat to finish, so it simply stands aside: a demand
+ * read fetches (and caches) what it needs by itself. The window is long
+ * enough to cover the gaps inside one burst of faults and the distance from
+ * importing an export to its consumer's first read. */
+#define S3_CACHE_FOREGROUND_QUIET_US (1000 * 1000)
+
+/* When a read of an imported object from the cache device takes this long,
+ * the device is busy with something else and S3 is the faster source.
+ *
+ * The cache sits on a local disk shared with the rest of the node. Idle, a
+ * small read comes back in a few milliseconds; a whole-object GET from the
+ * object store takes a few more. Under someone else's sustained writes the
+ * same disk read waits up to a second or two, and a restoring guest that
+ * faults its memory in one read at a time pays that on every fault -- long
+ * enough to miss its agent reconnect deadline. Objects are immutable, so S3
+ * returns the same bytes. The threshold is well above an idle read and well
+ * below a congested one. */
+#define S3_CACHE_OBJECT_SLOW_READ_US (100 * 1000)
+/* How long reads keep going to S3 after the last slow read if nothing
+ * measures the device again. */
+#define S3_CACHE_OBJECT_SLOW_HOLD_US (2 * 1000 * 1000)
+/* While slow, how often one background read re-measures the device. It
+ * serves no caller, so no caller waits on a busy disk to find out. */
+#define S3_CACHE_OBJECT_PROBE_US (200 * 1000)
+
 /* Whole-object DRAM hot set. RPC callers use DEFAULT when the parameter is
  * omitted and may pass zero to retain the disk-only behaviour. The limit keeps
  * a single malformed request from prefaulting an unbounded anonymous mapping. */
@@ -427,6 +460,50 @@ void s3_cache_drop_chunk(struct s3_cache *cache, uint64_t chunk_index);
  * it owns a slot across the GET, before any disk fill exists.
  */
 bool s3_cache_is_quiesced(const struct s3_cache *cache);
+
+/**
+ * Record foreground read activity against this cache's device.
+ *
+ * Called when a demand read starts and when it completes, from any thread.
+ * It is a timestamp rather than an in-flight count on purpose: a count that
+ * leaked on one error path would park preheat for good, whereas a missed
+ * touch only lets it resume a little early.
+ */
+void s3_cache_foreground_touch(struct s3_cache *cache);
+
+/**
+ * True while background work should stand aside for foreground reads: one
+ * was started or completed within S3_CACHE_FOREGROUND_QUIET_US. Safe from any
+ * thread. The caller polls; there is no wakeup when the window closes.
+ */
+bool s3_cache_foreground_active(const struct s3_cache *cache);
+
+/**
+ * Change the quiet window from its S3_CACHE_FOREGROUND_QUIET_US default.
+ * Zero disables yielding altogether: background work never stands aside.
+ */
+void s3_cache_set_foreground_quiet_us(struct s3_cache *cache, uint64_t quiet_us);
+
+/**
+ * True while reads of imported objects from the cache device are slow
+ * enough that callers should read the object from S3 instead. Safe from any
+ * thread.
+ */
+bool s3_cache_object_reads_slow(const struct s3_cache *cache);
+
+/**
+ * While reads are slow, true at most once per S3_CACHE_OBJECT_PROBE_US: the
+ * caller may then issue one read it does not wait on, whose completion
+ * re-measures the device. Safe from any thread.
+ */
+bool s3_cache_object_probe_due(struct s3_cache *cache);
+
+/**
+ * Record how long an object read from the cache device took. A slow read
+ * marks the device slow for S3_CACHE_OBJECT_SLOW_HOLD_US; a fast one clears
+ * it. Called on every completed object device read; exposed for tests.
+ */
+void s3_cache_object_note_read_us(struct s3_cache *cache, uint64_t us);
 
 void s3_cache_get_stats(struct s3_cache *cache, struct s3_cache_stats *stats);
 

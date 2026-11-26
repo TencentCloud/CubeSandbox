@@ -54,6 +54,11 @@ static bool g_fail_cache_read;
 static char g_preheat_keys[PREHEAT_CACHED][S3_EXPORT_KEY_MAX];
 static uint32_t g_preheat_nkeys;
 static uint32_t g_object_free_slots = 1024;
+static bool g_foreground_active;
+static bool g_cache_slow;
+static uint32_t g_probe_due_left;
+static uint32_t g_cache_read_calls;
+static uint32_t g_foreground_touches;
 static uint32_t g_object_reservations;
 static uint32_t g_reserved_populate_failures;
 static s3_cache_populate_cb g_failed_populate_cbs[2];
@@ -190,6 +195,43 @@ s3_cache_object_populate(struct s3_cache *cache,
 	snprintf(g_cached_key, sizeof(g_cached_key), "%s", id->key);
 }
 
+bool
+s3_cache_object_reads_slow(const struct s3_cache *cache)
+{
+	return cache && g_cache_slow;
+}
+
+bool
+s3_cache_object_probe_due(struct s3_cache *cache)
+{
+	if (!cache || !g_cache_slow || g_probe_due_left == 0) {
+		return false;
+	}
+	g_probe_due_left--;
+	return true;
+}
+
+void
+s3_cache_object_note_read_us(struct s3_cache *cache, uint64_t us)
+{
+	(void)cache;
+	(void)us;
+}
+
+void
+s3_cache_foreground_touch(struct s3_cache *cache)
+{
+	if (cache) {
+		g_foreground_touches++;
+	}
+}
+
+bool
+s3_cache_foreground_active(const struct s3_cache *cache)
+{
+	return cache && g_foreground_active;
+}
+
 int
 s3_cache_object_reserve(struct s3_cache *cache,
 			const struct s3_cache_object_id *id,
@@ -299,6 +341,7 @@ s3_cache_object_read_on_channel(struct s3_cache *cache,
 
 	(void)cache;
 	(void)channel;
+	g_cache_read_calls++;
 	if (!g_cached_object || object_valid_bytes != g_cached_object_len ||
 	    strcmp(id->endpoint, g_cached_endpoint) != 0 ||
 	    strcmp(id->bucket, g_cached_bucket) != 0 ||
@@ -922,6 +965,55 @@ main(void)
 				   fallback_read.status == 0 &&
 				   buffer_has_pattern(&fallback_read, byte_offset,
 						      CHUNK_SIZE));
+
+			/* A busy cache device: the object is resident, but S3 is
+			 * the faster source for the same immutable bytes. */
+			{
+				struct read_result slow_read = {0};
+				struct read_result again_read = {0};
+				uint32_t calls = g_cache_read_calls;
+
+				g_cache_slow = true;
+				g_probe_due_left = 1;
+				first = g_ngets;
+				submit_read_on_channel(second_dev, second_ch, &slow_read,
+						       byte_offset, CHUNK_SIZE);
+				check_u64("a slow cache device sends the hit to S3",
+					  g_ngets, first + 1);
+				check_u64("and measures the device with one probe read",
+					  g_cache_read_calls, calls + 1);
+				complete_get(first, 0, CHUNK_SIZE);
+				check_true("the bypassed read returns the object's bytes",
+					   slow_read.done && slow_read.status == 0 &&
+					   buffer_has_pattern(&slow_read, byte_offset,
+							      CHUNK_SIZE));
+
+				calls = g_cache_read_calls;
+				first = g_ngets;
+				submit_read_on_channel(second_dev, second_ch, &again_read,
+						       byte_offset, CHUNK_SIZE);
+				check_u64("no second probe inside the probe interval",
+					  g_cache_read_calls, calls);
+				if (g_ngets > first) {
+					complete_get(first, 0, CHUNK_SIZE);
+				}
+				check_true("further slow-device reads still complete",
+					   again_read.done && again_read.status == 0);
+				g_cache_slow = false;
+				g_probe_due_left = 0;
+
+				calls = g_cache_read_calls;
+				first = g_ngets;
+				free(again_read.buf);
+				submit_read_on_channel(second_dev, second_ch, &again_read,
+						       byte_offset, CHUNK_SIZE);
+				check_true("a fast device serves the hit again",
+					   again_read.done && again_read.status == 0 &&
+					   g_ngets == first &&
+					   g_cache_read_calls == calls + 1);
+				free(slow_read.buf);
+				free(again_read.buf);
+			}
 			second_dev->destroy_channel(second_dev, second_ch);
 			second_dev->destroy(second_dev);
 			spdk_thread_poll(thread, 0, 0);
@@ -931,6 +1023,169 @@ main(void)
 		free(fallback_read.buf);
 		free(g_cached_object);
 		g_cached_object = NULL;
+	}
+
+	printf("\n[14y] template preheat stands aside for foreground reads\n");
+	{
+		struct s3_export_manifest *busy = NULL;
+		struct spdk_bs_dev *busy_dev = NULL;
+		struct read_result demand = {0};
+		struct s3_cache *fake_cache = (struct s3_cache *)(uintptr_t)1;
+		struct spdk_uuid uuid;
+		uint8_t raw[16];
+		uint8_t src_idx;
+		uint32_t n = S3_EXPORT_PREHEAT_MAX + 4;
+		uint32_t touches;
+		uint32_t puts_before = g_client_puts;
+		uint32_t i;
+		uint32_t base = g_ngets;
+
+		g_preheat_nkeys = 0;
+		g_object_free_slots = 64;
+		if (s3_export_manifest_create(TEST_UUID, (uint64_t)n * CHUNK_SIZE,
+					      CHUNK_SIZE, S3_EXPORT_LAYOUT_REF,
+					      &busy) == 0) {
+			snprintf(busy->src.prefix, sizeof(busy->src.prefix),
+				 "preheat-yield");
+			if (s3_export_manifest_add_src(busy, busy->src.prefix,
+						       NULL, NULL, &src_idx) != 0) {
+				s3_export_manifest_unref(busy);
+				busy = NULL;
+			}
+		}
+		for (i = 0; busy && i < n; i++) {
+			memset(raw, (int)(i + 0x40), sizeof(raw));
+			memcpy(&uuid, raw, sizeof(uuid));
+			if (s3_export_manifest_set_ref(busy, i, &uuid,
+						      CHUNK_SIZE) != 0) {
+				s3_export_manifest_unref(busy);
+				busy = NULL;
+			}
+		}
+		if (busy) {
+			s3_export_manifest_seal(busy);
+		}
+		check_true("yield manifest created", busy != NULL);
+		touches = g_foreground_touches;
+		if (busy) {
+			rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1,
+						     busy, fake_cache, &busy_dev);
+			check_true("yield export device is created", rc == 0);
+		}
+		if (busy_dev) {
+			check_true("an import counts as its reader's first sign",
+				   g_foreground_touches > touches);
+
+			/* The restore case: the walk is started while the consumer's
+			 * reads are arriving. */
+			g_foreground_active = true;
+			base = g_ngets;
+			check_true("a walk started under foreground reads is accepted",
+				   s3_export_bs_dev_preheat(busy_dev) == 0);
+			check_u64("no preheat GET is issued under foreground reads",
+				  g_ngets - base, 0);
+			for (i = 0; i < 4; i++) {
+				spdk_delay_us(11 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+			}
+			check_u64("the walk keeps waiting while reads keep arriving",
+				  g_ngets - base, 0);
+
+			touches = g_foreground_touches;
+			submit_read(busy_dev, &demand, 0, 4096);
+			check_true("a demand read is foreground activity when it starts",
+				   g_foreground_touches > touches);
+			check_u64("the demand read fetches what it needs by itself",
+				  g_ngets - base, 1);
+			touches = g_foreground_touches;
+			complete_get(base, 0, CHUNK_SIZE);
+			spdk_thread_poll(thread, 0, 0);
+			check_true("the demand read completes under a waiting walk",
+				   demand.done && demand.status == 0);
+			check_true("and is foreground activity when it completes",
+				   g_foreground_touches > touches);
+			free(demand.buf);
+			demand.buf = NULL;
+
+			/* Quiet: nothing wakes the walk but its own poller. */
+			g_foreground_active = false;
+			base = g_ngets;
+			for (i = 0; i < 8 && g_ngets == base; i++) {
+				spdk_delay_us(11 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+			}
+			check_u64("the walk resumes by itself once the device is quiet",
+				  g_ngets - base, S3_EXPORT_PREHEAT_MAX);
+
+			/* Busy again with a window in flight: that window finishes,
+			 * nothing replaces it. */
+			g_foreground_active = true;
+			for (i = 0; i < S3_EXPORT_PREHEAT_MAX; i++) {
+				complete_get(base + i, 0, CHUNK_SIZE);
+			}
+			spdk_thread_poll(thread, 0, 0);
+			/* The demand read left chunk 0 in RAM; the walk cached that
+			 * without a GET, on top of its window. */
+			check_u64("work already in flight is still cached",
+				  g_preheat_nkeys, S3_EXPORT_PREHEAT_MAX + 1);
+			check_u64("no new GET replaces it under foreground reads",
+				  g_ngets - base, S3_EXPORT_PREHEAT_MAX);
+			for (i = 0; i < 4; i++) {
+				spdk_delay_us(11 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+			}
+			check_u64("a drained window does not strand the waiting walk",
+				  g_ngets - base, S3_EXPORT_PREHEAT_MAX);
+
+			g_foreground_active = false;
+			for (i = 0; i < 8 &&
+			     g_ngets - base == S3_EXPORT_PREHEAT_MAX; i++) {
+				spdk_delay_us(11 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+			}
+			check_true("the rest of the walk is issued after the quiet",
+				   g_ngets - base > S3_EXPORT_PREHEAT_MAX);
+			complete_outstanding();
+			for (i = 0; i < 8; i++) {
+				spdk_delay_us(11 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+				complete_outstanding();
+			}
+			check_u64("every object is cached by the end of the walk",
+				  g_preheat_nkeys, n);
+
+			/* A walk parked by foreground reads must not pin a device
+			 * that is being destroyed. */
+			g_preheat_nkeys = 0;
+			busy_dev->destroy(busy_dev);
+			spdk_thread_poll(thread, 0, 0);
+			busy_dev = NULL;
+			puts_before = g_client_puts;
+			g_foreground_active = true;
+			rc = s3_export_bs_dev_create((struct s3_client *)(uintptr_t)1,
+						     busy, fake_cache, &busy_dev);
+			check_true("parked-walk device is created", rc == 0);
+		}
+		if (busy_dev) {
+			base = g_ngets;
+			s3_export_bs_dev_preheat(busy_dev);
+			spdk_delay_us(11 * 1000);
+			spdk_thread_poll(thread, 0, 0);
+			busy_dev->destroy(busy_dev);
+			for (i = 0; i < 8 && g_client_puts == puts_before; i++) {
+				spdk_delay_us(11 * 1000);
+				spdk_thread_poll(thread, 0, 0);
+			}
+			check_u64("a parked walk issues nothing before destroy",
+				  g_ngets - base, 0);
+			check_u64("destroying a parked walk releases the device",
+				  g_client_puts, puts_before + 1);
+		}
+		g_foreground_active = false;
+		g_object_free_slots = 1024;
+		if (busy) {
+			s3_export_manifest_unref(busy);
+		}
 	}
 
 	printf("\n[15] template preheat fills the object cache and yields\n");
