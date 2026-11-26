@@ -19,6 +19,8 @@ import "google/protobuf/empty.proto";
 
 // unstable
 service AgentService {
+	// Collect completed, sampled lifecycle spans over the existing agent channel.
+	rpc PollGuestSpans(google.protobuf.Empty) returns (GuestTraceBatch);
 	// execution
 	rpc CreateContainer(CreateContainerRequest) returns (google.protobuf.Empty);
 	rpc StartContainer(StartContainerRequest) returns (google.protobuf.Empty);
@@ -630,4 +632,19 @@ message ResizeVolumeRequest {
 message CustomFile {
 	string path = 1;
 	string content = 2;
+}
+
+// The same fixed-size representation is used by the guest and shim. The host
+// supplies service and sandbox attributes and accepts no guest payload fields.
+message GuestTraceSpan {
+  bytes trace_id = 1;
+  bytes span_id = 2;
+  bytes parent_span_id = 3;
+  string operation = 4;
+  uint64 start_unix_nanos = 5;
+  uint64 end_unix_nanos = 6;
+}
+
+message GuestTraceBatch {
+  repeated GuestTraceSpan spans = 1;
 }

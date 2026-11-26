@@ -87,10 +87,10 @@ impl Guard {
     }
 }
 
-pub(crate) fn tracing_enabled() -> bool {
+pub(crate) fn configured_endpoint() -> Option<String> {
     let generic = std::env::var(ENV_ENDPOINT).unwrap_or_default();
     let traces = std::env::var(ENV_TRACES_ENDPOINT).unwrap_or_default();
-    select_endpoint(&traces, &generic).is_some()
+    select_endpoint(&traces, &generic).map(str::to_owned)
 }
 
 fn select_endpoint<'a>(traces: &'a str, generic: &'a str) -> Option<&'a str> {
@@ -171,11 +171,12 @@ impl Trace {
                 .with_attributes([KeyValue::new(ATTR_SANDBOX_ID, self.sandbox.clone())])
                 .start_with_context(&tracer, parent)
         });
-        Stage { span }
+        Stage { span, name }
     }
 }
 
 pub struct Stage {
+    name: &'static str,
     span: Option<BoxedSpan>,
 }
 
@@ -190,6 +191,20 @@ impl Stage {
         }
         // A reused RPC context must not send tracestate from a different trace.
         metadata.remove("tracestate");
+        metadata.remove("cube-guest-trace");
+        let operation = match self.name {
+            SPAN_GUEST_INIT => Some("create_sandbox"),
+            SPAN_CONTAINER_CREATE => Some("create_container"),
+            SPAN_CONTAINER_START => Some("start_container"),
+            _ => None,
+        };
+        if span_context.is_sampled() && crate::guest_trace::enabled() {
+            if let Some(operation) = operation {
+                if crate::guest_trace::register_parent(span_context, operation) {
+                    metadata.insert("cube-guest-trace".into(), vec!["1".into()]);
+                }
+            }
+        }
         let context = Context::new().with_remote_span_context(span_context.clone());
         global::get_text_map_propagator(|propagator| {
             propagator.inject_context(&context, &mut MetadataInjector(metadata));

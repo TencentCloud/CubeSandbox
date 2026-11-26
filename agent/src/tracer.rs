@@ -3,108 +3,152 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use anyhow::Result;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{LazyLock, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::sdk::export::trace::SpanData;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
-use opentelemetry::{
-    global,
-    sdk::{trace::Config, Resource},
-    trace::{TraceContextExt, TracerProvider},
-    KeyValue,
-};
-use slog::{info, o, Logger};
-use std::collections::HashMap;
-use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Registry;
-use ttrpc::r#async::TtrpcContext;
+use opentelemetry::sdk::trace::{Span, SpanProcessor, TracerProvider};
+use opentelemetry::trace::{SpanKind, TraceContextExt, TraceResult, Tracer, TracerProvider as _};
+use opentelemetry::Context;
+use protocols::agent::{GuestTraceBatch, GuestTraceSpan};
 
-pub fn setup_tracing(name: &'static str, logger: &Logger) -> Result<()> {
-    let logger = logger.new(o!("subsystem" => "vsock-tracer"));
+const CAPACITY: usize = 256;
+const BATCH_SIZE: usize = 32;
+static QUEUE: Mutex<VecDeque<GuestTraceSpan>> = Mutex::new(VecDeque::new());
+static PROVIDER: LazyLock<TracerProvider> = LazyLock::new(|| {
+    TracerProvider::builder()
+        .with_span_processor(QueueProcessor)
+        .build()
+});
 
-    let exporter = vsock_exporter::Exporter::builder()
-        .with_logger(&logger)
-        .init();
+#[derive(Debug)]
+struct QueueProcessor;
 
-    let config =
-        Config::default().with_resource(Resource::new(vec![KeyValue::new("service.name", name)]));
+impl SpanProcessor for QueueProcessor {
+    fn on_start(&self, _: &Span, _: &Context) {}
 
-    let builder = opentelemetry::sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry::runtime::TokioCurrentThread)
-        .with_config(config);
-
-    let provider = builder.build();
-
-    // We don't need a versioned tracer.
-    let version = None;
-
-    let tracer = provider.get_tracer(name, version);
-
-    let _global_provider = global::set_tracer_provider(provider);
-
-    let layer = OpenTelemetryLayer::new(tracer);
-
-    let subscriber = Registry::default().with(layer);
-
-    tracing::subscriber::set_global_default(subscriber)?;
-
-    global::set_text_map_propagator(TraceContextPropagator::new());
-
-    info!(logger, "tracing setup");
-
-    Ok(())
-}
-
-pub fn end_tracing() {
-    global::shutdown_tracer_provider();
-}
-
-pub fn extract_carrier_from_ttrpc(ttrpc_context: &TtrpcContext) -> HashMap<String, String> {
-    let mut carrier = HashMap::new();
-    for (k, v) in &ttrpc_context.metadata {
-        carrier.insert(k.clone(), v.join(","));
+    fn on_end(&self, span: SpanData) {
+        if let Ok(mut queue) = QUEUE.try_lock() {
+            if queue.len() == CAPACITY {
+                queue.pop_front();
+            }
+            queue.push_back(GuestTraceSpan {
+                trace_id: span
+                    .span_context
+                    .trace_id()
+                    .to_u128()
+                    .to_be_bytes()
+                    .to_vec(),
+                span_id: span.span_context.span_id().to_u64().to_be_bytes().to_vec(),
+                parent_span_id: span.parent_span_id.to_u64().to_be_bytes().to_vec(),
+                operation: span.name.into_owned(),
+                start_unix_nanos: unix_nanos(span.start_time),
+                end_unix_nanos: unix_nanos(span.end_time),
+                ..Default::default()
+            });
+        }
     }
 
-    carrier
+    fn force_flush(&self) -> TraceResult<()> {
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> TraceResult<()> {
+        Ok(())
+    }
 }
 
-pub fn has_traced_parent(context: &opentelemetry::Context) -> bool {
-    context.span().span_context().is_valid()
+fn unix_nanos(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| d.as_nanos().try_into().ok())
+        .unwrap_or_default()
 }
 
-#[macro_export]
-macro_rules! trace_rpc_call {
-    ($ctx: ident, $name:literal, $req: ident) => {
-        // extract context from request context
-        let parent_context = global::get_text_map_propagator(|propagator| {
-            propagator.extract(&extract_carrier_from_ttrpc($ctx))
-        });
+pub fn poll_spans() -> GuestTraceBatch {
+    let spans = QUEUE
+        .lock()
+        .map(|mut queue| {
+            let count = queue.len().min(BATCH_SIZE);
+            queue.drain(..count).collect()
+        })
+        .unwrap_or_default();
+    GuestTraceBatch {
+        spans,
+        ..Default::default()
+    }
+}
 
-        // Do not export payloads or start orphan traces for untraced RPCs.
-        let rpc_span = crate::tracer::has_traced_parent(&parent_context).then(|| {
-            let span = span!(tracing::Level::INFO, $name, "mod" = "rpc.rs");
-            span.set_parent(parent_context);
-            span
-        });
-        let _enter = rpc_span.as_ref().map(|span| span.enter());
-    };
+/// Instrument only Shim lifecycle calls that opted into guest collection.
+/// Dropping the returned SDK span ends it without attaching RPC arguments.
+pub fn start_rpc(
+    metadata: &HashMap<String, Vec<String>>,
+    name: &'static str,
+) -> Option<opentelemetry::sdk::trace::Span> {
+    if !metadata.get("cube-guest-trace")?.iter().any(|v| v == "1") {
+        return None;
+    }
+    let headers: HashMap<_, _> = ["traceparent", "tracestate"]
+        .into_iter()
+        .filter_map(|key| {
+            metadata
+                .get(key)
+                .and_then(|values| values.first())
+                .map(|value| (key.to_string(), value.clone()))
+        })
+        .collect();
+    let parent = TraceContextPropagator::new().extract(&headers);
+    let parent_span = parent.span();
+    let parent_context = parent_span.span_context();
+    if !parent_context.is_valid() || !parent_context.is_sampled() {
+        return None;
+    }
+    let tracer = PROVIDER.get_tracer("cube-agent", None);
+    Some(
+        tracer
+            .span_builder(name)
+            .with_kind(SpanKind::Server)
+            .with_parent_context(parent)
+            .start(&tracer),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::propagation::TextMapPropagator;
 
     #[test]
-    fn requires_a_valid_inbound_traceparent() {
-        let propagator = TraceContextPropagator::new();
-        let mut carrier = HashMap::new();
-        assert!(!has_traced_parent(&propagator.extract(&carrier)));
-        carrier.insert("traceparent".to_string(), "invalid".to_string());
-        assert!(!has_traced_parent(&propagator.extract(&carrier)));
-        carrier.insert(
+    fn poll_drains_bounded_sampled_spans_with_the_shim_parent() {
+        let mut metadata = HashMap::from([(
             "traceparent".to_string(),
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
-        );
-        assert!(has_traced_parent(&propagator.extract(&carrier)));
+            vec!["00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string()],
+        )]);
+        assert!(start_rpc(&metadata, "create_container").is_none());
+        metadata.insert("cube-guest-trace".into(), vec!["1".into()]);
+        metadata.get_mut("traceparent").unwrap()[0].replace_range(53..55, "00");
+        assert!(start_rpc(&metadata, "create_container").is_none());
+        metadata.get_mut("traceparent").unwrap()[0].replace_range(53..55, "01");
+
+        for _ in 0..=CAPACITY {
+            drop(start_rpc(&metadata, "create_container").unwrap());
+        }
+        for _ in 0..CAPACITY / BATCH_SIZE {
+            let batch = poll_spans();
+            assert_eq!(batch.spans.len(), BATCH_SIZE);
+            for span in batch.spans {
+                assert_eq!(
+                    span.trace_id,
+                    0x0123456789abcdef0123456789abcdefu128.to_be_bytes()
+                );
+                assert_eq!(span.parent_span_id, 0x0123456789abcdefu64.to_be_bytes());
+                assert_eq!(span.operation, "create_container");
+                assert!(span.start_unix_nanos > 0);
+                assert!(span.end_unix_nanos >= span.start_unix_nanos);
+            }
+        }
+        assert!(poll_spans().spans.is_empty());
     }
 }

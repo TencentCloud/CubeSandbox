@@ -15978,6 +15978,535 @@ impl ::protobuf::reflect::ProtobufValue for CustomFile {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct GuestTraceSpan {
+    // message fields
+    pub trace_id: ::std::vec::Vec<u8>,
+    pub span_id: ::std::vec::Vec<u8>,
+    pub parent_span_id: ::std::vec::Vec<u8>,
+    pub operation: ::std::string::String,
+    pub start_unix_nanos: u64,
+    pub end_unix_nanos: u64,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a GuestTraceSpan {
+    fn default() -> &'a GuestTraceSpan {
+        <GuestTraceSpan as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl GuestTraceSpan {
+    pub fn new() -> GuestTraceSpan {
+        ::std::default::Default::default()
+    }
+
+    // bytes trace_id = 1;
+
+
+    pub fn get_trace_id(&self) -> &[u8] {
+        &self.trace_id
+    }
+    pub fn clear_trace_id(&mut self) {
+        self.trace_id.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_trace_id(&mut self, v: ::std::vec::Vec<u8>) {
+        self.trace_id = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_trace_id(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.trace_id
+    }
+
+    // Take field
+    pub fn take_trace_id(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.trace_id, ::std::vec::Vec::new())
+    }
+
+    // bytes span_id = 2;
+
+
+    pub fn get_span_id(&self) -> &[u8] {
+        &self.span_id
+    }
+    pub fn clear_span_id(&mut self) {
+        self.span_id.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_span_id(&mut self, v: ::std::vec::Vec<u8>) {
+        self.span_id = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_span_id(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.span_id
+    }
+
+    // Take field
+    pub fn take_span_id(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.span_id, ::std::vec::Vec::new())
+    }
+
+    // bytes parent_span_id = 3;
+
+
+    pub fn get_parent_span_id(&self) -> &[u8] {
+        &self.parent_span_id
+    }
+    pub fn clear_parent_span_id(&mut self) {
+        self.parent_span_id.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_parent_span_id(&mut self, v: ::std::vec::Vec<u8>) {
+        self.parent_span_id = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_parent_span_id(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.parent_span_id
+    }
+
+    // Take field
+    pub fn take_parent_span_id(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.parent_span_id, ::std::vec::Vec::new())
+    }
+
+    // string operation = 4;
+
+
+    pub fn get_operation(&self) -> &str {
+        &self.operation
+    }
+    pub fn clear_operation(&mut self) {
+        self.operation.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_operation(&mut self, v: ::std::string::String) {
+        self.operation = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_operation(&mut self) -> &mut ::std::string::String {
+        &mut self.operation
+    }
+
+    // Take field
+    pub fn take_operation(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.operation, ::std::string::String::new())
+    }
+
+    // uint64 start_unix_nanos = 5;
+
+
+    pub fn get_start_unix_nanos(&self) -> u64 {
+        self.start_unix_nanos
+    }
+    pub fn clear_start_unix_nanos(&mut self) {
+        self.start_unix_nanos = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_start_unix_nanos(&mut self, v: u64) {
+        self.start_unix_nanos = v;
+    }
+
+    // uint64 end_unix_nanos = 6;
+
+
+    pub fn get_end_unix_nanos(&self) -> u64 {
+        self.end_unix_nanos
+    }
+    pub fn clear_end_unix_nanos(&mut self) {
+        self.end_unix_nanos = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_end_unix_nanos(&mut self, v: u64) {
+        self.end_unix_nanos = v;
+    }
+}
+
+impl ::protobuf::Message for GuestTraceSpan {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.trace_id)?;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.span_id)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.parent_span_id)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.operation)?;
+                },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.start_unix_nanos = tmp;
+                },
+                6 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.end_unix_nanos = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if !self.trace_id.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(1, &self.trace_id);
+        }
+        if !self.span_id.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(2, &self.span_id);
+        }
+        if !self.parent_span_id.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(3, &self.parent_span_id);
+        }
+        if !self.operation.is_empty() {
+            my_size += ::protobuf::rt::string_size(4, &self.operation);
+        }
+        if self.start_unix_nanos != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.start_unix_nanos, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.end_unix_nanos != 0 {
+            my_size += ::protobuf::rt::value_size(6, self.end_unix_nanos, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if !self.trace_id.is_empty() {
+            os.write_bytes(1, &self.trace_id)?;
+        }
+        if !self.span_id.is_empty() {
+            os.write_bytes(2, &self.span_id)?;
+        }
+        if !self.parent_span_id.is_empty() {
+            os.write_bytes(3, &self.parent_span_id)?;
+        }
+        if !self.operation.is_empty() {
+            os.write_string(4, &self.operation)?;
+        }
+        if self.start_unix_nanos != 0 {
+            os.write_uint64(5, self.start_unix_nanos)?;
+        }
+        if self.end_unix_nanos != 0 {
+            os.write_uint64(6, self.end_unix_nanos)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> GuestTraceSpan {
+        GuestTraceSpan::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                "trace_id",
+                |m: &GuestTraceSpan| { &m.trace_id },
+                |m: &mut GuestTraceSpan| { &mut m.trace_id },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                "span_id",
+                |m: &GuestTraceSpan| { &m.span_id },
+                |m: &mut GuestTraceSpan| { &mut m.span_id },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                "parent_span_id",
+                |m: &GuestTraceSpan| { &m.parent_span_id },
+                |m: &mut GuestTraceSpan| { &mut m.parent_span_id },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                "operation",
+                |m: &GuestTraceSpan| { &m.operation },
+                |m: &mut GuestTraceSpan| { &mut m.operation },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "start_unix_nanos",
+                |m: &GuestTraceSpan| { &m.start_unix_nanos },
+                |m: &mut GuestTraceSpan| { &mut m.start_unix_nanos },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "end_unix_nanos",
+                |m: &GuestTraceSpan| { &m.end_unix_nanos },
+                |m: &mut GuestTraceSpan| { &mut m.end_unix_nanos },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<GuestTraceSpan>(
+                "GuestTraceSpan",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static GuestTraceSpan {
+        static instance: ::protobuf::rt::LazyV2<GuestTraceSpan> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(GuestTraceSpan::new)
+    }
+}
+
+impl ::protobuf::Clear for GuestTraceSpan {
+    fn clear(&mut self) {
+        self.trace_id.clear();
+        self.span_id.clear();
+        self.parent_span_id.clear();
+        self.operation.clear();
+        self.start_unix_nanos = 0;
+        self.end_unix_nanos = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for GuestTraceSpan {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for GuestTraceSpan {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct GuestTraceBatch {
+    // message fields
+    pub spans: ::protobuf::RepeatedField<GuestTraceSpan>,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a GuestTraceBatch {
+    fn default() -> &'a GuestTraceBatch {
+        <GuestTraceBatch as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl GuestTraceBatch {
+    pub fn new() -> GuestTraceBatch {
+        ::std::default::Default::default()
+    }
+
+    // repeated .grpc.GuestTraceSpan spans = 1;
+
+
+    pub fn get_spans(&self) -> &[GuestTraceSpan] {
+        &self.spans
+    }
+    pub fn clear_spans(&mut self) {
+        self.spans.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_spans(&mut self, v: ::protobuf::RepeatedField<GuestTraceSpan>) {
+        self.spans = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_spans(&mut self) -> &mut ::protobuf::RepeatedField<GuestTraceSpan> {
+        &mut self.spans
+    }
+
+    // Take field
+    pub fn take_spans(&mut self) -> ::protobuf::RepeatedField<GuestTraceSpan> {
+        ::std::mem::replace(&mut self.spans, ::protobuf::RepeatedField::new())
+    }
+}
+
+impl ::protobuf::Message for GuestTraceBatch {
+    fn is_initialized(&self) -> bool {
+        for v in &self.spans {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.spans)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        for value in &self.spans {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        for v in &self.spans {
+            os.write_tag(1, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> GuestTraceBatch {
+        GuestTraceBatch::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<GuestTraceSpan>>(
+                "spans",
+                |m: &GuestTraceBatch| { &m.spans },
+                |m: &mut GuestTraceBatch| { &mut m.spans },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<GuestTraceBatch>(
+                "GuestTraceBatch",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static GuestTraceBatch {
+        static instance: ::protobuf::rt::LazyV2<GuestTraceBatch> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(GuestTraceBatch::new)
+    }
+}
+
+impl ::protobuf::Clear for GuestTraceBatch {
+    fn clear(&mut self) {
+        self.spans.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for GuestTraceBatch {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for GuestTraceBatch {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
 #[derive(Clone,PartialEq,Eq,Debug,Hash)]
 #[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum StartMode {
@@ -16234,9 +16763,16 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x13ResizeVolumeRequest\x12,\n\x11volume_guest_path\x18\x01\x20\x01(\t\
     R\x0fvolumeGuestPathB\0\x12\x14\n\x04size\x18\x02\x20\x01(\x04R\x04sizeB\
     \0:\0\"@\n\nCustomFile\x12\x14\n\x04path\x18\x01\x20\x01(\tR\x04pathB\0\
-    \x12\x1a\n\x07content\x18\x02\x20\x01(\tR\x07contentB\0:\0*3\n\tStartMod\
-    e\x12\t\n\x05START\x10\0\x12\x0c\n\x08SNAPSHOT\x10\x01\x12\x0b\n\x07REST\
-    ORE\x10\x02\x1a\0B\0b\x06proto3\
+    \x12\x1a\n\x07content\x18\x02\x20\x01(\tR\x07contentB\0:\0\"\xe6\x01\n\
+    \x0eGuestTraceSpan\x12\x1b\n\x08trace_id\x18\x01\x20\x01(\x0cR\x07traceI\
+    dB\0\x12\x19\n\x07span_id\x18\x02\x20\x01(\x0cR\x06spanIdB\0\x12&\n\x0ep\
+    arent_span_id\x18\x03\x20\x01(\x0cR\x0cparentSpanIdB\0\x12\x1e\n\toperat\
+    ion\x18\x04\x20\x01(\tR\toperationB\0\x12*\n\x10start_unix_nanos\x18\x05\
+    \x20\x01(\x04R\x0estartUnixNanosB\0\x12&\n\x0eend_unix_nanos\x18\x06\x20\
+    \x01(\x04R\x0cendUnixNanosB\0:\0\"A\n\x0fGuestTraceBatch\x12,\n\x05spans\
+    \x18\x01\x20\x03(\x0b2\x14.grpc.GuestTraceSpanR\x05spansB\0:\0*3\n\tStar\
+    tMode\x12\t\n\x05START\x10\0\x12\x0c\n\x08SNAPSHOT\x10\x01\x12\x0b\n\x07\
+    RESTORE\x10\x02\x1a\0B\0b\x06proto3\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;

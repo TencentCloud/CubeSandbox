@@ -34,6 +34,11 @@ impl AgentServiceClient {
         }
     }
 
+    pub async fn poll_guest_spans(&self, ctx: ttrpc::context::Context, req: &super::empty::Empty) -> ::ttrpc::Result<super::agent::GuestTraceBatch> {
+        let mut cres = super::agent::GuestTraceBatch::new();
+        ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "PollGuestSpans", cres);
+    }
+
     pub async fn create_container(&self, ctx: ttrpc::context::Context, req: &super::agent::CreateContainerRequest) -> ::ttrpc::Result<super::empty::Empty> {
         let mut cres = super::empty::Empty::new();
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "CreateContainer", cres);
@@ -222,6 +227,17 @@ impl AgentServiceClient {
     pub async fn resize_volume(&self, ctx: ttrpc::context::Context, req: &super::agent::ResizeVolumeRequest) -> ::ttrpc::Result<super::empty::Empty> {
         let mut cres = super::empty::Empty::new();
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "ResizeVolume", cres);
+    }
+}
+
+struct PollGuestSpansMethod {
+    service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
+}
+
+#[async_trait]
+impl ::ttrpc::r#async::MethodHandler for PollGuestSpansMethod {
+    async fn handler(&self, ctx: ::ttrpc::r#async::TtrpcContext, req: ::ttrpc::Request) -> ::ttrpc::Result<(u32, Vec<u8>)> {
+        ::ttrpc::async_request_handler!(self, ctx, req, empty, Empty, poll_guest_spans);
     }
 }
 
@@ -645,6 +661,9 @@ impl ::ttrpc::r#async::MethodHandler for ResizeVolumeMethod {
 
 #[async_trait]
 pub trait AgentService: Sync {
+    async fn poll_guest_spans(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::empty::Empty) -> ::ttrpc::Result<super::agent::GuestTraceBatch> {
+        Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/PollGuestSpans is not supported".to_string())))
+    }
     async fn create_container(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::CreateContainerRequest) -> ::ttrpc::Result<super::empty::Empty> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/CreateContainer is not supported".to_string())))
     }
@@ -763,6 +782,9 @@ pub trait AgentService: Sync {
 
 pub fn create_agent_service(service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>) -> HashMap <String, Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>> {
     let mut methods = HashMap::new();
+
+    methods.insert("/grpc.AgentService/PollGuestSpans".to_string(),
+                    std::boxed::Box::new(PollGuestSpansMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
 
     methods.insert("/grpc.AgentService/CreateContainer".to_string(),
                     std::boxed::Box::new(CreateContainerMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
