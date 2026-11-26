@@ -63,12 +63,23 @@ type SandboxLogEntry struct {
 // SandboxLogsRes is the response for POST /cube/sandbox/logs.
 type SandboxLogsRes struct {
 	*types.Res
+	// Logs is never nil: an empty result has to serialise as [] rather than
+	// null, because CubeAPI decodes it as Vec<T> and rejects null.
 	Logs       []SandboxLogEntry `json:"logs"`
 	NextCursor int64             `json:"nextCursor,omitempty"`
 	HasMore    bool              `json:"hasMore"`
 }
 
 var fastJSON = jsoniter.ConfigFastest
+
+// newSandboxLogsRes builds a response whose Logs field is never nil, so an
+// empty result serialises as [] instead of null (see SandboxLogsRes.Logs).
+func newSandboxLogsRes(ret *types.Ret, logs []SandboxLogEntry) *SandboxLogsRes {
+	if logs == nil {
+		logs = []SandboxLogEntry{}
+	}
+	return &SandboxLogsRes{Res: &types.Res{Ret: ret}, Logs: logs}
+}
 
 func handleSandboxLogsAction(c *gin.Context) {
 	rt := CubeLog.GetTraceInfo(c.Request.Context())
@@ -89,19 +100,15 @@ func handleSandboxLogsAction(c *gin.Context) {
 
 	if req.SandboxID == "" {
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
-		common.WriteAPI(c, &SandboxLogsRes{
-			Res: &types.Res{
-				Ret: &types.Ret{
-					RetCode: int(errorcode.ErrorCode_MasterParamsError),
-					RetMsg:  "sandboxID is required",
-				},
-			},
-		})
+		common.WriteAPI(c, newSandboxLogsRes(&types.Ret{
+			RetCode: int(errorcode.ErrorCode_MasterParamsError),
+			RetMsg:  "sandboxID is required",
+		}, nil))
 		return
 	}
 	if resolved, ret := sandbox.NormalizeSandboxIDParam(c.Request.Context(), req.SandboxID); ret != nil {
 		rt.RetCode = int64(ret.RetCode)
-		common.WriteAPI(c, &SandboxLogsRes{Res: &types.Res{Ret: ret}})
+		common.WriteAPI(c, newSandboxLogsRes(ret, nil))
 		return
 	} else {
 		req.SandboxID = resolved
@@ -115,43 +122,41 @@ func handleSandboxLogsAction(c *gin.Context) {
 		limit = maxLogLimit
 	}
 
-	entries, nextCursor, hasMore, err := readShimLogs(req.SandboxID, req.Cursor, limit)
+	entries, nextCursor, hasMore, err := readShimLogs(defaultShimLogPath, req.SandboxID, req.Cursor, limit)
 	if err != nil {
+		// Keep the host-side detail in the log: err.Error() can carry absolute
+		// paths from the node filesystem, which must not reach the caller.
 		CubeLog.Errorf("readShimLogs sandboxID=%s err=%v", req.SandboxID, err)
 		rt.RetCode = int64(errorcode.ErrorCode_MasterInternalError)
-		common.WriteAPI(c, &SandboxLogsRes{
-			Res: &types.Res{
-				Ret: &types.Ret{
-					RetCode: int(errorcode.ErrorCode_MasterInternalError),
-					RetMsg:  err.Error(),
-				},
-			},
-		})
+		common.WriteAPI(c, newSandboxLogsRes(&types.Ret{
+			RetCode: int(errorcode.ErrorCode_MasterInternalError),
+			RetMsg:  "failed to read sandbox logs",
+		}, nil))
 		return
 	}
 
 	rt.RetCode = 0
-	common.WriteAPI(c, &SandboxLogsRes{
-		Res: &types.Res{
-			Ret: &types.Ret{RetCode: 0, RetMsg: ""},
-		},
-		Logs:       entries,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
-	})
+	res := newSandboxLogsRes(&types.Ret{RetCode: 0, RetMsg: ""}, entries)
+	res.NextCursor = nextCursor
+	res.HasMore = hasMore
+	common.WriteAPI(c, res)
 }
 
-// readShimLogs scans the shim log file and returns entries matching sandboxID.
-// cursor is a Unix millisecond timestamp; entries with Timestamp <= cursor are skipped.
-// Returns at most limit entries, plus a nextCursor and hasMore flag for pagination.
-func readShimLogs(sandboxID string, cursor int64, limit int) ([]SandboxLogEntry, int64, bool, error) {
-	f, err := os.Open(defaultShimLogPath)
+// readShimLogs scans the shim log file at path and returns entries matching
+// sandboxID. cursor is a Unix millisecond timestamp; entries with
+// Timestamp <= cursor are skipped. Returns at most limit entries, plus a
+// nextCursor and hasMore flag for pagination.
+//
+// The returned slice is never nil, so callers cannot accidentally serialise an
+// empty result as null (see SandboxLogsRes.Logs).
+func readShimLogs(path, sandboxID string, cursor int64, limit int) ([]SandboxLogEntry, int64, bool, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, false, err
+		return []SandboxLogEntry{}, 0, false, err
 	}
 	defer f.Close()
 
-	var entries []SandboxLogEntry
+	entries := []SandboxLogEntry{}
 	var nextCursor int64
 	hasMore := false
 

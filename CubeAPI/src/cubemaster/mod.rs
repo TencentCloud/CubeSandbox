@@ -20,15 +20,18 @@
 ///   - POST   /cube/sandbox/{sandbox_id}/fork         fork sandbox into N copies (server-side, one snapshot)
 ///   - GET    /cube/operation/{operation_id}          query operation/audit record (not required for snapshot completion)
 ///
-/// New APIs required (❌ not yet on CubeMaster — pending implementation):
-///   - POST   /cube/sandbox/timeout    set absolute TTL
-///   - POST   /cube/sandbox/refresh    extend TTL by delta
-///   - POST   /cube/sandbox/logs       fetch sandbox logs
-///   - POST   /cube/sandbox/commit     commit sandbox → template image
-///   - GET    /cube/template/build/{id}/status  build status poll
-///   - DELETE /cube/template           delete template
-///   - POST   /cube/template/list      list templates
-///   - GET    /cube/template/{id}      get single template
+/// Implemented on CubeMaster (sandbox TTL / commit, template build + CRUD):
+///   - POST   /cube/sandbox/timeout              set absolute TTL
+///   - POST   /cube/sandbox/refresh              extend TTL by delta
+///   - POST   /cube/sandbox/commit               commit sandbox → template image
+///   - GET    /cube/template/build/{id}/status   build status poll
+///   - DELETE /cube/template                     delete template
+///   - GET    /cube/template                     list templates (paginated)
+///   - GET    /cube/template?template_id={id}    get single template
+///
+/// The authoritative route table is
+/// `CubeMaster/pkg/service/httpservice/cube/routes.go`; keep this list in sync
+/// with it rather than tracking implementation status here.
 use chrono::{DateTime, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -174,7 +177,6 @@ impl CubeMasterClient {
     }
 
     /// POST /cube/sandbox/timeout — set absolute TTL for a sandbox.
-    /// ❌ New API required on CubeMaster.
     pub async fn set_sandbox_timeout(
         &self,
         req: &SandboxTimeoutRequest,
@@ -207,7 +209,6 @@ impl CubeMasterClient {
     }
 
     /// POST /cube/sandbox/refresh — extend TTL by a delta (seconds).
-    /// ❌ New API required on CubeMaster.
     pub async fn refresh_sandbox(
         &self,
         req: &SandboxRefreshRequest,
@@ -224,7 +225,6 @@ impl CubeMasterClient {
     }
 
     /// POST /cube/sandbox/logs — fetch sandbox stdout/stderr logs.
-    /// ❌ New API required on CubeMaster.
     pub async fn get_sandbox_logs(
         &self,
         req: &SandboxLogsRequest,
@@ -1809,8 +1809,19 @@ pub struct SandboxLogsRequest {
 #[derive(Debug, Deserialize)]
 pub struct SandboxLogsResponse {
     pub ret: RetCode,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub logs: Vec<SandboxLogLine>,
+}
+
+/// A bare `#[serde(default)]` only covers a *missing* field, so an explicit
+/// `null` would fail with `invalid type: null, expected a sequence`. See the
+/// invariant documented on `SandboxLogsRes.Logs` in CubeMaster.
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2592,6 +2603,45 @@ mod tests {
         non_empty_str, validate_path_segment, validate_volume_id, CubeMasterError,
         GetSandboxResponse, SandboxInfo, TemplateResponse, TemplateSummaryItem,
     };
+
+    // CubeMaster answers a sandbox with no log entries with `"logs": null`.
+    // That has to decode to an empty list, not fail the whole response, or
+    // GET /sandboxes/{id}/logs and /v2/sandboxes/{id}/logs return 500.
+    #[test]
+    fn sandbox_logs_response_accepts_null_logs() {
+        let body = r#"{"ret":{"ret_code":0,"ret_msg":""},"logs":null,"hasMore":false}"#;
+        let response: super::SandboxLogsResponse =
+            serde_json::from_str(body).expect("null logs must decode to an empty list");
+        assert!(response.logs.is_empty());
+        assert_eq!(response.ret.ret_code, 0);
+    }
+
+    #[test]
+    fn sandbox_logs_response_accepts_missing_logs() {
+        let body = r#"{"ret":{"ret_code":0,"ret_msg":""}}"#;
+        let response: super::SandboxLogsResponse =
+            serde_json::from_str(body).expect("missing logs must decode to an empty list");
+        assert!(response.logs.is_empty());
+    }
+
+    #[test]
+    fn sandbox_logs_response_keeps_entries() {
+        let body = r#"{"ret":{"ret_code":0,"ret_msg":""},"logs":[
+            {"timestamp":"2026-11-24T06:03:55.455501721Z","message":"create req start","level":"info"}
+        ],"hasMore":false}"#;
+        let response: super::SandboxLogsResponse =
+            serde_json::from_str(body).expect("non-empty logs must decode");
+        assert_eq!(response.logs.len(), 1);
+        assert_eq!(response.logs[0].message, "create req start");
+    }
+
+    // A wrong payload type must still be rejected: the null tolerance must not
+    // silently swallow a malformed response.
+    #[test]
+    fn sandbox_logs_response_rejects_wrong_type() {
+        let body = r#"{"ret":{"ret_code":0,"ret_msg":""},"logs":"nope"}"#;
+        assert!(serde_json::from_str::<super::SandboxLogsResponse>(body).is_err());
+    }
 
     #[tokio::test]
     async fn exposed_port_info_uses_explicit_host_port_sentinel() {
