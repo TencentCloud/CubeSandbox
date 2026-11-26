@@ -1317,17 +1317,15 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 		}
 		// Cubelet itself initiated the pause and already tracks the in-progress
 		// state via PausingAt (CONTAINER_PAUSING) or PausedAt (CONTAINER_PAUSED).
-		// Calling RecoverContainer -> shim state() while pause_vm() holds the
-		// sandbox mutex causes a ttrpc timeout; RecoverContainer then sets
-		// Unknown=true, making the sandbox appear Terminated and triggering a
-		// spurious Destroy cascade.
+		// Skip RecoverContainer here to avoid contending with pause_vm() on the
+		// shim's sandbox mutex (ttrpc state() timeout) or overwriting the
+		// in-flight pause status transitions.
 		//
 		// The same race exists for snapshot rollback: while updateTaskForRollback
 		// runs, the shim holds its sandbox mutex doing delete_vm +
-		// resume_vm_with_config and ttrpc state() either times out or returns
-		// task status=Unknown. RollbackSandbox sets RollingBack on every
+		// resume_vm_with_config. RollbackSandbox sets RollingBack on every
 		// container's Status before invoking the shim and clears it via defer,
-		// so DeadGC must respect the flag for the same reason.
+		// so DeadGC skips it to avoid ttrpc timeouts and status races.
 		if status := cb.GetStatus(); status != nil {
 			st := status.Get()
 			if st.RollingBack {
@@ -1358,8 +1356,8 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 			case cubebox.ContainerState_CONTAINER_PAUSING:
 				// PAUSING is meant to be a short transient. While a pause is
 				// genuinely in flight the shim holds its sandbox mutex, so a
-				// state() query would time out and stamp Unknown=true (see
-				// above) -- within the safety window we still skip. Past
+				// state() query would time out or race with pause state
+				// transitions -- within the safety window we still skip. Past
 				// pausingStuckThreshold the pause is no longer running (e.g. the
 				// cubelet restarted mid-pause and missed both the RPC and
 				// /tasks/paused reconcile windows); reconcile once against the

@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func (l *local) RecoverAllCubebox(ctx context.Context, afterRecover func(ctx context.Context, cb *cubeboxstore.CubeBox) error) error {
@@ -184,18 +185,21 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 		}
 	}
 
+	if (cb.FirstContainerName != "" && cb.FirstContainerName == ctr.ID) || cb.ID == ctr.ID {
+		ctr.IsPod = true
+	}
+
 	newStatus, err := loadStatus(ctx, cntr, &oldStatus)
-	if err != nil {
-		log.G(ctx).Errorf("Failed to load container status for %q: %v", cntr.ID(), err)
-		if newStatus == nil {
-			newStatus = &cubeboxstore.Status{}
-		}
-		if newStatus.FinishedAt == 0 {
-			// Task status could not be loaded without a recorded exit; mark FinishedAt as unobserved.
-			newStatus.FinishedAt = time.Now().UnixNano()
-			newStatus.ExitUnobserved = true
-		}
-		newStatus.Unknown = true
+	switch {
+	case err != nil && shimLiveness(cb, ctr.IsPod) == utils.LivenessGone:
+		log.G(ctx).Errorf("Failed to load container status for %q and shim pid %d is gone: %v", cntr.ID(), cb.Endpoint.Pid, err)
+		newStatus = unobservedExitStatus(oldStatus)
+	case err != nil:
+		log.G(ctx).Warnf("Failed to load container status for %q, keeping previous status: %v", cntr.ID(), err)
+		newStatus = fallbackStatus(oldStatus)
+	case newStatus.Unknown && shimLiveness(cb, ctr.IsPod) == utils.LivenessAlive:
+		log.G(ctx).Warnf("Task not found for %q, but shim pid %d is still alive; keeping previous status", cntr.ID(), cb.Endpoint.Pid)
+		newStatus = fallbackStatus(oldStatus)
 	}
 
 	if ctr.SandboxID == "" {
@@ -211,11 +215,49 @@ func RecoverContainer(ctx context.Context, client *containerd.Client, cb *cubebo
 	}
 	ctr.Status = cubeboxstore.StoreStatus(*newStatus)
 	ctr.Container = cntr
-
-	if (cb.FirstContainerName != "" && cb.FirstContainerName == ctr.ID) || cb.ID == ctr.ID {
-		ctr.IsPod = true
-	}
 	return ctr, nil
+}
+
+func unobservedExitStatus(old cubeboxstore.Status) *cubeboxstore.Status {
+	s := old
+	if s.FinishedAt == 0 {
+		s.FinishedAt = time.Now().UnixNano()
+		s.ExitUnobserved = true
+	}
+	s.Unknown = true
+	return &s
+}
+
+// fallbackStatus preserves a known prior status when task state cannot be
+// refreshed (e.g. ttrpc timeout). UNKNOWN and CREATED (never confirmed started)
+// synthesize an unobserved exit so interrupted creates do not stay stuck in
+// CREATED.
+func fallbackStatus(old cubeboxstore.Status) *cubeboxstore.Status {
+	switch old.State() {
+	case cubebox.ContainerState_CONTAINER_RUNNING,
+		cubebox.ContainerState_CONTAINER_PAUSED,
+		cubebox.ContainerState_CONTAINER_PAUSING,
+		cubebox.ContainerState_CONTAINER_EXITED:
+		s := old
+		return &s
+	default:
+		return unobservedExitStatus(old)
+	}
+}
+
+// shimLiveness checks the sandbox's recorded pod-shim incarnation via /proc.
+// Only pod containers map to cb.Endpoint; non-pod containers and unrecorded
+// PIDs return LivenessUnknown. Records without PidStartTime also return
+// LivenessUnknown when the PID exists, intentionally avoiding trusting a bare
+// PID that may have been recycled after a host reboot.
+func shimLiveness(cb *cubeboxstore.CubeBox, isPod bool) utils.Liveness {
+	if !isPod || cb.Endpoint.Pid <= 1 {
+		return utils.LivenessUnknown
+	}
+	return utils.ProcessIdentity{
+		Pid:       int(cb.Endpoint.Pid),
+		StartTime: cb.Endpoint.PidStartTime,
+	}.Status()
 }
 
 const loadContainerTimeout = 10 * time.Second
@@ -264,21 +306,7 @@ func loadStatus(ctx context.Context, cntr containerd.Container, status *cubeboxs
 			newStatus.Pid = t.Pid()
 
 		case containerd.Stopped:
-
-			if _, err := t.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
-				if strings.Contains(err.Error(), "ttrpc: closed") {
-					t, err = cntr.Task(ctx, nil)
-					if err != nil && !errdefs.IsNotFound(err) {
-						return nil, fmt.Errorf("failed to load task: %w", err)
-					} else if err == nil {
-						if _, err := t.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
-							return nil, fmt.Errorf("failed to delete task: %w", err)
-						}
-					}
-				} else {
-					return nil, fmt.Errorf("failed to delete task: %w", err)
-				}
-			}
+			deleteStoppedTask(ctx, cntr, t)
 			finishedAt := s.ExitTime.UnixNano()
 			if finishedAt <= 0 {
 				// Backfill zero ExitTime so State() recognizes the container as exited.
@@ -311,4 +339,27 @@ func loadStatus(ctx context.Context, cntr containerd.Container, status *cubeboxs
 	}
 
 	return &newStatus, nil
+}
+
+// deleteStoppedTask cleans up an already-stopped task on a best-effort basis
+// so a transient delete error does not discard the observed exit metadata.
+func deleteStoppedTask(ctx context.Context, cntr containerd.Container, t containerd.Task) {
+	_, err := t.Delete(ctx, containerd.WithProcessKill)
+	if err == nil || errdefs.IsNotFound(err) {
+		return
+	}
+	if strings.Contains(err.Error(), "ttrpc: closed") {
+		t, err = cntr.Task(ctx, nil)
+		if err != nil {
+			if !errdefs.IsNotFound(err) {
+				log.G(ctx).Warnf("Failed to reload stopped task %q for cleanup: %v", cntr.ID(), err)
+			}
+			return
+		}
+		_, err = t.Delete(ctx, containerd.WithProcessKill)
+		if err == nil || errdefs.IsNotFound(err) {
+			return
+		}
+	}
+	log.G(ctx).Warnf("Failed to delete stopped task %q: %v", cntr.ID(), err)
 }

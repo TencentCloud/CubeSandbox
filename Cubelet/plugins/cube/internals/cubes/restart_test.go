@@ -6,6 +6,7 @@ package cubes
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -18,8 +19,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	sandboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/sandbox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func newRecoveryClient(t *testing.T, store containers.Store, tasks tasksapi.TasksClient) *containerd.Client {
@@ -224,6 +228,203 @@ func TestRecoverContainerClearsStaleExitReasonButKeepsPauseFailed(t *testing.T) 
 	}
 }
 
+func TestRecoverContainerKeepsStatusOnTaskStateTimeout(t *testing.T) {
+	started := time.Now().Add(-time.Minute).UnixNano()
+	for _, tc := range []struct {
+		name  string
+		tasks recoveryTasks
+	}{
+		{
+			name:  "containerd returns Status_UNKNOWN on state timeout",
+			tasks: recoveryTasks{get: &tasktypes.Process{ID: "sb", Status: tasktypes.Status_UNKNOWN}},
+		},
+		{
+			name:  "task query returns deadline exceeded",
+			tasks: recoveryTasks{err: context.DeadlineExceeded},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newRecoveryClient(t, recoveryStore{}, tc.tasks)
+			box, ctr := recoverySandbox(cubeboxstore.Status{StartedAt: started, Pid: 4242})
+
+			got, err := RecoverContainer(context.Background(), client, box, ctr)
+			require.NoError(t, err)
+
+			st := got.Status.Get()
+			require.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, st.State())
+			require.False(t, st.Unknown)
+			require.False(t, st.ExitUnobserved)
+			require.Zero(t, st.FinishedAt)
+			require.Equal(t, uint32(4242), st.Pid)
+		})
+	}
+}
+
+func TestRecoverContainerMarksUnobservedWhenPriorStatusIsUnknownOrCreated(t *testing.T) {
+	self, err := utils.ReadProcessIdentity(os.Getpid())
+	require.NoError(t, err)
+
+	created := time.Now().Add(-time.Minute).UnixNano()
+	for _, tc := range []struct {
+		name   string
+		status cubeboxstore.Status
+		tasks  recoveryTasks
+		alive  bool
+	}{
+		{
+			name:   "empty prior status on timeout",
+			status: cubeboxstore.Status{},
+			tasks:  recoveryTasks{err: context.DeadlineExceeded},
+		},
+		{
+			name:   "created prior status on timeout",
+			status: cubeboxstore.Status{CreatedAt: created},
+			tasks:  recoveryTasks{err: context.DeadlineExceeded},
+		},
+		{
+			name:   "created prior status with missing task and live shim",
+			status: cubeboxstore.Status{CreatedAt: created},
+			tasks:  recoveryTasks{},
+			alive:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newRecoveryClient(t, recoveryStore{}, tc.tasks)
+			box, ctr := recoverySandbox(tc.status)
+			if tc.alive {
+				box.Endpoint = sandboxstore.Endpoint{Pid: uint32(self.Pid), PidStartTime: self.StartTime}
+			}
+
+			got, err := RecoverContainer(context.Background(), client, box, ctr)
+			require.NoError(t, err)
+
+			st := got.Status.Get()
+			require.True(t, st.Unknown)
+			require.True(t, st.ExitUnobserved)
+			require.NotZero(t, st.FinishedAt)
+		})
+	}
+}
+
+func TestRecoverContainerKeepsRunningWhenTaskMissingButShimAlive(t *testing.T) {
+	self, err := utils.ReadProcessIdentity(os.Getpid())
+	require.NoError(t, err)
+
+	started := time.Now().Add(-time.Minute).UnixNano()
+	client := newRecoveryClient(t, recoveryStore{}, recoveryTasks{})
+	box, ctr := recoverySandbox(cubeboxstore.Status{StartedAt: started, Pid: uint32(self.Pid)})
+	box.Endpoint = sandboxstore.Endpoint{Pid: uint32(self.Pid), PidStartTime: self.StartTime}
+
+	got, err := RecoverContainer(context.Background(), client, box, ctr)
+	require.NoError(t, err)
+
+	st := got.Status.Get()
+	require.Equal(t, cubebox.ContainerState_CONTAINER_RUNNING, st.State())
+	require.False(t, st.Unknown)
+	require.False(t, st.ExitUnobserved)
+	require.Zero(t, st.FinishedAt)
+}
+
+func TestRecoverContainerMarksUnknownWhenTaskMissingAndShimRecycled(t *testing.T) {
+	self, err := utils.ReadProcessIdentity(os.Getpid())
+	require.NoError(t, err)
+
+	started := time.Now().Add(-time.Minute).UnixNano()
+	client := newRecoveryClient(t, recoveryStore{}, recoveryTasks{})
+	box, ctr := recoverySandbox(cubeboxstore.Status{StartedAt: started, Pid: uint32(self.Pid)})
+	box.Endpoint = sandboxstore.Endpoint{Pid: uint32(self.Pid), PidStartTime: self.StartTime + 1}
+
+	got, err := RecoverContainer(context.Background(), client, box, ctr)
+	require.NoError(t, err)
+
+	st := got.Status.Get()
+	require.True(t, st.Unknown)
+	require.Equal(t, cubebox.ContainerState_CONTAINER_UNKNOWN, st.State())
+}
+
+func TestRecoverContainerMarksUnknownWhenTaskMissingAndStartTimeZero(t *testing.T) {
+	self, err := utils.ReadProcessIdentity(os.Getpid())
+	require.NoError(t, err)
+
+	started := time.Now().Add(-time.Minute).UnixNano()
+	client := newRecoveryClient(t, recoveryStore{}, recoveryTasks{})
+	box, ctr := recoverySandbox(cubeboxstore.Status{StartedAt: started, Pid: uint32(self.Pid)})
+	box.Endpoint = sandboxstore.Endpoint{Pid: uint32(self.Pid)}
+
+	got, err := RecoverContainer(context.Background(), client, box, ctr)
+	require.NoError(t, err)
+
+	st := got.Status.Get()
+	require.True(t, st.Unknown)
+	require.Equal(t, cubebox.ContainerState_CONTAINER_UNKNOWN, st.State())
+}
+
+func TestRecoverContainerMarksUnobservedOnErrorWhenShimIsGone(t *testing.T) {
+	self, err := utils.ReadProcessIdentity(os.Getpid())
+	require.NoError(t, err)
+
+	started := time.Now().Add(-time.Minute).UnixNano()
+	client := newRecoveryClient(t, recoveryStore{}, recoveryTasks{err: context.DeadlineExceeded})
+	box, ctr := recoverySandbox(cubeboxstore.Status{StartedAt: started, Pid: uint32(self.Pid)})
+	box.Endpoint = sandboxstore.Endpoint{Pid: uint32(self.Pid), PidStartTime: self.StartTime + 1}
+
+	got, err := RecoverContainer(context.Background(), client, box, ctr)
+	require.NoError(t, err)
+
+	st := got.Status.Get()
+	require.True(t, st.Unknown)
+	require.True(t, st.ExitUnobserved)
+	require.NotZero(t, st.FinishedAt)
+}
+
+func TestRecoverContainerPreservesStoppedExitWhenDeleteFails(t *testing.T) {
+	started := time.Now().Add(-time.Hour).UnixNano()
+	client := newRecoveryClient(t, recoveryStore{}, recoveryTasks{
+		get: &tasktypes.Process{
+			ID:         "sb",
+			Status:     tasktypes.Status_STOPPED,
+			ExitStatus: 42,
+			ExitedAt:   timestamppb.New(time.Now().Add(-time.Minute)),
+		},
+		deleteErr: context.DeadlineExceeded,
+	})
+	box, ctr := recoverySandbox(cubeboxstore.Status{StartedAt: started, Pid: 4242})
+
+	got, err := RecoverContainer(context.Background(), client, box, ctr)
+	require.NoError(t, err)
+
+	st := got.Status.Get()
+	require.Equal(t, cubebox.ContainerState_CONTAINER_EXITED, st.State())
+	require.False(t, st.Unknown)
+	require.False(t, st.ExitUnobserved)
+	require.Equal(t, int32(42), st.ExitCode)
+	require.Equal(t, string(restartpolicy.ReasonError), st.Reason)
+}
+
+func TestRecoverContainerDoesNotUsePodShimForNonPodContainer(t *testing.T) {
+	self, err := utils.ReadProcessIdentity(os.Getpid())
+	require.NoError(t, err)
+
+	started := time.Now().Add(-time.Minute).UnixNano()
+	client := newRecoveryClient(t, recoveryStore{}, recoveryTasks{})
+	box := &cubeboxstore.CubeBox{ContainersMap: &cubeboxstore.ContainersMap{}}
+	box.ID = "sb"
+	box.Endpoint = sandboxstore.Endpoint{Pid: uint32(self.Pid), PidStartTime: self.StartTime}
+	ctr := &cubeboxstore.Container{
+		Metadata: cubeboxstore.Metadata{ID: "workload"},
+		IsPod:    false,
+		Status:   cubeboxstore.StoreStatus(cubeboxstore.Status{StartedAt: started}),
+	}
+	box.AddContainer(ctr)
+
+	got, err := RecoverContainer(context.Background(), client, box, ctr)
+	require.NoError(t, err)
+
+	st := got.Status.Get()
+	require.True(t, st.Unknown)
+	require.Equal(t, cubebox.ContainerState_CONTAINER_UNKNOWN, st.State())
+}
+
 type recoveryStore struct{ containers.Store }
 
 func (recoveryStore) Get(_ context.Context, id string) (containers.Container, error) {
@@ -238,16 +439,24 @@ func (recoveryMissingStore) Get(_ context.Context, id string) (containers.Contai
 
 type recoveryTasks struct {
 	tasksapi.TasksClient
-	get *tasktypes.Process
+	get       *tasktypes.Process
+	err       error
+	deleteErr error
 }
 
 func (r recoveryTasks) Get(context.Context, *tasksapi.GetRequest, ...grpc.CallOption) (*tasksapi.GetResponse, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
 	if r.get == nil {
 		return nil, errdefs.ErrNotFound
 	}
 	return &tasksapi.GetResponse{Process: r.get}, nil
 }
 
-func (recoveryTasks) Delete(context.Context, *tasksapi.DeleteTaskRequest, ...grpc.CallOption) (*tasksapi.DeleteResponse, error) {
+func (r recoveryTasks) Delete(context.Context, *tasksapi.DeleteTaskRequest, ...grpc.CallOption) (*tasksapi.DeleteResponse, error) {
+	if r.deleteErr != nil {
+		return nil, r.deleteErr
+	}
 	return &tasksapi.DeleteResponse{}, nil
 }
