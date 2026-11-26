@@ -27,6 +27,8 @@
  */
 
 #include "spdk/stdinc.h"
+#include "spdk/assert.h"
+#include "spdk/env.h"
 #include "spdk/json.h"
 #include "spdk/log.h"
 #include "spdk/string.h"
@@ -100,13 +102,26 @@ struct s3lvol_export {
 	 *
 	 * lease_failures counts consecutive failures that are neither success nor
 	 * 404, so a bucket this node cannot reach does not pin every snapshot for
-	 * ever: see the fallback in export_lease_failed(). */
+	 * ever: see the fallback in export_lease_failed().
+	 *
+	 * The rest schedule the checks; see "Check cadence" below:
+	 *
+	 *   lease_observed_at   time(NULL) at submission of the last check that
+	 *                       completed with an answer (present or absent).
+	 *                       Failed checks leave it alone.
+	 *   lease_kick_at       when a delete last asked for a fresh answer.
+	 *   lease_interval_s    the current check interval.
+	 *   lease_next_check    spdk ticks before which the poller skips. */
 	bool                       lease_checked;
 	bool                       lease_absent;
 	uint64_t                   lease_absent_at;
 	uint64_t                   lease_updated_at;
 	uint32_t                   lease_renew_s;
 	uint32_t                   lease_failures;
+	uint64_t                   lease_observed_at;
+	uint64_t                   lease_kick_at;
+	uint32_t                   lease_interval_s;
+	uint64_t                   lease_next_check;
 	struct spdk_poller        *lease_poller;
 	struct export_lease_get_ctx *lease_fetch;
 
@@ -208,8 +223,9 @@ s3lvol_export_find(struct s3lvol_lvstore *lvs, const char *uuid_str)
  * pointer from the in-memory registry and s3lvol_lvol_destroy uses it inline,
  * so a HEAD to S3 here would force changing the destroy contract to async.
  *
- * Hence the cache: a low-frequency poller per export re-reads the lease body
- * on the lvstore's thread, and the delete path consults the cached fields.
+ * Hence the cache: a poller per export re-reads the lease body on the
+ * lvstore's thread, and the delete path consults the cached fields -- but only
+ * while they are fresh (see "Check cadence" below).
  * Grace period W = 3x the importer's renew interval, from the body -- a lost
  * renew PUT (or clock skew) must not turn a live importer into a deletable
  * snapshot. The mis-delete window is "importer stopped renewing, then someone
@@ -248,6 +264,153 @@ s3lvol_export_find(struct s3lvol_lvstore *lvs, const char *uuid_str)
  * Both cases and the reasoning behind the value live with the constant in
  * vbdev_s3lvol.h, next to the renew floor it is tied to. */
 
+/* --------------------------------------------------------------------------
+ * Check cadence
+ *
+ * An export is checked every S3LVOL_LEASE_RENEW_MIN_SEC while its lease could
+ * matter soon: it is live, it went quiet recently, or a delete just asked about
+ * it. Once the lease has shown no reader for LEASE_BACKOFF_AFTER_SEC, the
+ * interval doubles on every check that still finds none, up to
+ * LEASE_MAX_INTERVAL_SEC.
+ *
+ * Why at all: an export stays registered for as long as its snapshot exists,
+ * and most of them are never imported again. A fixed 20 s HEAD per export turns
+ * a few hundred paused sandboxes into a constant stream of 404s, each one an
+ * ERROR line from the S3 client (#2289).
+ *
+ * What makes a slow cadence safe is that nothing which acts on the verdict uses
+ * an old observation. The danger the 20 s cadence bounded is an importer
+ * admitted after the lease went quiet: its first PUT is not awaited, so a
+ * delete is only safe once a check submitted after that PUT has completed. The
+ * delete paths therefore call the *_for_delete() queries, which treat a
+ * no-reader verdict older than LEASE_FRESH_SEC as "may be read", start a check
+ * at once, and fall back to the 20 s cadence. The delete is deferred (reported
+ * as success, see rpc_lvol_respond_deferred) and the pending-delete poller
+ * completes it on a fresh answer. Status queries keep reading the cache and
+ * never start a check, so polling rcow_get_lvstores cannot defeat the backoff.
+ *
+ * LEASE_FRESH_SEC is two regular intervals: at the 20 s cadence an observation
+ * is never older than that, so an export that is not backed off is decided
+ * exactly as before, with a margin for a slow HEAD and for a test that measures
+ * the boundary. It must stay below LEASE_MIN_GRACE_SEC -- the window in which a
+ * just-admitted importer is invisible to a delete is what this bounds, and the
+ * grace is what makes that window safe. */
+#define S3LVOL_LEASE_BACKOFF_AFTER_SEC	(3 * S3LVOL_LEASE_MIN_GRACE_SEC)
+#define S3LVOL_LEASE_MAX_INTERVAL_SEC	300
+#define S3LVOL_LEASE_FRESH_SEC		(2 * S3LVOL_LEASE_RENEW_MIN_SEC)
+SPDK_STATIC_ASSERT(S3LVOL_LEASE_FRESH_SEC < S3LVOL_LEASE_MIN_GRACE_SEC,
+		   "a delete must not act on an observation older than the grace");
+
+/* The poller runs every RENEW_MIN and skips until lease_next_check. The next
+ * check is scheduled this much earlier than the interval says, so the tick
+ * that lands on the interval is never skipped because the previous request
+ * took a while to complete. */
+#define S3LVOL_LEASE_SCHED_SLACK_SEC	(S3LVOL_LEASE_RENEW_MIN_SEC * 3 / 4)
+
+/* Lines per window for the "lease went quiet" notice. At attach every
+ * idle export reaches backoff together, and hundreds of identical lines would
+ * be a log flood of their own. */
+#define S3LVOL_LEASE_LOG_WINDOW_SEC	60
+#define S3LVOL_LEASE_LOG_BURST		10
+
+static uint64_t
+export_lease_grace(const struct s3lvol_export *exp)
+{
+	uint64_t grace = 3 * (uint64_t)exp->lease_renew_s;
+
+	/* Either no renew_s at all (an older importer), or one small enough that
+	 * honouring it would delete data under a reader that is merely slow.
+	 * See the constant. */
+	if (grace < S3LVOL_LEASE_MIN_GRACE_SEC) {
+		grace = S3LVOL_LEASE_MIN_GRACE_SEC;
+	}
+	return grace;
+}
+
+/* Since when the cached lease has shown no reader, or 0 while it shows one (or
+ * nothing is known yet). An absent lease is quiet from its first miss; a
+ * present one from the moment its grace ran out. */
+static uint64_t
+export_lease_quiet_since(const struct s3lvol_export *exp, uint64_t now)
+{
+	uint64_t expiry;
+
+	if (!exp->lease_checked) {
+		return 0;
+	}
+	if (exp->lease_updated_at == 0) {
+		return exp->lease_absent ? exp->lease_absent_at : 0;
+	}
+	expiry = exp->lease_updated_at + export_lease_grace(exp);
+	return expiry <= now ? expiry : 0;
+}
+
+static bool
+export_lease_log_allowed(uint64_t now)
+{
+	static uint64_t window_start;
+	static uint32_t lines, suppressed;
+
+	if (now < window_start || now - window_start >= S3LVOL_LEASE_LOG_WINDOW_SEC) {
+		if (suppressed > 0) {
+			SPDK_NOTICELOG("%u more export lease(s) went quiet in the "
+				       "last %d s; rcow_get_exports lists them "
+				       "(lease_interval_s > %d)\n", suppressed,
+				       S3LVOL_LEASE_LOG_WINDOW_SEC,
+				       S3LVOL_LEASE_RENEW_MIN_SEC);
+		}
+		window_start = now;
+		lines = 0;
+		suppressed = 0;
+	}
+	if (lines < S3LVOL_LEASE_LOG_BURST) {
+		lines++;
+		return true;
+	}
+	suppressed++;
+	return false;
+}
+
+/* Pick the interval after a check has completed. Only a check that answered
+ * moves it; a failed one keeps the current cadence, so an unreachable bucket
+ * is not polled harder than a quiet one. */
+static void
+export_lease_update_interval(struct s3lvol_export *exp, const char *key)
+{
+	uint64_t now = (uint64_t)time(NULL);
+	uint64_t quiet = export_lease_quiet_since(exp, now);
+	uint64_t from = spdk_max(quiet, exp->lease_kick_at);
+	uint32_t was = exp->lease_interval_s;
+
+	if (quiet == 0 || now < from || now - from < S3LVOL_LEASE_BACKOFF_AFTER_SEC) {
+		exp->lease_interval_s = S3LVOL_LEASE_RENEW_MIN_SEC;
+		return;
+	}
+
+	exp->lease_interval_s = spdk_min(spdk_max(was, (uint32_t)S3LVOL_LEASE_RENEW_MIN_SEC) * 2,
+					 (uint32_t)S3LVOL_LEASE_MAX_INTERVAL_SEC);
+
+	/* Once per quiet period: the S3 client logs every 404 without the key,
+	 * so this is the line that says which export the traffic belongs to. */
+	if (was <= S3LVOL_LEASE_RENEW_MIN_SEC && export_lease_log_allowed(now)) {
+		SPDK_NOTICELOG("lease '%s' of export %s has shown no reader for "
+			       "%" PRIu64 " s; checking it every %u s from now on "
+			       "(at most %d s apart; a delete still waits for a "
+			       "fresh check)\n", key, exp->uuid_str, now - quiet,
+			       exp->lease_interval_s, S3LVOL_LEASE_MAX_INTERVAL_SEC);
+	}
+}
+
+static void
+export_lease_schedule(struct s3lvol_export *exp)
+{
+	uint64_t hz = spdk_get_ticks_hz();
+	uint64_t delay = exp->lease_interval_s;
+
+	delay = delay > S3LVOL_LEASE_SCHED_SLACK_SEC ? delay - S3LVOL_LEASE_SCHED_SLACK_SEC : 0;
+	exp->lease_next_check = spdk_get_ticks() + delay * hz;
+}
+
 static void
 s3lvol_export_lease_key(struct s3lvol_export *exp, char *out, size_t out_len)
 {
@@ -262,35 +425,49 @@ struct export_lease_get_ctx {
 	char                  key[S3_EXPORT_KEY_MAX];
 	char                 *body;
 	uint64_t              size;
-	/* time(NULL) at s3_head, retained for diagnostics. */
+	/* time(NULL) at s3_head: the start of an absence, and the age of the
+	 * answer for the freshness rule. */
 	uint64_t              submitted_at;
+	/* The check produced an answer (present or absent), not a failure. */
+	bool                  answered;
 };
 
 /* Record that the last completed lease lookup found no current reader.
  *
  * lease_absent_at is the first miss in this absence, not the most recent one.
- * Refreshing it on every 20 s poll would keep miss_age under one interval and
- * the grace would never elapse. After that first miss is older than grace, a
- * newly admitted importer is unprotected until the next poll sees the PUT. */
+ * Refreshing it on every poll would keep miss_age under one interval and the
+ * grace would never elapse. After that first miss is older than grace, a newly
+ * admitted importer is unprotected until a check sees the PUT -- which is why
+ * the delete paths insist on a fresh one. */
 static void
-export_lease_note_absent(struct s3lvol_export *exp, uint64_t submitted_at)
+export_lease_note_absent(struct export_lease_get_ctx *ctx)
 {
+	struct s3lvol_export *exp = ctx->exp;
+
 	if (!exp->lease_absent || exp->lease_absent_at == 0) {
-		exp->lease_absent_at = submitted_at;
+		exp->lease_absent_at = ctx->submitted_at;
 	}
 	exp->lease_checked = true;
 	exp->lease_absent = true;
 	exp->lease_updated_at = 0;
 	exp->lease_failures = 0;
 	exp->lease_renew_s = 0;
+	exp->lease_observed_at = ctx->submitted_at;
+	ctx->answered = true;
 }
 
 static void
 export_lease_get_done(struct export_lease_get_ctx *ctx)
 {
-	if (ctx->exp) {
-		assert(ctx->exp->lease_fetch == ctx);
-		ctx->exp->lease_fetch = NULL;
+	struct s3lvol_export *exp = ctx->exp;
+
+	if (exp) {
+		assert(exp->lease_fetch == ctx);
+		exp->lease_fetch = NULL;
+		if (ctx->answered) {
+			export_lease_update_interval(exp, ctx->key);
+		}
+		export_lease_schedule(exp);
 	}
 	free(ctx->body);
 	free(ctx);
@@ -351,7 +528,7 @@ export_lease_got_body(void *cb_arg, uint64_t bytes_read, int status)
 		if (status == -ENOENT) {
 			/* Deleted between the HEAD and the GET -- release does
 			 * exactly this. */
-			export_lease_note_absent(exp, ctx->submitted_at);
+			export_lease_note_absent(ctx);
 		} else {
 			export_lease_failed(exp, status);
 		}
@@ -375,7 +552,7 @@ export_lease_got_body(void *cb_arg, uint64_t bytes_read, int status)
 
 	/* A lease that carries no updated_at is not one we recognise. */
 	if (updated_at == 0) {
-		export_lease_note_absent(exp, ctx->submitted_at);
+		export_lease_note_absent(ctx);
 		export_lease_get_done(ctx);
 		return;
 	}
@@ -385,6 +562,8 @@ export_lease_got_body(void *cb_arg, uint64_t bytes_read, int status)
 	exp->lease_failures = 0;
 	exp->lease_absent = false;
 	exp->lease_absent_at = 0;
+	exp->lease_observed_at = ctx->submitted_at;
+	ctx->answered = true;
 
 	/* One key can have several writers, so retain the largest reported cadence.
 	 * Current importers and derived exports both use 20 seconds; the high-water
@@ -413,7 +592,7 @@ export_lease_head_done(void *cb_arg, int status)
 	}
 
 	if (status == -ENOENT) {
-		export_lease_note_absent(exp, ctx->submitted_at);
+		export_lease_note_absent(ctx);
 		export_lease_get_done(ctx);
 		return;
 	}
@@ -424,7 +603,7 @@ export_lease_head_done(void *cb_arg, int status)
 	}
 	/* Empty or implausible: not a lease we can read, and not an error either. */
 	if (ctx->size == 0 || ctx->size > 4096) {
-		export_lease_note_absent(exp, ctx->submitted_at);
+		export_lease_note_absent(ctx);
 		export_lease_get_done(ctx);
 		return;
 	}
@@ -444,22 +623,21 @@ export_lease_head_done(void *cb_arg, int status)
 	}
 }
 
-static int
-export_lease_renew(void *arg)
+static void
+export_lease_check(struct s3lvol_export *exp)
 {
-	struct s3lvol_export *exp = arg;
 	struct export_lease_get_ctx *ctx;
 	int rc;
 
 	/* One check at a time. A slow bucket must not queue a check per tick,
 	 * and the completion writes to fields a second check would race on. */
 	if (exp->lease_fetch) {
-		return SPDK_POLLER_IDLE;
+		return;
 	}
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
-		return SPDK_POLLER_IDLE;
+		return;
 	}
 	ctx->exp = exp;
 	ctx->submitted_at = (uint64_t)time(NULL);
@@ -472,7 +650,33 @@ export_lease_renew(void *arg)
 		export_lease_failed(exp, rc);
 		export_lease_get_done(ctx);
 	}
+}
+
+static int
+export_lease_renew(void *arg)
+{
+	struct s3lvol_export *exp = arg;
+
+	if (exp->lease_next_check != 0 && spdk_get_ticks() < exp->lease_next_check) {
+		return SPDK_POLLER_IDLE;
+	}
+	export_lease_check(exp);
 	return SPDK_POLLER_IDLE;
+}
+
+/* A delete wants an answer the cache cannot give: start a check now, and keep
+ * the regular cadence until the export has been quiet for BACKOFF_AFTER again,
+ * so the pending-delete retry a minute later finds a fresh observation. */
+static void
+export_lease_kick(struct s3lvol_export *exp)
+{
+	if (!exp->lease_poller) {
+		return;
+	}
+	exp->lease_kick_at = (uint64_t)time(NULL);
+	exp->lease_interval_s = S3LVOL_LEASE_RENEW_MIN_SEC;
+	exp->lease_next_check = 0;
+	export_lease_check(exp);
 }
 
 static void
@@ -497,29 +701,30 @@ s3lvol_export_lease_stop(struct s3lvol_export *exp)
 static void
 s3lvol_export_lease_start(struct s3lvol_export *exp)
 {
-	uint64_t interval;
-
 	if (exp->layout != S3_EXPORT_LAYOUT_REF || exp->lease_poller) {
 		return;
 	}
 
-	/* Poll at the same fixed cadence importers renew. The grace period is still
-	 * derived from the importer's reported renew_s, not this local timer. */
-	interval = S3LVOL_LEASE_RENEW_MIN_SEC;
-
+	/* Tick at the cadence importers renew; export_lease_renew() skips ticks
+	 * while the export is backed off. The grace period is still derived from
+	 * the importer's reported renew_s, not this local timer. */
+	exp->lease_interval_s = S3LVOL_LEASE_RENEW_MIN_SEC;
+	exp->lease_next_check = 0;
 	exp->lease_poller = SPDK_POLLER_REGISTER(export_lease_renew, exp,
-						 interval * SPDK_SEC_TO_USEC);
+						 S3LVOL_LEASE_RENEW_MIN_SEC *
+						 SPDK_SEC_TO_USEC);
 	if (!exp->lease_poller) {
 		SPDK_WARNLOG("Could not start the lease poller for export %s\n",
 			     exp->uuid_str);
 		return;
 	}
 
-	SPDK_NOTICELOG("watching lease of export %s every %" PRIu64
-		       " second(s)\n", exp->uuid_str, interval);
+	SPDK_NOTICELOG("watching lease of export %s every %d s, backing off to "
+		       "%d s while it shows no reader\n", exp->uuid_str,
+		       S3LVOL_LEASE_RENEW_MIN_SEC, S3LVOL_LEASE_MAX_INTERVAL_SEC);
 
 	/* Check once now, rather than at the end of the first interval. */
-	export_lease_renew(exp);
+	export_lease_check(exp);
 }
 
 /* ==========================================================================
@@ -732,11 +937,15 @@ export_src_lease_start(struct s3lvol_export *exp, const struct s3_export_manifes
  * evidence -- an importer wrote it and stopped renewing, so nobody is reading --
  * and a delete on that basis is safe to carry out unattended. A legacy export
  * predates trustworthy leases, so status cannot prove a reader has gone; the
- * snapshot delete itself is still the revocation. */
+ * snapshot delete itself is still the revocation.
+ *
+ * need_fresh is for callers about to act on a "no reader" answer: one drawn
+ * from an observation older than LEASE_FRESH_SEC is reported as LEASE instead.
+ * See "Check cadence". */
 static enum s3lvol_export_pin
-export_pin_verdict(const struct s3lvol_export *exp)
+export_pin_verdict_cached(const struct s3lvol_export *exp)
 {
-	uint64_t now, grace;
+	uint64_t now;
 
 	/* A dense export holds copies, so it does not pin the snapshot. */
 	if (exp->layout != S3_EXPORT_LAYOUT_REF) {
@@ -779,19 +988,64 @@ export_pin_verdict(const struct s3lvol_export *exp)
 	}
 
 	now = (uint64_t)time(NULL);
-	grace = 3 * (uint64_t)exp->lease_renew_s;
-	if (grace < S3LVOL_LEASE_MIN_GRACE_SEC) {
-		/* Either no renew_s at all (an older importer), or one small enough
-		 * that honouring it would delete data under a reader that is merely
-		 * slow. See the constant. */
-		grace = S3LVOL_LEASE_MIN_GRACE_SEC;
-	}
 	/* Guard against a lease stamped in the future -- a skewed importer clock
 	 * would otherwise make now - updated_at wrap and read as ancient. */
-	if (exp->lease_updated_at > now || now - exp->lease_updated_at < grace) {
+	if (exp->lease_updated_at > now ||
+	    now - exp->lease_updated_at < export_lease_grace(exp)) {
 		return S3LVOL_EXPORT_PIN_LEASE;
 	}
 	return S3LVOL_EXPORT_PIN_STALE;
+}
+
+static bool
+export_lease_fresh(const struct s3lvol_export *exp)
+{
+	uint64_t now = (uint64_t)time(NULL);
+
+	return exp->lease_observed_at != 0 && exp->lease_observed_at <= now &&
+	       now - exp->lease_observed_at <= S3LVOL_LEASE_FRESH_SEC;
+}
+
+static enum s3lvol_export_pin
+export_pin_verdict(const struct s3lvol_export *exp, bool need_fresh)
+{
+	enum s3lvol_export_pin v = export_pin_verdict_cached(exp);
+
+	if (need_fresh && (v == S3LVOL_EXPORT_PIN_STALE || v == S3LVOL_EXPORT_PIN_LEGACY) &&
+	    !export_lease_fresh(exp)) {
+		return S3LVOL_EXPORT_PIN_LEASE;
+	}
+	return v;
+}
+
+/* For the delete paths: the verdict on a fresh observation.
+ *
+ * Any missing fresh answer starts a check, not only one that would otherwise
+ * allow the delete. A failed check leaves the interval where it was, so an
+ * export that had backed off to MAX_INTERVAL before the bucket became
+ * unreachable would otherwise be retried only every five minutes, and
+ * lease_checked == false makes it pin meanwhile -- the delete would wait a
+ * full backoff period for a question nobody is asking any more. Checking on
+ * demand is bounded by the delete requests themselves, so it cannot become the
+ * 404 flood this backoff exists to remove.
+ *
+ * *unfresh_only reports an export that pins solely because its no-reader
+ * answer is too old to act on. The caller logs that differently: it is a
+ * routine deferral, not a live reader standing in the way. */
+static enum s3lvol_export_pin
+export_pin_verdict_for_delete(struct s3lvol_export *exp, bool *unfresh_only)
+{
+	enum s3lvol_export_pin cached = export_pin_verdict_cached(exp);
+	enum s3lvol_export_pin v = export_pin_verdict(exp, true);
+
+	if (!export_lease_fresh(exp)) {
+		export_lease_kick(exp);
+	}
+	if (unfresh_only) {
+		*unfresh_only = v == S3LVOL_EXPORT_PIN_LEASE &&
+				cached != S3LVOL_EXPORT_PIN_LEASE;
+	}
+	return v;
 }
 
 /* Whether this live lvol is the snapshot the registry entry was published from.
@@ -836,69 +1090,102 @@ export_snapshot_alive(const struct s3lvol_export *exp)
 	return export_names_snapshot(exp, exp->lvs, exp->snapshot);
 }
 
-enum s3lvol_export_pin
-s3lvol_export_pin_state(struct s3lvol_lvstore *lvs, const char *snapshot_name)
+/* Several exports can name the same snapshot, and the most restrictive verdict
+ * wins: one live reader is enough to pin it, and one export whose liveness is
+ * unknowable is enough to keep the delete a decision.
+ *
+ * For a delete every matching export is visited even after the first LEASE, so
+ * each stale observation gets its check started in the same pass and the retry
+ * does not have to discover them one at a time. *pin_out is the export the
+ * caller names in its log line, and *pin_unfresh_only says that export pins
+ * only because its no-reader answer is too old to act on.
+ *
+ * Which pin is reported matters, because the caller picks NOTICE vs ERROR off
+ * pin_unfresh_only. A snapshot with one backed-off export and one with a live
+ * reader must report the live one: naming the backed-off export would log the
+ * routine "waiting for a fresh check" line for a delete that no check can ever
+ * let through. So a pin that really has a reader replaces one that is merely
+ * unfresh. */
+static enum s3lvol_export_pin
+export_pin_state(struct s3lvol_lvstore *lvs, const char *snapshot_name,
+		 bool for_delete, struct s3lvol_export **pin_out,
+		 bool *pin_unfresh_only)
 {
 	enum s3lvol_export_pin worst = S3LVOL_EXPORT_PIN_NONE;
-	struct s3lvol_export *exp;
+	struct s3lvol_export *exp, *pin = NULL;
+	bool pin_unfresh = false;
 
 	if (!lvs || !snapshot_name) {
-		return S3LVOL_EXPORT_PIN_NONE;
+		goto out;
 	}
 
-	/* Several exports can name the same snapshot, and the most restrictive
-	 * verdict wins: one live reader is enough to pin it, and one export whose
-	 * liveness is unknowable is enough to keep the delete a decision. */
 	TAILQ_FOREACH(exp, &g_exports, link) {
 		enum s3lvol_export_pin v;
+		bool unfresh_only = false;
 
 		if (!export_names_snapshot(exp, lvs, snapshot_name)) {
 			continue;
 		}
-		v = export_pin_verdict(exp);
-		if (v == S3LVOL_EXPORT_PIN_LEASE) {
-			return S3LVOL_EXPORT_PIN_LEASE;
+		v = for_delete ? export_pin_verdict_for_delete(exp, &unfresh_only) :
+		    export_pin_verdict(exp, false);
+		if (v == S3LVOL_EXPORT_PIN_LEASE &&
+		    (!pin || (pin_unfresh && !unfresh_only))) {
+			pin = exp;
+			pin_unfresh = unfresh_only;
 		}
 		if (v > worst) {
 			worst = v;
 		}
+		if (v == S3LVOL_EXPORT_PIN_LEASE && !for_delete) {
+			break;
+		}
+	}
+out:
+	if (pin_out) {
+		*pin_out = pin;
+	}
+	if (pin_unfresh_only) {
+		*pin_unfresh_only = pin_unfresh;
 	}
 	return worst;
 }
 
+enum s3lvol_export_pin
+s3lvol_export_pin_state(struct s3lvol_lvstore *lvs, const char *snapshot_name)
+{
+	return export_pin_state(lvs, snapshot_name, false, NULL, NULL);
+}
+
+enum s3lvol_export_pin
+s3lvol_export_pin_state_for_delete(struct s3lvol_lvstore *lvs,
+				   const char *snapshot_name)
+{
+	return export_pin_state(lvs, snapshot_name, true, NULL, NULL);
+}
+
+/* LEGACY does not pin: status still says liveness is unknown, but an explicit
+ * snapshot delete is the revocation, same as STALE -- rcow_get_snapshot_status
+ * reports deletable YES, and the poller will finish a recorded intent. A
+ * pre-lease importer cannot be observed. STALE means no lease within grace, or
+ * nobody has renewed within grace. */
 struct s3lvol_export *
 s3lvol_export_pinning(struct s3lvol_lvstore *lvs, const char *snapshot_name)
 {
-	struct s3lvol_export *exp;
+	struct s3lvol_export *pin;
 
-	if (!lvs || !snapshot_name) {
-		return NULL;
-	}
+	export_pin_state(lvs, snapshot_name, false, &pin, NULL);
+	return pin;
+}
 
-	TAILQ_FOREACH(exp, &g_exports, link) {
-		if (!export_names_snapshot(exp, lvs, snapshot_name)) {
-			continue;
-		}
+struct s3lvol_export *
+s3lvol_export_pinning_for_delete(struct s3lvol_lvstore *lvs,
+				 const char *snapshot_name,
+				 bool *awaiting_check)
+{
+	struct s3lvol_export *pin;
 
-		switch (export_pin_verdict(exp)) {
-		case S3LVOL_EXPORT_PIN_LEASE:
-			/* An importer is reading, or may be. */
-			return exp;
-		case S3LVOL_EXPORT_PIN_LEGACY:
-			/* Status still says liveness is unknown. An explicit snapshot
-			 * delete is the revocation, same as STALE — rcow_get_snapshot_status
-			 * reports deletable YES, and the poller will finish a recorded
-			 * intent. A pre-lease importer cannot be observed. */
-			continue;
-		case S3LVOL_EXPORT_PIN_STALE:
-			/* No lease within grace, or nobody has renewed within grace. */
-			continue;
-		case S3LVOL_EXPORT_PIN_NONE:
-		default:
-			continue;
-		}
-	}
-	return NULL;
+	export_pin_state(lvs, snapshot_name, true, &pin, awaiting_check);
+	return pin;
 }
 
 struct s3lvol_export *
@@ -925,6 +1212,27 @@ s3lvol_export_next(struct s3lvol_export *prev)
 		}
 	}
 	return NULL;
+}
+
+uint32_t
+s3lvol_export_count(struct s3lvol_lvstore *lvs, uint32_t *lease_backed_off)
+{
+	struct s3lvol_export *exp;
+	uint32_t n = 0, slow = 0;
+
+	TAILQ_FOREACH(exp, &g_exports, link) {
+		if (exp->lvs != lvs) {
+			continue;
+		}
+		n++;
+		if (exp->lease_poller && exp->lease_interval_s > S3LVOL_LEASE_RENEW_MIN_SEC) {
+			slow++;
+		}
+	}
+	if (lease_backed_off) {
+		*lease_backed_off = slow;
+	}
+	return n;
 }
 
 struct s3lvol_export *
@@ -979,7 +1287,9 @@ s3lvol_export_get(const struct s3lvol_export *exp, struct s3lvol_export_entry *o
 	out->lease_watch = exp->lease_poller != NULL;
 	out->lease_updated_at = exp->lease_updated_at;
 	out->lease_renew_s = exp->lease_renew_s;
-	out->pin = export_pin_verdict(exp);
+	out->lease_checked_at = exp->lease_observed_at;
+	out->lease_interval_s = exp->lease_poller ? exp->lease_interval_s : 0;
+	out->pin = export_pin_verdict(exp, false);
 	out->reaping = exp->reaping;
 
 	out->snapshot_alive = export_snapshot_alive(exp);

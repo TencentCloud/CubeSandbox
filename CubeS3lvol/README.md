@@ -316,9 +316,21 @@ grace window. Same-version importers renew every 20 s. A confirmed miss younger
 than 60 s still pins — that covers a first lease PUT that arrives in the first
 minute after publish (or after a live lease disappears). Once the export has
 been idle longer than that, the miss is already older than the grace: a newly
-admitted importer is unprotected until the source's next lease poll (20 s),
-when the source first sees the PUT. The delete path uses that cached
-poll; it does not HEAD S3 itself.
+admitted importer is protected once a lease check on the source sees its PUT.
+
+The source checks each lease every 20 s while it could matter soon. A lease that
+has shown no reader for 3 minutes is checked less often, doubling up to every
+5 minutes, so hundreds of idle exports do not keep the S3 client logging 404s
+(#2289). The first time an export backs off, the target logs a NOTICE that
+names the lease key. `rcow_get_exports` reports `lease_interval_s` and
+`lease_checked_at`, and `rcow_get_lvstores` reports `num_exports` and
+`num_exports_lease_backed_off`. A delete never acts on such an old answer: if the
+last check that found no reader is older than 40 s, `rcow_delete_lvol` starts a
+check, records the delete as deferred (success with `deferred: true`), and the
+pending-delete poller completes it on the next round (about a minute later).
+That deferral is a NOTICE naming the export; the ERROR line is kept for a lease
+that is actually live. Status queries (`rcow_get_snapshot_status`,
+`rcow_get_lvstores`) only read the cached result and never start a check.
 
 `rcow_export_snapshot` returns an **export uuid immediately**; the export itself
 keeps running in the background. The uuid is not a completion signal — poll it:
@@ -336,14 +348,17 @@ scripts/s3lvol_rpc.py rcow_get_snapshot_status '{"export_uuid":"<uuid>"}'
 - `export_status`: `INPROGRESS` / `DONE` / `NONE`.
 - `deletable`: `YES` / `NO`, computed on the spot each time from the cached
   lease poll (the query itself does not HEAD S3) and mirroring what
-  `rcow_delete_lvol` would actually refuse: a snapshot is **not
+  `rcow_delete_lvol` would **refuse**: a snapshot is **not
   deletable** while an export is in progress, has a live lease, has a miss
   younger than the source grace (`S3LVOL_LEASE_MIN_GRACE_SEC`), or is read by a
   local esnap clone; also while a decouple runs, while active over NVMf, or when
   it has more than one clone. An idle lease-aware ref export, and a pre-lease
   legacy export, are released internally by the delete — `deletable: YES` in
   those cases is the signal that an operator delete will revoke the export even
-  if a pre-lease reader cannot be observed.
+  if a pre-lease reader cannot be observed. `YES` does not promise the delete
+  runs synchronously: for a backed-off export (see above) it is first deferred
+  for one pending-delete round, which `rcow_delete_lvol` reports as
+  `deferred: true`.
 - `delete_pending`: whether a delete was asked for and refused — see
   [Retrying a refused snapshot delete](#retrying-a-refused-snapshot-delete---retry-pending).
   Only meaningful when the query names a `snapshot_name`; queried by
@@ -592,10 +607,16 @@ one object cannot land on a later one that reused the name:
   skipped; run `--retry-pending` again once the blocker clears.
 - Each successful delete clears the mark on the target; a delete refused again
   is reported and does not stop the others.
+- A delete the target **defers** (`deferred: true` — accepted as an intent, not
+  carried out) is printed as `deferred <name>` and is *not* counted as
+  completed. This is reachable even for a target picked on `deletable: YES`,
+  because that answer is the cached lease verdict while the delete path also
+  wants a recent one; the poller finishes it, and the next run confirms it went.
 
 The command takes no method argument. Its exit status is 0 when every
-marked-and-deletable snapshot went through, 1 if any delete failed, and it
-prints `no pending snapshot deletes to retry` when there is nothing to do:
+marked-and-deletable snapshot went through, 1 if any delete failed or was
+deferred, and it prints `no pending snapshot deletes to retry` when there is
+nothing to do:
 
 ```sh
 $ test/tools/s3lvol_rpc.py --retry-pending
@@ -695,4 +716,13 @@ esnap reader of an export of the snapshot also keeps it `NO`.
 It is a snapshot of the current state, not a promise: something can pin the
 snapshot again between the query and the delete, and a retry that is refused
 again is reported by `--retry-pending` (exit status 1) rather than hidden.
+
+It is also, deliberately, the *cached* lease verdict. The delete path asks the
+stricter question — it also requires the no-reader answer to be recent, because
+the lease check of an idle export is backed off — so `YES` can still be met by
+a deferral. Mirroring the strict query here is the wrong fix: this answer is
+served to `rcow_get_snapshot_status` and `rcow_get_lvstores`, and the strict one
+starts a lease check, which would let a status poll defeat the backoff. The
+divergence is bounded and self-clearing: the delete is deferred rather than
+failed, keeps its mark, and the poller completes it on the fresh answer.
 

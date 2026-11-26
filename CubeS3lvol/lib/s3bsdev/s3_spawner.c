@@ -75,11 +75,13 @@ spawner_thread_main(void *arg)
 		int rc = pthread_setaffinity_np(pthread_self(),
 						sizeof(cpu_set_t), &g_cpuset);
 		if (rc != 0) {
-			/* Not fatal: falls back to inheriting the caller's affinity,
-			 * degraded performance but still functional. */
-			SPDK_WARNLOG("spawner: pthread_setaffinity_np failed: %s "
-				     "(background threads may land on reactor cores)\n",
-				     strerror(rc));
+			/* Not fatal: falls back to inheriting the caller's affinity
+			 * (the main lcore, which also runs a reactor). Still
+			 * functional, but every CRT thread then competes with that
+			 * reactor, so say it loudly. */
+			SPDK_ERRLOG("spawner: pthread_setaffinity_np failed: %s "
+				    "(background threads stay on the caller's "
+				    "reactor core)\n", strerror(rc));
 		}
 	}
 

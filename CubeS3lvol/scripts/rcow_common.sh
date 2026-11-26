@@ -1663,6 +1663,26 @@ rcow_connected_nqns()
 	done 2>/dev/null
 }
 
+# One fabric login with the options every rcow controller is created with.
+#
+# The timeouts are set at connect time for a fresh start; the upgrade path
+# writes the same values to sysfs on controllers that already exist
+# (rcow_tune_initiator_timeouts), because connect options are fixed for a
+# connection's lifetime. fast_io_fail_tmo is deliberately never passed:
+# enabled, it turns every pause into a fast failure, which is the opposite of
+# what this whole path is for. RCOW_CONNECT_TIMEOUT, if set, bounds the call.
+rcow_connect_one()
+{
+	local -a wrap=()
+
+	[ -n "${RCOW_CONNECT_TIMEOUT:-}" ] && wrap=(timeout "${RCOW_CONNECT_TIMEOUT}")
+	"${wrap[@]+"${wrap[@]}"}" nvme connect -t tcp -a "${RCOW_LISTEN_ADDR}" \
+		-s "${RCOW_LISTEN_PORT}" -n "$1" \
+		-i "${RCOW_IO_QUEUES}" \
+		--reconnect-delay "${RCOW_RECONNECT_DELAY}" \
+		--ctrl-loss-tmo "${RCOW_CTRL_LOSS_TMO}" >/dev/null 2>&1
+}
+
 # Connect every subsystem at startup, empty ones included. A namespace added
 # later arrives as an AEN on an existing controller, which the host picks up on
 # its own; connecting on demand instead would mean a fabric login in the latency
@@ -1670,6 +1690,9 @@ rcow_connected_nqns()
 rcow_connect_all()
 {
 	local present i nqn already=0 connected=0 failed=0
+
+	# A start owns the grid again; let the patrol back in.
+	rm -f "${RCOW_PATROL_HOLD}" 2>/dev/null || true
 
 	present="$(rcow_connected_nqns)"
 
@@ -1679,17 +1702,7 @@ rcow_connect_all()
 			already=$((already + 1))
 			continue
 		fi
-		# The timeouts are set at connect time for a fresh start; the upgrade
-		# path writes the same values to sysfs on controllers that already
-		# exist (rcow_tune_initiator_timeouts), because connect options are
-		# fixed for a connection's lifetime. fast_io_fail_tmo is deliberately
-		# never passed: enabled, it turns every pause into a fast failure,
-		# which is the opposite of what this whole path is for.
-		if nvme connect -t tcp -a "${RCOW_LISTEN_ADDR}" \
-				-s "${RCOW_LISTEN_PORT}" -n "${nqn}" \
-				-i "${RCOW_IO_QUEUES}" \
-				--reconnect-delay "${RCOW_RECONNECT_DELAY}" \
-				--ctrl-loss-tmo "${RCOW_CTRL_LOSS_TMO}" >/dev/null 2>&1; then
+		if rcow_connect_one "${nqn}"; then
 			connected=$((connected + 1))
 		else
 			rcow_warn "nvme connect failed for ${nqn}"
@@ -1706,6 +1719,10 @@ rcow_disconnect_all()
 {
 	local i nqn gone=0
 
+	# Stop the controller patrol first, or a supervisor still running during
+	# ExecStop would log straight back in to what is being torn down.
+	rcow_patrol_hold
+
 	# Let an in-flight re-probe finish first. Disconnecting under one leaves
 	# "Buffer I/O error ... async page read" in dmesg, which is teardown noise
 	# that reads exactly like data loss.
@@ -1719,6 +1736,188 @@ rcow_disconnect_all()
 	done
 
 	rcow_log "initiator: disconnected ${gone} subsystem(s)"
+	return 0
+}
+
+# --------------------------------------------------------------------------
+# Controller patrol
+#
+# The kernel deletes a controller for good once reconnecting has failed for
+# ctrl_loss_tmo, and nothing in the start path runs again while the target
+# keeps running. A target that stalled past that budget, a controller torn down
+# by an error the kernel does not retry, or a stray `nvme disconnect` therefore
+# left a subsystem missing until somebody logged in again by hand (#2288).
+#
+# rcow_patrol_controllers is one round of the repair, meant to be called from a
+# supervisor loop every few seconds. It only acts on an NQN with no usable
+# controller at all: one in connecting/resetting/new is the kernel's own
+# reconnect, and logging in beside it would only make a duplicate. Each missing
+# NQN is retried with its own exponential backoff: RCOW_PATROL_BACKOFF_MIN
+# before the first login, then doubling per failure up to
+# RCOW_PATROL_BACKOFF_MAX, so at the defaults the series is 5s, then 10/20/40s
+# and so on to 300s. There is deliberately no point at which it
+# gives up: stopping is the failure this exists to remove. Failures are logged
+# with an attempt count, and every recovery is logged.
+#
+# It never runs against a target that has not finished starting (start.ready
+# must name the live pid), and never while RCOW_PATROL_HOLD exists.
+# rcow_disconnect_all creates the hold and rcow_connect_all removes it, so a
+# planned stop -- including one systemd runs as ExecStop while the supervisor is
+# still alive -- is not undone. To take a single subsystem down by hand, create
+# the hold file first.
+#
+# A reconnected controller is a new /dev/nvmeX. Filesystems still mounted on
+# the old device keep failing until whoever mounted them remounts; the patrol
+# restores the block device, not the mounts.
+# --------------------------------------------------------------------------
+RCOW_PATROL_HOLD="${RCOW_PATROL_HOLD:-${RCOW_RUN_DIR}/patrol.hold}"
+RCOW_PATROL_LOCK="${RCOW_PATROL_LOCK:-${RCOW_RUN_DIR}/patrol.lock}"
+RCOW_PATROL_BACKOFF_MIN="${RCOW_PATROL_BACKOFF_MIN:-5}"
+RCOW_PATROL_BACKOFF_MAX="${RCOW_PATROL_BACKOFF_MAX:-300}"
+# Bounds one round, so a target that accepts TCP but never answers cannot hold
+# the supervisor's liveness check for 32 x the connect timeout.
+RCOW_PATROL_CONNECT_TIMEOUT="${RCOW_PATROL_CONNECT_TIMEOUT:-30}"
+RCOW_PATROL_MAX_PER_ROUND="${RCOW_PATROL_MAX_PER_ROUND:-4}"
+declare -gA RCOW_PATROL_DUE=() RCOW_PATROL_WAIT=() RCOW_PATROL_FAILS=()
+
+rcow_patrol_now()
+{
+	local now
+	printf -v now '%(%s)T' -1
+	printf '%s' "${now}"
+}
+
+# How long rcow_patrol_hold waits for a round already in flight.
+#
+# One connect timeout, not a whole round: the hold file exists before the wait
+# starts, and rcow_patrol_round re-reads it before every further attempt, so
+# the only work that can outlive the hold is the single connect already in
+# flight (bounded by RCOW_PATROL_CONNECT_TIMEOUT) plus a sysfs scan.
+#
+# The bound has to stay this tight because of who waits here.
+# rcow_disconnect_all calls rcow_patrol_hold, and rcow_stop.sh runs that
+# *before* it computes UNLOAD_BUDGET from what is left of RCOW_STOP_TIMEOUT.
+# Waiting a whole round (4 x 30 + 5 = 125s against a 120s stop budget) would
+# eat all of it, drop rcow_unload_lvstore to its 10s floor and turn a clean
+# stop into a WAL-replay stop -- in exactly the flapping-controller case the
+# patrol exists for. A function so the test can assert that invariant without
+# waiting the timeout out.
+rcow_patrol_hold_wait()
+{
+	printf '%s' $((RCOW_PATROL_CONNECT_TIMEOUT + 5))
+}
+
+# Pause the patrol, and wait for a round already in flight to finish so it
+# cannot log in after the caller starts tearing down.
+rcow_patrol_hold()
+{
+	local fd
+
+	mkdir -p "$(dirname "${RCOW_PATROL_HOLD}")" 2>/dev/null || true
+	: >"${RCOW_PATROL_HOLD}" 2>/dev/null ||
+		rcow_warn "could not create ${RCOW_PATROL_HOLD}; the controller patrol may reconnect during this teardown"
+	command -v flock >/dev/null 2>&1 || return 0
+	{ exec {fd}>>"${RCOW_PATROL_LOCK}"; } 2>/dev/null || return 0
+	if ! flock -w "$(rcow_patrol_hold_wait)" "${fd}"; then
+		rcow_warn "a controller patrol round is still running; disconnecting anyway"
+	fi
+	exec {fd}>&-
+}
+
+# Is the start that produced the running target finished? File checks only:
+# this runs every few seconds and must not put RPC load on the target.
+rcow_patrol_target_started()
+{
+	local pid ready
+
+	pid="$(rcow_target_pid 2>/dev/null)" || return 1
+	[ -s "${RCOW_START_READY}" ] || return 1
+	ready="$(tr -dc '0-9' <"${RCOW_START_READY}")"
+	[ "${ready}" = "${pid}" ]
+}
+
+rcow_patrol_round()
+{
+	local d nqn state i now delay fails tries=0
+	local -A usable=()
+
+	[ -e "${RCOW_PATROL_HOLD}" ] && return 0
+	rcow_patrol_target_started || return 0
+
+	# Builtins only in the per-controller and per-NQN loops: this runs every
+	# few seconds for the life of the target.
+	for d in "${RCOW_NVME_SYSFS_ROOT}"/nvme*; do
+		[ -d "${d}" ] || continue
+		nqn="" state=""
+		{ read -r nqn <"${d}/subsysnqn"; } 2>/dev/null || [ -n "${nqn}" ] || continue
+		{ read -r state <"${d}/state"; } 2>/dev/null || true
+		case "${state}" in
+		deleting*|dead) ;;	# going away; a new login does not collide
+		*) usable["${nqn}"]=1 ;;
+		esac
+	done
+
+	now="$(rcow_patrol_now)"
+	for ((i = 0; i < RCOW_NUM_SUBSYS; i++)); do
+		printf -v nqn '%s%02d' "${RCOW_NQN_PREFIX}" "${i}"
+		if [ "${usable[${nqn}]+set}" = "set" ]; then
+			if [ "${RCOW_PATROL_DUE[${nqn}]+set}" = "set" ]; then
+				rcow_log "patrol: ${nqn} has a controller again"
+				unset "RCOW_PATROL_DUE[${nqn}]" "RCOW_PATROL_WAIT[${nqn}]" \
+					"RCOW_PATROL_FAILS[${nqn}]"
+			fi
+			continue
+		fi
+
+		# First sighting: give whatever removed it (or is re-adding it) one
+		# backoff step before logging in.
+		if [ "${RCOW_PATROL_DUE[${nqn}]+set}" != "set" ]; then
+			rcow_warn "patrol: ${nqn} has no controller; reconnecting in ${RCOW_PATROL_BACKOFF_MIN}s"
+			RCOW_PATROL_DUE["${nqn}"]=$((now + RCOW_PATROL_BACKOFF_MIN))
+			RCOW_PATROL_WAIT["${nqn}"]="${RCOW_PATROL_BACKOFF_MIN}"
+			RCOW_PATROL_FAILS["${nqn}"]=0
+			continue
+		fi
+		[ "${now}" -ge "${RCOW_PATROL_DUE[${nqn}]}" ] || continue
+		[ "${tries}" -lt "${RCOW_PATROL_MAX_PER_ROUND}" ] || continue
+		# A stop may have started since the round began.
+		[ -e "${RCOW_PATROL_HOLD}" ] && return 0
+		tries=$((tries + 1))
+
+		if RCOW_CONNECT_TIMEOUT="${RCOW_PATROL_CONNECT_TIMEOUT}" \
+				rcow_connect_one "${nqn}"; then
+			rcow_log "patrol: reconnected ${nqn} after ${RCOW_PATROL_FAILS[${nqn}]} failed attempt(s)"
+			unset "RCOW_PATROL_DUE[${nqn}]" "RCOW_PATROL_WAIT[${nqn}]" \
+				"RCOW_PATROL_FAILS[${nqn}]"
+			continue
+		fi
+
+		fails=$(( ${RCOW_PATROL_FAILS[${nqn}]} + 1 ))
+		delay=$(( ${RCOW_PATROL_WAIT[${nqn}]} * 2 ))
+		[ "${delay}" -le "${RCOW_PATROL_BACKOFF_MAX}" ] || delay="${RCOW_PATROL_BACKOFF_MAX}"
+		RCOW_PATROL_FAILS["${nqn}"]="${fails}"
+		RCOW_PATROL_WAIT["${nqn}"]="${delay}"
+		RCOW_PATROL_DUE["${nqn}"]=$(( $(rcow_patrol_now) + delay ))
+		rcow_warn "patrol: reconnecting ${nqn} failed (attempt ${fails}); next try in ${delay}s"
+	done
+	return 0
+}
+
+# One patrol round under the patrol lock. Never fails: a supervisor calls this
+# between liveness checks and must not exit because a reconnect did not work.
+rcow_patrol_controllers()
+{
+	local fd
+
+	if command -v flock >/dev/null 2>&1 &&
+	   { exec {fd}>>"${RCOW_PATROL_LOCK}"; } 2>/dev/null; then
+		if flock -n "${fd}"; then
+			rcow_patrol_round || true
+		fi
+		exec {fd}>&-
+	else
+		rcow_patrol_round || true
+	fi
 	return 0
 }
 
