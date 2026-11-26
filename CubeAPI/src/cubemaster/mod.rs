@@ -20,14 +20,18 @@
 ///   - POST   /cube/sandbox/{sandbox_id}/fork         fork sandbox into N copies (server-side, one snapshot)
 ///   - GET    /cube/operation/{operation_id}          query operation/audit record (not required for snapshot completion)
 ///
-/// New APIs required (❌ not yet on CubeMaster — pending implementation):
-///   - POST   /cube/sandbox/timeout    set absolute TTL
-///   - POST   /cube/sandbox/refresh    extend TTL by delta
-///   - POST   /cube/sandbox/commit     commit sandbox → template image
-///   - GET    /cube/template/build/{id}/status  build status poll
-///   - DELETE /cube/template           delete template
-///   - POST   /cube/template/list      list templates
-///   - GET    /cube/template/{id}      get single template
+/// Implemented on CubeMaster (sandbox TTL / commit, template build + CRUD):
+///   - POST   /cube/sandbox/timeout              set absolute TTL
+///   - POST   /cube/sandbox/refresh              extend TTL by delta
+///   - POST   /cube/sandbox/commit               commit sandbox → template image
+///   - GET    /cube/template/build/{id}/status   build status poll
+///   - DELETE /cube/template                     delete template
+///   - GET    /cube/template                     list templates (paginated)
+///   - GET    /cube/template?template_id={id}    get single template
+///
+/// The authoritative route table is
+/// `CubeMaster/pkg/service/httpservice/cube/routes.go`; keep this list in sync
+/// with it rather than tracking implementation status here.
 use chrono::{DateTime, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -173,7 +177,6 @@ impl CubeMasterClient {
     }
 
     /// POST /cube/sandbox/timeout — set absolute TTL for a sandbox.
-    /// ❌ New API required on CubeMaster.
     pub async fn set_sandbox_timeout(
         &self,
         req: &SandboxTimeoutRequest,
@@ -206,7 +209,6 @@ impl CubeMasterClient {
     }
 
     /// POST /cube/sandbox/refresh — extend TTL by a delta (seconds).
-    /// ❌ New API required on CubeMaster.
     pub async fn refresh_sandbox(
         &self,
         req: &SandboxRefreshRequest,
@@ -223,7 +225,6 @@ impl CubeMasterClient {
     }
 
     /// POST /cube/sandbox/logs — fetch sandbox stdout/stderr logs.
-    /// ❌ New API required on CubeMaster.
     pub async fn get_sandbox_logs(
         &self,
         req: &SandboxLogsRequest,
