@@ -111,6 +111,8 @@
 #   CUBELET_CONF          Cubelet dynamic config whose host.quota is checked on startup and
 #                         shown in the report,
 #                         default /usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml
+#   CPU_SYSFS_DIR         Linux CPU sysfs root used for on-line topology, default
+#                         /sys/devices/system/cpu; primarily useful for testing
 #   CUBE_BENCH_YES        set to 1 to skip the "destroys ALL sandboxes" confirmation prompt
 #                         (same as -y/--yes); REQUIRED for non-interactive runs — without a
 #                         terminal and without this opt-in the run aborts rather than assuming consent
@@ -411,6 +413,7 @@ TO_MD_PY_EOF
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 CUBELET_CONF="${CUBELET_CONF:-/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.yaml}"
+CPU_SYSFS_DIR="${CPU_SYSFS_DIR:-/sys/devices/system/cpu}"
 
 # This script ships inside the CubeSandbox repository, so cube-bench and the
 # 4.x bench scripts are located relative to it instead of being configured
@@ -1585,8 +1588,54 @@ parse_lscpu_field() {
 		}'
 }
 
+# Expands a kernel cpulist ("0-3,8,10-11") to one CPU id per line; fails on
+# empty or malformed input.
+expand_cpu_list() {
+	tr ',' '\n' <<<"$1" | awk -F- '
+		/^[0-9]+(-[0-9]+)?$/ {
+			hi = (NF == 2) ? $2 + 0 : $1 + 0
+			if (hi < $1 + 0) exit 1
+			for (i = $1 + 0; i <= hi; i++) print i
+			next
+		}
+		{ exit 1 }'
+}
+
+count_cpu_list() {
+	local ids
+	ids="$(expand_cpu_list "$1")" || return 1
+	[ -n "$ids" ] || return 1
+	wc -l <<<"$ids" | tr -d ' '
+}
+
+# Args: total online sockets cores_per_socket threads_per_core online_list topology_source.
+# cores_per_socket and threads_per_core may be a "min-max" range on
+# non-uniform topologies (e.g. hybrid P/E-core parts or partially offlined
+# SMT siblings).
+format_cpu_config() {
+	local total="$1" online="$2" sock="$3" cps="$4" tpc="$5" list="$6" source="$7" n out
+	for n in "$total" "$online" "$sock"; do
+		[[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "unknown"; return; }
+	done
+	for n in "$cps" "$tpc"; do
+		[[ "$n" =~ ^[1-9][0-9]*(-[1-9][0-9]*)?$ ]] || { echo "unknown"; return; }
+	done
+	out="${total} logical CPU$([ "$total" = 1 ] || echo s)"
+	[ "$online" = "$total" ] || out+=", ${online} on-line"
+	if [ "$source" = "online" ]; then
+		out+="; on-line topology"
+	fi
+	out+=" (${sock} socket$([ "$sock" = 1 ] || echo s)"
+	out+=", ${cps} core$([ "$cps" = 1 ] || echo s)/socket"
+	out+=", ${tpc} thread$([ "$tpc" = 1 ] || echo s)/core)"
+	[ -z "$list" ] || out+="; On-line CPU(s) list: ${list}"
+	echo "$out"
+}
+
+# Reads `lscpu` output on stdin.
 parse_cpu_config() {
-	awk -F: '
+	local cpus sock cps tpc list online
+	{ read -r cpus; read -r sock; read -r cps; read -r tpc; read -r list; } < <(awk -F: '
 		{
 			key=$1
 			value=$2
@@ -1596,17 +1645,66 @@ parse_cpu_config() {
 			if (key == "Socket(s)" && sock == "") sock=value
 			if (key == "Core(s) per socket" && cps == "") cps=value
 			if (key == "Thread(s) per core" && tpc == "") tpc=value
+			if (key == "On-line CPU(s) list" && list == "") list=value
+		}
+		END { print cpus; print sock; print cps; print tpc; print list }')
+	if [ -n "$list" ]; then
+		online="$(count_cpu_list "$list")" || { online="$cpus"; list=""; }
+	else
+		online="$cpus"
+	fi
+	format_cpu_config "$cpus" "$online" "$sock" "$cps" "$tpc" "$list" "summary"
+}
+
+# Derives the CPU config from Linux CPU sysfs (default /sys/devices/system/cpu).
+# Topology is taken from on-line CPUs only, since off-line CPUs expose no
+# reliable topology. Fails if the tree is missing or incomplete.
+sysfs_cpu_config() {
+	local dir="${1:-$CPU_SYSFS_DIR}" list present_list ids id topo pkg core core_ids sibling sibling_id total online
+	local -a pairs=()
+	read -r list 2>/dev/null <"${dir}/online" || return 1
+	ids="$(expand_cpu_list "$list")" || return 1
+	[ -n "$ids" ] || return 1
+	online="$(wc -l <<<"$ids" | tr -d ' ')"
+	total="$online"
+	if read -r present_list 2>/dev/null <"${dir}/present"; then
+		total="$(count_cpu_list "$present_list")" || total="$online"
+	fi
+	while read -r id; do
+		topo="${dir}/cpu${id}/topology"
+		read -r pkg 2>/dev/null <"${topo}/physical_package_id" || return 1
+		[[ "$pkg" =~ ^[0-9]+$ ]] || return 1
+		read -r core 2>/dev/null <"${topo}/core_cpus_list" ||
+			read -r core 2>/dev/null <"${topo}/thread_siblings_list" || return 1
+		core_ids="$(expand_cpu_list "$core")" || return 1
+		[ -n "$core_ids" ] || return 1
+		sibling=0
+		while read -r sibling_id; do
+			[ "$sibling_id" = "$id" ] && sibling=1
+		done <<<"$core_ids"
+		[ "$sibling" = 1 ] || return 1
+		pairs+=("${pkg} ${core}")
+	done <<<"$ids"
+	local sock cps tpc
+	{ read -r sock; read -r cps; read -r tpc; } < <(printf '%s\n' "${pairs[@]}" | awk '
+		function range(lo, hi) { return lo == hi ? lo : lo "-" hi }
+		{
+			if (!($1 in pkg_seen)) { pkg_seen[$1] = 1; sockets++ }
+			if (!(($1, $2) in core_seen)) { core_seen[$1, $2] = 1; pkg_cores[$1]++ }
+			core_threads[$1, $2]++
 		}
 		END {
-			if (cpus !~ /^[1-9][0-9]*$/ || sock !~ /^[1-9][0-9]*$/ ||
-				cps !~ /^[1-9][0-9]*$/ || tpc !~ /^[1-9][0-9]*$/) {
-				print "unknown"
-				exit
+			for (p in pkg_cores) {
+				if (cmin == "" || pkg_cores[p] < cmin) cmin = pkg_cores[p]
+				if (cmax == "" || pkg_cores[p] > cmax) cmax = pkg_cores[p]
 			}
-			printf "%s logical CPU%s (%s socket%s, %s core%s/socket, %s thread%s/core)",
-				cpus, cpus == 1 ? "" : "s", sock, sock == 1 ? "" : "s",
-				cps, cps == 1 ? "" : "s", tpc, tpc == 1 ? "" : "s"
-		}'
+			for (k in core_threads) {
+				if (tmin == "" || core_threads[k] < tmin) tmin = core_threads[k]
+				if (tmax == "" || core_threads[k] > tmax) tmax = core_threads[k]
+			}
+			print sockets; print range(cmin, cmax); print range(tmin, tmax)
+		}')
+	format_cpu_config "$total" "$online" "$sock" "$cps" "$tpc" "$list" "online"
 }
 
 print_test_env() {
@@ -1639,7 +1737,10 @@ print_test_env() {
 	[ -z "$cpu_model" ] && cpu_model="$(awk -F: '/model name/{gsub(/^[ \t]+/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
 	[ -z "$cpu_model" ] && cpu_model="unknown"
 
-	cpu_cfg="$(LC_ALL=C lscpu 2>/dev/null | parse_cpu_config)"
+	cpu_cfg="$(sysfs_cpu_config "$CPU_SYSFS_DIR")"
+	if [ -z "$cpu_cfg" ] || [ "$cpu_cfg" = "unknown" ]; then
+		cpu_cfg="$(LC_ALL=C lscpu 2>/dev/null | parse_cpu_config)"
+	fi
 	[ -n "$cpu_cfg" ] || cpu_cfg="unknown"
 
 	numa="$(LC_ALL=C lscpu 2>/dev/null | parse_lscpu_field "NUMA node(s)")"
