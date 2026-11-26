@@ -190,10 +190,17 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 			tmpCtx = context.WithValue(tmpCtx, constants.KCubeIndexContext, fmt.Sprint(len(containers)-1-i))
 			tmpCtx = context.WithValue(tmpCtx, "sandboxID", sandBoxID)
 
-			cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
-				status.Removing = true
-				return status, nil
-			})
+			// A degenerate stored row can carry a container without status
+			// (the shape TestToGRPCCubeBoxWithoutPrimaryStatus tolerates).
+			// GetStatus is strictly read-only and no longer materialises the
+			// missing storage, so guard the direct field access here instead
+			// of nil-dereferencing.
+			if cntr.Status != nil {
+				cntr.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+					status.Removing = true
+					return status, nil
+				})
+			}
 
 			if er := l.destroyContainer(tmpCtx, cntr); er != nil {
 				if strings.Contains(er.Error(), "closed") {

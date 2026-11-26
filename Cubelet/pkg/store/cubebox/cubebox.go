@@ -334,7 +334,11 @@ func (cb *CubeBox) GetStatus() *StatusStorage {
 	// Degenerate row (no container, or a container without status): hand back
 	// a fresh non-nil storage seeded with the row's CreatedAt so callers keep
 	// their nil-free assumption. Deliberately not written back — a getter on
-	// the hottest read path must not mutate shared state.
+	// the hottest read path must not mutate shared state. Contract: for such
+	// rows the returned storage is DETACHED — mutating through it (Update)
+	// persists nothing, and the container's own Status field stays nil, so
+	// callers that write a container's status directly must nil-check it
+	// (local.Destroy does).
 	return StoreStatus(Status{CreatedAt: cb.CreatedAt})
 }
 

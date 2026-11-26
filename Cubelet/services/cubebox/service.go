@@ -676,20 +676,29 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	// nil) still rolls back synchronously to release its allocations; it just
 	// has nothing to restore.
 	//
-	// Two error shapes are excluded, both meaning "not a half-built sandbox":
-	// PreConditionFailed — exactly as engine.run excludes it from the async
-	// failover, it marks a state the flow refused to act on — and any failure
-	// that left createInfo.SandboxID unset. The createid step pins that id
-	// before the allocating steps run, so an empty id means the flow never
-	// started: the workflow limiter rejected it (ConcurrentFailed — a busy
-	// node's cheap, retriable backpressure, which the async failover also
-	// never saw) or createid itself failed. There is nothing to tear down,
-	// and rolling back would run the whole destroy workflow against an empty
-	// sandbox id.
+	// Three error shapes are excluded, each meaning "not a half-built
+	// sandbox":
+	//   - PreConditionFailed — exactly as engine.run excludes it from the
+	//     async failover, it marks a state the flow refused to act on;
+	//   - ConcurrentFailed — engine.run returns it from the workflow limiter
+	//     BEFORE any step executes (the limiter is its only source), so
+	//     nothing was allocated and the pre-PR behaviour was a no-op. The
+	//     SandboxID check below cannot catch this shape: a resume of a
+	//     sandbox created with a restart policy carries that policy (Master
+	//     packs it into the pause spec and re-injects it on resume), so the
+	//     restart-arming block above has already pinned createInfo.SandboxID
+	//     before engine.Create ran. Rolling back here would turn a busy
+	//     node's cheap retriable backpressure into a full destroy round over
+	//     a tombstone this attempt never touched;
+	//   - an empty createInfo.SandboxID — the createid step pins the id
+	//     before any allocating step runs, so an empty id means no step that
+	//     could allocate ever ran: nothing to tear down, and no id to tear
+	//     down by.
 	if createErr != nil && constants.IsCubeRuntime(ctx) &&
 		(pausedTombstone != nil || resumeSID != "") &&
 		createInfo.SandboxID != "" &&
-		!ret.IsErrorCode(createErr, errorcode.ErrorCode_PreConditionFailed) {
+		!ret.IsErrorCode(createErr, errorcode.ErrorCode_PreConditionFailed) &&
+		!ret.IsErrorCode(createErr, errorcode.ErrorCode_ConcurrentFailed) {
 		s.rollbackPausedReplace(ctx, createInfo, pausedTombstone)
 	}
 

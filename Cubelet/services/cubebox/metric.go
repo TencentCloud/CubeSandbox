@@ -138,10 +138,14 @@ func (l *local) aggregateAllocated() aggregatedSandboxView {
 // while holding the node-wide reservation ledger lock, serializing every
 // resume on the node behind that scan. A burst of concurrent resumes now
 // shares one scan per TTL window; the ledger still makes check-and-register
-// atomic, and in-flight resume demand is exact through the reservations, so
-// the only staleness is other flows' Saves/Deletes landing within the window
-// — bounded, and in the common direction conservative (a reservation covers
-// its own Save until released).
+// atomic, and in-flight RESUME demand is exact through the reservations (a
+// reservation covers its own Save until released, and the release invalidates
+// this cache). Staleness is therefore confined to rows changed by flows that
+// hold no reservation: a Delete over-counts (conservative), while an ordinary
+// create's Save landing just after a refresh is missed for up to one TTL — a
+// bounded 10ms under-count in the permissive direction, backstopped by the
+// cgroup hard limits. It is the same race a fresh scan always had against a
+// concurrent Save, widened from microseconds to the TTL.
 const aggregateCacheTTL = 10 * time.Millisecond
 
 // aggregateCache memoizes one aggregateAllocated view for aggregateCacheTTL.

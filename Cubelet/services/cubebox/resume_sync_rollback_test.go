@@ -21,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -245,6 +246,107 @@ func TestCreateFromPauseSkipsRollbackWhenTheFlowNeverStarted(t *testing.T) {
 	assert.Nil(t, cur.UserMarkDeletedTime)
 }
 
+// TestCreateFromPauseSkipsRollbackOnLimiterRejectionWithRestartPolicy is the
+// production-shaped version of the flow-never-started guard: a resume of a
+// sandbox created with a restart policy arrives with RestartPolicy set (Master
+// packs it into the pause spec and expansion puts it back on the request), so
+// service.Create's restart-arming block pins createInfo.SandboxID BEFORE
+// engine.Create runs. When the node is at its create concurrency limit,
+// engine.run returns ConcurrentFailed from the workflow limiter — before any
+// step executes, with nothing allocated — yet the id is already set, so the
+// SandboxID guard alone would still fire a full synchronous destroy round
+// over a tombstone this attempt never touched. The ConcurrentFailed exclusion
+// must keep the rollback off.
+func TestCreateFromPauseSkipsRollbackOnLimiterRejectionWithRestartPolicy(t *testing.T) {
+	_, err := config.Init("", true)
+	require.NoError(t, err)
+	hostConf := config.GetHostConf()
+	hostConf.Quota.PausedResourceReleaseRatio = 1.0
+	hostConf.Quota.Cpu = 8000
+	hostConf.Quota.Mem = "16Gi"
+	defer func() {
+		hostConf.Quota.PausedResourceReleaseRatio = 0
+		hostConf.Quota.Cpu = 0
+		hostConf.Quota.Mem = ""
+	}()
+
+	// The packed spec carries the restart policy, exactly as Master builds it
+	// for a sandbox that was created with one.
+	seedPausePackageForTest(t, "snap-test", &cubeboxpb.RunCubeSandboxRequest{
+		RequestID:     "original-create",
+		RestartPolicy: restartpolicy.Always,
+		Containers: []*cubeboxpb.ContainerConfig{{
+			Name:      "main",
+			Resources: &cubeboxpb.Resource{Cpu: "1", Mem: "512Mi"},
+		}},
+	})
+
+	tomb := sandboxWithResourceForTest("sb-limited", cubeboxstore.Status{
+		StartedAt: 1,
+		PausedAt:  time.Now().Add(-time.Hour).UnixNano(),
+	}, "4000m", "8Gi", 4, 0, 0)
+	tomb.SandboxID = "sb-limited"
+
+	flow := &failingCreateFlow{}
+	mgr := &fakeCubeboxAPI{cb: tomb}
+
+	// Saturate the create workflow's limiter so engine.run rejects with
+	// ConcurrentFailed before any step (including the flow) runs.
+	limiter := semaphore.NewLimiter(1)
+	require.True(t, limiter.TryAcquire(), "the test must saturate the limiter first")
+
+	engine := &workflow.Engine{}
+	createWf := &workflow.Workflow{Name: "create", Limiter: limiter}
+	createWf.AppendStep(&workflow.Step{Name: flow.ID(), Actions: []workflow.Flow{flow}})
+	engine.AddFlow("create", createWf)
+	destroyWf := &workflow.Workflow{Name: "destroy", Limiter: semaphore.NewLimiter(1)}
+	destroyWf.AppendStep(&workflow.Step{Name: flow.ID(), Actions: []workflow.Flow{flow}})
+	engine.AddFlow("destroy", destroyWf)
+	engine.AddCleaupFlow(flow)
+
+	cubeboxMgr := &local{
+		config: &CubeConfig{
+			DefaultRuntimeName: "io.containerd.cube.v2.task",
+			Runtimes: map[string]cubeconfig.Runtime{
+				"io.containerd.cube.v2.task": {Type: "io.containerd.cube.v2.task"},
+			},
+		},
+		cubeboxManger: mgr,
+	}
+	cubeboxMgr.SetShimIntentTTL(time.Minute)
+	s := &service{
+		engine:                engine,
+		cubeboxMgr:            cubeboxMgr,
+		sandboxLifecycleLocks: utils.NewResourceLocks(),
+		restarts:              newRestartMgr(mgr),
+	}
+
+	req := resumeReplaceRequest("sb-limited")
+	rsp, err := s.Create(context.Background(), req)
+	require.NoError(t, err)
+
+	// Expansion put the packed restart policy back on the request — the
+	// precondition that makes the restart-arming block pin the SandboxID
+	// before engine.Create.
+	assert.Equal(t, restartpolicy.Always, req.GetRestartPolicy())
+
+	assert.Equal(t, errorcode.ErrorCode_ConcurrentFailed, rsp.Ret.RetCode,
+		"the limiter rejection must surface unchanged as the retriable backpressure it is")
+	assert.Zero(t, flow.createCalls, "the limiter rejects before any step runs")
+	assert.Zero(t, flow.destroyCalls,
+		"nothing was allocated: the rollback must not tear down the untouched tombstone")
+	assert.Zero(t, mgr.deleteCalls)
+
+	cur, gerr := mgr.Get(context.Background(), "sb-limited")
+	require.NoError(t, gerr)
+	require.NotNil(t, cur)
+	assert.Equal(t, cubeboxpb.ContainerState_CONTAINER_PAUSED, cur.GetStatus().Get().State(),
+		"the tombstone must be exactly as the retry expects it")
+	assert.Nil(t, cur.UserMarkDeletedTime)
+
+	limiter.Release()
+}
+
 // stubCbriManager stands in for the cbri API manager local.Destroy calls
 // before touching any container runtime, so the row-keep guard can be driven
 // through the REAL local.Destroy.
@@ -327,6 +429,29 @@ func TestLocalDestroyRollbackKeepsRowSkipsDeleteAndStamp(t *testing.T) {
 			"a kept row must not carry the IsRollBack stamp (allowCleanup would reclaim the pause package)")
 		assert.Empty(t, sb.DeleteRequestID)
 		assert.Empty(t, mgr.syncIDs, "nothing to persist: no stamp was written")
+	})
+
+	t.Run("tolerates a degenerate row whose container has no status", func(t *testing.T) {
+		// The shape TestToGRPCCubeBoxWithoutPrimaryStatus tolerates: a stored
+		// row whose main container carries no Status. GetStatus is read-only
+		// and hands back a detached fallback, so Destroy must nil-check the
+		// container field instead of dereferencing it.
+		sb := newCubeboxWithStatusForTest("sb-nostatus", cubeboxstore.Status{
+			CreatedAt: time.Now().UnixNano(),
+		})
+		sb.SandboxID = "sb-nostatus"
+		for _, c := range sb.AllContainers() {
+			c.Status = nil
+		}
+		mgr := &fakeCubeboxAPI{cb: sb}
+		l := &local{cubeboxManger: mgr, cbriManager: &stubCbriManager{}}
+
+		// The failover marker also keeps destroyContainer on its
+		// skip-preStop branch, isolating the status guard under test.
+		ctx := constants.WithFailoverOperation(context.Background())
+		require.NoError(t, l.Destroy(ctx, rollbackOpts("sb-nostatus", true)),
+			"destroying a row without container status must not panic")
+		assert.Nil(t, sb.UserMarkDeletedTime)
 	})
 
 	t.Run("without the flag the rollback stamp and delete proceed", func(t *testing.T) {
