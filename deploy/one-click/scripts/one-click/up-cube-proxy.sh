@@ -286,17 +286,15 @@ for entry in "${CUBE_PROXY_HTTP_PORT}:CUBE_PROXY_HTTP_PORT" \
   fi
 done
 
-# Pull explicitly so the failure mode (registry unreachable / not logged in /
-# image not pushed yet) surfaces here instead of midway through `compose up`.
-# If the image already exists locally and the registry is unreachable, fall
-# back to the cached copy (airgap / CUBE_SANDBOX_CUBE_PROXY_IMAGE preload).
-log "pulling ${CUBE_PROXY_IMAGE}"
-if ! docker pull "${CUBE_PROXY_IMAGE}" >/dev/null; then
-  if docker_image_exists "${CUBE_PROXY_IMAGE}"; then
-    log "WARN: pull failed but local image exists; using cached copy"
-  else
+# Prefer an exact local image reference. This supports preloaded/offline images
+# and avoids blocking startup on a registry lookup for operator overrides such
+# as CUBE_SANDBOX_CUBE_PROXY_IMAGE=cube-proxy:<local-tag>.
+if docker_image_exists "${CUBE_PROXY_IMAGE}"; then
+  log "using local image ${CUBE_PROXY_IMAGE}"
+else
+  log "local image not found; pulling ${CUBE_PROXY_IMAGE}"
+  docker pull "${CUBE_PROXY_IMAGE}" >/dev/null || \
     die "pull failed for ${CUBE_PROXY_IMAGE} and no local copy is cached; check registry reachability and credentials (or set MIRROR=cn / CUBE_SANDBOX_CUBE_PROXY_IMAGE)"
-  fi
 fi
 
 if [[ "${COMPOSE_DETACH}" == "0" ]]; then
