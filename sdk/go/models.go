@@ -114,6 +114,13 @@ func IntPtr(i int) *int {
 	return &i
 }
 
+// BoolPtr returns a pointer to b, for optional bool fields such as
+// VolumeWriteOptions.Force or CreateOptions.AllowInternetAccess, where nil
+// means "not provided; use the default".
+func BoolPtr(b bool) *bool {
+	return &b
+}
+
 // NeverTimeout requests a sandbox that never idle-times-out. See docs/guide/lifecycle.md.
 const NeverTimeout time.Duration = -1
 
