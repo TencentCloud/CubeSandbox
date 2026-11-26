@@ -387,10 +387,11 @@ func clearStalePauseBindingIfRunning(ctx context.Context, requestID, sandboxID, 
 func runningHostForLostResume(ctx context.Context, sandboxID, hostIP string) string {
 	hostIP = strings.TrimSpace(hostIP)
 	candidates := []string{hostIP}
-	var pmHostID string
+	proxyHost, pmHostID := "", ""
 	if pm, ok := getSandboxProxyMapFn(ctx, sandboxID); ok && pm != nil {
-		if ip := strings.TrimSpace(pm.HostIP); ip != "" && ip != hostIP {
-			candidates = append(candidates, ip)
+		proxyHost = strings.TrimSpace(pm.HostIP)
+		if proxyHost != "" && proxyHost != hostIP {
+			candidates = append(candidates, proxyHost)
 			pmHostID = pm.HostID
 		}
 	}
@@ -405,6 +406,7 @@ func runningHostForLostResume(ctx context.Context, sandboxID, hostIP string) str
 				SandboxID: sandboxID,
 				HostID:    pmHostID,
 				HostIP:    ip,
+				FromProxy: ip == proxyHost,
 			})
 		}
 		return ip
@@ -808,6 +810,7 @@ func refreshProxyMapAfterResume(ctx context.Context, sandboxID, hostID, hostIP s
 		SandboxID: sandboxID,
 		HostID:    hostID,
 		HostIP:    hostIP,
+		FromProxy: true,
 	})
 	log.G(ctx).Infof("resume: refreshed proxy map sandbox=%s host=%s sandboxIP=%s ports=%v",
 		sandboxID, hostIP, proxy.SandboxIP, proxy.ContainerToHostPorts)
@@ -866,13 +869,7 @@ func resolvePauseHost(ctx context.Context, sandboxID string) (string, string, bo
 	if rec, err := pausesnap.GetBySandbox(ctx, sandboxID); err == nil && rec != nil && rec.NodeIP != "" {
 		return rec.NodeID, rec.NodeIP, true
 	}
-	if v := localcache.GetSandboxCache(sandboxID); v != nil && v.HostIP != "" {
-		return v.HostID, v.HostIP, true
-	}
-	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
-		return proxyMap.HostID, proxyMap.HostIP, true
-	}
-	return "", "", false
+	return SandboxHost(ctx, sandboxID)
 }
 
 // resolvePauseHostIP prefers the pause-snap replica node, then cache/proxy.

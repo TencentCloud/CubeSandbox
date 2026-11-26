@@ -49,6 +49,7 @@ import (
 
 var setSandboxProxyMapFn = localcache.SetSandboxProxyMap
 var getSandboxProxyMapFn = localcache.GetSandboxProxyMap
+var proxyRouteGoneFn = localcache.ProxyRouteGone
 
 // JFSTemplateVariantResolver verifies that the variant selected for a
 // target host-fact class was built successfully. Templatecenter wires the DB

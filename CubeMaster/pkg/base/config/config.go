@@ -117,6 +117,10 @@ type CommonConf struct {
 	EnableGetStatusFromCubelet     bool              `yaml:"enable_get_status_from_cubelet"`
 	DisableHardDelete              bool              `yaml:"disable_hard_delete"`
 
+	// SandboxCacheTTL is how long a cached host is routed to before re-checking the
+	// shared proxy map; unset or 0s keeps the 60s default, a negative value disables it.
+	SandboxCacheTTL time.Duration `yaml:"sandbox_cache_ttl"`
+
 	// TemplateCacheTTL is how long template metadata stays in the local cache
 	// before expiring. Default 6 hours, matching the historical behavior.
 	// Shorter values reduce the stale-read window in multi-replica deployments
@@ -922,6 +926,10 @@ func preComHandleConf(config *Config) error {
 
 	if config.Common.CleanSandboxCacheInterval == time.Duration(0) {
 		config.Common.CleanSandboxCacheInterval = 2 * time.Hour
+	}
+
+	if config.Common.SandboxCacheTTL == time.Duration(0) {
+		config.Common.SandboxCacheTTL = time.Minute
 	}
 
 	if config.Common.GraceFullStopTimeoutInSec == 0 {

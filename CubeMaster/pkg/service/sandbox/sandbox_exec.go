@@ -11,7 +11,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
@@ -50,19 +49,10 @@ func Exec(ctx context.Context, req *types.ExecRequest) (rsp *types.Res) {
 		return
 	}
 
-	var hostIP string
-	if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
-		hostIP = v.HostIP
-	} else if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID); ok {
-		hostIP = proxyMap.HostIP
-	} else {
+	hostIP, found := SandboxHostIP(ctx, req.SandboxID)
+	if !found {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "sandbox not found"
-		return
-	}
-	if hostIP == "" {
-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
-		rsp.Ret.RetMsg = "sandbox host ip is empty"
 		return
 	}
 	calleeEndpoint := cubelet.GetCubeletAddr(hostIP)

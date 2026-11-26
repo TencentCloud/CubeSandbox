@@ -14,6 +14,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
+// listCache is the per-process routing hint read on the hot path. Entries are
+// dropped by cache invalidation, by sandbox teardown, or by the periodic wipe.
 var (
 	listCache = &sync.Map{}
 )
@@ -22,20 +24,52 @@ type SandboxCache struct {
 	SandboxID string
 	HostID    string
 	HostIP    string
+	// FromProxy marks a host taken from sandbox:proxy, so a later confirmed
+	// absence of that key means teardown rather than "never had one".
+	FromProxy bool
+
+	// expireAt bounds routing freshness only; an expired entry still proves the
+	// sandbox is known. Zero means no TTL was applied.
+	expireAt time.Time
 }
 
 func cleanSandboxCache() {
 	listCache = &sync.Map{}
 }
 
+// sandboxCacheTTL returns the per-entry TTL, or 0 when disabled or unconfigured.
+func sandboxCacheTTL() time.Duration {
+	cfg := config.GetConfig()
+	if cfg == nil || cfg.Common == nil {
+		return 0
+	}
+	return cfg.Common.SandboxCacheTTL
+}
+
+// GetSandboxCache returns a copy of the entry regardless of age, with HostIP
+// resolved by HostID, for existence checks and as a last-resort route.
 func GetSandboxCache(sandboxID string) *SandboxCache {
 	val, ok := listCache.Load(sandboxID)
 	if !ok {
 		return nil
 	}
-	cp := *val.(*SandboxCache)
+	stored, _ := val.(*SandboxCache)
+	if stored == nil {
+		return nil
+	}
+	cp := *stored
 	cp.HostIP = ResolveNodeIP(cp.HostID, cp.HostIP)
 	return &cp
+}
+
+// GetFreshSandboxCache returns the entry only within its TTL, so routing
+// re-checks the shared proxy map once an invalidation might have been lost.
+func GetFreshSandboxCache(sandboxID string) *SandboxCache {
+	cache := GetSandboxCache(sandboxID)
+	if cache == nil || (!cache.expireAt.IsZero() && time.Now().After(cache.expireAt)) {
+		return nil
+	}
+	return cache
 }
 
 func DeleteSandboxCache(sandboxID string) {
@@ -52,7 +86,25 @@ func SetSandboxCache(sandboxID string, cache *SandboxCache) {
 			cp.HostID = n.ID()
 		}
 	}
+	cp.expireAt = time.Time{}
+	if ttl := sandboxCacheTTL(); ttl > 0 {
+		cp.expireAt = time.Now().Add(ttl)
+	}
 	listCache.Store(sandboxID, &cp)
+}
+
+// SetSandboxCacheIfAbsent keeps a weaker source (a List response) from
+// overwriting a host this replica resolved recently.
+func SetSandboxCacheIfAbsent(sandboxID string, cache *SandboxCache) {
+	if cache == nil || GetFreshSandboxCache(sandboxID) != nil {
+		return
+	}
+	cp := *cache
+	// Re-stamping the same host must not drop the proxy backing it had.
+	if prev := GetSandboxCache(sandboxID); prev != nil && prev.HostIP == cp.HostIP {
+		cp.FromProxy = cp.FromProxy || prev.FromProxy
+	}
+	SetSandboxCache(sandboxID, &cp)
 }
 
 func ListKnownSandboxIDs() []string {

@@ -116,12 +116,7 @@ func handleSandboxCommitAction(c *gin.Context) {
 		})
 		return
 	}
-	hostIP := ""
-	hostID := ""
-	if cache := localcache.GetSandboxCache(req.SandboxID); cache != nil {
-		hostIP = cache.HostIP
-		hostID = cache.HostID
-	}
+	hostID, hostIP, _ := sandbox.SandboxHost(c.Request.Context(), req.SandboxID)
 	if hostIP == "" {
 		infoRsp := sandbox.SandboxInfo(c.Request.Context(), &types.GetCubeSandboxReq{
 			RequestID: req.RequestID,

@@ -153,17 +153,8 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		// Client/HTTP cancel must not abort bookkeeping or release the lock
 		// while SAVE/Create/Destroy is still in flight on Cubelet.
 		ctx = context.WithoutCancel(ctx)
-		var hostID, hostIP string
-		if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
-			hostID = v.HostID
-			hostIP = v.HostIP
-		} else if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID); ok {
-			hostID = proxyMap.HostID
-			hostIP = proxyMap.HostIP
-		} else if id, ip, ok := resolvePauseHost(ctx, req.SandboxID); ok {
-			hostID = id
-			hostIP = ip
-		} else {
+		hostID, hostIP, found := resolveSandboxHost(ctx, req.SandboxID)
+		if !found {
 			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 			rsp.Ret.RetMsg = "sandbox not found"
 			return nil
@@ -346,14 +337,17 @@ func persistSandboxNetworkSpec(ctx context.Context, req *types.UpdateNetworkRequ
 	}
 }
 
-// resolveSandboxHostIP finds the node currently hosting the sandbox, trying the
+// resolveSandboxHost finds the node currently hosting the sandbox, trying the
 // same sources as the pause/resume path.
+func resolveSandboxHost(ctx context.Context, sandboxID string) (string, string, bool) {
+	if hostID, hostIP, ok := SandboxHost(ctx, sandboxID); ok {
+		return hostID, hostIP, true
+	}
+	return resolvePauseHost(ctx, sandboxID)
+}
+
+// resolveSandboxHostIP is resolveSandboxHost for callers that only need the IP.
 func resolveSandboxHostIP(ctx context.Context, sandboxID string) (string, bool) {
-	if v := localcache.GetSandboxCache(sandboxID); v != nil {
-		return v.HostIP, true
-	}
-	if proxyMap, ok := localcache.GetSandboxProxyMap(ctx, sandboxID); ok {
-		return proxyMap.HostIP, true
-	}
-	return resolvePauseHostIP(ctx, sandboxID)
+	_, hostIP, ok := resolveSandboxHost(ctx, sandboxID)
+	return hostIP, ok
 }

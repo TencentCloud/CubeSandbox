@@ -163,39 +163,32 @@ func isDeleteAutoResumeBusinessCode(code errorcode.ErrorCode) bool {
 }
 
 func dealScfSandbox(ctx context.Context, req *types.DeleteCubeSandboxReq, t *task.Task) bool {
-	var hostIP string
-	if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
-		hostIP = v.HostIP
-		t.NodeID = v.HostID
-	} else {
-		proxyMap, ok := localcache.GetSandboxProxyMap(ctx, req.SandboxID)
-		if !ok {
-			// Paused sandboxes keep proxy normally; fall back to pausesnap node.
-			if rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID); err == nil && rec != nil && rec.NodeIP != "" {
-				t.NodeID = rec.NodeID
-				t.CallEp = cubelet.GetCubeletAddr(rec.NodeIP)
-				return true
-			}
-			return false
+	host, proxyMap, ok := sandboxRoute(ctx, req.SandboxID)
+	if !ok {
+		// Paused sandboxes keep proxy normally; fall back to pausesnap node.
+		if rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID); err == nil && rec != nil && rec.NodeIP != "" {
+			t.NodeID = rec.NodeID
+			t.CallEp = cubelet.GetCubeletAddr(rec.NodeIP)
+			return true
 		}
-		hostIP = proxyMap.HostIP
-		t.NodeID = proxyMap.HostID
-		if proxyMap.CreatedAt != "" {
-			created, err := strconv.ParseInt(proxyMap.CreatedAt, 10, 64)
-			if err == nil && created > 0 {
-				rt := CubeLog.GetTraceInfo(ctx)
-				rt.InstanceID = req.SandboxID
+		return false
+	}
+	t.NodeID = host.ID
+	if proxyMap != nil && proxyMap.CreatedAt != "" {
+		created, err := strconv.ParseInt(proxyMap.CreatedAt, 10, 64)
+		if err == nil && created > 0 {
+			rt := CubeLog.GetTraceInfo(ctx)
+			rt.InstanceID = req.SandboxID
 
-				tmpRt := rt.DeepCopy()
-				tmpRt.RetCode = int64(errorcode.ErrorCode_Success)
-				tmpRt.CalleeAction = "lifetime"
-				tmpRt.Cost = time.Duration(time.Now().UnixNano()-created) * time.Nanosecond
-				go CubeLog.Trace(tmpRt)
-			}
+			tmpRt := rt.DeepCopy()
+			tmpRt.RetCode = int64(errorcode.ErrorCode_Success)
+			tmpRt.CalleeAction = "lifetime"
+			tmpRt.Cost = time.Duration(time.Now().UnixNano()-created) * time.Nanosecond
+			go CubeLog.Trace(tmpRt)
 		}
 	}
 
-	t.CallEp = cubelet.GetCubeletAddr(hostIP)
+	t.CallEp = cubelet.GetCubeletAddr(host.IP)
 	return true
 }
 

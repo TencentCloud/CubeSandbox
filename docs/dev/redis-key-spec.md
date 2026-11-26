@@ -58,7 +58,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | --- | --- | --- | --- | --- | --- | --- |
 | Node resource metrics | `cube:v1:master:node:metric:{nodeID}` | Hash | master | CubeMaster | CubeMaster | refresh-style (heartbeat, default 600s) |
 | Node live endpoint table | `cube:v1:shared:node:endpoint` | Hash | shared | CubeOps | CubeProxy | none (`HSET` on register/heartbeat, `HDEL` on node delete) |
-| Sandbox proxy route | `cube:v1:shared:sandbox:proxy:{sandboxID}` | Hash | shared | CubeMaster | CubeProxy | none (lifecycle via `DEL`) |
+| Sandbox proxy route | `cube:v1:shared:sandbox:proxy:{sandboxID}` | Hash | shared | CubeMaster | CubeProxy, CubeMaster | none (lifecycle via `DEL`) |
 | Instance info | `cube:v1:master:instance:info:{insID}` | Hash | master | CubeMaster | CubeMaster | none |
 | Describe task result | `cube:v1:master:task:describe:{taskID}` | Hash | master | CubeMaster | CubeMaster / external | 86400s (configurable) |
 | Instance metadata (reserved) | `cube:v1:master:instance:meta:{...}` | string / list | master | CubeMaster | CubeMaster | none |
@@ -66,6 +66,7 @@ The following are the standard keys currently registered in the system (`v1`). N
 | Sandbox lifecycle events | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | Sandbox lifecycle state | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL (default 60s); plain-text state (`paused` / `running` / transition markers) |
 | Sandbox lifecycle wakeup | `cube:v1:shared:sandbox:lifecycle:notify` | Pub/Sub channel | shared | cube-lifecycle-manager | cube-lifecycle-manager | n/a (best-effort hint) |
+| Sandbox route cache invalidation | `cube:v1:shared:sandbox:cache:invalidate` | Pub/Sub channel | shared | CubeMaster | CubeMaster | n/a (payload is a sandbox ID) |
 | CLM leader lease | `cube:v1:shared:lock:lifecycle-manager:leader` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET NX PX, default 10s; single-key WATCH transaction for renew/release |
 | Sandbox op lock (pause/resume/delete) | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | SET NX EX by op: pause **180s**, resume/delete **120s**, other **60s**; unlock = token-matched Lua GET+DEL (no renew) |
 | CubeProxy replica registry | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | none (evicted on heartbeat expiry via `HDEL`) |
@@ -138,7 +139,8 @@ See the `redis` tags on `InstanceInfoMap` in [`CubeMaster/pkg/base/types/redis.g
 | --- | --- | --- |
 | `node:metric` | Refresh-style TTL | `EXPIRE` after each heartbeat write (default 600s); live nodes keep refreshing, offline nodes auto-expire |
 | `node:endpoint` | No TTL | Maintained by CubeOps: `HSET` on node register and every heartbeat, `HDEL` on node deletion. CubeProxy caches lookups in `ngx.shared.local_cache` with a fixed 10s TTL (not renewed on hit) |
-| `sandbox:proxy` | No TTL | Written once at sandbox creation with no refresh path; lifecycle managed by CubeMaster `DEL` on teardown. **Do not** set a TTL shorter than the max sandbox lifetime |
+| `sandbox:proxy` | No TTL | Written once at sandbox creation with no refresh path; lifecycle managed by CubeMaster `DEL` on teardown. **Do not** set a TTL shorter than the max sandbox lifetime. CubeMaster's process-local route cache follows this key and only falls back to it on a miss |
+| `sandbox:cache:invalidate` | n/a | Pub/Sub channel, not a key. One sandbox ID is published after every `sandbox:proxy` write or delete (even a failed one) so every CubeMaster replica drops its local route; a lost message or a dropped subscription is bounded by `sandbox_cache_ttl` (default 60s), after which routing re-checks `sandbox:proxy`: a host taken from that key is dropped once both proxy keys are confirmed absent (`EXISTS`), while a host with no proxy backing (seeded by a cluster scan or a List) keeps the last known value until `clean_sandbox_cache_interval` (default 2h), and any host keeps it during a Redis outage. On a Sentinel failover, Sentinel closes subscriber connections when it converts the old master to a replica and CubeMaster resubscribes to the new master; messages published between `+switch-master` and that conversion are lost and fall under the same TTL bound |
 | `task:describe` | Fixed TTL | `EXPIRE` on write, default 86400s (`describe_task_expire_time`) |
 | `instance:info` / `instance:meta` | No TTL | Managed per instance lifecycle; may be augmented later |
 | `sandbox:lifecycle:meta` | No TTL | Written on sandbox create, `HDEL` on destroy |

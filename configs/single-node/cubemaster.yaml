@@ -12,6 +12,8 @@ common:
   sync_meta_data_interval: 1s
   sync_metric_data_interval: 1s
   collect_metric_interval: 1s
+  # Trust a cached sandbox host this long before re-checking the shared proxy map.
+  # sandbox_cache_ttl: 60s  # unset/0s = 60s default; negative disables it
   default_headless_service_nodes_num: 1
   enable_check_com_net_id_param: false
   # Per-call max concurrency for rootfs artifact distribution. Default 4.

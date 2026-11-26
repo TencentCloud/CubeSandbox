@@ -46,8 +46,10 @@ func ResolveSandboxID(ctx context.Context, input string) (string, error) {
 		return "", err
 	}
 
-	entries := append(collectClusterSandboxIDs(ctx), collectPausedSandboxIDs(ctx)...)
-	cacheCollectedSandboxEntries(entries)
+	// Live node scan is cached last so it overrides a stale pause binding, and a
+	// duplicate ID is resolved in cacheCollectedSandboxEntries rather than here.
+	entries := append(collectPausedSandboxIDs(ctx), collectClusterSandboxIDs(ctx)...)
+	cacheCollectedSandboxEntries(ctx, entries)
 	clusterIDs := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		clusterIDs = append(clusterIDs, entry.SandboxID)
@@ -76,15 +78,39 @@ func mergeSandboxIDs(base, extra []string) []string {
 	return merged
 }
 
-func cacheCollectedSandboxEntries(entries []clusterSandboxEntry) {
+// cacheCollectedSandboxEntries seeds the cache from a cluster scan; when two nodes
+// report one ID (a ghost), the proxy map picks the live host.
+func cacheCollectedSandboxEntries(ctx context.Context, entries []clusterSandboxEntry) {
+	// hosts maps each reported IP to the node ID that reported it.
+	hosts := make(map[string]map[string]string, len(entries))
+	last := make(map[string]string, len(entries))
+	order := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.SandboxID == "" || entry.HostIP == "" {
 			continue
 		}
-		localcache.SetSandboxCache(entry.SandboxID, &localcache.SandboxCache{
-			SandboxID: entry.SandboxID,
-			HostID:    entry.HostID,
-			HostIP:    entry.HostIP,
+		if hosts[entry.SandboxID] == nil {
+			hosts[entry.SandboxID] = make(map[string]string, 2)
+			order = append(order, entry.SandboxID)
+		}
+		hosts[entry.SandboxID][entry.HostIP] = entry.HostID
+		last[entry.SandboxID] = entry.HostIP
+	}
+	for _, sandboxID := range order {
+		hostIP := last[sandboxID]
+		if len(hosts[sandboxID]) > 1 {
+			// A reported-but-unrouted host would be neither live nor stale, so
+			// only a proxy host inside the reporting set is trusted over the scan.
+			if pm, ok := getSandboxProxyMapFn(ctx, sandboxID); ok && pm != nil {
+				if _, routed := hosts[sandboxID][pm.HostIP]; routed && pm.HostIP != "" {
+					hostIP = pm.HostIP
+				}
+			}
+		}
+		localcache.SetSandboxCache(sandboxID, &localcache.SandboxCache{
+			SandboxID: sandboxID,
+			HostID:    hosts[sandboxID][hostIP],
+			HostIP:    hostIP,
 		})
 	}
 }

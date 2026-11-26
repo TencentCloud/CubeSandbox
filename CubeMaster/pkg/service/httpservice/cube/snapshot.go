@@ -783,12 +783,7 @@ func deleteSnapshot(r *http.Request, rt *CubeLog.RequestTrace, snapshotID string
 var errSandboxNotFound = errors.New("sandbox not found")
 
 func resolveSandboxHost(ctx context.Context, requestID, sandboxID string) (string, string, error) {
-	hostIP := ""
-	hostID := ""
-	if cache := localcache.GetSandboxCache(sandboxID); cache != nil {
-		hostIP = cache.HostIP
-		hostID = cache.HostID
-	}
+	hostID, hostIP, _ := sandbox.SandboxHost(ctx, sandboxID)
 	if hostIP == "" {
 		infoRsp := sandbox.SandboxInfo(ctx, &types.GetCubeSandboxReq{
 			RequestID: requestID,

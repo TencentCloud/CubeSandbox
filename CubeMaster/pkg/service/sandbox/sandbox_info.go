@@ -184,17 +184,11 @@ func checkValidAndGetReqWithDeps(ctx context.Context, req *types.GetCubeSandboxR
 }
 
 // cachedSandboxHostIPWith returns where the sandbox was last seen running. It
-// wins over the pause binding's node: after a cross-node resume whose binding
-// cleanup failed, the binding still names the origin node.
+// wins over a pause binding left stale by a failed cross-node resume cleanup.
 func cachedSandboxHostIPWith(ctx context.Context, sandboxID string,
 	getSandboxProxyMap func(context.Context, string) (*basetypes.SandboxProxyMap, bool)) string {
-	if v := localcache.GetSandboxCache(sandboxID); v != nil {
-		return v.HostIP
-	}
-	if proxyMap, ok := getSandboxProxyMap(ctx, sandboxID); ok && proxyMap != nil {
-		return proxyMap.HostIP
-	}
-	return ""
+	host, _, _ := sandboxRouteWith(ctx, sandboxID, getSandboxProxyMap)
+	return host.IP
 }
 
 func lookupPauseBindingWith(ctx context.Context, sandboxID string,
