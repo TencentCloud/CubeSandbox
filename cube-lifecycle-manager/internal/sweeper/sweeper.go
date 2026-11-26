@@ -13,12 +13,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/cubemasterclient"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leader"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/lifecycle"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/telemetry"
 )
 
 // Options is the dependency injection bundle for Sweeper. Pulling everything
@@ -192,7 +195,20 @@ func (s *Sweeper) sweepOnce(ctx context.Context) {
 			zap.Duration("idle_for", idleFor),
 			zap.Intp("timeout_seconds", e.Meta.TimeoutSeconds),
 			zap.String("kill_reason", cubemasterclient.KillReasonTimeout))
-		if err := s.tryKill(ctx, e); err != nil {
+		// Each timeout action has its own trace. Empty sweeps emit no spans.
+		killCtx, span := telemetry.Start(ctx, telemetry.SpanSweepKill,
+			trace.WithNewRoot(),
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrSandboxID, e.Meta.SandboxID),
+				attribute.String(telemetry.AttrInstanceType, e.Meta.InstanceType),
+				attribute.String(telemetry.AttrKillReason, cubemasterclient.KillReasonTimeout),
+				attribute.Int64(telemetry.AttrIdleMS, idleFor.Milliseconds()),
+				attribute.Int64(telemetry.AttrTimeoutMS, timeout.Milliseconds()),
+			),
+		)
+		err := s.tryKill(killCtx, e)
+		telemetry.End(span, err)
+		if err != nil {
 			s.killFailed.Add(1)
 			s.o.Log.Warn("timeout-kill failed",
 				zap.String("sandbox_id", e.Meta.SandboxID),

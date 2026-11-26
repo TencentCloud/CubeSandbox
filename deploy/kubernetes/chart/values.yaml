@@ -636,6 +636,7 @@ lifecycleManager:
     retryInterval: 1s
   podAnnotations: {}
   listenAddr: "0.0.0.0:8083"
+  env: []
   service:
     port: 8083
     annotations: {}
