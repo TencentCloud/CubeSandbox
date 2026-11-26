@@ -82,6 +82,7 @@ func TestCMError_Predicates(t *testing.T) {
 		{409, false, true, false, false, 0},
 		{130490, false, false, true, false, 2},
 		{130589, false, false, false, true, 5},
+		{130591, false, false, false, false, 2},
 		{99999, false, false, false, false, 0},
 	}
 	for _, tt := range tests {
@@ -97,6 +98,9 @@ func TestCMError_Predicates(t *testing.T) {
 		}
 		if e.IsResumeFailed() != tt.isResumeFail {
 			t.Errorf("code %d: IsResumeFailed = %v, want %v", tt.code, e.IsResumeFailed(), tt.isResumeFail)
+		}
+		if e.IsResumeRollbackPending() != (tt.code == 130591) {
+			t.Errorf("code %d: IsResumeRollbackPending = %v", tt.code, e.IsResumeRollbackPending())
 		}
 		if e.RetryAfter() != tt.retryAfter {
 			t.Errorf("code %d: RetryAfter = %d, want %d", tt.code, e.RetryAfter(), tt.retryAfter)

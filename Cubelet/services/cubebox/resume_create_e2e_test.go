@@ -353,3 +353,19 @@ func TestCreateFromPauseEarlyStepFailurePreservesPausedTombstone(t *testing.T) {
 	assert.Contains(t, rsp2.Ret.RetMsg, "need 2048MB + used 8192MB > mem quota 8192MB")
 	assert.Equal(t, 1, earlyFailFlow.createCalls)
 }
+
+func TestCreateFromPauseWithoutCoordinatorRetainsLegacyFailover(t *testing.T) {
+	paused := resumableForCreateTest("sb-legacy-resume", "1000m", "2Gi")
+	flow := &fakeCreateFlow{onCreate: func(opts *workflow.CreateContext) error {
+		require.Nil(t, opts.RollbackCoordinator, "no durable owner must mean ordinary workflow failover")
+		require.True(t, opts.Failover)
+		return nil
+	}}
+	s, _ := resumeCreateService(t, paused, []*cubeboxstore.CubeBox{paused}, flow, 1.0, 16000, "8Gi")
+	require.Nil(t, s.rollbacks)
+	rsp, err := s.Create(t.Context(), resumeCreateRequest(paused.ID))
+	require.NoError(t, err)
+	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
+	require.Equal(t, 1, flow.createCalls)
+	require.Empty(t, s.cubeboxMgr.resumeReserved)
+}

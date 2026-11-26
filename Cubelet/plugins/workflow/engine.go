@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/rollback"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
@@ -126,6 +127,12 @@ type VolumeRefEvent struct {
 	CreateReportClaimed bool   `json:"create_report_claimed,omitempty"`
 }
 
+// RollbackScheduler returns false when it declines ownership, allowing the
+// engine to retain generic failover for other create paths.
+type RollbackScheduler interface {
+	Schedule(context.Context, *CreateContext) bool
+}
+
 type CreateContext struct {
 	BaseWorkflowInfo
 
@@ -139,7 +146,8 @@ type CreateContext struct {
 
 	VolumeInfo interface{}
 
-	Failover bool
+	Failover            bool
+	RollbackCoordinator RollbackScheduler
 
 	UserData *cubeboxstore.UserData
 
@@ -378,6 +386,8 @@ type DestroyContext struct {
 	// and cubebox row. The VM, shim and cgroup are still torn down.
 	// What is kept is decided only by Retain.
 	IsRestartDestroy bool
+	// Rollback owns durable evidence and retries for a same-ID resume cleanup.
+	Rollback *rollback.Task
 
 	// CreateVolumeRollback is set only while a failed Create is waiting for
 	// its own cleanup. Storage sets PluginVolumeRollback once it proves release.
@@ -555,7 +565,7 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 					e.failCreate(ctx, opts.(*CreateContext))
 				}
 
-				if flow_destroy == do && !restartDestroyKeepsResources(opts) && !pausedTombstoneRollbackKeepsRow(opts) {
+				if flow_destroy == do && !restartDestroyKeepsResources(opts) && !pausedTombstoneRollbackKeepsRow(opts) && opts.(*DestroyContext).Rollback == nil {
 					e.cleanUp(ctx, opts)
 				}
 
@@ -732,6 +742,9 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 
 func (e *Engine) failCreate(ctx context.Context, opts *CreateContext) {
 	if !opts.Failover {
+		return
+	}
+	if opts.RollbackCoordinator != nil && opts.RollbackCoordinator.Schedule(ctx, opts) {
 		return
 	}
 	if len(opts.PluginVolumeIDs) != 0 && !opts.PluginVolumeAttachUncertain && opts.PluginVolumeRollback == nil {

@@ -2095,6 +2095,7 @@ Service for handling cubesandbox
 | TaskPauseFailed | 130588 |  |
 | TaskResumeFailed | 130589 |  |
 | UpdateNetworkFailed | 130590 |  |
+| ResumeRollbackPending | 130591 |  |
 | InitCommandPathError | 130445 |  |
 | ContainerStateExitedByUser | 130451 |  |
 | PullImageFailed | 130456 |  |

@@ -28,6 +28,10 @@ import (
 // authoritative mapping from a sandbox to the directory its shim runs in.
 var resolveShimBundles = (*local).shimBundlePaths
 
+// Tests can model transient /proc read failures without depending on host
+// permissions; liveness checks still use the captured process identity.
+var readRuntimeProcessIdentity = utils.ReadProcessIdentity
+
 // runtimeReapWait bounds the wait after SIGKILL. The caller's context is
 // already canceled, so this cannot reuse it.
 const runtimeReapWait = 2 * time.Second
@@ -72,8 +76,9 @@ const (
 // the shim-intent TTL may age out; everything else means we found something we
 // could not interpret, and waiting never fixes that.
 type unresolvedEvidence struct {
-	message  string
-	intentAt time.Time
+	message     string
+	intentAt    time.Time
+	spawnIntent bool
 }
 
 func (u unresolvedEvidence) ageable() bool { return !u.intentAt.IsZero() }
@@ -146,11 +151,20 @@ func (e *shimIntentPendingError) RetryWithoutPenalty() bool { return true }
 type sandboxRuntimeEvidence struct {
 	identities []utils.ProcessIdentity
 	unresolved []unresolvedEvidence
+	// Keep the source and any captured identity so rollback retries can
+	// re-check unresolved processes even after their bundle has been removed.
+	unresolvedPIDs []runtimePIDCandidate
+	spawnIntent    *time.Time
 	// intentTTL is the window the spawn-intent record may still be inside,
 	// copied from the collecting local so the pending/really-stuck decision
 	// travels with the evidence instead of being re-derived by a caller that
 	// does not know the setting.
 	intentTTL time.Duration
+}
+
+func (e *sandboxRuntimeEvidence) markUnresolvedPID(c runtimePIDCandidate, format string, args ...interface{}) {
+	e.unresolvedPIDs = append(e.unresolvedPIDs, c)
+	e.markUnresolved(format, args...)
 }
 
 func (e *sandboxRuntimeEvidence) markUnresolved(format string, args ...interface{}) {
@@ -163,9 +177,11 @@ func (e *sandboxRuntimeEvidence) markUnresolved(format string, args ...interface
 // intent was written; a zero value means its age is unknown, and the intent
 // then never ages out.
 func (e *sandboxRuntimeEvidence) markStaleIntent(startedAt time.Time, format string, args ...interface{}) {
+	e.spawnIntent = &startedAt
 	e.unresolved = append(e.unresolved, unresolvedEvidence{
-		message:  fmt.Sprintf(format, args...),
-		intentAt: startedAt,
+		message:     fmt.Sprintf(format, args...),
+		intentAt:    startedAt,
+		spawnIntent: true,
 	})
 }
 
@@ -215,6 +231,7 @@ func (e *sandboxRuntimeEvidence) resolveStaleIntents(ctx context.Context, sandbo
 		"found for it (%s); treating the intent as stale and allowing resource cleanup",
 		sandboxID, ttl, strings.Join(e.unresolvedMessages(), "; "))
 	e.unresolved = nil
+	e.spawnIntent = nil
 }
 
 // runtimeEvidenceScope says which recorded sources of evidence a caller will
@@ -242,8 +259,8 @@ const (
 // shim.pid / vmm.pid. Call this BEFORE DeleteTask — containerd removes the
 // bundle on Delete, and TaskExit only means the task slot is gone, not that
 // the shim process has released its fds.
-func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox) sandboxRuntimeEvidence {
-	return l.collectRuntimeEvidence(ctx, sb, evidenceEveryRecordedSource)
+func (l *local) collectSandboxRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox, remembered ...runtimePIDCandidate) sandboxRuntimeEvidence {
+	return l.collectRuntimeEvidence(ctx, sb, evidenceEveryRecordedSource, remembered...)
 }
 
 // collectVerifiableRuntimeEvidence is the resume gate's view of the same state.
@@ -259,7 +276,7 @@ func (l *local) collectVerifiableRuntimeEvidence(ctx context.Context, sb *cubebo
 	return l.collectRuntimeEvidence(ctx, sb, evidenceVerifiableOnly)
 }
 
-func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox, scope runtimeEvidenceScope) sandboxRuntimeEvidence {
+func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.CubeBox, scope runtimeEvidenceScope, remembered ...runtimePIDCandidate) sandboxRuntimeEvidence {
 	var ev sandboxRuntimeEvidence
 	if sb == nil {
 		return ev
@@ -299,6 +316,10 @@ func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.Cub
 			},
 		)
 	}
+	// Bundle files may have disappeared during the previous teardown. Keep
+	// their unresolved candidates ahead of weaker endpoint/status records.
+	// Appending to the fresh slice leaves the remembered evidence untouched.
+	candidates = append(candidates, remembered...)
 	if ep := sb.Endpoint; ep.Pid > 1 {
 		c := runtimePIDCandidate{pid: int(ep.Pid), source: holderSourceEndpoint, trusted: trustBare}
 		if ep.PidStartTime != 0 {
@@ -356,19 +377,19 @@ func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.Cub
 
 		identity := c.identity
 		if identity == nil {
-			id, err := utils.ReadProcessIdentity(c.pid)
+			id, err := readRuntimeProcessIdentity(c.pid)
 			if err != nil {
 				if os.IsNotExist(err) {
 					continue // already exited, nothing to wait for
 				}
-				ev.markUnresolved("pid %d recorded in %s is unreadable: %v", c.pid, c.source, err)
+				ev.markUnresolvedPID(c, "pid %d recorded in %s is unreadable: %v", c.pid, c.source, err)
 				continue
 			}
 			if !c.trusted {
 				// A live process we cannot tie to this sandbox. The narrow
 				// TTL does not cover it either: we can see it, so releasing
 				// the sandbox's resources would hand them to a live holder.
-				ev.markUnresolved(
+				ev.markUnresolvedPID(c,
 					"pid %d recorded in %s has no start time, so it cannot be shown to be this sandbox's",
 					c.pid, c.source)
 				continue
@@ -381,7 +402,10 @@ func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.Cub
 			// Provably finished — including the case where the pid number now
 			// belongs to someone else entirely.
 		case utils.LivenessUnknown:
-			ev.markUnresolved("pid %d recorded in %s has no verifiable identity", c.pid, c.source)
+			// Preserve the incarnation we already read; a recycled PID must
+			// not be adopted as the original process on the next attempt.
+			c.identity = identity
+			ev.markUnresolvedPID(c, "pid %d recorded in %s has no verifiable identity", c.pid, c.source)
 		default:
 			ev.identities = append(ev.identities, *identity)
 		}

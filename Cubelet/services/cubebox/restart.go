@@ -77,6 +77,11 @@ func (s *service) restartClassified(ctx context.Context, req *cubebox.RunCubeSan
 	}
 	defer unlock()
 
+	if s.resumeRollbackPending(sandboxID) {
+		setResumeRollbackPending(rsp.Ret)
+		return rsp, restartStop, nil
+	}
+
 	old, err := s.cubeboxMgr.cubeboxManger.Get(ctx, sandboxID)
 	if err != nil || old == nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed

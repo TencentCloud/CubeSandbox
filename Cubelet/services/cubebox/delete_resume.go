@@ -10,6 +10,7 @@ import (
 )
 
 const deleteLifecycleLockMaxWait = 2 * time.Second
+const deleteLifecycleResponseReserve = 100 * time.Millisecond
 
 // deleteLifecycleLockDeadline bounds how long Destroy waits for the per-sandbox
 // lifecycle lock so the Cubelet RPC still has time to return.
@@ -24,7 +25,7 @@ func deleteLifecycleLockDeadline(ctx context.Context, now time.Time) (time.Time,
 	maxLockDeadline := now.Add(deleteLifecycleLockMaxWait)
 	if deadline.Before(maxLockDeadline) {
 		// Leave a tiny floor for the RPC response after the lock attempt.
-		latest := deadline.Add(-100 * time.Millisecond)
+		latest := deadline.Add(-deleteLifecycleResponseReserve)
 		if !latest.After(now) {
 			return time.Time{}, false
 		}
