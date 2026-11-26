@@ -20,6 +20,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxid"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -33,6 +35,7 @@ import (
 
 var (
 	createSnapshotFn       = templatecenter.SubmitSandboxSnapshotWithTTL
+	lookupSnapshotReplayFn = templatecenter.LookupReadySnapshotCreateReplay
 	getSnapshotInfoFn      = templatecenter.GetSnapshotInfo
 	listSnapshotsFn        = templatecenter.ListSnapshots
 	listSnapshotStorageFn  = templatecenter.ListSnapshotStorageStatus
@@ -578,12 +581,6 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		}
 	}
 	span.SetAttributes(attribute.String(telemetry.AttrSandboxID, sandboxID))
-	if resolved, ret := sandbox.NormalizeSandboxIDParam(r.Context(), req.SandboxID); ret != nil {
-		return &snapshotResponse{Res: &types.Res{Ret: ret}}
-	} else {
-		req.SandboxID = resolved
-		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, resolved))
-	}
 	mode := snapshotmode.Full
 	if req.Mode != nil {
 		parsed, err := snapshotmode.Parse(*req.Mode)
@@ -611,22 +608,35 @@ func createSnapshot(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		"SandboxID": req.SandboxID,
 	})
 	defer cancel()
-	hostID, hostIP, err := resolveSnapshotHostFn(ctx, requestID, req.SandboxID)
-	if err != nil {
-		code := snapshotErrorCode(err)
-		rt.RetCode = int64(code)
-		return &snapshotResponse{
-			Res: &types.Res{
-				RequestID: requestID,
-				Ret:       &types.Ret{RetCode: code, RetMsg: err.Error()},
-			},
+	var info *types.TemplateImageJobInfo
+	var err error
+	var replaySandboxID string
+	if sandboxid.IsFullID(sandboxID) {
+		replaySandboxID = strings.ToLower(sandboxID)
+		info, err = lookupSnapshotReplayFn(ctx, requestID, replaySandboxID, req.DisplayName, mode, req.TTLSeconds)
+	}
+	if err == nil && info == nil {
+		resolved, ret := sandbox.NormalizeSandboxIDParam(r.Context(), sandboxID)
+		if ret != nil {
+			return &snapshotResponse{Res: &types.Res{Ret: ret}}
+		}
+		sandboxID = resolved
+		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, resolved))
+		if resolved != replaySandboxID {
+			info, err = lookupSnapshotReplayFn(ctx, requestID, sandboxID, req.DisplayName, mode, req.TTLSeconds)
 		}
 	}
-	ctx = log.WithLogger(ctx, log.G(ctx).WithFields(map[string]any{
-		"RequestId":   requestID,
-		"SandboxHost": hostIP,
-	}))
-	info, err := createSnapshotFn(ctx, requestID, req.SandboxID, hostID, hostIP, req.DisplayName, req.Backend, mode, req.TTLSeconds)
+	if err == nil && info == nil {
+		var hostID, hostIP string
+		hostID, hostIP, err = resolveSnapshotHostFn(ctx, requestID, sandboxID)
+		if err == nil {
+			ctx = log.WithLogger(ctx, log.G(ctx).WithFields(map[string]any{
+				"RequestId":   requestID,
+				"SandboxHost": hostIP,
+			}))
+			info, err = createSnapshotFn(ctx, requestID, sandboxID, hostID, hostIP, req.DisplayName, req.Backend, mode, req.TTLSeconds)
+		}
+	}
 	if err != nil {
 		code := snapshotErrorCode(err)
 		rt.RetCode = int64(code)
@@ -831,6 +841,8 @@ func snapshotErrorCode(err error) int {
 		return int(errorcode.ErrorCode_NotFound)
 	case errors.Is(err, templatecenter.ErrTemplateStoreNotInitialized):
 		return int(errorcode.ErrorCode_DBError)
+	case errors.Is(err, sandboxlock.ErrRedisUnavailable):
+		return int(errorcode.ErrorCode_MasterUnavailable)
 	case isMySQLLockError(err):
 		return int(errorcode.ErrorCode_DBError)
 	case errors.Is(err, context.DeadlineExceeded):

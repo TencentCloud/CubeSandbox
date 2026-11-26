@@ -14,6 +14,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
@@ -221,6 +222,7 @@ func stubResumeUpdate(t *testing.T, resumeRsp *types.Res) {
 	patches.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, sandboxID string, opts sandboxlock.Options, fn func(context.Context) error) error {
 		return fn(ctx)
 	})
+	patches.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
 	patches.ApplyFunc(resumeFromPauseSnapshot, func(ctx context.Context, req *types.UpdateRequest, hostIP string) *types.Res {
 		return resumeRsp
 	})

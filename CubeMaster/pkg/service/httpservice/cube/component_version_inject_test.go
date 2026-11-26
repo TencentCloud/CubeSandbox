@@ -11,8 +11,10 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 )
 
 func TestInjectReplicaComponentVersionAnnotationsIncludesShim(t *testing.T) {
@@ -27,6 +29,48 @@ func TestInjectReplicaComponentVersionAnnotationsIncludesShim(t *testing.T) {
 	require.Equal(t, "agent-1", annotations[constants.CubeAnnotationComponentCubeAgentVersion])
 	require.Equal(t, "kern-1", annotations[constants.CubeAnnotationComponentCubeKernelVersion])
 	require.Equal(t, "shim-1", annotations[constants.CubeAnnotationComponentCubeShimVersion])
+}
+
+func TestSnapshotCreateBindingWithCapturedRuntimeMount(t *testing.T) {
+	for _, mode := range []snapshotmode.Mode{snapshotmode.Full, snapshotmode.FsOnly} {
+		t.Run(mode.String(), func(t *testing.T) {
+			patches := gomonkey.NewPatches()
+			t.Cleanup(patches.Reset)
+			metadataKey := constants.CubeAnnotationSnapshotRuntimeVolumeMounts
+			patches.ApplyFunc(templatecenter.GetTemplateRequest, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+				return &types.CreateCubeSandboxReq{Backend: "xfs", Annotations: map[string]string{
+					metadataKey:                          `[{"volume_id":"data","volume_record_id":7,"container_path":"/data","readonly":true}]`,
+					sandbox.AnnotationPluginVolumeMounts: `[{"name":"data","container_path":"/data","readonly":true}]`,
+				}, Volumes: []*types.Volume{{Name: "data"}}}, nil
+			})
+			patches.ApplyFunc(templatecenter.GetTemplateKind, func(context.Context, string) (string, error) {
+				return templatecenter.TemplateKindSnapshot, nil
+			})
+			patches.ApplyFunc(templatecenter.EnsureTemplateLocalityReady, func(context.Context, string, string) error { return nil })
+			oldSource, oldReady, oldReplica := getSnapshotRestoreSourceFn, ensureSnapshotReadyForNewUseFn, resolveSnapshotReadyReplicaFn
+			t.Cleanup(func() {
+				getSnapshotRestoreSourceFn, ensureSnapshotReadyForNewUseFn, resolveSnapshotReadyReplicaFn = oldSource, oldReady, oldReplica
+			})
+			getSnapshotRestoreSourceFn = func(context.Context, string) (*templatecenter.RestoreSource, error) {
+				return &templatecenter.RestoreSource{Mode: mode, Backend: "xfs", OriginNodeID: "node-a", OriginNodeIP: "127.0.0.1"}, nil
+			}
+			ensureSnapshotReadyForNewUseFn = func(context.Context, string) error { return nil }
+			resolveSnapshotReadyReplicaFn = func(context.Context, string, string) (templatecenter.ReplicaStatus, error) {
+				return templatecenter.ReplicaStatus{NodeID: "node-a"}, nil
+			}
+			req := &types.CreateCubeSandboxReq{Annotations: map[string]string{metadataKey: "user value"}, Volumes: []*types.Volume{{Name: "caller-volume"}}}
+			err := dealCubeboxCreateReqWithTemplateCenter(t.Context(), "snap-data", req)
+			if mode.HasMemory() {
+				require.ErrorIs(t, err, templatecenter.ErrTemplateAttemptInProgress)
+				return
+			}
+			require.NoError(t, err)
+			require.NotContains(t, req.Annotations, metadataKey)
+			require.NotContains(t, req.Annotations, sandbox.AnnotationPluginVolumeMounts)
+			require.Len(t, req.Volumes, 1)
+			require.Equal(t, "caller-volume", req.Volumes[0].Name)
+		})
+	}
 }
 
 func TestLocalTemplateShimPinOverridesCaller(t *testing.T) {

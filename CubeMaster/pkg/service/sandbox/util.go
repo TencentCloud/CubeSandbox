@@ -1089,6 +1089,7 @@ func rejectUserCubeMasterAnnotation(key string) bool {
 	case constants.CubeAnnotationPauseSnapshotID,
 		constants.CubeAnnotationPauseAbortedSnapshotID,
 		constants.CubeAnnotationLaunchMemorySnapshotID,
+		constants.CubeAnnotationSnapshotRuntimeVolumeMounts,
 		constants.CubeAnnotationRuntimeRestoreSnapshotID,
 		constants.CubeAnnotationRuntimeRestoreSnapshotAttachedAt:
 		return true

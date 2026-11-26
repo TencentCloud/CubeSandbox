@@ -153,6 +153,9 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		// Client/HTTP cancel must not abort bookkeeping or release the lock
 		// while SAVE/Create/Destroy is still in flight on Cubelet.
 		ctx = context.WithoutCancel(ctx)
+		if err := sandboxspec.EnsureNoPendingRuntimeAttach(ctx, req.SandboxID); err != nil {
+			return err
+		}
 		var hostIP string
 		if v := localcache.GetSandboxCache(req.SandboxID); v != nil {
 			hostIP = v.HostIP
@@ -212,6 +215,9 @@ func applyLifecycleLockError(rsp *types.Res, err error) {
 	case errors.Is(err, sandboxlock.ErrLockNotAcquired):
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_Conflict)
 		rsp.Ret.RetMsg = "sandbox lifecycle operation in progress; retry later"
+	case errors.Is(err, sandboxspec.ErrRuntimeAttachPending):
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_Conflict)
+		rsp.Ret.RetMsg = "sandbox runtime attach is pending; retry later"
 	case errors.Is(err, sandboxlock.ErrRedisUnavailable):
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
 		rsp.Ret.RetMsg = err.Error()

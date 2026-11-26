@@ -187,7 +187,9 @@ func patchResumeDependencies(t *testing.T, failure string) {
 	p.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
 		return &pausesnap.Record{SnapshotID: "snap", Status: "READY", NodeIP: "127.0.0.1", Backend: "xfs"}, nil
 	})
-	p.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) { return lifecycleSpec(), nil })
+	p.ApplyFunc(sandboxspec.GetWithRuntimeVolumeMounts, func(context.Context, string) (*sandboxspec.SpecWithRuntimeVolumeMounts, error) {
+		return &sandboxspec.SpecWithRuntimeVolumeMounts{Request: lifecycleSpec()}, nil
+	})
 	p.ApplyFunc(cubelet.Create, func(ctx context.Context, _ string, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
 		require.NoError(t, ctx.Err())
 		if failure == "node" {
@@ -358,6 +360,7 @@ func TestUpdateDetachedCancellationAndResumeTimeout(t *testing.T) {
 					cancel()
 					return fn(ctx)
 				})
+				p.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
 				p.ApplyFunc(localcache.ListKnownSandboxIDs, func() []string { return []string{"sb"} })
 				p.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache { return &localcache.SandboxCache{HostIP: "127.0.0.1"} })
 				provider := &resumeTimeoutProvider{}
@@ -385,6 +388,7 @@ func TestPauseDuplicateAndUploadResult(t *testing.T) {
 	for _, terminal := range []string{constants.RemoteStatusReady, constants.RemoteStatusFailed} {
 		t.Run(terminal, func(t *testing.T) {
 			db := webhooktest.SnapshotDB(t)
+			require.NoError(t, db.AutoMigrate(&models.SandboxSpec{}))
 			pausesnap.Init(db)
 			defer pausesnap.Init(nil)
 			p := lifecycleBuffer(t)

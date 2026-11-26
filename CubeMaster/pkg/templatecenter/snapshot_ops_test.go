@@ -17,6 +17,8 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
@@ -24,6 +26,23 @@ import (
 	errorcodev1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"gorm.io/gorm"
 )
+
+func stubSnapshotLifecycleLock(t *testing.T) {
+	t.Helper()
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, fn func(context.Context) error) error {
+		return fn(ctx)
+	})
+}
+
+func stubSnapshotCreateLifecycle(t *testing.T) {
+	t.Helper()
+	stubSnapshotLifecycleLock(t)
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
+}
 
 func TestBuildSnapshotRequestsUsesSnapshotID(t *testing.T) {
 	req := &sandboxtypes.CreateCubeSandboxReq{
@@ -59,9 +78,9 @@ func TestSubmitSandboxSnapshotRejectsReservedPrefixName(t *testing.T) {
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
 
-	origLoad := loadSandboxCreateRequestFn
-	defer func() { loadSandboxCreateRequestFn = origLoad }()
-	loadSandboxCreateRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	defer func() { loadSnapshotOriginRequestFn = origLoad }()
+	loadSnapshotOriginRequestFn = func(context.Context, string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		t.Fatal("create request must not be loaded for an invalid snapshot name")
 		return nil, nil
 	}
@@ -115,6 +134,7 @@ func TestBuildSnapshotRequestsUnnamedSnapshotHasNoAlias(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
+	stubSnapshotCreateLifecycle(t)
 	publisher, err := webhook.NewBufferedPublisher(2)
 	if err != nil {
 		t.Fatal(err)
@@ -133,9 +153,9 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	origLoad := loadSandboxCreateRequestFn
-	defer func() { loadSandboxCreateRequestFn = origLoad }()
-	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	defer func() { loadSnapshotOriginRequestFn = origLoad }()
+	loadSnapshotOriginRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return &sandboxtypes.CreateCubeSandboxReq{
 			InstanceType: "cubebox",
 			Annotations:  map[string]string{},
@@ -169,6 +189,7 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
+	stubSnapshotCreateLifecycle(t)
 	publisher, err := webhook.NewBufferedPublisher(2)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +215,7 @@ func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
 	}
 	storedReq.Annotations[constants.CubeAnnotationStorageBackend] = constants.SnapshotBackendXFS
 	storedReq.Backend = constants.SnapshotBackendXFS
-	requestJSON, err := marshalSnapshotCreateRequest(snapshotCreateJobRequest{
+	originalRequest := snapshotCreateJobRequest{
 		RequestID:       "req-existing",
 		SandboxID:       "sb-1",
 		SnapshotID:      "snap-existing",
@@ -203,27 +224,35 @@ func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
 		DisplayName:     "snap",
 		Backend:         constants.SnapshotBackendXFS,
 		SpecFingerprint: buildCommitTemplateSpecFingerprint(storedReq),
-	})
-	if err != nil {
-		t.Fatalf("marshalSnapshotCreateRequest returned error: %v", err)
 	}
 
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	origLoad := loadSandboxCreateRequestFn
-	defer func() { loadSandboxCreateRequestFn = origLoad }()
-	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
-		return &sandboxtypes.CreateCubeSandboxReq{
-			InstanceType: "cubebox",
-			Annotations:  map[string]string{},
-		}, nil
+	var specReads, claims, captures int
+	var annotation string
+	var requestJSON, initialStatus, finalStatus string
+	var preflightErr bool
+	origLoad := loadSnapshotOriginRequestFn
+	defer func() { loadSnapshotOriginRequestFn = origLoad }()
+	loadSnapshotOriginRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+		specReads++
+		spec := &sandboxtypes.CreateCubeSandboxReq{InstanceType: "cubebox", Annotations: map[string]string{}}
+		if annotation != "" {
+			spec.Annotations[sandbox.AnnotationPluginVolumeMounts] = annotation
+		}
+		return spec, nil
 	}
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
+		if preflightErr {
+			preflightErr = false
+			return nil, errors.New("preflight DB read failed")
+		}
 		return &models.TemplateImageJob{
 			TemplateID:  "snap-existing",
 			JobID:       "job-existing",
 			Operation:   JobOperationSnapshotCreate,
+			Status:      initialStatus,
 			RequestJSON: requestJSON,
 		}, nil
 	})
@@ -231,20 +260,98 @@ func TestSubmitSandboxSnapshotRetryMatchesExistingSnapshotID(t *testing.T) {
 		return &sandboxtypes.TemplateImageJobInfo{
 			JobID:      jobID,
 			TemplateID: "snap-existing",
-			Status:     JobStatusReady,
+			Status:     finalStatus,
 		}, nil
 	})
 
-	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "", snapshotmode.Full)
-	if err != nil {
-		t.Fatalf("SubmitSandboxSnapshot returned error: %v", err)
-	}
-	if info == nil || info.JobID != "job-existing" {
-		t.Fatalf("unexpected job info: %#v", info)
+	patches.ApplyFunc(claimSnapshotJobExecution, func(context.Context, string, string, int32) (bool, error) {
+		claims++
+		return false, errors.New("unexpected execution claim")
+	})
+	patches.ApplyFunc(runSnapshotCreateJob, func(context.Context, string, string, string, string, *sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq) error {
+		captures++
+		return errors.New("unexpected snapshot capture")
+	})
+
+	readOnlyMount := `[{"name":"data","container_path":"/data","readonly":true}]`
+	writableMount := `[{"name":"data","container_path":"/data"}]`
+	for _, tt := range []struct {
+		name      string
+		mount     string
+		change    func(*snapshotCreateJobRequest)
+		payload   func(*snapshotCreateJobRequest)
+		raw       string
+		useRaw    bool
+		status    string
+		result    string
+		wantReads int
+		wantErr   bool
+		lookupErr bool
+	}{
+		{name: "mount added after completion", mount: readOnlyMount},
+		{name: "writable mount added after filesystem-only completion", mount: writableMount,
+			change:  func(r *snapshotCreateJobRequest) { r.Mode = snapshotmode.FsOnly.String() },
+			payload: func(r *snapshotCreateJobRequest) { r.Mode = snapshotmode.AliasFilesystem }},
+		{name: "sandbox mismatch", change: func(r *snapshotCreateJobRequest) { r.SandboxID = "sb-2" }, wantErr: true},
+		{name: "node ID mismatch", change: func(r *snapshotCreateJobRequest) { r.NodeID = "node-2" }, wantErr: true},
+		{name: "node IP mismatch", change: func(r *snapshotCreateJobRequest) { r.NodeIP = "10.0.0.2" }, wantErr: true},
+		{name: "name mismatch", change: func(r *snapshotCreateJobRequest) { r.DisplayName = "another-snap" }, wantErr: true},
+		{name: "mode mismatch", change: func(r *snapshotCreateJobRequest) { r.Mode = snapshotmode.FsOnly.String() }, wantErr: true},
+		{name: "TTL mismatch", change: func(r *snapshotCreateJobRequest) { r.TTLSeconds = 60 }, wantErr: true},
+		{name: "preflight error rechecks under the lock", lookupErr: true},
+		{name: "empty payload uses the original path", useRaw: true, wantReads: 1},
+		{name: "missing snapshot ID uses the original path", payload: func(r *snapshotCreateJobRequest) { r.SnapshotID = "" }, wantReads: 1},
+		{name: "malformed payload rejected", useRaw: true, raw: `{`, wantErr: true},
+		{name: "missing identity rejected", payload: func(r *snapshotCreateJobRequest) { r.RequestID = "" }, wantErr: true},
+		{name: "inconsistent snapshot ID rejected", payload: func(r *snapshotCreateJobRequest) { r.SnapshotID = "snap-other" }, wantErr: true},
+		{name: "pending request with spec drift", mount: readOnlyMount, status: JobStatusPending, wantReads: 1, wantErr: true},
+		{name: "job status changes after preflight", mount: readOnlyMount, result: JobStatusPending, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			specReads, claims, captures = 0, 0, 0
+			annotation, preflightErr = tt.mount, tt.lookupErr
+			initialStatus, finalStatus = JobStatusReady, JobStatusReady
+			if tt.status != "" {
+				initialStatus = tt.status
+			}
+			if tt.result != "" {
+				finalStatus = tt.result
+			}
+			caller, saved := originalRequest, originalRequest
+			if tt.change != nil {
+				tt.change(&caller)
+			}
+			if tt.payload != nil {
+				tt.payload(&saved)
+			}
+			if tt.useRaw {
+				requestJSON = tt.raw
+			} else {
+				var err error
+				requestJSON, err = marshalSnapshotCreateRequest(saved)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			info, err := SubmitSandboxSnapshotWithTTL(context.Background(), caller.RequestID, caller.SandboxID, caller.NodeID,
+				caller.NodeIP, caller.DisplayName, "ignored-backend", snapshotmode.Normalize(caller.Mode), caller.TTLSeconds)
+			if tt.wantErr {
+				if !errors.Is(err, ErrTemplateAttemptInProgress) {
+					t.Fatalf("submit error = %v, want ErrTemplateAttemptInProgress", err)
+				}
+			} else if err != nil || info == nil || info.JobID != "job-existing" || info.TemplateID != "snap-existing" {
+				t.Fatalf("submit = (%+v, %v), want the original job and snapshot", info, err)
+			}
+			if specReads != tt.wantReads || claims != 0 || captures != 0 {
+				t.Fatalf("got %d spec reads, %d claims, %d captures, want %d, 0, 0", specReads, claims, captures, tt.wantReads)
+			}
+		})
 	}
 }
 
 func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
+	stubSnapshotCreateLifecycle(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -254,9 +361,9 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 	ran := false
 	infoCalls := 0
 
-	origLoad := loadSandboxCreateRequestFn
-	defer func() { loadSandboxCreateRequestFn = origLoad }()
-	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	defer func() { loadSnapshotOriginRequestFn = origLoad }()
+	loadSnapshotOriginRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return &sandboxtypes.CreateCubeSandboxReq{
 			InstanceType: "cubebox",
 			Annotations:  map[string]string{},
@@ -305,6 +412,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 }
 
 func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.T) {
+	stubSnapshotCreateLifecycle(t)
 	oldDB := store.db
 	store.db = &gorm.DB{}
 	defer func() { store.db = oldDB }()
@@ -312,9 +420,9 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 	patches := gomonkey.NewPatches()
 	defer patches.Reset()
 
-	origLoad := loadSandboxCreateRequestFn
-	defer func() { loadSandboxCreateRequestFn = origLoad }()
-	loadSandboxCreateRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
+	origLoad := loadSnapshotOriginRequestFn
+	defer func() { loadSnapshotOriginRequestFn = origLoad }()
+	loadSnapshotOriginRequestFn = func(ctx context.Context, sandboxID string) (*sandboxtypes.CreateCubeSandboxReq, error) {
 		return &sandboxtypes.CreateCubeSandboxReq{
 			InstanceType: "cubebox",
 			Annotations:  map[string]string{},

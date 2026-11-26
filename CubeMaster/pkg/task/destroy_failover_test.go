@@ -16,6 +16,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	ec "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 )
@@ -46,6 +47,7 @@ func TestCreateFailoverDestroyMissingNode(t *testing.T) {
 			p.ApplyFunc(sandboxlock.WithLock, func(ctx context.Context, _ string, _ sandboxlock.Options, f func(context.Context) error) error {
 				return f(ctx)
 			})
+			p.ApplyFunc(sandboxspec.EnsureNoPendingRuntimeAttach, func(context.Context, string) error { return nil })
 			p.ApplyFunc(pausesnap.TryDeletePaused, func(context.Context, string, string, string) (bool, error) { return false, nil })
 
 			var cachedNode *node.Node

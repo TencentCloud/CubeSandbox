@@ -32,6 +32,7 @@ func sanitizeTemplateCreateRequest(req *types.CreateCubeSandboxReq) *types.Creat
 		for _, key := range constants.TemplateManagedQosAnnotationKeys {
 			delete(cloned.Annotations, key)
 		}
+		delete(cloned.Annotations, constants.CubeAnnotationSnapshotRuntimeVolumeMounts)
 	}
 	return &cloned
 }

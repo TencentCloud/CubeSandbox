@@ -19,6 +19,9 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/rediskey"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/wrapredis"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxlock"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
@@ -370,6 +373,104 @@ func TestAttachRuntimeVolume(t *testing.T) {
 		require.EqualValues(t, 1, volume.InFlightCreates)
 		require.EqualValues(t, 1, volume.RefCount)
 		require.NoError(t, other.Finish(ctx, nil, false))
+	})
+
+	t.Run("pause waits through cancellation and lock expiry", func(t *testing.T) {
+		for _, publish := range []bool{true, false} {
+			name := "confirmed reply"
+			if !publish {
+				name = "lost reply"
+			}
+			t.Run(name, func(t *testing.T) {
+				db, req, volume := newRuntimeAttachFixture(t, 0)
+				localcache.SetSandboxCache(req.SandboxID, &localcache.SandboxCache{SandboxID: req.SandboxID, HostIP: "127.0.0.1"})
+				t.Cleanup(func() { localcache.DeleteSandboxCache(req.SandboxID) })
+				pauseDispatches := 0
+				pausePatch := gomonkey.ApplyFunc(cubelet.UpdateWithTimeout, func(ctx context.Context, _ string, pauseReq *cubebox.UpdateCubeSandboxRequest, _ time.Duration) (*cubebox.UpdateCubeSandboxResponse, error) {
+					pauseDispatches++
+					require.Equal(t, req.SandboxID, pauseReq.GetSandboxID())
+					assertRuntimeAttachState(t, db, req, volume.ID, 1, 0, true)
+					return nil, errors.New("stopped at pause dispatch")
+				})
+				t.Cleanup(pausePatch.Reset)
+				pause := func(ctx context.Context) *types.Ret {
+					return Update(ctx, &types.UpdateRequest{SandboxID: req.SandboxID, InstanceType: "cubebox", RequestID: "pause", Action: "pause"}).Ret
+				}
+				clientCtx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				entered, release := make(chan struct{}), make(chan struct{}, 1)
+				finished := make(chan struct{})
+				result := make(chan error, 1)
+				t.Cleanup(func() {
+					select {
+					case release <- struct{}{}:
+					default:
+					}
+					select {
+					case <-finished:
+					case <-time.After(5 * time.Second):
+						t.Error("attach worker did not exit")
+					}
+				})
+				ext := runtimeAttachFirstReference(t, req.VolumeID)
+				go func() {
+					defer close(finished)
+					result <- AttachRuntimeVolume(clientCtx, req, noActiveRuntimeAttachSnapshot, func(ctx context.Context, binding RuntimeAttachBinding, _ models.VolumeRecord) (RuntimeAttachReply, error) {
+						close(entered)
+						select {
+						case <-release:
+						case <-ctx.Done():
+							return RuntimeAttachReply{}, ctx.Err()
+						}
+						if !publish {
+							return RuntimeAttachReply{}, errors.New("reply was not delivered")
+						}
+						return RuntimeAttachReply{Binding: binding, Outcome: RuntimeAttachPublished, ExtInfo: ext}, nil
+					})
+				}()
+				select {
+				case <-entered:
+				case err := <-result:
+					t.Fatalf("attach returned before dispatch: %v", err)
+				case <-time.After(5 * time.Second):
+					t.Fatal("attach did not enter dispatch")
+				}
+				cancel()
+				pauseCtx, stopPause := context.WithTimeout(t.Context(), 50*time.Millisecond)
+				ret := pause(pauseCtx)
+				stopPause()
+				require.EqualValues(t, errorcode.ErrorCode_Conflict, ret.RetCode)
+				require.Contains(t, ret.RetMsg, "sandbox lifecycle operation in progress")
+				require.Zero(t, pauseDispatches)
+				assertRuntimeAttachState(t, db, req, volume.ID, 0, 1, false)
+
+				server.FastForward(2 * sandboxlock.LifecycleTTL)
+				require.False(t, server.Exists(rediskey.LockSandbox(req.SandboxID)))
+				ret = pause(t.Context())
+				require.EqualValues(t, errorcode.ErrorCode_Conflict, ret.RetCode)
+				require.Contains(t, ret.RetMsg, sandboxspec.ErrRuntimeAttachPending.Error())
+				require.Zero(t, pauseDispatches)
+				_, err := pausesnap.GetBySandbox(t.Context(), req.SandboxID)
+				require.ErrorIs(t, err, pausesnap.ErrNotFound)
+
+				release <- struct{}{}
+				select {
+				case err = <-result:
+				case <-time.After(5 * time.Second):
+					t.Fatal("attach did not finish")
+				}
+				if publish {
+					require.NoError(t, err)
+					require.Contains(t, pause(t.Context()).RetMsg, "stopped at pause dispatch")
+					require.Equal(t, 1, pauseDispatches)
+				} else {
+					require.ErrorIs(t, err, ErrRuntimeAttachUnresolved)
+					require.Contains(t, pause(t.Context()).RetMsg, sandboxspec.ErrRuntimeAttachPending.Error())
+					require.Zero(t, pauseDispatches)
+					assertRuntimeAttachState(t, db, req, volume.ID, 0, 1, false)
+				}
+			})
+		}
 	})
 }
 

@@ -50,10 +50,10 @@ func TestResumeFromPauseReservesSharedPluginVolume(t *testing.T) {
 	patches.ApplyFunc(pausesnap.GetBySandbox, func(context.Context, string) (*pausesnap.Record, error) {
 		return &pausesnap.Record{SnapshotID: "snap-shared", Status: "READY", NodeIP: "127.0.0.1", Backend: "s3", RemoteStatus: "ready"}, nil
 	})
-	patches.ApplyFunc(sandboxspec.Get, func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
-		return &types.CreateCubeSandboxReq{
+	patches.ApplyFunc(sandboxspec.GetWithRuntimeVolumeMounts, func(context.Context, string) (*sandboxspec.SpecWithRuntimeVolumeMounts, error) {
+		return &sandboxspec.SpecWithRuntimeVolumeMounts{Request: &types.CreateCubeSandboxReq{
 			Volumes: []*types.Volume{{Name: row.VolumeID}},
-		}, nil
+		}}, nil
 	})
 	patches.ApplyFunc(dao.Default, func() *gorm.DB { return db })
 	response := &cubebox.RunCubeSandboxResponse{
