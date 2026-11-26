@@ -1604,6 +1604,9 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 		log.G(ctx).Fatalf("readBackendFileInfo fail:%v", err)
 		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, err.Error())
 	}
+	if err := l.checkDestroyPluginVolumeFallback(opts.SandboxID, info); err != nil {
+		return ret.Err(errorcode.ErrorCode_DestroyStorageFailed, err.Error())
+	}
 	defer func() {
 		if err == nil {
 
@@ -1794,6 +1797,29 @@ func (l *local) failoverDir() string {
 	return filepath.Join(l.config.RootPath, failoverDir)
 }
 
+// A current Bolt record can hide fallback-only cleanup inputs. Leave both
+// records intact if Destroy cannot account for every recorded plugin backend.
+func (l *local) checkDestroyPluginVolumeFallback(id string, current *StorageInfo) error {
+	if current.SandboxID != id || id == "." || id == ".." || filepath.Base(id) != id {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(l.failoverDir(), id))
+	if err != nil {
+		return nil
+	}
+	var backup StorageInfo
+	if err := jsoniter.ConfigFastest.Unmarshal(data, &backup); err != nil ||
+		backup.SandboxID != id || backup.Namespace != current.Namespace {
+		return nil
+	}
+	for name, backend := range backup.PluginVolumeBackendInfos {
+		if backend != nil && backend.VolumeID != "" && backend.Driver != "" && current.PluginVolumeBackendInfos[name] == nil {
+			return fmt.Errorf("storage fallback contains plugin volume %q that the current record cannot clean up", backend.VolumeID)
+		}
+	}
+	return nil
+}
+
 func (l *local) deleteBackendFileInfo(ctx context.Context, id string) error {
 
 	err := l.db.Delete(bucketName, id)
@@ -1848,6 +1874,12 @@ func (l *local) readBackendFileInfo(ctx context.Context, id string) (*StorageInf
 }
 
 func (l *local) writeBackendFileInfo(ctx context.Context, id string, info *StorageInfo) error {
+	_, err := l.writeBackendFileInfoWithFallback(id, info)
+	return err
+}
+
+// The first result records the Bolt write outcome even if the fallback succeeds.
+func (l *local) writeBackendFileInfoWithFallback(id string, info *StorageInfo) (error, error) {
 	b, _ := jsoniter.ConfigFastest.Marshal(info)
 	err := l.db.Set(bucketName, id, b)
 	if err != nil {
@@ -1855,10 +1887,10 @@ func (l *local) writeBackendFileInfo(ctx context.Context, id string, info *Stora
 		er := os.WriteFile(filepath.Join(l.failoverDir(), id), b, 0666)
 		if er != nil {
 			_ = atomicDelete(filepath.Join(l.failoverDir(), id))
-			return fmt.Errorf("%w:%s", err, er)
+			return err, fmt.Errorf("%w:%s", err, er)
 		}
 	}
-	return nil
+	return err, nil
 }
 
 func (l *local) updateCubeBoxBaseInfo(ctx context.Context, templateID string) error {
