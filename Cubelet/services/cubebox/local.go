@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -280,6 +281,26 @@ type local struct {
 	// than a plain field. Zero — the value before that call, and the
 	// fail-closed one — means the intent never ages out. Nanoseconds.
 	shimIntentTTL atomic.Int64
+
+	// resumeAdmitMu serializes the admit-and-reserve step of concurrent
+	// resumes so they cannot all pass against the same pre-admission snapshot.
+	// resumeReserved holds the incremental demand of admitted resumes whose
+	// Create has not yet converged, keyed by sandbox id (a resume keeps its id
+	// across pause/resume, so re-entry overwrites instead of double-counting).
+	// See admitAndReserveResume.
+	resumeAdmitMu  sync.Mutex
+	resumeReserved map[string]resumeReservation
+
+	// A failed Create-from-pause restores its PAUSED row on rollback. Because a
+	// late rollback can overlap with a client retry that already claimed or
+	// replaced the same sandbox ID, pausedTombstoneMu serializes the read /
+	// decide / write sequence against the next attempt's arm, Save, and delete
+	// transitions. pausedTombstoneEpoch tracks the latest attempt epoch per
+	// paused/resumed sandbox ID (without retaining CubeBox pointers across
+	// attempts).
+	pausedTombstoneMu    sync.Mutex
+	pausedTombstoneEpoch map[string]uint64
+	pausedTombstoneSeq   uint64
 }
 
 const (
@@ -655,6 +676,7 @@ func (l *local) CleanUp(ctx context.Context, opts *workflow.CleanContext) error 
 		stepLog.Errorf("clean up deleteSandBoxInfo fail:%v", err)
 		return err
 	}
+	l.advancePausedTombstoneEpochIfTracked(sandBoxID)
 	return nil
 }
 

@@ -173,6 +173,29 @@ type CreateContext struct {
 	IsRestart         bool
 	SavedContainerIDs map[int]string
 	RestartPrior      *RestartPrior
+
+	// PausedTombstone is the clean PAUSED row a Create-from-pause is about to
+	// replace. The create flow deletes that row before the new one is saved, so
+	// failover carries the snapshot into DestroyContext and puts it back: a
+	// retry must still see a local PAUSED record, otherwise it is mistaken for
+	// a cross-node restore and skips both resume admission and the shim
+	// liveness gate.
+	PausedTombstone *cubeboxstore.CubeBox
+
+	// PausedTombstoneGuard tracks the store rows and epoch owned by this
+	// PAUSED-replacement Create attempt so a late rollback leaves a newer
+	// retry's row and resources alone.
+	PausedTombstoneGuard *PausedTombstoneGuard
+}
+
+// PausedTombstoneGuard records the store rows belonging to one
+// Create-from-pause attempt. All fields are read and written under
+// cubebox's pausedTombstoneMu.
+type PausedTombstoneGuard struct {
+	Epoch       uint64
+	OrigRow     *cubeboxstore.CubeBox
+	CreatedRow  *cubeboxstore.CubeBox
+	RestoredRow *cubeboxstore.CubeBox
 }
 
 func (b *CreateContext) GetInstanceType() string {
@@ -364,6 +387,20 @@ type DestroyContext struct {
 	// (1→0) observed during this destroy, to be reported to CubeMaster in the
 	// destroy response ext_info.
 	VolumeRefEvents []VolumeRefEvent
+
+	// RestorePausedTombstone is set only by create failover. When non-nil, the
+	// rollback must put this PAUSED row back instead of deleting the partially
+	// created one.
+	RestorePausedTombstone *cubeboxstore.CubeBox
+
+	// PausedTombstoneGuard is the ownership guard of the failed Create this
+	// rollback belongs to; see CreateContext.PausedTombstoneGuard.
+	PausedTombstoneGuard *PausedTombstoneGuard
+
+	// StalePausedTombstoneRollback is set by the cubebox destroy step when a
+	// newer Create attempt already owns the sandbox ID. Remaining destroy steps
+	// must be skipped so the live retry's network, storage and cgroup survive.
+	StalePausedTombstoneRollback bool
 }
 
 func (b *DestroyContext) GetInstanceType() string {
@@ -518,11 +555,16 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 					e.failCreate(ctx, opts.(*CreateContext))
 				}
 
-				if flow_destroy == do && !restartDestroyKeepsResources(opts) {
+				if flow_destroy == do && !restartDestroyKeepsResources(opts) && !pausedTombstoneRollbackKeepsRow(opts) {
 					e.cleanUp(ctx, opts)
 				}
 
 				return err
+			}
+			if flow_destroy == do {
+				if dOpts, ok := opts.(*DestroyContext); ok && dOpts != nil && dOpts.StalePausedTombstoneRollback {
+					return nil
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -560,6 +602,15 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) (err error
 func restartDestroyKeepsResources(opts ReqContext) bool {
 	d, ok := opts.(*DestroyContext)
 	return ok && RetainFor(d).Storage
+}
+
+// pausedTombstoneRollbackKeepsRow is true when this destroy is rolling back a
+// failed Create-from-pause. Enqueuing the sandbox ID into background GC would
+// stamp UserMarkDeletedTime and delete the restored PAUSED tombstone (or tear
+// down a later retry).
+func pausedTombstoneRollbackKeepsRow(opts ReqContext) bool {
+	d, ok := opts.(*DestroyContext)
+	return ok && d != nil && d.IsRollBack && d.RestorePausedTombstone != nil
 }
 
 // restartDestroyContinueTimeout is a fresh window for destroy steps that did
@@ -687,6 +738,15 @@ func (e *Engine) failCreate(ctx context.Context, opts *CreateContext) {
 		e.failover(ctx, opts, true)
 		return
 	}
+	if opts.PausedTombstone != nil {
+		// Same-node resume reuses the paused sandbox's ID. Finish rolling back
+		// its partial allocations and restoring the PAUSED tombstone before
+		// service.Create releases the per-sandbox lifecycle lock and resume
+		// reservation, so an immediate retry neither collides with leftover
+		// per-ID state nor races this rollback.
+		e.failover(ctx, opts, false)
+		return
+	}
 	go e.failover(ctx, opts, false)
 }
 
@@ -714,7 +774,11 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	createCtx := ctx
 	ctx = namespaces.WithNamespace(context.Background(), namespace)
 	ctx = telemetry.DetachTrace(ctx, createCtx)
-	ctx, cancel := context.WithTimeout(ctx, config.GetCommon().CommonTimeout)
+	timeout := config.GetCommon().CommonTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	ctx = CubeLog.WithRequestTrace(ctx, failoverRt)
@@ -741,6 +805,10 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 	if opts.CubeBoxCreated {
 		ctx = constants.WithCubeboxCreated(ctx)
 	}
+	// Hand the PAUSED tombstone and attempt guard to rollback so a failed
+	// resume keeps its local record without clobbering a newer retry.
+	destroyOpt.RestorePausedTombstone = opts.PausedTombstone
+	destroyOpt.PausedTombstoneGuard = opts.PausedTombstoneGuard
 	// A failed restart must not delete the disk and network the next attempt
 	// (or the still-kept cubebox row) depends on.
 	if opts.IsRestart {
@@ -751,6 +819,10 @@ func (e *Engine) failover(ctx context.Context, opts *CreateContext, reportVolume
 		if err != nil {
 			if opts.IsRestart {
 				log.G(ctx).Warnf("restart failover keeps sandbox %s: %v", sandboxID, err)
+				return
+			}
+			if opts.PausedTombstone != nil {
+				log.G(ctx).Warnf("paused-resume failover keeps tombstone %s: %v", sandboxID, err)
 				return
 			}
 			e.cleanUp(ctx, opts)

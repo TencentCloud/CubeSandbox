@@ -266,6 +266,10 @@ type service struct {
 	restarts              *restartMgr
 
 	otherRuntime *ociRuntime
+
+	// Instance-scoped seam so Create-from-pause wiring can be exercised through
+	// service.Create without an on-disk pause package. Nil uses the real loader.
+	expandPauseSnapshotPackageFn func(*cubebox.RunCubeSandboxRequest) error
 }
 
 func (s *service) RegisterTCP(server *grpc.Server) error {
@@ -395,7 +399,11 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	ctx = preparedCtx
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
-	if err := expandPauseSnapshotPackage(req); err != nil {
+	expandPauseSnapshot := expandPauseSnapshotPackage
+	if s.expandPauseSnapshotPackageFn != nil {
+		expandPauseSnapshot = s.expandPauseSnapshotPackageFn
+	}
+	if err := expandPauseSnapshot(req); err != nil {
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
@@ -476,9 +484,12 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		}
 		dealCreateInnerMetric(rsp, createInfo)
 
-		rt = CubeLog.GetTraceInfo(ctx)
-		rt.InstanceID = createInfo.SandboxID
-		go s.reportTrace(rt, createInfo.GetMetric())
+		// The trace in ctx is shared with the asynchronous create failover,
+		// which DeepCopy()s it once the flow fails. Never mutate that shared
+		// object here: hand reportTrace its own copy instead.
+		trace := CubeLog.GetTraceInfo(ctx).DeepCopy()
+		trace.InstanceID = createInfo.SandboxID
+		go s.reportTrace(trace, createInfo.GetMetric())
 	}()
 
 	defer recov.HandleCrash(func(panicError interface{}) {
@@ -517,6 +528,17 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		return rsp, nil
 	}
+
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		release, rejected := s.cubeboxMgr.admitAndReserveResume(ctx, sid)
+		if rejected != nil {
+			rsp.Ret.RetMsg = rejected.RetMsg
+			rsp.Ret.RetCode = rejected.RetCode
+			return rsp, nil
+		}
+		defer release()
+	}
+	s.cubeboxMgr.armPausedTombstone(ctx, req, createInfo)
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
@@ -565,6 +587,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	// Fallback restore when create failed without running failover (for example
+	// on PreConditionFailed after local.Create removed the PAUSED row). Both
+	// this path and failover's Destroy check PausedTombstoneGuard so neither can
+	// overwrite a row owned by a newer attempt.
+	if !ret.IsSuccessCode(rsp.Ret.RetCode) && createInfo.PausedTombstone != nil {
+		if err := s.cubeboxMgr.restorePausedTombstone(ctx, createInfo.PausedTombstone,
+			createInfo.PausedTombstoneGuard); err != nil {
+			log.G(ctx).Warnf("restore paused tombstone after failed resume: %v", err)
+		}
 	}
 	if s.restarts != nil {
 		if armedID != "" {
@@ -929,6 +961,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	if isPauseDeleteTombstone(req) {
 		if getErr != nil {
 			if errors.Is(getErr, utils.ErrorKeyNotFound) {
+				s.cubeboxMgr.advancePausedTombstoneEpochIfTracked(req.SandboxID)
 				rsp.Ret.RetCode = errorcode.ErrorCode_Success
 				rsp.Ret.RetMsg = "success"
 				return rsp, nil
@@ -943,6 +976,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			rsp.Ret.RetMsg = delErr.Error()
 			return rsp, nil
 		}
+		s.cubeboxMgr.advancePausedTombstoneEpochIfTracked(req.SandboxID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Success
 		rsp.Ret.RetMsg = "success"
 		return rsp, nil

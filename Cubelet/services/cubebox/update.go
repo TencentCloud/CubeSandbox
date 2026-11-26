@@ -14,7 +14,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
 	"google.golang.org/protobuf/proto"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
@@ -178,8 +177,6 @@ type resumeTask interface {
 type resumeOptions struct {
 	taskDeadline      time.Time
 	reconcileDeadline time.Time
-	persist           bool
-	skipAdmission     bool // when true, skip paused-resource admission (tests / special callers)
 }
 
 type resumeResult struct {
@@ -188,63 +185,9 @@ type resumeResult struct {
 	reconciledRunning bool
 }
 
-// resumeLocked performs the pause -> running transition while the caller owns
-// the sandbox lifecycle lock. It does not validate the current state because
-// explicit Resume and Destroy intentionally apply different state policies.
-func (s *service) resumeLocked(ctx context.Context, sb *cubeboxstore.CubeBox, opts resumeOptions) resumeResult {
-	// The caller's runtime resume budget covers task loading and the resume RPC.
-	// Delete persists the converged state with its normal delete marker after
-	// this function returns, so it avoids a second synchronous store write in
-	// the bounded wake-up phase.
-	preflightCtx, preflightCancel := context.WithDeadline(ctx, opts.taskDeadline)
-	defer preflightCancel()
-
-	if !opts.skipAdmission {
-		if rejected := s.admitResume(preflightCtx, sb); rejected != nil {
-			return resumeResult{ret: rejected}
-		}
-	}
-	if err := preflightCtx.Err(); err != nil {
-		return resumeResult{ret: &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_TaskResumeFailed,
-			RetMsg:  err.Error(),
-		}}
-	}
-
-	ns := sb.Namespace
-	if ns == "" {
-		ns = namespaces.Default
-	}
-	syncCtx := namespaces.WithNamespace(ctx, ns)
-	preflightCtx = namespaces.WithNamespace(preflightCtx, ns)
-	firstContainer := sb.FirstContainer()
-	if firstContainer == nil || firstContainer.Container == nil {
-		return resumeResult{ret: &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_TaskResumeFailed,
-			RetMsg:  "failed to load task for paused sandbox",
-		}}
-	}
-	task, err := firstContainer.Container.Task(preflightCtx, nil)
-	if err != nil {
-		return resumeResult{ret: &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_TaskResumeFailed,
-			RetMsg:  err.Error(),
-		}}
-	}
-
-	preflightCtx = addSandboxTaskMetaData(preflightCtx, sb.ID)
-	if opts.persist {
-		// Explicit Resume persists both an ordinary successful transition and a
-		// reconciliation that discovers the VM became RUNNING despite an RPC
-		// error. DELETE persists its converged RUNNING state immediately after
-		// this function returns, before it writes the delete marker.
-		defer s.cubeboxMgr.cubeboxManger.SyncByID(syncCtx, sb.ID)
-	}
-	defer utils.Recover()
-
-	return resumeTaskLocked(preflightCtx, sb, task, opts)
-}
-
+// resumeTaskLocked is the VM wake-up + reconcile core shared by the event and
+// reconcile paths. It stays a package-level helper so those paths (and their
+// tests) do not need a live containerd task.
 func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resumeTask, opts resumeOptions) resumeResult {
 	resumeCtx, resumeCancel := context.WithDeadline(ctx, opts.taskDeadline)
 	defer resumeCancel()
@@ -269,83 +212,53 @@ func resumeTaskLocked(ctx context.Context, sb *cubeboxstore.CubeBox, task resume
 	}
 }
 
-// admitResume enforces the resume side of the release-paused-resources policy.
-// When the policy is off it is a no-op (resume is always admitted, matching
-// the legacy guaranteed-resume behaviour). When on, pausing this sandbox
-// already released its CPU/memory quota so the scheduler could fill the node;
-// resuming would re-add that demand, so we re-check against the node's local,
-// real-time quota usage and reject when the sandbox no longer fits. Rejecting
-// here -- rather than overcommitting host RAM and risking an OOM -- is the
-// explicit trade-off the policy makes.
-//
-// It returns a non-nil business error when resume must be rejected, or nil to
-// proceed. Under a release ratio r the still-paused sandbox
-// already contributes (1-r) of its quota to aggregateAllocated, so resuming it
-// (a full reservation) only adds the remaining r fraction; we check that
-// incremental demand against the node quota to model the post-resume state.
-//
-// The check is best-effort, not a hard reservation: concurrent resumes of
-// different sandboxes each read their own snapshot of aggregateAllocated, so a
-// burst can momentarily admit past the quota (the OS/cgroup remains the hard
-// backstop). This matches how create scheduling is optimistic too; operators
-// who want more headroom can lower the release ratio so the reserved fraction
-// absorbs concurrent-resume overshoot.
-func (s *service) admitResume(
-	ctx context.Context,
-	sb *cubeboxstore.CubeBox,
-) *errorcode.Ret {
-	// GetHostConf always returns a non-nil config (it falls back to defaults).
-	hostConf := config.GetHostConf()
-	releaseRatio := clampRatio(hostConf.Quota.PausedResourceReleaseRatio)
+// resumeAdmissionInputs sizes the incremental demand of a Create-from-pause
+// and resolves the quota it is checked against. There is exactly one live
+// admission path in production (admitAndReserveResume in resume_admission.go);
+// the old Update(resume) path was removed, so keeping a second implementation
+// here would only let the two drift apart.
+type resumeAdmission struct {
+	needMemMB     int64
+	needCPUMilli  int64
+	memQuotaMB    int64
+	cpuQuotaMilli int64
+}
+
+// resumeAdmissionState says whether the inputs can be compared at all.
+type resumeAdmissionState int
+
+const (
+	// resumeAdmissionCheck: the policy is on and the demand is known.
+	resumeAdmissionCheck resumeAdmissionState = iota
+	// resumeAdmissionOff: the policy is off, so a paused sandbox kept its full
+	// quota and resume is guaranteed — no check at all.
+	resumeAdmissionOff
+	// resumeAdmissionUnsizable: the policy is on but the demand cannot be
+	// sized. Callers fail closed rather than admit an unknown demand.
+	resumeAdmissionUnsizable
+)
+
+func resumeAdmissionInputs(sb *cubeboxstore.CubeBox, hostQuota config.HostConfigQuota, releaseRatio float64) (resumeAdmission, resumeAdmissionState) {
+	releaseRatio = clampRatio(releaseRatio)
 	if releaseRatio <= 0 {
-		// Policy off: paused sandboxes kept their full quota, so resume is
-		// guaranteed and needs no admission check (legacy behaviour).
-		return nil
+		return resumeAdmission{}, resumeAdmissionOff
 	}
-	if sb.ResourceWithOverHead == nil {
-		// Policy active but we cannot size this sandbox's demand. Fail closed
-		// (reject) rather than silently admit and risk overcommit; this also
-		// surfaces any sandbox missing resource metadata instead of hiding it.
-		ret := &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_Conflict,
-			RetMsg:  "resume rejected by paused_resource_release_ratio policy: missing resource metadata",
-		}
-		log.G(ctx).Warnf("admitResume reject sandbox=%s: missing resource metadata under paused_resource_release_ratio policy", sb.ID)
-		return ret
+	if sb == nil || sb.ResourceWithOverHead == nil {
+		return resumeAdmission{}, resumeAdmissionUnsizable
 	}
-
-	// Recomputed live (no cache) on purpose: admission must reflect the current
-	// allocation to avoid overcommit, and resume is far rarer than its VM-wake
-	// cost, so this O(n) scan is acceptable on this path.
-	alloc := s.cubeboxMgr.aggregateAllocated()
-	memQuotaMB := int64(0)
-	if memQuota, err := resource.ParseQuantity(hostConf.Quota.Mem); err == nil {
-		memQuotaMB = bytesToMB(memQuota.Value())
+	in := resumeAdmission{
+		// Node registration reports the *resolved* quota as Capacity/Allocatable:
+		// it falls back to node capacity / host RAM when mcpu_limit or mem_limit
+		// is unset. Reading the raw values here would leave both dimensions
+		// unbounded on the default config and silently disable the guard.
+		cpuQuotaMilli: config.ResolvedHostQuotaCPUMilli(hostQuota),
+		memQuotaMB:    config.ResolvedHostQuotaMemMB(hostQuota),
 	}
-	// Only the released fraction is the incremental demand of resuming.
-	needMemMB, needCPU := resumeDemand(sb.ResourceWithOverHead, releaseRatio)
-
-	if reason := resumeQuotaRejection(resumeQuotaCheck{
-		usedMemMB:     alloc.MemoryMB,
-		needMemMB:     needMemMB,
-		memQuotaMB:    memQuotaMB,
-		usedCPUMilli:  alloc.MilliCPU,
-		needCPUMilli:  needCPU,
-		cpuQuotaMilli: int64(hostConf.Quota.Cpu),
-	}); reason != "" {
-		ret := &errorcode.Ret{
-			RetCode: errorcode.ErrorCode_Conflict,
-			RetMsg:  "resume rejected by paused_resource_release_ratio policy: " + reason,
-		}
-		// Conflict (not TaskResumeFailed) so the capacity rejection surfaces as
-		// HTTP 409 at the API edge: this is an expected, retriable state (free
-		// up capacity and retry), not a backend failure that should read as a
-		// 500. The descriptive RetMsg is carried through to the client.
-		log.G(ctx).Warnf("admitResume reject sandbox=%s: %s", sb.ID, ret.RetMsg)
-		return ret
-	}
-
-	return nil
+	// Only the released fraction is the incremental demand of resuming: while
+	// paused the sandbox still contributes (1-ratio) of its quota to
+	// aggregateSandboxResources, so a full reservation adds back just `ratio`.
+	in.needMemMB, in.needCPUMilli = resumeDemand(sb.ResourceWithOverHead, releaseRatio)
+	return in, resumeAdmissionCheck
 }
 
 // resumeDemand returns the incremental CPU/memory a resume re-adds to the node
@@ -369,7 +282,7 @@ type resumeQuotaCheck struct {
 	usedCPUMilli, needCPUMilli, cpuQuotaMilli int64
 }
 
-// resumeQuotaRejection is the pure decision behind admitResume: it returns a
+// resumeQuotaRejection is the pure decision behind admitAndReserveResume: it returns a
 // non-empty human-readable reason when bringing a paused sandbox back would
 // push the node past its CPU or memory quota, or "" when the resume fits. A
 // non-positive quota means "unbounded" for that dimension and is skipped, which
@@ -399,8 +312,7 @@ func resumeQuotaRejection(c resumeQuotaCheck) string {
 // call from being stuck indefinitely when the upstream ctx is missing or
 // blocked. Used together with the reconcile* error convergence.
 const (
-	taskPauseTimeout  = 30 * time.Second
-	taskResumeTimeout = 30 * time.Second
+	taskPauseTimeout = 30 * time.Second
 
 	// Dedicated status-query timeout opened during reconcile. It MUST use a
 	// fresh ctx and never reuse the already-expired ctx.

@@ -79,7 +79,8 @@ type HostConfigQuota struct {
 	//                    behaviour (the safe zero-value default).
 	//   1.0           -- release everything: maximum density, resume is purely
 	//                    best-effort and rejected when the node can no longer
-	//                    fit the sandbox (see UpdateWithResume admission).
+	//                    fit the sandbox (see admitAndReserveResume in the
+	//                    cubebox service's Create-from-pause path).
 	//   0 < r < 1     -- release a fraction r and reserve (1-r) as headroom. A
 	//                    pause-heavy node then (a) keeps room for its own
 	//                    resumes and (b), because the reserved quota still shows
@@ -87,6 +88,11 @@ type HostConfigQuota struct {
 	//                    deprioritised by the cpu/mem quota scoring factors, so
 	//                    the scheduler stops piling new sandboxes onto nodes
 	//                    that already hold many paused ones.
+	// This is a node-wide dial: it applies to every PAUSED/PAUSING sandbox
+	// regardless of its storage backend. Resume admission runs against the
+	// resolved host quota (the same fallback rules as node registration), so
+	// a same-node resume can legitimately fail with a retriable 409 when the
+	// released capacity has already been handed to another sandbox.
 	// Disk is intentionally still counted (the pause snapshot occupies storage)
 	// and paused sandboxes still count toward MvmNum, regardless of the ratio.
 	PausedResourceReleaseRatio float64 `yaml:"paused_resource_release_ratio"`
