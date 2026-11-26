@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
+pub mod cgroup_mode;
 pub mod snapshot_mode;
 pub use snapshot_mode::{normalize_request, SnapshotMode};
 
@@ -2214,6 +2215,11 @@ pub struct CreateTemplateRequest {
     /// Enable ivshmem when building the template snapshot.
     #[serde(rename = "enableIvshmem", default)]
     pub enable_ivshmem: Option<bool>,
+    /// Cgroup hierarchy for the template and every sandbox created from it:
+    /// `""`/omitted (default, unified v2) or `"legacy"` (cgroup v1, required
+    /// by Android-based guests). Validated at the API edge.
+    #[serde(rename = "cgroupMode", default)]
+    pub cgroup_mode: Option<String>,
     /// Optional template-level QoS. Every sandbox created from this template
     /// receives the same independent ingress and egress network ceilings.
     #[serde(default)]

@@ -2412,6 +2412,11 @@ pub struct CreateTemplateFromImageReq {
     /// Whether the template build sandbox should include ivshmem.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_ivshmem: Option<bool>,
+    /// Cgroup hierarchy for the template and its sandboxes: "" (default,
+    /// unified v2) or "legacy" (cgroup v1). Mirrors the Go field the
+    /// `--cgroup-mode` CLI flag fills.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cgroup_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qos: Option<CubeQosConfig>,
     /// Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.

@@ -64,7 +64,7 @@ This view requires:
 - a complete workload response through CubeShim and `Task.Stats`;
 - Cubelet lifecycle state for metrics epochs and counter baselines.
 
-CubeShim enables the unified cgroup v2 hierarchy for `cube-agent` with `agent.unified_cgroup_hierarchy=true` when starting a sandbox.
+CubeShim enables the unified cgroup v2 hierarchy for `cube-agent` with `agent.unified_cgroup_hierarchy=true` when starting a sandbox, unless the sandbox's template was created with `cgroup_mode: legacy` (cgroup v1), in which case the injection is skipped and `guest_workload` is not available.
 
 The `cube-agent` captured by an old template may not provide these capabilities. Such a sandbox does not export `guest_workload`, but it can still export `host_sandbox`.
 
