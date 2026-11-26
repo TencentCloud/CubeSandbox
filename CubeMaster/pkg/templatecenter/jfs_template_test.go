@@ -24,15 +24,15 @@ import (
 // jfs keeps replica rows meaning "built the shared package": distribution
 // only caches the ext4 and must not fabricate replica rows, on any alias
 // or spelling of the backend.
-func TestDistributionTracksReplicas(t *testing.T) {
+func TestDistributionReplicaWriteMode(t *testing.T) {
 	for _, backend := range []string{"jfs", "JuiceFS", "juicefs"} {
-		if distributionTracksReplicas(backend) {
-			t.Fatalf("backend %q must not track replica rows during distribution", backend)
+		if got := jobReplicaWrite(backend); got != replicaWriteNone {
+			t.Fatalf("backend %q must not write replica rows during distribution, got %v", backend, got)
 		}
 	}
 	for _, backend := range []string{"xfs", "s3", "cubecow", ""} {
-		if !distributionTracksReplicas(backend) {
-			t.Fatalf("backend %q must track replica rows during distribution", backend)
+		if got := jobReplicaWrite(backend); got != replicaWriteOwner {
+			t.Fatalf("backend %q must write owner replica rows during distribution, got %v", backend, got)
 		}
 	}
 }

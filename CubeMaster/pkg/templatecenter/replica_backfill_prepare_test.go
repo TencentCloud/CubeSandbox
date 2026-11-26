@@ -51,6 +51,10 @@ type backfillPrepareFixture struct {
 	definitionErr        error
 	definitionErrAfter   int // >0: return definitionErr only from this call index (0-based)
 	definitionArtifactID string
+	definitionStatus     string // "" = READY
+	// per-call status sequence (last value repeats), simulating a definition
+	// demoted between the pre-cleanup and pre-persist rechecks
+	definitionStatuses []string
 	// per-call RootfsArtifactID sequence (last value repeats), simulating a
 	// redo that switches the artifact between the pre-cleanup and pre-persist
 	// rechecks
@@ -198,12 +202,12 @@ func (f *backfillPrepareFixture) stub(t *testing.T) {
 	backfillPlacements = func(context.Context, string) ([]models.ArtifactNodePlacement, error) {
 		return f.placements, nil
 	}
-	backfillDistribute = func(ctx context.Context, req *sandboxtypes.CreateTemplateFromImageReq, generatedReq *sandboxtypes.CreateCubeSandboxReq, art *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
+	backfillDistribute = func(ctx context.Context, req *sandboxtypes.CreateTemplateFromImageReq, generatedReq *sandboxtypes.CreateCubeSandboxReq, art *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, write replicaWrite) ([]*node.Node, int32, int32, int32, error) {
 		f.mu.Lock()
 		f.distCalls = append(f.distCalls, backfillDistributeCall{
-			targets:       targets,
-			trackReplicas: trackReplicas,
-			generatedReq:  generatedReq,
+			targets:      targets,
+			write:        write,
+			generatedReq: generatedReq,
 		})
 		f.mu.Unlock()
 		return targets, int32(len(targets)), int32(len(targets)), f.distFailed, f.distErr
@@ -263,7 +267,18 @@ func (f *backfillPrepareFixture) stub(t *testing.T) {
 			}
 			id = f.definitionArtifactIDs[i]
 		}
-		return &models.TemplateDefinition{RootfsArtifactID: id}, nil
+		status := f.definitionStatus
+		if len(f.definitionStatuses) > 0 {
+			i := call
+			if i >= len(f.definitionStatuses) {
+				i = len(f.definitionStatuses) - 1
+			}
+			status = f.definitionStatuses[i]
+		}
+		if status == "" {
+			status = StatusReady
+		}
+		return &models.TemplateDefinition{RootfsArtifactID: id, Status: status}, nil
 	}
 	backfillCleanupReplicas = func(_ context.Context, templateID string, replicas []models.TemplateReplica, targets []*node.Node, backend string) error {
 		f.record("cleanup")
@@ -297,8 +312,8 @@ func TestBackfillPrepareReplicaReadyAfterDistribute(t *testing.T) {
 	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
 		t.Fatalf("backfillTemplateReplicas: %v", err)
 	}
-	if len(f.distCalls) != 1 || !f.distCalls[0].trackReplicas {
-		t.Fatalf("distribute calls = %+v, want 1 call with trackReplicas=true", f.distCalls)
+	if len(f.distCalls) != 1 || f.distCalls[0].write != replicaWriteRepair {
+		t.Fatalf("distribute calls = %+v, want 1 repair write call", f.distCalls)
 	}
 	if len(f.snapshotCalls) != 1 {
 		t.Fatalf("AppSnapshot calls = %d, want 1 (the sweep must prepare the replica after CreateImage)", len(f.snapshotCalls))
@@ -519,8 +534,7 @@ func TestBackfillCleanupErrorDoesNotBlockPrepare(t *testing.T) {
 	}
 }
 
-// jfs: the sweep stays on the placement path (trackReplicas=false) and must
-// NEVER run the AppSnapshot prepare step or write replica rows.
+// jfs: placement only — no AppSnapshot prepare, no replica rows.
 func TestBackfillJFSNeverRunsAppSnapshot(t *testing.T) {
 	f := newBackfillPrepareFixture(t, "jfs")
 	f.nodes = []*node.Node{
@@ -536,8 +550,8 @@ func TestBackfillJFSNeverRunsAppSnapshot(t *testing.T) {
 	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
 		t.Fatalf("backfillTemplateReplicas: %v", err)
 	}
-	if len(f.distCalls) != 1 || f.distCalls[0].trackReplicas {
-		t.Fatalf("jfs sweep must distribute once with trackReplicas=false, got %+v", f.distCalls)
+	if len(f.distCalls) != 1 || f.distCalls[0].write != replicaWriteNone {
+		t.Fatalf("jfs sweep must distribute once without replica writes, got %+v", f.distCalls)
 	}
 	// The missing set must be derived from the PLACEMENT rows: node-a already
 	// holds the ext4 cache, only node-new is pushed. Asserting the targets
@@ -639,8 +653,8 @@ func TestBackfillUpsertFailureRecordedAndNotCached(t *testing.T) {
 	// Force the registration fallback (fresh re-list fails) so the cache can
 	// only contain what `prepared` holds: if an upsert failure ever leaked
 	// into prepared, node-a would land in the locality cache here.
-	f.replicasSeq = [][]models.TemplateReplica{{}, {}, {}, {}}
-	f.replicasSeqErr = []error{nil, nil, nil, errors.New("fresh list fail")}
+	f.replicasSeq = [][]models.TemplateReplica{{}, {}, {}}
+	f.replicasSeqErr = []error{nil, nil, errors.New("fresh list fail")}
 	f.stub(t)
 
 	def := backfillDefinition{TemplateID: "tpl-upsert", InstanceType: "cubebox", RootfsArtifactID: f.artifact.ArtifactID}
@@ -664,7 +678,7 @@ func TestBackfillCacheRefreshedAfterReadyUpsert(t *testing.T) {
 	// The registration step re-reads the replica rows after the prepare;
 	// the upserted READY row must be in that listing.
 	f.replicasSeq = [][]models.TemplateReplica{
-		{}, {}, {},
+		{}, {},
 		{{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady, Phase: ReplicaPhaseReady}},
 	}
 	f.stub(t)
@@ -710,6 +724,66 @@ func TestBackfillDeleteTemplateRaceDropsReplica(t *testing.T) {
 	raced := f.cleanups[1]
 	if raced.templateID != "tpl-1" || len(raced.replicas) != 1 || raced.replicas[0].NodeID != "node-a" || len(raced.targets) != 1 {
 		t.Fatalf("raced cleanup = %+v, want tpl-1 package on node-a only", raced)
+	}
+}
+
+// A non-READY definition aborts the pass: pushing into a torn-down template
+// leaks state.
+func TestBackfillSkipsPassWhenDefinitionNotReady(t *testing.T) {
+	f := newBackfillPrepareFixture(t, "xfs")
+	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
+	f.definitionStatus = StatusFailed
+	f.stub(t)
+
+	def := backfillDefinition{TemplateID: "tpl-failed", InstanceType: "cubebox", RootfsArtifactID: f.artifact.ArtifactID}
+	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
+		t.Fatalf("backfillTemplateReplicas: %v", err)
+	}
+	if len(f.distCalls) != 0 || len(f.cleanups) != 0 || len(f.snapshotCalls) != 0 || len(f.upserts) != 0 {
+		t.Fatalf("a non-READY definition must skip the pass: dist=%d cleanups=%d snap=%d upserts=%d",
+			len(f.distCalls), len(f.cleanups), len(f.snapshotCalls), len(f.upserts))
+	}
+}
+
+// Terminal status mid-prepare: drop the prepared row and reclaim the package.
+func TestBackfillDropsPackageWhenDefinitionTurnsTerminalMidPrepare(t *testing.T) {
+	f := newBackfillPrepareFixture(t, "xfs")
+	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
+	f.definitionStatuses = []string{StatusReady, StatusFailed}
+	f.stub(t)
+
+	def := backfillDefinition{TemplateID: "tpl-torn-down", InstanceType: "cubebox", RootfsArtifactID: f.artifact.ArtifactID}
+	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
+		t.Fatalf("backfillTemplateReplicas: %v", err)
+	}
+	if upserts := f.upsertsSnapshot(); len(upserts) != 0 {
+		t.Fatalf("upserts = %+v, want none for a terminal definition", upserts)
+	}
+	if len(f.cleanups) != 2 {
+		t.Fatalf("cleanups = %d, want 2 (stale sweep + the package we just built)", len(f.cleanups))
+	}
+	dropped := f.cleanups[1]
+	if dropped.templateID != "tpl-torn-down" || len(dropped.replicas) != 1 || dropped.replicas[0].NodeID != "node-a" {
+		t.Fatalf("dropped package = %+v, want tpl-torn-down on node-a only", dropped)
+	}
+}
+
+// A live-but-partial definition (a redo that ended with mixed replicas) still
+// takes the READY outcome: the node holds it, and no row would orphan the package.
+func TestBackfillPersistsOutcomeWhenDefinitionTurnsPartiallyReadyMidPrepare(t *testing.T) {
+	f := newBackfillPrepareFixture(t, "xfs")
+	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
+	f.definitionStatuses = []string{StatusReady, StatusPartiallyReady}
+	f.stub(t)
+	t.Cleanup(func() { localcache.InvalidateImageState("tpl-partial") })
+
+	def := backfillDefinition{TemplateID: "tpl-partial", InstanceType: "cubebox", RootfsArtifactID: f.artifact.ArtifactID}
+	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
+		t.Fatalf("backfillTemplateReplicas: %v", err)
+	}
+	upserts := f.upsertsSnapshot()
+	if len(upserts) != 1 || upserts[0].replica.Status != ReplicaStatusReady {
+		t.Fatalf("upserts = %+v, want the READY outcome persisted", upserts)
 	}
 }
 
@@ -790,7 +864,7 @@ func TestBackfillCacheRegistersAllReadyNodes(t *testing.T) {
 	nodeB := models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusReady, Phase: ReplicaPhaseReady}
 	nodeAReady := models.TemplateReplica{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady, Phase: ReplicaPhaseReady}
 	f.replicasSeq = [][]models.TemplateReplica{
-		{nodeB}, {nodeB}, {nodeB}, {nodeAReady, nodeB},
+		{nodeB}, {nodeB}, {nodeAReady, nodeB},
 	}
 	f.stub(t)
 	t.Cleanup(func() { invalidateTemplateCaches("tpl-cache2"); localcache.InvalidateImageState("tpl-cache2") })
@@ -806,29 +880,6 @@ func TestBackfillCacheRegistersAllReadyNodes(t *testing.T) {
 	}
 	if _, ok := getCachedTemplateLocality("tpl-cache2"); ok {
 		t.Fatalf("READY upsert must drop the stale locality cache so it reloads from the persisted rows")
-	}
-}
-
-// The pre-lock listing can go stale while the sweep waits on the artifact
-// lock: a live redo may converge the node to READY in the meantime. The
-// sweep must re-list under the lock and stand down instead of pushing,
-// cleaning, or preparing against the old view.
-func TestBackfillReloadsReplicasAfterLock(t *testing.T) {
-	f := newBackfillPrepareFixture(t, "xfs")
-	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
-	f.replicasSeq = [][]models.TemplateReplica{
-		{{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusFailed, Phase: ReplicaPhaseFailed}},
-		{{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady, Phase: ReplicaPhaseReady}},
-	}
-	f.stub(t)
-
-	def := backfillDefinition{TemplateID: "tpl-1", InstanceType: "cubebox", RootfsArtifactID: f.artifact.ArtifactID}
-	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
-		t.Fatalf("backfillTemplateReplicas: %v", err)
-	}
-	if len(f.distCalls) != 0 || len(f.cleanups) != 0 || len(f.snapshotCalls) != 0 || len(f.upserts) != 0 {
-		t.Fatalf("a node that converged to READY while we waited for the lock must be left alone: dist=%d cleanups=%d snap=%d upserts=%d",
-			len(f.distCalls), len(f.cleanups), len(f.snapshotCalls), len(f.upserts))
 	}
 }
 
@@ -871,7 +922,7 @@ func TestBackfillPrepareSkipsNodeConvergedDuringDistribute(t *testing.T) {
 	f := newBackfillPrepareFixture(t, "xfs")
 	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
 	f.replicasSeq = [][]models.TemplateReplica{
-		{}, {},
+		{},
 		{{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady, Phase: ReplicaPhaseReady}},
 	}
 	f.stub(t)
@@ -924,7 +975,7 @@ func TestBackfillCleanupUsesPostDistributionListing(t *testing.T) {
 	// pre-cleanup listing (a redo fixed the node while distribute ran).
 	fresh := newBackfillPrepareFixture(t, "xfs")
 	fresh.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
-	fresh.replicasSeq = [][]models.TemplateReplica{{staleRow}, {staleRow}, {readyRow}}
+	fresh.replicasSeq = [][]models.TemplateReplica{{staleRow}, {readyRow}}
 	fresh.stub(t)
 	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
 		t.Fatalf("backfillTemplateReplicas: %v", err)
@@ -940,7 +991,7 @@ func TestBackfillCleanupUsesPostDistributionListing(t *testing.T) {
 	// fresh view keeps it in the stale set.
 	still := newBackfillPrepareFixture(t, "xfs")
 	still.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
-	still.replicasSeq = [][]models.TemplateReplica{{staleRow}, {staleRow}, {staleRow}}
+	still.replicasSeq = [][]models.TemplateReplica{{staleRow}, {staleRow}}
 	still.stub(t)
 	if err := backfillTemplateReplicas(context.Background(), def); err != nil {
 		t.Fatalf("backfillTemplateReplicas: %v", err)
@@ -959,10 +1010,10 @@ func TestBackfillCleanupUsesPostDistributionListing(t *testing.T) {
 func TestBackfillPrepareRunsWhenCleanupListingFails(t *testing.T) {
 	f := newBackfillPrepareFixture(t, "xfs")
 	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
-	f.replicasSeq = [][]models.TemplateReplica{{}, {}, {}, {
+	f.replicasSeq = [][]models.TemplateReplica{{}, {}, {
 		{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusReady, Phase: ReplicaPhaseReady},
 	}}
-	f.replicasSeqErr = []error{nil, nil, errors.New("list replicas fail"), nil}
+	f.replicasSeqErr = []error{nil, errors.New("list replicas fail"), nil}
 	f.stub(t)
 	t.Cleanup(func() {
 		invalidateTemplateCaches("tpl-cleanup-list")
@@ -996,8 +1047,8 @@ func TestBackfillPrepareRunsWhenCleanupListingFails(t *testing.T) {
 func TestBackfillRegisterFallsBackToPreparedOnFreshListingError(t *testing.T) {
 	f := newBackfillPrepareFixture(t, "xfs")
 	f.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
-	f.replicasSeq = [][]models.TemplateReplica{{}, {}, {}, {}}
-	f.replicasSeqErr = []error{nil, nil, nil, errors.New("fresh list fail")}
+	f.replicasSeq = [][]models.TemplateReplica{{}, {}, {}}
+	f.replicasSeqErr = []error{nil, nil, errors.New("fresh list fail")}
 	f.stub(t)
 	t.Cleanup(func() {
 		invalidateTemplateCaches("tpl-regfallback")
@@ -1017,10 +1068,7 @@ func TestBackfillRegisterFallsBackToPreparedOnFreshListingError(t *testing.T) {
 	}
 }
 
-// A replica-listing failure — before the lock or under it — must abort the
-// sweep before it touches any node: pushing, cleaning, and preparing against
-// a view we could not load is how the stale-view bugs this sweep guards
-// against come back.
+// A replica-listing failure aborts the sweep before any node is touched.
 func TestBackfillReplicaListingErrorAbortsSweep(t *testing.T) {
 	def := backfillDefinition{TemplateID: "tpl-1", InstanceType: "cubebox", RootfsArtifactID: "rfs-xfs-1"}
 
@@ -1030,25 +1078,13 @@ func TestBackfillReplicaListingErrorAbortsSweep(t *testing.T) {
 	pre.replicasSeqErr = []error{errors.New("list replicas fail")}
 	pre.stub(t)
 	if err := backfillTemplateReplicas(context.Background(), def); err == nil {
-		t.Fatalf("pre-lock listing failure must abort the sweep")
+		t.Fatalf("listing failure must abort the sweep")
 	}
 	if len(pre.distCalls) != 0 || len(pre.snapshotCalls) != 0 || len(pre.upsertsSnapshot()) != 0 {
-		t.Fatalf("pre-lock listing failure must not touch nodes: dist=%d snap=%d upserts=%d",
+		t.Fatalf("listing failure must not touch nodes: dist=%d snap=%d upserts=%d",
 			len(pre.distCalls), len(pre.snapshotCalls), len(pre.upsertsSnapshot()))
 	}
 
-	post := newBackfillPrepareFixture(t, "xfs")
-	post.nodes = []*node.Node{testNode("node-a", "10.0.0.1")}
-	post.replicasSeq = [][]models.TemplateReplica{{}, {}}
-	post.replicasSeqErr = []error{nil, errors.New("list replicas after lock fail")}
-	post.stub(t)
-	if err := backfillTemplateReplicas(context.Background(), def); err == nil {
-		t.Fatalf("post-lock listing failure must abort the sweep")
-	}
-	if len(post.distCalls) != 0 || len(post.snapshotCalls) != 0 || len(post.upsertsSnapshot()) != 0 {
-		t.Fatalf("post-lock listing failure must not touch nodes: dist=%d snap=%d upserts=%d",
-			len(post.distCalls), len(post.snapshotCalls), len(post.upsertsSnapshot()))
-	}
 }
 
 // jfs: a placement-push failure must surface as the sweep error (the
@@ -1221,10 +1257,9 @@ func TestBackfillCleanupCoversJustPushedInFlightRows(t *testing.T) {
 		testNode("node-b", "10.0.0.2"),
 	}
 	leftoverRow := models.TemplateReplica{NodeID: "node-b", NodeIP: "10.0.0.2", Status: ReplicaStatusFailed, Phase: ReplicaPhaseFailed, CleanupRequired: true}
-	// Pre-distribute listings show the leftover only; the pre-cleanup
+	// The pre-distribute listing shows the leftover only; the post-distribute
 	// listing adds node-a's freshly written in-flight DISTRIBUTED row.
 	f.replicasSeq = [][]models.TemplateReplica{
-		{leftoverRow},
 		{leftoverRow},
 		{{NodeID: "node-a", NodeIP: "10.0.0.1", Status: ReplicaStatusFailed, Phase: ReplicaPhaseDistributed}, leftoverRow},
 	}
@@ -1393,7 +1428,7 @@ func TestBackfillJFSSweepCapsTargetsPerRound(t *testing.T) {
 		t.Fatalf("distribute calls = %d, want 1", len(f.distCalls))
 	}
 	call := f.distCalls[0]
-	if call.trackReplicas {
+	if call.write != replicaWriteNone {
 		t.Fatalf("jfs placement push must not track replica rows")
 	}
 	if got := len(call.targets); got != backfillMaxTargetsPerSweep {

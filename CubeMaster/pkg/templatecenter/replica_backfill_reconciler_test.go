@@ -100,11 +100,11 @@ func stubBackfillSeams(t *testing.T, job *models.TemplateImageJob, artifact *mod
 	backfillPlacements = func(context.Context, string) ([]models.ArtifactNodePlacement, error) {
 		return placements, nil
 	}
-	backfillDistribute = func(ctx context.Context, req *sandboxtypes.CreateTemplateFromImageReq, generatedReq *sandboxtypes.CreateCubeSandboxReq, art *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
+	backfillDistribute = func(ctx context.Context, req *sandboxtypes.CreateTemplateFromImageReq, generatedReq *sandboxtypes.CreateCubeSandboxReq, art *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, write replicaWrite) ([]*node.Node, int32, int32, int32, error) {
 		recorder.calls = append(recorder.calls, backfillDistributeCall{
-			targets:       targets,
-			trackReplicas: trackReplicas,
-			generatedReq:  generatedReq,
+			targets:      targets,
+			write:        write,
+			generatedReq: generatedReq,
 		})
 		return targets, int32(len(targets)), int32(len(targets)), 0, nil
 	}
@@ -112,9 +112,9 @@ func stubBackfillSeams(t *testing.T, job *models.TemplateImageJob, artifact *mod
 }
 
 type backfillDistributeCall struct {
-	targets       []*node.Node
-	trackReplicas bool
-	generatedReq  *sandboxtypes.CreateCubeSandboxReq
+	targets      []*node.Node
+	write        replicaWrite
+	generatedReq *sandboxtypes.CreateCubeSandboxReq
 }
 
 type backfillDistributeRecorder struct {
@@ -165,7 +165,7 @@ func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 		}
 		t.Fatalf("push targets = %v, want [node-new]", got)
 	}
-	if call.trackReplicas {
+	if call.write != replicaWriteNone {
 		t.Fatal("jfs artifact push must not write replica rows")
 	}
 	if call.generatedReq != nil {
