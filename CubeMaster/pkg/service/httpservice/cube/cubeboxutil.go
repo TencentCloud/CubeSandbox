@@ -31,7 +31,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -256,24 +255,20 @@ func applyTemplateImageSpec(imageSpecIn *types.ImageSpec, imageSpecOut *types.Im
 // uses the ordinary merge and keeps its component override precedence.
 //
 // The saved request carries the source sandbox's labels, its user metadata
-// included. When the create request brings user metadata, the new sandbox
-// gets exactly that metadata: none of the source's is kept, and Cube's own
-// labels still come from the snapshot (a request cannot override them). A
-// request without user metadata keeps inheriting the source's.
+// included. Labels merge per key: the create request wins on the keys it
+// sets, keys it does not set keep inheriting the source's, and Cube's own
+// labels still come from the snapshot (a request cannot override them).
 func applySnapshotTemplateAnnotationsAndLabels(reqIn, reqOut *types.CreateCubeSandboxReq) {
 	key := constants.CubeAnnotationComponentCubeShimVersion
 	selected, bound := reqOut.Annotations[key]
 	requested := maps.Clone(reqOut.Labels)
-	maps.DeleteFunc(requested, func(k, _ string) bool { return !webhook.IsUserMetadataKey(k) })
+	maps.DeleteFunc(requested, func(k, _ string) bool { return strings.HasPrefix(k, "cube.master.") })
 	applyTemplateAnnotationsAndLabels(reqIn, reqOut)
 	delete(reqOut.Annotations, key)
 	if bound {
 		reqOut.Annotations[key] = selected
 	}
-	if len(requested) > 0 {
-		maps.DeleteFunc(reqOut.Labels, func(k, _ string) bool { return webhook.IsUserMetadataKey(k) })
-		maps.Copy(reqOut.Labels, requested)
-	}
+	maps.Copy(reqOut.Labels, requested)
 }
 
 //go:noinline
