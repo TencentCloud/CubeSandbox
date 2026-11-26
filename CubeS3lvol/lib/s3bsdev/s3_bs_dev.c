@@ -1457,7 +1457,12 @@ s3_writeback_op_maybe_release(struct s3_writeback_wal_op *op)
 			SPDK_ERRLOG("Failed to complete write-back record %" PRIu64
 				    ": %d\n", op->writeback_seq, rc);
 		}
-		(void)s3_writeback_reclaim_and_wake(op->ctx);
+		/* The release callback runs inside an overlay mutation. Retrying
+		 * here can overwrite the block before its old reference has been
+		 * cleared, recursively releasing this operation a second time.
+		 * Reclaim space now; the already-registered retry poller resumes
+		 * queued writes after the overlay has finished its bookkeeping. */
+		(void)s3_writeback_reclaim(op->ctx->writeback);
 	}
 	free(op->zero_buf);
 	free(op);

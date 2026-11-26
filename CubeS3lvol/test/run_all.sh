@@ -395,7 +395,7 @@ for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
 	 s3_export_read_test s3_preheat_test s3_copy_xml_test s3_pending_persist_test \
 	 s3_active_nsid_test s3_dynamic_json_test s3_bstore_test \
-	 s3_registry_persist_test s3_owner_test s3_nvmf_state_test; do
+	 s3_registry_persist_test s3_owner_test s3_nvmf_state_test s3_overlay_retry_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""
