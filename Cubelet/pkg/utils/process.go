@@ -7,6 +7,7 @@ package utils
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,8 +15,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 )
 
 // procRootDefault is where the kernel exposes the process table on a normal
@@ -207,25 +206,17 @@ func readProcStatAt(procRoot string, pid int) (procStat, error) {
 	return procStat{state: fields[0][0], startTime: startTime}, nil
 }
 
-func ProcessExists(ctx context.Context, pid int) bool {
+// ProcessExists reports whether pid is currently live. A single kill(pid, 0)
+// answers the question directly: nil means the process exists, ESRCH means it
+// does not, and EPERM means it exists but this identity may not signal it.
+//
+// The previous implementation polled every 10ms and only returned true after a
+// full second, so every liveness check of a live process cost one second of
+// latency plus a busy CPU spin.
+func ProcessExists(_ context.Context, pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	ctxTmp, cancel := context.WithTimeout(ctx, 1*time.Second)
-	defer cancel()
-	for {
-		select {
-		case <-ctxTmp.Done():
-			log.G(ctx).Warnf("process[%d] check timeout,still exist,%v", pid, ctxTmp.Err())
-			return true
-		default:
-
-			if err := syscall.Kill(pid, syscall.Signal(0)); err != nil {
-				log.G(ctx).Debugf("process[%d] not exist,%v", pid, err)
-				return false
-			}
-
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	err := syscall.Kill(pid, syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
