@@ -14,11 +14,17 @@ var (
 )
 
 type SimpleLinearRanger struct {
+	empty bool
 	lower uint16
 	upper uint16
 
 	cur   int
 	start int
+}
+
+// NewEmptySimpleLinearRanger starts without slots and grows from ID zero.
+func NewEmptySimpleLinearRanger() *SimpleLinearRanger {
+	return &SimpleLinearRanger{empty: true, cur: -1}
 }
 
 func NewSimpleLinearRanger(lower, upper uint16) (*SimpleLinearRanger, error) {
@@ -34,14 +40,21 @@ func NewSimpleLinearRanger(lower, upper uint16) (*SimpleLinearRanger, error) {
 }
 
 func (r *SimpleLinearRanger) Contains(rangeID uint16) bool {
-	return (rangeID >= r.lower) && (rangeID <= r.upper)
+	return !r.empty && (rangeID >= r.lower) && (rangeID <= r.upper)
 }
 
 func (r *SimpleLinearRanger) Cap() int {
-	return int(r.upper - r.lower + 1)
+	if r.empty {
+		return 0
+	}
+	return int(r.upper) - int(r.lower) + 1
 }
 
 func (r *SimpleLinearRanger) Expand() (uint16, error) {
+	if r.empty {
+		r.empty = false
+		return r.lower, nil
+	}
 	if r.upper == math.MaxUint16 {
 		return 0, ErrExhausted
 	}
@@ -50,7 +63,8 @@ func (r *SimpleLinearRanger) Expand() (uint16, error) {
 }
 
 func (r *SimpleLinearRanger) ExpandTo(upper uint16) {
-	if r.upper < upper {
+	if r.empty || r.upper < upper {
+		r.empty = false
 		r.upper = upper
 	}
 }

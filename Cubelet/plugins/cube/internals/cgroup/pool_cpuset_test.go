@@ -167,9 +167,10 @@ func newCpusetTestPoolWithCPUs(t *testing.T, h handle.Interface, cpulist string)
 			handle:  h,
 			enabled: true,
 			numaPools: []cgPoolV2Numa{{
-				allocator: allocator.NewAllocator[uint16](ranger),
-				cgRanger:  ranger,
-				numaNode:  numa.NumaNode{NodeId: 0, Cpulist: cpulist},
+				prewarmSize: 2,
+				allocator:   allocator.NewAllocator[uint16](ranger),
+				cgRanger:    ranger,
+				numaNode:    numa.NumaNode{NodeId: 0, Cpulist: cpulist},
 			}},
 		},
 		reparentFileEnabled: func() bool { return false },

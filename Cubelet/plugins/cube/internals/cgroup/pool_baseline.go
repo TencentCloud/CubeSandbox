@@ -229,11 +229,11 @@ func (p *cgPool) BaselineFor(ctx context.Context, fullCgID uint32) (handle.Usage
 	return handle.UsageSnapshot{}, false, err
 }
 
-// sweepBaselines enqueues every idle slot for a baseline read; in-use slots
-// are skipped.
+// sweepBaselines enqueues only prewarmed idle slots. Allocator ranges may
+// have expanded to reserve high DB IDs; their holes must not be swept.
 func (p *cgPool) sweepBaselines(inUse map[uint32]struct{}) {
 	p.mutex.RLock()
-	v1Cap := p.poolV1.cgRanger.Cap()
+	v1Cap := p.poolV1.prewarmSize
 	numaPools := p.poolV2.numaPools
 	p.mutex.RUnlock()
 
@@ -246,7 +246,7 @@ func (p *cgPool) sweepBaselines(inUse map[uint32]struct{}) {
 	}
 	for _, numaPool := range numaPools {
 		nodeID := int32(numaPool.numaNode.NodeId)
-		for id := 0; id < numaPool.cgRanger.Cap(); id++ {
+		for id := 0; id < numaPool.prewarmSize; id++ {
 			full := MakeFullCgID(uint16(id), true, nodeID)
 			if _, used := inUse[full]; used {
 				continue

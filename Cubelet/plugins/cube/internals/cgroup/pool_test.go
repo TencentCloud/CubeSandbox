@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -186,10 +187,27 @@ func TestPoolTidy(t *testing.T) {
 	}
 	err = p.init()
 	require.NoErrorf(t, err, "init pool")
+	t.Cleanup(p.stop)
 
 	cgList, err := p.poolV1Handle.List()
 	assert.NoError(t, err)
 	assert.LessOrEqual(t, 11, len(cgList))
+	retained := append([]string(nil), cgList...)
+	p.stop()
+
+	// Exercise the real kill-on-delete regression when cgroupfs is writable.
+	// Neither process has a DB assignment, including the high slot that falls
+	// outside the smaller prewarming range after restart.
+	var running []<-chan struct{}
+	for _, id := range []uint32{0, 10} {
+		cmd := exec.Command("sleep", "60")
+		require.NoError(t, cmd.Start())
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		t.Cleanup(func() { _ = cmd.Process.Kill(); <-done })
+		require.NoError(t, p.poolV1Handle.AddProc(MakeCgroupPathByID(id), uint64(cmd.Process.Pid)))
+		running = append(running, done)
+	}
 
 	err = p.poolV1Handle.Create(context.TODO(), MakeCgroupPoolV1PathByString("somecgunknown"))
 	assert.NoError(t, err)
@@ -202,6 +220,7 @@ func TestPoolTidy(t *testing.T) {
 	}
 	err = p.init()
 	require.NoErrorf(t, err, "init pool")
+	t.Cleanup(p.stop)
 	errs := p.Tidy()
 	if len(errs) > 0 {
 		err = fmt.Errorf("Tidy() returned errors: %v", errs)
@@ -210,7 +229,18 @@ func TestPoolTidy(t *testing.T) {
 
 	cgList, err = p.poolV1Handle.List()
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(cgList))
+	assert.ElementsMatch(t, retained, cgList, "shrinking prewarming must retain existing slots")
+	assert.NotContains(t, cgList, "somecgunknown")
+	for _, done := range running {
+		require.Never(t, func() bool {
+			select {
+			case <-done:
+				return true
+			default:
+				return false
+			}
+		}, 100*time.Millisecond, 10*time.Millisecond, "historical slot processes must survive Tidy")
+	}
 }
 
 func TestPoolExpand(t *testing.T) {
