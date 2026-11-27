@@ -870,12 +870,22 @@ func (l *listener) OnEvent(data interface{}) {
 		CubeLog.Fatalf("validate Config:%v fail:%v", data, err)
 		return
 	}
+	previous := cfg
 	cfg = conf
 	// conf.yaml is hot-reloadable, so apply a narrowed max_procs here as well.
 	// Widening is not possible: once lowered, the runtime default this process
-	// started with is gone, so raising the value back needs a restart.
-	if prev, now := conf.ApplyMaxProcs(); prev != now {
+	// started with is gone, so raising the value back needs a restart. Say so
+	// rather than accepting the edit silently: the published config would then
+	// disagree with the width actually in effect.
+	prev, now := conf.ApplyMaxProcs()
+	switch {
+	case prev != now:
 		CubeLog.Infof("config reload: gomaxprocs %d -> %d (max_procs=%d)", prev, now, conf.Common.MaxProcs)
+	case conf.Common.MaxProcs > 0 && conf.Common.MaxProcs >= prev:
+		CubeLog.Warnf("config reload: max_procs=%d not applied (gomaxprocs already %d); raising needs a restart",
+			conf.Common.MaxProcs, prev)
+	case conf.Common.MaxProcs == 0 && previous != nil && previous.Common != nil && previous.Common.MaxProcs > 0:
+		CubeLog.Warnf("config reload: max_procs removed, gomaxprocs stays %d until restart", prev)
 	}
 	notify(conf)
 }
@@ -914,10 +924,10 @@ func preHandle(config *Config) (*Config, error) {
 		return nil, fmt.Errorf("preHandleCubeletConf fail: %w", err)
 	}
 	if err := preHandleScheduler(config); err != nil {
-		return nil, fmt.Errorf("preHandleScheduler fail: %w", err)
+		return nil, fmt.Errorf("preHandleScheduler failed: %w", err)
 	}
 	if err := preHandleAuthConf(config); err != nil {
-		return nil, fmt.Errorf("preHandleAuthConf fail: %w", err)
+		return nil, fmt.Errorf("preHandleAuthConf failed: %w", err)
 	}
 	return config, nil
 }
