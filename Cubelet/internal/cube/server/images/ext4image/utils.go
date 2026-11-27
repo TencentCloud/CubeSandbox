@@ -6,7 +6,6 @@ package ext4image
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -238,20 +237,34 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 	return nil
 }
 
-// isAllZeros checks if the byte slice consists entirely of zero bytes.
-func isAllZeros(buf []byte) bool {
-	for len(buf) >= 8 {
-		if binary.LittleEndian.Uint64(buf) != 0 {
-			return false
+// countLeadingZeros returns the number of leading zero bytes in buf.
+func countLeadingZeros(buf []byte) int {
+	i := 0
+	for i+8 <= len(buf) {
+		if binary.LittleEndian.Uint64(buf[i:]) != 0 {
+			break
 		}
-		buf = buf[8:]
+		i += 8
 	}
-	for _, b := range buf {
-		if b != 0 {
-			return false
+	for i < len(buf) && buf[i] == 0 {
+		i++
+	}
+	return i
+}
+
+// countTrailingZeros returns the number of trailing zero bytes in buf.
+func countTrailingZeros(buf []byte) int {
+	end := len(buf)
+	for end >= 8 {
+		if binary.LittleEndian.Uint64(buf[end-8:]) != 0 {
+			break
 		}
+		end -= 8
 	}
-	return true
+	for end > 0 && buf[end-1] == 0 {
+		end--
+	}
+	return len(buf) - end
 }
 
 const sparseHoleThreshold = int64(1024 * 1024)
@@ -279,9 +292,8 @@ func sparseCopy(dst sparseFile, hasher hash.Hash, src io.Reader, bufSize int, st
 		}
 	}
 	buf := make([]byte, bufSize)
-	// Data is split at every zero byte, so mixed content such as binaries
-	// produces many tiny runs. Coalesce them into bufSize writes instead of
-	// issuing one write syscall per run. The buffer must be flushed before
+	// Coalesce short network reads and boundary zero flushes into bufSize writes
+	// so dst receives fewer write syscalls. The buffer must be flushed before
 	// any direct operation on dst (Seek, Truncate).
 	writer := bufio.NewWriterSize(dst, bufSize)
 	// Flush on the error paths too: the caller resumes from the partial's
@@ -318,6 +330,13 @@ func sparseCopy(dst sparseFile, hasher hash.Hash, src io.Reader, bufSize int, st
 		return nil
 	}
 
+	// Process each read in blocks of at most sparseHoleThreshold bytes.
+	// A non-zero block of length <= sparseHoleThreshold cannot contain an
+	// interior zero run of length >= sparseHoleThreshold: only its leading
+	// zeros (extending pendingZeros) and trailing zeros (starting a new run)
+	// can participate in a sparse hole, so the middle is written verbatim
+	// without splitting on every 0x00 byte.
+	const maxBlockSize = int(sparseHoleThreshold)
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
@@ -327,31 +346,28 @@ func sparseCopy(dst sparseFile, hasher hash.Hash, src io.Reader, bufSize int, st
 					return totalBytes, err
 				}
 			}
-			if isAllZeros(chunk) {
-				pendingZeros += int64(n)
-			} else {
-				for offset := 0; offset < len(chunk); {
-					if chunk[offset] == 0 {
-						start := offset
-						for offset < len(chunk) && chunk[offset] == 0 {
-							offset++
-						}
-						pendingZeros += int64(offset - start)
-						continue
-					}
+			for len(chunk) > 0 {
+				block := chunk[:min(len(chunk), maxBlockSize)]
+				chunk = chunk[len(block):]
+
+				lead := countLeadingZeros(block)
+				if lead == len(block) {
+					pendingZeros += int64(len(block))
+					continue
+				}
+				start := 0
+				if pendingZeros > 0 {
+					pendingZeros += int64(lead)
 					if err := flushZeros(); err != nil {
 						return totalBytes, err
 					}
-					start := offset
-					if nextZero := bytes.IndexByte(chunk[offset:], 0); nextZero >= 0 {
-						offset += nextZero
-					} else {
-						offset = len(chunk)
-					}
-					if _, err := writer.Write(chunk[start:offset]); err != nil {
-						return totalBytes, err
-					}
+					start = lead
 				}
+				trail := countTrailingZeros(block)
+				if _, err := writer.Write(block[start : len(block)-trail]); err != nil {
+					return totalBytes, err
+				}
+				pendingZeros = int64(trail)
 			}
 			totalBytes += int64(n)
 		}
