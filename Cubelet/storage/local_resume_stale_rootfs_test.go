@@ -72,6 +72,15 @@ func seedFailedResume(t *testing.T, engine *cubecow.Engine) (pausePath, gen0Path
 	return pausePath, gen0.FilePath
 }
 
+// useOwnProcRoot points procRoot at ownProcRoot for the rest of the test.
+func useOwnProcRoot(t *testing.T) {
+	t.Helper()
+	root := ownProcRoot(t)
+	old := procRoot
+	procRoot = root
+	t.Cleanup(func() { procRoot = old })
+}
+
 func resumeCreateContext(withPausedRow bool) *workflow.CreateContext {
 	opts := pauseResumeCreateContext(staleResumeSandboxID, map[string]string{
 		constants.MasterAnnotationPauseSnapshotID:  staleResumeTemplateID,
@@ -102,6 +111,7 @@ func requirePrefix(t *testing.T, path string, want []byte) {
 }
 
 func TestResumeRetryReplacesStaleRootfsOnReflink(t *testing.T) {
+	useOwnProcRoot(t)
 	engine := newReflinkTestEngine(t)
 	pausePath, gen0Path := seedFailedResume(t, engine)
 	l := &local{cowManager: newCowVolumeManager(engine)}
@@ -118,6 +128,7 @@ func TestResumeRetryReplacesStaleRootfsOnReflink(t *testing.T) {
 }
 
 func TestResumeRetryKeepsExistingRootfsWhenNotProvablyStale(t *testing.T) {
+	useOwnProcRoot(t)
 	gen0 := SandboxRootfsName(staleResumeSandboxID, 0)
 	cases := []struct {
 		name   string

@@ -1473,7 +1473,13 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 	// not exit in time the failover keeps the PAUSED row but leaves the VM
 	// running on this disk, and the PAUSED row only knows the runtime of the
 	// pause, not of that attempt. So keep the object while any process on the
-	// host still has it open or mapped; the retry after that VM is gone replaces it.
+	// host still has it open or mapped, or while the scan cannot tell; the retry
+	// after that VM is gone replaces it.
+	//
+	// The scan and the delete are not atomic, and the lifecycle lock does not
+	// cover the earlier attempt's shim: a process that opens the object between
+	// the scan and the delete would still lose it. The check narrows that risk;
+	// it does not rule it out.
 	name := SandboxRootfsName(sandboxID, 0)
 	path, resolveErr := store.ResolveDevPath(ctx, name, cowKindSnapshot)
 	if resolveErr != nil {

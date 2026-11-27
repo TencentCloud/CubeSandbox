@@ -7,21 +7,35 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestFileHolders(t *testing.T) {
-	if _, err := os.Stat(filepath.Join(procRoot, "self", "fd")); err != nil {
+// ownProcRoot returns a /proc look-alike that lists only this process, plus a
+// pid that does not exist, so the result does not depend on other processes
+// on the host (which a non-root test run may not be allowed to read).
+func ownProcRoot(t *testing.T) string {
+	t.Helper()
+	self := filepath.Join("/proc", strconv.Itoa(os.Getpid()))
+	if _, err := os.Stat(filepath.Join(self, "fd")); err != nil {
 		t.Skip("no /proc on this host")
 	}
+	root := t.TempDir()
+	require.NoError(t, os.Symlink(self, filepath.Join(root, strconv.Itoa(os.Getpid()))))
+	require.NoError(t, os.Symlink("/proc/2147483646", filepath.Join(root, "2147483646")))
+	return root
+}
+
+func TestFileHolders(t *testing.T) {
+	root := ownProcRoot(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "disk")
 	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
 
-	pids, err := fileHolders(procRoot, path)
+	pids, err := fileHolders(root, path)
 	require.NoError(t, err)
 	require.NotContains(t, pids, os.Getpid())
 
@@ -30,12 +44,12 @@ func TestFileHolders(t *testing.T) {
 	// Reached through another name, the open file is still found.
 	link := filepath.Join(dir, "link")
 	require.NoError(t, os.Symlink(path, link))
-	pids, err = fileHolders(procRoot, link)
+	pids, err = fileHolders(root, link)
 	require.NoError(t, err)
 	require.Contains(t, pids, os.Getpid())
 
 	require.NoError(t, f.Close())
-	pids, err = fileHolders(procRoot, path)
+	pids, err = fileHolders(root, path)
 	require.NoError(t, err)
 	require.NotContains(t, pids, os.Getpid())
 
@@ -45,14 +59,28 @@ func TestFileHolders(t *testing.T) {
 	mem, err := syscall.Mmap(int(f.Fd()), 0, 1, syscall.PROT_READ, syscall.MAP_SHARED)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
-	pids, err = fileHolders(procRoot, path)
+	pids, err = fileHolders(root, path)
 	require.NoError(t, err)
 	require.Contains(t, pids, os.Getpid())
 	require.NoError(t, syscall.Munmap(mem))
-	pids, err = fileHolders(procRoot, path)
+	pids, err = fileHolders(root, path)
 	require.NoError(t, err)
 	require.NotContains(t, pids, os.Getpid())
 
-	_, err = fileHolders(procRoot, filepath.Join(dir, "missing"))
+	_, err = fileHolders(root, filepath.Join(dir, "missing"))
 	require.Error(t, err)
+}
+
+// A process whose entries cannot be read is reported as an error, so the
+// caller keeps the file instead of assuming nobody holds it.
+func TestFileHoldersFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk")
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "1"), 0o700))
+	// fd is a file, not a directory: reading it fails with ENOTDIR.
+	require.NoError(t, os.WriteFile(filepath.Join(root, "1", "fd"), nil, 0o600))
+
+	_, err := fileHolders(root, path)
+	require.ErrorIs(t, err, syscall.ENOTDIR)
 }
