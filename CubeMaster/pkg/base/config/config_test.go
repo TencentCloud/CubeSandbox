@@ -133,6 +133,44 @@ func TestPreComHandleConfDistributionWorkersDefault(t *testing.T) {
 	assert.Equal(t, 16, cfg.Common.DistributionWorkers)
 }
 
+func TestPreComHandleConfMaxProcs(t *testing.T) {
+	// max_procs is a cap, not a requirement: 0 must survive the defaults pass
+	// untouched so the Go runtime keeps whatever it computed at startup (nproc,
+	// or the cgroup CPU quota on Go 1.25+).
+	cfg := &Config{Common: &CommonConf{}}
+	require.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 0, cfg.Common.MaxProcs)
+
+	cfg = &Config{Common: &CommonConf{MaxProcs: 32}}
+	require.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 32, cfg.Common.MaxProcs)
+
+	// Negative is a configuration error, not a silent fallback to the default:
+	// it would otherwise read like a deliberate value while doing nothing.
+	cfg = &Config{Common: &CommonConf{MaxProcs: -1}}
+	err := preComHandleConf(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_procs")
+}
+
+func TestPreHandlePropagatesMaxProcsError(t *testing.T) {
+	// The startup path wraps preComHandleConf; a rejected max_procs must reach
+	// the operator with the reason attached instead of a bare "preHandle fail".
+	_, err := preHandle(&Config{Common: &CommonConf{MaxProcs: -1}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_procs")
+}
+
+func TestCommonConfMaxProcsYAML(t *testing.T) {
+	var cfg CommonConf
+	require.NoError(t, yaml.Unmarshal([]byte("max_procs: 32\n"), &cfg))
+	assert.Equal(t, 32, cfg.MaxProcs)
+
+	var unset CommonConf
+	require.NoError(t, yaml.Unmarshal([]byte("http_port: 8089\n"), &unset))
+	assert.Equal(t, 0, unset.MaxProcs, "unset max_procs must stay 0 (= runtime default)")
+}
+
 func TestNestedLogSettingsUseSnakeCaseOnRoundTrip(t *testing.T) {
 	var cfg Config
 	err := yaml.Unmarshal([]byte("log:\n  file_size: 100\n  file_num: 10\n  enable_log_metric: true\n"), &cfg)

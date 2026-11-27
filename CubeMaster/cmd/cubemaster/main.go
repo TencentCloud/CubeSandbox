@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	stdlog "log"
+	"runtime"
 	"runtime/debug"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemaster/app"
@@ -34,6 +35,13 @@ func main() {
 	if err != nil {
 		stdlog.Fatalf("config init fail:%v", recov.DumpStacktrace(3, err))
 		return
+	}
+
+	// Cap the scheduler before anything sizes itself from it: the runtime
+	// derives the GC mark worker count and every sync.Pool's per-P shard array
+	// from GOMAXPROCS. Zero keeps the runtime default.
+	if cfg.Common.MaxProcs > 0 {
+		runtime.GOMAXPROCS(cfg.Common.MaxProcs)
 	}
 
 	if cfg.Common.MockDebug {
