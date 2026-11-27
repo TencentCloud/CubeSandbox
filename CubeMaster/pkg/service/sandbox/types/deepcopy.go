@@ -34,9 +34,13 @@ import (
 // one.
 
 // DeepCopy returns a request that shares no mutable state with r. The result
-// marshals to exactly the same JSON as r, which is what the previous
-// json.Marshal/json.Unmarshal clone guaranteed for code that persists or
-// fingerprints a request.
+// marshals to the same JSON as r, with a single exception: when r.Request is
+// nil it stays nil, whereas the round trip this replaced always materialized
+// &Request{} (UnmarshalJSON does that unconditionally) and so emitted
+// `"requestID":""` for an input that has no requestID key at all. Nothing
+// serializes a request with its embedded request dropped, so the difference is
+// not reachable, but it is pinned by
+// TestCreateCubeSandboxReqDeepCopyKeepsNilRequest so the claim stays honest.
 func (r *CreateCubeSandboxReq) DeepCopy() *CreateCubeSandboxReq {
 	if r == nil {
 		return nil
