@@ -10,6 +10,9 @@ local sb = require "sandbox_backend"
 local state = require "sandbox_state"
 local activity = require "activity"
 local request_host = require "request_host"
+local trace = require "trace"
+
+trace.start("path")
 
 local uri = ngx.var.uri or ""
 local ins_id, container_port, rest = uri:match("^/sandbox/([%w_%-]+)/(%d+)(/?.*)$")
@@ -30,6 +33,7 @@ end
 -- can rewrite Location headers and cookie Path values back into the
 -- /sandbox/<id>/<port>/ prefix on the response side.
 ngx.var.ins_id = ins_id
+trace.set("cube.sandbox_id", ins_id)
 ngx.var.container_port = container_port
 
 -- Strip the /sandbox/<id>/<port> prefix from the upstream URI. The second

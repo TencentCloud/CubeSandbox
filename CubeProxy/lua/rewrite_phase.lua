@@ -4,6 +4,9 @@ local sb = require "sandbox_backend"
 local state = require "sandbox_state"
 local activity = require "activity"
 local request_host = require "request_host"
+local trace = require "trace"
+
+trace.start("host")
 
 -- Parse Host: <container_port>-<sandbox_id>.<domain> e.g. 49983-7c8fbcd45ffe450fb8f7fb223ad45507.cube.app
 -- Returns container_port, ins_id (sandbox / instance id), or nil, nil on failure.
@@ -55,6 +58,7 @@ end
 -- purposes), so populate it here to make activity tracking work uniformly.
 ngx.var.ins_id = ins_id
 metrics.start_current_request()
+trace.set("cube.sandbox_id", ins_id)
 
 -- Auto-pause gate. See sandbox_state.lua for failure-mode semantics.
 state.gate(ins_id)

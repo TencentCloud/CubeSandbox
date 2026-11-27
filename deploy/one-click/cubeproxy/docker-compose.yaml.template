@@ -9,6 +9,13 @@ services:
       # Prometheus request metrics (opt-in; LISTEN honored only when enabled).
       CUBE_PROXY_METRICS_ENABLE: "__CUBE_PROXY_METRICS_ENABLE__"
       CUBE_PROXY_METRICS_LISTEN: "__CUBE_PROXY_METRICS_LISTEN__"
+      # Request tracing (opt-in). Compose reads the exported one-click .env.
+      CUBE_PROXY_OTEL_ENABLE: "${CUBE_PROXY_OTEL_ENABLE:-0}"
+      CUBE_PROXY_OTEL_ENDPOINT: "${CUBE_PROXY_OTEL_ENDPOINT:-}"
+      CUBE_PROXY_OTEL_SERVICE_NAME: "${CUBE_PROXY_OTEL_SERVICE_NAME:-cube-proxy}"
+      CUBE_PROXY_OTEL_SAMPLE_RATIO: "${CUBE_PROXY_OTEL_SAMPLE_RATIO:-1}"
+      CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS: "${CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS:-2000}"
+      CUBE_PROXY_OTEL_TIMEOUT_MS: "${CUBE_PROXY_OTEL_TIMEOUT_MS:-2000}"
       # ── Service registration (consumed by lua/proxy_registry.lua) ────────
       # These let this replica announce itself to Redis so
       # cube-lifecycle-manager can discover it and route pause/resume

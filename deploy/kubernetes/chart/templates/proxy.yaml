@@ -251,6 +251,21 @@ spec:
             - name: CUBE_PROXY_METRICS_LISTEN
               value: {{ .Values.cubeProxy.metrics.listen | quote }}
             {{- end }}
+            # Sandbox data-plane tracing (opt-in).
+            - name: CUBE_PROXY_OTEL_ENABLE
+              value: {{ ternary "1" "0" .Values.cubeProxy.tracing.enabled | quote }}
+            {{- if .Values.cubeProxy.tracing.enabled }}
+            - name: CUBE_PROXY_OTEL_ENDPOINT
+              value: {{ .Values.cubeProxy.tracing.endpoint | quote }}
+            - name: CUBE_PROXY_OTEL_SERVICE_NAME
+              value: {{ .Values.cubeProxy.tracing.serviceName | quote }}
+            - name: CUBE_PROXY_OTEL_SAMPLE_RATIO
+              value: {{ .Values.cubeProxy.tracing.sampleRatio | quote }}
+            - name: CUBE_PROXY_OTEL_FLUSH_INTERVAL_MS
+              value: {{ .Values.cubeProxy.tracing.flushIntervalMs | quote }}
+            - name: CUBE_PROXY_OTEL_TIMEOUT_MS
+              value: {{ .Values.cubeProxy.tracing.timeoutMs | quote }}
+            {{- end }}
             {{- if and .Values.cubeProxy.registry.enabled (eq (include "cube.lifecycleManagerEnabled" .) "true") }}
             - name: CUBE_PROXY_REGISTRY_ENABLE
               value: "1"
