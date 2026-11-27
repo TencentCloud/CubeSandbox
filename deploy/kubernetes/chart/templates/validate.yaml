@@ -415,6 +415,42 @@ away from CubeMaster means one of the two Pods cannot attach the volume.
 {{- if not .Values.cubeEgress.network.ingressInterface }}
 {{- fail "cubeEgress.network.ingressInterface is required" }}
 {{- end }}
+{{- if .Values.egressProxy.enabled }}
+{{- if not .Values.cubeNode.network.cubeRouter.enabled }}
+{{- fail "egressProxy.enabled=true requires cubeNode.network.cubeRouter.enabled=true" }}
+{{- end }}
+{{- if lt (len .Values.egressProxy.clusterCIDRs) 1 }}
+{{- fail "egressProxy.enabled=true requires at least one egressProxy.clusterCIDRs entry" }}
+{{- end }}
+{{- if gt (len .Values.egressProxy.clusterCIDRs) 32 }}
+{{- fail "egressProxy.clusterCIDRs supports at most 32 entries" }}
+{{- end }}
+{{- $seenClusterCIDRs := dict }}
+{{- range .Values.egressProxy.clusterCIDRs }}
+{{- if not (regexMatch `^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/([0-9]|[12][0-9]|3[0-2])$` .) }}
+{{- fail (printf "egressProxy.clusterCIDRs contains an invalid IPv4 CIDR: %s" .) }}
+{{- end }}
+{{- if hasKey $seenClusterCIDRs . }}
+{{- fail (printf "egressProxy.clusterCIDRs contains a duplicate entry: %s" .) }}
+{{- end }}
+{{- $_ := set $seenClusterCIDRs . true }}
+{{- end }}
+{{- $routeTable := .Values.egressProxy.routeTable | int }}
+{{- $inLowRange := and (ge $routeTable 1) (le $routeTable 252) }}
+{{- $inHighRange := and (ge $routeTable 10000) (le $routeTable 20000) }}
+{{- if not (or $inLowRange $inHighRange) }}
+{{- fail (printf "egressProxy.routeTable must be in 1-252 or 10000-20000, got %v (253-255 are reserved by the kernel)" $routeTable) }}
+{{- end }}
+{{- if eq $routeTable 100 }}
+{{- fail "egressProxy.routeTable cannot be 100: that table belongs to CubeEgress L7 TPROXY (local default dev lo). Pick a dedicated table such as the default 10901." }}
+{{- end }}
+{{- if not .Values.images.egressConfigurer.repository }}
+{{- fail "egressProxy.enabled=true requires images.egressConfigurer.repository" }}
+{{- end }}
+{{- if not .Values.images.egressProxy.repository }}
+{{- fail "egressProxy.enabled=true requires images.egressProxy.repository" }}
+{{- end }}
+{{- end }}
 {{- if .Values.volumeCos.enabled }}
 {{- if and (not .Values.volumeCos.existingSecret) (or (not .Values.volumeCos.secretId) (not .Values.volumeCos.secretKey) (not .Values.volumeCos.bucket)) }}
 {{- fail "volumeCos.enabled=true requires volumeCos.existingSecret or volumeCos.secretId/secretKey/bucket" }}
