@@ -189,6 +189,39 @@ func TestApplyMaxProcsOnlyLowers(t *testing.T) {
 	}
 }
 
+func TestClassifyMaxProcsReload(t *testing.T) {
+	// The switch in listener.OnEvent is the only place that mutates the
+	// process-wide width at runtime, so the decision it takes is pinned here.
+	cfgWith := func(n int) *Config { return &Config{Common: &CommonConf{MaxProcs: n}} }
+	cases := []struct {
+		name     string
+		previous *Config
+		conf     *Config
+		prev     int
+		now      int
+		want     maxProcsReloadAction
+	}{
+		{"narrowed by the edit", cfgWith(32), cfgWith(8), 32, 8, maxProcsNarrowed},
+		{"unchanged value and width", cfgWith(32), cfgWith(32), 32, 32, maxProcsUnchanged},
+		{"raise attempted by the edit", cfgWith(32), cfgWith(64), 32, 32, maxProcsIgnoredRaise},
+		// A cap above the width in effect is a normal steady state (a bare-metal
+		// value carried into a CPU-limited pod). Warning only when the edit
+		// changed the value keeps unrelated reloads quiet.
+		{"raise already in steady state", cfgWith(300), cfgWith(300), 256, 256, maxProcsUnchanged},
+		{"key removed after narrowing", cfgWith(32), cfgWith(0), 32, 32, maxProcsIgnoredRemoval},
+		{"key never set", cfgWith(0), cfgWith(0), 256, 256, maxProcsUnchanged},
+		{"no previous config", nil, cfgWith(64), 32, 32, maxProcsIgnoredRaise},
+		{"new config without common", cfgWith(32), &Config{}, 32, 32, maxProcsUnchanged},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyMaxProcsReload(tc.previous, tc.conf, tc.prev, tc.now); got != tc.want {
+				t.Fatalf("classify = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCommonConfMaxProcsYAML(t *testing.T) {
 	var cfg CommonConf
 	require.NoError(t, yaml.Unmarshal([]byte("max_procs: 32\n"), &cfg))

@@ -874,23 +874,62 @@ func (l *listener) OnEvent(data interface{}) {
 	cfg = conf
 	// conf.yaml is hot-reloadable, so apply a narrowed max_procs here as well.
 	// Widening is not possible: once lowered, the runtime default this process
-	// started with is gone, so raising the value back needs a restart. Say so
-	// rather than accepting the edit silently: the published config would then
-	// disagree with the width actually in effect.
+	// started with is gone, so raising the value back needs a restart. Only an
+	// edit that actually asks for something unapplied is worth a warning.
 	prev, now := conf.ApplyMaxProcs()
-	switch {
-	case prev != now:
+	switch classifyMaxProcsReload(previous, conf, prev, now) {
+	case maxProcsNarrowed:
 		CubeLog.Infof("config reload: gomaxprocs %d -> %d (max_procs=%d)", prev, now, conf.Common.MaxProcs)
-	case conf.Common.MaxProcs > prev:
-		// Strictly above the width in effect: this is the raise that cannot be
-		// honoured. Equality is not a problem -- the request is already met -- so
-		// warning there would fire on every reload that touches an unrelated key.
+	case maxProcsIgnoredRaise:
 		CubeLog.Warnf("config reload: max_procs=%d not applied (gomaxprocs already %d); raising needs a restart",
 			conf.Common.MaxProcs, prev)
-	case conf.Common.MaxProcs == 0 && previous != nil && previous.Common != nil && previous.Common.MaxProcs > 0:
+	case maxProcsIgnoredRemoval:
 		CubeLog.Warnf("config reload: max_procs removed, gomaxprocs stays %d until restart", prev)
 	}
 	notify(conf)
+}
+
+type maxProcsReloadAction int
+
+const (
+	// maxProcsUnchanged covers "nothing to do" and "the edit asked for the width
+	// already in effect": both stay silent, so a reload that only touches an
+	// unrelated key does not produce a warning about a raise nobody made.
+	maxProcsUnchanged maxProcsReloadAction = iota
+	maxProcsNarrowed
+	maxProcsIgnoredRaise
+	maxProcsIgnoredRemoval
+)
+
+// classifyMaxProcsReload decides what a reload did with common.max_procs, for
+// logging only. prev/now are the widths reported by ApplyMaxProcs.
+//
+// The configured value has to have changed for an unapplied edit to be worth a
+// warning: max_procs above the width in effect is a perfectly normal steady
+// state (a bare-metal value carried into a CPU-limited pod, or the runtime
+// default being lower than the cap), and warning about it on every unrelated
+// reload would train operators to ignore the line.
+func classifyMaxProcsReload(previous, conf *Config, prev, now int) maxProcsReloadAction {
+	if prev != now {
+		return maxProcsNarrowed
+	}
+	if conf == nil || conf.Common == nil {
+		return maxProcsUnchanged
+	}
+	before, hadBefore := 0, false
+	if previous != nil && previous.Common != nil {
+		before, hadBefore = previous.Common.MaxProcs, true
+	}
+	changed := !hadBefore || before != conf.Common.MaxProcs
+	switch {
+	case conf.Common.MaxProcs > prev && changed:
+		return maxProcsIgnoredRaise
+	case conf.Common.MaxProcs == 0 && hadBefore && before > 0:
+		// The key was deleted after it had narrowed the process; the runtime
+		// default it would restore is no longer known.
+		return maxProcsIgnoredRemoval
+	}
+	return maxProcsUnchanged
 }
 
 // ApplyMaxProcs lowers the Go scheduler width when common.max_procs asks for a
