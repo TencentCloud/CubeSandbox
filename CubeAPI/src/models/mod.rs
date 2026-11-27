@@ -1976,6 +1976,40 @@ mod tests {
     }
 
     #[test]
+    fn create_template_request_accepts_cgroup_mode_wire_name() {
+        // The public wire name is camelCase `cgroupMode`: a wrong
+        // #[serde(rename)] would make deserialization silently drop
+        // client input while every struct-level test stays green.
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "cgroupMode": "legacy"
+        }))
+        .expect("create template request should deserialize");
+
+        assert_eq!(req.cgroup_mode.as_deref(), Some("legacy"));
+    }
+
+    #[test]
+    fn create_template_request_ignores_internal_cgroup_mode_name() {
+        // `cgroup_mode` is the internal CubeMaster/Cubelet field name, not
+        // the public wire name. The request struct does not deny unknown
+        // fields, so the snake_case spelling deserializes fine while the
+        // value is silently dropped — the exact silent failure this
+        // feature exists to prevent. Pinning it here makes the trap
+        // visible in the contract tests.
+        let req: CreateTemplateRequest = serde_json::from_value(serde_json::json!({
+            "image": "example.invalid/sandbox:latest",
+            "cgroup_mode": "legacy"
+        }))
+        .expect("request with an unknown field should still deserialize");
+
+        assert_eq!(
+            req.cgroup_mode, None,
+            "snake_case cgroup_mode is not the public wire name; clients must send cgroupMode"
+        );
+    }
+
+    #[test]
     fn template_alias_lookup_response_serializes_e2b_shape() {
         let resp = TemplateAliasLookupResponse {
             template_id: "tpl-abc".to_string(),

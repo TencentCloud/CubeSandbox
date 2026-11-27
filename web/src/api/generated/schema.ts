@@ -630,6 +630,12 @@ export interface components {
              *     Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
              */
             backend?: string | null;
+            /**
+             * @description Cgroup hierarchy for the template and every sandbox created from it:
+             *     `""`/omitted (default, unified v2) or `"legacy"` (cgroup v1, required
+             *     by Android-based guests). Validated at the API edge.
+             */
+            cgroupMode?: string | null;
             /** @description Override container ENTRYPOINT. */
             command?: string[] | null;
             /**
