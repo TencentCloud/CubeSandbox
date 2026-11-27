@@ -53,6 +53,7 @@ PREFIX_RM="${ROOT}/test/tools/s3_prefix_rm.py"
 
 # Test-specific, and exported so the three scripts pick them up.
 export RCOW_LVS_NAME=ctlvs
+export RCOW_NODE_ID=ctl-node-id
 export RCOW_WAL_IMG=/data/s3lvol_ctl_wal.img
 export RCOW_WAL_BDEV=ctl_wal0
 export RCOW_CAPACITY_GB=1
@@ -587,6 +588,10 @@ grep -q "no target is running: recovery is a start" /tmp/rcow_ctl_recover.log &&
 grep -q "which is not running. Retrying with force=true" /tmp/rcow_ctl_recover.log &&
 	pass "the stale owner marker was confirmed dead before being overwritten" ||
 	fail "the owner marker was not handled the way it should be"
+
+grep -q "already held by node=${RCOW_NODE_ID} pid=${CRASH_PID}" "${RCOW_LOG}" &&
+	pass "the owner marker and recovery both used RCOW_NODE_ID" ||
+	fail "the stale owner marker did not contain RCOW_NODE_ID"
 
 grep -q "'ctl-ghost' was active .* no longer exists" /tmp/rcow_ctl_recover.log &&
 	pass "the entry for a volume that no longer exists was refused, loudly" ||

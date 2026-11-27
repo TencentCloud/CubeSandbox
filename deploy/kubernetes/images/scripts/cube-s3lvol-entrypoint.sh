@@ -6,10 +6,12 @@
 # rcow_start.sh detaches the target (setsid) and returns, so this script stays
 # in the foreground, polls the pidfile, and on SIGTERM runs rcow_stop.sh.
 #
-# The Pod hostname changes on recreate, so pin the UTS hostname to
-# spec.nodeName before sourcing rcow_common.sh (owner recovery matches on
-# hostname), and derive the lvstore name from the full node name rather than
-# hostname -s, which truncates an address to its first octet.
+# The Pod hostname changes on recreate, so use spec.nodeName explicitly for the
+# owner marker and lvstore-name derivation. Do not mutate the Pod's UTS hostname:
+# it is application-visible state and is not needed once RCOW_NODE_ID carries the
+# stable identity. Scripts run later with `kubectl exec` do not inherit these
+# exports; rcow_common.sh derives the same values from NODE_NAME for them
+# (RCOW_IDENTITY_FROM_NODE_NAME, set in this image's ENV).
 set -euo pipefail
 
 S3LVOL_ROOT="${S3LVOL_ROOT:-/opt/s3lvol}"
@@ -92,17 +94,49 @@ s3lvol_derived_lvs_name() {
   printf 'rcow-%s' "$(printf '%s' "${id}" | sha256sum | cut -c1-8)"
 }
 
+# Owner identity derived from NODE_NAME, in the form s3_owner.c gives a
+# hostname: the first 63 bytes, with anything outside [A-Za-z0-9._-] replaced
+# by '_'. spec.nodeName may be 64 bytes, one more than the marker field holds;
+# an explicit RCOW_NODE_ID is still rejected rather than rewritten. Same rule
+# as the NODE_NAME fallback in rcow_common.sh.
+s3lvol_derived_node_id() {
+  local id="${1:-}"
+  [[ -n "${id}" ]] || return 1
+  id="$(LC_ALL=C printf '%.63s' "${id}")"
+  printf '%s' "${id}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'
+}
+
 # An explicit RCOW_LVS_NAME (cubeS3lvol.lvsName) wins; otherwise derive
 # rcow-<hash of NODE_NAME> now, before rcow_common.sh resolves the name at
-# source time. RCOW_TGT_CPUMASK is exported only when set (rcow default:
-# last two allowed CPUs).
+# source time. The owner marker gets the same stable Kubernetes node identity,
+# canonicalised by s3lvol_derived_node_id. This is upgrade-compatible because
+# earlier entrypoints wrote NODE_NAME into the UTS hostname, so existing owner
+# markers already contain the same value -- except for a 63- or 64-byte node
+# name, which older targets recorded as `unknown` (see CubeS3lvol/README.md).
+# The lvstore name still hashes the full NODE_NAME.
+# RCOW_TGT_CPUMASK is exported only when set (rcow default: last two allowed
+# CPUs).
 s3lvol_export_optional_knobs() {
+  local node="${NODE_NAME:-}"
+  # Needed only for a value that has to be derived; same rule as the
+  # NODE_NAME fallback in rcow_common.sh.
+  if [[ -z "${node}" && ( -z "${RCOW_NODE_ID:-}" || -z "${RCOW_LVS_NAME:-}" ) ]]; then
+    fail "NODE_NAME is empty and an s3lvol identity must be derived; set RCOW_NODE_ID and RCOW_LVS_NAME explicitly"
+  fi
+  if [[ -n "${RCOW_NODE_ID:-}" ]]; then
+    export RCOW_NODE_ID
+    log "RCOW_NODE_ID=${RCOW_NODE_ID} (explicit)"
+  else
+    RCOW_NODE_ID="$(s3lvol_derived_node_id "${node}")" \
+      || fail "could not derive RCOW_NODE_ID from NODE_NAME=${node}"
+    export RCOW_NODE_ID
+    log "RCOW_NODE_ID=${RCOW_NODE_ID} (from NODE_NAME=${node})"
+  fi
+
   if [[ -n "${RCOW_LVS_NAME:-}" ]]; then
     export RCOW_LVS_NAME
     log "RCOW_LVS_NAME=${RCOW_LVS_NAME} (explicit)"
   else
-    local node="${NODE_NAME:-}"
-    [[ -n "${node}" ]] || fail "NODE_NAME is required to derive RCOW_LVS_NAME"
     RCOW_LVS_NAME="$(s3lvol_derived_lvs_name "${node}")" \
       || fail "could not derive RCOW_LVS_NAME from NODE_NAME=${node}"
     export RCOW_LVS_NAME
@@ -117,12 +151,6 @@ s3lvol_export_optional_knobs() {
 }
 
 s3lvol_prepare_identity() {
-  local node="${NODE_NAME:-}"
-  [[ -n "${node}" ]] || fail "NODE_NAME is required (spec.nodeName)"
-  if ! hostname "${node}"; then
-    fail "failed to set UTS hostname to ${node}; cube-s3lvol must run privileged"
-  fi
-  log "hostname pinned to ${node}"
   s3lvol_export_optional_knobs
 }
 

@@ -79,6 +79,52 @@ sanitise_ident(const char *in, char *out, size_t out_len)
 	out[i] = '\0';
 }
 
+/*
+ * RCOW_NODE_ID is an operator-supplied stable node identity.  It is deliberately
+ * optional: an unset or empty value falls back to gethostname(), so upgrading an
+ * existing deployment does not change who recovery considers to be this node.
+ *
+ * One exception, on purpose: a 63- or 64-byte hostname.  The old code read it
+ * into a 63-byte buffer, which glibc refuses with ENAMETOOLONG, and recorded
+ * "unknown"; this reads the whole name and keeps its first 63 bytes.  The
+ * recovery script has always computed the truncated name, so such a node never
+ * recognised its own "unknown" marker -- after a crash it needed a manual force
+ * before and needs one, once, now.  From then on the two sides agree.
+ *
+ * Explicit values are rejected rather than sanitised.  The recovery scripts
+ * compare this value byte-for-byte with the marker; silently changing it here
+ * would make a crashed lvstore impossible to recover automatically.
+ */
+static int
+owner_node_id(char out[S3_OWNER_NODE_ID_MAX])
+{
+	const char *configured = getenv("RCOW_NODE_ID");
+	char host[HOST_NAME_MAX + 1] = {0};
+	size_t len;
+
+	if (!configured || configured[0] == '\0') {
+		if (gethostname(host, sizeof(host)) != 0) {
+			snprintf(host, sizeof(host), "unknown");
+		}
+		sanitise_ident(host, out, S3_OWNER_NODE_ID_MAX);
+		return 0;
+	}
+
+	len = strlen(configured);
+	if (len >= S3_OWNER_NODE_ID_MAX) {
+		return -ENAMETOOLONG;
+	}
+	for (size_t i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)configured[i];
+
+		if (!isalnum(c) && c != '.' && c != '-' && c != '_') {
+			return -EINVAL;
+		}
+	}
+	memcpy(out, configured, len + 1);
+	return 0;
+}
+
 static int
 owner_encode(const struct s3_owner_info *info, char **out_doc)
 {
@@ -523,7 +569,6 @@ s3_owner_acquire(struct s3_client *client, const char *lvs_name,
 		 s3_owner_acquire_cb cb_fn, void *cb_arg)
 {
 	struct owner_ctx *ctx;
-	char host[S3_OWNER_NODE_ID_MAX] = {0};
 	int rc;
 
 	assert(cb_fn != NULL);
@@ -550,10 +595,14 @@ s3_owner_acquire(struct s3_client *client, const char *lvs_name,
 		return;
 	}
 
-	if (gethostname(host, sizeof(host) - 1) != 0) {
-		snprintf(host, sizeof(host), "unknown");
+	rc = owner_node_id(ctx->self.node_id);
+	if (rc != 0) {
+		SPDK_ERRLOG("Invalid RCOW_NODE_ID: use 1-%d characters from "
+			    "[A-Za-z0-9._-]\n", S3_OWNER_NODE_ID_MAX - 1);
+		free(ctx);
+		cb_fn(cb_arg, NULL, rc);
+		return;
 	}
-	sanitise_ident(host, ctx->self.node_id, sizeof(ctx->self.node_id));
 	ctx->self.pid = (int32_t)getpid();
 	ctx->self.attach_ts = (uint64_t)time(NULL);
 	if (lvs_uuid) {

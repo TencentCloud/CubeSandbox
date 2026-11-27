@@ -695,6 +695,83 @@ test_legacy_directory_without_VERSION_uses_legacy_name() {
     fail "legacy migration did not preserve the previous install"
 }
 
+test_owner_identity_cannot_change_during_a_live_upgrade() {
+  s3lvol_node_id_upgrade_allowed 1 "" "" ||
+    fail "an unchanged legacy hostname identity must remain upgradeable"
+  s3lvol_node_id_upgrade_allowed 1 "inventory-7" "inventory-7" ||
+    fail "an unchanged explicit identity must remain upgradeable"
+  if s3lvol_node_id_upgrade_allowed 1 "" "inventory-7"; then
+    fail "an enabled legacy installation must not switch identity in-place"
+  fi
+  if s3lvol_node_id_upgrade_allowed 1 "inventory-7" "inventory-8"; then
+    fail "an enabled installation must not change its explicit identity in-place"
+  fi
+  s3lvol_node_id_upgrade_allowed 0 "" "inventory-7" ||
+    fail "a previously disabled installation may choose an identity when enabled"
+  assert_contains "${INSTALL_SH}" "s3lvol_node_id_upgrade_allowed"
+
+  # The merge keeps the old RCOW_NODE_ID, so the guard only sees this run's
+  # value if the intent is snapshotted before any file is sourced and replayed
+  # after the merge, before the guard (test_toggle_inputs.sh covers the
+  # behaviour; this pins the wiring).
+  local snap capture load_merged apply guard
+  snap="$(grep -n '^snapshot_one_click_node_id_intent ' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  capture="$(grep -n '^ *capture_one_click_node_id_dotenv_value$' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  load_merged="$(grep -n 'load_env_file "${MERGED_ENV}"' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  apply="$(grep -n '^ *apply_one_click_node_id_intent$' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  guard="$(grep -n 'if ! s3lvol_node_id_upgrade_allowed' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  [[ -n "${snap}" && -n "${capture}" && -n "${load_merged}" && -n "${apply}" && -n "${guard}" ]] ||
+    fail "install.sh must snapshot, capture and apply RCOW_NODE_ID intent around the guard"
+  (( snap < capture && capture < load_merged && load_merged < apply && apply < guard )) ||
+    fail "RCOW_NODE_ID intent must be replayed after the merge and before the guard (lines ${snap} ${capture} ${load_merged} ${apply} ${guard})"
+
+  # The hot swap is not gated on INSTALL_MODE, so neither may the guard be:
+  # `--mode=install` over an enabled install replaces a running target too.
+  # The old identity is read whenever an install exists, the replay and the
+  # guard sit at top level (not inside the upgrade block), and the guard runs
+  # before the swap.
+  local read_old swap
+  grep -q '^if ! s3lvol_node_id_upgrade_allowed' "${INSTALL_SH}" ||
+    fail "the RCOW_NODE_ID guard must run in every install mode, not only in the upgrade block"
+  grep -q '^apply_one_click_node_id_intent$' "${INSTALL_SH}" ||
+    fail "the RCOW_NODE_ID replay must run in every install mode"
+  read_old="$(grep -n '^  OLD_RCOW_NODE_ID=' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  [[ -n "${read_old}" ]] &&
+    sed -n "$((read_old - 1))p" "${INSTALL_SH}" | grep -q '^if detect_existing_install ' ||
+    fail "the installed RCOW_NODE_ID must be read whenever an install exists, not only on upgrade"
+  swap="$(grep -n '^if \[\[ -d "${PKG_ROOT}/CubeS3lvol" \]\]; then' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+  [[ -n "${swap}" ]] && (( guard < swap )) ||
+    fail "the RCOW_NODE_ID guard must run before the CubeS3lvol hot swap (guard ${guard}, swap ${swap:-missing})"
+}
+
+test_old_identity_is_read_like_load_env_file() {
+  local env="${TMP_DIR}/old-identity.env" got
+  # An installed env may reference a variable this run does not define (the
+  # commented examples in env.example do). install.sh runs under set -u, and
+  # load_env_file tolerates this, so reading the old identity must as well.
+  cat >"${env}" <<'EOF'
+ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR="${ONE_CLICK_UNDEFINED_FOR_TEST}:8089"
+ONE_CLICK_ENABLE_S3LVOL=1
+RCOW_NODE_ID=inventory-7
+EOF
+  unset ONE_CLICK_UNDEFINED_FOR_TEST
+  got="$(set -u; RCOW_NODE_ID=from-caller env_file_value "${env}" RCOW_NODE_ID)" ||
+    fail "reading the old env failed on an unset variable reference under set -u"
+  [[ "${got}" == "inventory-7" ]] || fail "old RCOW_NODE_ID read as '${got}'"
+  got="$(set -u; env_file_value "${env}" ONE_CLICK_ENABLE_S3LVOL 0)"
+  [[ "${got}" == "1" ]] || fail "old ONE_CLICK_ENABLE_S3LVOL read as '${got}'"
+
+  printf 'ONE_CLICK_ENABLE_S3LVOL=1\n' >"${env}"
+  got="$(set -u; RCOW_NODE_ID=from-caller env_file_value "${env}" RCOW_NODE_ID)"
+  [[ -z "${got}" ]] ||
+    fail "an absent old RCOW_NODE_ID must not inherit this run's value (got '${got}')"
+  got="$(set -u; env_file_value "${env}" ONE_CLICK_MISSING_KEY 0)"
+  [[ "${got}" == "0" ]] || fail "an absent key must yield its default"
+
+  [[ "$(grep -c 'env_file_value "${INSTALL_PREFIX}/.one-click.env"' "${INSTALL_SH}")" -eq 2 ]] ||
+    fail "install.sh must read the old identity through env_file_value"
+}
+
 test_the_prefix_travels_with_the_invocation
 test_without_the_prefix_it_refuses
 test_install_sh_hands_over_the_prefix
@@ -722,5 +799,7 @@ test_owner_release_is_guarded_by_acquired_identity
 test_s3lvol_version_missing_does_not_silent_abort
 test_bundle_script_dies_without_s3lvol_VERSION
 test_legacy_directory_without_VERSION_uses_legacy_name
+test_owner_identity_cannot_change_during_a_live_upgrade
+test_old_identity_is_read_like_load_env_file
 
 echo "CubeS3lvol hot upgrade tests OK"
