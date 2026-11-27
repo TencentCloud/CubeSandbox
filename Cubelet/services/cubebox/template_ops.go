@@ -265,10 +265,12 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		return rsp, nil
 	}
 
-	cleanupArtifacts := func() {
-		cleanupPreparedLayout()
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, payload.memory, rootfsObject)
+	cleanupArtifactsOn := func(c context.Context) {
+		layout.releaseMetadata(c)
+		layout.discardTmpDir()
+		cleanupCowSnapshotObjectsOn(c, stepLog, backend, payload.memory, rootfsObject)
 	}
+	cleanupArtifacts := func() { cleanupArtifactsOn(ctx) }
 
 	if layoutErr != nil {
 		cleanupArtifacts()
@@ -514,7 +516,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// guest after every snapshot; legacy templates without the annotation keep
 	// the previous best-effort behavior of returning an empty version.
 	rsp.EnvdVersion = envdVersionFromCubeBox(cb)
-	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+	catalogErr := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:        rsp.TemplateID,
 		InstanceType:      "cubebox",
 		SpecDir:           specDir,
@@ -528,18 +530,19 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		ComponentVersions: cloneStringMap(cb.ComponentVersions),
 		Kind:              storage.CatalogKindRuntimeSnapshot,
 		Backend:           backend,
-	}); err != nil {
+	})
+	if catalogErr != nil {
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and rollback
 		// path keeps the legacy fallback. Log loudly so operators notice
 		// drift between master and cubelet local view.
-		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
+		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, catalogErr)
 		markPublishIncomplete()
 	}
 	// Post-publish packaging: no-op on XFS/JFS, seal on S3.
 	if err := finalizePublishedPackage(
-		publishPhaseCtx, stepLog, backend, rsp.TemplateID, snapshotPath,
-		cleanupArtifacts, markPublishIncomplete,
+		publishPhaseCtx, stepLog, backend, rsp.TemplateID, snapshotPath, catalogErr == nil,
+		cleanupArtifactsOn, markPublishIncomplete,
 	); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()

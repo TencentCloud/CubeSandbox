@@ -656,9 +656,13 @@ func MaterializeRollbackSnapshotMetadata(ctx context.Context, backend, snapshotI
 	if copyErr == nil {
 		validateErr = validateRollbackSnapshotDir(dst)
 	}
-	if err := errors.Join(copyErr, validateErr, relErr, rmErr); err != nil {
+	if err := errors.Join(copyErr, validateErr); err != nil {
 		_ = os.RemoveAll(dst) // NOCC:Path Traversal()
-		return "", err
+		return "", errors.Join(err, relErr, rmErr)
+	}
+	// A clone-release failure is not fatal; the deferred release retries it.
+	if relErr != nil || rmErr != nil {
+		CubeLog.Warnf("rollback metadata %s materialized; releasing derived clone: %v", dst, errors.Join(relErr, rmErr))
 	}
 	return dst, nil
 }
@@ -733,6 +737,30 @@ func rollbackMetadataMountPath(sandboxID string) string {
 
 func rollbackMetadataTempMountPath(dst string) string {
 	return dst + ".mnt"
+}
+
+// UnmountPackageMetadata unmounts a package's metadata disk without deleting it.
+func UnmountPackageMetadata(backend, snapshotID, metaDir string) error {
+	if !isS3CatalogBackend(backend) {
+		return nil
+	}
+	id := strings.TrimSpace(snapshotID)
+	if id == "" {
+		return nil
+	}
+	if err := pathutil.ValidateSafeID(id); err != nil {
+		return fmt.Errorf("invalid s3 metadata snapshot_id: %w", err)
+	}
+	s3MetadataMu.Lock()
+	defer s3MetadataMu.Unlock()
+	var unmountErr error
+	if dir := strings.TrimSpace(metaDir); dir != "" {
+		unmountErr = errors.Join(unmountErr, unmountS3MetadataPathIfMounted(dir))
+	}
+	if mountPath := s3MetadataMounts[id]; mountPath != "" {
+		unmountErr = errors.Join(unmountErr, unmountS3MetadataPathIfMounted(mountPath))
+	}
+	return unmountErr
 }
 
 // ReleaseS3MetadataVolume unmounts and deletes the derived metadata volume

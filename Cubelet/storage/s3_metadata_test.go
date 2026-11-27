@@ -616,6 +616,77 @@ func newRollbackMaterializeFixture(
 	return engine, packageSnap
 }
 
+func TestUnmountPackageMetadata(t *testing.T) {
+	t.Run("non-s3 is a no-op", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		for _, backend := range []string{cow.BackendXFS, cow.BackendJFS} {
+			require.NoError(t, UnmountPackageMetadata(backend, "tpl-x", "/nonexistent/metadata"))
+		}
+	})
+
+	t.Run("empty id is a no-op and unsafe id is rejected", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		require.NoError(t, UnmountPackageMetadata(cow.BackendS3, "", "/nonexistent/metadata"))
+		require.ErrorContains(t, UnmountPackageMetadata(cow.BackendS3, "../escape", "/nonexistent/metadata"), "invalid")
+	})
+
+	t.Run("unmounts the package metadata dir", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		id := "tpl-umount"
+		metaDir := filepath.Join(t.TempDir(), SnapshotMetadataDir)
+		require.NoError(t, os.MkdirAll(metaDir, 0o755))
+		require.NoError(t, mountS3MetadataDevice("/dev/mapper/meta-umount", metaDir))
+		require.True(t, s3MetadataIsMounted(metaDir))
+
+		require.NoError(t, UnmountPackageMetadata(cow.BackendS3, id, metaDir))
+		require.False(t, s3MetadataIsMounted(metaDir), "stale metadata mount must be gone")
+	})
+
+	t.Run("unmounts a recorded mount path", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		id := "tpl-umount-alias"
+		alias := filepath.Join(t.TempDir(), "alias")
+		require.NoError(t, os.MkdirAll(alias, 0o755))
+		require.NoError(t, mountS3MetadataDevice("/dev/mapper/meta-alias", alias))
+		s3MetadataMu.Lock()
+		s3MetadataMounts[id] = alias
+		s3MetadataMu.Unlock()
+
+		require.NoError(t, UnmountPackageMetadata(cow.BackendS3, id, ""))
+		require.False(t, s3MetadataIsMounted(alias), "recorded mount must be released")
+	})
+
+	t.Run("propagates unmount failure", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		id := "tpl-umount-busy"
+		metaDir := filepath.Join(t.TempDir(), SnapshotMetadataDir)
+		require.NoError(t, os.MkdirAll(metaDir, 0o755))
+		require.NoError(t, mountS3MetadataDevice("/dev/mapper/meta-busy", metaDir))
+		unmountS3MetadataPath = func(string) error { return errors.New("umount busy") }
+
+		require.ErrorContains(t, UnmountPackageMetadata(cow.BackendS3, id, metaDir), "umount busy")
+	})
+}
+
+func TestMaterializeRollbackMetadataReleaseFailureKeepsCopy(t *testing.T) {
+	snapshotID := "snap-relfail"
+	sandboxID := "sb-relfail"
+	newRollbackMaterializeFixture(t, snapshotID, sandboxID, func(t *testing.T, mountPath string) {
+		snapDir := filepath.Join(mountPath, "snapshot")
+		require.NoError(t, os.MkdirAll(snapDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(snapDir, "config.json"), []byte(`{"vm":"cfg"}`), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(snapDir, "state.json"), []byte(`{"vm":"state"}`), 0o644))
+	})
+	unmountS3MetadataPath = func(string) error { return errors.New("umount busy") }
+
+	// A clone-release failure must not fail the rollback.
+	dir, err := MaterializeRollbackSnapshotMetadata(context.Background(), cow.BackendS3, snapshotID, sandboxID)
+	require.NoError(t, err)
+	require.NotEmpty(t, dir)
+	require.FileExists(t, filepath.Join(dir, "snapshot", "config.json"))
+	require.FileExists(t, filepath.Join(dir, "snapshot", "state.json"))
+}
+
 func TestMaterializeRollbackMetadataReturnsPlainDir(t *testing.T) {
 	snapshotID := "snap-4c0c3e1f"
 	sandboxID := "b1c1d1e1f1"

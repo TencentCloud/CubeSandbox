@@ -771,7 +771,11 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to finalize pause package snapshots for %s: %v", snapID, err))
 	} else if finalizeRes.CleanupErr != nil {
-		stepLog.Warnf("pause package %s sealed with deferred post-seal cleanup: %v", snapID, finalizeRes.CleanupErr)
+		if finalizeRes.Sealed {
+			stepLog.Warnf("pause package %s sealed with deferred post-seal cleanup: %v", snapID, finalizeRes.CleanupErr)
+		} else {
+			stepLog.Warnf("pause package %s left unsealed, keeping it for cleanup: %v", snapID, finalizeRes.CleanupErr)
+		}
 	}
 
 	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the

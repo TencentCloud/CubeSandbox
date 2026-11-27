@@ -309,12 +309,12 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 	snapshotPath := layout.Home
 	rsp.SnapshotPath = snapshotPath
-	prevCleanupSnapshotObjects := cleanupSnapshotObjects
-	cleanupSnapshotObjects = func() {
-		layout.releaseMetadata(ctx)
-		prevCleanupSnapshotObjects()
+	cleanupSnapshotObjectsOn := func(c context.Context) {
+		layout.releaseMetadata(c)
+		cleanupCowSnapshotObjectsOn(c, stepLog, backend, memoryObject, rootfsObject)
 		layout.discardTmpDir()
 	}
+	cleanupSnapshotObjects = func() { cleanupSnapshotObjectsOn(ctx) }
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 	stepLog.Infof("Step 3: Creating snapshot at path: %s", layout.Home)
 
@@ -559,7 +559,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// CleanupTemplate calls can resolve physical refs locally. The build
 	// rootfs name is deterministic on cubelet side; we record it so cleanup
 	// works even if the live volume has already been removed by other paths.
-	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+	catalogErr := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:        templateID,
 		InstanceType:      "cubebox",
 		SpecDir:           specDir,
@@ -574,21 +574,22 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
 		ComponentVersions: frozenVersions,
 		Kind:              storage.CatalogKindTemplate,
-	}); err != nil {
+	})
+	if catalogErr != nil {
 		if backend == cow.BackendJFS {
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", err)
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", catalogErr)
 			return rsp, nil
 		}
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and the
 		// deterministic-name cleanup fallback keeps working. Log loudly so
 		// operators notice drift between master and cubelet local view.
-		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
+		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, catalogErr)
 	}
 	if err := finalizePublishedPackage(
-		ctx, stepLog, backend, templateID, snapshotPath,
-		cleanupSnapshotObjects, nil,
+		ctx, stepLog, backend, templateID, snapshotPath, catalogErr == nil,
+		cleanupSnapshotObjectsOn, nil,
 	); err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = err.Error()

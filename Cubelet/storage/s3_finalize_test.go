@@ -193,6 +193,26 @@ func TestFinalizePostSealCleanupErrorsDoNotFailSeal(t *testing.T) {
 	require.ErrorContains(t, res.CleanupErr, "kv write failed")
 	require.Contains(t, f.engine.createSnapshots, [2]string{f.memWork, f.memSnap})
 	require.Contains(t, f.engine.createSnapshots, [2]string{f.metaWork, f.metaSnap})
+	require.True(t, res.Sealed, "post-seal cleanup issues must not unset Sealed")
+}
+
+func TestFinalizeCatalogPersistFailureKeepsPackage(t *testing.T) {
+	f := newS3FinalizeFixture(t, "snap-catalog-fail", s3FinalizeOpts{withMemory: true})
+
+	// A directory at catalog.json makes the rewrite's rename fail.
+	catalogPath := filepath.Join(f.metaDir, snapshotCatalogFileName)
+	require.NoError(t, os.Remove(catalogPath))
+	require.NoError(t, os.Mkdir(catalogPath, 0o755))
+
+	res, err := FinalizeS3PackageSnapshots(context.Background(), cow.BackendS3, f.id)
+	require.NoError(t, err, "a catalog write failure must not fail finalize")
+	require.False(t, res.Sealed, "package must stay unsealed without a persisted catalog")
+	require.ErrorContains(t, res.CleanupErr, "persist s3 package catalog")
+	require.Empty(t, f.engine.createSnapshots, "nothing may be sealed without a persisted catalog")
+	require.NotContains(t, f.engine.deletedVolumes, f.metaWork, "work volume must survive an unsealed package")
+	require.NotContains(t, f.engine.deletedVolumes, f.memWork, "memory work volume must survive an unsealed package")
+	require.FileExists(t, filepath.Join(f.metaDir, "metadata.json"))
+	require.DirExists(t, filepath.Join(f.metaDir, "snapshot"))
 }
 
 func TestFinalizeValidatesContentsAndSupportsFsOnly(t *testing.T) {
@@ -265,6 +285,8 @@ func TestFinalizeIdempotentRetryAndFallback(t *testing.T) {
 		require.Empty(t, f.engine.createSnapshots)
 		require.NotContains(t, f.engine.deletedVolumes, f.memWork)
 		require.Contains(t, f.engine.deactivatedVolumes, f.memSnap)
+		// A retry must reclaim the leftover metadata work volume.
+		require.Contains(t, f.engine.deletedVolumes, f.metaWork)
 	})
 
 	t.Run("trims -snap when catalog rewrote memory_vol before seal", func(t *testing.T) {

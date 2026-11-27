@@ -197,6 +197,48 @@ func TestSnapshotWorkLayoutPublishPropagatesRemoveAllError(t *testing.T) {
 	}
 }
 
+func TestSnapshotWorkLayoutPublishUnmountsStaleMetadataFirst(t *testing.T) {
+	orig := unmountPackageMetadataFn
+	t.Cleanup(func() { unmountPackageMetadataFn = orig })
+
+	root := t.TempDir()
+	home := filepath.Join(root, "snap-mounted")
+	layout := snapshotWorkLayout{
+		Backend:    cow.BackendS3,
+		SnapshotID: "snap-mounted",
+		Home:       home,
+		TmpHome:    home + ".tmp",
+		MetaDir:    filepath.Join(home, storage.SnapshotMetadataDir),
+	}
+	if err := os.MkdirAll(layout.TmpHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBackend, gotID, gotMetaDir string
+	unmountPackageMetadataFn = func(backend, snapshotID, metaDir string) error {
+		gotBackend, gotID, gotMetaDir = backend, snapshotID, metaDir
+		return errors.New("umount busy")
+	}
+
+	err := layout.publish()
+	if err == nil || !strings.Contains(err.Error(), "unmount stale package metadata") {
+		t.Fatalf("expected stale metadata unmount error, got %v", err)
+	}
+	if gotBackend != cow.BackendS3 || gotID != "snap-mounted" || gotMetaDir != layout.MetaDir {
+		t.Fatalf("unexpected unmount args backend=%q id=%q metaDir=%q", gotBackend, gotID, gotMetaDir)
+	}
+	// A failed unmount must not touch the home or the staged dir.
+	if _, statErr := os.Stat(home); statErr != nil {
+		t.Fatalf("existing home %q must survive a failed unmount: %v", home, statErr)
+	}
+	if _, statErr := os.Stat(layout.TmpHome); statErr != nil {
+		t.Fatalf("staged dir %q must survive a failed unmount: %v", layout.TmpHome, statErr)
+	}
+}
+
 func TestFinalizePublishedPackageFatalVsDeferredCleanup(t *testing.T) {
 	t.Run("fatal seal error discards package and catalog", func(t *testing.T) {
 		origFinalize, origDiscard := finalizePublishedPackageFn, discardSealedPackageFn
@@ -224,19 +266,25 @@ func TestFinalizePublishedPackageFatalVsDeferredCleanup(t *testing.T) {
 			return storage.PackageFinalizeResult{}, errors.New("mkfs failed")
 		}
 		discarded := false
-		discardSealedPackageFn = func(_ context.Context, backend, snapshotID string) error {
+		var discardCtxErr error
+		discardSealedPackageFn = func(ctx context.Context, backend, snapshotID string) error {
 			if backend != cow.BackendS3 || snapshotID != id {
 				t.Fatalf("unexpected discard args backend=%q id=%q", backend, snapshotID)
 			}
 			discarded = true
-			return nil
+			discardCtxErr = ctx.Err()
+			return errors.New("discard busy")
 		}
 		fatalCleanupCalled := false
+		var fatalCleanupCtxErr error
 		deferredCalled := false
 
+		requestCtx, requestCancel := context.WithCancel(context.Background())
+		requestCancel()
+
 		err := finalizePublishedPackage(
-			context.Background(), nil, cow.BackendS3, id, home,
-			func() { fatalCleanupCalled = true },
+			requestCtx, nil, cow.BackendS3, id, home, true,
+			func(c context.Context) { fatalCleanupCalled = true; fatalCleanupCtxErr = c.Err() },
 			func() { deferredCalled = true },
 		)
 		if err == nil || !strings.Contains(err.Error(), "mkfs failed") {
@@ -244,6 +292,9 @@ func TestFinalizePublishedPackageFatalVsDeferredCleanup(t *testing.T) {
 		}
 		if !fatalCleanupCalled || !discarded {
 			t.Fatalf("expected fatal cleanup and sealed package discard, got cleanup=%v discarded=%v", fatalCleanupCalled, discarded)
+		}
+		if fatalCleanupCtxErr != nil || discardCtxErr != nil {
+			t.Fatalf("cleanup must not inherit the canceled request context: fatal=%v discard=%v", fatalCleanupCtxErr, discardCtxErr)
 		}
 		if deferredCalled {
 			t.Fatal("onCleanupDeferred must not run on fatal seal error")
@@ -253,6 +304,39 @@ func TestFinalizePublishedPackageFatalVsDeferredCleanup(t *testing.T) {
 		}
 		if _, catErr := storage.GetLocalSnapshotFor(context.Background(), cow.BackendS3, id); !errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
 			t.Fatalf("catalog should be deleted on fatal seal error, got err=%v", catErr)
+		}
+	})
+
+	t.Run("unpersisted catalog leaves the package unsealed", func(t *testing.T) {
+		origFinalize, origDiscard := finalizePublishedPackageFn, discardSealedPackageFn
+		t.Cleanup(func() {
+			finalizePublishedPackageFn, discardSealedPackageFn = origFinalize, origDiscard
+		})
+
+		id := "tpl-finalize-no-catalog"
+		home := filepath.Join(t.TempDir(), id)
+		if err := os.MkdirAll(filepath.Join(home, storage.SnapshotMetadataDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		finalizePublishedPackageFn = func(context.Context, string, string) (storage.PackageFinalizeResult, error) {
+			t.Fatal("sealing must not run without a persisted catalog")
+			return storage.PackageFinalizeResult{}, nil
+		}
+		discardSealedPackageFn = func(context.Context, string, string) error {
+			t.Fatal("nothing was sealed, so nothing may be discarded")
+			return nil
+		}
+
+		err := finalizePublishedPackage(
+			context.Background(), nil, cow.BackendS3, id, home, false,
+			func(context.Context) { t.Fatal("fatal cleanup must not run") },
+			func() { t.Fatal("deferred cleanup must not run") },
+		)
+		if err != nil {
+			t.Fatalf("an unpersisted catalog must not fail the request, got %v", err)
+		}
+		if _, statErr := os.Stat(home); statErr != nil {
+			t.Fatalf("package home %q must be kept for cleanup: %v", home, statErr)
 		}
 	})
 
@@ -279,7 +363,7 @@ func TestFinalizePublishedPackageFatalVsDeferredCleanup(t *testing.T) {
 		t.Cleanup(func() { storage.DeleteSnapshotCatalogFor(cow.BackendS3, id) })
 
 		finalizePublishedPackageFn = func(context.Context, string, string) (storage.PackageFinalizeResult, error) {
-			return storage.PackageFinalizeResult{CleanupErr: errors.New("resetDir EBUSY")}, nil
+			return storage.PackageFinalizeResult{Sealed: true, CleanupErr: errors.New("resetDir EBUSY")}, nil
 		}
 		discardSealedPackageFn = func(context.Context, string, string) error {
 			t.Fatal("deferred cleanup must not discard sealed package")
@@ -288,8 +372,8 @@ func TestFinalizePublishedPackageFatalVsDeferredCleanup(t *testing.T) {
 		deferredCalled := false
 
 		err := finalizePublishedPackage(
-			context.Background(), nil, cow.BackendS3, id, home,
-			func() { t.Fatal("deferred cleanup must not run fatal cleanup") },
+			context.Background(), nil, cow.BackendS3, id, home, true,
+			func(context.Context) { t.Fatal("deferred cleanup must not run fatal cleanup") },
 			func() { deferredCalled = true },
 		)
 		if err != nil {

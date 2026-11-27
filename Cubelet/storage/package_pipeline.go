@@ -6,9 +6,9 @@ package storage
 
 import "context"
 
-// PackageFinalizeResult reports non-fatal post-seal cleanup issues. A non-nil
-// CleanupErr means warn but keep the package.
+// PackageFinalizeResult reports the sealing outcome.
 type PackageFinalizeResult struct {
+	Sealed     bool
 	CleanupErr error
 }
 

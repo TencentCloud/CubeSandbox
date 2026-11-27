@@ -23,6 +23,8 @@ type S3FinalizeResult = PackageFinalizeResult
 // FinalizeS3PackageSnapshots seals an S3 package: encode metadata onto its
 // disk, seal memory/metadata work volumes, and clear the plain host metadata
 // dir. Rootfs is already a snapshot. Non-S3 is a no-op.
+//
+// An unpersisted catalog leaves the package unsealed; every other failure is fatal.
 func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string) (S3FinalizeResult, error) {
 	var res S3FinalizeResult
 	normalized, err := cow.NormalizeBackend(backend)
@@ -116,15 +118,17 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 	}
 	if changed {
 		if err := WriteSnapshotCatalogFor(cow.BackendS3, entry); err != nil {
-			return res, err
+			// Keep the package unsealed rather than packing a stale catalog.
+			res.CleanupErr = fmt.Errorf("persist s3 package catalog %s: %w", id, err)
+			return res, nil
 		}
 	}
 
 	// Encode MetaDir into the work volume without mounting it (skip if sealed).
 	packWorkVol := ""
 	if needPack {
-		if err := validateJSONObjectFile(filepath.Join(metaDir, snapshotCatalogFileName)); err != nil {
-			return res, fmt.Errorf("validate s3 package %s: %w", snapshotCatalogFileName, err)
+		if err := validateOptionalCatalogFile(metaDir); err != nil {
+			return res, err
 		}
 		packWorkVol = initialMetaRef
 		if strings.HasSuffix(packWorkVol, "-snap") {
@@ -182,6 +186,8 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 		}
 	}
 
+	res.Sealed = true
+
 	// Post-seal cleanup failures are non-fatal (res.CleanupErr).
 	var cleanupErr error
 	memorySnap := strings.TrimSpace(entry.MemoryVol)
@@ -199,12 +205,14 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 		}
 	}
 	metaSnap := strings.TrimSpace(entry.MetadataVol)
-	if packWorkVol != "" && packWorkVol != metaSnap && !IsS3MetadataBaseName(packWorkVol) && !strings.HasSuffix(packWorkVol, "-snap") {
-		if err := deactivateS3Object(ctx, s3store, packWorkVol, cowKindVolume); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deactivate metadata work %s: %w", packWorkVol, err))
+	// Reclaim the work volume even when packing is skipped.
+	metaWorkVol := S3MetadataVolumeName(id)
+	if metaWorkVol != metaSnap {
+		if err := deactivateS3Object(ctx, s3store, metaWorkVol, cowKindVolume); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deactivate metadata work %s: %w", metaWorkVol, err))
 		}
-		if err := s3store.DeleteByKind(ctx, packWorkVol, cowKindVolume); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete metadata work %s: %w", packWorkVol, err))
+		if err := s3store.DeleteByKind(ctx, metaWorkVol, cowKindVolume); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete metadata work %s: %w", metaWorkVol, err))
 		}
 	}
 	if metaSnap != "" && !IsS3MetadataBaseName(metaSnap) {
@@ -257,6 +265,15 @@ func validateS3PackageDirForPack(metaDir string, entry *SnapshotCatalogEntry) er
 		}
 	}
 	return nil
+}
+
+// validateOptionalCatalogFile allows a missing catalog.json but not a corrupt one.
+func validateOptionalCatalogFile(metaDir string) error {
+	err := validateJSONObjectFile(filepath.Join(metaDir, snapshotCatalogFileName))
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("validate s3 package %s: %w", snapshotCatalogFileName, err)
 }
 
 // resetDir clears dir's contents while preserving dir itself.

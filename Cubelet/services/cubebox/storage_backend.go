@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -21,7 +22,11 @@ import (
 var (
 	finalizePublishedPackageFn = storage.FinalizePublishedPackage
 	discardSealedPackageFn     = storage.DiscardSealedPackage
+	unmountPackageMetadataFn   = storage.UnmountPackageMetadata
 )
+
+// packageFinalizeCleanupTimeout bounds cleanup that must outlive the request.
+const packageFinalizeCleanupTimeout = 30 * time.Second
 
 // resolveRequestStorageBackend maps Master-supplied backend (xfs｜s3) onto a
 // live Store. Empty defaults to xfs.
@@ -114,8 +119,11 @@ func (l snapshotWorkLayout) discardTmpDir() {
 	_ = os.RemoveAll(l.TmpHome) // NOCC:Path Traversal()
 }
 
-// publish moves the staged package to its final home.
+// publish moves the staged package into place after unmounting stale metadata.
 func (l snapshotWorkLayout) publish() error {
+	if err := unmountPackageMetadataFn(l.Backend, l.SnapshotID, l.MetaDir); err != nil {
+		return fmt.Errorf("unmount stale package metadata %s: %w", l.SnapshotID, err)
+	}
 	if err := os.RemoveAll(l.Home); err != nil { // NOCC:Path Traversal()
 		return fmt.Errorf("remove existing snapshot home %s: %w", l.Home, err)
 	}
@@ -126,31 +134,49 @@ func (l snapshotWorkLayout) releaseMetadata(ctx context.Context) {
 	_ = storage.ReleasePackageMetadata(ctx, l.Backend, l.SnapshotID)
 }
 
-// finalizePublishedPackage seals a published package. Sealing failures discard
-// the package; post-seal cleanup errors only warn.
+// finalizePublishedPackage seals a published package; without a persisted
+// catalog the package is kept unsealed.
 func finalizePublishedPackage(
 	ctx context.Context,
 	stepLog *log.CubeWrapperLogEntry,
 	backend, snapshotID, snapshotPath string,
-	onFatalCleanup func(),
+	catalogPersisted bool,
+	onFatalCleanup func(context.Context),
 	onCleanupDeferred func(),
 ) error {
+	if !catalogPersisted && storage.IsS3Backend(backend) {
+		if stepLog != nil {
+			stepLog.Warnf("leaving package %s unsealed: snapshot catalog was not persisted", snapshotID)
+		}
+		return nil
+	}
 	res, err := finalizePublishedPackageFn(ctx, backend, snapshotID)
 	if err != nil {
 		if stepLog != nil {
 			stepLog.Errorf("failed to finalize package snapshots for %s: %v", snapshotID, err)
 		}
+		// Cleanup must survive a canceled request context.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), packageFinalizeCleanupTimeout)
+		defer cancel()
 		if onFatalCleanup != nil {
-			onFatalCleanup()
+			onFatalCleanup(cleanupCtx)
 		}
-		_ = discardSealedPackageFn(ctx, backend, snapshotID)
+		if discardErr := discardSealedPackageFn(cleanupCtx, backend, snapshotID); discardErr != nil {
+			if stepLog != nil {
+				stepLog.Warnf("discard sealed package %s after seal failure: %v", snapshotID, discardErr)
+			}
+		}
 		storage.DeleteSnapshotCatalogFor(backend, snapshotID)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return fmt.Errorf("failed to finalize package snapshots for %s: %w", snapshotID, err)
 	}
 	if res.CleanupErr != nil {
 		if stepLog != nil {
-			stepLog.Warnf("package %s sealed with deferred post-seal cleanup: %v", snapshotID, res.CleanupErr)
+			if res.Sealed {
+				stepLog.Warnf("package %s sealed with deferred post-seal cleanup: %v", snapshotID, res.CleanupErr)
+			} else {
+				stepLog.Warnf("package %s left unsealed, keeping it for cleanup: %v", snapshotID, res.CleanupErr)
+			}
 		}
 		if onCleanupDeferred != nil {
 			onCleanupDeferred()
