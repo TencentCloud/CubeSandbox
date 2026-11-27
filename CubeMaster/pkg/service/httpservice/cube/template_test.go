@@ -257,6 +257,7 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 				constants.CubeAnnotationAppSnapshotTemplateID: templateID,
 				constants.CubeAnnotationsNetWork:              `{"Qos":{"BandWidth":{"Size":1250000,"RefillTime":100}}}`,
 				constants.CubeAnnotationsBlkQos:               `{"bandwidth":{"size":67108864,"refill_time":1000}}`,
+				constants.CubeAnnotationWritableDiskReclaim:   "true",
 			},
 		}, nil
 	}
@@ -274,6 +275,8 @@ func TestGetTemplateIncludeRequest(t *testing.T) {
 		assert.Equal(t, "tpl-include", got.CreateRequest.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
 		assert.NotContains(t, got.CreateRequest.Annotations, constants.CubeAnnotationsNetWork)
 		assert.NotContains(t, got.CreateRequest.Annotations, constants.CubeAnnotationsBlkQos)
+		assert.Equal(t, "true", got.CreateRequest.Annotations[constants.CubeAnnotationWritableDiskReclaim],
+			"include_request must retain the template-owned reclaim policy for docs visibility")
 	}
 	assert.Equal(t, uint32(100), got.ConfiguredQos.Network.BandwidthMbps)
 	assert.Equal(t, uint32(5000), got.ConfiguredQos.Network.PacketsPerSecond)

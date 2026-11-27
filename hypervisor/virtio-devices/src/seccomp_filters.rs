@@ -63,6 +63,23 @@ fn create_virtio_console_ioctl_seccomp_rule() -> Vec<SeccompRule> {
     or![and![Cond::new(1, ArgLen::Dword, Eq, TIOCGWINSZ).unwrap()]]
 }
 
+// Linux _IO(0x12, 119): BLKDISCARD, the only ioctl the block discard path
+// issues. Kept narrow so unrelated block ioctls still trap.
+const BLKDISCARD: u64 = 0x1277;
+
+fn create_virtio_block_ioctl_seccomp_rule() -> Vec<SeccompRule> {
+    or![and![Cond::new(1, ArgLen::Dword, Eq, BLKDISCARD).unwrap()]]
+}
+
+// With library UB checks enabled (debug builds), std's OwnedFd destructor
+// probes the fd via fcntl(F_GETFD) before closing it. The discard worker drops
+// OwnedFd, so permit only that probe; every other fcntl command still traps.
+fn create_virtio_block_fcntl_seccomp_rule() -> Vec<SeccompRule> {
+    or![and![
+        Cond::new(1, ArgLen::Dword, Eq, libc::F_GETFD as u64).unwrap()
+    ]]
+}
+
 fn create_virtio_iommu_ioctl_seccomp_rule() -> Vec<SeccompRule> {
     or![
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_IOMMU_MAP_DMA).unwrap()],
@@ -84,10 +101,12 @@ fn virtio_balloon_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_fallocate, vec![]),
+        (libc::SYS_fcntl, create_virtio_block_fcntl_seccomp_rule()),
         (libc::SYS_fdatasync, vec![]),
         (libc::SYS_fsync, vec![]),
         (libc::SYS_ftruncate, vec![]),
         (libc::SYS_getrandom, vec![]),
+        (libc::SYS_ioctl, create_virtio_block_ioctl_seccomp_rule()),
         (libc::SYS_io_uring_enter, vec![]),
         (libc::SYS_lseek, vec![]),
         // before_pause() drains in-flight IO via libc::poll; glibc maps this
@@ -382,6 +401,8 @@ fn virtio_fs_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 
 pub fn create_virtio_device_ioctl_seccomp_rule() -> Vec<SeccompRule> {
     let mut common_rules = vec![];
+    let rules = create_virtio_block_ioctl_seccomp_rule();
+    common_rules.extend(rules);
     let rules = create_virtio_console_ioctl_seccomp_rule();
     common_rules.extend(rules);
     let rules = create_virtio_net_ctl_ioctl_seccomp_rule();
@@ -572,6 +593,164 @@ mod tests {
         assert!(
             libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
             "strict vsock filter rejected getsockopt(SOL_SOCKET, SO_PEERCRED): wait status {status:#x}"
+        );
+    }
+
+    // Linux _IO(0x12, 119): the BLKDISCARD request the block discard path
+    // issues. Deliberately spelled out here instead of importing production
+    // helpers so this test pins the on-wire request number.
+    #[cfg(target_os = "linux")]
+    const BLKDISCARD_REQUEST: libc::c_ulong = 0x1277;
+    // _IO(0x12, 120) repeats BLKIOMIN, an unrelated block ioctl the narrow
+    // discard confinement must not allow.
+    #[cfg(target_os = "linux")]
+    const UNRELATED_BLOCK_IOCTL: libc::c_ulong = 0x1278;
+
+    /// Fork a child, install the real strict VirtioBlock filter, then issue
+    /// `request` against an invalid fd. Returns the raw wait status. The child
+    /// exits via SYS_exit so no disallowed teardown syscall runs.
+    #[cfg(target_os = "linux")]
+    fn run_block_ioctl_under_strict_filter(request: libc::c_ulong) -> i32 {
+        let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioBlock).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            // An invalid fd must yield the ordinary EBADF error, not SIGSYS.
+            let mut range = [0u64, 4096u64];
+            let result = unsafe { libc::ioctl(-1, request, range.as_mut_ptr()) };
+            let exit_code = if result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+            {
+                0
+            } else {
+                2
+            };
+            unsafe { libc::syscall(libc::SYS_exit, exit_code) };
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        status
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_block_filter_allows_blkdiscard_without_sigsys() {
+        let status = run_block_ioctl_under_strict_filter(BLKDISCARD_REQUEST);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "strict block filter must allow exactly BLKDISCARD so an invalid fd returns EBADF \
+             instead of SIGSYS; wait status {status:#x}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_block_filter_still_traps_unrelated_ioctl() {
+        let status = run_block_ioctl_under_strict_filter(UNRELATED_BLOCK_IOCTL);
+        assert!(
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS,
+            "the block discard confinement must stay a narrow allowlist: an unrelated ioctl \
+             request must remain SIGSYS rather than a blanket ioctl allowance; \
+             wait status {status:#x}"
+        );
+    }
+
+    // Primitive syscall smoke, not an end-to-end worker run: it reproduces the
+    // individual syscalls the real discard worker issues — a notifier write, a
+    // condvar futex wait, and (debug builds) std's OwnedFd destructor F_GETFD
+    // probe before close. None may trip the strict block filter.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_block_filter_allows_discard_worker_syscalls() {
+        let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioBlock).unwrap();
+        // Created before the fork so no fd-creating syscall runs under the
+        // filter; only the worker's own syscalls are exercised.
+        let notifier = vmm_sys_util::eventfd::EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let temp = vmm_sys_util::tempfile::TempFile::new().unwrap();
+        let fd: std::os::fd::OwnedFd = temp.as_file().try_clone().unwrap().into();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            let value = 1u64;
+            let wrote = unsafe {
+                libc::write(
+                    notifier.as_raw_fd(),
+                    &value as *const u64 as *const libc::c_void,
+                    std::mem::size_of::<u64>(),
+                )
+            } == std::mem::size_of::<u64>() as isize;
+            // A mismatched expected value makes FUTEX_WAIT return EAGAIN
+            // immediately, proving the syscall is permitted without blocking.
+            // Every ABI argument is written explicitly: a variadic syscall that
+            // omits the timeout leaves its register indeterminate on older
+            // toolchains, which turns the wait into EFAULT instead of EAGAIN.
+            let futex_value: u32 = 1;
+            let futex = unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    &futex_value as *const u32,
+                    libc::FUTEX_WAIT,
+                    0u32,
+                    std::ptr::null::<libc::timespec>(),
+                    std::ptr::null_mut::<u32>(),
+                    0u32,
+                ) as i32
+            };
+            let futex_ok =
+                futex == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN);
+            // Exercise the same owned-fd destructor as the discard worker.
+            drop(fd);
+            let closed = unsafe { libc::close(notifier.as_raw_fd()) } == 0;
+            let exit_code = if wrote && futex_ok && closed { 0 } else { 2 };
+            unsafe { libc::syscall(libc::SYS_exit, exit_code) };
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "the strict block filter must allow the discard worker's notifier write, futex wait \
+             and OwnedFd destructor (F_GETFD debug check plus close); wait status {status:#x}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_block_filter_traps_unrelated_fcntl() {
+        let filter = get_seccomp_filter(&SeccompAction::Trap, Thread::VirtioBlock).unwrap();
+        // Valid fd created before the filter, so an F_DUPFD_CLOEXEC rejection
+        // is the filter's doing rather than EBADF.
+        let notifier = vmm_sys_util::eventfd::EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            let result = unsafe { libc::fcntl(notifier.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+            // Reaching here means the unrelated fcntl command was permitted.
+            unsafe { libc::syscall(libc::SYS_exit, if result >= 0 { 2 } else { 0 }) };
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS,
+            "the block filter must allow only fcntl(F_GETFD) for the OwnedFd debug check; \
+             F_DUPFD_CLOEXEC on a valid fd must remain SIGSYS; wait status {status:#x}"
         );
     }
 }

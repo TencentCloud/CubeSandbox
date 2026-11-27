@@ -152,6 +152,9 @@ pub enum DeviceManagerError {
     /// Cannot create virtio-blk device
     CreateVirtioBlock(io::Error),
 
+    /// Discard was requested but this disk configuration or backend cannot support it
+    DiscardNotSupported(String),
+
     /// Cannot create virtio-net device
     CreateVirtioNet(virtio_devices::net::Error),
 
@@ -2232,6 +2235,19 @@ impl DeviceManager {
 
         info!("Creating virtio-block device: {:?}", disk_cfg);
 
+        if disk_cfg.discard {
+            if disk_cfg.readonly {
+                return Err(DeviceManagerError::DiscardNotSupported(
+                    "discard is not supported on a read-only disk".to_owned(),
+                ));
+            }
+            if disk_cfg.vhost_user {
+                return Err(DeviceManagerError::DiscardNotSupported(
+                    "discard is not supported on a vhost-user disk".to_owned(),
+                ));
+            }
+        }
+
         let (virtio_device, migratable_device) = if disk_cfg.vhost_user {
             let socket = disk_cfg.vhost_socket.as_ref().unwrap().clone();
             let vu_cfg = VhostUserConfig {
@@ -2282,6 +2298,12 @@ impl DeviceManager {
             let image_type =
                 detect_image_type(&mut file).map_err(DeviceManagerError::DetectImageType)?;
 
+            if disk_cfg.discard && !matches!(image_type, ImageType::Raw) {
+                return Err(DeviceManagerError::DiscardNotSupported(
+                    "discard requires a raw disk image".to_owned(),
+                ));
+            }
+
             let image = match image_type {
                 ImageType::FixedVhd => {
                     // Use asynchronous backend relying on io_uring if the
@@ -2305,10 +2327,12 @@ impl DeviceManager {
                     // syscalls are supported.
                     if !disk_cfg.disable_io_uring && self.io_uring_is_supported() {
                         info!("Using asynchronous RAW disk file (io_uring)");
-                        Box::new(RawFileDisk::new(file)) as Box<dyn DiskFile>
+                        Box::new(RawFileDisk::new(file).with_discard(disk_cfg.discard))
+                            as Box<dyn DiskFile>
                     } else {
                         info!("Using synchronous RAW disk file");
-                        Box::new(RawFileDiskSync::new(file)) as Box<dyn DiskFile>
+                        Box::new(RawFileDiskSync::new(file).with_discard(disk_cfg.discard))
+                            as Box<dyn DiskFile>
                     }
                 }
                 ImageType::Qcow2 => {
@@ -2326,6 +2350,13 @@ impl DeviceManager {
                     ) as Box<dyn DiskFile>
                 }
             };
+
+            if disk_cfg.discard && !image.supports_discard() {
+                return Err(DeviceManagerError::DiscardNotSupported(
+                    "discard requires a regular file on XFS or JuiceFS, or a block device advertising queue/discard_max_bytes, with a supported raw backend"
+                        .to_owned(),
+                ));
+            }
 
             let virtio_block = Arc::new(Mutex::new(
                 virtio_devices::Block::new(

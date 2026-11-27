@@ -266,6 +266,7 @@ export default withMermaid(defineConfig({
               text: 'Storage',
               items: [
                 { text: 'Using Volumes', link: '/guide/volume' },
+                { text: 'Writable Disk Reclaim', link: '/guide/writable-disk-reclaim' },
                 { text: 'Volume Plugin Development', link: '/guide/volume-plugin' }
               ]
             },
@@ -515,6 +516,7 @@ export default withMermaid(defineConfig({
               text: '存储',
               items: [
                 { text: 'Volume 使用', link: '/zh/guide/volume' },
+                { text: '可写磁盘回收', link: '/zh/guide/writable-disk-reclaim' },
                 { text: 'Volume 插件开发', link: '/zh/guide/volume-plugin' }
               ]
             },

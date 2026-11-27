@@ -816,6 +816,12 @@ type CreateTemplateFromImageReq struct {
 	// Backend is the CoW store (xfs｜s3) for this template and every
 	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.
 	Backend string `json:"backend,omitempty"`
+
+	// WritableDiskReclaim enables guest discard on the template's writable
+	// rootfs volume for every sandbox created from it. Supported on xfs, jfs
+	// and s3; the policy is persisted with the template request and can never
+	// be changed per sandbox.
+	WritableDiskReclaim bool `json:"writable_disk_reclaim,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {

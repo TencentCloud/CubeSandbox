@@ -3422,6 +3422,36 @@ class TestTemplateAPI:
         assert "backend" not in post.call_args.kwargs["json"]
         assert "user" not in post.call_args.kwargs["json"]
 
+    def test_build_forwards_writable_disk_reclaim_true(self):
+        body = {"jobID": "job-reclaim", "templateID": "tpl-reclaim", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(
+                image="python:3.11-slim",
+                writable_disk_reclaim=True,
+                config=make_config(),
+            )
+        sent = post.call_args.kwargs["json"]
+        assert sent["writableDiskReclaim"] is True
+        assert "writable_disk_reclaim" not in sent
+
+    def test_build_forwards_writable_disk_reclaim_false(self):
+        body = {"jobID": "job-reclaim", "templateID": "tpl-reclaim", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(
+                image="python:3.11-slim",
+                writable_disk_reclaim=False,
+                config=make_config(),
+            )
+        sent = post.call_args.kwargs["json"]
+        assert sent["writableDiskReclaim"] is False
+        assert "writable_disk_reclaim" not in sent
+
+    def test_build_omits_writable_disk_reclaim_when_none(self):
+        body = {"jobID": "j", "templateID": "t", "status": "accepted"}
+        with patch("requests.Session.post", return_value=mock_response(body)) as post:
+            Template.build(image="python:3.11-slim", config=make_config())
+        assert "writableDiskReclaim" not in post.call_args.kwargs["json"]
+
     def test_build_rejects_allow_out_domain_without_deny_all(self):
         with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:
             Template.build(

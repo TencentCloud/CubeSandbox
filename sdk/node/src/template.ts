@@ -178,6 +178,10 @@ export interface TemplateBuildOptions {
   backend?: string;
   /** Container user: uid, uid:gid, username, or username:gid. gid must be numeric. */
   user?: string;
+  /** Opt into online reclaim of the template's writable disk at sandbox runtime.
+   *  Default off; stored on the template and applies for its lifetime.
+   *  Supported on xfs, jfs and s3; only the root writable disk is affected. */
+  writableDiskReclaim?: boolean;
   config?: Config | ConfigOptions;
   extra?: Record<string, unknown>;
 }
@@ -265,6 +269,9 @@ export class Template {
     if (options.denyOut !== undefined) payload.denyOut = options.denyOut;
     if (options.backend !== undefined) payload.backend = options.backend;
     if (options.user !== undefined) payload.user = options.user;
+    if (options.writableDiskReclaim !== undefined) {
+      payload.writableDiskReclaim = options.writableDiskReclaim;
+    }
     if (options.extra) Object.assign(payload, options.extra);
 
     const resp = await controlFetch(cfg, `${cfg.apiUrl}/templates`, {

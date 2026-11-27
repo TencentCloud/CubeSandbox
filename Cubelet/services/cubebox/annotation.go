@@ -120,6 +120,27 @@ func (l *local) genVirtFsAnnotationOpt(ctx context.Context,
 	})
 }
 
+// writableDiskReclaimRootVolumeName is the template-owned writable rootfs
+// volume. Discard is only meaningful there: the read-only image disk and data
+// volumes must keep their historical config.
+const writableDiskReclaimRootVolumeName = "cube_rootfs_rw"
+
+func writableDiskReclaimEnabled(req *cubebox.RunCubeSandboxRequest) (bool, error) {
+	raw, ok := req.GetAnnotations()[constants.MasterAnnotationWritableDiskReclaim]
+	if !ok {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid %s value %q: supported values are \"true\" and \"false\"",
+			constants.MasterAnnotationWritableDiskReclaim, raw)
+	}
+}
+
 func (l *local) genStorageMediumDefaultAnnotationOpt(ctx context.Context,
 	opts *workflow.CreateContext,
 	sandBox *cubeboxstore.CubeBox) ([]oci.SpecOpts, error) {
@@ -129,10 +150,25 @@ func (l *local) genStorageMediumDefaultAnnotationOpt(ctx context.Context,
 	if err != nil {
 		return tmpSpecs, err
 	}
+	reclaim, err := writableDiskReclaimEnabled(opts.ReqInfo)
+	if err != nil {
+		return tmpSpecs, err
+	}
+	reclaimRootFound := false
 	if opts.StorageInfo != nil {
 		tmpInfo, ok := opts.StorageInfo.(*storage.StorageInfo)
 		if ok && len(tmpInfo.Volumes) > 0 {
 			for _, v := range tmpInfo.Volumes {
+				discard := reclaim && v.Name == writableDiskReclaimRootVolumeName
+				if discard {
+					reclaimRootFound = true
+					if v.Type != "ext4" {
+						return tmpSpecs, fmt.Errorf(
+							"%s is enabled but %s volume %q has guest filesystem type %q; an ext4 guest root is required",
+							constants.MasterAnnotationWritableDiskReclaim,
+							writableDiskReclaimRootVolumeName, v.Name, v.Type)
+					}
+				}
 				annotationInfo = append(annotationInfo, disk.CubeDiskConfig{
 					HostPath:         v.FilePath,
 					Type:             v.Type,
@@ -140,10 +176,15 @@ func (l *local) genStorageMediumDefaultAnnotationOpt(ctx context.Context,
 					Size:             v.SizeLimit,
 					FSQuota:          v.FSQuota,
 					RateLimiter:      limit,
+					Discard:          discard,
 					VolumeSourceName: v.Name,
 				})
 			}
 		}
+	}
+	if reclaim && !reclaimRootFound {
+		return tmpSpecs, fmt.Errorf("%s is enabled but the storage info has no %s volume",
+			constants.MasterAnnotationWritableDiskReclaim, writableDiskReclaimRootVolumeName)
 	}
 	for key := range sandBox.AllContainers() {
 		ci, err := sandBox.Get(key)

@@ -89,7 +89,13 @@ func dealCubeboxReqTemplateByLocalConfig(ctx context.Context, reqInOut *types.Cr
 		}
 	}
 
+	if err := templatecenter.ApplyWritableDiskReclaimFromTemplate(reqInOut, templateReq); err != nil {
+		return err
+	}
 	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	if err := inheritLocalConfigReclaimBackend(reqInOut, templateReq); err != nil {
+		return err
+	}
 	reqInOut.CubeNetworkConfig = mergeCubeNetworkConfigs(templateReq.CubeNetworkConfig, reqInOut.CubeNetworkConfig)
 
 	if templateReq.NetworkType != "" {
@@ -99,6 +105,26 @@ func dealCubeboxReqTemplateByLocalConfig(ctx context.Context, reqInOut *types.Cr
 	sandbox.CopyTemplateRestartFields(templateReq, reqInOut)
 	log.G(ctx).Infof("Successfully dealCubeboxReqTemplateByLocalConfig: %s", utils.InterfaceToString(reqInOut))
 	return nil
+}
+
+// inheritLocalConfigReclaimBackend pins the stored local template backend onto
+// a create only when that template enables writable-disk reclaim. Reclaim
+// supports xfs, jfs and s3, so only an unknown persisted backend is rejected
+// (by ResolveSnapshotBackend). Disabled templates keep the historical
+// caller-selected backend untouched.
+func inheritLocalConfigReclaimBackend(req, templateReq *types.CreateCubeSandboxReq) error {
+	if req == nil || templateReq == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.Annotations[constants.CubeAnnotationWritableDiskReclaim]), "true") {
+		return nil
+	}
+	if _, err := constants.ResolveSnapshotBackend(templateReq.Backend,
+		templateReq.Annotations[constants.CubeAnnotationStorageBackend]); err != nil {
+		return fmt.Errorf("stored template enables %s on an unsupported backend: %w",
+			constants.CubeAnnotationWritableDiskReclaim, err)
+	}
+	return templatecenter.InheritCreateBackendFromTemplate(req, templateReq)
 }
 
 func validateContainerRequirements(req *types.CreateCubeSandboxReq) error {
@@ -284,6 +310,12 @@ func applyTemplateAnnotationsAndLabels(reqIn *types.CreateCubeSandboxReq, reqOut
 			reqOut.Annotations = make(map[string]string)
 		}
 		for k, v := range reqIn.Annotations {
+			// The template-owned reclaim policy is applied by
+			// ApplyWritableDiskReclaimFromTemplate so conflicts are rejected
+			// before this copy overwrites them.
+			if k == constants.CubeAnnotationWritableDiskReclaim {
+				continue
+			}
 			if k == constants.AnnotationsNetID {
 				if _, ok := reqOut.Annotations[constants.AnnotationsNetID]; ok {
 
@@ -573,6 +605,9 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 		log.G(ctx).Infof("getTemplateParam success:template=%s %s", templateID, summarizeTemplateRequest(templateReq))
 	}
 
+	if err := templatecenter.ApplyWritableDiskReclaimFromTemplate(reqInOut, templateReq); err != nil {
+		return err
+	}
 	if strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
 		applySnapshotTemplateAnnotationsAndLabels(templateReq, reqInOut)
 	} else {

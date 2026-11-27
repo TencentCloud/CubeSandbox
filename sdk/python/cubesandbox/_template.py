@@ -244,6 +244,7 @@ class Template:
         enable_ivshmem: bool | None = None,
         backend: str | None = None,
         user: str | None = None,
+        writable_disk_reclaim: bool | None = None,
         config: Config | None = None,
         **kwargs: Any,
     ) -> TemplateBuild:
@@ -286,6 +287,10 @@ class Template:
             user: Container user for the template build and later sandboxes.
                 ``uid``, ``uid:gid``, ``username``, or ``username:gid``. The group
                 must be numeric. Omitted keeps the default root user.
+            writable_disk_reclaim: Opt into online reclaim of the template's
+                writable disk at sandbox runtime. Defaults off; the setting is
+                stored with the template and applies for the template's lifetime.
+                Supported on xfs, jfs and s3; only the root writable disk is affected.
             config: SDK config.  Uses default (env-based) config if omitted.
             **kwargs: Extra fields forwarded verbatim to the request body.
 
@@ -355,6 +360,8 @@ class Template:
             payload["backend"] = backend
         if user is not None:
             payload["user"] = user
+        if writable_disk_reclaim is not None:
+            payload["writableDiskReclaim"] = writable_disk_reclaim
         payload.update(kwargs)
 
         s = requests.Session()

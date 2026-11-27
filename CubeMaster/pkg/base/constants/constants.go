@@ -126,7 +126,11 @@ const (
 	CubeAnnotationRootfsArtifactSHA256      = "cube.master.rootfs.artifact.sha256"
 	CubeAnnotationRootfsArtifactSizeBytes   = "cube.master.rootfs.artifact.size_bytes"
 	CubeAnnotationWritableLayerSize         = "cube.master.rootfs.writable_layer_size"
-	CubeAnnotationTemplateSpecFingerprint   = "cube.master.template.spec_fingerprint"
+	// CubeAnnotationWritableDiskReclaim is a template-owned policy: when "true"
+	// the Cubelet enables discard on the sandbox's writable rootfs volume so
+	// the guest can reclaim freed blocks.
+	CubeAnnotationWritableDiskReclaim     = "cube.master.rootfs.writable_disk_reclaim"
+	CubeAnnotationTemplateSpecFingerprint = "cube.master.template.spec_fingerprint"
 	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"

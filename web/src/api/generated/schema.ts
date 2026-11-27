@@ -692,6 +692,11 @@ export interface components {
              *     Omitted or null defaults to true on CubeMaster.
              */
             with_cube_ca?: boolean | null;
+            /**
+             * @description Enable discard on the writable rootfs so freed blocks can be reclaimed.
+             *     Omitted or false keeps the historical behavior.
+             */
+            writableDiskReclaim?: boolean | null;
             /** @description Writable layer size for the rootfs, e.g. "1G". */
             writableLayerSize?: string | null;
         };

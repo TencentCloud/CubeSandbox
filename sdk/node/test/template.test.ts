@@ -208,6 +208,45 @@ describe("Template.build", () => {
     };
     await Template.build({ image: "python:3.11-slim", config: makeConfig() });
   });
+
+  it("forwards writableDiskReclaim=true under camel key", async () => {
+    let body: Record<string, any> = {};
+    handler = (req) => {
+      body = JSON.parse(req.body.toString());
+      return { status: 200, json: { jobID: "job-reclaim", templateID: "tpl-reclaim" } };
+    };
+    await Template.build({
+      image: "python:3.11-slim",
+      writableDiskReclaim: true,
+      config: makeConfig(),
+    });
+    expect(body.writableDiskReclaim).toBe(true);
+    expect(body.writable_disk_reclaim).toBeUndefined();
+  });
+
+  it("preserves explicit writableDiskReclaim=false", async () => {
+    let body: Record<string, any> = {};
+    handler = (req) => {
+      body = JSON.parse(req.body.toString());
+      return { status: 200, json: { jobID: "job-reclaim", templateID: "tpl-reclaim" } };
+    };
+    await Template.build({
+      image: "python:3.11-slim",
+      writableDiskReclaim: false,
+      config: makeConfig(),
+    });
+    expect(body.writableDiskReclaim).toBe(false);
+  });
+
+  it("omits writableDiskReclaim when undefined", async () => {
+    let body: Record<string, any> = {};
+    handler = (req) => {
+      body = JSON.parse(req.body.toString());
+      return { status: 200, json: { jobID: "j", templateID: "t" } };
+    };
+    await Template.build({ image: "python:3.11-slim", config: makeConfig() });
+    expect("writableDiskReclaim" in body).toBe(false);
+  });
 });
 
 describe("Template.rebuild", () => {

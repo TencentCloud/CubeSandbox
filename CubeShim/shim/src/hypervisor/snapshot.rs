@@ -47,6 +47,8 @@ pub struct VmRes {
 pub struct Disk {
     pub fs_type: String,
     pub size: u64,
+    #[serde(default)]
+    pub discard: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -116,6 +118,7 @@ impl SnapshotInfo {
             let disk = Disk {
                 size: d.size,
                 fs_type: d.fs_type.clone(),
+                discard: d.discard,
             };
             self.vm_res.disks.push(disk);
         }
@@ -265,6 +268,90 @@ mod tests {
         let err = a.eq(&b).unwrap_err();
         assert!(err.contains("image version not eq"), "unexpected: {err}");
     }
+
+    fn sandbox_disk_from_json(discard: Option<bool>) -> SbDisk {
+        let mut value = serde_json::json!({
+            "path": "/dev/vdb",
+            "fs_type": "ext4",
+            "size": 1024,
+        });
+        if let Some(discard) = discard {
+            value["discard"] = serde_json::Value::Bool(discard);
+        }
+        serde_json::from_value(value).expect("sandbox disk json should deserialize")
+    }
+
+    /// Metadata written before the discard field existed.
+    fn legacy_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "kernel_version": "",
+            "image_version": "",
+            "ch_version": cube_hypervisor::SNAPSHOT_VERSION,
+            "vm_res": {
+                "cpu": 2,
+                "cpu_max": 2,
+                "memory": 1024,
+                "disks": [{"fs_type": "ext4", "size": 1024}],
+                "pmems": []
+            }
+        })
+    }
+
+    #[test]
+    fn legacy_metadata_disk_discard_defaults_off() {
+        let legacy: SnapshotInfo =
+            serde_json::from_value(legacy_metadata()).expect("legacy metadata should deserialize");
+
+        let mut wanted = SnapshotInfo::new(2, 1024);
+        wanted.set_disks(&[sandbox_disk_from_json(None)]);
+
+        legacy
+            .eq(&wanted)
+            .expect("legacy metadata should default discard off");
+    }
+
+    #[test]
+    fn snapshot_eq_rejects_discard_mismatch() {
+        let legacy: SnapshotInfo =
+            serde_json::from_value(legacy_metadata()).expect("legacy metadata should deserialize");
+
+        let mut wanted = SnapshotInfo::new(2, 1024);
+        wanted.set_disks(&[sandbox_disk_from_json(Some(true))]);
+
+        assert!(
+            legacy.eq(&wanted).is_err(),
+            "a discard-enabled request must not reuse metadata recorded without discard"
+        );
+    }
+
+    #[test]
+    fn snapshot_eq_accepts_matching_discard() {
+        let mut a = SnapshotInfo::new(2, 1024);
+        a.set_disks(&[sandbox_disk_from_json(Some(true))]);
+
+        let mut b = SnapshotInfo::new(2, 1024);
+        b.set_disks(&[sandbox_disk_from_json(Some(true))]);
+
+        a.eq(&b).expect("equal discard flags should match");
+    }
+
+    #[test]
+    fn set_disks_serializes_discard() {
+        let mut info = SnapshotInfo::new(2, 1024);
+        info.set_disks(&[
+            sandbox_disk_from_json(Some(true)),
+            sandbox_disk_from_json(None),
+        ]);
+
+        let serialized = serde_json::to_value(&info).expect("metadata should serialize");
+        assert_eq!(serialized["vm_res"]["disks"][0]["discard"], true);
+        assert_eq!(
+            serialized["vm_res"]["disks"][1]["discard"]
+                .as_bool()
+                .unwrap_or(false),
+            false
+        );
+    }
 }
 
 impl Disk {
@@ -277,6 +364,12 @@ impl Disk {
         }
         if self.size != o.size {
             return Err(format!("disk size not eq, {} {}", &self.size, &o.size));
+        }
+        if self.discard != o.discard {
+            return Err(format!(
+                "disk discard not eq, {} {}",
+                &self.discard, &o.discard
+            ));
         }
         Ok(())
     }

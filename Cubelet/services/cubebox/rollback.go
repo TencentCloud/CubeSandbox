@@ -65,6 +65,9 @@ type rollbackRestoreConfig struct {
 	Disks        []rollbackDiskConfig `json:"disks,omitempty"`
 }
 
+// rollbackDiskConfig deliberately carries no discard field: restore only
+// rewrites the host path and rate limit, and the saved VMM snapshot config
+// stays authoritative for discard.
 type rollbackDiskConfig struct {
 	Path              string          `json:"path,omitempty"`
 	ID                string          `json:"id,omitempty"`

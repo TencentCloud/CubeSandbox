@@ -12,6 +12,7 @@
 extern crate log;
 
 pub mod async_io;
+mod discard;
 pub mod fixed_vhd_async;
 pub mod fixed_vhd_sync;
 pub mod qcow_sync;
@@ -45,6 +46,8 @@ use vmm_sys_util::eventfd::EventFd;
 
 const SECTOR_SHIFT: u8 = 9;
 pub const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
+// Bound one deallocation operation to 128 MiB.
+pub const MAX_DISCARD_SECTORS: u32 = 262144;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -130,6 +133,8 @@ pub enum ExecuteError {
     AsyncFlush(AsyncIoError),
     #[error("Failed allocating a temporary buffer: {0}")]
     TemporaryBufferAllocation(io::Error),
+    #[error("Failed to discard: {0}")]
+    AsyncDiscard(AsyncIoError),
 }
 
 impl ExecuteError {
@@ -149,6 +154,7 @@ impl ExecuteError {
             ExecuteError::AsyncWrite(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::AsyncFlush(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::TemporaryBufferAllocation(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::AsyncDiscard(_) => VIRTIO_BLK_S_IOERR,
         }
     }
 }
@@ -159,6 +165,7 @@ pub enum RequestType {
     Out,
     Flush,
     GetDeviceId,
+    Discard,
     Unsupported(u32),
 }
 
@@ -172,6 +179,7 @@ pub fn request_type<B: Bitmap + 'static>(
         VIRTIO_BLK_T_OUT => Ok(RequestType::Out),
         VIRTIO_BLK_T_FLUSH => Ok(RequestType::Flush),
         VIRTIO_BLK_T_GET_ID => Ok(RequestType::GetDeviceId),
+        VIRTIO_BLK_T_DISCARD => Ok(RequestType::Discard),
         t => Ok(RequestType::Unsupported(t)),
     }
 }
@@ -257,7 +265,9 @@ impl Request {
             }
         } else {
             while desc.has_next() {
-                if desc.is_write_only() && req.request_type == RequestType::Out {
+                if desc.is_write_only()
+                    && matches!(req.request_type, RequestType::Out | RequestType::Discard)
+                {
                     return Err(Error::UnexpectedWriteOnlyDescriptor);
                 }
                 if !desc.is_write_only() && req.request_type == RequestType::In {
@@ -350,10 +360,57 @@ impl Request {
                     mem.write_slice(disk_id, *data_addr)
                         .map_err(ExecuteError::Write)?;
                 }
+                RequestType::Discard => {
+                    return Err(ExecuteError::Unsupported(VIRTIO_BLK_T_DISCARD))
+                }
                 RequestType::Unsupported(t) => return Err(ExecuteError::Unsupported(t)),
             };
         }
         Ok(len)
+    }
+
+    fn discard_range<B: Bitmap + 'static>(
+        &self,
+        mem: &vm_memory::GuestMemoryMmap<B>,
+        disk_nsectors: u64,
+    ) -> result::Result<(libc::off_t, libc::off_t), ExecuteError> {
+        let invalid = || ExecuteError::BadRequest(Error::InvalidOffset);
+        let size = self
+            .data_descriptors
+            .iter()
+            .try_fold(0u32, |n, (_, len)| n.checked_add(*len));
+        if size != Some(16) {
+            return Err(invalid());
+        }
+        let mut bytes = [0u8; 16];
+        let mut pos = 0;
+        for (addr, len) in &self.data_descriptors {
+            let end = pos + *len as usize;
+            mem.read_slice(&mut bytes[pos..end], *addr)
+                .map_err(|e| ExecuteError::BadRequest(Error::GuestMemory(e)))?;
+            pos = end;
+        }
+        let sector = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let flags = u32::from_le_bytes(bytes[12..].try_into().unwrap());
+        if flags != 0 {
+            return Err(ExecuteError::Unsupported(VIRTIO_BLK_T_DISCARD));
+        }
+        if count > MAX_DISCARD_SECTORS
+            || sector
+                .checked_add(count as u64)
+                .filter(|end| *end <= disk_nsectors)
+                .is_none()
+        {
+            return Err(invalid());
+        }
+        let offset = sector
+            .checked_mul(SECTOR_SIZE)
+            .and_then(|n| libc::off_t::try_from(n).ok())
+            .ok_or_else(invalid)?;
+        let len = libc::off_t::from(count) * SECTOR_SIZE as libc::off_t;
+        offset.checked_add(len).ok_or_else(invalid)?;
+        Ok((offset, len))
     }
 
     pub fn execute_async<B: Bitmap + 'static>(
@@ -364,6 +421,16 @@ impl Request {
         disk_id: &[u8],
         user_data: u64,
     ) -> result::Result<bool, ExecuteError> {
+        if self.request_type == RequestType::Discard {
+            let (offset, len) = self.discard_range(mem, disk_nsectors)?;
+            if len == 0 {
+                return Ok(false);
+            }
+            disk_image
+                .discard(offset, len, user_data)
+                .map_err(ExecuteError::AsyncDiscard)?;
+            return Ok(true);
+        }
         let sector = self.sector;
         let request_type = self.request_type;
         let offset = (sector << SECTOR_SHIFT) as libc::off_t;
@@ -472,6 +539,7 @@ impl Request {
                     .map_err(ExecuteError::Write)?;
                 return Ok(false);
             }
+            RequestType::Discard => unreachable!("discard handled before data IO"),
             RequestType::Unsupported(t) => return Err(ExecuteError::Unsupported(t)),
         }
 
@@ -752,6 +820,135 @@ mod tests {
     use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
     use std::sync::{Mutex, MutexGuard};
     use vmm_sys_util::eventfd::EventFd;
+
+    fn discard_request(
+        mem: &vm_memory::GuestMemoryMmap,
+        sector: u64,
+        sectors: u32,
+        flags: u32,
+        payload_len: u32,
+    ) -> super::Request {
+        use vm_memory::{Bytes, GuestAddress};
+        mem.write_obj(11u32, GuestAddress(0)).unwrap();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&sector.to_le_bytes());
+        payload.extend_from_slice(&sectors.to_le_bytes());
+        payload.extend_from_slice(&flags.to_le_bytes());
+        mem.write_slice(&payload, GuestAddress(0x1000)).unwrap();
+        super::Request {
+            request_type: super::request_type(mem, GuestAddress(0)).unwrap(),
+            sector: 0,
+            data_descriptors: vec![(GuestAddress(0x1000), payload_len)],
+            status_addr: GuestAddress(0x2000),
+            writeback: true,
+            aligned_operations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_discard_reclaims_raw_range_without_changing_live_data() {
+        use crate::async_io::AsyncIo;
+        use std::os::unix::fs::MetadataExt;
+        use std::time::{Duration, Instant};
+        use vm_memory::GuestAddress;
+        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let temp = vmm_sys_util::tempfile::TempFile::new().unwrap();
+        let mut file = temp.as_file().try_clone().unwrap();
+        file.write_all(&vec![0xa5; 32768]).unwrap();
+        file.sync_all().unwrap();
+        let before = file.metadata().unwrap().blocks();
+        let mut backend = super::raw_sync::RawFileSync::new(std::os::fd::AsRawFd::as_raw_fd(&file))
+            .with_file_discard(true)
+            .with_discard_capacity(8);
+        let runner = backend
+            .start_discard_worker()
+            .unwrap()
+            .expect("file backend must expose a discard worker");
+
+        let mut request = discard_request(&mem, 16, 16, 0, 16);
+        let submitted = request.execute_async(&mem, 64, &mut backend, &[], 42);
+        assert!(matches!(submitted, Ok(true)), "{submitted:?}");
+        assert!(
+            backend.complete().is_empty(),
+            "execute_async must queue the discard, not run it inline"
+        );
+
+        // Start the worker only after the queued-not-inlined assertion, so a
+        // fast completion cannot mask an inline discard.
+        let worker = std::thread::spawn(move || runner().unwrap());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let completions = loop {
+            let completions = backend.complete();
+            if !completions.is_empty() {
+                break completions;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the worker discard completion"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(completions, vec![(42, 0)]);
+        request.complete_async(0).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 32768);
+        assert!(file.metadata().unwrap().blocks() < before);
+        file.rewind().unwrap();
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).unwrap();
+        assert!(data[..8192].iter().all(|x| *x == 0xa5));
+        assert!(data[8192..16384].iter().all(|x| *x == 0));
+        assert!(data[16384..].iter().all(|x| *x == 0xa5));
+
+        // Reuse the punched range; neighbours and length must stay intact.
+        file.seek(std::io::SeekFrom::Start(8192)).unwrap();
+        file.write_all(&[0x5a; 8192]).unwrap();
+        file.sync_all().unwrap();
+        file.rewind().unwrap();
+        let mut reused = Vec::new();
+        file.read_to_end(&mut reused).unwrap();
+        assert!(reused[..8192].iter().all(|x| *x == 0xa5));
+        assert!(reused[8192..16384].iter().all(|x| *x == 0x5a));
+        assert!(reused[16384..].iter().all(|x| *x == 0xa5));
+
+        drop(backend);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_discard_rejects_invalid_ranges_before_changing_file() {
+        use crate::async_io::AsyncIo;
+        use virtio_bindings::bindings::virtio_blk::{VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_UNSUPP};
+        use vm_memory::GuestAddress;
+        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let temp = vmm_sys_util::tempfile::TempFile::new().unwrap();
+        let mut file = temp.as_file().try_clone().unwrap();
+        file.write_all(&vec![0xa5; 32768]).unwrap();
+        let mut backend = super::raw_sync::RawFileSync::new(std::os::fd::AsRawFd::as_raw_fd(&file));
+        for (sector, count, flags, len, expected) in [
+            (63, 2, 0, 16, VIRTIO_BLK_S_IOERR),
+            (u64::MAX, 1, 0, 16, VIRTIO_BLK_S_IOERR),
+            (0, u32::MAX, 0, 16, VIRTIO_BLK_S_IOERR),
+            (0, 1, 1, 16, VIRTIO_BLK_S_UNSUPP),
+            (0, 1, 0, 15, VIRTIO_BLK_S_IOERR),
+            (0, 1, 0, 32, VIRTIO_BLK_S_IOERR),
+        ] {
+            let mut request = discard_request(&mem, sector, count, flags, len);
+            let error = request
+                .execute_async(&mem, 64, &mut backend, &[], 42)
+                .unwrap_err();
+            assert_eq!(
+                error.status(),
+                expected,
+                "{sector}/{count}/{flags}/{len}: {error}"
+            );
+            assert!(backend.complete().is_empty());
+        }
+        file.rewind().unwrap();
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).unwrap();
+        assert_eq!(data, vec![0xa5; 32768]);
+    }
 
     struct ShortIo {
         inner: Cursor<Vec<u8>>,
