@@ -220,6 +220,10 @@ func TestClassifyMaxProcsReload(t *testing.T) {
 		// Removing a cap that never bound changes nothing, not even after a
 		// restart, so there is nothing to warn about.
 		{"key removed but never applied", cfgWith(32), cfgWith(0), 16, 16, false, maxProcsUnchanged},
+		// The warning fires once, when the key is deleted. A later reload that
+		// only touches an unrelated key must not repeat it: maxProcsApplied stays
+		// set for the life of the process.
+		{"key already absent on a later reload", cfgWith(0), cfgWith(0), 8, 8, true, maxProcsUnchanged},
 		{"key never set", cfgWith(0), cfgWith(0), 256, 256, false, maxProcsUnchanged},
 		{"no previous config", nil, cfgWith(64), 32, 32, false, maxProcsNotApplied},
 		{"new config without common", cfgWith(32), &Config{}, 32, 32, true, maxProcsUnchanged},

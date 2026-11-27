@@ -930,9 +930,11 @@ func classifyMaxProcsReload(previous, conf *Config, prev, now int, narrowed bool
 	switch {
 	case conf.Common.MaxProcs > prev && changed:
 		return maxProcsNotApplied
-	case conf.Common.MaxProcs == 0 && narrowed:
+	case conf.Common.MaxProcs == 0 && narrowed && changed:
 		// The key was deleted after it had narrowed the process; the runtime
-		// default it would restore is no longer known.
+		// default it would restore is no longer known. `changed` keeps later,
+		// unrelated reloads quiet: once the key is gone, deleting it again is not
+		// an event, and maxProcsApplied stays set for the life of the process.
 		return maxProcsLostNarrowing
 	}
 	return maxProcsUnchanged
