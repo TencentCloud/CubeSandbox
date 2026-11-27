@@ -107,6 +107,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "cube.secretName" . }}
                   key: cube-admin-token
+            {{- with .Values.lifecycleManager.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.lifecycleManager.service.port }}

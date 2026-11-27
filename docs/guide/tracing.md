@@ -59,6 +59,12 @@ Cubelet launches a fresh CubeShim process per sandbox; the process lives alongsi
 
 Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
 
+### Lifecycle Manager timeout cleanup
+
+To trace idle-timeout deletion, set an OTLP/gRPC endpoint on the Lifecycle Manager process. For Helm, add `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) under `lifecycleManager.env`.
+
+The `clm.sweep.kill` span records the sandbox ID, idle duration, and configured timeout. Its `clm.cubemaster.kill` child records CubeMaster's business return code and sends the trace context with `DELETE /cube/sandbox`. A complete trace into CubeMaster and Cubelet also requires deletion tracing on those components.
+
 ### Rust envd REST tracing
 
 To enable tracing in Rust envd, set `CUBE_ENVD_OTEL_ENDPOINT` in the guest

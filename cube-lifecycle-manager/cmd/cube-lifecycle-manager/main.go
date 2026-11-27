@@ -32,6 +32,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/statesync"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/sweeper"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/telemetry"
 )
 
 func main() {
@@ -85,6 +86,19 @@ func run() error {
 
 	rootCtx, cancel := signalContext()
 	defer cancel()
+
+	shutdownTracing, err := telemetry.Setup(rootCtx)
+	if err != nil {
+		logger.Warn("telemetry setup failed", zap.Error(err))
+	} else if shutdownTracing != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				logger.Warn("telemetry shutdown failed", zap.Error(err))
+			}
+		}()
+	}
 
 	// startupTs marks the boundary between "bootstrap entries (HGETALL)"
 	// and stream entries for the sweeper's warmup logic.
