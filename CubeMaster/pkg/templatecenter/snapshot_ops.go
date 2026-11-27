@@ -583,9 +583,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	setTemplateLocalityCache(snapshotID, []ReplicaStatus{replica})
 	registerTemplateReplicaForSnapshot(snapshotID, nodeID, 1)
 
-	if cacheErr := setTemplateRequestCache(snapshotID, storedReq); cacheErr != nil {
-		logger.Warnf("set snapshot request cache failed: %v", cacheErr)
-	}
+	setTemplateRequestCache(snapshotID, storedReq)
 	snapUpdates := map[string]any{
 		"status":                        StatusReady,
 		"last_error":                    "",
@@ -1236,11 +1234,8 @@ func failSnapshotRollbackJob(ctx context.Context, jobID, phase string, resultPay
 }
 
 func buildSnapshotRequests(req *sandboxtypes.CreateCubeSandboxReq, snapshotID, snapshotName string) (*sandboxtypes.CreateCubeSandboxReq, *sandboxtypes.CreateCubeSandboxReq, error) {
-	createReq, err := cloneCreateRequest(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	if createReq.Request == nil || strings.TrimSpace(createReq.RequestID) == "" {
+	createReq := req.DeepCopy()
+	if createReq == nil || createReq.Request == nil || strings.TrimSpace(createReq.RequestID) == "" {
 		return nil, nil, errors.New("requestID is required")
 	}
 	if createReq.Annotations == nil {

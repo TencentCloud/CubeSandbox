@@ -139,34 +139,26 @@ func (g *templateFetchGroup) Do(ctx context.Context, key string, fn func() (inte
 	return call.val, call.err
 }
 
-func getCachedTemplateRequest(templateID string) (*sandboxtypes.CreateCubeSandboxReq, bool, error) {
+func getCachedTemplateRequest(templateID string) (*sandboxtypes.CreateCubeSandboxReq, bool) {
 	v, ok := templateDefinitionCache.Get(templateID)
 	if !ok {
-		return nil, false, nil
+		return nil, false
 	}
 	req, ok := v.(*sandboxtypes.CreateCubeSandboxReq)
 	if !ok || req == nil {
 		templateDefinitionCache.Delete(templateID)
-		return nil, false, nil
+		return nil, false
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		templateDefinitionCache.Delete(templateID)
-		return nil, false, err
-	}
-	return cloned, true, nil
+	// The cache entry is shared by concurrent creates, so every hit hands out
+	// its own copy instead of the stored request.
+	return req.DeepCopy(), true
 }
 
-func setTemplateRequestCache(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error {
+func setTemplateRequestCache(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {
 	if templateID == "" || req == nil {
-		return nil
+		return
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		return err
-	}
-	templateDefinitionCache.Set(templateID, cloned, templateCacheTTL())
-	return nil
+	templateDefinitionCache.Set(templateID, req.DeepCopy(), templateCacheTTL())
 }
 
 func getCachedTemplateLocality(templateID string) ([]ReplicaStatus, bool) {

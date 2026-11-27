@@ -95,9 +95,8 @@ func runCheckpointFixture(t *testing.T, backend, failure string) error {
 	})
 	p.ApplyFunc(setTemplateLocalityCache, func(string, []ReplicaStatus) {})
 	p.ApplyFunc(registerTemplateReplicaForSnapshot, func(string, string, int64) {})
-	p.ApplyFunc(setTemplateRequestCache, func(_ string, req *sandboxtypes.CreateCubeSandboxReq) error {
+	p.ApplyFunc(setTemplateRequestCache, func(_ string, req *sandboxtypes.CreateCubeSandboxReq) {
 		require.Equal(t, "snapshot-name", req.Annotations[constants.CubeAnnotationAppSnapshotTemplateAlias])
-		return errors.New("warn-only cache")
 	})
 	// Exercise the real failure cleanup, whose successful FAILED writes can
 	// return nil. Only its external RPC/database/cache dependencies are stubbed.

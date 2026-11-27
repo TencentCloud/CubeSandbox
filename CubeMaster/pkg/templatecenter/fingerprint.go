@@ -164,10 +164,10 @@ func marshalTemplateCommitJobRequest(req *types.CreateCubeSandboxReq) (string, e
 	if req == nil {
 		return "", errors.New("request is nil")
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		return "", err
-	}
+	// The transport-only envelope is dropped before hashing, so the fingerprint
+	// covers the payload alone. The copy must be deep: the caller's request is
+	// still live and shared with the cache.
+	cloned := req.DeepCopy()
 	cloned.Request = nil
 	payload, err := json.Marshal(cloned)
 	if err != nil {

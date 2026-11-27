@@ -21,23 +21,15 @@ func TestTemplateRequestCacheReturnsClone(t *testing.T) {
 		},
 		Labels: map[string]string{"k": "v"},
 	}
-	if err := setTemplateRequestCache(templateID, req); err != nil {
-		t.Fatalf("setTemplateRequestCache failed: %v", err)
-	}
+	setTemplateRequestCache(templateID, req)
 
-	cached, hit, err := getCachedTemplateRequest(templateID)
-	if err != nil {
-		t.Fatalf("getCachedTemplateRequest failed: %v", err)
-	}
+	cached, hit := getCachedTemplateRequest(templateID)
 	if !hit {
 		t.Fatal("expected cache hit")
 	}
 	cached.Labels["k"] = "changed"
 
-	cachedAgain, hit, err := getCachedTemplateRequest(templateID)
-	if err != nil {
-		t.Fatalf("getCachedTemplateRequest second read failed: %v", err)
-	}
+	cachedAgain, hit := getCachedTemplateRequest(templateID)
 	if !hit {
 		t.Fatal("expected cache hit on second read")
 	}
@@ -84,17 +76,13 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
 		},
 	}
-	if err := setTemplateRequestCache(templateID, req); err != nil {
-		t.Fatalf("setTemplateRequestCache failed: %v", err)
-	}
+	setTemplateRequestCache(templateID, req)
 	setTemplateLocalityCache(templateID, []ReplicaStatus{
 		{NodeID: "node-a", Status: ReplicaStatusReady},
 	})
 	setTemplateKindCache(templateID, TemplateKindSnapshot)
 
-	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		t.Fatalf("getCachedTemplateRequest failed before invalidation: %v", err)
-	} else if !hit {
+	if _, hit := getCachedTemplateRequest(templateID); !hit {
 		t.Fatal("expected template request cache hit before invalidation")
 	}
 	if _, hit := getCachedTemplateLocality(templateID); !hit {
@@ -106,9 +94,7 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 
 	invalidateTemplateCaches(templateID)
 
-	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		t.Fatalf("getCachedTemplateRequest failed after invalidation: %v", err)
-	} else if hit {
+	if _, hit := getCachedTemplateRequest(templateID); hit {
 		t.Fatal("expected template request cache miss after invalidation")
 	}
 	if _, hit := getCachedTemplateLocality(templateID); hit {
@@ -163,9 +149,7 @@ func TestTemplateWriteLockClearsConcurrentReadRefill(t *testing.T) {
 					constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
 				},
 			}
-			if err := setTemplateRequestCache(templateID, req); err != nil {
-				return err
-			}
+			setTemplateRequestCache(templateID, req)
 			setTemplateLocalityCache(templateID, []ReplicaStatus{
 				{NodeID: "node-a", Status: ReplicaStatusReady},
 			})
@@ -191,9 +175,7 @@ func TestTemplateWriteLockClearsConcurrentReadRefill(t *testing.T) {
 		t.Fatalf("writer invalidation failed: %v", err)
 	}
 
-	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		t.Fatalf("getCachedTemplateRequest failed after write lock invalidation: %v", err)
-	} else if hit {
+	if _, hit := getCachedTemplateRequest(templateID); hit {
 		t.Fatal("expected template request cache miss after concurrent delete invalidation")
 	}
 	if _, hit := getCachedTemplateLocality(templateID); hit {
