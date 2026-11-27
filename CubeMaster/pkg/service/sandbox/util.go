@@ -1216,40 +1216,6 @@ func redactToken(token string) string {
 	return "***REDACTED***"
 }
 
-func simplePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
-	tmp := types.CreateCubeSandboxReq{
-		Request: req.Request,
-		InsId:   req.InsId,
-		InsIp:   req.InsIp,
-		Labels:  req.Labels,
-	}
-	for _, v := range req.Containers {
-		tmp.Containers = append(tmp.Containers, &types.Container{
-			Name: v.Name,
-			Resources: &types.Resource{
-				Cpu: v.Resources.Cpu,
-				Mem: v.Resources.Mem,
-			},
-		})
-	}
-	for _, v := range req.Volumes {
-		if v.VolumeSource == nil {
-			continue
-		}
-		if v.VolumeSource.HostDirVolumeSources != nil {
-			tmp.Volumes = append(tmp.Volumes, &types.Volume{
-				Name: v.Name,
-				VolumeSource: &types.VolumeSource{
-					HostDirVolumeSources: &types.HostDirVolumeSources{
-						VolumeSources: v.VolumeSource.HostDirVolumeSources.VolumeSources,
-					},
-				},
-			})
-		}
-	}
-	return utils.InterfaceToString(tmp)
-}
-
 func dealSecurity(volume *types.VolumeSource) *types.VolumeSource {
 	if volume == nil {
 		return volume
