@@ -292,9 +292,20 @@ const symlinkHopLimit = 40
 // must not matter: the host is never consulted during resolution.
 var errDanglingSymlink = errors.New("cube_egress_ca: symlink dangling inside the rootfs")
 
-// resolveUnderRootfs joins rel onto rootfsDir and resolves the path
-// component by component, verifying every existing component — including
-// the final one — stays inside the rootfs.
+// containedInRoot reports whether fs is cleanRoot itself or a path
+// under it. cleanRoot == "/" (a rootfs at the filesystem root, which
+// never happens for template artifacts but costs nothing to allow)
+// trivially contains every absolute path.
+func containedInRoot(cleanRoot, fs string) bool {
+	if cleanRoot == string(os.PathSeparator) {
+		return true
+	}
+	return fs == cleanRoot || strings.HasPrefix(fs, cleanRoot+string(os.PathSeparator))
+}
+
+// resolveUnderRootfs joins rel onto rootfsDir and resolves the path,
+// verifying every existing component — including the final one — stays
+// inside the rootfs.
 //
 // Resolution semantics:
 //
@@ -302,26 +313,30 @@ var errDanglingSymlink = errors.New("cube_egress_ca: symlink dangling inside the
 //     and every returned path is built from it, so a rootfsDir spelled
 //     through symlinks compares like with like (its raw spelling never
 //     reaches the containment checks).
-//   - An existing symlink component is resolved *inside the rootfs*:
-//     absolute targets are rebased onto cleanRoot, relative targets are
-//     resolved against the symlink's own directory in guest terms, so
-//     Android's /etc -> /system/etc and RHEL's
+//   - Symlinks are resolved entirely inside the rootfs, component by
+//     component: absolute targets are clamped at the guest root
+//     (leading ".." collapses at "/" POSIX style) and then rebased onto
+//     cleanRoot; relative targets join the symlink's own directory in
+//     guest terms; targets that themselves pass through further
+//     symlinks are re-walked the same way. Every filesystem lookup is a
+//     single-component Lstat whose earlier components are already
+//     verified symlink-free, so the kernel never resolves an
+//     intermediate symlink for us and the walk cannot be steered to
+//     build-host files. Android's /etc -> /system/etc and RHEL's
 //     /etc/pki/tls/certs/ca-bundle.crt -> /etc/pki/ca-trust/... land
-//     where they exist in the guest tree. The build host is never
-//     consulted — not even for absolute targets — so a crafted image
-//     cannot make the bake read or write host files, and host paths
-//     reused by an image symlink are simply absent from the rootfs.
+//     where they exist in the guest tree; host paths an image may
+//     reuse are simply absent from the rootfs.
 //   - A missing component ends the walk: the remainder is joined onto
-//     the already-verified prefix instead of the raw path. Callers
-//     create the remainder fresh (MkdirAll/WriteFile), and a raw join
-//     could let MkdirAll traverse an earlier symlink into a location
-//     that only partially exists, creating directories elsewhere.
+//     the guest-visible location the walk stopped at. Callers create
+//     the remainder fresh (MkdirAll/WriteFile), and anchoring it on
+//     the walked location keeps MkdirAll from traversing an earlier
+//     symlink into a location that only partially exists elsewhere.
 //   - A symlink whose target is missing inside the rootfs (dangling,
-//     e.g. a link to a host-only path) keeps "missing" semantics, but
-//     the remainder is joined onto the *rebased target*: a later
-//     MkdirAll creates the guest-visible location inside the rootfs,
-//     mirroring what the guest itself would see through the link, and
-//     never touching the build host.
+//     e.g. a link to a host-only path) keeps "missing" semantics, with
+//     the remainder joined onto the rebased target: a later MkdirAll
+//     creates the guest-visible location inside the rootfs, mirroring
+//     what the guest itself would see through the link, and never
+//     touching the build host.
 //   - The final component is resolved too: callers Stat/Read/Write the
 //     returned path, and an unresolved leaf symlink would let those
 //     reach files outside the verified chain.
@@ -333,82 +348,106 @@ func resolveUnderRootfs(rootfsDir, rel string) (string, error) {
 		return filepath.Join(rootfsDir, rel), nil
 	}
 	relParts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
-	resolved := cleanRoot
+	for _, part := range relParts {
+		if part == ".." {
+			return "", fmt.Errorf("path %q escapes rootfs %q lexically", rel, cleanRoot)
+		}
+	}
+	resolvedFS := cleanRoot
+	resolvedGuest := "/"
+	hops := 0
 	for i, part := range relParts {
 		if part == "" || part == "." {
 			continue
 		}
-		if part == ".." {
-			return "", fmt.Errorf("path %q escapes rootfs %q lexically", rel, cleanRoot)
+		fs, guest, err := resolveGuestPath(cleanRoot, path.Join(resolvedGuest, part), &hops)
+		if errors.Is(err, errDanglingSymlink) {
+			// Missing at this component: the remainder is created fresh
+			// by the caller, anchored on the guest-visible location the
+			// walk stopped at.
+			return filepath.Join(append([]string{fs}, relParts[i+1:]...)...), nil
 		}
-		next := filepath.Join(resolved, part)
-		info, err := os.Lstat(next)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				// First missing component: the remainder is created fresh
-				// by the caller under the already-verified prefix.
-				return filepath.Join(append([]string{resolved}, relParts[i:]...)...), nil
-			}
 			return "", err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			next, err = resolveSymlinkInRootfs(cleanRoot, next)
-			if err != nil {
-				if errors.Is(err, errDanglingSymlink) {
-					// Dangling inside the rootfs: missing semantics for the
-					// symlink itself, remainder created at the guest-visible
-					// (rebased) target so callers stay inside the rootfs.
-					return filepath.Join(append([]string{next}, relParts[i+1:]...)...), nil
-				}
-				return "", err
-			}
-		}
-		resolved = next
+		resolvedFS, resolvedGuest = fs, guest
 	}
-	return resolved, nil
+	return resolvedFS, nil
 }
 
-// resolveSymlinkInRootfs resolves the symlink at fsPath — an absolute
-// path under cleanRoot — following the chain entirely inside the
-// rootfs: absolute targets are rebased onto cleanRoot, relative targets
-// are joined onto the symlink's own directory *in guest terms*, then
-// collapsed lexically. The build host is never consulted, so a crafted
-// image cannot steer resolution to host files; guest paths can never
-// climb above the guest root (".." at "/" stays "/"), which keeps the
-// walk inside the rootfs. On success it returns the resolved absolute
-// fs path. When the chain ends on a target that is missing inside the
-// rootfs it returns that target's fs path with errDanglingSymlink, so
-// the caller can continue building the remainder at the guest-visible
-// location. Chains longer than symlinkHopLimit are rejected like
-// Linux ELOOP.
-func resolveSymlinkInRootfs(cleanRoot, fsPath string) (string, error) {
-	// fsPath is always cleanRoot + guest; recover the guest spelling.
-	guest := fsPath[len(cleanRoot):]
-	for hops := 0; ; hops++ {
-		if hops >= symlinkHopLimit {
-			return "", fmt.Errorf("symlink chain too deep at %q (limit %d hops)", guest, symlinkHopLimit)
+// resolveGuestPath resolves guest — an absolute guest-space path — under
+// cleanRoot, walking one component at a time. Each component is Lstat'ed
+// on a path whose earlier components are already verified symlink-free,
+// so the kernel never resolves an intermediate symlink for us; when a
+// component is a symlink its target is clamped at the guest root
+// (path.Clean collapses leading ".." at "/"), rebased onto cleanRoot,
+// and re-walked the same way. Symlink resolutions are counted through
+// hops and capped at symlinkHopLimit (Linux SYMLOOP_MAX semantics).
+//
+// Returns (fsPath, guestPath, nil) when every component exists and is
+// symlink-free — fsPath is safe for direct use by the caller. Returns
+// (fsPath, guestPath, errDanglingSymlink) when the guest path is
+// missing inside the rootfs; fsPath is the full guest-visible location
+// (missing middle components included) where the caller can create the
+// remainder. Any fsPath handed back is asserted to stay under
+// cleanRoot: a future walk bug fails loudly instead of escaping.
+func resolveGuestPath(cleanRoot, guest string, hops *int) (string, string, error) {
+walk:
+	for {
+		guest = path.Clean(guest)
+		if !path.IsAbs(guest) {
+			return "", "", errors.New("cube_egress_ca: guest path must be absolute")
 		}
-		target, err := os.Readlink(fsPath)
-		if err != nil {
-			return "", err
-		}
-		if !path.IsAbs(filepath.ToSlash(target)) {
-			// Relative to the symlink's own directory, in guest terms:
-			// lexical join with the guest parent, collapsing ".." there.
-			target = path.Join(path.Dir(guest), target)
-		}
-		guest = target
-		fsPath = filepath.Join(cleanRoot, guest)
-		info, err := os.Lstat(fsPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fsPath, errDanglingSymlink
+		parts := strings.Split(guest, "/")
+		fs := cleanRoot
+		for i := 1; i < len(parts); i++ {
+			fs = filepath.Join(fs, parts[i])
+			info, err := os.Lstat(fs)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					// Hand back the full guest-visible location; the
+					// caller creates the remainder (MkdirAll builds any
+					// missing middle components inside the rootfs).
+					fs = filepath.Join(cleanRoot, guest)
+					if !containedInRoot(cleanRoot, fs) {
+						return "", "", fmt.Errorf("symlink resolution escaped the rootfs: %q", guest)
+					}
+					return fs, guest, errDanglingSymlink
+				}
+				return "", "", err
 			}
-			return "", err
+			if info.Mode()&os.ModeSymlink != 0 {
+				target, err := os.Readlink(fs)
+				if err != nil {
+					return "", "", err
+				}
+				*hops++
+				if *hops > symlinkHopLimit {
+					return "", "", fmt.Errorf("symlink chain too deep at %q (limit %d hops)", guest, symlinkHopLimit)
+				}
+				t := filepath.ToSlash(target)
+				if path.IsAbs(t) {
+					// Clamp at the guest root first: path.Clean collapses
+					// leading ".." at "/", so the target can never climb
+					// out of the guest namespace before it is rebased
+					// onto cleanRoot.
+					guest = path.Clean(t)
+				} else {
+					// Resolve against the symlink's own directory, in
+					// guest terms.
+					guest = path.Join("/"+strings.Join(parts[1:i], "/"), t)
+				}
+				// The components that follow the symlink in the current
+				// path continue past the target. The substituted path may
+				// traverse further symlinks, so the walk restarts on it.
+				guest = path.Join(guest, strings.Join(parts[i+1:], "/"))
+				continue walk
+			}
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			return fsPath, nil
+		if !containedInRoot(cleanRoot, fs) {
+			return "", "", fmt.Errorf("symlink resolution escaped the rootfs: %q", guest)
 		}
+		return fs, guest, nil
 	}
 }
 

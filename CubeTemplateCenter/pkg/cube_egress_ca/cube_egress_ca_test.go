@@ -698,6 +698,67 @@ func TestBakeSymlinkLoopRejected(t *testing.T) {
 	}
 }
 
+func TestResolveUnderRootfsAbsoluteTargetDotDotClamped(t *testing.T) {
+	// etc -> "/../../../../system/etc": the absolute target carries
+	// leading "..", which must collapse at the guest root (POSIX: ".."
+	// at "/" is "/") *before* the target is rebased onto the rootfs.
+	// Joining the raw target instead lets filepath.Clean eat into the
+	// cleanRoot prefix and hand back a build-host path.
+	root := t.TempDir()
+	mustMkdir(t, root, "system/etc")
+	if err := os.Symlink("/../../../../../../../../system/etc", filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveUnderRootfs(root, "etc/x/y")
+	if err != nil {
+		t.Fatalf("leading-dotdot absolute target must clamp at the guest root, got: %v", err)
+	}
+	if !strings.HasPrefix(got, root+string(os.PathSeparator)) {
+		t.Fatalf("resolved path %q escaped the rootfs %q", got, root)
+	}
+	want := filepath.Join(root, "system/etc/x/y")
+	if got != want {
+		t.Fatalf("expected guest-faithful %q, got %q", want, got)
+	}
+}
+
+func TestResolveUnderRootfsSymlinkInsideTargetResolvesInRootfs(t *testing.T) {
+	// etc -> "link/ssl" and link -> "/tmp": the symlink target passes
+	// through a second symlink, so no single filesystem lookup may be
+	// handed the whole "rootfs/link/ssl" path — lstat(2) would follow
+	// link against the build host and steer the result out of the
+	// rootfs. The walk must resolve link as its own component, inside
+	// the rootfs, and land at the guest-visible tmp/ssl.
+	root := t.TempDir()
+	if err := os.Symlink("/tmp", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("link/ssl", filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, root, "tmp/ssl") // guest-faithful destination of etc
+
+	got, err := resolveUnderRootfs(root, "etc/ca.crt")
+	if err != nil {
+		t.Fatalf("symlinked target prefix must resolve inside the rootfs, got: %v", err)
+	}
+	if !strings.HasPrefix(got, root+string(os.PathSeparator)) {
+		t.Fatalf("resolved path %q escaped the rootfs %q", got, root)
+	}
+	want := filepath.Join(root, "tmp/ssl/ca.crt")
+	if got != want {
+		t.Fatalf("expected guest-faithful %q, got %q", want, got)
+	}
+	// The escape would materialize only at use time: with a buggy walk
+	// the returned path is lexically inside the rootfs but crosses the
+	// `link` symlink, so a MkdirAll on its parent would create
+	// directories on the build host. The walk must return a path whose
+	// *every component* is verified symlink-free.
+	if got == filepath.Join(root, "link/ssl/ca.crt") {
+		t.Fatalf("walk returned the unresolved link crossing %q", got)
+	}
+}
+
 func TestBakeDanglingSymlinkTreatedAsMissing(t *testing.T) {
 	// Android-style: etc -> <absolute path> that exists nowhere relevant.
 	// Resolution rebases the target into the rootfs; the rebased target
