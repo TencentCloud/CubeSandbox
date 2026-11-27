@@ -28,6 +28,25 @@ func TestProcessExists(t *testing.T) {
 	assert.False(t, flag)
 }
 
+// TestProcessExistsDoesNotBlock guards the fix for the previous busy-wait: a
+// live process must be reported "exists" without polling for a full second.
+func TestProcessExistsDoesNotBlock(t *testing.T) {
+	start := time.Now()
+	flag := ProcessExists(context.Background(), os.Getpid())
+	elapsed := time.Since(start)
+
+	assert.True(t, flag)
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"ProcessExists must not busy-wait on a live process")
+}
+
+func TestProcessExistsRejectsNonPositivePid(t *testing.T) {
+	start := time.Now()
+	assert.False(t, ProcessExists(context.Background(), 0))
+	assert.False(t, ProcessExists(context.Background(), -1))
+	assert.Less(t, time.Since(start), 50*time.Millisecond)
+}
+
 func TestReadProcessIdentity(t *testing.T) {
 	self, err := ReadProcessIdentity(os.Getpid())
 	require.NoError(t, err)
