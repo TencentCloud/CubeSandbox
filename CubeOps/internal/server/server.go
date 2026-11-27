@@ -74,7 +74,7 @@ func (s *Server) Start() error {
 
 	nodeCtx, nodeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer nodeCancel()
-	nodeSvc, err := nodemanagement.New(nodeCtx, s.store.DB(), nodemanagement.DefaultDeclaredVersionInfo())
+	nodeSvc, err := nodemanagement.New(nodeCtx, s.store.DB(), nodemanagement.DefaultDeclaredVersionInfo(), s.cfg.SplitNodeInventory)
 	if err != nil {
 		return fmt.Errorf("init node management service: %w", err)
 	}

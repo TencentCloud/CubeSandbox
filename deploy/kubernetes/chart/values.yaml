@@ -528,6 +528,9 @@ webui:
   resources: {}
 
 cubeOps:
+  # Enable only after every CubeOps instance supports split inventory.
+  # An explicit CUBE_OPS_SPLIT_NODE_INVENTORY entry in env takes precedence.
+  splitNodeInventory: false
   # Stateful ops/admin backend (JWT) + WebUI SDK proxy to CubeMaster.
   # Required when webui.enabled=true.
   enabled: true

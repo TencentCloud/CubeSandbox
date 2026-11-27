@@ -53,6 +53,8 @@ type Config struct {
 	MySQLPassword string `yaml:"mysql_password"`
 	MySQLDB       string `yaml:"mysql_db"`
 
+	SplitNodeInventory bool `yaml:"split_node_inventory"`
+
 	// JWT
 	AccessTTL  time.Duration `yaml:"access_ttl"`
 	RefreshTTL time.Duration `yaml:"refresh_ttl"`
@@ -456,6 +458,9 @@ func loadFromYAML() (*Config, error) {
 // overrideFromEnv fills in any zero-valued fields from environment
 // variables. Env vars are higher priority than the YAML file.
 func overrideFromEnv(cfg *Config) {
+	if v := parseEnvBool(os.Getenv("CUBE_OPS_SPLIT_NODE_INVENTORY")); v != nil {
+		cfg.SplitNodeInventory = *v
+	}
 	if v := os.Getenv("CUBE_OPS_BIND"); v != "" {
 		cfg.Bind = v
 	}

@@ -116,6 +116,7 @@ defaults.
 |----------|---------|-------------|
 | `CUBE_OPS_BIND` | `127.0.0.1:3010` | Listen address. In All-in-One deployments this must be set to `0.0.0.0:3010` so the WebUI nginx container can reach CubeOps via `host.docker.internal:3010`. |
 | `CUBE_OPS_LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `CUBE_OPS_SPLIT_NODE_INVENTORY` | `false` | Set to `true` after upgrading every CubeOps instance to keep node inventory out of heartbeat rows (YAML: `split_node_inventory`). |
 | `CUBE_OPS_LOG_DIR` | `/data/log/CubeOps` | Log file directory. Logs are written to `cubeops-req.log` (business) and `cubeops-stat.log` (trace), rotated by size. |
 | `CUBE_OPS_LOG_FILE_NUM` | `10` | Number of rotated log files to retain. |
 | `CUBE_OPS_LOG_FILE_SIZE` | `100` | Max size in MB per log file before rotation. |
@@ -172,6 +173,63 @@ See [`config.example.yaml`](./config.example.yaml) for all available fields
 with inline comments. One-click does not install this file.
 
 **Redis connection priority**: `REDIS_URL` > Sentinel settings > split `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`/`REDIS_PASSWORD` settings.
+
+### Node inventory during a rolling upgrade
+
+Upgraded CubeOps readers require `t_cube_node_inventory`, even with
+`split_node_inventory=false`. If automatic migration is disabled
+(`CUBE_AUTO_MIGRATION=false`), apply the node inventory migration before
+starting the first upgraded CubeOps instance.
+
+Leave `split_node_inventory` disabled while older CubeOps instances are running.
+With the default setting, each heartbeat uses a single status-row upsert and
+writes inline inventory for older instances. This mode keeps the existing large
+field writes; it does not query the inventory digest or mirror inventory into
+the separate table.
+
+Once all instances have been upgraded, enable the setting and restart CubeOps.
+Each node's next report sets `t_cube_node_status.images_json` and
+`local_templates_json` to SQL NULL and writes inventory to
+`t_cube_node_inventory` in the same transaction. Subsequent heartbeats query
+the digest and write inventory only when its contents change. This trades a
+digest read per heartbeat for fewer large-field writes.
+
+With either setting, upgraded
+readers use each inline field while it is populated and fall back to the
+separate table when that field is NULL. Nodes that have not reported since the
+upgrade remain readable from their inline fields.
+
+Clients should treat the image and local template lists as unordered. A cached
+report can retain the node's original order, while inventory read from the
+database can be in the order used to compute the digest.
+
+For Helm deployments, enable the setting only after the first rollout has completed:
+
+```yaml
+cubeOps:
+  splitNodeInventory: true
+```
+
+An explicit `CUBE_OPS_SPLIT_NODE_INVENTORY` entry in `cubeOps.env` takes
+precedence over this chart setting. For
+one-click deployments, set `CUBE_OPS_SPLIT_NODE_INVENTORY=true` in
+`/usr/local/services/cubetoolbox/.one-click.env` and restart
+`cube-sandbox-cubeops.service` after all instances have been upgraded.
+
+To revert the database and binary, stop CubeOps writers and roll back the node
+inventory migration before starting the older version. The down migration restores
+inline inventories, including those for nodes that are offline. Disabling the
+setting alone restores inline data only as each node reports. Rolling back the
+binary without restoring inline data makes older database readers see empty
+inventories for nodes whose inline fields are still NULL, including offline nodes.
+MySQL restores data with UPDATE and then drops the table in a separate,
+implicitly committed statement. Writers must remain stopped throughout the
+downgrade; the migration lock does not block heartbeat writes.
+
+External SQL queries, dashboards, and exports that read the old fields must use
+the same inline-first fallback to the inventory table. Back up and restore
+`t_cube_node_inventory` together with `t_cube_node_status` from a consistent
+database snapshot.
 
 ## Authentication
 

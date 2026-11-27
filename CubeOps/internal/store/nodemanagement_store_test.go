@@ -18,7 +18,7 @@ func TestNodeStore_RegistrationLifecycle(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	reg := &nmstore.NodeRegistration{
 		NodeID:       "node-1",
@@ -62,7 +62,7 @@ func TestNodeStore_StatusLifecycle(t *testing.T) {
 			env := tc.open(t)
 			defer env.teardown()
 			ctx := context.Background()
-			s := nmstore.NewNodeStore(env.store.DB())
+			s := nmstore.NewNodeStore(env.store.DB(), false)
 			first := time.Now().Unix()
 
 			st := &nmstore.NodeStatus{
@@ -115,7 +115,7 @@ func TestNodeStore_ComponentVersions(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	_ = s.UpsertRegistration(ctx, &nmstore.NodeRegistration{NodeID: "node-1"})
 
@@ -148,7 +148,7 @@ func TestNodeStore_HostFacts(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	// Register with HostFacts.
 	factsJSON := `{"cpu_vendor":"AuthenticAMD","cpuid_hash":"sha256:abc","host_kernel_release":"5.15.0","kvm_api_version":12}`
@@ -202,7 +202,7 @@ func TestNodeStore_Operations(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	if err := s.CreateOperation(ctx, &nmstore.NodeOperation{NodeID: "node-1", Type: "isolate", Operator: "admin"}); err != nil {
 		t.Fatalf("create: %v", err)
@@ -224,7 +224,7 @@ func TestNodeStore_DeleteRegistration(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	if err := s.UpsertRegistration(ctx, &nmstore.NodeRegistration{NodeID: "node-1"}); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -246,7 +246,7 @@ func TestNodeStore_DeleteNode_RemovesAllRows(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	// Seed: registration + status + versions + operations.
 	s.UpsertRegistration(ctx, &nmstore.NodeRegistration{NodeID: "node-1", HostIP: "10.0.0.1"})
@@ -290,7 +290,7 @@ func TestNodeStore_DeleteNode_NotFound(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	if err := s.DeleteNode(ctx, "no-such-node"); !errors.Is(err, nmstore.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
@@ -302,7 +302,7 @@ func TestNodeStore_DeleteNode_AllowsReRegister(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	// Register, then delete.
 	s.UpsertRegistration(ctx, &nmstore.NodeRegistration{NodeID: "node-1", HostIP: "10.0.0.1"})
@@ -330,7 +330,7 @@ func TestNodeStore_QuotaSpecLifecycle(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	// CreateQuotaSpecIfAbsent: first insert succeeds.
 	row := &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 64000, MemLimit: "64Gi", Revision: 1, UpdatedBy: "alice", NodeManaged: true}
@@ -389,7 +389,7 @@ func TestNodeStore_QuotaSpecUpsertBumpsRevision(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	if err := s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: "node-a", MCpuLimit: 64000, Revision: 1, UpdatedBy: "alice"}); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -412,7 +412,7 @@ func TestNodeStore_QuotaSpecFollowersAndBump(t *testing.T) {
 	defer env.teardown()
 
 	ctx := context.Background()
-	s := nmstore.NewNodeStore(env.store.DB())
+	s := nmstore.NewNodeStore(env.store.DB(), false)
 
 	// Sentinel (cluster default) with an explicit ratio.
 	s.UpsertQuotaSpec(ctx, &nmstore.NodeQuotaSpec{NodeID: nmstore.ClusterQuotaSentinelID, PausedReleaseRatio: floatPtr(0.5), Revision: 1})

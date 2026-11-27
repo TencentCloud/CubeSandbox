@@ -27,12 +27,14 @@ jwt_secret: "yaml-secret"
 access_ttl: "30m"
 refresh_ttl: "336h"
 redis_db: 7
+split_node_inventory: true
 `)
 	if err := os.WriteFile(yamlPath, yamlContent, 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
 	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
 	t.Setenv("REDIS_DB", "")
+	t.Setenv("CUBE_OPS_SPLIT_NODE_INVENTORY", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -53,6 +55,9 @@ redis_db: 7
 	if cfg.JWTSecret != "yaml-secret" {
 		t.Errorf("JWTSecret = %q, want yaml-secret", cfg.JWTSecret)
 	}
+	if !cfg.SplitNodeInventory {
+		t.Error("split_node_inventory was not loaded")
+	}
 	if cfg.RedisDB != 7 {
 		t.Errorf("RedisDB = %d, want 7", cfg.RedisDB)
 	}
@@ -66,6 +71,7 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	yamlContent := []byte(`bind: "0.0.0.0:9999"
 database_url: "mysql://root:pass@127.0.0.1:3306/yamldb"
 redis_db: 3
+split_node_inventory: true
 `)
 	if err := os.WriteFile(yamlPath, yamlContent, 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
@@ -73,6 +79,7 @@ redis_db: 3
 	t.Setenv("CUBE_OPS_CONFIG", yamlPath)
 	t.Setenv("CUBE_OPS_BIND", "127.0.0.1:7777")
 	t.Setenv("REDIS_DB", "9")
+	t.Setenv("CUBE_OPS_SPLIT_NODE_INVENTORY", "false")
 
 	cfg, err := Load()
 	if err != nil {
@@ -80,6 +87,9 @@ redis_db: 3
 	}
 	if cfg.Bind != "127.0.0.1:7777" {
 		t.Errorf("Bind = %q, want 127.0.0.1:7777 (env should override YAML)", cfg.Bind)
+	}
+	if cfg.SplitNodeInventory {
+		t.Error("environment should disable split inventory")
 	}
 	if cfg.RedisDB != 9 {
 		t.Errorf("RedisDB = %d, want 9 (env should override YAML)", cfg.RedisDB)

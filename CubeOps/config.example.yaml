@@ -35,6 +35,11 @@ jwt_secret: ""                  # JWT_SECRET; leave empty to auto-generate on fi
 # CUBE_SANDBOX_MYSQL_*); env wins. If neither form is set, CubeOps fails
 # at startup.
 
+# --- Node inventory ---
+# Keep false until every CubeOps instance has been upgraded. See the README
+# for rolling upgrade and database rollback steps.
+split_node_inventory: false    # CUBE_OPS_SPLIT_NODE_INVENTORY
+
 # --- JWT ---
 # Access tokens are short-lived; refresh tokens are long-lived.
 access_ttl: "15m"               # JWT_ACCESS_TTL

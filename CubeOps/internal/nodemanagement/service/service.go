@@ -197,8 +197,8 @@ func (svc *NodeService) UpdateNodeStatus(ctx context.Context, nodeID string, req
 	status := &store.NodeStatus{
 		NodeID:                nodeID,
 		ConditionsJSON:        model.MustJSON(req.Conditions),
-		ImagesJSON:            model.MustJSON(req.Images),
-		LocalTemplatesJSON:    model.MustJSON(req.LocalTemplates),
+		ImagesJSON:            model.MustJSON(model.CanonicalImages(req.Images)),
+		LocalTemplatesJSON:    model.MustJSON(model.CanonicalLocalTemplates(req.LocalTemplates)),
 		HeartbeatUnix:         req.HeartbeatTime.Unix(),
 		HeartbeatReceivedUnix: receivedAt.Unix(),
 		Healthy:               reportedReady,
