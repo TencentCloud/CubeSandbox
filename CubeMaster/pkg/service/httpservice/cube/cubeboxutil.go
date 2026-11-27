@@ -31,6 +31,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/webhook"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -262,7 +263,7 @@ func applySnapshotTemplateAnnotationsAndLabels(reqIn, reqOut *types.CreateCubeSa
 	key := constants.CubeAnnotationComponentCubeShimVersion
 	selected, bound := reqOut.Annotations[key]
 	requested := maps.Clone(reqOut.Labels)
-	maps.DeleteFunc(requested, func(k, _ string) bool { return strings.HasPrefix(k, "cube.master.") })
+	maps.DeleteFunc(requested, func(k, _ string) bool { return !webhook.IsUserMetadataKey(k) })
 	applyTemplateAnnotationsAndLabels(reqIn, reqOut)
 	delete(reqOut.Annotations, key)
 	if bound {
