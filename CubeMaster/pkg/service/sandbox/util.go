@@ -296,12 +296,16 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		out.Backend = b
 		out.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	log.G(ctx).Debugf(
-		"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
-		req.InstanceType,
-		req.NetworkType,
-		formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
-	)
+	if log.IsDebug() {
+		// Arguments are evaluated before Debugf decides to drop the entry, and this
+		// one formats the config with fmt verbs, so guard the call itself.
+		log.G(ctx).Debugf(
+			"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
+			req.InstanceType,
+			req.NetworkType,
+			formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
+		)
+	}
 
 	err = checkAndGetAnnotation(req, out)
 	if err != nil {
@@ -1214,6 +1218,19 @@ func redactToken(token string) string {
 		return ""
 	}
 	return "***REDACTED***"
+}
+
+// firstImage returns the image of the first container, for the info level create
+// log. It is empty when the request carries no container or no image, which is
+// what an operator sees in that case rather than a misleading placeholder.
+func firstImage(req *types.CreateCubeSandboxReq) string {
+	if req == nil || len(req.Containers) == 0 || req.Containers[0] == nil || req.Containers[0].Image == nil {
+		return ""
+	}
+	if img := req.Containers[0].Image.Image; img != "" {
+		return img
+	}
+	return req.Containers[0].Image.Name
 }
 
 func dealSecurity(volume *types.VolumeSource) *types.VolumeSource {

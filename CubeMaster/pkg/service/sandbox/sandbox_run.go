@@ -175,8 +175,8 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		// Info level logs scalars only: serializing the whole request for every
 		// create is a real allocation source on high-throughput masters (it shows
 		// up as GC pressure on many-core hosts). The body stays available at debug.
-		log.G(ctx).Infof("CreateSandbox request_id=%s instance_type=%s containers=%d volumes=%d annotations=%d",
-			req.RequestID, req.InstanceType, len(req.Containers), len(req.Volumes), len(req.Annotations))
+		log.G(ctx).Infof("CreateSandbox request_id=%s instance_type=%s image=%s containers=%d volumes=%d annotations=%d",
+			req.RequestID, req.InstanceType, firstImage(req), len(req.Containers), len(req.Volumes), len(req.Annotations))
 	}
 
 	defer func() {
@@ -190,7 +190,7 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 				"RetCode": int64(rsp.Ret.RetCode),
 			}).Errorf("CreateSandbox_rsp fail:%+v", msg)
 		} else if log.IsDebug() {
-			log.G(ctx).Infof("CreateSandbox_rsp:%s", safePrintCreateCubeSandboxRes(rsp))
+			log.G(ctx).Debugf("CreateSandbox_rsp:%s", safePrintCreateCubeSandboxRes(rsp))
 		} else {
 			// Same rationale as the request log: keep the scalars, keep the body at debug.
 			log.G(ctx).Infof("CreateSandbox_rsp request_id=%s ret=%d sandbox_id=%s host_ip=%s e2e_ms=%s",
