@@ -295,9 +295,9 @@ var protoMessageType = reflect.TypeOf((*proto.Message)(nil)).Elem()
 // TestCreateCubeSandboxReqDeepCopySharesNoMutableState walks the original and
 // the copy in lockstep and fails on any pointer, slice or map that still points
 // at the original's backing memory. It inspects the structs by type instead of
-// a hand-written list of fields, so a mutable field added later is covered
-// without touching this test: the struct assignment at the top of DeepCopy
-// copies it by reference, which is exactly what this test rejects.
+// a hand-written list of fields, and every DeepCopy starts from a value copy of
+// its receiver, so a reference field added later is inherited by reference and
+// fails here until the matching copy line is written.
 func TestCreateCubeSandboxReqDeepCopySharesNoMutableState(t *testing.T) {
 	req := fullCreateRequest()
 	assertNoSharedState(t, "request", reflect.ValueOf(req), reflect.ValueOf(req.DeepCopy()))
