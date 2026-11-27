@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/moby/sys/mountinfo"
@@ -69,17 +70,21 @@ type s3MetadataKV interface {
 }
 
 var (
-	formatS3MetadataBaseDevice = formatS3MetadataBaseDeviceImpl
-	mountS3MetadataDevice      = mountS3MetadataDeviceImpl
-	execS3MetadataMount        = utils.ExecV
-	unmountS3MetadataPath      = unmountS3MetadataPathImpl
-	s3MetadataIsMounted        = s3MetadataIsMountedImpl
-	s3MetadataMountSource      = s3MetadataMountSourceImpl
+	formatS3MetadataBaseDevice   = formatS3MetadataBaseDeviceImpl
+	packS3MetadataDevice         = packS3MetadataDeviceImpl
+	execS3MetadataPack           = utils.ExecV
+	checkMkfsExt4PopulateSupport = checkMkfsExt4PopulateSupportImpl
+	mountS3MetadataDevice        = mountS3MetadataDeviceImpl
+	execS3MetadataMount          = utils.ExecV
+	unmountS3MetadataPath        = unmountS3MetadataPathImpl
+	s3MetadataIsMounted          = s3MetadataIsMountedImpl
+	s3MetadataMountSource        = s3MetadataMountSourceImpl
 
-	s3MetadataMu         sync.Mutex
-	s3MetadataMounts     = map[string]string{} // snapshotID → current mount path
-	s3MetadataOperations = map[string]*s3PackageOperation{}
-	testS3MetadataKV     s3MetadataKV
+	s3MetadataMu              sync.Mutex
+	s3MetadataMounts          = map[string]string{} // snapshotID -> current mount path
+	s3MetadataOperations      = map[string]*s3PackageOperation{}
+	testS3MetadataKV          s3MetadataKV
+	mkfsExt4PopulateSupported atomic.Bool
 )
 
 type s3PackageOperation struct {
@@ -146,28 +151,104 @@ func S3PackageOperationInProgress(snapshotID string) bool {
 	return busy
 }
 
-// ValidateS3PackageMetadata checks the mounted disk, not files left underneath
-// its mountpoint, before a template can be sealed and reported ready.
-func ValidateS3PackageMetadata(backend, mountPath string) error {
+// ValidateS3PackageMetadata checks staged metadata.json and snapshot JSON before publish.
+func ValidateS3PackageMetadata(backend, metaDir string) error {
+	return ValidateS3PackageMetadataFor(backend, metaDir, true)
+}
+
+// ValidateS3PackageMetadataFor checks staged JSON object files, requiring
+// state.json when requireMemory is true.
+func ValidateS3PackageMetadataFor(backend, metaDir string, requireMemory bool) error {
 	if !isS3CatalogBackend(backend) {
 		return nil
 	}
-	s3MetadataMu.Lock()
-	defer s3MetadataMu.Unlock()
-	if s3MetadataMountSource(mountPath) == "" {
-		return fmt.Errorf("snapshot metadata disk is not mounted at %s", mountPath)
+	required := []string{"metadata.json", filepath.Join("snapshot", "config.json")}
+	if requireMemory {
+		required = append(required, filepath.Join("snapshot", "state.json"))
 	}
-	for _, name := range []string{"config.json", "state.json"} {
-		path := filepath.Join(mountPath, "snapshot", name)
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read snapshot %s: %w", name, err)
-		}
-		if !json.Valid(body) {
-			return fmt.Errorf("snapshot %s is not valid JSON", name)
+	for _, rel := range required {
+		if err := validateJSONObjectFile(filepath.Join(metaDir, rel)); err != nil {
+			return fmt.Errorf("validate s3 package %s: %w", rel, err)
 		}
 	}
 	return nil
+}
+
+func validateJSONObjectFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink", filepath.Base(path))
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if obj == nil {
+		return fmt.Errorf("expected JSON object")
+	}
+	return nil
+}
+
+// validateS3MetadataDir checks metaDir is under the S3 root and symlink-free.
+func validateS3MetadataDir(metaDir string) (string, error) {
+	dir := strings.TrimSpace(metaDir)
+	if dir == "" {
+		return "", fmt.Errorf("s3 metadata dir is required")
+	}
+	base := BackendStorageRoot(cow.BackendS3)
+	cleaned, err := pathutil.ValidatePathUnderBase(base, dir)
+	if err != nil {
+		return "", fmt.Errorf("unsafe s3 metadata dir %q: %w", dir, err)
+	}
+	baseAbs, err := filepath.Abs(filepath.Clean(base))
+	if err != nil {
+		return "", fmt.Errorf("resolve s3 storage root %q: %w", base, err)
+	}
+	if cleaned == baseAbs {
+		return "", fmt.Errorf("refuse to use s3 storage root %q as metadata dir", dir)
+	}
+	rel, err := filepath.Rel(baseAbs, cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve relative s3 metadata dir %q: %w", dir, err)
+	}
+	cur := baseAbs
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, statErr := os.Lstat(cur)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				break
+			}
+			return "", fmt.Errorf("stat s3 metadata path %s: %w", cur, statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("s3 metadata path %s must not traverse symlink %s", cleaned, cur)
+		}
+	}
+	if info, statErr := os.Lstat(cleaned); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("s3 metadata dir %s must not be a symlink", cleaned)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("s3 metadata dir %s is not a directory", cleaned)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("stat s3 metadata dir %s: %w", cleaned, statErr)
+	}
+	return cleaned, nil
 }
 
 // S3MetadataVolumeName is the writable cubecow volume for one template /
@@ -243,11 +324,15 @@ func requireS3Cow() (*S3Cow, error) {
 	return store, nil
 }
 
-// EnsureS3MetadataReady creates (or reconciles) the node-local 8MiB metadata
-// base. Nothing else is done at startup: every package disk is derived and
-// mounted by the request that reads it, and a restarted Cubelet has no way to
-// tell a leftover from a disk a live sandbox is running on.
+// EnsureS3MetadataReady verifies host mkfs.ext4 -d support and creates (or
+// reconciles) the node-local 8MiB metadata base. Nothing else is done at
+// startup: every package disk is derived and mounted by the request that reads
+// it, and a restarted Cubelet has no way to tell a leftover from a disk a live
+// sandbox is running on.
 func EnsureS3MetadataReady(ctx context.Context) error {
+	if err := checkMkfsExt4PopulateSupport(); err != nil {
+		return err
+	}
 	return EnsureS3MetadataBase(ctx)
 }
 
@@ -374,40 +459,40 @@ func ensureS3MetadataBaseSnapshotLocked(ctx context.Context, store *S3Cow, base 
 	return nil
 }
 
-// PrepareS3MetadataMount ensures the node-local base volume+snapshot exist,
-// clones a writable package metadata volume from the base snapshot, and
-// mounts it at mountPath (the designed metadata/ directory). XFS is a no-op.
-func PrepareS3MetadataMount(ctx context.Context, backend, snapshotID, mountPath string) error {
-	if !isS3CatalogBackend(backend) {
-		return nil
+// packS3MetadataVolume encodes dir onto the metadata disk without mounting it.
+// Idempotent: a retry reformats the volume.
+func (m *S3Cow) packS3MetadataVolume(ctx context.Context, volName, dir string) error {
+	volName = strings.TrimSpace(volName)
+	dir = strings.TrimSpace(dir)
+	if volName == "" || dir == "" {
+		return fmt.Errorf("s3 metadata volume name and source dir are required")
 	}
-	id := strings.TrimSpace(snapshotID)
-	mountPath = strings.TrimSpace(mountPath)
-	if id == "" || mountPath == "" {
-		return fmt.Errorf("s3 metadata snapshot_id and mount path are required")
+	if IsS3MetadataBaseName(volName) {
+		return fmt.Errorf("refusing to pack onto node-local s3 metadata base")
 	}
-	if err := EnsureS3MetadataBase(ctx); err != nil {
-		return err
-	}
-	store, err := requireS3Cow()
+	cleanDir, err := validateS3MetadataDir(dir)
 	if err != nil {
 		return err
 	}
-	if store == nil {
-		return fmt.Errorf("s3 cow store is not initialized")
+	info, err := os.Lstat(cleanDir)
+	if err != nil {
+		return fmt.Errorf("stat s3 metadata source dir %s: %w", cleanDir, err)
 	}
-
-	s3MetadataMu.Lock()
-	defer s3MetadataMu.Unlock()
-
-	vol, err := store.deriveMetadataSnapshotLocked(ctx, id, "")
+	if !info.IsDir() {
+		return fmt.Errorf("s3 metadata source dir %s is not a directory", cleanDir)
+	}
+	dev, _, err := m.createOrResolveVolumePath(ctx, volName, s3MetadataBaseSizeBytes)
 	if err != nil {
 		return err
 	}
-	if err := mountS3MetadataLocked(id, vol.FilePath, mountPath); err != nil {
+	if dev, err = requireS3DevicePath(volName, "CreateVolume", dev); err != nil {
 		return err
 	}
-	return persistDerivedLocked(id, vol.VolumeName, mountPath)
+	if err := packS3MetadataDevice(cleanDir, dev); err != nil {
+		_ = deactivateS3Object(ctx, m, volName, cowKindVolume)
+		return err
+	}
+	return nil
 }
 
 // CloneS3MetadataFromParent creates the child package／sandbox metadata disk
@@ -535,14 +620,9 @@ func RollbackMetadataOwnerID(sandboxID string) string {
 	return id + rollbackMetadataOwnerSuffix
 }
 
-// MountRollbackSnapshotMetadata clones the snapshot's sealed metadata disk into
-// a volume owned by this sandbox and mounts it, returning the directory holding
-// snapshot/{config,state}.json. Callers pass that directory to the shim instead
-// of the package's own MetaDir, which Finalize left unmounted.
-//
-// XFS returns an empty path and no error: there the package directory is a
-// plain directory that is always readable.
-func MountRollbackSnapshotMetadata(ctx context.Context, backend, snapshotID, sandboxID string) (string, error) {
+// MaterializeRollbackSnapshotMetadata produces a plain metadata directory for
+// the shim from the sealed disk. XFS returns an empty path (no-op).
+func MaterializeRollbackSnapshotMetadata(ctx context.Context, backend, snapshotID, sandboxID string) (string, error) {
 	if !isS3CatalogBackend(backend) {
 		return "", nil
 	}
@@ -551,27 +631,75 @@ func MountRollbackSnapshotMetadata(ctx context.Context, backend, snapshotID, san
 	if snapshotID == "" || sandboxID == "" {
 		return "", fmt.Errorf("rollback metadata snapshot_id and sandbox_id are required")
 	}
-	owner := RollbackMetadataOwnerID(sandboxID)
-	// A rollback that died before its release ran leaves a clone of some other
-	// snapshot's metadata under this name. Reusing it would restore from the
-	// wrong config, so drop it and clone again.
+	if err := pathutil.ValidateSafeID(sandboxID); err != nil {
+		return "", fmt.Errorf("invalid rollback metadata sandbox_id: %w", err)
+	}
+	// Drop any stale metadata copy/mount from an interrupted rollback.
 	if err := ReleaseRollbackSnapshotMetadata(ctx, backend, sandboxID); err != nil {
 		return "", err
 	}
-	mountPath := rollbackMetadataMountPath(sandboxID)
-	if err := CloneS3MetadataFromParent(ctx, backend, snapshotID, owner, mountPath); err != nil {
+	owner := RollbackMetadataOwnerID(sandboxID)
+	dst := rollbackMetadataMountPath(sandboxID)
+	if dst == "" {
+		return "", fmt.Errorf("rollback metadata path for sandbox %s is empty", sandboxID)
+	}
+	mnt := rollbackMetadataTempMountPath(dst)
+	if err := CloneS3MetadataFromParent(ctx, backend, snapshotID, owner, mnt); err != nil {
+		_ = ReleaseS3MetadataDerivedVolume(ctx, backend, owner)
+		_ = os.RemoveAll(mnt) // NOCC:Path Traversal()
 		return "", err
 	}
-	return mountPath, nil
+	copyErr := os.CopyFS(filepath.Join(dst, "snapshot"), os.DirFS(filepath.Join(mnt, "snapshot")))
+	relErr := ReleaseS3MetadataDerivedVolume(ctx, backend, owner)
+	rmErr := os.RemoveAll(mnt) // NOCC:Path Traversal()
+	var validateErr error
+	if copyErr == nil {
+		validateErr = validateRollbackSnapshotDir(dst)
+	}
+	if err := errors.Join(copyErr, validateErr, relErr, rmErr); err != nil {
+		_ = os.RemoveAll(dst) // NOCC:Path Traversal()
+		return "", err
+	}
+	return dst, nil
 }
 
-// ReleaseRollbackSnapshotMetadata unmounts and deletes the copy
-// MountRollbackSnapshotMetadata made. The package's sealed metadata snapshot is
-// left alone: it belongs to the snapshot, which outlives this sandbox.
+func validateRollbackSnapshotDir(dst string) error {
+	for _, name := range []string{"config.json", "state.json"} {
+		rel := filepath.Join("snapshot", name)
+		if err := validateJSONObjectFile(filepath.Join(dst, rel)); err != nil {
+			return fmt.Errorf("validate materialized rollback %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+// ReleaseRollbackSnapshotMetadata removes this sandbox's materialized copy;
+// the package's sealed snapshot is left intact.
 func ReleaseRollbackSnapshotMetadata(ctx context.Context, backend, sandboxID string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil
+	}
+	if err := pathutil.ValidateSafeID(sandboxID); err != nil {
+		return fmt.Errorf("invalid rollback metadata sandbox_id: %w", err)
+	}
 	owner := RollbackMetadataOwnerID(sandboxID)
 	if owner == "" {
 		return nil
+	}
+	if isS3CatalogBackend(backend) {
+		if dst := rollbackMetadataMountPath(sandboxID); dst != "" {
+			// Unmount first to clean up mounts left by crashed/older Cubelets.
+			s3MetadataMu.Lock()
+			umountErr := errors.Join(
+				unmountS3MetadataPathIfMounted(rollbackMetadataTempMountPath(dst)),
+				unmountS3MetadataPathIfMounted(dst),
+			)
+			s3MetadataMu.Unlock()
+			if umountErr != nil {
+				return umountErr
+			}
+		}
 	}
 	if err := ReleaseS3MetadataDerivedVolume(ctx, backend, owner); err != nil {
 		return err
@@ -579,31 +707,32 @@ func ReleaseRollbackSnapshotMetadata(ctx context.Context, backend, sandboxID str
 	if !isS3CatalogBackend(backend) {
 		return nil
 	}
-	if path := rollbackMetadataMountPath(sandboxID); path != "" {
-		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove rollback metadata mount %s: %w", path, err)
+	if dst := rollbackMetadataMountPath(sandboxID); dst != "" {
+		mnt := rollbackMetadataTempMountPath(dst)
+		if err := os.RemoveAll(mnt); err != nil && !os.IsNotExist(err) { // NOCC:Path Traversal()
+			return fmt.Errorf("remove rollback metadata temp mount %s: %w", mnt, err)
+		}
+		if err := os.RemoveAll(dst); err != nil && !os.IsNotExist(err) { // NOCC:Path Traversal()
+			return fmt.Errorf("remove rollback metadata dir %s: %w", dst, err)
 		}
 	}
 	return nil
 }
 
 func rollbackMetadataMountPath(sandboxID string) string {
-	home := SnapshotHome(cow.BackendS3, SnapshotKindNormal, strings.TrimSpace(sandboxID))
+	id := strings.TrimSpace(sandboxID)
+	if id == "" || pathutil.ValidateSafeID(id) != nil {
+		return ""
+	}
+	home := SnapshotHome(cow.BackendS3, SnapshotKindNormal, id)
 	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, rollbackMetadataDirName)
 }
 
-// UnmountS3Metadata unmounts a metadata mount point if it is mounted.
-func UnmountS3Metadata(mountPath string) error {
-	mountPath = strings.TrimSpace(mountPath)
-	if mountPath == "" {
-		return nil
-	}
-	s3MetadataMu.Lock()
-	defer s3MetadataMu.Unlock()
-	return unmountS3MetadataPathIfMounted(mountPath)
+func rollbackMetadataTempMountPath(dst string) string {
+	return dst + ".mnt"
 }
 
 // ReleaseS3MetadataVolume unmounts and deletes the derived metadata volume
@@ -946,6 +1075,87 @@ func formatS3MetadataBaseDeviceImpl(devicePath string) error {
 			return fmt.Errorf("mkfs.ext4 s3 metadata base failed:%s", stderr)
 		}
 	}
+	return nil
+}
+
+func mkfsExt4PopulateArgs(dir, dev string, dryRun bool) []string {
+	cmd := []string{"mkfs.ext4"}
+	if dryRun {
+		cmd = append(cmd, "-n")
+	}
+	return append(cmd, "-F", "-O", "^has_journal", "-b", "4096", "-d", dir, dev)
+}
+
+func packS3MetadataDeviceImpl(dir, dev string) error {
+	dir = strings.TrimSpace(dir)
+	dev = strings.TrimSpace(dev)
+	if dir == "" {
+		return fmt.Errorf("s3 metadata source dir is required")
+	}
+	if dev == "" {
+		return errS3EmptyDevicePath("metadata", "CreateVolume")
+	}
+	cmd := mkfsExt4PopulateArgs(dir, dev, false)
+	if _, stderr, err := execS3MetadataPack(cmd, cmdTimeout); err != nil {
+		packErr := fmt.Errorf("mkfs.ext4 -d %s %s: %w", dir, dev, err)
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			return fmt.Errorf("%w: %s", packErr, msg)
+		}
+		return packErr
+	}
+	return nil
+}
+
+func s3ProbeTempParent() string {
+	if localStorage == nil || localStorage.config == nil {
+		return ""
+	}
+	if strings.TrimSpace(localStorage.config.DataPath) == "" &&
+		strings.TrimSpace(localStorage.config.RootPath) == "" {
+		return ""
+	}
+	parent := CubeletStorageWorkPath()
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return ""
+	}
+	return parent
+}
+
+// checkMkfsExt4PopulateSupportImpl probes mkfs.ext4 -d support once per process
+// so S3 init fails fast on unsupported hosts.
+func checkMkfsExt4PopulateSupportImpl() error {
+	if mkfsExt4PopulateSupported.Load() {
+		return nil
+	}
+	tmpDir, err := os.MkdirTemp(s3ProbeTempParent(), "cubelet-mkfs-ext4-probe-*")
+	if err != nil {
+		return fmt.Errorf("probe mkfs.ext4 -d support: create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir) // NOCC:Path Traversal()
+
+	rootDir := filepath.Join(tmpDir, "root")
+	if err := os.Mkdir(rootDir, 0o755); err != nil {
+		return fmt.Errorf("probe mkfs.ext4 -d support: create root dir: %w", err)
+	}
+	imgPath := filepath.Join(tmpDir, "probe.img")
+	f, err := os.OpenFile(imgPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("probe mkfs.ext4 -d support: create probe image: %w", err)
+	}
+	truncErr := f.Truncate(s3MetadataBaseSizeBytes)
+	closeErr := f.Close()
+	if err := errors.Join(truncErr, closeErr); err != nil {
+		return fmt.Errorf("probe mkfs.ext4 -d support: size probe image: %w", err)
+	}
+	cmd := mkfsExt4PopulateArgs(rootDir, imgPath, true)
+	if _, stderr, err := execS3MetadataPack(cmd, cmdTimeout); err != nil {
+		probeErr := fmt.Errorf("mkfs.ext4 -d is not supported or unavailable: %w", err)
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			return fmt.Errorf("%w: %s", probeErr, msg)
+		}
+		return probeErr
+	}
+	mkfsExt4PopulateSupported.Store(true)
 	return nil
 }
 

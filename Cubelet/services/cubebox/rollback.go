@@ -177,23 +177,18 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		return rsp, nil
 	}
 
-	// S3 Finalize unmounts package metadata. Restore reads
-	// <meta>/snapshot/{config,state}.json from that disk, so clone the sealed
-	// snap into a disk this sandbox owns and read the config from there. XFS
-	// is a no-op and keeps the catalog MetaDir.
-	// Same-node only: catalog miss (no local package) already failed above.
-	rollbackMetaDir, err := storage.MountRollbackSnapshotMetadata(prepareCtx, backend, req.GetSnapshotID(), req.GetSandboxID())
+	// S3 keeps metadata only on its sealed disk; materialize a plain copy for
+	// the shim. XFS is a no-op. Same-node only (catalog miss already failed).
+	rollbackMetaDir, err := storage.MaterializeRollbackSnapshotMetadata(prepareCtx, backend, req.GetSnapshotID(), req.GetSandboxID())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to mount snapshot metadata: %v", err)
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to materialize snapshot metadata: %v", err)
 		return rsp, nil
 	}
 	if rollbackMetaDir != "" {
 		metaDir = rollbackMetaDir
 		defer func() {
-			// Only the copy this read created goes away. The package's sealed
-			// metadata snap stays: it belongs to the snapshot, which outlives
-			// this rollback.
+			// Remove only this sandbox's copy; the sealed snapshot stays.
 			if relErr := storage.ReleaseRollbackSnapshotMetadata(ctx, backend, req.GetSandboxID()); relErr != nil {
 				stepLog.Warnf("rollback: release snapshot metadata copy: %v", relErr)
 			}
@@ -365,6 +360,9 @@ func runRollbackWithPreparedGuestMetrics(
 func validateRollbackSandboxRequest(req *cubebox.RollbackSandboxRequest) error {
 	if req.GetSandboxID() == "" {
 		return fmt.Errorf("sandboxID is required")
+	}
+	if err := pathutil.ValidateSafeID(req.GetSandboxID()); err != nil {
+		return fmt.Errorf("invalid sandboxID: %v", err)
 	}
 	if req.GetSnapshotID() == "" {
 		return fmt.Errorf("snapshotID is required")

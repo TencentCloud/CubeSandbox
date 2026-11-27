@@ -6,12 +6,15 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
@@ -19,8 +22,9 @@ import (
 )
 
 type memS3MetadataKV struct {
-	mu   sync.Mutex
-	data []byte
+	mu     sync.Mutex
+	data   []byte
+	setErr error
 }
 
 func (m *memS3MetadataKV) Get() ([]byte, error) {
@@ -37,6 +41,9 @@ func (m *memS3MetadataKV) Get() ([]byte, error) {
 func (m *memS3MetadataKV) Set(body []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.setErr != nil {
+		return m.setErr
+	}
 	m.data = append([]byte(nil), body...)
 	return nil
 }
@@ -45,6 +52,9 @@ func stubS3MetadataMounts(t *testing.T) {
 	t.Helper()
 	mounted := map[string]string{}
 	origFormat := formatS3MetadataBaseDevice
+	origPack := packS3MetadataDevice
+	origExecPack := execS3MetadataPack
+	origProbe := checkMkfsExt4PopulateSupport
 	origMount := mountS3MetadataDevice
 	origUmount := unmountS3MetadataPath
 	origIsMounted := s3MetadataIsMounted
@@ -52,7 +62,14 @@ func stubS3MetadataMounts(t *testing.T) {
 	origKV := testS3MetadataKV
 	kv := &memS3MetadataKV{}
 	testS3MetadataKV = kv
+	mkfsExt4PopulateSupported.Store(false)
 	formatS3MetadataBaseDevice = func(string) error {
+		return nil
+	}
+	packS3MetadataDevice = func(string, string) error {
+		return nil
+	}
+	checkMkfsExt4PopulateSupport = func() error {
 		return nil
 	}
 	mountS3MetadataDevice = func(devicePath, mountPath string) error {
@@ -70,15 +87,32 @@ func stubS3MetadataMounts(t *testing.T) {
 	s3MetadataMountSource = func(mountPath string) string { return mounted[mountPath] }
 	t.Cleanup(func() {
 		formatS3MetadataBaseDevice = origFormat
+		packS3MetadataDevice = origPack
+		execS3MetadataPack = origExecPack
+		checkMkfsExt4PopulateSupport = origProbe
 		mountS3MetadataDevice = origMount
 		unmountS3MetadataPath = origUmount
 		s3MetadataIsMounted = origIsMounted
 		s3MetadataMountSource = origMountSource
 		testS3MetadataKV = origKV
+		mkfsExt4PopulateSupported.Store(false)
 		s3MetadataMu.Lock()
 		s3MetadataMounts = map[string]string{}
 		s3MetadataMu.Unlock()
 	})
+}
+
+func writeValidS3PackageMetadata(t *testing.T, metaDir string, withMemory, withPauseSpec bool) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(metaDir, "snapshot"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(metaDir, "metadata.json"), []byte(`{"version":"1"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(metaDir, "snapshot", "config.json"), []byte(`{"ok":true}`), 0o644))
+	if withMemory {
+		require.NoError(t, os.WriteFile(filepath.Join(metaDir, "snapshot", "state.json"), []byte(`{"ok":true}`), 0o644))
+	}
+	if withPauseSpec {
+		require.NoError(t, os.WriteFile(filepath.Join(metaDir, "sandbox_spec.json"), []byte(`{"sandbox":"sb"}`), 0o644))
+	}
 }
 
 func TestS3MetadataMountAliasDoesNotRemount(t *testing.T) {
@@ -139,19 +173,41 @@ func TestS3MetadataRecoverySkipsActivePackageWriter(t *testing.T) {
 	require.True(t, s3MetadataIsMounted(dir))
 }
 
-func TestValidateS3PackageMetadataRejectsMissingState(t *testing.T) {
-	stubS3MetadataMounts(t)
+func TestValidateS3PackageMetadata(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "snapshot"), 0o755))
-	for _, name := range []string{"config.json", "state.json"} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", name), []byte(`{}`), 0o644))
-	}
-	// Host files underneath an unmounted metadata disk must not be accepted.
-	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "not mounted")
-	require.NoError(t, mountS3MetadataDevice("/dev/nvme42n1", dir))
+	writeValidS3PackageMetadata(t, dir, true, false)
+	// Plain staged directories pass validation without being mounted.
 	require.NoError(t, ValidateS3PackageMetadata(cow.BackendS3, dir))
+	require.NoError(t, ValidateS3PackageMetadataFor(cow.BackendS3, dir, false))
+
+	// Invalid JSON and non-object JSON values (such as null or arrays) are rejected.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", "config.json"), []byte(`not-json`), 0o644))
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "invalid JSON")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", "config.json"), []byte(`null`), 0o644))
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "expected JSON object")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", "config.json"), []byte(`[]`), 0o644))
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "invalid JSON")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot", "config.json"), []byte(`{}`), 0o644))
+
+	// Missing metadata.json is rejected for both full and fs-only snapshots.
+	require.NoError(t, os.Remove(filepath.Join(dir, "metadata.json")))
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "metadata.json")
+	require.ErrorContains(t, ValidateS3PackageMetadataFor(cow.BackendS3, dir, false), "metadata.json")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{}`), 0o644))
+
+	// Missing state.json fails full validation but passes fs-only validation.
 	require.NoError(t, os.Remove(filepath.Join(dir, "snapshot", "state.json")))
 	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "state.json")
+	require.NoError(t, ValidateS3PackageMetadataFor(cow.BackendS3, dir, false))
+
+	// Symlink files are rejected.
+	target := filepath.Join(t.TempDir(), "real-state.json")
+	require.NoError(t, os.WriteFile(target, []byte(`{}`), 0o644))
+	require.NoError(t, os.Symlink(target, filepath.Join(dir, "snapshot", "state.json")))
+	require.ErrorContains(t, ValidateS3PackageMetadata(cow.BackendS3, dir), "symlink")
+
+	// Non-S3 backends are no-op.
+	require.NoError(t, ValidateS3PackageMetadata(cow.BackendXFS, dir))
 }
 
 func TestEnsureS3MetadataBaseCreatesOnce(t *testing.T) {
@@ -197,35 +253,11 @@ func TestEnsureS3MetadataBaseRecreatesWhenMissing(t *testing.T) {
 }
 
 func TestRollbackSnapshotMetadataNoopOnXFS(t *testing.T) {
-	dir, err := MountRollbackSnapshotMetadata(context.Background(), cow.BackendXFS, "snap-1", "sb-1")
+	dir, err := MaterializeRollbackSnapshotMetadata(context.Background(), cow.BackendXFS, "snap-1", "sb-1")
 	require.NoError(t, err)
 	require.Empty(t, dir)
 	require.NoError(t, ReleaseRollbackSnapshotMetadata(context.Background(), cow.BackendXFS, "sb-1"))
 	require.NoError(t, ReleaseS3MetadataVolume(context.Background(), cow.BackendXFS, "snap-1"))
-}
-
-func TestPrepareS3MetadataMountSnapshotsFromBase(t *testing.T) {
-	stubS3MetadataMounts(t)
-	engine := &fakeCowEngine{createVolumePath: "/dev/mapper/" + S3MetadataBaseVolumeName}
-	useTestCowStorage(t, engine)
-
-	mount := t.TempDir()
-	require.NoError(t, PrepareS3MetadataMount(context.Background(), cow.BackendS3, "snap-meta-1", mount))
-	require.Equal(t, [][2]string{{S3MetadataBaseVolumeName, S3MetadataBaseSnapshotName}}, engine.createSnapshots)
-	require.Equal(t, [][2]string{{S3MetadataBaseSnapshotName, S3MetadataVolumeName("snap-meta-1")}}, engine.createVolumeFromSnapshots)
-	require.True(t, s3MetadataIsMounted(mount))
-
-	require.NoError(t, UnmountS3Metadata(mount))
-	final := t.TempDir()
-	require.NoError(t, MountS3MetadataAt(context.Background(), cow.BackendS3, "snap-meta-1", final))
-	require.True(t, s3MetadataIsMounted(final))
-	require.False(t, s3MetadataIsMounted(mount))
-
-	require.NoError(t, ReleaseS3MetadataVolume(context.Background(), cow.BackendS3, "snap-meta-1"))
-	require.Equal(t, []string{S3MetadataVolumeName("snap-meta-1")}, engine.deletedVolumes)
-	require.NotContains(t, engine.deletedVolumes, S3MetadataBaseVolumeName)
-	require.NotContains(t, engine.deletedSnapshots, S3MetadataBaseSnapshotName)
-	require.False(t, s3MetadataIsMounted(final))
 }
 
 func TestMountS3MetadataAtClonesSealedSnap(t *testing.T) {
@@ -246,16 +278,13 @@ func TestMountS3MetadataAtClonesSealedSnap(t *testing.T) {
 	require.Equal(t, [][2]string{{snap, S3MetadataVolumeName(id)}}, engine.createVolumeFromSnapshots)
 	require.True(t, s3MetadataIsMounted(mount))
 	require.NotContains(t, engine.activatedVolumes, snap)
-}
 
-func TestPrepareS3MetadataMountNoOpOnXFS(t *testing.T) {
-	stubS3MetadataMounts(t)
-	engine := &fakeCowEngine{}
-	useTestCowStorage(t, engine)
-
-	require.NoError(t, PrepareS3MetadataMount(context.Background(), cow.BackendXFS, "snap-xfs", t.TempDir()))
-	require.Empty(t, engine.createSnapshots)
-	require.Empty(t, engine.createVolumes)
+	require.NoError(t, ReleaseS3MetadataVolume(context.Background(), cow.BackendS3, id))
+	require.Contains(t, engine.deletedVolumes, S3MetadataVolumeName(id))
+	require.Contains(t, engine.deletedSnapshots, snap)
+	require.NotContains(t, engine.deletedVolumes, S3MetadataBaseVolumeName)
+	require.NotContains(t, engine.deletedSnapshots, S3MetadataBaseSnapshotName)
+	require.False(t, s3MetadataIsMounted(mount))
 }
 
 func TestCloneS3MetadataFromParentUsesParentVolume(t *testing.T) {
@@ -382,6 +411,7 @@ func TestUploadStatusExportStatusFailedIsFailed(t *testing.T) {
 func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 	stubS3MetadataMounts(t)
 	engine := &fakeCowEngine{
+		createVolumePath: "/dev/mapper/" + S3MetadataVolumeName("snap-1"),
 		volumeInfos: map[string]*cubecow.Volume{
 			"tpl-snap-1-rootfs":            {SizeBytes: 1 << 20},
 			"tpl-snap-1-memory":            {SizeBytes: 64 << 20},
@@ -389,13 +419,16 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 			S3MetadataBaseVolumeName:       {SizeBytes: 8 << 20},
 		},
 	}
-	useTestCowStorage(t, engine)
-	home := t.TempDir()
+	useTestCowStorageAt(t, engine)
+	t.Cleanup(func() { DeleteSnapshotCatalogFor(cow.BackendS3, "snap-1") })
+	home := SnapshotHome(cow.BackendS3, SnapshotKindNormal, "snap-1")
 	require.NoError(t, EnsureSnapshotPackage(cow.BackendS3, home))
+	metaDir := filepath.Join(home, SnapshotMetadataDir)
+	writeValidS3PackageMetadata(t, metaDir, true, false)
 	require.NoError(t, WriteSnapshotCatalogFor(cow.BackendS3, &SnapshotCatalogEntry{
 		SnapshotID:   "snap-1",
 		SnapshotPath: home,
-		MetaDir:      filepath.Join(home, SnapshotMetadataDir),
+		MetaDir:      metaDir,
 		RootfsVol:    "tpl-snap-1-rootfs",
 		RootfsKind:   cowKindSnapshot,
 		MemoryVol:    "tpl-snap-1-memory",
@@ -404,7 +437,9 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 		MetadataKind: cowKindVolume,
 		Backend:      cow.BackendS3,
 	}))
-	require.NoError(t, FinalizeS3PackageSnapshots(context.Background(), cow.BackendS3, "snap-1"))
+	res, err := FinalizeS3PackageSnapshots(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.NoError(t, res.CleanupErr)
 	require.Contains(t, engine.deletedVolumes, S3MetadataVolumeName("snap-1"))
 	require.Contains(t, engine.deactivatedVolumes, S3MetadataVolumeName("snap-1"))
 	require.Contains(t, engine.deactivatedVolumes, S3MetadataSnapshotName("snap-1"))
@@ -552,10 +587,13 @@ func TestEnsureS3MetadataReadyLeavesPackageObjectsAlone(t *testing.T) {
 	require.NotEmpty(t, engine.volumeInfos[mem].DevicePath)
 }
 
-func TestMountRollbackSnapshotMetadataIsOwnedBySandbox(t *testing.T) {
+func newRollbackMaterializeFixture(
+	t *testing.T,
+	snapshotID, sandboxID string,
+	populate func(t *testing.T, mountPath string),
+) (*fakeCowEngine, string) {
+	t.Helper()
 	stubS3MetadataMounts(t)
-	snapshotID := "snap-4c0c3e1f"
-	sandboxID := "b1c1d1e1f1"
 	packageSnap := S3MetadataSnapshotName(snapshotID)
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
@@ -564,30 +602,221 @@ func TestMountRollbackSnapshotMetadataIsOwnedBySandbox(t *testing.T) {
 			packageSnap:                {SizeBytes: 8 << 20},
 		},
 	}
-	useTestCowStorage(t, engine)
-	localStorage.config.DataPath = t.TempDir()
+	useTestCowStorageAt(t, engine)
+	if populate != nil {
+		origMount := mountS3MetadataDevice
+		mountS3MetadataDevice = func(devicePath, mountPath string) error {
+			if err := origMount(devicePath, mountPath); err != nil {
+				return err
+			}
+			populate(t, mountPath)
+			return nil
+		}
+	}
+	return engine, packageSnap
+}
+
+func TestMaterializeRollbackMetadataReturnsPlainDir(t *testing.T) {
+	snapshotID := "snap-4c0c3e1f"
+	sandboxID := "b1c1d1e1f1"
+	engine, packageSnap := newRollbackMaterializeFixture(t, snapshotID, sandboxID, func(t *testing.T, mountPath string) {
+		snapDir := filepath.Join(mountPath, "snapshot")
+		require.NoError(t, os.MkdirAll(snapDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(snapDir, "config.json"), []byte(`{"vm":"cfg"}`), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(snapDir, "state.json"), []byte(`{"vm":"state"}`), 0o644))
+	})
+	origUmount := unmountS3MetadataPath
+	unmountS3MetadataPath = func(mountPath string) error {
+		if err := os.RemoveAll(filepath.Join(mountPath, "snapshot")); err != nil {
+			return err
+		}
+		return origUmount(mountPath)
+	}
 
 	ctx := context.Background()
-	dir, err := MountRollbackSnapshotMetadata(ctx, cow.BackendS3, snapshotID, sandboxID)
+	dir, err := MaterializeRollbackSnapshotMetadata(ctx, cow.BackendS3, snapshotID, sandboxID)
 	require.NoError(t, err)
 
 	owned := S3MetadataVolumeName(RollbackMetadataOwnerID(sandboxID))
+	mnt := dir + ".mnt"
 	require.Equal(t, [][2]string{{packageSnap, owned}}, engine.createVolumeFromSnapshots)
-	require.True(t, s3MetadataIsMounted(dir))
-	// Neither the sandbox's own metadata disk nor the package's sealed snap is
-	// what a rollback reads through.
-	require.NotContains(t, engine.volumeInfos, S3MetadataVolumeName(sandboxID))
-
-	require.NoError(t, ReleaseRollbackSnapshotMetadata(ctx, cow.BackendS3, sandboxID))
-	// Mount drops a leftover clone before making a new one, so delete runs
-	// twice for the same name. The package snap must still be untouched.
+	require.False(t, s3MetadataIsMounted(dir), "returned dir must be a plain directory, not a mount")
+	require.False(t, s3MetadataIsMounted(mnt), "temporary mount must already be unmounted")
+	require.NoDirExists(t, mnt, "temporary mount dir must be removed before returning")
 	require.NotEmpty(t, engine.deletedVolumes)
 	for _, name := range engine.deletedVolumes {
 		require.Equal(t, owned, name)
 	}
 	require.NotContains(t, engine.deletedSnapshots, packageSnap)
-	require.False(t, s3MetadataIsMounted(dir))
+	require.NotContains(t, engine.volumeInfos, S3MetadataVolumeName(sandboxID))
+
+	gotCfg, err := os.ReadFile(filepath.Join(dir, "snapshot", "config.json"))
+	require.NoError(t, err)
+	require.Equal(t, `{"vm":"cfg"}`, string(gotCfg))
+	gotState, err := os.ReadFile(filepath.Join(dir, "snapshot", "state.json"))
+	require.NoError(t, err)
+	require.Equal(t, `{"vm":"state"}`, string(gotState))
+
+	require.NoError(t, ReleaseRollbackSnapshotMetadata(ctx, cow.BackendS3, sandboxID))
 	require.NoDirExists(t, dir)
+}
+
+func TestMaterializeRollbackMetadataErrorsAndCleanup(t *testing.T) {
+	cases := []struct {
+		name      string
+		cloneErr  error
+		populate  func(t *testing.T, mountPath string)
+		wantErr   string
+		wantClone bool
+	}{
+		{
+			name:     "clone failure cleans up dirs",
+			cloneErr: errors.New("clone rpc timeout"),
+			wantErr:  "clone rpc timeout",
+		},
+		{
+			name:      "missing snapshot dir fails copy and cleans up",
+			wantErr:   "no such file or directory",
+			wantClone: true,
+		},
+		{
+			name: "empty snapshot dir rejected before delete_vm",
+			populate: func(t *testing.T, mountPath string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(mountPath, "snapshot"), 0o755))
+			},
+			wantErr:   "config.json",
+			wantClone: true,
+		},
+		{
+			name: "missing state.json rejected",
+			populate: func(t *testing.T, mountPath string) {
+				snapDir := filepath.Join(mountPath, "snapshot")
+				require.NoError(t, os.MkdirAll(snapDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(snapDir, "config.json"), []byte(`{"ok":true}`), 0o644))
+			},
+			wantErr:   "state.json",
+			wantClone: true,
+		},
+		{
+			name: "null json payload rejected",
+			populate: func(t *testing.T, mountPath string) {
+				snapDir := filepath.Join(mountPath, "snapshot")
+				require.NoError(t, os.MkdirAll(snapDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(snapDir, "config.json"), []byte(`null`), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(snapDir, "state.json"), []byte(`{"ok":true}`), 0o644))
+			},
+			wantErr:   "expected JSON object",
+			wantClone: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshotID := "snap-rb-err"
+			sandboxID := "sb-rb-err"
+			engine, packageSnap := newRollbackMaterializeFixture(t, snapshotID, sandboxID, tc.populate)
+			engine.createVolumeFromSnapshotErr = tc.cloneErr
+
+			dir, err := MaterializeRollbackSnapshotMetadata(context.Background(), cow.BackendS3, snapshotID, sandboxID)
+			require.ErrorContains(t, err, tc.wantErr)
+			require.Empty(t, dir)
+
+			dst := rollbackMetadataMountPath(sandboxID)
+			require.False(t, s3MetadataIsMounted(dst+".mnt"))
+			require.NoDirExists(t, dst)
+			require.NoDirExists(t, dst+".mnt")
+			require.NotContains(t, engine.deletedSnapshots, packageSnap)
+			if tc.wantClone {
+				require.Contains(t, engine.deletedVolumes, S3MetadataVolumeName(RollbackMetadataOwnerID(sandboxID)))
+			}
+		})
+	}
+
+	t.Run("release unmounts and removes crash-leftover mnt", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		useTestCowStorageAt(t, &fakeCowEngine{})
+		sandboxID := "sb-crash-leftover"
+		dst := rollbackMetadataMountPath(sandboxID)
+		mnt := dst + ".mnt"
+		require.NoError(t, os.MkdirAll(mnt, 0o755))
+		require.NoError(t, os.MkdirAll(dst, 0o755))
+		require.NoError(t, mountS3MetadataDevice("/dev/nvme9n1", mnt))
+		require.True(t, s3MetadataIsMounted(mnt))
+
+		require.NoError(t, ReleaseRollbackSnapshotMetadata(context.Background(), cow.BackendS3, sandboxID))
+		require.False(t, s3MetadataIsMounted(mnt))
+		require.NoDirExists(t, mnt)
+		require.NoDirExists(t, dst)
+	})
+}
+
+func TestMkfsExt4PopulateProbe(t *testing.T) {
+	t.Run("fails fast before base volume creation when unsupported", func(t *testing.T) {
+		stubS3MetadataMounts(t)
+		checkMkfsExt4PopulateSupport = func() error {
+			return errors.New("mkfs.ext4 -d is not supported")
+		}
+		engine := &fakeCowEngine{createVolumePath: "/dev/mapper/" + S3MetadataBaseVolumeName}
+		useTestCowStorage(t, engine)
+
+		err := EnsureS3MetadataReady(context.Background())
+		require.ErrorContains(t, err, "mkfs.ext4 -d")
+		require.Empty(t, engine.createVolumes)
+	})
+
+	t.Run("real mkfs.ext4 -n -d probe caches success", func(t *testing.T) {
+		if _, err := exec.LookPath("mkfs.ext4"); err != nil {
+			t.Skip(err.Error())
+		}
+		mkfsExt4PopulateSupported.Store(false)
+		t.Cleanup(func() { mkfsExt4PopulateSupported.Store(false) })
+		require.NoError(t, checkMkfsExt4PopulateSupportImpl())
+
+		origExec := execS3MetadataPack
+		t.Cleanup(func() { execS3MetadataPack = origExec })
+		execS3MetadataPack = func([]string, time.Duration) (string, string, error) {
+			return "", "", errors.New("cached probe must not invoke mkfs.ext4 again")
+		}
+		require.NoError(t, checkMkfsExt4PopulateSupportImpl())
+	})
+}
+
+func TestPackS3MetadataDeviceImplBuildsValidExt4Image(t *testing.T) {
+	for _, bin := range []string{"mkfs.ext4", "e2fsck", "debugfs"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skip(err.Error())
+		}
+	}
+	srcDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "snapshot"), 0o755))
+	wantCatalog := `{"snapshot_id":"snap-real","metadata_vol":"s3-meta-snap-real-snap"}`
+	wantConfig := `{"vm":"real-cfg"}`
+	wantState := `{"vm":"real-state"}`
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "catalog.json"), []byte(wantCatalog), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "snapshot", "config.json"), []byte(wantConfig), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "snapshot", "state.json"), []byte(wantState), 0o644))
+
+	imgPath := filepath.Join(t.TempDir(), "metadata.ext4")
+	f, err := os.Create(imgPath)
+	require.NoError(t, err)
+	require.NoError(t, f.Truncate(s3MetadataBaseSizeBytes))
+	require.NoError(t, f.Close())
+
+	require.NoError(t, packS3MetadataDeviceImpl(srcDir, imgPath))
+
+	out, err := exec.Command("e2fsck", "-fn", imgPath).CombinedOutput()
+	require.NoError(t, err, "e2fsck failed: %s", string(out))
+
+	readFromImage := func(imagePath string) string {
+		t.Helper()
+		cmd := exec.Command("debugfs", "-R", "cat "+imagePath, imgPath)
+		body, err := cmd.Output()
+		require.NoError(t, err)
+		return string(body)
+	}
+	require.Equal(t, wantCatalog, readFromImage("/catalog.json"))
+	require.Equal(t, wantConfig, readFromImage("/snapshot/config.json"))
+	require.Equal(t, wantState, readFromImage("/snapshot/state.json"))
 }
 
 func TestS3MetadataInvalidMountPaths(t *testing.T) {
@@ -599,7 +828,7 @@ func TestS3MetadataInvalidMountPaths(t *testing.T) {
 	require.NoError(t, err)
 	fixture := fmt.Sprintf("42 1 259:1 / %s rw - ext4 /dev/root rw\n", strings.ReplaceAll(cwd, " ", `\040`))
 	for _, path := range []string{"", " ", ".", "./", "child/.."} {
-		require.NoError(t, UnmountS3Metadata(path), path)
+		require.NoError(t, unmountS3MetadataPathIfMounted(path), path)
 		require.False(t, s3MetadataIsMountedImpl(path), path)
 		require.Empty(t, s3MetadataMountSourceFrom(strings.NewReader(fixture), path), path)
 	}
@@ -662,4 +891,31 @@ func TestS3MetadataCleanupRequiresCurrentWriterContext(t *testing.T) {
 	t.Cleanup(nextRelease)
 	_, err = BeginS3PackageCleanup(ctx, cow.BackendS3, id)
 	require.ErrorContains(t, err, "active write", "a stale context must not own the next writer")
+}
+
+func TestRollbackMetadataRejectsUnsafeSandboxID(t *testing.T) {
+	stubS3MetadataMounts(t)
+	engine := &fakeCowEngine{}
+	useTestCowStorageAt(t, engine)
+
+	for _, unsafeID := range []string{"../escape", "a/b", `a\b`, ".."} {
+		require.Empty(t, rollbackMetadataMountPath(unsafeID), "unsafe sandboxID %q must yield empty path", unsafeID)
+		_, err := MaterializeRollbackSnapshotMetadata(context.Background(), cow.BackendS3, "snap-1", unsafeID)
+		require.ErrorContains(t, err, "invalid rollback metadata sandbox_id")
+	}
+	require.Empty(t, engine.createVolumes)
+	require.Empty(t, engine.createVolumeFromSnapshots)
+
+	// Place a sentinel file where an unvalidated "../victim" join would point
+	// and verify ReleaseRollbackSnapshotMetadata rejects it without deleting.
+	normalRoot := filepath.Dir(SnapshotHome(cow.BackendS3, SnapshotKindNormal, "anchor"))
+	victimDir := filepath.Join(filepath.Dir(normalRoot), "victim", rollbackMetadataDirName)
+	require.NoError(t, os.MkdirAll(victimDir, 0o755))
+	sentinel := filepath.Join(victimDir, "keep.txt")
+	require.NoError(t, os.WriteFile(sentinel, []byte("keep"), 0o644))
+
+	err := ReleaseRollbackSnapshotMetadata(context.Background(), cow.BackendS3, "../victim")
+	require.ErrorContains(t, err, "invalid rollback metadata sandbox_id")
+	require.FileExists(t, sentinel)
+	require.Empty(t, engine.deletedVolumes)
 }

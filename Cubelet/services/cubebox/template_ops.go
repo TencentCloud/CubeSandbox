@@ -174,7 +174,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 	defer releaseMetadataWrite()
 	rsp.SnapshotPath = snapshotPath
-	tmpSnapshotPath := layout.TmpHome
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 
 	mode, err := parseCommitSnapshotMode(req.GetSnapshotMode())
@@ -227,15 +226,12 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	cleanupPreparedLayout := func() {
 		layout.releaseMetadata(ctx)
 		layout.discardTmpDir()
-		if !layout.usesTmpRename() {
-			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
-		}
 	}
 
 	// Memory preparation and package layout creation are independent. Prepare
 	// them together so JFS metadata latency does not serialize the snapshot
 	// critical path.
-	layout.resetTmpDir()
+	layout.discardTmpDir()
 	layoutReady := make(chan error, 1)
 	go func() {
 		layoutReady <- layout.prepareWork(ctx)
@@ -473,30 +469,27 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		}
 	}
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
+	if err := storage.ValidateStagedPackage(backend, layout.MetaWork, payload.HasMemory()); err != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshot metadata: %v", err)
+		return rsp, nil
+	}
 	if err := deactivateCowSnapshotObjectsOn(publishPhaseCtx, stepLog, backend, payload.memory, rootfsObject); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
 		return rsp, nil
 	}
-	if layout.usesTmpRename() {
-		// NOCC:Path Traversal()
-		if err := os.RemoveAll(snapshotPath); err != nil {
-			stepLog.Warnf("failed to remove existing snapshot path: %v", err)
-		}
-		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-			_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-			cleanupArtifacts()
-			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
-			return rsp, nil
-		}
+	if err := layout.publish(); err != nil {
+		cleanupArtifacts()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+		return rsp, nil
 	}
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
 		cleanupArtifacts()
-		if layout.usesTmpRename() {
-			_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
-		}
+		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
 		return rsp, nil
@@ -531,8 +524,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		RootfsKind:        rootfsObject.Kind,
 		MemoryVol:         payload.MemoryVol(),
 		MemoryKind:        payload.MemoryKind(),
-		MetadataVol:       storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
-		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
 		ComponentVersions: cloneStringMap(cb.ComponentVersions),
 		Kind:              storage.CatalogKindRuntimeSnapshot,
@@ -545,10 +536,14 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
 		markPublishIncomplete()
 	}
-	// S3: seal memory／metadata work volumes to RO snapshots, then Upload.
-	if err := storage.FinalizeS3PackageSnapshots(publishPhaseCtx, backend, rsp.TemplateID); err != nil {
-		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
-		markPublishIncomplete()
+	// Post-publish packaging: no-op on XFS/JFS, seal on S3.
+	if err := finalizePublishedPackage(
+		publishPhaseCtx, stepLog, backend, rsp.TemplateID, snapshotPath,
+		cleanupArtifacts, markPublishIncomplete,
+	); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
 	}
 	raw := uploadRemoteUUIDs(publishPhaseCtx, backend, rsp.TemplateID)
 	if raw != "" {

@@ -366,7 +366,8 @@ var (
 	pauseCleanupObjects    = cleanupCowSnapshotObjectsOn
 	pauseCommitRootfs      = storage.CommitRootfsFor
 	pauseDeactivateObjects = deactivateCowSnapshotObjectsOn
-	pauseFinalizePackage   = storage.FinalizeS3PackageSnapshots
+	pauseFinalizePackage   = storage.FinalizePublishedPackage
+	pauseDestroyLive       = (*service).destroyLiveAfterPause
 )
 
 // updateWithPauseCow pauses a running sandbox into a CubeCow-backed catalog
@@ -512,7 +513,6 @@ func (s *service) updateWithPauseCow(
 	}
 	defer releaseMetadataWrite()
 	snapshotPath := layout.Home
-	tmpSnapshotPath := layout.TmpHome
 
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 	// Resolve live rootfs now; CommitRootfs runs *after* PauseToSnapshot so the
@@ -530,13 +530,10 @@ func (s *service) updateWithPauseCow(
 	cleanupPreparedLayout := func(cleanupCtx context.Context) {
 		pauseReleaseMetadata(layout, cleanupCtx)
 		layout.discardTmpDir()
-		if !layout.usesTmpRename() {
-			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
-		}
 	}
 	stageTimings.SetupMS = durationMS(time.Since(pauseStarted))
 	prepareStarted := time.Now()
-	layout.resetTmpDir()
+	layout.discardTmpDir()
 	type layoutPrepareResult struct {
 		err      error
 		duration time.Duration
@@ -732,18 +729,19 @@ func (s *service) updateWithPauseCow(
 	if specErr != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write pause sandbox_spec: %v", specErr))
 	}
+	if err := storage.ValidateStagedPackage(backend, layout.MetaWork, true); err != nil {
+		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("invalid pause snapshot metadata: %v", err))
+	}
 	packageFinalizeStarted := time.Now()
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
 	if err := pauseDeactivateObjects(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
 	}
-	if layout.usesTmpRename() {
-		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
-		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
-		}
+	if err := layout.publish(); err != nil {
+		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
 	}
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
+		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to expose shim spec dir: %v", err))
 	}
 
@@ -757,25 +755,23 @@ func (s *service) updateWithPauseCow(
 		RootfsKind:      rootfsObject.Kind,
 		MemoryVol:       memoryObject.Name,
 		MemoryKind:      memoryObject.Kind,
-		MetadataVol:     storage.S3MetadataCatalogVol(backend, snapID),
-		MetadataKind:    storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes: rootfsObject.SizeBytes,
 		Kind:            storage.CatalogKindPauseSnapshot,
 		Backend:         backend,
 	}); err != nil {
 		// catalog.json is required for Resume / List / cross-node; do not mark
 		// PAUSED without it (sandbox_spec already fails hard above).
-		_ = storage.UnmountS3Metadata(layout.MetaDir)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
 	}
-	// S3: seal memory/metadata work volumes to RO snapshots before Upload.
-	if err := pauseFinalizePackage(workCtx, backend, snapID); err != nil {
-		_ = storage.UnmountS3Metadata(layout.MetaDir)
+	// Post-publish packaging: no-op on XFS/JFS, seal on S3.
+	if finalizeRes, err := pauseFinalizePackage(workCtx, backend, snapID); err != nil {
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown,
-			fmt.Sprintf("failed to seal s3 pause package snapshots for %s: %v", snapID, err))
+			fmt.Sprintf("failed to finalize pause package snapshots for %s: %v", snapID, err))
+	} else if finalizeRes.CleanupErr != nil {
+		stepLog.Warnf("pause package %s sealed with deferred post-seal cleanup: %v", snapID, finalizeRes.CleanupErr)
 	}
 
 	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the
@@ -809,7 +805,7 @@ func (s *service) updateWithPauseCow(
 	workCtx = telemetry.DetachTrace(workCtx, startStage(telemetry.SpanPauseTeardown,
 		attribute.String(telemetry.AttrSandboxID, req.SandboxID)))
 	destroyStarted := time.Now()
-	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb, pauseStateSyncErr != nil)
+	extInfo, err := pauseDestroyLive(s, workCtx, req, sb, pauseStateSyncErr != nil)
 	stageTimings.DestroyLiveMS = durationMS(time.Since(destroyStarted))
 	// Always attach whatever volume ref events were observed — Detach may have
 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
