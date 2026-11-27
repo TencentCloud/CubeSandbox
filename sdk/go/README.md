@@ -395,6 +395,50 @@ if err := client.DeleteVolume(ctx, "my-data"); err != nil {
 }
 ```
 
+### Direct Volume Content Access
+
+Read, write, list, stat, create directories, update metadata, and remove entries inside a Volume **without starting a helper sandbox**:
+
+```go
+vc, err := client.VolumeContent("my-data")
+if err != nil {
+	return err
+}
+defer vc.Close()
+
+// Write bytes or stream an io.Reader directly to S3/COS.
+_, err = vc.Write(ctx, "/notes/hello.txt", []byte("hello"), cubesandbox.VolumeWriteOptions{
+	Mode: cubesandbox.IntPtr(0o644),
+})
+_, err = vc.WriteFrom(ctx, "/artifacts/archive.bin", fileReader, cubesandbox.VolumeWriteOptions{})
+
+// Read as text, raw bytes, or an io.ReadCloser stream.
+text, err := vc.Read(ctx, "/notes/hello.txt")
+rc, err := vc.ReadStream(ctx, "/artifacts/archive.bin")
+defer rc.Close()
+
+// Directory and metadata operations.
+entries, err := vc.List(ctx, "/", cubesandbox.VolumeListOptions{Depth: cubesandbox.IntPtr(2)})
+info, err := vc.Stat(ctx, "/notes/hello.txt")
+exists, err := vc.Exists(ctx, "/notes/hello.txt")
+_, err = vc.MakeDir(ctx, "/tmp-dir", cubesandbox.VolumeMakeDirOptions{Force: cubesandbox.BoolPtr(false)})
+_, err = vc.UpdateMetadata(ctx, "/notes/hello.txt", cubesandbox.VolumeUpdateMetadataOptions{Mode: cubesandbox.IntPtr(0o600)})
+
+// Remove deletes a file or an empty directory (returning ErrVolumeDirNotEmpty
+// for non-empty directories and ErrVolumePathNotFound for missing paths).
+// Use RemoveAll for recursive directory deletion.
+err = vc.Remove(ctx, "/notes/hello.txt")
+err = vc.RemoveAll(ctx, "/notes")
+```
+
+**Prerequisites and limitations:**
+
+- Requires CubeAPI and CubeMaster with `POST /volumes/{id}/content-token` support (PR #2297 or newer) and a volume driver plugin implementing `ContentPlugin.IssueCredentials` for `s3` or `cos` backends.
+- Unsupported servers or drivers without a direct-access credential hook (for example `nfs`) return an error matching `ErrVolumeContentUnsupported`; the SDK never silently falls back to `VolumeInfo.Token` or legacy HTTP endpoints.
+- Short-lived credentials are kept in memory only, proactively refreshed before expiry, and scrubbed from formatted output and error diagnostics.
+- Storage endpoints must use HTTPS and resolve to public IPs by default (SSRF protection blocks loopback, RFC1918/ULA private, and link-local/metadata IPs, and rejects HTTP redirects). For in-VPC MinIO/S3 deployments pass `WithVolumeAllowPrivateEndpoints(true)` and optionally pin trusted hosts with `WithVolumeAllowedEndpointHosts(...)`; for local loopback contract tests pass `WithVolumeAllowInsecureLoopback(true)`.
+- Object storage is not a POSIX filesystem: `MakeDir` writes zero-byte `/` markers, `UpdateMetadata` replaces S3 user metadata via `CopyObject`, and concurrent writes through a mounted FUSE/s3fs sandbox may be subject to FUSE cache propagation delays.
+
 ## L7 Egress Policy
 
 ```go

@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	apiErrorKindAPI              = "api"
-	apiErrorKindAuthentication   = "authentication"
-	apiErrorKindSandboxNotFound  = "sandbox_not_found"
-	apiErrorKindTemplateNotFound = "template_not_found"
-	apiErrorKindVolumeNotFound   = "volume_not_found"
-	apiErrorKindVolumeInUse      = "volume_in_use"
+	apiErrorKindAPI                      = "api"
+	apiErrorKindAuthentication           = "authentication"
+	apiErrorKindSandboxNotFound          = "sandbox_not_found"
+	apiErrorKindTemplateNotFound         = "template_not_found"
+	apiErrorKindVolumeNotFound           = "volume_not_found"
+	apiErrorKindVolumeInUse              = "volume_in_use"
+	apiErrorKindVolumeContentUnsupported = "volume_content_unsupported"
 )
 
 var (
@@ -30,7 +31,74 @@ var (
 	// ErrVolumeInUse matches the HTTP 409 the server returns when deleting a
 	// volume that is still mounted by one or more sandboxes.
 	ErrVolumeInUse = errors.New("cubesandbox: volume is still in use")
+	// ErrVolumePathNotFound is returned when a path inside a volume does not exist.
+	ErrVolumePathNotFound = errors.New("cubesandbox: volume path not found")
+	// ErrVolumePathExists is returned when creating a file or directory with
+	// Force set to false and the target path already exists (or a file blocks a directory).
+	ErrVolumePathExists = errors.New("cubesandbox: volume path already exists")
+	// ErrVolumeDirNotEmpty is returned by VolumeContent.Remove when the target
+	// directory still contains entries.
+	ErrVolumeDirNotEmpty = errors.New("cubesandbox: volume directory is not empty")
+	// ErrVolumeContentUnsupported is returned when the server or volume driver
+	// does not support direct volume content access.
+	ErrVolumeContentUnsupported = errors.New("cubesandbox: direct volume content access is not supported")
+	// ErrVolumeCredentialsExpired is returned when short-lived storage
+	// credentials are expired or rejected as expired by the storage backend.
+	ErrVolumeCredentialsExpired = errors.New("cubesandbox: volume storage credentials expired")
 )
+
+// VolumeStorageError describes an error returned by the direct object-storage
+// backend during a volume content operation. Secrets and signed URLs are
+// scrubbed before constructing this error.
+type VolumeStorageError struct {
+	Op         string
+	Path       string
+	StatusCode int
+	Code       string
+	Message    string
+	Err        error
+}
+
+func (e *VolumeStorageError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	var parts []string
+	if e.Op != "" {
+		parts = append(parts, e.Op)
+	}
+	if e.Path != "" {
+		parts = append(parts, e.Path)
+	}
+	prefix := "volume storage error"
+	if len(parts) > 0 {
+		prefix = "volume " + strings.Join(parts, " ")
+	}
+	detail := strings.TrimSpace(e.Message)
+	if detail == "" && e.Code != "" {
+		detail = e.Code
+	}
+	if detail == "" && e.Err != nil {
+		detail = e.Err.Error()
+	}
+	if e.StatusCode > 0 {
+		if detail != "" {
+			return fmt.Sprintf("%s: %s (HTTP %d)", prefix, detail, e.StatusCode)
+		}
+		return fmt.Sprintf("%s (HTTP %d)", prefix, e.StatusCode)
+	}
+	if detail != "" {
+		return fmt.Sprintf("%s: %s", prefix, detail)
+	}
+	return prefix
+}
+
+func (e *VolumeStorageError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // APIError describes an HTTP error returned by the CubeSandbox API.
 type APIError struct {
@@ -66,6 +134,8 @@ func (e *APIError) Is(target error) bool {
 		return e.Kind == apiErrorKindVolumeNotFound
 	case ErrVolumeInUse:
 		return e.Kind == apiErrorKindVolumeInUse
+	case ErrVolumeContentUnsupported:
+		return e.Kind == apiErrorKindVolumeContentUnsupported
 	default:
 		return false
 	}
