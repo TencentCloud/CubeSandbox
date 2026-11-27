@@ -73,6 +73,9 @@ __pycache__
 !/tests/e2e/memory_reclaim/
 !/tests/e2e/memory_reclaim/**
 /tests/e2e/memory_reclaim/__pycache__/
+!/tests/e2e/disk_reclaim/
+!/tests/e2e/disk_reclaim/**
+/tests/e2e/disk_reclaim/__pycache__/
 !/tests/e2e/scheduler/
 !/tests/e2e/scheduler/**
 /tests/e2e/scheduler/.pytest_cache/
@@ -115,3 +118,7 @@ runtime-values.yaml
 /.tmp-ghcr/
 /.tmp-otel-024f2acfe949/
 /.tmp-otel-20261105-7eb4ae6f/
+
+# Parent-owned loop fixture for hypervisor/block_util/tests/block_discard_eligibility.rs
+/reclaim-poc-artifacts/
+/cube-reclaim-poc-block-*

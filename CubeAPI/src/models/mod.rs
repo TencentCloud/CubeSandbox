@@ -2163,6 +2163,10 @@ pub struct CreateTemplateRequest {
     /// Writable layer size for the rootfs, e.g. "1G".
     #[serde(rename = "writableLayerSize", default)]
     pub writable_layer_size: Option<String>,
+    /// Enable discard on the writable rootfs so freed blocks can be reclaimed.
+    /// Omitted or false keeps the historical behavior.
+    #[serde(rename = "writableDiskReclaim", default)]
+    pub writable_disk_reclaim: Option<bool>,
     /// Ports the container listens on.
     #[serde(rename = "exposedPorts", default)]
     pub exposed_ports: Option<Vec<u16>>,

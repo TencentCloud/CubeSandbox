@@ -55,7 +55,10 @@ const POLL_QUEUE_US: u128 = 50;
 fn used_len(request_type: RequestType, guest_data_bytes: u32) -> u32 {
     match request_type {
         RequestType::In | RequestType::GetDeviceId => guest_data_bytes.saturating_add(1),
-        RequestType::Out | RequestType::Flush | RequestType::Unsupported(_) => 1,
+        RequestType::Out
+        | RequestType::Flush
+        | RequestType::Discard
+        | RequestType::Unsupported(_) => 1,
     }
 }
 

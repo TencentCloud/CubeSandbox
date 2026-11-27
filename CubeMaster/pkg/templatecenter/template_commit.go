@@ -211,6 +211,9 @@ func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, tem
 		// commit instead of silently producing an unthrottled template.
 		inheritTemplateManagedQosAnnotations(source, base)
 	}
+	if err := ApplyWritableDiskReclaimFromTemplate(source, base); err != nil {
+		return nil, err
+	}
 	if source.Request == nil {
 		source.Request = &sandboxtypes.Request{}
 	}

@@ -962,6 +962,75 @@ mod tests {
         get_seccomp_filter as get_virtio_filter, Thread as VirtioThread,
     };
 
+    // Linux _IO(0x12, 119): the BLKDISCARD request the block discard path
+    // issues. Spelled out here so the on-wire value is pinned independently of
+    // any production helper.
+    const BLKDISCARD_REQUEST: libc::c_ulong = 0x1277;
+    // _IO(0x12, 126): unrelated to discard and absent from both the VMM and
+    // block whitelists. 0x1278/0x1279 (BLKIOMIN/BLKIOOPT) are already allowed
+    // by the VMM-wide filter, so they cannot prove the block filter's
+    // confinement.
+    const UNRELATED_STACKED_IOCTL: libc::c_ulong = 0x127e;
+
+    /// Fork a child that inherits the real process-wide VMM filter and then
+    /// installs the real strict VirtioBlock filter, then issue `request`
+    /// against an invalid fd. Both filters are built in the parent before
+    /// either is applied. Returns the raw wait status.
+    fn run_block_ioctl_under_stacked_filters(request: libc::c_ulong) -> i32 {
+        let inherited = get_seccomp_filter(
+            &SeccompAction::KillProcess,
+            Thread::All,
+            HypervisorType::Kvm,
+        )
+        .unwrap();
+        let block_filter =
+            get_virtio_filter(&SeccompAction::Trap, VirtioThread::VirtioBlock).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            if apply_filter(&inherited).is_err() || apply_filter(&block_filter).is_err() {
+                unsafe { libc::syscall(libc::SYS_exit, 3) };
+            }
+            // An invalid fd must yield the ordinary EBADF error, not SIGSYS.
+            let mut range = [0u64, 4096u64];
+            let result = unsafe { libc::ioctl(-1, request, range.as_mut_ptr()) };
+            let exit_code = if result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+            {
+                0
+            } else {
+                2
+            };
+            unsafe { libc::syscall(libc::SYS_exit, exit_code) };
+            unreachable!();
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        status
+    }
+
+    #[test]
+    fn strict_inherited_vmm_filter_allows_blkdiscard_after_block_filter() {
+        let status = run_block_ioctl_under_stacked_filters(BLKDISCARD_REQUEST);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "the inherited VMM-wide filter plus the block filter must allow BLKDISCARD so an \
+             invalid fd returns EBADF instead of SIGSYS; wait status {status:#x}"
+        );
+    }
+
+    #[test]
+    fn strict_inherited_vmm_filter_still_traps_unrelated_ioctl() {
+        let status = run_block_ioctl_under_stacked_filters(UNRELATED_STACKED_IOCTL);
+        assert!(
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS,
+            "an unrelated ioctl must stay SIGSYS under the stacked filters rather than become a \
+             blanket ioctl allowance; wait status {status:#x}"
+        );
+    }
+
     #[test]
     fn strict_vmm_parent_filter_allows_vsock_peer_credentials() {
         let (socket, _peer) = UnixStream::pair().unwrap();

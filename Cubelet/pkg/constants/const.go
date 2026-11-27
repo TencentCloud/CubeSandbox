@@ -253,6 +253,7 @@ const (
 	MasterAnnotationRootfsArtifactSHA256    = "cube.master.rootfs.artifact.sha256"
 	MasterAnnotationRootfsArtifactSizeBytes = "cube.master.rootfs.artifact.size_bytes"
 	MasterAnnotationWritableLayerSize       = "cube.master.rootfs.writable_layer_size"
+	MasterAnnotationWritableDiskReclaim     = "cube.master.rootfs.writable_disk_reclaim"
 	MasterAnnotationTemplateSpecFingerprint = "cube.master.template.spec_fingerprint"
 	MasterAnnotationComponentEnvdVersion    = "cube.master.components.envd.version"
 	MasterAnnotationCreateTimeEnvVars       = "cube.master.internal.create_time_env_vars"

@@ -201,4 +201,63 @@ mod tests {
             schema["type"] == "object" && schema["additionalProperties"]["type"] == "array"
         }));
     }
+
+    #[test]
+    fn create_template_schema_exposes_optional_writable_disk_reclaim() {
+        let document = serde_json::to_value(build_openapi()).expect("serialize OpenAPI document");
+        let schemas = &document["components"]["schemas"];
+        let request = &schemas["CreateTemplateRequest"];
+        let properties = &request["properties"];
+
+        let field = &properties["writableDiskReclaim"];
+        assert!(
+            !field.is_null(),
+            "CreateTemplateRequest must document writableDiskReclaim"
+        );
+
+        // utoipa 5 encodes Option<bool> as a 3.1 type array; also accept the
+        // 3.0-style boolean + nullable form so this is not tied to the version.
+        let optional_boolean = match &field["type"] {
+            serde_json::Value::String(kind) => {
+                kind == "boolean" && field["nullable"] == serde_json::Value::Bool(true)
+            }
+            serde_json::Value::Array(kinds) => {
+                kinds.iter().any(|kind| kind == "boolean")
+                    && kinds.iter().any(|kind| kind == "null")
+                    && kinds.iter().all(|kind| kind == "boolean" || kind == "null")
+            }
+            _ => false,
+        };
+        assert!(
+            optional_boolean,
+            "writableDiskReclaim must be an optional boolean: {field}"
+        );
+
+        let required = request["required"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !required.iter().any(|name| name == "writableDiskReclaim"),
+            "writableDiskReclaim must not be required"
+        );
+
+        assert!(
+            properties.get("writable_disk_reclaim").is_none(),
+            "the schema must use the camel-case wire key only"
+        );
+
+        let description = field["description"].as_str().unwrap_or_default();
+        let description = description.to_lowercase();
+        assert!(
+            description.contains("omitted") && description.contains("false"),
+            "description must state that omitted or false disables reclaim: {description}"
+        );
+
+        for schema in ["NewSandbox", "RebuildTemplateRequest"] {
+            assert!(
+                schemas[schema]["properties"]
+                    .get("writableDiskReclaim")
+                    .is_none(),
+                "{schema} must not expose writableDiskReclaim"
+            );
+        }
+    }
 }

@@ -1937,6 +1937,13 @@ components:
           description: |-
             Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
             Omitted or null defaults to true on CubeMaster.
+        writableDiskReclaim:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            Enable discard on the writable rootfs so freed blocks can be reclaimed.
+            Omitted or false keeps the historical behavior.
         writableLayerSize:
           type:
           - string

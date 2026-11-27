@@ -127,6 +127,7 @@ impl Config {
         if let Some(opt_disk) = anno.get(ANNO_DISK) {
             disk = Utils::anno_to_obj::<Vec<Disk>>(opt_disk)?;
             for (i, d) in disk.iter().enumerate() {
+                d.validate()?;
                 disk_path_map.insert(d.path.clone(), i as u32);
             }
         }
@@ -324,6 +325,7 @@ mod tests {
     use crate::sandbox::config::DEFAULT_AGENT_PATH;
     use crate::sandbox::config::IMAGE_PATH;
     use crate::sandbox::config::KERNEL_SCF;
+    use crate::sandbox::disk::ANNO_DISK;
 
     #[test]
     fn utils_config_new() {
@@ -411,6 +413,33 @@ mod tests {
         assert_eq!(
             config.extra_kernel_params,
             vec!["foo=bar".to_string(), "second=2".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_rejects_discard_on_non_ext4_disk() {
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+
+        annotations.insert(
+            ANNO_DISK.to_string(),
+            r#"[{"path": "/dev/vdb", "fs_type": "ext4", "size": 1024, "discard": true}]"#
+                .to_string(),
+        );
+        assert!(
+            Config::new(&Some(annotations.clone())).is_ok(),
+            "ext4 supports discard"
+        );
+
+        annotations.insert(
+            ANNO_DISK.to_string(),
+            r#"[{"path": "/dev/vdb", "fs_type": "xfs", "size": 1024, "discard": true}]"#
+                .to_string(),
+        );
+        assert!(
+            Config::new(&Some(annotations)).is_err(),
+            "discard on a non-ext4 disk must be rejected instead of mounted"
         );
     }
 

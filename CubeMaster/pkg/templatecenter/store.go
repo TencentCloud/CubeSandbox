@@ -571,6 +571,15 @@ func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.Cre
 	if err != nil {
 		return nil, "", err
 	}
+	reclaimEnabled, _, err := writableDiskReclaimFromCreate(cloned)
+	if err != nil {
+		return nil, "", err
+	}
+	if reclaimEnabled {
+		if err := validateWritableDiskReclaimBackend(storageBackendFromCreate(cloned)); err != nil {
+			return nil, "", err
+		}
+	}
 	if cloned.Annotations == nil {
 		cloned.Annotations = make(map[string]string)
 	}
@@ -2578,7 +2587,11 @@ func ResolveTemplate(ctx context.Context, reqInOut *sandboxtypes.CreateCubeSandb
 }
 
 func applyTemplateRequest(templateReq, reqInOut *sandboxtypes.CreateCubeSandboxReq) error {
-
+	// The stored template owns this policy; decide it before the generic merge
+	// below can mask a caller conflict.
+	if err := ApplyWritableDiskReclaimFromTemplate(reqInOut, templateReq); err != nil {
+		return err
+	}
 	if reqInOut.Annotations == nil {
 		reqInOut.Annotations = make(map[string]string)
 	}
@@ -2586,6 +2599,9 @@ func applyTemplateRequest(templateReq, reqInOut *sandboxtypes.CreateCubeSandboxR
 		reqInOut.Labels = make(map[string]string)
 	}
 	for k, v := range templateReq.Annotations {
+		if k == constants.CubeAnnotationWritableDiskReclaim {
+			continue
+		}
 		if _, exists := reqInOut.Annotations[k]; !exists {
 			reqInOut.Annotations[k] = v
 		}

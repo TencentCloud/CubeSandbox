@@ -12,6 +12,7 @@ type CubeDiskConfig struct {
 	FSQuota     int64        `json:"fs_quota,omitempty"`
 	RateLimiter *RateLimiter `json:"rate_limiter_config,omitempty"`
 	Options     []string     `json:"options,omitempty"`
+	Discard     bool         `json:"discard,omitempty"`
 
 	VolumeSourceName string `json:"volume_source,omitempty"`
 }

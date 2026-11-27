@@ -7,6 +7,7 @@ package cube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -68,6 +69,12 @@ func createSandbox(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		return rsp
 	}
 	if err := rejectCallerSuppliedQos(req); err != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+		rsp.Ret.RetMsg = err.Error()
+		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		return rsp
+	}
+	if err := rejectCallerSuppliedWritableDiskReclaim(req); err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = err.Error()
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
@@ -201,6 +208,26 @@ func registerCreatedSandboxRuntimeRef(ctx context.Context, req *types.CreateCube
 		)
 	}
 	return createSandboxRegisterRuntimeRefFn(ctx, templateID, ret.SandboxID, ret.HostID, ret.HostIP)
+}
+
+// rejectCallerSuppliedWritableDiskReclaim keeps the template-owned discard
+// policy off creates that have no template to own it. Template-backed creates
+// are validated later against the stored template value, which lets a caller
+// repeat a matching value but never forge or flip it. Internally generated
+// template build requests never pass through this HTTP handler.
+func rejectCallerSuppliedWritableDiskReclaim(req *types.CreateCubeSandboxReq) error {
+	if req == nil {
+		return nil
+	}
+	if _, ok := req.Annotations[constants.CubeAnnotationWritableDiskReclaim]; !ok {
+		return nil
+	}
+	templateID := strings.TrimSpace(req.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	if templateID == "" || req.InstanceType != cubebox.InstanceType_cubebox.String() {
+		return fmt.Errorf("%s is template-owned and cannot be supplied on a sandbox create without a template",
+			constants.CubeAnnotationWritableDiskReclaim)
+	}
+	return nil
 }
 
 func constructCreateReq(r *http.Request) (*types.CreateCubeSandboxReq, error) {

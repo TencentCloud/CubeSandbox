@@ -202,6 +202,10 @@ pub enum ValidationError {
     InvalidMtu(u16),
     /// native virtio-fs shouldn't have socket argument
     NativeVirtioFsSocket,
+    /// Discard requires a writable raw disk
+    DiscardOnReadonlyDisk,
+    /// Discard is not supported for vhost-user disks
+    DiscardWithVhostUser,
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -315,6 +319,12 @@ impl fmt::Display for ValidationError {
             DuplicateDevicePath(p) => write!(f, "Duplicated device path: {}", p),
             NativeVirtioFsSocket => {
                 write!(f, "Native virtio-fs shouldn't have socket argument")
+            }
+            DiscardOnReadonlyDisk => {
+                write!(f, "Discard is not supported on a read-only disk")
+            }
+            DiscardWithVhostUser => {
+                write!(f, "Discard is not supported for vhost-user disks")
             }
             &InvalidMtu(mtu) => {
                 write!(
@@ -969,6 +979,7 @@ impl DiskConfig {
             .add("ops_refill_time")
             .add("id")
             .add("_disable_io_uring")
+            .add("discard")
             .add("pci_segment");
         parser.parse(disk).map_err(Error::ParseDisk)?;
 
@@ -1003,6 +1014,11 @@ impl DiskConfig {
             .0;
         let vhost_socket = parser.get("socket");
         let id = parser.get("id");
+        let discard = parser
+            .convert::<Toggle>("discard")
+            .map_err(Error::ParseDisk)?
+            .unwrap_or(Toggle(false))
+            .0;
         let disable_io_uring = parser
             .convert::<Toggle>("_disable_io_uring")
             .map_err(Error::ParseDisk)?
@@ -1075,6 +1091,7 @@ impl DiskConfig {
             rate_limiter_config,
             id,
             disable_io_uring,
+            discard,
             pci_segment,
         })
     }
@@ -1090,6 +1107,14 @@ impl DiskConfig {
 
         if self.vhost_user && self.iommu {
             return Err(ValidationError::IommuNotSupported);
+        }
+
+        if self.discard && self.readonly {
+            return Err(ValidationError::DiscardOnReadonlyDisk);
+        }
+
+        if self.discard && self.vhost_user {
+            return Err(ValidationError::DiscardWithVhostUser);
         }
 
         if let Some(platform_config) = vm_config.platform.as_ref() {
@@ -2275,6 +2300,8 @@ impl VmConfig {
         }
     }
 
+    /// Restore replaces only the host path and rate limit. `discard` stays from
+    /// the saved snapshot config, which remains authoritative per disk.
     pub fn update_disks(&mut self, disk_cfgs: &Vec<DiskConfig>) {
         if let Some(disks) = &mut self.disks {
             let mut devices: HashMap<String, PathBuf> = HashMap::default();
@@ -2908,6 +2935,50 @@ mod tests {
                 .unwrap()
                 .remap_filter
         );
+    }
+
+    #[test]
+    fn update_disks_keeps_saved_discard_and_replaces_path_and_rate_limit() {
+        let rate_limiter = |size| RateLimiterConfig {
+            bandwidth: Some(TokenBucketConfig {
+                size,
+                one_time_burst: Some(0),
+                refill_time: 1000,
+            }),
+            ops: None,
+        };
+
+        // The restore-side DiskConfig deliberately carries a different (or
+        // default) discard value; the saved snapshot config must win either way.
+        for (saved, incoming) in [(true, false), (false, true), (true, true)] {
+            let mut config = VmConfig {
+                disks: Some(vec![DiskConfig {
+                    id: Some("disk-0".to_string()),
+                    path: Some("/old/path".into()),
+                    rate_limiter_config: Some(rate_limiter(1)),
+                    discard: saved,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            let restore = vec![DiskConfig {
+                id: Some("disk-0".to_string()),
+                path: Some("/new/path".into()),
+                rate_limiter_config: Some(rate_limiter(2)),
+                discard: incoming,
+                ..Default::default()
+            }];
+
+            config.update_disks(&restore);
+
+            let disk = &config.disks.unwrap()[0];
+            assert_eq!(disk.path, Some("/new/path".into()));
+            assert_eq!(disk.rate_limiter_config, Some(rate_limiter(2)));
+            assert_eq!(
+                disk.discard, saved,
+                "saved snapshot discard must stay authoritative (incoming {incoming})"
+            );
+        }
     }
 
     #[test]
@@ -3971,5 +4042,44 @@ mod tests {
             },
         ]);
         assert!(invalid_config.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod discard_poc_tests {
+    use super::*;
+    #[test]
+    fn test_discard_poc_is_explicit_and_defaults_off() {
+        let default = DiskConfig::parse("path=/tmp/poc.raw").unwrap();
+        assert_eq!(
+            serde_json::to_value(default)
+                .unwrap()
+                .get("discard")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let enabled = DiskConfig::parse("path=/tmp/poc.raw,discard=on").unwrap();
+        assert_eq!(
+            serde_json::to_value(enabled)
+                .unwrap()
+                .get("discard")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_discard_validation_rejects_readonly_and_vhost_user() {
+        let vm_config = VmConfig::default();
+        for invalid in [
+            "path=/tmp/poc.raw,readonly=on,discard=on",
+            "vhost_user=on,socket=/tmp/poc.sock,discard=on",
+        ] {
+            let disk = DiskConfig::parse(invalid).unwrap();
+            assert!(disk.validate(&vm_config).is_err(), "{invalid}");
+        }
+
+        let valid = DiskConfig::parse("path=/tmp/poc.raw,discard=on").unwrap();
+        assert!(valid.validate(&vm_config).is_ok());
     }
 }

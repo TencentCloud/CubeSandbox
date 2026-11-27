@@ -2044,6 +2044,81 @@ func TestBuildTemplateOmitsBackendWhenBlank(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateForwardsWritableDiskReclaim(t *testing.T) {
+	enabled := true
+	disabled := false
+	cases := []struct {
+		name        string
+		option      *bool
+		extra       map[string]any
+		wantOmitted bool
+		wantValue   bool
+	}{
+		{name: "nil omitted", option: nil, wantOmitted: true},
+		{name: "true forwarded", option: &enabled, wantValue: true},
+		{name: "explicit false forwarded", option: &disabled, wantValue: false},
+		{
+			name:      "Extra false overrides field true",
+			option:    &enabled,
+			extra:     map[string]any{"writableDiskReclaim": false},
+			wantValue: false,
+		},
+		{
+			name:      "Extra true overrides field false",
+			option:    &disabled,
+			extra:     map[string]any{"writableDiskReclaim": true},
+			wantValue: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/templates" {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				fmt.Fprint(w, `{"jobID":"job-1","templateID":"tpl-1","status":"accepted"}`)
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{APIURL: server.URL, Timeout: 300 * time.Second})
+			if _, err := client.BuildTemplate(context.Background(), BuildTemplateOptions{
+				Image:               "python:3.11-slim",
+				WritableDiskReclaim: tc.option,
+				Extra:               tc.extra,
+			}); err != nil {
+				t.Fatalf("BuildTemplate returned error: %v", err)
+			}
+
+			if _, ok := got["writable_disk_reclaim"]; ok {
+				t.Fatalf("snake_case key must not be sent: %#v", got)
+			}
+			value, present := got["writableDiskReclaim"]
+			if tc.wantOmitted {
+				if present {
+					t.Fatalf("writableDiskReclaim=%#v, want omitted for nil option", value)
+				}
+				return
+			}
+			if !present {
+				t.Fatalf("writableDiskReclaim missing, want JSON boolean %t", tc.wantValue)
+			}
+			boolean, ok := value.(bool)
+			if !ok {
+				t.Fatalf("writableDiskReclaim=%#v, want JSON boolean", value)
+			}
+			if boolean != tc.wantValue {
+				t.Fatalf("writableDiskReclaim=%t, want %t", boolean, tc.wantValue)
+			}
+		})
+	}
+}
+
 func TestGetTemplateParsesNetworkFields(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/templates/tpl-network" {

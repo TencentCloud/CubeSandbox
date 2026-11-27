@@ -363,6 +363,127 @@ func TestNormalizeRequestAcceptsTemplateAndSnapshotPrefixes(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequestWritableDiskReclaimPolicy(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	cases := []struct {
+		name       string
+		backend    string
+		storageAnn string
+		reclaim    *string
+		wantErr    string
+	}{
+		{
+			name:    "malformed enabled value rejected",
+			reclaim: strPtr("enabled"),
+			wantErr: constants.CubeAnnotationWritableDiskReclaim,
+		},
+		{
+			name:    "malformed numeric value rejected",
+			reclaim: strPtr("1"),
+			wantErr: constants.CubeAnnotationWritableDiskReclaim,
+		},
+		{
+			name:    "enabled s3 backend accepted",
+			backend: constants.SnapshotBackendS3,
+			reclaim: strPtr("true"),
+		},
+		{
+			name:       "enabled legacy annotation s3 accepted",
+			storageAnn: constants.SnapshotBackendS3,
+			reclaim:    strPtr("true"),
+		},
+		{
+			name:    "enabled unknown backend rejected",
+			backend: "nfs",
+			reclaim: strPtr("true"),
+			wantErr: "nfs",
+		},
+		{
+			name:       "enabled legacy annotation unknown backend rejected",
+			storageAnn: "nfs",
+			reclaim:    strPtr("true"),
+			wantErr:    "nfs",
+		},
+		{
+			name:    "enabled xfs backend accepted",
+			backend: constants.SnapshotBackendXFS,
+			reclaim: strPtr("true"),
+		},
+		{
+			name:    "enabled jfs backend accepted",
+			backend: constants.SnapshotBackendJFS,
+			reclaim: strPtr("true"),
+		},
+		{
+			name:       "enabled legacy annotation jfs accepted",
+			storageAnn: constants.SnapshotBackendJFS,
+			reclaim:    strPtr("true"),
+		},
+		{
+			name:    "enabled absent backend defaults to xfs",
+			reclaim: strPtr("true"),
+		},
+		{
+			name:    "disabled with s3 backend accepted",
+			backend: constants.SnapshotBackendS3,
+			reclaim: strPtr("false"),
+		},
+		{
+			name:    "absent with s3 backend accepted",
+			backend: constants.SnapshotBackendS3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := &types.CreateCubeSandboxReq{
+				Request: &types.Request{RequestID: "req-1"},
+				Backend: tc.backend,
+				Annotations: map[string]string{
+					constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
+				},
+			}
+			if tc.storageAnn != "" {
+				input.Annotations[constants.CubeAnnotationStorageBackend] = tc.storageAnn
+			}
+			if tc.reclaim != nil {
+				input.Annotations[constants.CubeAnnotationWritableDiskReclaim] = *tc.reclaim
+			}
+			before := make(map[string]string, len(input.Annotations))
+			for k, v := range input.Annotations {
+				before[k] = v
+			}
+
+			out, _, err := NormalizeRequest(input)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if out == nil {
+					t.Fatal("expected normalized request, got nil")
+				}
+				if tc.reclaim != nil && out.Annotations[constants.CubeAnnotationWritableDiskReclaim] != *tc.reclaim {
+					t.Fatalf("reclaim annotation=%q, want %q",
+						out.Annotations[constants.CubeAnnotationWritableDiskReclaim], *tc.reclaim)
+				}
+			}
+
+			if !reflect.DeepEqual(input.Annotations, before) {
+				t.Fatalf("input annotations mutated: before=%v after=%v", before, input.Annotations)
+			}
+			if input.Backend != tc.backend {
+				t.Fatalf("input backend mutated: %q -> %q", tc.backend, input.Backend)
+			}
+		})
+	}
+}
+
 func TestBuildTemplateSpecFingerprintUsesDigest(t *testing.T) {
 
 	req, err := normalizeTemplateImageRequest(&types.CreateTemplateFromImageReq{

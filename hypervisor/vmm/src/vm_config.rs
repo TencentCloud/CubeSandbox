@@ -239,6 +239,9 @@ pub struct DiskConfig {
     // For testing use only. Not exposed in API.
     #[serde(default)]
     pub disable_io_uring: bool,
+    /// Experimental RAW discard capability; disabled unless explicitly requested.
+    #[serde(default)]
+    pub discard: bool,
     #[serde(default)]
     pub pci_segment: u16,
 }
@@ -268,6 +271,7 @@ impl Default for DiskConfig {
             vhost_socket: None,
             id: None,
             disable_io_uring: false,
+            discard: false,
             rate_limiter_config: None,
             pci_segment: 0,
         }

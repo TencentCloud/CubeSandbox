@@ -178,6 +178,11 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		}
 		cloned.Backend = backend
 	}
+	if cloned.WritableDiskReclaim {
+		if err := validateWritableDiskReclaimBackend(cloned.Backend); err != nil {
+			return nil, err
+		}
+	}
 	if err := validateTemplateCubeNetworkConfig(cloned.CubeNetworkConfig); err != nil {
 		return nil, err
 	}
@@ -185,6 +190,15 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, err
 	}
 	return &cloned, nil
+}
+
+// validateWritableDiskReclaimBackend accepts every backend with a real
+// writable-volume discard path: xfs/jfs files and s3 block volumes. Empty
+// backend means the historical xfs default. Unknown backends are rejected by
+// NormalizeSnapshotBackend.
+func validateWritableDiskReclaimBackend(backend string) error {
+	_, err := constants.NormalizeSnapshotBackend(backend)
+	return err
 }
 
 func templateResources(req *types.CreateTemplateFromImageReq) qos.TemplateResources {

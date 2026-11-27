@@ -2386,6 +2386,9 @@ pub struct CreateTemplateFromImageReq {
     /// Writable layer size, e.g. "1G".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable_layer_size: Option<String>,
+    /// Template-level policy: enable discard on the writable rootfs.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub writable_disk_reclaim: bool,
     /// Human-readable stable template alias.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,

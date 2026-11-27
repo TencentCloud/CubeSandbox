@@ -152,6 +152,7 @@ impl TemplateService {
             template_id: String::new(),
             source_image_ref: body.image.trim().to_string(),
             writable_layer_size: body.writable_layer_size,
+            writable_disk_reclaim: body.writable_disk_reclaim.unwrap_or(false),
             alias,
             exposed_ports: body.exposed_ports,
             network_type: non_empty_option(body.network_type),
@@ -826,6 +827,7 @@ mod tests {
             instance_type: Some("cubebox".to_string()),
             image: "python:3.11-slim".to_string(),
             writable_layer_size: Some("1G".to_string()),
+            writable_disk_reclaim: None,
             exposed_ports: Some(vec![8080]),
             probe_port: Some(8080),
             probe_path: Some("/health".to_string()),
@@ -1245,6 +1247,95 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert!(body.get("backend").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_template_forwards_writable_disk_reclaim_to_cubemaster() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        async fn forward(service: &TemplateService, capture: &Capture, external: Value) -> Value {
+            let req: CreateTemplateRequest =
+                serde_json::from_value(external).expect("external body should deserialize");
+            service
+                .create_template(req)
+                .await
+                .expect("template create should succeed");
+            capture
+                .body
+                .lock()
+                .await
+                .clone()
+                .expect("request body should be captured")
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+
+        // External true must reach CubeMaster as the internal bool true.
+        let body = forward(
+            &service,
+            &capture,
+            json!({ "image": "python:3.11-slim", "writableDiskReclaim": true }),
+        )
+        .await;
+        assert_eq!(body["writable_disk_reclaim"], true);
+
+        let body = forward(&service, &capture, json!({ "image": "python:3.11-slim" })).await;
+        assert_ne!(
+            body.get("writable_disk_reclaim").and_then(Value::as_bool),
+            Some(true),
+            "omitted writableDiskReclaim must stay off: {body}"
+        );
+
+        let body = forward(
+            &service,
+            &capture,
+            json!({ "image": "python:3.11-slim", "writableDiskReclaim": false }),
+        )
+        .await;
+        assert_ne!(
+            body.get("writable_disk_reclaim").and_then(Value::as_bool),
+            Some(true),
+            "explicit false must stay off: {body}"
+        );
     }
 
     #[test]

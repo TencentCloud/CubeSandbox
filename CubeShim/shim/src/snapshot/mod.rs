@@ -407,6 +407,7 @@ impl Snapshot {
             let disk = snapshot::Disk {
                 fs_type: d.fs_type.clone(),
                 size: d.size,
+                discard: d.discard,
             };
             snap_info.vm_res.disks.push(disk);
         }

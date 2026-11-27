@@ -66,10 +66,14 @@ type TemplateBuildStatus struct {
 }
 
 type BuildTemplateOptions struct {
-	Image               string
-	Name                string
-	InstanceType        string
-	WritableLayerSize   string
+	Image             string
+	Name              string
+	InstanceType      string
+	WritableLayerSize string
+	// WritableDiskReclaim enables discard on the writable rootfs so freed
+	// blocks can be reclaimed. It is off by default and owned by the template
+	// for its lifetime; sandboxes cannot override it.
+	WritableDiskReclaim *bool
 	ExposedPorts        []uint16
 	ProbePort           *uint16
 	ProbePath           string
@@ -196,6 +200,9 @@ func buildTemplatePayload(opts BuildTemplateOptions) (map[string]any, error) {
 	}
 	if writableLayerSize := strings.TrimSpace(opts.WritableLayerSize); writableLayerSize != "" {
 		payload["writableLayerSize"] = writableLayerSize
+	}
+	if opts.WritableDiskReclaim != nil {
+		payload["writableDiskReclaim"] = *opts.WritableDiskReclaim
 	}
 	if len(opts.ExposedPorts) > 0 {
 		payload["exposedPorts"] = append([]uint16(nil), opts.ExposedPorts...)

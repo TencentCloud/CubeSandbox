@@ -66,6 +66,12 @@ func generateTemplateCreateRequest(ctx context.Context, req *types.CreateTemplat
 	if req.CgroupMode != nil && *req.CgroupMode != "" {
 		annotations[constants.CubeAnnotationCgroupMode] = *req.CgroupMode
 	}
+	if req.WritableDiskReclaim {
+		if err := validateWritableDiskReclaimBackend(req.Backend); err != nil {
+			return nil, err
+		}
+		annotations[constants.CubeAnnotationWritableDiskReclaim] = "true"
+	}
 	rootVolume := &types.Volume{
 		Name: rootfsWritableVolumeName,
 		VolumeSource: &types.VolumeSource{

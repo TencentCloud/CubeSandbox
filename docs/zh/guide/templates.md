@@ -74,6 +74,7 @@ OCI 镜像是制作模板的一种输入，而不是可直接启动的 CubeSandb
 
 ## 下一步
 
+- [可写磁盘回收](./writable-disk-reclaim.md) — 按模板开启可写根盘自动回收，了解后端差异和使用建议。
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 完整的 CLI 指南，包括探针配置、进度监控和故障排查。
 - [将运行中的沙箱提交为模板](./tutorials/template-from-sandbox.md) — 固化沙箱当前环境，并按需覆盖创建请求。
 - [环境变量](./environment-variables.md) — 区分模板、Sandbox 与单次执行的环境变量作用域和覆盖规则。

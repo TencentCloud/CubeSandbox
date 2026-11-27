@@ -441,6 +441,7 @@ impl Utils {
                 id: Some(format!("{}-{}", DISK_DEVICE_ID_PRE, disk_configs.len())),
                 path: Some(PathBuf::from(d.path.clone())),
                 rate_limiter_config: d.rate_limiter_config,
+                discard: d.discard,
                 ..Default::default()
             };
             disk_configs.push(disk_config);
@@ -894,6 +895,7 @@ mod tests {
             fs_type: "ext4".to_string(),
             size: 1024,
             fs_quota: 1024,
+            discard: false,
             rate_limiter_config: None,
         }];
         let disk_configs = Utils::restore_disks_config(&disks);
@@ -905,6 +907,30 @@ mod tests {
             disk_configs[0].id,
             Some(format!("{}-{}", DISK_DEVICE_ID_PRE, disk_configs.len() - 1))
         )
+    }
+
+    #[test]
+    fn utils_restore_disks_config_forwards_discard() {
+        for (input, expected) in [(None, false), (Some(false), false), (Some(true), true)] {
+            let mut value = serde_json::json!({
+                "path": "/dev/test",
+                "fs_type": "ext4",
+                "size": 1024,
+            });
+            if let Some(discard) = input {
+                value["discard"] = serde_json::Value::Bool(discard);
+            }
+            let disk: Disk = serde_json::from_value(value).expect("disk json should deserialize");
+
+            let disk_configs = Utils::restore_disks_config(&vec![disk]);
+            let serialized =
+                serde_json::to_value(&disk_configs[0]).expect("disk config should serialize");
+            assert_eq!(
+                serialized["discard"],
+                serde_json::Value::Bool(expected),
+                "restore should forward discard from input {input:?}"
+            );
+        }
     }
 
     #[test]

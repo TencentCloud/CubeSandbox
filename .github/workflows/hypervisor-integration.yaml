@@ -50,3 +50,109 @@ jobs:
         run: hypervisor/scripts/dev_cli.sh tests --integration --quick --libc ${{ matrix.libc }}
       - name: Skipping build for PR
         run: echo "Skipping build for PR"
+
+  block-discard-eligibility:
+    timeout-minutes: 30
+    name: Block discard eligibility (owned loop)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v6
+      - name: Build block_util integration test
+        working-directory: hypervisor
+        run: |
+          set -euo pipefail
+          cargo test --locked -p block_util --test block_discard_eligibility \
+            --no-run --message-format=json > "$RUNNER_TEMP/block-util-test.json"
+          python3 - "$RUNNER_TEMP/block-util-test.json" "$GITHUB_ENV" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          artifacts, env_path = sys.argv[1], sys.argv[2]
+          executable = None
+          with open(artifacts, encoding="utf-8") as stream:
+              for line in stream:
+                  line = line.strip()
+                  if not line.startswith("{"):
+                      continue
+                  message = json.loads(line)
+                  if message.get("reason") != "compiler-artifact":
+                      continue
+                  if message.get("target", {}).get("name") != "block_discard_eligibility":
+                      continue
+                  if message.get("executable"):
+                      executable = message["executable"]
+          if not executable:
+              sys.exit("block_discard_eligibility test executable not found")
+          executable = str(pathlib.Path(executable).resolve())
+          with open(env_path, "a", encoding="utf-8") as stream:
+              stream.write(f"BLOCK_UTIL_ELIGIBILITY_BIN={executable}\n")
+          PY
+      - name: Run against an owned loop device
+        run: |
+          set -euo pipefail
+          : "${BLOCK_UTIL_ELIGIBILITY_BIN:?build step did not export the test executable}"
+          command -v losetup >/dev/null
+          command -v sudo >/dev/null
+          mkdir -p reclaim-poc-artifacts
+          RECLAIM_DIR="$(mktemp -d "$PWD/reclaim-poc-artifacts/cube-reclaim-poc-block-ci-XXXXXX")"
+          RECLAIM_IMAGE="$RECLAIM_DIR/image"
+          RECLAIM_LOOP_DEVICE=""
+          cleanup() {
+            status=$?
+            cleanup_failed=0
+            set +e
+            if [ -n "$RECLAIM_LOOP_DEVICE" ] && [ -e "$RECLAIM_LOOP_DEVICE" ]; then
+              CURRENT_BACKING="$(readlink -f "$(cat "/sys/block/$(basename "$RECLAIM_LOOP_DEVICE")/loop/backing_file" 2>/dev/null | tr -d '\n')" 2>/dev/null)"
+              EXPECTED_BACKING="$(readlink -f "$RECLAIM_IMAGE" 2>/dev/null)"
+              if [ -z "$CURRENT_BACKING" ] || [ "$CURRENT_BACKING" != "$EXPECTED_BACKING" ]; then
+                echo "Not detaching $RECLAIM_LOOP_DEVICE: current backing does not match $RECLAIM_IMAGE" >&2
+                cleanup_failed=1
+              elif ! sudo losetup -d "$RECLAIM_LOOP_DEVICE"; then
+                echo "Failed to detach $RECLAIM_LOOP_DEVICE" >&2
+                cleanup_failed=1
+              fi
+            fi
+            if [ "$cleanup_failed" -eq 0 ] && [ -n "$RECLAIM_IMAGE" ] && [ -e "$RECLAIM_IMAGE" ]; then
+              if ! ASSOCIATIONS="$(sudo losetup -j "$RECLAIM_IMAGE" 2>/dev/null)"; then
+                echo "Cannot verify loop associations for $RECLAIM_IMAGE; retaining it" >&2
+                cleanup_failed=1
+              elif [ -n "$ASSOCIATIONS" ]; then
+                echo "Retaining $RECLAIM_IMAGE: still associated with a loop device" >&2
+                cleanup_failed=1
+              elif ! rm -f "$RECLAIM_IMAGE"; then
+                echo "Failed to remove $RECLAIM_IMAGE" >&2
+                cleanup_failed=1
+              fi
+            fi
+            if [ "$cleanup_failed" -eq 0 ] && [ -n "$RECLAIM_DIR" ] && [ -d "$RECLAIM_DIR" ]; then
+              if ! rmdir "$RECLAIM_DIR"; then
+                echo "Failed to remove $RECLAIM_DIR" >&2
+                cleanup_failed=1
+              fi
+            fi
+            if [ "$cleanup_failed" -ne 0 ]; then
+              echo "Cleanup failed; inspect $RECLAIM_IMAGE and $RECLAIM_DIR for retained artifacts" >&2
+              if [ "$status" -eq 0 ]; then
+                status=1
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          truncate -s 64M "$RECLAIM_IMAGE"
+          RECLAIM_LOOP_DEVICE="$(sudo losetup --find --show "$RECLAIM_IMAGE")"
+          test -b "$RECLAIM_LOOP_DEVICE"
+          test -f "$RECLAIM_IMAGE"
+          QUEUE="/sys/block/$(basename "$RECLAIM_LOOP_DEVICE")/queue"
+          test -r "$QUEUE/discard_max_bytes"
+          test -r "$QUEUE/discard_granularity"
+          export CUBE_RECLAIM_BLOCK_DEVICE="$RECLAIM_LOOP_DEVICE"
+          export CUBE_RECLAIM_BLOCK_BACKING_FILE="$RECLAIM_IMAGE"
+          test -n "$CUBE_RECLAIM_BLOCK_DEVICE"
+          test -n "$CUBE_RECLAIM_BLOCK_BACKING_FILE"
+          sudo env \
+            CUBE_RECLAIM_BLOCK_DEVICE="$CUBE_RECLAIM_BLOCK_DEVICE" \
+            CUBE_RECLAIM_BLOCK_BACKING_FILE="$CUBE_RECLAIM_BLOCK_BACKING_FILE" \
+            "$BLOCK_UTIL_ELIGIBILITY_BIN" --test-threads=1 --nocapture

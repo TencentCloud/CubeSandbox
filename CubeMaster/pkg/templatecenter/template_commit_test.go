@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -259,6 +260,132 @@ func TestPrepareTemplateCommitRequestInheritsTemplateManagedQos(t *testing.T) {
 	}
 	if got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID] != "tpl-new" {
 		t.Fatalf("template annotation=%q, want tpl-new", got.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	}
+}
+
+func cloneAnnotationMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// TestPrepareTemplateCommitRequestWritableDiskReclaimPolicy pins that a commit
+// inherits the template-owned reclaim policy from the live sandbox spec. An
+// override may neither drop an enabled policy nor flip it, and a legacy
+// sandbox without the policy may not be used to forge one.
+func TestPrepareTemplateCommitRequestWritableDiskReclaimPolicy(t *testing.T) {
+	reclaim := constants.CubeAnnotationWritableDiskReclaim
+	tests := []struct {
+		name                string
+		baseAnnotations     map[string]string
+		overrideAnnotations map[string]string
+		wantValue           string
+		wantPresent         bool
+		wantErrSubstring    string
+	}{
+		{
+			name:                "base enables policy, override omits it",
+			baseAnnotations:     map[string]string{reclaim: "true"},
+			overrideAnnotations: map[string]string{},
+			wantValue:           "true",
+			wantPresent:         true,
+		},
+		{
+			name:                "base enables policy, override matches",
+			baseAnnotations:     map[string]string{reclaim: "true"},
+			overrideAnnotations: map[string]string{reclaim: "true"},
+			wantValue:           "true",
+			wantPresent:         true,
+		},
+		{
+			name:                "base enables policy, override tries to disable",
+			baseAnnotations:     map[string]string{reclaim: "true"},
+			overrideAnnotations: map[string]string{reclaim: "false"},
+			wantErrSubstring:    reclaim,
+		},
+		{
+			name:                "legacy base without policy rejects forged enable",
+			overrideAnnotations: map[string]string{reclaim: "true"},
+			wantErrSubstring:    reclaim,
+		},
+		{
+			name:                "base stores false, override tries to enable",
+			baseAnnotations:     map[string]string{reclaim: "false"},
+			overrideAnnotations: map[string]string{reclaim: "true"},
+			wantErrSubstring:    reclaim,
+		},
+		{
+			name:                "base stores false, override omits it",
+			baseAnnotations:     map[string]string{reclaim: "false"},
+			overrideAnnotations: map[string]string{},
+			wantPresent:         false,
+		},
+		{
+			name:                "base omits policy, override omits it",
+			overrideAnnotations: map[string]string{},
+			wantPresent:         false,
+		},
+		{
+			name:                "malformed base policy is rejected",
+			baseAnnotations:     map[string]string{reclaim: "enabled"},
+			overrideAnnotations: map[string]string{},
+			wantErrSubstring:    reclaim,
+		},
+		{
+			name:                "malformed override policy is rejected",
+			baseAnnotations:     map[string]string{reclaim: "true"},
+			overrideAnnotations: map[string]string{reclaim: "TRUE!"},
+			wantErrSubstring:    reclaim,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origLoad := loadSandboxCreateRequestFn
+			defer func() { loadSandboxCreateRequestFn = origLoad }()
+
+			base := &types.CreateCubeSandboxReq{Annotations: tc.baseAnnotations}
+			override := &types.CreateCubeSandboxReq{
+				InstanceType: "custom",
+				Annotations:  tc.overrideAnnotations,
+			}
+			baseBefore := cloneAnnotationMap(tc.baseAnnotations)
+			overrideBefore := cloneAnnotationMap(tc.overrideAnnotations)
+			loadSandboxCreateRequestFn = func(context.Context, string) (*types.CreateCubeSandboxReq, error) {
+				return base, nil
+			}
+
+			got, err := prepareTemplateCommitRequest(context.Background(), "req-1", "sb-1", "tpl-new", override)
+			if tc.wantErrSubstring != "" {
+				if err == nil {
+					t.Fatalf("prepareTemplateCommitRequest succeeded, want rejection of conflicting writable disk reclaim policy")
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSubstring) {
+					t.Fatalf("error %q must mention %q", err.Error(), tc.wantErrSubstring)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("prepareTemplateCommitRequest: %v", err)
+				}
+				value, ok := got.Annotations[reclaim]
+				if ok != tc.wantPresent {
+					t.Fatalf("annotation %s present=%t (value=%q), want present=%t", reclaim, ok, value, tc.wantPresent)
+				}
+				if tc.wantPresent && value != tc.wantValue {
+					t.Fatalf("annotation %s=%q, want %q", reclaim, value, tc.wantValue)
+				}
+			}
+			if !reflect.DeepEqual(base.Annotations, baseBefore) {
+				t.Fatalf("base sandbox annotations mutated: %v -> %v", baseBefore, base.Annotations)
+			}
+			if !reflect.DeepEqual(override.Annotations, overrideBefore) {
+				t.Fatalf("override annotations mutated: %v -> %v", overrideBefore, override.Annotations)
+			}
+		})
 	}
 }
 

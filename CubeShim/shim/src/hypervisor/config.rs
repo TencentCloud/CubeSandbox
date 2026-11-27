@@ -322,6 +322,7 @@ impl VmConfig {
                 id: Some(format!("{}-{}", utils::DISK_DEVICE_ID_PRE, ds.len())),
                 path: Some(d.path.clone().into()),
                 rate_limiter_config: d.rate_limiter_config,
+                discard: d.discard,
                 ..Default::default()
             };
             ds.push(disk_conf);
@@ -597,6 +598,7 @@ mod tests {
             fs_type: "ext4".to_string(),
             size: 88,
             fs_quota: 88,
+            discard: false,
             rate_limiter_config: None,
         };
 
@@ -617,6 +619,34 @@ mod tests {
         let vsock = config.vsock.unwrap();
         let vs = Utils::gen_vsock_config("ut_test");
         assert_eq!(vs, vsock)
+    }
+
+    fn disk_from_json(discard: Option<bool>) -> Disk {
+        let mut value = serde_json::json!({
+            "path": "/dev/test",
+            "fs_type": "ext4",
+            "size": 1024,
+        });
+        if let Some(discard) = discard {
+            value["discard"] = serde_json::Value::Bool(discard);
+        }
+        serde_json::from_value(value).expect("disk json should deserialize")
+    }
+
+    #[test]
+    fn add_disks_forwards_discard() {
+        for (input, expected) in [(None, false), (Some(false), false), (Some(true), true)] {
+            let mut config = VmConfig::default();
+            config.add_disks(&[disk_from_json(input)]);
+
+            let disks = config.disks.expect("disks should be configured");
+            let serialized = serde_json::to_value(&disks[0]).expect("disk config should serialize");
+            assert_eq!(
+                serialized["discard"],
+                serde_json::Value::Bool(expected),
+                "discard should be forwarded from input {input:?}"
+            );
+        }
     }
 
     #[test]
