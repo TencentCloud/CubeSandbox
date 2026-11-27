@@ -396,6 +396,7 @@ struct s3_bs_dev_stats {
 	uint64_t overlay_flushes_partial;
 	uint64_t overlay_flushes_repeated;
 	uint64_t overlay_flushes_repeated_partial;
+	uint64_t overlay_retry_scan_chunks; /* entries examined for retry eligibility */
 
 	/* Local read cache. All zero when there is none.
 	 *

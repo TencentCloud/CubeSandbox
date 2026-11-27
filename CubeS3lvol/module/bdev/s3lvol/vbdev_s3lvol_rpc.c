@@ -2031,6 +2031,8 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 		spdk_json_write_named_uint64(
 			w, "flushes_repeated_partial",
 			stats.overlay_flushes_repeated_partial);
+		spdk_json_write_named_uint64(w, "retry_scan_chunks",
+					     stats.overlay_retry_scan_chunks);
 
 		/* Local read cache. hits vs misses is the number that matters: a
 		 * hit is a read that cost a local round trip instead of an S3 one.

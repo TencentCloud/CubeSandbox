@@ -33,6 +33,7 @@
 #include "spdk/env.h"
 #include "spdk/log.h"
 #include "spdk/thread.h"
+#include "spdk/util.h"
 
 #include "s3lvol/s3_flusher.h"
 #include "s3lvol/s3_overlay.h"
@@ -46,6 +47,30 @@
 
 static int g_pass;
 static int g_fail;
+static uint64_t g_resume_logs;
+static uint64_t g_resume_failures;
+static uint64_t g_failure_logs;
+
+static void
+test_log(int level, const char *file, const int line, const char *func,
+	 const char *format, va_list args)
+{
+	char message[1024];
+
+	(void)level;
+	(void)file;
+	(void)line;
+	(void)func;
+	vsnprintf(message, sizeof(message), format, args);
+	if (sscanf(message, "S3 uploads resumed after %" SCNu64,
+		   &g_resume_failures) == 1) {
+		g_resume_logs++;
+	}
+	if (strstr(message, "Failed to flush chunk ")) {
+		g_failure_logs++;
+	}
+	fputs(message, stderr);
+}
 
 static void
 check_true(const char *what, bool ok, const char *detail)
@@ -139,6 +164,8 @@ struct fake_uploader {
 	uint32_t started;
 	uint32_t completed;
 	uint32_t max_in_flight;
+	uint32_t callback_depth;
+	uint32_t max_callback_depth;
 
 	uint32_t rounds[TEST_CHUNKS];
 
@@ -169,7 +196,12 @@ fake_upload(void *vctx, const struct s3_overlay_flush_view *view,
 
 	if (f->auto_complete) {
 		f->completed++;
+		f->callback_depth++;
+		if (f->callback_depth > f->max_callback_depth) {
+			f->max_callback_depth = f->callback_depth;
+		}
 		cb(cb_arg, f->forced_status);
+		f->callback_depth--;
 		return;
 	}
 
@@ -199,6 +231,23 @@ fake_complete_all(struct fake_uploader *f, int status)
 		f->completed++;
 		batch[i].cb(batch[i].cb_arg, status);
 	}
+}
+
+/* Complete one chunk while leaving unrelated uploads in flight. */
+static void
+fake_complete_chunk(struct fake_uploader *f, uint64_t chunk_index, int status)
+{
+	for (uint32_t i = 0; i < f->n_pending; i++) {
+		if (f->pending[i].chunk_index == chunk_index) {
+			struct fake_pending request = f->pending[i];
+
+			f->pending[i] = f->pending[--f->n_pending];
+			f->completed++;
+			request.cb(request.cb_arg, status);
+			return;
+		}
+	}
+	check_true("requested chunk has a pending upload", false, NULL);
 }
 
 /* ==========================================================================
@@ -800,6 +849,10 @@ test_flush_handshake(void)
 
 	check_true("a second round on the same chunk is refused",
 		   s3_overlay_flush_begin(ov, 0, &view) == -EBUSY, NULL);
+	/* Even a cooldown armed before flush_end must not hide single flight. */
+	s3_overlay_backoff_flush(ov, 0, view.epoch, S3_OVERLAY_RETRY_MAX_US);
+	check_true("active flush takes precedence over cooldown",
+		   s3_overlay_flush_begin(ov, 0, &view) == -EBUSY, NULL);
 
 	fill_pattern(blk, 1, 0, 0xC2);
 	s3_overlay_write(ov, 0, 1, blk, 11);
@@ -1008,21 +1061,140 @@ test_flusher(void)
 
 	fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0x81);
 	s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 400);
+	/* The original retry storm completes inside upload_fn itself. */
+	fake.auto_complete = true;
+	fake.forced_status = -EIO;
+	uint64_t first_failure_at = spdk_get_ticks();
 	s3_flusher_kick(fl);
-	fake_complete_all(&fake, -EIO);
+	fake.auto_complete = false;
+	fake.forced_status = 0;
 
-	/* The completion path kicks the flusher, so the retry is already running by
-	 * the time we get here -- the chunk is in flight again rather than queued. */
-	check_u64("a new round started right away", fake.started, 2);
+	check_u64("failure does not immediately start another upload", fake.started, 1);
+	/* Only assert inside the cooldown; a descheduled host may miss it. */
+	for (unsigned i = 0; i < 10; i++) {
+		s3_flusher_kick(fl);
+	}
+	if (spdk_get_ticks() - first_failure_at <
+	    S3_OVERLAY_RETRY_BASE_US * spdk_get_ticks_hz() / 1000000) {
+		check_u64("immediate kicks respect retry backoff", fake.started, 1);
+	}
+	check_true("failed data stays dirty during backoff", s3_overlay_has_dirty(ov), NULL);
+	uint64_t retry_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+	while (fake.started < 2 && spdk_get_ticks() < retry_deadline) {
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+		usleep(1000);
+	}
+	check_u64("retry starts after the initial backoff", fake.started, 2);
 	s3_flusher_get_stats(fl, &fstats);
 	check_u64("failure counted", fstats.failures, 1);
+	uint64_t second_failure_at = spdk_get_ticks();
+	uint64_t logged_failures = g_failure_logs;
+	fake_complete_all(&fake, -EACCES);
+	check_u64("changed error status bypasses suppression", g_failure_logs, logged_failures + 1);
+	s3_flusher_kick(fl);
+	check_u64("second failure increases the backoff", fake.started, 2);
+	retry_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+	while (fake.started < 3 && spdk_get_ticks() < retry_deadline) {
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+		usleep(1000);
+	}
+	check_u64("second retry starts after doubled backoff", fake.started, 3);
+	check_true("second retry waited at least 200 ms",
+		   spdk_get_ticks() - second_failure_at >= spdk_get_ticks_hz() / 5, NULL);
 
+	uint64_t first_resume_logs = g_resume_logs;
 	fake_complete_all(&fake, 0);
-	check_u64("retried once", fake.rounds[2], 2);
+	check_u64("first recovery logs progress", g_resume_logs, first_resume_logs + 1);
+	check_u64("first recovery counts consecutive failures", g_resume_failures, 2);
+	check_u64("retried twice", fake.rounds[2], 3);
 	check_true("and it is clean now", !s3_overlay_has_dirty(ov), NULL);
 	check_true("the retried upload still had the data",
 		   check_pattern(fake.image[2], 1, 2 * BLOCKS_PER_CHUNK, 0x81),
 		   NULL);
+
+	/* A late success from another chunk must not reset the failed chunk's
+	 * next delay, even after the original cooldown has elapsed. */
+	{
+		fill_pattern(blk, 1, BLOCKS_PER_CHUNK, 0x82);
+		s3_overlay_write(ov, BLOCKS_PER_CHUNK, 1, blk, 405);
+		fill_pattern(blk, 1, 2 * BLOCKS_PER_CHUNK, 0x83);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, 1, blk, 406);
+		s3_flusher_kick(fl);
+		check_u64("two independent uploads are pending", fake.n_pending, 2);
+		fake_complete_chunk(&fake, 2, -EIO);
+		usleep(S3_OVERLAY_RETRY_BASE_US + 20000);
+		uint64_t resume_logs = g_resume_logs;
+		uint64_t failure_logs = g_failure_logs;
+		fake_complete_chunk(&fake, 1, 0);
+		check_u64("repeated recovery notices are throttled under continuous writes",
+			  g_resume_logs, resume_logs);
+		check_true("successful upload does not require an idle uploader", fake.n_pending > 0, NULL);
+		uint64_t failed_again = spdk_get_ticks();
+		fake_complete_chunk(&fake, 2, -EIO);
+		check_u64("success preserves failure log suppression", g_failure_logs, failure_logs);
+		uint64_t before_retry = fake.started;
+		uint64_t limit = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+		while (fake.started == before_retry && spdk_get_ticks() < limit) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_u64("failed chunk retries after unrelated completion", fake.started, before_retry + 1);
+		check_true("unrelated success preserves doubled delay",
+			   spdk_get_ticks() - failed_again >= spdk_get_ticks_hz() / 5, NULL);
+		fake_complete_all(&fake, 0);
+	}
+
+	/* A poisoned object must not stall a different chunk, and unmap must
+	 * discard the failed object's cooldown along with its data. */
+	{
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 2 * BLOCKS_PER_CHUNK, 0x84);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 407);
+		s3_flusher_kick(fl);
+		fake_complete_chunk(&fake, 2, -EIO);
+		uint32_t failed_rounds = fake.rounds[2];
+		uint32_t healthy_rounds = fake.rounds[3];
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 3 * BLOCKS_PER_CHUNK, 0x85);
+		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 408);
+		s3_flusher_kick(fl);
+		check_u64("healthy data bypasses another chunk's cooldown", fake.rounds[3], healthy_rounds + 1);
+		check_u64("failed object remains in cooldown", fake.rounds[2], failed_rounds);
+		fake_complete_chunk(&fake, 3, 0);
+		check_true("healthy completion leaves failed data dirty", s3_overlay_has_dirty(ov), NULL);
+		s3_overlay_drop_chunk(ov, 2);
+		fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, 2 * BLOCKS_PER_CHUNK, 0x86);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 409);
+		s3_flusher_kick(fl);
+		check_u64("unmap removes stale retry delay", fake.rounds[2], failed_rounds + 1);
+
+		/* Replace the chunk while the previous generation is in flight. */
+		s3_overlay_drop_chunk(ov, 2);
+		s3_overlay_write(ov, 2 * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 410);
+		fake_complete_chunk(&fake, 2, -EIO);
+		check_u64("old generation failure does not defer replacement", fake.rounds[2], failed_rounds + 2);
+		fake_complete_all(&fake, 0);
+		check_true("replacement data reaches the uploader", !s3_overlay_has_dirty(ov), NULL);
+	}
+
+	/* Multiple inline failures must return to the scheduling loop instead of
+	 * adding one stack frame per queued chunk. */
+	{
+		for (uint32_t i = 0; i < 4; i++) {
+			fill_pattern(chunkbuf, BLOCKS_PER_CHUNK, i * BLOCKS_PER_CHUNK, 0x87);
+			s3_overlay_write(ov, i * BLOCKS_PER_CHUNK, BLOCKS_PER_CHUNK, chunkbuf, 420 + i);
+		}
+		uint32_t before = fake.started;
+		fake.max_callback_depth = 0;
+		fake.auto_complete = true;
+		fake.forced_status = -EIO;
+		s3_flusher_kick(fl);
+		check_u64("each failing chunk gets one attempt", fake.started, before + 4);
+		check_u64("inline failures do not nest callbacks", fake.max_callback_depth, 1);
+		fake.auto_complete = false;
+		fake.forced_status = 0;
+		for (uint32_t i = 0; i < 4; i++) {
+			s3_overlay_drop_chunk(ov, i);
+		}
+	}
 
 	/* --- drain --- */
 	printf("\n[9] drain waits for everything to reach S3\n");
@@ -1031,11 +1203,26 @@ test_flusher(void)
 
 		fill_pattern(blk, 1, 3 * BLOCKS_PER_CHUNK, 0x91);
 		s3_overlay_write(ov, 3 * BLOCKS_PER_CHUNK, 1, blk, 500);
+		s3_flusher_kick(fl);
+		fake_complete_all(&fake, -EIO);
+		uint64_t before_drain = fake.started;
 
 		s3_flusher_drain(fl, 0, drain_cb, &probe);
+		check_u64("drain probes immediately despite an existing cooldown",
+			  fake.started, before_drain + 1);
 
 		check_true("drain does not complete while work is outstanding",
 			   !probe.done, NULL);
+
+		/* Recovery can happen after the initial drain probe failed. Only the
+		 * owner-thread poller drives this retry; no manual kick is involved. */
+		fake_complete_all(&fake, -EIO);
+		uint64_t recovery_deadline = spdk_get_ticks() + 2 * spdk_get_ticks_hz();
+		while (fake.n_pending == 0 && !probe.done && spdk_get_ticks() < recovery_deadline) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_true("drain retries after storage recovers", fake.n_pending > 0, NULL);
 
 		while (fake.n_pending > 0) {
 			fake_complete_all(&fake, 0);
@@ -1278,6 +1465,370 @@ out:
 }
 
 static void
+test_retry_queue_order(void)
+{
+	uint8_t *data = calloc(1, CHUNK_SIZE);
+
+	check_true("retry-order buffer allocates", data != NULL, NULL);
+	if (!data) {
+		return;
+	}
+	for (unsigned mode = 0; mode < 2; mode++) {
+		struct s3_overlay *ov = NULL;
+		struct s3_overlay_flush_view view;
+		struct s3_overlay_flush_policy policy = {
+			.max_age_us = 1, .full_pct = 100, .high_pct = 100,
+		};
+		uint64_t idx = UINT64_MAX;
+		bool force = mode != 0;
+		int rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+
+		check_true("retry-order overlay creates", rc == 0, NULL);
+		if (rc != 0) {
+			continue;
+		}
+		s3_overlay_set_flush_policy(ov, &policy);
+		for (unsigned partial = 0; partial < 2; partial++) {
+			uint64_t first = partial * 3;
+
+			s3_overlay_write(ov, first * BLOCKS_PER_CHUNK,
+					 partial ? 1 : BLOCKS_PER_CHUNK, data, 10);
+			rc = s3_overlay_flush_begin(ov, first, &view);
+			check_true("claim failed queue head", rc == 0, NULL);
+			if (rc != 0) {
+				break;
+			}
+			s3_overlay_backoff_flush(ov, first, view.epoch, 30000000);
+			s3_overlay_flush_end(ov, first, false);
+			check_true("direct flush cannot bypass retry cooldown",
+				   s3_overlay_flush_begin(ov, first, &view) == -EAGAIN, NULL);
+			s3_overlay_write(ov, (first + 1) * BLOCKS_PER_CHUNK, 1, data, 20);
+			s3_overlay_write(ov, (first + 2) * BLOCKS_PER_CHUNK,
+					 BLOCKS_PER_CHUNK, data, 30);
+			usleep(1000);
+			check_true("older eligible partial precedes younger full chunk",
+				   s3_overlay_next_dirty(ov, force, &idx) == 0 && idx == first + 1,
+				   NULL);
+			check_true("younger full chunk still progresses",
+				   s3_overlay_next_dirty(ov, force, &idx) == 0 && idx == first + 2,
+				   NULL);
+			check_true("cooling head stays queued",
+				   s3_overlay_next_dirty(ov, force, &idx) == -EAGAIN &&
+				   s3_overlay_has_dirty(ov), NULL);
+			s3_overlay_reset_flush_backoff(ov);
+			check_true("retry head becomes eligible after cooldown reset",
+				   s3_overlay_next_dirty(ov, force, &idx) == 0 && idx == first,
+				   NULL);
+		}
+		s3_overlay_destroy(ov);
+	}
+	free(data);
+}
+
+static void
+test_retry_queue_cache(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_overlay_flush_view view;
+	struct s3_overlay_stats before, after;
+	uint64_t idx;
+	int rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+
+	check_true("retry-cache overlay creates", rc == 0, NULL);
+	if (rc != 0) {
+		return;
+	}
+	/* Exercise both queues, including a caller that dequeues before finding
+	 * the cooldown armed. Failed flush_begin must put the chunk back. */
+	for (uint64_t i = 0; i < 2; i++) {
+		s3_overlay_write(ov, i * BLOCKS_PER_CHUNK, i ? 1 : BLOCKS_PER_CHUNK, NULL, i + 1);
+		check_true("take chunk before arming cooldown",
+			   s3_overlay_next_dirty(ov, true, &idx) == 0 && idx == i, NULL);
+		uint64_t epoch = s3_overlay_chunk_epoch(ov, i);
+		for (unsigned round = 0; round < 10; round++) {
+			s3_overlay_backoff_flush(ov, i, epoch, 30000000);
+		}
+		check_true("dequeued cooling chunk is rejected",
+			   s3_overlay_flush_begin(ov, i, &view) == -EAGAIN, NULL);
+		check_true("rejected chunk stays visible as dirty", s3_overlay_has_dirty(ov), NULL);
+	}
+	check_true("all cooling chunks wait", s3_overlay_next_dirty(ov, true, &idx) == -EAGAIN, NULL);
+	s3_overlay_get_stats(ov, &before);
+	for (unsigned i = 0; i < 100; i++) {
+		s3_overlay_next_dirty(ov, true, &idx);
+	}
+	s3_overlay_get_stats(ov, &after);
+	check_u64("repeated scheduling skips cooling queues", after.retry_scan_chunks, before.retry_scan_chunks);
+
+	/* Rewrites of cooling chunks must not discard the cached wait. */
+	s3_overlay_write(ov, 0, 1, NULL, 10);
+	s3_overlay_write(ov, BLOCKS_PER_CHUNK, 1, NULL, 11);
+	s3_overlay_next_dirty(ov, true, &idx);
+	s3_overlay_get_stats(ov, &after);
+	check_u64("cooling rewrites preserve cached waits", after.retry_scan_chunks, before.retry_scan_chunks);
+
+	for (uint64_t i = 2; i < 4; i++) {
+		s3_overlay_write(ov, i * BLOCKS_PER_CHUNK, i == 2 ? BLOCKS_PER_CHUNK : 1, NULL, 20 + i);
+		check_true("new work invalidates its queue's cached wait",
+			   s3_overlay_next_dirty(ov, true, &idx) == 0 && idx == i, NULL);
+		s3_overlay_drop_chunk(ov, i);
+	}
+	s3_overlay_reset_flush_backoff(ov);
+	for (unsigned i = 0; i < 2; i++) {
+		check_true("drain probe invalidates cached waits", s3_overlay_next_dirty(ov, true, &idx) == 0, NULL);
+		check_true("drain probe claims requeued chunk", s3_overlay_flush_begin(ov, idx, &view) == 0, NULL);
+		s3_overlay_flush_end(ov, idx, true);
+	}
+	check_true("all requeued data reaches a successful flush", !s3_overlay_has_dirty(ov), NULL);
+	s3_overlay_destroy(ov);
+}
+
+static void
+test_drain_backoff_history(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_overlay_flush_view view;
+	uint64_t epoch;
+	int rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+
+	check_true("drain-history overlay creates", rc == 0, NULL);
+	if (rc != 0) {
+		return;
+	}
+	s3_overlay_write(ov, 0, 1, NULL, 1);
+	epoch = s3_overlay_chunk_epoch(ov, 0);
+	for (unsigned round = 0; round < 6; round++) {
+		uint64_t expected = spdk_min(100000ULL << round, 1000000ULL);
+
+		s3_overlay_reset_flush_backoff(ov);
+		check_true("each drain permits an immediate probe", s3_overlay_flush_begin(ov, 0, &view) == 0, NULL);
+		check_u64("repeated drains retain exponential history",
+			  s3_overlay_backoff_flush(ov, 0, epoch, 1000000), expected);
+		s3_overlay_flush_end(ov, 0, false);
+		check_true("drain failure rearms cooldown", s3_overlay_flush_begin(ov, 0, &view) == -EAGAIN, NULL);
+	}
+	check_u64("background retry retains escalation beyond drain cap",
+		  s3_overlay_backoff_flush(ov, 0, epoch, 30000000), 6400000);
+	for (unsigned round = 0; round < 3; round++) {
+		s3_overlay_backoff_flush(ov, 0, epoch, 30000000);
+	}
+	check_u64("background escalation stays bounded", s3_overlay_backoff_flush(ov, 0, epoch, 30000000), 30000000);
+	s3_overlay_reset_flush_backoff(ov);
+	check_true("successful probe starts", s3_overlay_flush_begin(ov, 0, &view) == 0, NULL);
+	/* Keep newer data so success must reset history on the same chunk. */
+	s3_overlay_write(ov, 0, 1, NULL, 2);
+	s3_overlay_flush_end(ov, 0, true);
+	check_u64("success clears accumulated history", s3_overlay_backoff_flush(ov, 0, epoch, 30000000), 100000);
+	s3_overlay_drop_chunk(ov, 0);
+	s3_overlay_destroy(ov);
+}
+
+static void
+test_unmap_retry_backoff(void)
+{
+	/* A live unmap keeps newer writes, including when the original full
+	 * chunk remains on ripe_q after being trimmed to a partial chunk. */
+	for (unsigned mode = 0; mode < 3; mode++) {
+		struct s3_overlay *ov = NULL;
+		struct s3_overlay_flush_view view;
+		uint64_t idx, old_epoch;
+		bool in_flight = mode == 2;
+		uint32_t blocks = mode == 1 ? BLOCKS_PER_CHUNK : 2;
+		int rc = s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov);
+
+		check_true("live-unmap overlay creates", rc == 0, NULL);
+		if (rc != 0) {
+			continue;
+		}
+		s3_overlay_write(ov, 0, blocks, NULL, 10);
+		rc = s3_overlay_flush_begin(ov, 0, &view);
+		check_true("live-unmap original upload starts", rc == 0, NULL);
+		if (rc != 0) {
+			s3_overlay_destroy(ov);
+			continue;
+		}
+		old_epoch = view.epoch;
+		for (unsigned round = 0; round < 10; round++) {
+			s3_overlay_backoff_flush(ov, 0, old_epoch, 30000000);
+		}
+		if (!in_flight) {
+			s3_overlay_flush_end(ov, 0, false);
+		}
+		s3_overlay_write(ov, blocks - 1, 1, NULL, 30);
+		if (!in_flight) {
+			/* Populate the cached wait before unmap changes eligibility. */
+			check_true("old generation is cooling",
+				   s3_overlay_next_dirty(ov, true, &idx) == -EAGAIN, NULL);
+			s3_overlay_drop_chunk_upto(ov, 0, 0);
+			check_true("no-op unmap preserves cooldown",
+				   s3_overlay_next_dirty(ov, true, &idx) == -EAGAIN, NULL);
+		}
+		s3_overlay_drop_chunk_upto(ov, 0, 10);
+		check_true("live unmap retains only replacement data",
+			   !s3_overlay_covers(ov, 0, 1) &&
+			   s3_overlay_covers(ov, blocks - 1, 1), NULL);
+		check_u64("old upload cannot rearm cooldown after live unmap",
+			  s3_overlay_backoff_flush(ov, 0, old_epoch, 30000000), 0);
+		if (in_flight) {
+			s3_overlay_flush_end(ov, 0, false);
+		}
+		rc = s3_overlay_next_dirty(ov, true, &idx);
+		check_true("live unmap releases cached cooldown for replacement",
+			   rc == 0 && idx == 0, NULL);
+		if (rc == 0) {
+			rc = s3_overlay_flush_begin(ov, idx, &view);
+			check_true("replacement upload starts immediately", rc == 0, NULL);
+			if (rc == 0) {
+				check_u64("replacement upload contains only the newer block", view.nblocks, 1);
+				check_u64("live unmap resets accumulated retry history",
+					  s3_overlay_backoff_flush(ov, idx, view.epoch, 30000000), 100000);
+				s3_overlay_flush_end(ov, idx, true);
+				check_true("replacement upload leaves no dirty data", !s3_overlay_has_dirty(ov), NULL);
+			}
+		}
+		s3_overlay_destroy(ov);
+	}
+}
+
+static void
+test_intermittent_failure_logging(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_flusher *fl = NULL;
+	struct fake_uploader fake = { .auto_complete = true };
+	uint64_t failure_logs = g_failure_logs, resume_logs = g_resume_logs;
+
+	if (s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov) != 0) {
+		check_true("intermittent logging overlay creates", false, NULL);
+		return;
+	}
+	fake.ov = ov;
+	fake.image[0] = malloc(CHUNK_SIZE);
+	if (!fake.image[0] || s3_flusher_create(ov, NULL, fake_upload, &fake, NULL, &fl)) {
+		check_true("intermittent logging flusher creates", false, NULL);
+		goto out;
+	}
+	for (unsigned i = 0; i < 8; i++) {
+		s3_overlay_write(ov, 0, BLOCKS_PER_CHUNK, NULL, i + 1);
+		fake.forced_status = -EIO;
+		s3_flusher_kick(fl);
+		/* Advance eligibility explicitly: this checks log throttling, not
+		 * the retry wait already covered by the scheduling tests. */
+		s3_overlay_reset_flush_backoff(ov);
+		fake.forced_status = 0;
+		s3_flusher_kick(fl);
+		usleep(S3_FLUSHER_DEFAULT_POLL_US * 2);
+		spdk_thread_poll(spdk_get_thread(), 0, 0);
+	}
+	check_u64("alternating results do not flood failure logs", g_failure_logs, failure_logs + 1);
+	check_u64("alternating results do not flood recovery logs", g_resume_logs, resume_logs + 1);
+	check_true("intermittent failures do not prevent uploads", !s3_overlay_has_dirty(ov), NULL);
+	s3_overlay_write(ov, 0, BLOCKS_PER_CHUNK, NULL, 20);
+	fake.forced_status = -EACCES;
+	s3_flusher_kick(fl);
+	check_u64("new error status is reported after intervening successes",
+		  g_failure_logs, failure_logs + 2);
+
+out:
+	if (fl) {
+		s3_overlay_drop_chunk(ov, 0);
+		s3_flusher_destroy(fl);
+	}
+	s3_overlay_destroy(ov);
+	free(fake.image[0]);
+}
+
+static void
+test_pressure_retry(void)
+{
+	struct s3_overlay *ov = NULL;
+	struct s3_flusher *fl = NULL;
+	struct s3_writeback *wb = NULL;
+	struct s3_writeback_opts opts = {
+		.capacity_bytes = 64 * 1024,
+		.record_alignment = 64,
+		.flags = S3_WRITEBACK_OPEN_CREATE,
+	};
+	struct s3_writeback_record records[8] = {};
+	struct fake_uploader fake = {};
+	uint8_t *blk = calloc(1, BLOCK_SIZE);
+	char name[96];
+	uint64_t seq, idx, started, deadline;
+	unsigned published = 0;
+
+	snprintf(name, sizeof(name), "flush-pressure-test-%ld", (long)getpid());
+	opts.lvstore_name = name;
+	if (!blk || s3_overlay_create(TOTAL_BLOCKS, BLOCK_SIZE, CHUNK_SIZE, 0, &ov) ||
+	    s3_writeback_open(&opts, &wb)) {
+		check_true("pressure retry setup", false, NULL);
+		goto out;
+	}
+	fake.ov = ov;
+	fake.image[0] = malloc(CHUNK_SIZE);
+	if (!fake.image[0] || s3_flusher_create(ov, NULL, fake_upload, &fake, NULL, &fl)) {
+		check_true("pressure retry flusher", false, NULL);
+		goto out;
+	}
+	s3_overlay_write(ov, 0, 1, blk, 1);
+	for (unsigned i = 0; i < 10; i++) {
+		s3_overlay_backoff_flush(ov, 0, s3_overlay_chunk_epoch(ov, 0), S3_OVERLAY_RETRY_MAX_US);
+	}
+	check_true("background cooldown is cached", s3_overlay_next_dirty(ov, true, &idx) == -EAGAIN, NULL);
+	for (unsigned i = 0; i < SPDK_COUNTOF(records); i++) {
+		if (s3_writeback_publish(wb, S3_WRITEBACK_WRITE, 0, 1, blk, BLOCK_SIZE,
+					0, &seq, &records[i]) != 0) {
+			check_true("pressure retry record publishes", false, NULL);
+			goto out;
+		}
+		published++;
+	}
+	check_true("retry ring is under pressure", s3_writeback_should_force_flush(wb), NULL);
+	s3_flusher_set_writeback(fl, wb);
+	for (unsigned attempt = 1; attempt <= 2; attempt++) {
+		started = spdk_get_ticks();
+		s3_flusher_kick(fl);
+		deadline = started + 3 * spdk_get_ticks_hz();
+		while (fake.started < attempt && spdk_get_ticks() < deadline) {
+			spdk_thread_poll(spdk_get_thread(), 0, 0);
+			usleep(1000);
+		}
+		check_u64(attempt == 1 ? "pressure shortens existing background cooldown" :
+			  "pressure caps subsequent retry cooldown", fake.started, attempt);
+		if (fake.started != attempt) {
+			break;
+		}
+		if (attempt == 1) {
+			fake_complete_all(&fake, -EIO);
+		}
+	}
+	s3_flusher_set_writeback(fl, NULL);
+	check_u64("pressure cap retains background failure history",
+		  s3_overlay_backoff_flush(ov, 0, s3_overlay_chunk_epoch(ov, 0),
+					   S3_OVERLAY_RETRY_MAX_US), S3_OVERLAY_RETRY_MAX_US);
+
+out:
+	if (fl) {
+		s3_flusher_set_writeback(fl, NULL);
+		fake_complete_all(&fake, 0);
+		s3_overlay_drop_chunk(ov, 0);
+		s3_flusher_destroy(fl);
+	}
+	if (ov) {
+		s3_overlay_destroy(ov);
+	}
+	if (wb) {
+		for (unsigned i = 0; i < published; i++) {
+			s3_writeback_mark_record_complete(wb, &records[i], 0);
+		}
+		s3_writeback_reclaim(wb);
+		s3_writeback_close(wb);
+	}
+	s3_writeback_cleanup(name);
+	free(fake.image[0]);
+	free(blk);
+}
+
+static void
 test_head_aware_flusher(void)
 {
 	struct s3_overlay *ov = NULL;
@@ -1379,6 +1930,13 @@ test_head_aware_flusher(void)
 	check_u64("ring-head scan skips the already active chunk",
 		  stats.ring_head_in_flight_skips, 1);
 
+	/* A failed ring-head upload must cool down just like a queued upload. */
+	fake_complete_chunk(&fake, 4, -EIO);
+	check_u64("ring-head failure does not retry immediately", fake.rounds[4], 1);
+	check_true("another ring-head chunk progresses during cooldown",
+		   fake.rounds[6] == 1, NULL);
+	s3_overlay_reset_flush_backoff(ov);
+
 	/* Detach before completing uploads so cleanup does not schedule more from
 	 * records whose test-only payload releases are not wired to the overlay. */
 	s3_flusher_set_writeback(fl, NULL);
@@ -1431,7 +1989,7 @@ main(void)
 	int rc;
 
 	spdk_log_set_print_level(SPDK_LOG_NOTICE);
-	spdk_log_open(NULL);
+	spdk_log_open(test_log);
 
 	printf("=== overlay + flusher unit test ===\n\n");
 
@@ -1471,6 +2029,12 @@ main(void)
 	test_flush_handshake();
 	test_flusher();
 	test_flush_policy();
+	test_retry_queue_order();
+	test_retry_queue_cache();
+	test_drain_backoff_history();
+	test_unmap_retry_backoff();
+	test_intermittent_failure_logging();
+	test_pressure_retry();
 	test_head_aware_flusher();
 
 	spdk_thread_exit(thread);

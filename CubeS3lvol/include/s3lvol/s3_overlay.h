@@ -112,6 +112,11 @@
  * starts catching up before writes have to be retried. */
 #define S3_OVERLAY_FLUSH_HIGH_PCT     75
 
+/* Per-chunk retry policy. A gap without failures expires the escalation. */
+#define S3_OVERLAY_RETRY_BASE_US      (100ULL * 1000)
+#define S3_OVERLAY_RETRY_MAX_US       (30ULL * 1000 * 1000)
+#define S3_OVERLAY_RETRY_RESET_SEC    60ULL
+
 struct s3_overlay;
 struct s3_overlay_write_reservation;
 typedef void (*s3_overlay_data_release_fn)(void *cb_arg);
@@ -157,6 +162,7 @@ struct s3_overlay_stats {
 	uint64_t flushes_repeated; /* chunk had an earlier flush round */
 	uint64_t flushes_repeated_partial;
 	uint64_t peak_bytes;
+	uint64_t retry_scan_chunks; /* queue entries examined for retry eligibility */
 
 	/* Why chunks were handed to the flusher. Together these say whether the
 	 * policy is doing what it is meant to: a healthy write-heavy run is
@@ -332,12 +338,12 @@ void s3_overlay_set_flush_policy(struct s3_overlay *ov,
  * Take the next chunk that needs flushing off the queue.
  *
  * \param force ignore the policy and take the oldest dirty chunk, whatever its
- *              age or fill. Required by a drain: "everything acknowledged is in
- *              S3" cannot be satisfied by waiting.
+ *              age or fill. Failure cooldowns still apply. Required by a drain:
+ *              "everything acknowledged is in S3" cannot be satisfied by waiting.
  *
  * \return 0 with \c out_chunk_index set; -ENOENT when nothing is dirty;
- *         **-EAGAIN when something is dirty but the policy says to keep holding
- *         it**. A caller that treats -EAGAIN as -ENOENT still behaves correctly,
+ *         -EAGAIN when dirty chunks are held by policy or retry cooldown.
+ *         A caller that treats -EAGAIN as -ENOENT still behaves correctly;
  *         it just loses the distinction between "idle" and "waiting".
  */
 int s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
@@ -348,7 +354,7 @@ int s3_overlay_next_dirty(struct s3_overlay *ov, bool force,
  *
  * \return 0 and fills \c view; -ENOENT nothing dirty; -EBUSY a flush is already
  *         running on this chunk (per-chunk single flight is what serialises the
- *         read-modify-write).
+ *         read-modify-write); -EAGAIN waiting for WAL durability or retry cooldown.
  */
 int s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 			   struct s3_overlay_flush_view *view);
@@ -366,6 +372,18 @@ int s3_overlay_flush_begin(struct s3_overlay *ov, uint64_t chunk_index,
 void s3_overlay_flush_merge(struct s3_overlay *ov,
 			    const struct s3_overlay_flush_view *view,
 			    void *chunk_buf);
+
+/* Arm a failed round's cooldown before flush_end requeues it. max_delay_us
+ * bounds this wait without reducing the accumulated backoff, which is capped
+ * at S3_OVERLAY_RETRY_MAX_US regardless of max_delay_us.
+ * Returns the wait in microseconds, or zero if unmap invalidated the round. */
+uint64_t s3_overlay_backoff_flush(struct s3_overlay *ov, uint64_t chunk_index,
+				uint64_t epoch, uint64_t max_delay_us);
+/* Shorten existing cooldowns to at most max_delay_us from now, preserving
+ * failure history and invalidating cached queue waits only when needed. */
+void s3_overlay_limit_flush_backoff(struct s3_overlay *ov, uint64_t max_delay_us);
+/* Give a drain one immediate attempt per chunk, retaining failure history. */
+void s3_overlay_reset_flush_backoff(struct s3_overlay *ov);
 
 /**
  * End the flush round. On success the claimed blocks are released; on failure
