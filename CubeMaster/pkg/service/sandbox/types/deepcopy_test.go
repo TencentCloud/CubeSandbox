@@ -276,9 +276,15 @@ func mustJSON(t *testing.T, req *CreateCubeSandboxReq) string {
 // with a nil embedded *Request, is covered separately by
 // TestCreateCubeSandboxReqDeepCopyKeepsNilRequest.
 func TestCreateCubeSandboxReqDeepCopyMatchesJSONClone(t *testing.T) {
-	req := fullCreateRequest()
-	// The reference implementation, kept in the test so the contract stays
-	// visible next to the copy it constrains.
+	assertDeepCopyMatchesJSONClone(t, fullCreateRequest())
+}
+
+// assertDeepCopyMatchesJSONClone snapshots req through the round trip that used
+// to do the copying and requires the deep copy to serialize identically. It is
+// kept next to the copy it constrains so the reference implementation stays
+// visible.
+func assertDeepCopyMatchesJSONClone(t *testing.T, req *CreateCubeSandboxReq) {
+	t.Helper()
 	payload, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
@@ -287,12 +293,35 @@ func TestCreateCubeSandboxReqDeepCopyMatchesJSONClone(t *testing.T) {
 	if err := json.Unmarshal(payload, viaJSON); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
-
-	want := mustJSON(t, viaJSON)
-	got := mustJSON(t, req.DeepCopy())
-	if got != want {
+	if got, want := mustJSON(t, req.DeepCopy()), mustJSON(t, viaJSON); got != want {
 		t.Fatalf("deep copy does not serialize like the JSON clone\n got: %s\nwant: %s", got, want)
 	}
+}
+
+// TestEgressRuleDeepCopyKeepsNilInjectEntries pins the degenerate shape the
+// shared fixture cannot carry, because TestFullCreateRequestCoversEveryReference
+// Field requires every element it walks to be non-nil: a null element inside
+// action.inject. The JSON round trip keeps it as null, so a copy that skipped it
+// would drop the whole inject key under omitempty and change the bytes.
+func TestEgressRuleDeepCopyKeepsNilInjectEntries(t *testing.T) {
+	const raw = `{"cube_network_config":{"rules":[{"name":"r","action":{"allow":true,` +
+		`"inject":[null,{"header":"h","secret":"s"}]}}]}}`
+	req := &CreateCubeSandboxReq{}
+	if err := json.Unmarshal([]byte(raw), req); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	if req.CubeNetworkConfig == nil || len(req.CubeNetworkConfig.Rules) != 1 ||
+		req.CubeNetworkConfig.Rules[0] == nil || req.CubeNetworkConfig.Rules[0].Action == nil {
+		t.Fatalf("fixture did not decode as expected: %s", raw)
+	}
+	inject := req.CubeNetworkConfig.Rules[0].Action.Inject
+	if len(inject) != 2 || inject[0] != nil {
+		t.Fatalf("fixture did not decode a nil inject entry: %#v", inject)
+	}
+	if !strings.Contains(mustJSON(t, req), `"inject":[null,`) {
+		t.Fatalf("fixture does not serialize a null entry: %s", mustJSON(t, req))
+	}
+	assertDeepCopyMatchesJSONClone(t, req)
 }
 
 var protoMessageType = reflect.TypeOf((*proto.Message)(nil)).Elem()

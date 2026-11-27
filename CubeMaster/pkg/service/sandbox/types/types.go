@@ -265,17 +265,21 @@ func (r *EgressRule) DeepCopy() *EgressRule {
 			Allow: r.Action.Allow,
 			Audit: cloneStringPtr(r.Action.Audit),
 		}
-		if len(r.Action.Inject) > 0 {
-			out.Action.Inject = make([]*EgressRuleInject, 0, len(r.Action.Inject))
-			for _, inject := range r.Action.Inject {
+		if r.Action.Inject != nil {
+			// Keep nil entries. A request decoded from `"inject":[null]` holds
+			// one, the JSON round trip this copy replaces keeps it as null, and
+			// dropping it would drop the whole inject key under omitempty —
+			// which changes the serialized bytes and the commit fingerprint.
+			out.Action.Inject = make([]*EgressRuleInject, len(r.Action.Inject))
+			for i, inject := range r.Action.Inject {
 				if inject == nil {
 					continue
 				}
-				out.Action.Inject = append(out.Action.Inject, &EgressRuleInject{
+				out.Action.Inject[i] = &EgressRuleInject{
 					Header: inject.Header,
 					Secret: inject.Secret,
 					Format: cloneStringPtr(inject.Format),
-				})
+				}
 			}
 		}
 	}
