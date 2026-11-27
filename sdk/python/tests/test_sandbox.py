@@ -3386,6 +3386,7 @@ class TestTemplateAPI:
                 enable_ivshmem=True,
                 backend="s3",
                 user="1000:1000",
+                cgroup_mode="legacy",
                 config=config,
             )
 
@@ -3406,6 +3407,7 @@ class TestTemplateAPI:
                 "enableIvshmem": True,
                 "backend": "s3",
                 "user": "1000:1000",
+                "cgroupMode": "legacy",
             },
             headers={"Content-Type": "application/json"},
             timeout=config.request_timeout,
@@ -3421,6 +3423,7 @@ class TestTemplateAPI:
             Template.build(image="python:3.11-slim", config=make_config())
         assert "backend" not in post.call_args.kwargs["json"]
         assert "user" not in post.call_args.kwargs["json"]
+        assert "cgroupMode" not in post.call_args.kwargs["json"]
 
     def test_build_rejects_allow_out_domain_without_deny_all(self):
         with pytest.raises(ApiError, match="must disable public outbound traffic or include '0.0.0.0/0' in deny_out") as exc:
