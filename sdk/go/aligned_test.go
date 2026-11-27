@@ -364,8 +364,11 @@ func TestCreateAcceptsAllowOutDomainWhenInternetAccessDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if got["allowInternetAccess"] != false {
-		t.Fatalf("allowInternetAccess=%#v, want false", got["allowInternetAccess"])
+	if got["allow_internet_access"] != false {
+		t.Fatalf("allow_internet_access=%#v, want false", got["allow_internet_access"])
+	}
+	if _, ok := got["allowInternetAccess"]; ok {
+		t.Fatalf("the create body must not carry camelCase allowInternetAccess: %#v", got)
 	}
 	network, ok := got["network"].(map[string]any)
 	if !ok {
