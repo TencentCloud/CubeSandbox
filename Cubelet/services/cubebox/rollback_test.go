@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestRollbackDisksFromSnapshotSpecReplacesCurrentRootfs(t *testing.T) {
@@ -405,4 +406,24 @@ func TestScanDeadContainerCreateSkipIsBounded(t *testing.T) {
 	assert.Panics(t, func() {
 		scanDeadContainer(context.Background(), []*cubeboxstore.CubeBox{stuck}, nil, time.Hour)
 	}, "a long-stuck creating sandbox must fall out of the skip window and be probed")
+}
+
+func TestValidateRollbackSandboxRequestRejectsUnsafeSandboxID(t *testing.T) {
+	t.Parallel()
+
+	for _, unsafeID := range []string{"../escape", "a/b", `a\b`, ".."} {
+		err := validateRollbackSandboxRequest(&cubebox.RollbackSandboxRequest{
+			SandboxID:  unsafeID,
+			SnapshotID: "snap-1",
+			NewGen:     1,
+		})
+		require.Error(t, err, "expected unsafe sandboxID %q to be rejected", unsafeID)
+		assert.Contains(t, err.Error(), "invalid sandboxID")
+	}
+
+	require.NoError(t, validateRollbackSandboxRequest(&cubebox.RollbackSandboxRequest{
+		SandboxID:  "sb-safe_1.0",
+		SnapshotID: "snap-1",
+		NewGen:     1,
+	}))
 }

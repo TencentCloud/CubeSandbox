@@ -247,6 +247,14 @@ func WriteSnapshotCatalogFor(backend string, entry *SnapshotCatalogEntry) error 
 	} else if normalized, err := cow.NormalizeBackend(entry.Backend); err == nil {
 		entry.Backend = normalized
 	}
+	if strings.TrimSpace(entry.MetadataVol) == "" {
+		if vol, kind := packageMetadataCatalogRef(backend, entry.SnapshotID); vol != "" {
+			entry.MetadataVol = vol
+			if strings.TrimSpace(entry.MetadataKind) == "" {
+				entry.MetadataKind = kind
+			}
+		}
+	}
 	if err := os.MkdirAll(catalogDir, 0o755); err != nil {
 		return fmt.Errorf("ensure snapshot dir: %w", err)
 	}

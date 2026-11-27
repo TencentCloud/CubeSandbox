@@ -150,6 +150,15 @@ func AppendS3SealedPackageCleanupRefs(templateID string, refs []CowObjectRef) []
 	return out
 }
 
+// DiscardS3SealedPackage removes sealed and work objects created for an S3
+// package when finalization fails. Non-S3 backends are a no-op.
+func DiscardS3SealedPackage(ctx context.Context, backend, snapshotID string) error {
+	if !isS3CatalogBackend(backend) {
+		return nil
+	}
+	return CleanupObjectsFor(ctx, backend, AppendS3SealedPackageCleanupRefs(snapshotID, nil))
+}
+
 // TemplateBuildRootfsName returns the deterministic cubecow volume name used
 // for a template's temporary writable working layer during AppSnapshot. Exposed
 // so non-storage callers (e.g. AppSnapshot handler writing snapshot catalog)

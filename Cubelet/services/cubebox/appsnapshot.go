@@ -309,20 +309,16 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 	snapshotPath := layout.Home
 	rsp.SnapshotPath = snapshotPath
-	tmpSnapshotPath := layout.TmpHome
-	prevCleanupSnapshotObjects := cleanupSnapshotObjects
-	cleanupSnapshotObjects = func() {
-		layout.releaseMetadata(ctx)
-		prevCleanupSnapshotObjects()
+	cleanupSnapshotObjectsOn := func(c context.Context) {
+		layout.releaseMetadata(c)
+		cleanupCowSnapshotObjectsOn(c, stepLog, backend, memoryObject, rootfsObject)
 		layout.discardTmpDir()
-		if !layout.usesTmpRename() {
-			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
-		}
 	}
+	cleanupSnapshotObjects = func() { cleanupSnapshotObjectsOn(ctx) }
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 	stepLog.Infof("Step 3: Creating snapshot at path: %s", layout.Home)
 
-	layout.resetTmpDir()
+	layout.discardTmpDir()
 	if err := layout.prepareWork(ctx); err != nil {
 		stepLog.Errorf("Failed to create snapshot dir: %v", err)
 		cleanupSnapshotObjects()
@@ -479,7 +475,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	envdVersion := s.collectEnvdVersion(ctx, sandboxID)
 
 	stepLog.Infof("Step 5: Destroying temporary cubebox (templateID=%s)...", templateID)
-	if err := storage.ValidateS3PackageMetadata(backend, layout.MetaWork); err != nil {
+	if err := storage.ValidateStagedPackage(backend, layout.MetaWork, true); err != nil {
 		cleanupSnapshotObjects()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("invalid snapshot metadata: %v", err)
@@ -525,22 +521,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 
-	if layout.usesTmpRename() {
-		stepLog.Info("Step 6: Moving snapshot to final path...")
-
-		// NOCC:Path Traversal()
-		if err := os.RemoveAll(snapshotPath); err != nil {
-			stepLog.Warnf("Failed to remove existing snapshot directory: %v", err)
-		}
-
-		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-			stepLog.Errorf("Failed to move snapshot to final path: %v", err)
-			os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-			cleanupSnapshotObjects()
-			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
-			return rsp, nil
-		}
+	stepLog.Info("Step 6: Moving snapshot to final path...")
+	if err := layout.publish(); err != nil {
+		stepLog.Errorf("Failed to move snapshot to final path: %v", err)
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+		return rsp, nil
 	}
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
 		stepLog.Errorf("Failed to expose shim spec dir: %v", err)
@@ -572,7 +559,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	// CleanupTemplate calls can resolve physical refs locally. The build
 	// rootfs name is deterministic on cubelet side; we record it so cleanup
 	// works even if the live volume has already been removed by other paths.
-	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+	catalogErr := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:        templateID,
 		InstanceType:      "cubebox",
 		SpecDir:           specDir,
@@ -582,27 +569,31 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		RootfsKind:        rootfsObject.Kind,
 		MemoryVol:         memoryObject.Name,
 		MemoryKind:        memoryObject.Kind,
-		MetadataVol:       storage.S3MetadataCatalogVol(backend, templateID),
-		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		BuildRootfsVol:    storage.TemplateBuildRootfsName(templateID),
 		BuildRootfsKind:   storage.CowKindVolume,
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
 		ComponentVersions: frozenVersions,
 		Kind:              storage.CatalogKindTemplate,
-	}); err != nil {
+	})
+	if catalogErr != nil {
 		if backend == cow.BackendJFS {
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", err)
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to persist jfs template catalog: %v", catalogErr)
 			return rsp, nil
 		}
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and the
 		// deterministic-name cleanup fallback keeps working. Log loudly so
 		// operators notice drift between master and cubelet local view.
-		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
+		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, catalogErr)
 	}
-	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, templateID); err != nil {
-		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
+	if err := finalizePublishedPackage(
+		ctx, stepLog, backend, templateID, snapshotPath, catalogErr == nil,
+		cleanupSnapshotObjectsOn, nil,
+	); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = err.Error()
+		return rsp, nil
 	}
 
 	// JFS templates become eligible for cross-node use when this call succeeds.
