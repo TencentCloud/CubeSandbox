@@ -17,7 +17,10 @@ cleanup() {
   log "removing CubeEgress transparent proxy rules"
   "${INIT_SCRIPT}" down || true
 }
-trap cleanup TERM INT HUP EXIT
+trap cleanup EXIT
+# Exit on a stop signal; a cleanup-only TERM trap resumes the loop below and
+# the container lingers until terminationGracePeriodSeconds expires.
+trap 'exit 0' TERM INT HUP
 
 wait_for_iface() {
   local waited=0
@@ -26,7 +29,8 @@ wait_for_iface() {
       log "interface ${INGRESS_IFACE} not present after ${INITIAL_WAIT_SECONDS}s; keep waiting"
       waited=0
     fi
-    sleep 1
+    sleep 1 &
+    wait $! || true
     waited=$((waited + 1))
   done
 }
@@ -39,7 +43,9 @@ apply_rules() {
 
 apply_rules
 while true; do
-  sleep "${REAPPLY_INTERVAL_SECONDS}"
+  # Background sleep + wait so a stop signal is handled immediately.
+  sleep "${REAPPLY_INTERVAL_SECONDS}" &
+  wait $! || true
   if ! ip link show "${INGRESS_IFACE}" >/dev/null 2>&1; then
     log "interface ${INGRESS_IFACE} disappeared; waiting before reapply"
     wait_for_iface

@@ -46,6 +46,30 @@ func (c *Config) jfsConfigured() bool {
 	return c != nil && c.Cow.JFS.Enable
 }
 
+const (
+	jfsRootfsPlacementShared = "shared"
+	jfsRootfsPlacementLocal  = "local"
+)
+
+// jfsLocalRootfs reports whether jfs runtime rootfs lives on local XFS
+// ([cow.jfs] rootfs_placement = "local").
+func (c *Config) jfsLocalRootfs() bool {
+	return c.jfsConfigured() && strings.EqualFold(strings.TrimSpace(c.Cow.JFS.RootfsPlacement), jfsRootfsPlacementLocal)
+}
+
+func (c *Config) validateJFSRootfsPlacement() error {
+	if c == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Cow.JFS.RootfsPlacement)) {
+	case "", jfsRootfsPlacementShared, jfsRootfsPlacementLocal:
+		return nil
+	default:
+		return fmt.Errorf("invalid [cow.jfs] rootfs_placement %q (want %q or %q)",
+			c.Cow.JFS.RootfsPlacement, jfsRootfsPlacementShared, jfsRootfsPlacementLocal)
+	}
+}
+
 func (c *Config) jfsMountPath() string {
 	if c != nil {
 		if p := strings.TrimSpace(c.Cow.JFS.MountPath); p != "" {
@@ -198,6 +222,12 @@ func (l *local) tryJFSCowInitOnce(ctx context.Context) error {
 	if err := checkJFSMount(l.config.jfsMountPath()); err != nil {
 		return err
 	}
+	if err := l.config.validateJFSRootfsPlacement(); err != nil {
+		return err
+	}
+	if err := l.config.applyJFSFuseReadAhead(); err != nil {
+		CubeLog.Warnf("jfs: fuse read-ahead not applied: %v", err)
+	}
 	engine, source, err := initJFSCowEngine(l.config)
 	if err != nil {
 		return fmt.Errorf("jfs cubecow handle init: %w", err)
@@ -206,7 +236,17 @@ func (l *local) tryJFSCowInitOnce(ctx context.Context) error {
 		engine.Close()
 		return err
 	}
-	manager := newCowVolumeManager(engine)
+	var manager cowVolumeManager = newCowVolumeManager(engine)
+	if l.config.jfsLocalRootfs() {
+		hybrid, err := l.newJFSHybridStore(manager, engine)
+		if err != nil {
+			engine.Close()
+			return fmt.Errorf("jfs local-rootfs store init: %w", err)
+		}
+		manager = hybrid
+		hybrid.startBackground(ctx)
+		CubeLog.Infof("cubecow jfs rootfs_placement=local: runtime rootfs on %s, packages publish rootfs diffs to JuiceFS", hybrid.localRoot)
+	}
 	l.jfsStateMu.Lock()
 	l.jfsCowEngine = engine
 	l.jfsCowManager = manager

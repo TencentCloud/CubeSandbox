@@ -151,6 +151,24 @@ type CowJFSUserConfig struct {
 	// uploaded, and so restorable on another node, once none of its blocks
 	// is left in the writeback staging area under it.
 	CacheDir string `toml:"cache_dir"`
+	// RootfsPlacement selects where a jfs sandbox's runtime rootfs lives.
+	// "shared" (default) keeps it on the JuiceFS mount like every other jfs
+	// object. "local" keeps runtime rootfs on the node-local XFS reflink
+	// store (xfs-level random I/O) and publishes only each pause package's or
+	// snapshot's rootfs difference to JuiceFS; memory and package metadata
+	// stay on JuiceFS. Every node in a cluster must use the same value.
+	RootfsPlacement string `toml:"rootfs_placement"`
+	// MemoryPrefetch reads a restore's whole guest memory image into the
+	// kernel page cache before the VM starts. Default false: it puts the
+	// full read on the resume critical path and bursts JuiceFS cache writes
+	// that can stall the mount, and on-demand faults with a larger
+	// FuseReadAheadKB measured faster. Set true to enable.
+	MemoryPrefetch *bool `toml:"memory_prefetch"`
+	// FuseReadAheadKB is written to the JuiceFS mount's
+	// /sys/class/bdi/<dev>/read_ahead_kb (kernel default 128), so each cold
+	// MAP_PRIVATE fault on a memory image fetches a larger run. Unset uses
+	// defaultJFSFuseReadAheadKB; 0 leaves the kernel value untouched.
+	FuseReadAheadKB *int `toml:"fuse_read_ahead_kb"`
 }
 
 // CowS3UserConfig is the operator-facing `[cow.s3]` block.

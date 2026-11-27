@@ -179,6 +179,8 @@ jobs:
           sh -n deploy/kubernetes/images/scripts/wait-node-prep.sh
           sh -n deploy/kubernetes/chart/files/cube-proxy/cube-proxy-entrypoint.sh
           bash -n deploy/kubernetes/images/scripts/cube-s3lvol-entrypoint.sh
+          bash -n deploy/kubernetes/images/scripts/component-entrypoint.sh
+          bash -n deploy/kubernetes/images/scripts/cube-egress-net-entrypoint.sh
           bash -n deploy/kubernetes/chart/files/cube-node-hostnet-preflight.sh
           bash -n deploy/kubernetes/chart/files/cubevs-cidr-preflight.sh
       # Cloud-free chart/image guard suite (deploy/kubernetes/*/scripts/
