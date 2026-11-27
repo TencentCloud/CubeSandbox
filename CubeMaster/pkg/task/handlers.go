@@ -125,9 +125,13 @@ func (l *localTask) acquireTask(t *Task) error {
 		return errors.New("task type not found")
 	}
 	if err := handler.Acquire(t.Ctx); err != nil {
-
 		l.backoffRetryDelay(t)
+		// Re-queue for a later retry. AddAsyncTask is the only requeue path:
+		// the queue worker records the returned error but never re-pushes, so
+		// returning here both retries the task and stops workHandler from
+		// running it and releasing a slot that was never acquired.
 		AddAsyncTask(t)
+		return err
 	}
 	return nil
 }
