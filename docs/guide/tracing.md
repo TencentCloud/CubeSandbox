@@ -38,7 +38,7 @@ A few boundaries are worth knowing:
 
 - When CubeAPI is bypassed, a trace can start at CubeMaster; the entry span is then CubeMaster's own HTTP `POST /cube/...` span, which may not carry a named `cubemaster.*` business name.
 - Propagation is W3C Trace Context. A request from an SDK that does not propagate context is still traced server-side — you get the server-side trace, just without the client's own spans.
-- Clone and other SDK-composed operations are not merged into a single trace. The guest agent has separate tracing code, but this integration does not connect its spans to the trace backend; guest work and hypervisor work appear in the duration of the surrounding `cube-shim` spans.
+- Clone and other SDK-composed operations are not merged into a single trace. When guest tracing is enabled, supported guest RPCs appear under their parent `cube-shim` spans.
 
 ## Enabling tracing
 
@@ -58,6 +58,14 @@ Configuration is environment-based and follows the install method:
 Cubelet launches a fresh CubeShim process per sandbox; the process lives alongside its sandbox and inherits Cubelet's environment at process start, so an already-running shim keeps its previous setting.
 
 Cubelet registers containerd's `task.Wait` before `task.Start`. After the task starts, that wait intentionally outlives the sandbox creation request and is completed by task exit, so cancellation or timeout of the create request does not discard the exit event. The wait retains only the containerd namespace; it does not inherit request cancellation, logging values, or the completed creation span. A startup failure cancels the wait.
+
+### Guest tracing for cube-agent
+
+Guest RPC tracing is off by default. To enable it, set `CUBE_GUEST_TRACE=1` in the worker service environment inherited by CubeShim and configure `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+
+CubeShim pulls spans over the existing guest ttrpc connection and exports them over the host's OTLP/gRPC connection. The default poll interval is 15 seconds. Set `CUBE_GUEST_TRACE_POLL_INTERVAL_SECS` in the same worker environment to an integer from 5 to 300. Invalid values fall back to 15 seconds. CubeShim skips the poll when it has no pending guest spans or when the lifecycle client is busy. The guest holds up to 256 spans and returns up to 32 per batch. Sandbox initialization, container creation, and container startup each produce a `cube-agent` span when the Shim parent is sampled. Guest spans contain trace identifiers, the operation name, timing, and the sandbox ID supplied by Shim.
+
+Use a template with the updated Cube Agent. CubeShim stops polling if the guest agent does not support the pull RPC. Guest collection is best effort, so queued spans may be lost when a sandbox exits before the next poll.
 
 ### Rust envd REST tracing
 

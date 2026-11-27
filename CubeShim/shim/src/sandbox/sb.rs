@@ -42,6 +42,7 @@ use crate::common::{
 };
 use crate::container::container_mgr::ContainerInfo;
 use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
+use crate::guest_trace::TracePuller;
 use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
 use crate::hypervisor::snapshot::SnapshotInfo;
@@ -166,6 +167,7 @@ pub struct SandBox {
     monitor_conn: Option<Client>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    trace_puller: Arc<Mutex<Option<TracePuller>>>,
 }
 
 impl SandBox {
@@ -208,6 +210,7 @@ impl SandBox {
             monitor_conn: None,
             tx_oom_exited: None,
             oom_handle: None,
+            trace_puller: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -375,9 +378,12 @@ impl SandBox {
 
     async fn connect_agent(&mut self) -> CResult<()> {
         let conn = AsyncUtils::connect_agent(&self.id).await?;
-        let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
+        let client = Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(
+            conn.clone(),
+        )));
+        *self.trace_puller.lock().await = TracePuller::spawn(client.clone(), self.id.clone());
         self.conn = Some(Arc::new(Mutex::new(conn)));
-        self.client = Some(Arc::new(Mutex::new(client)));
+        self.client = Some(client);
 
         Ok(())
     }
@@ -424,6 +430,7 @@ impl SandBox {
     /// disconnect (rollback): whatever holds a clone of the agent client must
     /// be stopped before the connection is dealt with.
     async fn stop_watchers(&mut self) {
+        self.trace_puller.lock().await.take();
         //stop monitor
         if let Some(tx) = self.tx_monitor_exited.as_ref() {
             let _ = tx.try_send(());
@@ -646,8 +653,10 @@ impl SandBox {
 
         infof!(self.log, "agent is ready");
 
-        let mut stat = trace
-            .start(telemetry::SPAN_GUEST_INIT)
+        let stage = trace.start(telemetry::SPAN_GUEST_INIT);
+        let mut ctx = self.ctx.clone();
+        stage.inject(&mut ctx.metadata);
+        let mut stat = stage
             .run(async {
                 //add vfio device
                 if !self.app_snapshot_restore() {
@@ -674,8 +683,6 @@ impl SandBox {
                 if snapshot {
                     req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
                 }
-
-                let mut ctx = self.ctx.clone();
 
                 ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
                 if self.app_snapshot_create() {
@@ -845,6 +852,11 @@ impl SandBox {
     }
 
     pub async fn destroy_sandbox(&mut self) -> CResult<()> {
+        self.trace_puller.lock().await.take();
+        self.destroy_guest_and_vm().await
+    }
+
+    async fn destroy_guest_and_vm(&mut self) -> CResult<()> {
         infof!(self.log, "destroy sandbox start");
         let req = agent::DestroySandboxRequest {
             ..Default::default()

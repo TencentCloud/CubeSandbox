@@ -37,7 +37,7 @@ use clap::{AppSettings, Parser};
 use nix::fcntl::OFlag;
 use nix::sys::socket::{self, AddressFamily, SockAddr, SockFlag, SockType};
 use nix::unistd::{self, dup, Pid};
-use tracing::{instrument, span};
+use tracing::instrument;
 
 mod capabilities;
 mod config;
@@ -221,16 +221,6 @@ async fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ttrpc_log_guard = Ok(slog_stdlog::init()?);
     }
 
-    if config.tracing {
-        tracer::setup_tracing(NAME, &logger)?;
-    }
-
-    let root_span = span!(tracing::Level::TRACE, "root-span");
-
-    // XXX: Start the root trace transaction.
-    //
-    // XXX: Note that *ALL* spans needs to start after this point!!
-    let span_guard = root_span.enter();
     println!(
         "start sandbox at:{}",
         moniclock::Clock::new().elapsed().as_millis()
@@ -257,14 +247,6 @@ async fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Wait for all threads to finish
     let results = join_all(tasks).await;
-
-    // force flushing spans
-    drop(span_guard);
-    drop(root_span);
-
-    if config.tracing {
-        tracer::end_tracing();
-    }
 
     eprintln!("{} shutdown complete", NAME);
 

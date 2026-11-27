@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use opentelemetry::global::BoxedSpan;
-use opentelemetry::propagation::Extractor;
+use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::{
     global,
     trace::{Span, SpanKind, Status, TraceContextExt, Tracer},
@@ -87,6 +87,12 @@ impl Guard {
     }
 }
 
+pub(crate) fn configured_endpoint() -> Option<String> {
+    let generic = std::env::var(ENV_ENDPOINT).unwrap_or_default();
+    let traces = std::env::var(ENV_TRACES_ENDPOINT).unwrap_or_default();
+    select_endpoint(&traces, &generic).map(str::to_owned)
+}
+
 fn select_endpoint<'a>(traces: &'a str, generic: &'a str) -> Option<&'a str> {
     let traces = traces.trim();
     let generic = generic.trim();
@@ -132,6 +138,14 @@ impl Extractor for MetadataExtractor<'_> {
     }
 }
 
+struct MetadataInjector<'a>(&'a mut HashMap<String, Vec<String>>);
+
+impl Injector for MetadataInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), vec![value]);
+    }
+}
+
 pub struct Trace {
     parent: Option<Context>,
     sandbox: String,
@@ -157,15 +171,46 @@ impl Trace {
                 .with_attributes([KeyValue::new(ATTR_SANDBOX_ID, self.sandbox.clone())])
                 .start_with_context(&tracer, parent)
         });
-        Stage { span }
+        Stage { span, name }
     }
 }
 
 pub struct Stage {
+    name: &'static str,
     span: Option<BoxedSpan>,
 }
 
 impl Stage {
+    pub fn inject(&self, metadata: &mut HashMap<String, Vec<String>>) {
+        let Some(span) = self.span.as_ref() else {
+            return;
+        };
+        let span_context = span.span_context();
+        if !span_context.is_valid() {
+            return;
+        }
+        // A reused RPC context must not send tracestate from a different trace.
+        metadata.remove("tracestate");
+        metadata.remove("cube-guest-trace");
+        let operation = match self.name {
+            SPAN_GUEST_INIT => Some("create_sandbox"),
+            SPAN_CONTAINER_CREATE => Some("create_container"),
+            SPAN_CONTAINER_START => Some("start_container"),
+            _ => None,
+        };
+        if span_context.is_sampled() && crate::guest_trace::enabled() {
+            if let Some(operation) = operation {
+                if crate::guest_trace::register_parent(span_context, operation) {
+                    metadata.insert("cube-guest-trace".into(), vec!["1".into()]);
+                }
+            }
+        }
+        let context = Context::new().with_remote_span_context(span_context.clone());
+        global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&context, &mut MetadataInjector(metadata));
+        });
+    }
+
     pub async fn run<T, E>(mut self, future: impl Future<Output = Result<T, E>>) -> Result<T, E> {
         let out = future.await;
         self.finish(out.is_err().then_some(STATUS_ERROR));
@@ -252,6 +297,36 @@ mod tests {
 
     use opentelemetry::propagation::TextMapPropagator;
     use opentelemetry::trace::noop::NoopTextMapPropagator;
+
+    #[tokio::test]
+    async fn guest_rpc_receives_the_shim_stage_as_its_parent() {
+        let (exporter, _guard) = install();
+        let trace = Trace::extract(&traced_call(INBOUND), SANDBOX_ID);
+        let stage = trace.start(SPAN_GUEST_INIT);
+        let mut metadata = traced_call(INBOUND);
+        metadata.insert("rpc-key".to_string(), vec!["rpc-value".to_string()]);
+        stage.inject(&mut metadata);
+        stage.run(async { Ok::<_, ()>(()) }).await.unwrap();
+
+        let spans = exporter.finished();
+        let parent = TraceContextPropagator::new().extract(&MetadataExtractor(&metadata));
+        let parent_span = parent.span();
+        let parent_context = parent_span.span_context();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(parent_context.trace_id().to_string(), INBOUND_TRACE_ID);
+        assert_eq!(parent_context.span_id(), spans[0].span_context.span_id());
+        assert_eq!(metadata["rpc-key"], vec!["rpc-value".to_string()]);
+    }
+
+    #[test]
+    fn untraced_stage_does_not_write_rpc_metadata() {
+        let (exporter, _guard) = install();
+        let mut metadata = HashMap::new();
+        let stage = Trace::extract(&metadata, SANDBOX_ID).start(SPAN_GUEST_INIT);
+        stage.inject(&mut metadata);
+        assert!(metadata.is_empty());
+        assert!(exporter.finished().is_empty());
+    }
 
     #[test]
     fn traces_endpoint_takes_precedence_and_generic_is_a_fallback() {

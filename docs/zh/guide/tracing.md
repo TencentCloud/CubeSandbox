@@ -38,7 +38,7 @@ containerd 插桩还会记录 Task、RPC 和传输等 span，并使用调用方�
 
 - 绕过 CubeAPI 时，trace 可以从 CubeMaster 开始；此时入口 span 是 CubeMaster 自己的 HTTP `POST /cube/...` span，未必带有具名的 `cubemaster.*` 业务名称。
 - 传播协议是 W3C Trace Context。未传播上下文的 SDK 发来的请求仍会在服务端被追踪——你拿到的是服务端 trace，只是缺少客户端自身的 span。
-- 克隆等由 SDK 组合的多种操作不会合并成同一条 trace。Guest agent 有独立的追踪代码，但当前集成尚未将其 span 接入追踪后端；Guest 与 hypervisor 的工作目前主要体现为外层 `cube-shim` span 的耗时。
+- 克隆等由 SDK 组合的多种操作不会合并成同一条 trace。启用 Guest 追踪后，支持的 Guest RPC 会在相应的 `cube-shim` span 下显示。
 
 ## 启用追踪
 
@@ -58,6 +58,14 @@ containerd 插桩还会记录 Task、RPC 和传输等 span，并使用调用方�
 Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启动时继承 Cubelet 的环境变量，因此已在运行的 shim 会保留旧设置。
 
 Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后，等待会有意持续到任务退出；创建请求取消或超时不会丢失退出事件。等待上下文只保留 containerd 命名空间，不继承请求取消、日志字段或已结束的创建 Span。若任务启动失败，则取消等待。
+
+### cube-agent Guest 追踪
+
+Guest RPC 追踪默认关闭。要启用，请在 CubeShim 继承的工作节点服务环境中设置 `CUBE_GUEST_TRACE=1`，并配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 或 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`。
+
+CubeShim 通过现有 ttrpc 连接拉取 span，再通过宿主机的 OTLP/gRPC 连接上报。默认每 15 秒轮询一次。在同一工作节点环境中设置 `CUBE_GUEST_TRACE_POLL_INTERVAL_SECS` 可调整间隔，取值为 5 到 300 的整数，单位为秒。无效值回退到 15 秒。没有待拉取的 Guest span 或业务客户端正忙时，CubeShim 跳过本轮请求。Guest 最多缓存 256 条，每批最多返回 32 条。沙箱初始化、容器创建和启动这三种 RPC 在收到已采样的 Shim 父上下文时生成 `cube-agent` span。Span 仅包含追踪标识、操作名称、时间和由 Shim 附加的沙箱 ID。
+
+使用包含新版 Cube Agent 的模板。旧版 Agent 不支持拉取接口时，CubeShim 会停止轮询。Guest Span 采用尽力上报，沙箱在下一次轮询前退出时，缓存中的 span 可能丢失。
 
 ### Rust envd REST 追踪
 

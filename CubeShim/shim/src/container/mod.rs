@@ -679,9 +679,11 @@ impl Container {
 
         let client = self.client.as_ref().unwrap().lock().await;
 
-        trace
-            .start(telemetry::SPAN_CONTAINER_CREATE)
-            .run(client.create_container(self.ctx.clone(), &req))
+        let stage = trace.start(telemetry::SPAN_CONTAINER_CREATE);
+        let mut ctx = self.ctx.clone();
+        stage.inject(&mut ctx.metadata);
+        stage
+            .run(client.create_container(ctx, &req))
             .await
             .map_err(|e: ttrpc::Error| format!("create container failed:{}", e))?;
 
@@ -740,9 +742,11 @@ impl Container {
                 container_id: self.id.clone(),
                 ..Default::default()
             };
-            trace
-                .start(telemetry::SPAN_CONTAINER_START)
-                .run(client.start_container(self.ctx.clone(), &req))
+            let stage = trace.start(telemetry::SPAN_CONTAINER_START);
+            let mut ctx = self.ctx.clone();
+            stage.inject(&mut ctx.metadata);
+            stage
+                .run(client.start_container(ctx, &req))
                 .await
                 .map_err(|e| format!("start container failed:{}", e))?;
         }

@@ -6,6 +6,7 @@ pub mod capabilities;
 pub mod common;
 pub mod container;
 pub mod cube;
+pub mod guest_trace;
 pub mod hypervisor;
 pub mod log;
 pub mod sandbox;
