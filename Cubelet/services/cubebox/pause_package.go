@@ -124,30 +124,46 @@ func pauseSpecDir(entry *storage.SnapshotCatalogEntry) string {
 	return strings.TrimSpace(entry.SnapshotPath)
 }
 
-// pauseSpecDirFor is where this Resume reads sandbox_spec.json from, with the
-// disk holding it mounted.
+// loadPauseSandboxSpecFor loads sandbox_spec.json for a Resume.
 //
-// Same-node that is the pause package, found through the catalog and mounted
-// on demand because Finalize seals and unmounts it after Pause. Cross-node
-// there is no package to look up: the Create entry already imported a copy of
-// the very same disk under the sandbox's own name, so the spec is read from
-// there and the catalog is never consulted.
-func pauseSpecDirFor(ctx context.Context, req *cubebox.RunCubeSandboxRequest, backend, snapID string) (string, error) {
+// Same-node S3 packages are sealed and unmounted after Pause; temporarily mount
+// the derived metadata disk only for the duration of this read and release it
+// immediately so the pause package does not retain an active NVMe namespace.
+// Cross-node there is no local package to look up: the Create entry already
+// imported a copy of the disk under the sandbox's own name, which stays mounted
+// for the sandbox's lifetime.
+func loadPauseSandboxSpecFor(ctx context.Context, req *cubebox.RunCubeSandboxRequest, backend, snapID string) (*cubebox.RunCubeSandboxRequest, error) {
 	if imp := storage.CrossNodeSandboxImport(req.GetAnnotations()); imp != nil {
-		return imp.EnsureMetadata(ctx)
+		specDir, err := imp.EnsureMetadata(ctx)
+		if err != nil {
+			return nil, err
+		}
+		packed, err := loadPauseSandboxSpec(specDir)
+		if err != nil {
+			return nil, fmt.Errorf("load pause sandbox_spec: %w", err)
+		}
+		return packed, nil
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapID)
 	if err != nil {
-		return "", fmt.Errorf("load pause snapshot catalog %s: %w", snapID, err)
+		return nil, fmt.Errorf("load pause snapshot catalog %s: %w", snapID, err)
 	}
 	if !strings.EqualFold(strings.TrimSpace(entry.Kind), storage.CatalogKindPauseSnapshot) {
-		return "", fmt.Errorf("snapshot %s kind=%q is not pause_snapshot", snapID, entry.Kind)
+		return nil, fmt.Errorf("snapshot %s kind=%q is not pause_snapshot", snapID, entry.Kind)
 	}
 	specDir := pauseSpecDir(entry)
-	if err := storage.MountS3MetadataAt(ctx, backend, snapID, specDir); err != nil {
-		return "", fmt.Errorf("mount pause metadata for sandbox_spec: %w", err)
+	var packed *cubebox.RunCubeSandboxRequest
+	if err := storage.WithMountedS3Metadata(ctx, backend, snapID, specDir, func() error {
+		var loadErr error
+		packed, loadErr = loadPauseSandboxSpec(specDir)
+		if loadErr != nil {
+			return fmt.Errorf("load pause sandbox_spec: %w", loadErr)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	return specDir, nil
+	return packed, nil
 }
 
 func writePauseSandboxSpec(snapshotPath string, runReq *cubebox.RunCubeSandboxRequest) error {
@@ -304,13 +320,9 @@ func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
 		return fmt.Errorf("pause snapshot backend: %w", berr)
 	}
 	ctx := context.Background()
-	specDir, err := pauseSpecDirFor(ctx, req, backend, snapID)
+	packed, err := loadPauseSandboxSpecFor(ctx, req, backend, snapID)
 	if err != nil {
 		return err
-	}
-	packed, err := loadPauseSandboxSpec(specDir)
-	if err != nil {
-		return fmt.Errorf("load pause sandbox_spec: %w", err)
 	}
 	if err := applyPausePluginVolumes(packed, ann); err != nil {
 		return err

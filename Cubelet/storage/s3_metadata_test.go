@@ -50,6 +50,7 @@ func (m *memS3MetadataKV) Set(body []byte) error {
 
 func stubS3MetadataMounts(t *testing.T) {
 	t.Helper()
+	var mountedMu sync.Mutex
 	mounted := map[string]string{}
 	origFormat := formatS3MetadataBaseDevice
 	origPack := packS3MetadataDevice
@@ -73,18 +74,29 @@ func stubS3MetadataMounts(t *testing.T) {
 		return nil
 	}
 	mountS3MetadataDevice = func(devicePath, mountPath string) error {
+		mountedMu.Lock()
 		mounted[mountPath] = devicePath
+		mountedMu.Unlock()
 		return nil
 	}
 	unmountS3MetadataPath = func(mountPath string) error {
+		mountedMu.Lock()
 		delete(mounted, mountPath)
+		mountedMu.Unlock()
 		return nil
 	}
 	s3MetadataIsMounted = func(mountPath string) bool {
+		mountedMu.Lock()
 		_, ok := mounted[mountPath]
+		mountedMu.Unlock()
 		return ok
 	}
-	s3MetadataMountSource = func(mountPath string) string { return mounted[mountPath] }
+	s3MetadataMountSource = func(mountPath string) string {
+		mountedMu.Lock()
+		src := mounted[mountPath]
+		mountedMu.Unlock()
+		return src
+	}
 	t.Cleanup(func() {
 		formatS3MetadataBaseDevice = origFormat
 		packS3MetadataDevice = origPack
@@ -989,4 +1001,103 @@ func TestRollbackMetadataRejectsUnsafeSandboxID(t *testing.T) {
 	require.ErrorContains(t, err, "invalid rollback metadata sandbox_id")
 	require.FileExists(t, sentinel)
 	require.Empty(t, engine.deletedVolumes)
+}
+
+func TestS3MetadataSlowMountDoesNotBlockHeartbeatGuardsOrOtherPackages(t *testing.T) {
+	stubS3MetadataMounts(t)
+	idA := "tpl-slow-a"
+	idB := "tpl-fast-b"
+	engine := &fakeCowEngine{volumeInfos: map[string]*cubecow.Volume{
+		S3MetadataVolumeName(idA): {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/meta-a"},
+		S3MetadataVolumeName(idB): {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/meta-b"},
+	}}
+	useTestCowStorage(t, engine)
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	baseMount := mountS3MetadataDevice
+	mountS3MetadataDevice = func(devicePath, mountPath string) error {
+		if mountPath == dirA {
+			close(enteredA)
+			<-releaseA
+		}
+		return baseMount(devicePath, mountPath)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- MountS3MetadataForRecovery(context.Background(), cow.BackendS3, idA, dirA)
+	}()
+
+	select {
+	case <-enteredA:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for package A mount to start")
+	}
+
+	// Heartbeat operation-guard check and writes on another package must not
+	// block while package A is stuck inside mount().
+	doneQuick := make(chan struct{})
+	go func() {
+		defer close(doneQuick)
+		require.False(t, S3PackageOperationInProgress(idA))
+		require.False(t, S3PackageOperationInProgress(idB))
+		// Same package A writer is still excluded while recovery holds its op guard.
+		_, _, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, idA)
+		require.ErrorContains(t, err, "active recovery")
+		// Another package B can write and mount concurrently without blocking on A.
+		_, releaseB, err := BeginS3PackageWrite(context.Background(), cow.BackendS3, idB)
+		require.NoError(t, err)
+		releaseB()
+		require.NoError(t, MountS3MetadataAt(context.Background(), cow.BackendS3, idB, dirB))
+		require.True(t, s3MetadataIsMounted(dirB))
+	}()
+
+	select {
+	case <-doneQuick:
+	case <-time.After(2 * time.Second):
+		close(releaseA)
+		t.Fatal("operations on other packages or guards blocked on package A's slow mount")
+	}
+
+	close(releaseA)
+	require.NoError(t, <-errCh)
+	require.True(t, s3MetadataIsMounted(dirA))
+}
+
+func TestWithMountedS3MetadataReleasesDerivedVolumeKeepsSealedSnap(t *testing.T) {
+	stubS3MetadataMounts(t)
+	id := "snap-pause-read"
+	snapName := S3MetadataSnapshotName(id)
+	volName := S3MetadataVolumeName(id)
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			snapName: {SizeBytes: 8 << 20},
+		},
+	}
+	useTestCowStorageAt(t, engine)
+
+	dir := filepath.Join(t.TempDir(), SnapshotMetadataDir)
+	called := false
+	err := WithMountedS3Metadata(context.Background(), cow.BackendS3, id, dir, func() error {
+		called = true
+		require.True(t, s3MetadataIsMounted(dir), "metadata disk must be mounted during callback")
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, called)
+	require.False(t, s3MetadataIsMounted(dir), "temporary mount must be released after callback")
+	require.Contains(t, engine.deletedVolumes, volName, "temporary derived volume must be deleted")
+	require.NotContains(t, engine.deletedSnapshots, snapName, "sealed snapshot must remain intact")
+	require.NotNil(t, engine.volumeInfos[snapName], "sealed snapshot must still exist")
+
+	// Non-S3 backend runs callback directly without mounting or touching S3.
+	xfsCalled := false
+	require.NoError(t, WithMountedS3Metadata(context.Background(), cow.BackendXFS, id, dir, func() error {
+		xfsCalled = true
+		return nil
+	}))
+	require.True(t, xfsCalled)
 }

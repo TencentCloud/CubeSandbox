@@ -31,11 +31,18 @@ const (
 	// config inside a package metadata dir: <meta>/snapshot/config.json.
 	runTemplateSnapshotDir = "snapshot"
 	runTemplateConfigFile  = "config.json"
+
+	// defaultInventoryRefreshTimeout bounds each asynchronous template
+	// discovery pass so a stalled storage backend cannot wedge refreshes.
+	defaultInventoryRefreshTimeout = 30 * time.Second
 )
 
 // Recovery lookups are replaceable so tests can verify backend isolation
-// without accessing host mounts.
-var recoverySnapshotKindRoot = storage.SnapshotKindRoot
+// without accessing host mounts or live cubecow daemons.
+var (
+	recoverySnapshotKindRoot = storage.SnapshotKindRoot
+	recoveryS3CatalogLookup  = storage.GetLocalSnapshotFor
+)
 
 type RunTemplateManager interface {
 	SetInstanceType(instanceType string)
@@ -60,6 +67,13 @@ type localCubeRunTemplateManager struct {
 
 	lock              sync.RWMutex
 	unusedTemplateMap map[string]*unusedTemplate
+
+	refreshMu      sync.Mutex
+	refreshRunning bool
+	refreshPending bool
+	refreshDone    chan struct{}
+	refreshTimeout time.Duration
+	refreshFn      func(context.Context)
 }
 
 func NewCubeRunTemplateManager(db multimeta.MetadataDBAPI, _ any) (*localCubeRunTemplateManager, error) {
@@ -71,6 +85,7 @@ func NewCubeRunTemplateManager(db multimeta.MetadataDBAPI, _ any) (*localCubeRun
 		store:                     store,
 		unusedTemplateMap:         make(map[string]*unusedTemplate),
 		maxUnusedTemplateDuration: 2 * 24 * time.Hour,
+		refreshTimeout:            defaultInventoryRefreshTimeout,
 	}
 
 	cdp.RegisterDeleteProtectionHook(cdp.ResourceDeleteProtectionTypeImage, &imageDeleteHook{manager})
@@ -87,6 +102,87 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 	if !h.IsReady() {
 		return nil, fmt.Errorf("local template manager is not ready")
 	}
+	// Never block node-liveness heartbeats on filesystem scans or storage RPCs:
+	// serve from the in-memory store and reconcile asynchronously.
+	h.triggerInventoryRefresh()
+	templates, err := h.store.ListGeneric()
+	if err != nil {
+		log.G(ctx).WithFields(CubeLog.Fields{
+			"err": err.Error(),
+		}).Error("failed to list local templates")
+		return nil, err
+	}
+	templateMap := make(map[string]*templatetypes.LocalRunTemplate)
+	for _, template := range templates {
+		if template == nil {
+			continue
+		}
+		if storage.S3PackageOperationInProgress(template.TemplateID) {
+			continue
+		}
+		templateMap[template.TemplateID] = template.Clone()
+	}
+	return templateMap, nil
+}
+
+// triggerInventoryRefresh schedules a coalesced background template discovery
+// pass without blocking the caller. At most one pass runs at a time.
+func (h *localCubeRunTemplateManager) triggerInventoryRefresh() {
+	h.refreshMu.Lock()
+	if h.refreshRunning {
+		h.refreshPending = true
+		h.refreshMu.Unlock()
+		return
+	}
+	h.refreshRunning = true
+	h.refreshPending = false
+	done := make(chan struct{})
+	h.refreshDone = done
+	fn := h.refreshFn
+	if fn == nil {
+		fn = h.refreshLocalTemplates
+	}
+	timeout := h.refreshTimeout
+	if timeout <= 0 {
+		timeout = defaultInventoryRefreshTimeout
+	}
+	h.refreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			h.refreshMu.Lock()
+			h.refreshRunning = false
+			close(done)
+			h.refreshMu.Unlock()
+		}()
+		for {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), timeout)
+			fn(refreshCtx)
+			cancel()
+
+			h.refreshMu.Lock()
+			if !h.refreshPending {
+				h.refreshMu.Unlock()
+				return
+			}
+			h.refreshPending = false
+			h.refreshMu.Unlock()
+		}
+	}()
+}
+
+// waitInventoryRefresh waits for any in-flight background inventory refresh to
+// finish. Used by tests for deterministic synchronization.
+func (h *localCubeRunTemplateManager) waitInventoryRefresh() {
+	h.refreshMu.Lock()
+	done := h.refreshDone
+	h.refreshMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+func (h *localCubeRunTemplateManager) refreshLocalTemplates(ctx context.Context) {
 	if err := h.recoverLocalTemplatesFromSnapshotRoot(ctx, constants.DefaultSnapshotDir, ""); err != nil {
 		log.G(ctx).WithFields(CubeLog.Fields{
 			"err": err.Error(),
@@ -112,24 +208,6 @@ func (h *localCubeRunTemplateManager) ListLocalTemplates(ctx context.Context) (m
 			"err": err.Error(),
 		}).Warn("failed to remove missing local templates")
 	}
-	templates, err := h.store.ListGeneric()
-	if err != nil {
-		log.G(ctx).WithFields(CubeLog.Fields{
-			"err": err.Error(),
-		}).Error("failed to list local templates")
-		return nil, err
-	}
-	templateMap := make(map[string]*templatetypes.LocalRunTemplate)
-	for _, template := range templates {
-		if template == nil {
-			continue
-		}
-		if storage.S3PackageOperationInProgress(template.TemplateID) {
-			continue
-		}
-		templateMap[template.TemplateID] = template.Clone()
-	}
-	return templateMap, nil
 }
 
 // removeMissingLocalTemplates reconciles the persisted local-template store
@@ -233,7 +311,11 @@ func (h *localCubeRunTemplateManager) EnsureCubeRunTemplate(ctx context.Context,
 		}
 		reportRecoveryError(h.recoverBackendMetadataHomes(ctx, backend, "cubebox", templateID))
 	case cow.BackendS3:
-		reportRecoveryError(h.recoverS3LocalTemplates(ctx, templateID))
+		if recovered, err := h.recoverS3LocalTemplateForEnsure(ctx, templateID); err != nil {
+			reportRecoveryError(err)
+		} else if recovered != nil {
+			return recovered, nil
+		}
 	case cow.BackendJFS:
 		reportRecoveryError(h.recoverBackendMetadataHomes(ctx, backend, "cubebox", templateID))
 		if cloned, err := h.cloneAndHydrate(templateID); err != nil || cloned != nil {
@@ -258,32 +340,131 @@ func (h *localCubeRunTemplateManager) SetInstanceType(instanceType string) {
 }
 
 func (h *localCubeRunTemplateManager) recoverS3LocalTemplates(ctx context.Context, templateID string) error {
-	// Heartbeat recovery has no template id. S3 config.json lives on a metadata
-	// disk that Finalize unmounts, so a directory scan alone sees empty homes
-	// and drops every local S3 template after Cubelet restarts. Mount each
-	// package home first; a known id still mounts only that package.
-	for _, id := range s3RecoveryIDs(ctx, templateID, s3SnapshotKindRoots()) {
-		mountS3PackageMetadataForRecovery(ctx, id)
+	id := strings.TrimSpace(templateID)
+	if id != "" {
+		_, err := h.recoverS3LocalTemplateForEnsure(ctx, id)
+		return err
 	}
-	return h.recoverBackendMetadataHomes(ctx, cow.BackendS3, "s3", templateID)
+	// Inventory discovery only inspects reusable templates under snapshots/.
+	// Completed pause packages under pause-snapshots/ are internal per-sandbox
+	// Resume artifacts and must never be scanned or mounted by heartbeat
+	// discovery, otherwise idle paused sandboxes leak permanent NVMe namespaces.
+	normalRoot := recoverySnapshotKindRoot(cow.BackendS3, storage.SnapshotKindNormal)
+	if err := h.recoverMetadataHomes(ctx, normalRoot, cow.BackendS3, ""); err != nil {
+		return err
+	}
+	// Finalized S3 templates keep snapshot/config.json on a sealed, unmounted
+	// metadata snapshot while clearing host metadata/. Probe read-only catalog
+	// existence without cloning, activating, or mounting any metadata disk.
+	for _, pkgID := range s3PackageIDsUnder(ctx, normalRoot) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if storage.S3PackageOperationInProgress(pkgID) {
+			continue
+		}
+		home := filepath.Join(normalRoot, pkgID)
+		if _, err := os.Stat(metadataHomeConfigPath(home)); err == nil {
+			continue
+		}
+		h.recoverSealedS3Package(ctx, pkgID, home, filepath.Join(home, storage.SnapshotMetadataDir), true)
+	}
+	return nil
 }
 
-func s3SnapshotKindRoots() []string {
-	return []string{
-		storage.SnapshotKindRoot(cow.BackendS3, storage.SnapshotKindNormal),
-		storage.SnapshotKindRoot(cow.BackendS3, storage.SnapshotKindPause),
+// recoverS3LocalTemplateForEnsure resolves one explicit S3 package ID on demand
+// (create from template/snapshot or Resume fallback to a pause package) without
+// mounting or retaining the package's metadata disk.
+func (h *localCubeRunTemplateManager) recoverS3LocalTemplateForEnsure(ctx context.Context, templateID string) (*templatetypes.LocalRunTemplate, error) {
+	id := strings.TrimSpace(templateID)
+	if id == "" {
+		return nil, nil
 	}
+	if err := h.recoverBackendMetadataHomes(ctx, cow.BackendS3, cow.BackendS3, id); err != nil {
+		return nil, err
+	}
+	if cloned, err := h.cloneAndHydrate(id); err != nil || cloned != nil {
+		return cloned, err
+	}
+	for _, kind := range []string{storage.SnapshotKindNormal, storage.SnapshotKindPause} {
+		root := recoverySnapshotKindRoot(cow.BackendS3, kind)
+		if root == "" {
+			continue
+		}
+		home := filepath.Join(root, id)
+		if st, err := os.Stat(home); err != nil || !st.IsDir() {
+			continue
+		}
+		metaDir := filepath.Join(home, storage.SnapshotMetadataDir)
+		persist := kind == storage.SnapshotKindNormal
+		if tpl := h.recoverSealedS3Package(ctx, id, home, metaDir, persist); tpl != nil {
+			return tpl.Clone(), nil
+		}
+	}
+	return nil, nil
 }
 
-// s3RecoveryIDs is the set of S3 packages whose metadata disk must be mounted
-// before the host scan can see snapshot/config.json. A specific id mounts
-// only that package. An empty id lists package homes under the snapshot roots;
-// those directories survive reboot even while the metadata disk is unmounted.
-func s3RecoveryIDs(ctx context.Context, templateID string, roots []string) []string {
-	if id := strings.TrimSpace(templateID); id != "" {
-		return []string{id}
+// recoverSealedS3Package builds a LocalRunTemplate for a finalized S3 package
+// whose host metadata directory was cleared after sealing, using read-only
+// catalog/object probing so no RW clone or NVMe namespace is attached.
+func (h *localCubeRunTemplateManager) recoverSealedS3Package(ctx context.Context, id, home, metaDir string, persist bool) *templatetypes.LocalRunTemplate {
+	if storage.S3PackageOperationInProgress(id) {
+		return nil
 	}
-	return s3PackageIDsUnder(ctx, roots...)
+	entry, err := recoveryS3CatalogLookup(ctx, cow.BackendS3, id)
+	if err != nil || entry == nil {
+		return nil
+	}
+	if strings.TrimSpace(entry.RootfsVol) == "" || strings.TrimSpace(entry.MetadataVol) == "" {
+		return nil
+	}
+	// Re-check after lookup so a write/cleanup that started concurrently is
+	// never published prematurely.
+	if storage.S3PackageOperationInProgress(id) {
+		return nil
+	}
+	if entry.SpecDir != "" {
+		_ = storage.EnsureShimSpecDirLink(home, entry.SpecDir)
+	}
+	if strings.TrimSpace(entry.MetaDir) != "" {
+		metaDir = filepath.Clean(entry.MetaDir)
+	}
+	template := &templatetypes.LocalRunTemplate{
+		DistributionReference: templatetypes.DistributionReference{
+			Namespace:          "default",
+			Name:               "recovered-" + id,
+			DistributionName:   "recovered-" + id,
+			DistributionTaskID: "recovered-" + id,
+			TemplateID:         id,
+		},
+		Snapshot: templatetypes.LocalSnapshot{
+			Snapshot: templatetypes.Snapshot{
+				ID:    id,
+				Media: cow.BackendS3,
+				Path:  metaDir,
+			},
+		},
+		Volumes:  map[string]templatetypes.LocalBaseVolume{},
+		Componts: map[string]templatetypes.LocalComponent{},
+	}
+	if len(entry.ComponentVersions) > 0 {
+		templatetypes.ApplyVersionMap(template, entry.ComponentVersions)
+	} else if existing, err := h.cloneAndHydrate(id); err == nil && existing != nil && len(existing.Componts) > 0 {
+		// Preserve previously persisted component versions across restarts when
+		// deriveS3CatalogEntry cannot read catalog.json from the unmounted snap.
+		template.Componts = existing.Componts
+	}
+	if persist {
+		if err := h.store.Update(template); err != nil {
+			log.G(ctx).WithFields(CubeLog.Fields{
+				"template_id": template.TemplateID,
+				"path":        template.Snapshot.Snapshot.Path,
+				"err":         err.Error(),
+			}).Warn("failed to persist recovered sealed s3 local template")
+			return nil
+		}
+	}
+	return template
 }
 
 func s3PackageIDsUnder(ctx context.Context, roots ...string) []string {
@@ -305,9 +486,7 @@ func s3PackageIDsUnder(ctx context.Context, roots ...string) []string {
 			continue
 		}
 		// Sandbox homes share <work>/s3/snapshots/<id> with template packages.
-		// Only tpl- directories there are packages. pause-snapshots holds
-		// pause packages, not sandbox homes.
-		pause := filepath.Base(root) == storage.SnapshotKindPause
+		// Only tpl- directories there are reusable template packages.
 		for _, ent := range entries {
 			if !ent.IsDir() {
 				continue
@@ -316,7 +495,7 @@ func s3PackageIDsUnder(ctx context.Context, roots ...string) []string {
 			if name == "" || strings.HasSuffix(name, ".tmp") {
 				continue
 			}
-			if !pause && !strings.HasPrefix(name, "tpl-") {
+			if !strings.HasPrefix(name, "tpl-") {
 				continue
 			}
 			if _, ok := seen[name]; ok {
@@ -330,41 +509,6 @@ func s3PackageIDsUnder(ctx context.Context, roots ...string) []string {
 	return ids
 }
 
-// mountS3PackageMetadataForRecovery makes an S3 package's run-template
-// metadata readable before the recovery scan looks for it.
-//
-// config.json lives on the package metadata disk, which Finalize seals and
-// unmounts, so a package that is on this node still shows an empty metadata
-// dir on the host. Mounting it here is what lets a package imported from
-// another node stand in for a template that was never built locally.
-func mountS3PackageMetadataForRecovery(ctx context.Context, templateID string) {
-	id := strings.TrimSpace(templateID)
-	if id == "" {
-		return
-	}
-	for _, kind := range []string{storage.SnapshotKindNormal, storage.SnapshotKindPause} {
-		home := storage.SnapshotHome(cow.BackendS3, kind, id)
-		if home == "" {
-			continue
-		}
-		if st, err := os.Stat(home); err != nil || !st.IsDir() {
-			continue
-		}
-		if _, err := os.Stat(metadataHomeConfigPath(home)); err == nil {
-			return
-		}
-		metaDir := filepath.Join(home, storage.SnapshotMetadataDir)
-		if err := storage.MountS3MetadataForRecovery(ctx, cow.BackendS3, id, metaDir); err != nil {
-			log.G(ctx).WithFields(CubeLog.Fields{
-				"template_id": id,
-				"meta_dir":    metaDir,
-				"err":         err.Error(),
-			}).Warn("failed to mount s3 package metadata for template recovery")
-		}
-		return
-	}
-}
-
 // metadataHomeConfigPath is the cube-runtime config a package home must have
 // for the recovery scan to accept it as a run template.
 func metadataHomeConfigPath(home string) string {
@@ -372,8 +516,12 @@ func metadataHomeConfigPath(home string) string {
 }
 
 func (h *localCubeRunTemplateManager) recoverBackendMetadataHomes(ctx context.Context, backend, media, templateID string) error {
+	kinds := []string{storage.SnapshotKindNormal}
+	if strings.TrimSpace(templateID) != "" {
+		kinds = append(kinds, storage.SnapshotKindPause)
+	}
 	var first error
-	for _, kind := range []string{storage.SnapshotKindNormal, storage.SnapshotKindPause} {
+	for _, kind := range kinds {
 		if err := h.recoverMetadataHomes(ctx, recoverySnapshotKindRoot(backend, kind), media, templateID); err != nil && first == nil {
 			first = err
 		}

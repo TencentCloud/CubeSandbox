@@ -68,9 +68,9 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 	}
 
 	// Unmount any stale metadata disk left by an older Cubelet (retry/upgrade).
-	s3MetadataMu.Lock()
+	unlockPkg := lockS3MetadataPackage(id)
 	umountErr := unmountS3MetadataPathIfMounted(metaDir)
-	s3MetadataMu.Unlock()
+	unlockPkg()
 	if umountErr != nil {
 		return res, umountErr
 	}

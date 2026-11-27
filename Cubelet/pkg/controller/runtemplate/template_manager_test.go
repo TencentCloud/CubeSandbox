@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
@@ -261,6 +263,7 @@ func newReadyTemplateManager(t *testing.T) *localCubeRunTemplateManager {
 		t.Fatalf("create local template manager: %v", err)
 	}
 	manager.SetInstanceType("SA5")
+	t.Cleanup(manager.waitInventoryRefresh)
 	return manager
 }
 
@@ -399,17 +402,15 @@ func TestRecoveredMetadataHomeAcceptsPausePackage(t *testing.T) {
 	}
 }
 
-func TestS3RecoveryIDsListsPackageHomesWhenIDUnknown(t *testing.T) {
+func TestS3PackageIDsUnderListsReusableTemplatesOnly(t *testing.T) {
 	root := t.TempDir()
 	snapshots := filepath.Join(root, "snapshots")
-	pause := filepath.Join(root, "pause-snapshots")
 	for _, dir := range []string{
 		filepath.Join(snapshots, "tpl-b"),
 		filepath.Join(snapshots, "tpl-a"),
 		filepath.Join(snapshots, "tpl-tmp.tmp"),
 		filepath.Join(snapshots, "deadbeefdeadbeefdeadbeef"),
-		filepath.Join(pause, "tpl-b"),
-		filepath.Join(pause, "snap-pause-1"),
+		filepath.Join(snapshots, "snap-pause-1"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
@@ -419,8 +420,8 @@ func TestS3RecoveryIDsListsPackageHomesWhenIDUnknown(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	got := s3RecoveryIDs(context.Background(), "", []string{snapshots, pause, filepath.Join(root, "missing")})
-	want := []string{"snap-pause-1", "tpl-a", "tpl-b"}
+	got := s3PackageIDsUnder(context.Background(), snapshots, filepath.Join(root, "missing"))
+	want := []string{"tpl-a", "tpl-b"}
 	if len(got) != len(want) {
 		t.Fatalf("ids=%v, want %v", got, want)
 	}
@@ -429,18 +430,205 @@ func TestS3RecoveryIDsListsPackageHomesWhenIDUnknown(t *testing.T) {
 			t.Fatalf("ids=%v, want %v", got, want)
 		}
 	}
+}
 
-	one := s3RecoveryIDs(context.Background(), " tpl-only ", []string{snapshots})
-	if len(one) != 1 || one[0] != "tpl-only" {
-		t.Fatalf("specific id=%v, want [tpl-only]", one)
+// Heartbeat / inventory recovery must discover finalized S3 templates via
+// read-only catalog probing without mounting any metadata disks, and must
+// completely skip completed pause packages so idle paused sandboxes do not
+// leak permanent NVMe namespaces.
+func TestS3InventoryDiscoverySkipsPausePackagesAndAvoidsMounts(t *testing.T) {
+	manager := newReadyTemplateManager(t)
+	root := t.TempDir()
+	snapshots := filepath.Join(root, storage.SnapshotKindNormal)
+	pause := filepath.Join(root, storage.SnapshotKindPause)
+
+	tplMetaDir := filepath.Join(snapshots, "tpl-sealed", storage.SnapshotMetadataDir)
+	pauseMetaDir := filepath.Join(pause, "snap-paused-1", storage.SnapshotMetadataDir)
+	orphanMetaDir := filepath.Join(snapshots, "tpl-orphan", storage.SnapshotMetadataDir)
+	for _, dir := range []string{tplMetaDir, pauseMetaDir, orphanMetaDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	// Seed a previously persisted component version to verify restart recovery
+	// does not wipe BoltDB component versions when derived catalog has none.
+	seedLocalTemplate(t, manager, "tpl-sealed", "recovered-tpl-sealed", map[string]templatetypes.LocalComponent{
+		templatetypes.CubeComponentCubeKernel: {Component: templatetypes.MachineComponent{Version: "k-v1"}},
+	})
+
+	oldRoot := recoverySnapshotKindRoot
+	oldLookup := recoveryS3CatalogLookup
+	t.Cleanup(func() {
+		recoverySnapshotKindRoot = oldRoot
+		recoveryS3CatalogLookup = oldLookup
+	})
+	recoverySnapshotKindRoot = func(backend, kind string) string {
+		if backend != cow.BackendS3 {
+			return ""
+		}
+		return filepath.Join(root, kind)
+	}
+
+	var probed []string
+	recoveryS3CatalogLookup = func(_ context.Context, backend, id string) (*storage.SnapshotCatalogEntry, error) {
+		probed = append(probed, id)
+		if backend != cow.BackendS3 {
+			t.Fatalf("unexpected backend %q", backend)
+		}
+		if id == "snap-paused-1" {
+			t.Fatalf("inventory discovery must not probe pause package %s", id)
+		}
+		if id == "tpl-sealed" {
+			return &storage.SnapshotCatalogEntry{
+				SnapshotID:   id,
+				SnapshotPath: filepath.Dir(tplMetaDir),
+				MetaDir:      tplMetaDir,
+				RootfsVol:    "tpl-sealed-rootfs",
+				MetadataVol:  "s3-meta-tpl-sealed-snap",
+				Kind:         storage.CatalogKindTemplate,
+				Backend:      cow.BackendS3,
+			}, nil
+		}
+		return nil, storage.ErrSnapshotCatalogNotFound
+	}
+
+	if err := manager.recoverS3LocalTemplates(context.Background(), ""); err != nil {
+		t.Fatalf("recoverS3LocalTemplates: %v", err)
+	}
+
+	// Only snapshots/tpl-* were probed; pause-snapshots/snap-paused-1 was ignored.
+	for _, id := range probed {
+		if id == "snap-paused-1" {
+			t.Fatalf("pause package was probed during inventory scan: %v", probed)
+		}
+	}
+	got, err := manager.cloneAndHydrate("tpl-sealed")
+	if err != nil || got == nil {
+		t.Fatalf("sealed S3 template not recovered: got=%v err=%v", got, err)
+	}
+	if got.Snapshot.Snapshot.Path != tplMetaDir {
+		t.Fatalf("path=%q, want %q", got.Snapshot.Snapshot.Path, tplMetaDir)
+	}
+	if got.Componts[templatetypes.CubeComponentCubeKernel].Component.Version != "k-v1" {
+		t.Fatalf("expected persisted component version preserved, got %+v", got.Componts)
+	}
+	if orphan, err := manager.cloneAndHydrate("tpl-orphan"); err != nil || orphan != nil {
+		t.Fatalf("orphan dir without cubecow objects must not be published: got=%v err=%v", orphan, err)
+	}
+	if paused, err := manager.cloneAndHydrate("snap-paused-1"); err != nil || paused != nil {
+		t.Fatalf("pause package must not be persisted into LocalTemplates store: got=%v err=%v", paused, err)
 	}
 }
 
-// An unmounted or absent package must not blow up the recovery attempt; the
-// caller treats it as a plain miss.
-func TestMountS3PackageMetadataForRecoveryTolerAtesMissingPackage(t *testing.T) {
-	mountS3PackageMetadataForRecovery(context.Background(), "")
-	mountS3PackageMetadataForRecovery(context.Background(), "snap-does-not-exist")
+// On-demand EnsureCubeRunTemplate for a sealed pause package (Resume fallback
+// when original tpl-* is absent) resolves without mounting or polluting the
+// heartbeat LocalTemplates store.
+func TestEnsureCubeRunTemplateResolvesSealedPausePackageOnDemandWithoutPersisting(t *testing.T) {
+	manager := newReadyTemplateManager(t)
+	root := t.TempDir()
+	pauseMetaDir := filepath.Join(root, storage.SnapshotKindPause, "snap-pause-demand", storage.SnapshotMetadataDir)
+	if err := os.MkdirAll(pauseMetaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRoot := recoverySnapshotKindRoot
+	oldLookup := recoveryS3CatalogLookup
+	t.Cleanup(func() {
+		recoverySnapshotKindRoot = oldRoot
+		recoveryS3CatalogLookup = oldLookup
+	})
+	recoverySnapshotKindRoot = func(backend, kind string) string {
+		if backend != cow.BackendS3 {
+			return ""
+		}
+		return filepath.Join(root, kind)
+	}
+	recoveryS3CatalogLookup = func(_ context.Context, _ string, id string) (*storage.SnapshotCatalogEntry, error) {
+		if id != "snap-pause-demand" {
+			return nil, storage.ErrSnapshotCatalogNotFound
+		}
+		return &storage.SnapshotCatalogEntry{
+			SnapshotID:   id,
+			SnapshotPath: filepath.Dir(pauseMetaDir),
+			MetaDir:      pauseMetaDir,
+			RootfsVol:    "tpl-snap-pause-demand-rootfs",
+			MetadataVol:  "s3-meta-snap-pause-demand-snap",
+			Kind:         storage.CatalogKindPauseSnapshot,
+			Backend:      cow.BackendS3,
+		}, nil
+	}
+
+	got, err := manager.EnsureCubeRunTemplate(context.Background(), "snap-pause-demand", cow.BackendS3)
+	if err != nil {
+		t.Fatalf("EnsureCubeRunTemplate: %v", err)
+	}
+	if got == nil || got.TemplateID != "snap-pause-demand" || got.Snapshot.Snapshot.Path != pauseMetaDir {
+		t.Fatalf("unexpected pause template: %+v", got)
+	}
+	// Pause fallback must not leak into the persisted heartbeat store.
+	rows, err := manager.store.ListGeneric()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected pause package not to be persisted in LocalTemplates store, got %d", len(rows))
+	}
+}
+
+// ListLocalTemplates runs on the node-liveness heartbeat path and must return
+// immediately even when background storage/filesystem recovery is stalled,
+// coalescing repeated heartbeat triggers into at most one follow-up pass.
+func TestListLocalTemplatesDoesNotBlockOnSlowInventoryRefresh(t *testing.T) {
+	manager := newReadyTemplateManager(t)
+	seedLocalTemplate(t, manager, "tpl-cached", "task-cached", map[string]templatetypes.LocalComponent{
+		templatetypes.CubeComponentCubeShim: {Component: templatetypes.MachineComponent{Version: "v1"}},
+	})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var runs atomic.Int32
+	manager.refreshFn = func(ctx context.Context) {
+		n := runs.Add(1)
+		if n == 1 {
+			close(started)
+			<-release
+		}
+	}
+
+	// First heartbeat returns immediately even though the background refresh
+	// blocks on storage.
+	start := time.Now()
+	listed, err := manager.ListLocalTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("ListLocalTemplates: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("ListLocalTemplates blocked on slow refresh: %v", elapsed)
+	}
+	if listed["tpl-cached"] == nil {
+		t.Fatal("expected cached template to be served immediately")
+	}
+
+	<-started
+
+	// Fire 10 more heartbeats while the first refresh is still blocked:
+	// every call must return promptly and coalesce into at most 1 follow-up run.
+	for i := range 10 {
+		callStart := time.Now()
+		if _, err := manager.ListLocalTemplates(context.Background()); err != nil {
+			t.Fatalf("heartbeat %d failed: %v", i, err)
+		}
+		if elapsed := time.Since(callStart); elapsed > time.Second {
+			t.Fatalf("heartbeat %d blocked on in-flight refresh: %v", i, elapsed)
+		}
+	}
+
+	close(release)
+	manager.waitInventoryRefresh()
+
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("expected 1 initial + 1 coalesced follow-up refresh, got %d", got)
+	}
 }
 
 // A backend lookup must stay inside that backend's registered package root.
