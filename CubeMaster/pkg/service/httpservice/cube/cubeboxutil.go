@@ -166,6 +166,9 @@ func applyTemplateToContainer(ctr *types.Container, templateCtr *types.Container
 	if ctr.LivenessProbe == nil {
 		ctr.LivenessProbe = templateCtr.LivenessProbe
 	}
+	if ctr.Lifecycle == nil {
+		ctr.Lifecycle = templateCtr.Lifecycle
+	}
 
 	return nil
 }

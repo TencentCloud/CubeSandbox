@@ -63,6 +63,44 @@ cubemastercli tpl create-from-image \
 
 The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
 
+### Configure container lifecycle hooks
+
+Use the optional `lifecycle` field in the CubeAPI `POST /templates` request to run commands when a sandbox starts or is gracefully deleted. You can configure either hook or both. In each `exec.command` array, the first element is an executable available in the image and the remaining elements are its arguments. The command runs as the container user.
+
+```json
+{
+  "image": "registry.example.com/my-app:latest",
+  "writableLayerSize": "1G",
+  "lifecycle": {
+    "postStart": {
+      "exec": { "command": ["/usr/local/bin/init-workspace"] }
+    },
+    "preStop": {
+      "exec": { "command": ["/usr/local/bin/flush-workspace"] }
+    }
+  }
+}
+```
+
+Commands run directly, without an implicit shell. The executable (`command[0]`) must be non-blank and have no leading or trailing whitespace; other arguments are preserved as supplied. To use shell features such as `&&`, pipes, redirection, or environment variable expansion, invoke a shell explicitly. For example, if the image includes `/bin/sh`, a `postStart` hook can use:
+
+```json
+{
+  "postStart": {
+    "exec": {
+      "command": ["/bin/sh", "-c", "mkdir -p /tmp/workspace-cache && echo ready > /tmp/workspace-ready"]
+    }
+  }
+}
+```
+
+- `postStart` runs in each new sandbox, including one created from a template snapshot, before it becomes ready. All containers in that sandbox share a 10-second hook execution budget; container startup time does not consume it. A nonzero exit status or a timeout causes sandbox creation to fail and starts cleanup.
+- `preStop` runs during graceful deletion while the guest can still execute commands. The hook and the wait for the main process to exit after `SIGTERM` share up to 5 seconds. The legacy HTTP `Poststop` hook runs before `SIGTERM`, and its duration can consume the remaining termination grace. A shorter deletion deadline can reduce that time. Cubelet logs hook failures and timeouts and continues deletion. A deletion retry skips a hook that has already been attempted. Timed-out hook processes receive a separate bounded cleanup attempt.
+
+The hooks are skipped during template snapshot builds and when an existing sandbox is paused, resumed, or restarted.
+
+The separate sandbox-level `lifecycle` object accepted by `POST /sandboxes` controls idle behavior through `onTimeout` and `autoResume`. It is distinct from the template container lifecycle hooks accepted by `POST /templates`.
+
 ## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.

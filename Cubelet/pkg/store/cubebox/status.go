@@ -38,6 +38,9 @@ type Status struct {
 	PostStop               bool `json:"-"`
 	LifeTimeMetricReported bool `json:"-"`
 
+	// Persisted across restarts so a retried delete never re-runs an attempted hook.
+	TemplatePreStopStarted bool `json:",omitempty"`
+
 	// RollingBack signals that a snapshot rollback is in flight against this
 	// sandbox. While set, the shim holds its sandbox mutex doing
 	// delete_vm + resume_vm_with_config and ttrpc state() may transiently

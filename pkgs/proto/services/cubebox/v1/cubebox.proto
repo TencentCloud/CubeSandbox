@@ -365,6 +365,12 @@ message HostAlias {
   string ip = 2;
 }
 
+// Commands executed in a sandbox created from a template, as argv vectors.
+message TemplateLifecycleCommands {
+  repeated string post_start = 1;
+  repeated string pre_stop = 2;
+}
+
 message ContainerConfig {
   // Name of the container
   string name = 1;
@@ -416,6 +422,7 @@ message ContainerConfig {
   OCIConfig oci_config = 21;
   // Runtime liveness check. Times are seconds; see LivenessProbe.
   LivenessProbe liveness_probe = 22;
+  TemplateLifecycleCommands lifecycle = 23;
 }
 
 message OCIConfig {

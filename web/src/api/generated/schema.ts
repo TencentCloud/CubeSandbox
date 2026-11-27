@@ -491,7 +491,7 @@ export interface paths {
         };
         /**
          * Get info for a single volume (includes auth token).
-         * @description Returns `200 OK` with `VolumeAndToken` on success.
+         * @description Returns `200 OK` with `VolumeDetails` on success.
          */
         get: operations["get_volume"];
         put?: never;
@@ -605,6 +605,11 @@ export interface components {
         };
         /** @description Request body for POST /sandboxes/{id}/snapshots. */
         CreateSnapshotRequest: {
+            /**
+             * Format: int64
+             * @description Lifetime from READY in seconds; omitted or zero means no expiration.
+             */
+            ttlSeconds?: number | null;
             /** @description CoW backend (xfs | s3). Empty means xfs. */
             backend?: string | null;
             /** @description Deprecated E2B alias for `memory`; false means fs-only. */
@@ -650,6 +655,7 @@ export interface components {
             /** @description Container image reference, e.g. `registry.example.com/code:latest`. */
             image: string;
             instanceType?: string | null;
+            lifecycle?: null | components["schemas"]["TemplateLifecycle"];
             /**
              * Format: int32
              * @description Memory in MiB, e.g. 2000.
@@ -849,8 +855,6 @@ export interface components {
         /** @description One entry in GET /sandboxes (RunningSandbox in OpenAPI spec). */
         ListedSandbox: {
             alias?: string | null;
-            /** @description Persisted internet-access flag; absent when the spec was not read. */
-            allowInternetAccess?: boolean | null;
             clientID: string;
             /** Format: int32 */
             cpuCount: number;
@@ -866,17 +870,13 @@ export interface components {
              * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
             endAt: string;
-            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
-            endAtStatus?: string | null;
             envdVersion: string;
-            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
             /**
              * Format: int32
              * @description Historical field name; the value is memory in MiB.
              */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
-            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
             restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
@@ -884,6 +884,12 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+            /** @description Persisted internet-access flag; absent when the spec was not read. */
+            allowInternetAccess?: boolean | null;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         LivenessHTTPGet: {
             path?: string | null;
@@ -1046,6 +1052,46 @@ export interface components {
             healthy: boolean;
             nodeID: string;
         };
+        NodeView: {
+            allocatable: components["schemas"]["NodeResourcesView"];
+            capacity: components["schemas"]["NodeResourcesView"];
+            conditions?: components["schemas"]["NodeConditionView"][];
+            /**
+             * Format: float
+             * @description Percentage (0-100) of CPU currently in use.
+             */
+            cpuSaturation: number;
+            /**
+             * Format: int64
+             * @description Max concurrent sandbox-create operations on this node.
+             */
+            createConcurrentNum: number;
+            healthy: boolean;
+            /** Format: date-time */
+            heartbeatTime?: string | null;
+            hostIP: string;
+            instanceType?: string;
+            localTemplates?: string[];
+            /** Format: int64 */
+            maxMvmSlots: number;
+            /**
+             * Format: float
+             * @description Percentage (0-100) of memory currently in use.
+             */
+            memorySaturation: number;
+            nodeID: string;
+            /**
+             * Format: int64
+             * @description CPU quota in millicores assigned to this node.
+             */
+            quotaCpu: number;
+            /**
+             * Format: int64
+             * @description Memory quota in MiB assigned to this node.
+             */
+            quotaMemMB: number;
+            versions?: components["schemas"]["ComponentVersionView"][];
+        };
         QosConfig: {
             blockIo?: null | components["schemas"]["BlockIoQosConfig"];
             network?: null | components["schemas"]["NetworkQosConfig"];
@@ -1080,7 +1126,16 @@ export interface components {
              * @description 0 or omitted uses the node default (2). It does not select a constant interval.
              */
             multiplier?: number | null;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Seconds of uninterrupted uptime after which the restart count is
+             *     reset. Zero or omitted uses the node default (600). The clock starts
+             *     when the current run starts being up -- on create, on a successful
+             *     restart, or on resume -- and a failed attempt does not restart it.
+             *     The reset is applied as soon as the window elapses; it does not wait
+             *     for the next exit, and it never revives a sandbox that already
+             *     reached maxRestarts.
+             */
             stableDurationSecond?: number | null;
         };
         /**
@@ -1154,8 +1209,6 @@ export interface components {
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
-            /** @description Persisted internet-access flag; absent when the spec was not read. */
-            allowInternetAccess?: boolean | null;
             clientID: string;
             configuredQos?: null | components["schemas"]["QosConfig"];
             /** Format: int32 */
@@ -1173,20 +1226,16 @@ export interface components {
              * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
             endAt: string;
-            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
-            endAtStatus?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** @description Stored status or exit reason for the primary container. Omitted when unavailable. */
             errorReason?: string;
-            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
             /**
              * Format: int32
              * @description Historical field name; the value is memory in MiB.
              */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
-            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
             restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
@@ -1194,6 +1243,12 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+            /** @description Persisted internet-access flag; absent when the spec was not read. */
+            allowInternetAccess?: boolean | null;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         /**
          * @description Sandbox lifecycle configuration. Mirrors the e2b SDK's `lifecycle` object —
@@ -1252,6 +1307,22 @@ export interface components {
             rules?: null | components["schemas"]["SandboxNetworkRulesInput"];
         };
         /**
+         * @description Query-response form of [`SandboxNetworkConfig`]. Egress `rules` never
+         *     appear here — they carry plaintext inject secrets and are scrubbed before
+         *     a response is built — so the response schema must not declare them.
+         */
+        SandboxNetworkConfigEcho: {
+            allowOut?: string[] | null;
+            allowPublicTraffic?: boolean | null;
+            denyOut?: string[] | null;
+            maskRequestHost?: string | null;
+            /**
+             * @description True when the persisted config carried egress rules, which never
+             *     appear on the wire (plaintext inject secrets).
+             */
+            rulesPresent?: boolean | null;
+        };
+        /**
          * @description Accepted wire shapes for `SandboxNetworkConfig.rules`.
          *
          *     CubeSandbox clients use the ordered rule array. E2B clients use a
@@ -1278,17 +1349,6 @@ export interface components {
              */
             readOnly?: boolean;
         };
-        SandboxNetworkConfigEcho: {
-            allowOut?: string[] | null;
-            allowPublicTraffic?: boolean | null;
-            denyOut?: string[] | null;
-            maskRequestHost?: string | null;
-            /**
-             * @description True when the persisted config carried egress rules, which never
-             *     appear on the wire (plaintext inject secrets).
-             */
-            rulesPresent?: boolean | null;
-        };
         /**
          * @description Body for PUT /templates/:id/alias (set / modify / clear alias).
          *
@@ -1306,6 +1366,8 @@ export interface components {
         };
         /** @description Response for POST /sandboxes/{id}/snapshots. */
         SnapshotInfo: {
+            /** Format: date-time */
+            expiresAt?: string | null;
             /** @description CoW backend that produced this snapshot (xfs | s3). */
             backend?: string | null;
             /** @description Snapshot artifact mode. Always one of full | fs-only. */
@@ -1317,6 +1379,8 @@ export interface components {
         };
         /** @description One entry in the GET /snapshots list. */
         SnapshotListItem: {
+            /** Format: date-time */
+            expiresAt?: string | null;
             /** @description CoW backend that produced this snapshot (xfs | s3). */
             backend?: string | null;
             /** Format: date-time */
@@ -1410,6 +1474,17 @@ export interface components {
             templateID: string;
             version?: string | null;
         };
+        TemplateLifecycle: {
+            postStart?: null | components["schemas"]["TemplateLifecycleHook"];
+            preStop?: null | components["schemas"]["TemplateLifecycleHook"];
+        };
+        TemplateLifecycleExec: {
+            /** @description Executable and arguments. No shell is added implicitly. */
+            command: string[];
+        };
+        TemplateLifecycleHook: {
+            exec: components["schemas"]["TemplateLifecycleExec"];
+        };
         TemplateNodeCompatView: {
             boundAgentVersion?: string | null;
             boundGuestImageVersion?: string | null;
@@ -1483,7 +1558,7 @@ export interface components {
             volumeID: string;
         };
         /**
-         * @description Volume descriptor with auth token — returned on create / get-single.
+         * @description Volume descriptor with auth token — returned on create.
          *     E2B SDK requires `token` to always be present (non-optional); use empty
          *     string when the plugin does not return a token.
          */
@@ -1491,6 +1566,15 @@ export interface components {
             name: string;
             /** @description Auth token returned by the volume plugin. Empty string when not applicable. */
             token?: string;
+            volumeID: string;
+        };
+        /** @description Single-volume GET response, including admission state when supplied by CubeMaster. */
+        VolumeDetails: {
+            deleting?: boolean | null;
+            /** Format: int64 */
+            in_flight_creates?: number | null;
+            name: string;
+            token: string;
             volumeID: string;
         };
     };
@@ -2708,7 +2792,7 @@ export interface operations {
             query?: {
                 /** @description CubeMaster instance_type filter */
                 instance_type?: string;
-                /** @description Wait for deletion to complete before returning */
+                /** @description Wait for the delete to finish before returning; nodes unreachable past the 15-minute grace period are still cleaned in the background */
                 sync?: boolean;
                 /** @description Only match snapshots by id or name; a miss is 404 and never deletes a template */
                 snapshot_only?: boolean;
@@ -2722,7 +2806,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Template or snapshot deleted */
+            /** @description Template or snapshot deleted; data on nodes unreachable past the 15-minute grace period is cleaned in the background once they return */
             204: {
                 headers: {
                     [name: string]: unknown;
@@ -3346,7 +3430,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["VolumeAndToken"];
+                    "application/json": components["schemas"]["VolumeDetails"];
                 };
             };
             /** @description Authentication error */

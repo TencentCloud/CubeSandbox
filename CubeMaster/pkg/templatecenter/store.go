@@ -2612,6 +2612,9 @@ func applyTemplateRequest(templateReq, reqInOut *sandboxtypes.CreateCubeSandboxR
 		if ctr.LivenessProbe == nil {
 			ctr.LivenessProbe = templateCtr.LivenessProbe
 		}
+		if ctr.Lifecycle == nil {
+			ctr.Lifecycle = templateCtr.Lifecycle
+		}
 	}
 	if reqInOut.RestartPolicy == "" {
 		reqInOut.RestartPolicy = templateReq.RestartPolicy

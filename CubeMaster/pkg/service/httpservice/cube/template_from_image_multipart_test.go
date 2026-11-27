@@ -17,6 +17,30 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
+func TestParseCreateTemplateFromImageRequestPreservesEmptyLifecycleCommand(t *testing.T) {
+	for _, hook := range []string{"post_start", "pre_stop"} {
+		t.Run(hook, func(t *testing.T) {
+			body := `{"source_image_ref":"ubuntu:22.04","writable_layer_size":"1Gi","lifecycle":{"` + hook + `":[]}}`
+			r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			req, _, err := parseCreateTemplateFromImageRequest(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.Lifecycle == nil {
+				t.Fatal("explicit empty lifecycle command lost during JSON decoding")
+			}
+			command, omitted := req.Lifecycle.GetPostStart(), req.Lifecycle.GetPreStop()
+			if hook == "pre_stop" {
+				command, omitted = omitted, command
+			}
+			if command == nil || len(command) != 0 || omitted != nil {
+				t.Fatalf("expected an explicit empty %s command and an omitted other hook: %v", hook, req.Lifecycle)
+			}
+		})
+	}
+}
+
 func TestParseCreateTemplateFromImageRequestRejectsJSONEnvdInjection(t *testing.T) {
 	reqBody := &types.CreateTemplateFromImageReq{
 		Request:           &types.Request{RequestID: "req-1"},
