@@ -81,15 +81,34 @@ fn virtio_balloon_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![(libc::SYS_fallocate, vec![])]
 }
 
+// NBD reconnect over TCP uses TcpStream::connect_timeout(), which toggles
+// O_NONBLOCK on the new socket through ioctl(FIONBIO).
+fn create_virtio_block_ioctl_seccomp_rule() -> Vec<SeccompRule> {
+    or![and![Cond::new(1, ArgLen::Dword, Eq, FIONBIO).unwrap()]]
+}
+
 fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
+        (libc::SYS_clock_nanosleep, vec![]),
+        (libc::SYS_connect, vec![]),
         (libc::SYS_fallocate, vec![]),
         (libc::SYS_fdatasync, vec![]),
         (libc::SYS_fsync, vec![]),
         (libc::SYS_ftruncate, vec![]),
         (libc::SYS_getrandom, vec![]),
+        // TcpStream::connect_timeout() reads the connect result back via
+        // getsockopt(SOL_SOCKET, SO_ERROR); nothing else is needed.
+        (
+            libc::SYS_getsockopt,
+            vec![and![
+                Cond::new(1, ArgLen::Dword, Eq, libc::SOL_SOCKET as u64).unwrap(),
+                Cond::new(2, ArgLen::Dword, Eq, libc::SO_ERROR as u64).unwrap()
+            ]],
+        ),
         (libc::SYS_io_uring_enter, vec![]),
+        (libc::SYS_ioctl, create_virtio_block_ioctl_seccomp_rule()),
         (libc::SYS_lseek, vec![]),
+        (libc::SYS_nanosleep, vec![]),
         // before_pause() drains in-flight IO via libc::poll; glibc maps this
         // to SYS_poll on x86_64 and SYS_ppoll on aarch64. Without these a
         // pause-snapshot raises SIGSYS when seccomp is not Allow.
@@ -102,8 +121,25 @@ fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
         (libc::SYS_preadv, vec![]),
         (libc::SYS_pwritev, vec![]),
         (libc::SYS_pwrite64, vec![]),
+        // NBD reconnect handshake over TCP: std's TcpStream::read()/write()
+        // are recv()/send(), i.e. SYS_recvfrom/SYS_sendto. Unix sockets use
+        // plain read()/write() instead.
+        (libc::SYS_recvfrom, vec![]),
+        (libc::SYS_recvmsg, vec![]),
         (libc::SYS_sched_getaffinity, vec![]),
+        (libc::SYS_sendmsg, vec![]),
+        (libc::SYS_sendto, vec![]),
         (libc::SYS_set_robust_list, vec![]),
+        (libc::SYS_setsockopt, vec![]),
+        (libc::SYS_shutdown, vec![]),
+        (
+            libc::SYS_socket,
+            or![
+                and![Cond::new(0, ArgLen::Dword, Eq, libc::AF_UNIX as u64).unwrap()],
+                and![Cond::new(0, ArgLen::Dword, Eq, libc::AF_INET as u64).unwrap()],
+                and![Cond::new(0, ArgLen::Dword, Eq, libc::AF_INET6 as u64).unwrap()],
+            ],
+        ),
         (libc::SYS_timerfd_settime, vec![]),
     ]
 }

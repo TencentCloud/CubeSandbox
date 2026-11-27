@@ -164,6 +164,13 @@ if [ ! -f "$VIRTIOFSD" ]; then
     popd
 fi
 
+# nbdkit backs the NBD disk tests (common_sequential::nbd::*). Those tests
+# skip themselves when nbdkit is unavailable, so a failure here is not fatal.
+PREPARE_NBDKIT="$(dirname "$0")/prepare_nbdkit.sh"
+if [ -x "$PREPARE_NBDKIT" ]; then
+    "$PREPARE_NBDKIT" "$WORKLOADS_DIR" || echo "WARNING: nbdkit not prepared, NBD tests will be skipped"
+fi
+
 
 BLK_IMAGE="$WORKLOADS_DIR/blk.img"
 MNT_DIR="mount_image"

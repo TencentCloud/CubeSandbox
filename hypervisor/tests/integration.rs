@@ -143,6 +143,226 @@ fn temp_vsock_path(tmp_dir: &TempDir) -> String {
     String::from(tmp_dir.as_path().join("vsock").to_str().unwrap())
 }
 
+/// Locate the nbdkit binary used by the NBD disk tests: `$NBDKIT` first, then
+/// `~/workloads/nbdkit/sbin/nbdkit` (installed by `scripts/prepare_nbdkit.sh`).
+/// Returns `None` when neither is available so the NBD tests can be skipped.
+fn nbdkit_path() -> Option<String> {
+    if let Ok(path) = std::env::var("NBDKIT") {
+        return Some(path);
+    }
+    let mut path = dirs::home_dir()?;
+    path.push("workloads/nbdkit/sbin/nbdkit");
+    if path.is_file() {
+        return Some(String::from(path.to_str().unwrap()));
+    }
+    None
+}
+
+/// Resolve nbdkit for an NBD test, or print why it is skipped and return.
+macro_rules! nbdkit_or_skip {
+    ($test:expr) => {
+        match nbdkit_path() {
+            Some(path) => path,
+            None => {
+                eprintln!(
+                    "skipping {}: nbdkit not found; run scripts/prepare_nbdkit.sh or set NBDKIT",
+                    $test
+                );
+                return;
+            }
+        }
+    };
+}
+
+/// Where an nbdkit instance listens.
+enum NbdkitListen {
+    Unix(String),
+    Tcp(u16),
+}
+
+/// An nbdkit `file` plugin instance serving `backing` on a Unix socket or a
+/// loopback TCP port. Optionally wrapped by the `delay` filter so guest writes
+/// stay in flight long enough for pause/snapshot/reconnect to race with them.
+struct NbdkitServer {
+    binary: String,
+    child: Option<Child>,
+    listen: NbdkitListen,
+    log: String,
+    backing: String,
+    write_delay_ms: Option<u64>,
+}
+
+impl NbdkitServer {
+    fn start(binary: &str, tmp_dir: &TempDir, backing: &str, write_delay_ms: Option<u64>) -> Self {
+        Self::start_named(binary, tmp_dir, "nbdkit", false, backing, write_delay_ms)
+    }
+
+    /// Start an instance whose socket/log files are prefixed with `name`, so
+    /// several servers can share one tmp dir. With `tcp` it listens on a free
+    /// 127.0.0.1 port instead of a Unix socket; the port is kept across
+    /// restarts.
+    fn start_named(
+        binary: &str,
+        tmp_dir: &TempDir,
+        name: &str,
+        tcp: bool,
+        backing: &str,
+        write_delay_ms: Option<u64>,
+    ) -> Self {
+        let listen = if tcp {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            NbdkitListen::Tcp(probe.local_addr().unwrap().port())
+        } else {
+            NbdkitListen::Unix(String::from(
+                tmp_dir
+                    .as_path()
+                    .join(format!("{}.sock", name))
+                    .to_str()
+                    .unwrap(),
+            ))
+        };
+        let mut server = NbdkitServer {
+            binary: binary.to_string(),
+            child: None,
+            listen,
+            log: String::from(
+                tmp_dir
+                    .as_path()
+                    .join(format!("{}.log", name))
+                    .to_str()
+                    .unwrap(),
+            ),
+            backing: backing.to_string(),
+            write_delay_ms,
+        };
+        server.spawn();
+        server
+    }
+
+    fn listening(&self) -> bool {
+        match &self.listen {
+            NbdkitListen::Unix(socket) => std::os::unix::net::UnixStream::connect(socket).is_ok(),
+            NbdkitListen::Tcp(port) => std::net::TcpStream::connect(("127.0.0.1", *port)).is_ok(),
+        }
+    }
+
+    fn remove_socket(&self) {
+        if let NbdkitListen::Unix(socket) = &self.listen {
+            let _ = fs::remove_file(socket);
+        }
+    }
+
+    fn spawn(&mut self) {
+        self.remove_socket();
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(["-f", "--exit-with-parent"]);
+        match &self.listen {
+            NbdkitListen::Unix(socket) => {
+                cmd.args(["-U", socket.as_str()]);
+            }
+            NbdkitListen::Tcp(port) => {
+                cmd.args(["-i", "127.0.0.1", "-p", port.to_string().as_str()]);
+            }
+        }
+        if self.write_delay_ms.is_some() {
+            cmd.arg("--filter=delay");
+        }
+        // nbdkit syntax is `[options] PLUGIN [key=value...]`: filter parameters
+        // must follow the plugin name, otherwise they are parsed as the plugin.
+        cmd.args(["file", format!("file={}", self.backing).as_str()]);
+        if let Some(ms) = self.write_delay_ms {
+            cmd.arg(format!("delay-write={}ms", ms));
+        }
+        // Keep nbdkit output out of the test console. The readiness probe below
+        // connects and drops immediately, which makes nbdkit log a harmless
+        // "sending newstyle handshake: Broken pipe" error.
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+            .expect("failed to open nbdkit log");
+        cmd.stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log));
+        let mut child = cmd.spawn().expect("failed to spawn nbdkit");
+
+        for _ in 0..100 {
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!(
+                    "nbdkit exited early: {}\n{}",
+                    status,
+                    fs::read_to_string(&self.log).unwrap_or_default()
+                );
+            }
+            if self.listening() {
+                self.child = Some(child);
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        panic!("nbdkit did not start listening on {}", self.uri());
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            kill_child(&mut child);
+            let _ = child.wait();
+        }
+        self.remove_socket();
+    }
+
+    /// Kill the server and start a brand new process on the same socket and
+    /// backing file, so the next client has to connect and handshake again.
+    fn restart(&mut self) {
+        self.stop();
+        self.spawn();
+    }
+
+    /// SIGKILL the server, as if it crashed: in-flight requests get no reply
+    /// and every client connection is torn down at once.
+    fn crash(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.remove_socket();
+    }
+
+    fn uri(&self) -> String {
+        match &self.listen {
+            NbdkitListen::Unix(socket) => format!("nbd+unix:///?socket={}", socket),
+            NbdkitListen::Tcp(port) => format!("nbd://127.0.0.1:{}/", port),
+        }
+    }
+
+    /// `uri()` with extra query parameters, e.g. `reconnect_timeout=15`.
+    fn uri_with_query(&self, query: &str) -> String {
+        match &self.listen {
+            NbdkitListen::Unix(_) => format!("{}&{}", self.uri(), query),
+            NbdkitListen::Tcp(_) => format!("{}?{}", self.uri(), query),
+        }
+    }
+}
+
+impl Drop for NbdkitServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// md5 of `count_mb` MiB of a host file starting at `skip_mb` MiB.
+fn host_md5(path: &str, skip_mb: u64, count_mb: u64) -> String {
+    let output = exec_host_command_output(&format!(
+        "dd if={} bs=1M skip={} count={} 2>/dev/null | md5sum",
+        path, skip_mb, count_mb
+    ));
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn temp_api_path(tmp_dir: &TempDir) -> String {
     String::from(
         tmp_dir
@@ -8393,6 +8613,662 @@ mod common_sequential {
         kill_child(&mut restored_child);
         let restored_output = restored_child.wait_with_output().unwrap();
         handle_child_output(r, &restored_output);
+    }
+
+    /// virtio-blk disks backed by an nbdkit server through the `nbd` module
+    /// (`--disk path=nbd+unix:///?socket=...`). Cold boot, pause/resume and
+    /// snapshot/restore are covered. They live in `common_sequential` because
+    /// the pause/snapshot cases depend on timing (writes must be in flight).
+    mod nbd {
+        use crate::*;
+
+        const NBD_DISK_SIZE: u64 = 128 << 20;
+        const NBD_DISK_ID: &str = "nbd0";
+        /// MiB of random data the guest streams to the NBD disk.
+        const PATTERN_MB: u64 = 64;
+        /// Per-request write latency injected by nbdkit's delay filter, so a
+        /// `PATTERN_MB` direct dd takes well over 10s and pause/snapshot land
+        /// while requests are still in flight on the NBD connection.
+        const WRITE_DELAY_MS: u64 = 200;
+
+        fn create_backing(tmp_dir: &TempDir) -> String {
+            let path = tmp_dir.as_path().join("nbd-backing.img");
+            let f = fs::File::create(&path).unwrap();
+            f.set_len(NBD_DISK_SIZE).unwrap();
+            String::from(path.to_str().unwrap())
+        }
+
+        fn spawn_vm(
+            guest: &Guest,
+            api_socket: &str,
+            event_path: &str,
+            nbd_disks: &[String],
+        ) -> Child {
+            let kernel_path = direct_kernel_boot_path();
+            let mut disks = vec![
+                format!(
+                    "path={}",
+                    guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
+                ),
+                format!(
+                    "path={}",
+                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                ),
+            ];
+            disks.extend_from_slice(nbd_disks);
+            let mut disk_args = vec!["--disk"];
+            disk_args.extend(disks.iter().map(String::as_str));
+            GuestCommand::new(guest)
+                .args(["--api-socket", api_socket])
+                .args(["--event-monitor", format!("path={}", event_path).as_str()])
+                .args(["--cpus", "boot=2"])
+                .args(["--memory", "size=1G"])
+                .args(["--kernel", kernel_path.to_str().unwrap()])
+                .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(disk_args)
+                .default_net()
+                // CubeSandbox logs to a fixed file by default; send the log to
+                // the captured stderr so tests can check it.
+                .args(["--log-stderr"])
+                .capture_output()
+                .spawn()
+                .unwrap()
+        }
+
+        fn guest_md5(guest: &Guest, cmd: &str) -> String {
+            guest
+                .ssh_command(&format!("{} | md5sum", cmd))
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        fn guest_u64(guest: &Guest, cmd: &str) -> u64 {
+            guest
+                .ssh_command(cmd)
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(u64::MAX)
+        }
+
+        /// Fill /tmp/pattern with random data and return its md5.
+        fn make_pattern(guest: &Guest, mb: u64) -> String {
+            guest
+                .ssh_command(&format!("head -c {}M /dev/urandom > /tmp/pattern", mb))
+                .unwrap();
+            guest_md5(guest, "cat /tmp/pattern")
+        }
+
+        /// Start a direct-IO dd of /tmp/pattern onto /dev/vdc in the
+        /// background; its exit code ends up in /tmp/dd.rc.
+        fn start_background_write(guest: &Guest) {
+            start_background_write_to(guest, "vdc");
+        }
+
+        /// Start a direct-IO dd of /tmp/pattern onto /dev/`dev` in the
+        /// background; its exit code ends up in `dd_rc_file(dev)`.
+        fn start_background_write_to(guest: &Guest, dev: &str) {
+            let rc = dd_rc_file(dev);
+            guest
+                .ssh_command(&format!(
+                    "rm -f {rc}; sudo nohup sh -c 'dd if=/tmp/pattern of=/dev/{dev} bs=1M \
+                     oflag=direct; echo $? > {rc}' </dev/null >/dev/null 2>&1 &"
+                ))
+                .unwrap();
+        }
+
+        fn dd_rc_file(dev: &str) -> String {
+            if dev == "vdc" {
+                "/tmp/dd.rc".to_string()
+            } else {
+                format!("/tmp/dd-{}.rc", dev)
+            }
+        }
+
+        fn background_write_running(guest: &Guest) -> bool {
+            background_write_running_on(guest, "vdc")
+        }
+
+        fn background_write_running_on(guest: &Guest, dev: &str) -> bool {
+            guest
+                .ssh_command(&format!(
+                    "test -f {} && echo done || echo running",
+                    dd_rc_file(dev)
+                ))
+                .unwrap()
+                .trim()
+                == "running"
+        }
+
+        /// Wait for the background dd and return its exit code.
+        fn wait_background_write(guest: &Guest, timeout_s: u64) -> String {
+            wait_background_write_on(guest, "vdc", timeout_s)
+        }
+
+        fn wait_background_write_on(guest: &Guest, dev: &str, timeout_s: u64) -> String {
+            for _ in 0..timeout_s {
+                let rc = guest
+                    .ssh_command(&format!(
+                        "cat {} 2>/dev/null || echo running",
+                        dd_rc_file(dev)
+                    ))
+                    .unwrap()
+                    .trim()
+                    .to_string();
+                if rc != "running" {
+                    return rc;
+                }
+                thread::sleep(std::time::Duration::new(1, 0));
+            }
+            panic!(
+                "background dd on {} did not finish within {}s",
+                dev, timeout_s
+            );
+        }
+
+        /// Guest kernel must not have seen block errors or hung tasks.
+        fn assert_no_block_errors(guest: &Guest) {
+            let errors = guest
+                .ssh_command(
+                    "sudo dmesg | grep -E 'I/O error|blocked for more than|virtio_blk.*(error|timeout)' || true",
+                )
+                .unwrap();
+            assert!(errors.trim().is_empty(), "guest dmesg errors: {}", errors);
+        }
+
+        /// Verify the whole pattern reached the NBD disk, as seen from the
+        /// guest (direct read through virtio-blk) and from the host (the
+        /// nbdkit backing file).
+        fn assert_pattern_written(guest: &Guest, backing: &str, pattern_md5: &str) {
+            assert_pattern_written_on(guest, "vdc", backing, pattern_md5);
+        }
+
+        fn assert_pattern_written_on(guest: &Guest, dev: &str, backing: &str, pattern_md5: &str) {
+            assert_eq!(
+                guest_md5(
+                    guest,
+                    &format!(
+                        "sudo dd if=/dev/{} bs=1M count={} iflag=direct 2>/dev/null",
+                        dev, PATTERN_MB
+                    )
+                ),
+                pattern_md5,
+                "/dev/{}: guest read-back mismatch",
+                dev
+            );
+            assert_eq!(
+                host_md5(backing, 0, PATTERN_MB),
+                pattern_md5,
+                "/dev/{}: backing file mismatch",
+                dev
+            );
+        }
+
+        fn wait_events(events: &[&MetaEvent], event_path: &str, timeout_s: u64) -> bool {
+            for _ in 0..timeout_s {
+                if std::path::Path::new(event_path).exists()
+                    && check_latest_events_exact(events, event_path)
+                {
+                    return true;
+                }
+                thread::sleep(std::time::Duration::new(1, 0));
+            }
+            false
+        }
+
+        fn event(name: &str) -> MetaEvent {
+            MetaEvent {
+                event: name.to_string(),
+                device_id: None,
+            }
+        }
+
+        /// Cold boot with an NBD disk: geometry, multiqueue, read of data
+        /// pre-seeded by the host, direct write/read-back verified on both
+        /// sides, filesystem round trip across remount, and a read-only NBD
+        /// disk on the same export.
+        #[test]
+        fn test_nbd_cold_boot() {
+            let nbdkit_bin = nbdkit_or_skip!("test_nbd_cold_boot");
+            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(Box::new(focal));
+            let api_socket = temp_api_path(&guest.tmp_dir);
+            let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+            // Seed the first MiB from the host to exercise the read path.
+            let backing = create_backing(&guest.tmp_dir);
+            exec_host_command_output(&format!(
+                "dd if=/dev/urandom of={} bs=1M count=1 conv=notrunc",
+                backing
+            ));
+            let seed_md5 = host_md5(&backing, 0, 1);
+
+            let nbdkit = NbdkitServer::start(&nbdkit_bin, &guest.tmp_dir, &backing, None);
+            let disks = [
+                format!("id={},path={},num_queues=2", NBD_DISK_ID, nbdkit.uri()),
+                format!("id=nbd-ro,path={},readonly=on", nbdkit.uri()),
+            ];
+            let mut child = spawn_vm(&guest, &api_socket, &event_path, &disks);
+
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
+                // vdc: read-write, right size, 2 queues.
+                assert_eq!(
+                    guest_u64(&guest, "lsblk -b -d -n -o SIZE /dev/vdc"),
+                    NBD_DISK_SIZE
+                );
+                assert_eq!(guest_u64(&guest, "cat /sys/block/vdc/ro"), 0);
+                assert_eq!(guest_u64(&guest, "ls -d /sys/block/vdc/mq/*/ | wc -l"), 2);
+
+                // vdd: same export, read-only.
+                assert_eq!(
+                    guest_u64(&guest, "lsblk -b -d -n -o SIZE /dev/vdd"),
+                    NBD_DISK_SIZE
+                );
+                assert_eq!(guest_u64(&guest, "cat /sys/block/vdd/ro"), 1);
+                assert_ne!(
+                    guest
+                        .ssh_command(
+                            "sudo dd if=/dev/zero of=/dev/vdd bs=4k count=1 oflag=direct \
+                             2>/dev/null; echo $?"
+                        )
+                        .unwrap()
+                        .trim(),
+                    "0"
+                );
+
+                // Read the host-seeded data through both disks.
+                let read_seed = "bs=1M count=1 iflag=direct 2>/dev/null";
+                assert_eq!(
+                    guest_md5(&guest, &format!("sudo dd if=/dev/vdc {}", read_seed)),
+                    seed_md5
+                );
+                assert_eq!(
+                    guest_md5(&guest, &format!("sudo dd if=/dev/vdd {}", read_seed)),
+                    seed_md5
+                );
+
+                // Direct write + flush, then read back from guest and host.
+                let pattern_md5 = make_pattern(&guest, 32);
+                guest
+                    .ssh_command(
+                        "sudo dd if=/tmp/pattern of=/dev/vdc bs=1M seek=8 oflag=direct conv=fsync",
+                    )
+                    .unwrap();
+                assert_eq!(
+                    guest_md5(
+                        &guest,
+                        "sudo dd if=/dev/vdc bs=1M skip=8 count=32 iflag=direct 2>/dev/null"
+                    ),
+                    pattern_md5
+                );
+                assert_eq!(host_md5(&backing, 8, 32), pattern_md5);
+
+                // Filesystem round trip: data must survive umount + cache drop.
+                guest
+                    .ssh_command(
+                        "sudo mkfs.ext4 -F -q /dev/vdc && sudo mkdir -p /mnt/nbd && \
+                         sudo mount /dev/vdc /mnt/nbd && sudo cp /tmp/pattern /mnt/nbd/f && \
+                         sync && sudo umount /mnt/nbd && \
+                         echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null && \
+                         sudo mount /dev/vdc /mnt/nbd",
+                    )
+                    .unwrap();
+                assert_eq!(guest_md5(&guest, "sudo cat /mnt/nbd/f"), pattern_md5);
+                guest.ssh_command("sudo umount /mnt/nbd").unwrap();
+
+                assert_no_block_errors(&guest);
+            });
+
+            kill_child(&mut child);
+            let output = child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+        }
+
+        /// Pause while guest writes are in flight on the NBD connection.
+        /// Pause must drain them (pause succeeds, backend stops changing while
+        /// paused) and after resume the guest dd must finish with every byte
+        /// on the backend. Repeated several times.
+        #[test]
+        fn test_nbd_pause_resume() {
+            let nbdkit_bin = nbdkit_or_skip!("test_nbd_pause_resume");
+            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(Box::new(focal));
+            let api_socket = temp_api_path(&guest.tmp_dir);
+            let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+            let backing = create_backing(&guest.tmp_dir);
+            let nbdkit =
+                NbdkitServer::start(&nbdkit_bin, &guest.tmp_dir, &backing, Some(WRITE_DELAY_MS));
+            let disks = [format!("id={},path={}", NBD_DISK_ID, nbdkit.uri())];
+            let mut child = spawn_vm(&guest, &api_socket, &event_path, &disks);
+
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+                assert_eq!(
+                    guest_u64(&guest, "lsblk -b -d -n -o SIZE /dev/vdc"),
+                    NBD_DISK_SIZE
+                );
+
+                let pattern_md5 = make_pattern(&guest, PATTERN_MB);
+                start_background_write(&guest);
+                thread::sleep(std::time::Duration::new(2, 0));
+
+                for round in 0..3 {
+                    assert!(
+                        background_write_running(&guest),
+                        "round {}: dd finished before pause, no in-flight IO to drain",
+                        round
+                    );
+
+                    assert!(
+                        remote_command(&api_socket, "pause", None),
+                        "round {}: pause failed (NBD in-flight drain/flush failed?)",
+                        round
+                    );
+                    assert!(check_latest_events_exact(
+                        &[&event("pausing"), &event("paused")],
+                        &event_path
+                    ));
+
+                    // Everything in flight was drained before the queue
+                    // thread parked, so nothing reaches the backend now.
+                    let before = host_md5(&backing, 0, PATTERN_MB);
+                    thread::sleep(std::time::Duration::new(2, 0));
+                    assert_eq!(
+                        host_md5(&backing, 0, PATTERN_MB),
+                        before,
+                        "round {}: backend modified while paused",
+                        round
+                    );
+
+                    assert!(remote_command(&api_socket, "resume", None));
+                    assert!(check_latest_events_exact(
+                        &[&event("resuming"), &event("resumed")],
+                        &event_path
+                    ));
+                    thread::sleep(std::time::Duration::new(2, 0));
+                }
+
+                assert_eq!(wait_background_write(&guest, 120), "0");
+                assert_pattern_written(&guest, &backing, &pattern_md5);
+
+                // Pause/resume on an idle disk, then IO still works.
+                assert!(remote_command(&api_socket, "pause", None));
+                assert!(remote_command(&api_socket, "resume", None));
+                guest
+                    .ssh_command(
+                        "sudo dd if=/tmp/pattern of=/dev/vdc bs=1M count=4 seek=100 \
+                         oflag=direct conv=fsync",
+                    )
+                    .unwrap();
+                assert_eq!(
+                    host_md5(&backing, 100, 4),
+                    host_md5(&backing, 0, 4),
+                    "write after idle pause/resume did not reach the backend"
+                );
+
+                assert_no_block_errors(&guest);
+            });
+
+            kill_child(&mut child);
+            let output = child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+        }
+
+        /// Snapshot while guest writes are in flight, then restore against a
+        /// freshly started nbdkit (same socket and backing file). The restored
+        /// VM must reconnect, the interrupted dd must complete, and all data
+        /// must be on the backend.
+        #[test]
+        fn test_nbd_snapshot_restore() {
+            let nbdkit_bin = nbdkit_or_skip!("test_nbd_snapshot_restore");
+            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(Box::new(focal));
+            let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
+            let event_path = temp_event_monitor_path(&guest.tmp_dir);
+            let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+
+            let backing = create_backing(&guest.tmp_dir);
+            let mut nbdkit =
+                NbdkitServer::start(&nbdkit_bin, &guest.tmp_dir, &backing, Some(WRITE_DELAY_MS));
+            let disks = [format!("id={},path={}", NBD_DISK_ID, nbdkit.uri())];
+            let mut child = spawn_vm(&guest, &api_socket_source, &event_path, &disks);
+
+            let pattern_md5 = std::sync::Mutex::new(String::new());
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+                *pattern_md5.lock().unwrap() = make_pattern(&guest, PATTERN_MB);
+                start_background_write(&guest);
+                thread::sleep(std::time::Duration::new(3, 0));
+                assert!(
+                    background_write_running(&guest),
+                    "dd finished before snapshot, no in-flight IO to drain"
+                );
+
+                // pause (drains in-flight NBD writes) + snapshot
+                snapshot_and_check_events(
+                    api_socket_source.as_str(),
+                    snapshot_dir.as_str(),
+                    event_path.as_str(),
+                );
+            });
+
+            kill_child(&mut child);
+            let output = child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+            let pattern_md5 = pattern_md5.into_inner().unwrap();
+
+            // The restored VM must open a brand new NBD connection.
+            nbdkit.restart();
+
+            let api_socket_restored = format!("{}.2", temp_api_path(&guest.tmp_dir));
+            let event_path_restored = format!("{}.2", temp_event_monitor_path(&guest.tmp_dir));
+            let mut restored_child = GuestCommand::new(&guest)
+                .args(["--api-socket", &api_socket_restored])
+                .args([
+                    "--event-monitor",
+                    format!("path={}", event_path_restored).as_str(),
+                ])
+                .args([
+                    "--restore",
+                    format!("source_url=file://{}", snapshot_dir).as_str(),
+                ])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let r = std::panic::catch_unwind(|| {
+                assert!(
+                    wait_events(
+                        &[&event("restored"), &event("resuming"), &event("resumed")],
+                        &event_path_restored,
+                        30
+                    ),
+                    "restored VM did not reach `resumed`"
+                );
+
+                // The dd interrupted by the snapshot resumes and completes.
+                assert_eq!(wait_background_write(&guest, 120), "0");
+                assert_eq!(
+                    guest_u64(&guest, "lsblk -b -d -n -o SIZE /dev/vdc"),
+                    NBD_DISK_SIZE
+                );
+                assert_pattern_written(&guest, &backing, &pattern_md5);
+
+                // New IO on the restored VM, including pause/resume.
+                guest
+                    .ssh_command(
+                        "sudo dd if=/tmp/pattern of=/dev/vdc bs=1M count=4 seek=100 \
+                         oflag=direct conv=fsync",
+                    )
+                    .unwrap();
+                assert_eq!(host_md5(&backing, 100, 4), host_md5(&backing, 0, 4));
+                assert!(remote_command(&api_socket_restored, "pause", None));
+                assert!(remote_command(&api_socket_restored, "resume", None));
+                assert_eq!(
+                    guest_md5(
+                        &guest,
+                        "sudo dd if=/dev/vdc bs=1M skip=100 count=4 iflag=direct 2>/dev/null"
+                    ),
+                    host_md5(&backing, 0, 4)
+                );
+
+                assert_no_block_errors(&guest);
+            });
+
+            kill_child(&mut restored_child);
+            let output = restored_child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+        }
+
+        /// nbdkit crashes (SIGKILL) while guest writes are in flight and comes
+        /// back on the same address. With `reconnect_timeout` in the URI the
+        /// virtio-blk queue thread reconnects on its own, replays the lost
+        /// requests and the guest never sees an IO error. Covers a Unix socket
+        /// disk (vdc) and a TCP disk (vdd); the TCP path needs ioctl(FIONBIO)
+        /// in the block thread seccomp filter, otherwise the VMM dies with
+        /// SIGSYS on the first reconnect.
+        #[test]
+        fn test_nbd_reconnect() {
+            const RECONNECT_TIMEOUT_S: u64 = 15;
+            const CRASH_ROUNDS: u32 = 2;
+            /// Time nbdkit stays down, so the queue thread has to go through
+            /// several failed connect attempts and backoff sleeps.
+            const DOWNTIME_S: u64 = 1;
+
+            let nbdkit_bin = nbdkit_or_skip!("test_nbd_reconnect");
+            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(Box::new(focal));
+            let api_socket = temp_api_path(&guest.tmp_dir);
+            let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+            let backing_unix = create_backing(&guest.tmp_dir);
+            let backing_tcp = {
+                let path = guest.tmp_dir.as_path().join("nbd-backing-tcp.img");
+                let f = fs::File::create(&path).unwrap();
+                f.set_len(NBD_DISK_SIZE).unwrap();
+                String::from(path.to_str().unwrap())
+            };
+            let mut unix_server = NbdkitServer::start_named(
+                &nbdkit_bin,
+                &guest.tmp_dir,
+                "nbdkit-unix",
+                false,
+                &backing_unix,
+                Some(WRITE_DELAY_MS),
+            );
+            let mut tcp_server = NbdkitServer::start_named(
+                &nbdkit_bin,
+                &guest.tmp_dir,
+                "nbdkit-tcp",
+                true,
+                &backing_tcp,
+                Some(WRITE_DELAY_MS),
+            );
+            let reconnect = format!("reconnect_timeout={}", RECONNECT_TIMEOUT_S);
+            let disks = [
+                format!(
+                    "id=nbd-unix,path={}",
+                    unix_server.uri_with_query(&reconnect)
+                ),
+                format!("id=nbd-tcp,path={}", tcp_server.uri_with_query(&reconnect)),
+            ];
+            let mut child = spawn_vm(&guest, &api_socket, &event_path, &disks);
+
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                guest.wait_vm_boot(None).unwrap();
+                for dev in ["vdc", "vdd"] {
+                    assert_eq!(
+                        guest_u64(&guest, &format!("lsblk -b -d -n -o SIZE /dev/{}", dev)),
+                        NBD_DISK_SIZE
+                    );
+                }
+
+                let pattern_md5 = make_pattern(&guest, PATTERN_MB);
+                let cases: [(&str, &mut NbdkitServer, &str); 2] = [
+                    ("vdc", &mut unix_server, &backing_unix),
+                    ("vdd", &mut tcp_server, &backing_tcp),
+                ];
+                for (dev, server, backing) in cases {
+                    start_background_write_to(&guest, dev);
+                    thread::sleep(std::time::Duration::new(2, 0));
+
+                    for round in 0..CRASH_ROUNDS {
+                        assert!(
+                            background_write_running_on(&guest, dev),
+                            "{} round {}: dd finished before the crash, no in-flight IO",
+                            dev,
+                            round
+                        );
+                        server.crash();
+                        thread::sleep(std::time::Duration::new(DOWNTIME_S, 0));
+                        server.spawn();
+
+                        // Let the queue thread reconnect and replay, and make
+                        // sure it did not kill the VMM (e.g. SIGSYS).
+                        thread::sleep(std::time::Duration::new(3, 0));
+                        assert!(
+                            remote_command(&api_socket, "info", None),
+                            "{} round {}: VMM stopped responding after reconnect",
+                            dev,
+                            round
+                        );
+                    }
+
+                    assert_eq!(
+                        wait_background_write_on(&guest, dev, 120),
+                        "0",
+                        "dd on /dev/{} failed across nbdkit restarts",
+                        dev
+                    );
+                    assert_pattern_written_on(&guest, dev, backing, &pattern_md5);
+
+                    // Fresh IO on the reconnected disk still works.
+                    guest
+                        .ssh_command(&format!(
+                            "sudo dd if=/tmp/pattern of=/dev/{} bs=1M count=4 seek=100 \
+                             oflag=direct conv=fsync",
+                            dev
+                        ))
+                        .unwrap();
+                    assert_eq!(
+                        host_md5(backing, 100, 4),
+                        host_md5(backing, 0, 4),
+                        "/dev/{}: write after reconnect did not reach the backend",
+                        dev
+                    );
+                }
+
+                assert_no_block_errors(&guest);
+            }));
+
+            kill_child(&mut child);
+            let output = child.wait_with_output().unwrap();
+            // The VMM log must show both disks going through the reconnect
+            // path (and not only through a lucky retry of the first connect).
+            if r.is_ok() {
+                let log = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                for uri in [unix_server.uri(), tcp_server.uri()] {
+                    let needle = format!("Reconnected to NBD export {}", uri);
+                    assert!(
+                        log.matches(needle.as_str()).count() >= CRASH_ROUNDS as usize,
+                        "expected >= {} `{}` lines in the VMM log",
+                        CRASH_ROUNDS,
+                        needle
+                    );
+                }
+            }
+            handle_child_output(r, &output);
+        }
     }
 }
 

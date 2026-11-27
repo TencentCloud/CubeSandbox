@@ -1105,6 +1105,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbd"
+version = "0.1.0"
+dependencies = [
+ "block_util",
+ "io-uring",
+ "libc",
+ "log",
+ "thiserror",
+ "vmm-sys-util",
+]
+
+[[package]]
 name = "net_gen"
 version = "0.1.0"
 dependencies = [
@@ -2533,6 +2545,7 @@ dependencies = [
  "log",
  "logging",
  "micro_http",
+ "nbd",
  "net_util",
  "once_cell",
  "option_parser",

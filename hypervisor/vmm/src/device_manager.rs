@@ -2262,6 +2262,13 @@ impl DeviceManager {
                 Arc::clone(&vhost_user_block) as Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
                 vhost_user_block as Arc<Mutex<dyn Migratable>>,
             )
+        } else if let Some(nbd_uri) = disk_cfg
+            .path
+            .as_deref()
+            .and_then(nbd::block_backend::is_nbd_path)
+            .map(str::to_owned)
+        {
+            self.make_nbd_virtio_block_device(&id, disk_cfg, &nbd_uri)?
         } else {
             let mut options = OpenOptions::new();
             options.read(true);
@@ -2372,6 +2379,51 @@ impl DeviceManager {
             pci_segment: disk_cfg.pci_segment,
             dma_handler: None,
         })
+    }
+
+    fn make_nbd_virtio_block_device(
+        &mut self,
+        id: &str,
+        disk_cfg: &DiskConfig,
+        nbd_uri: &str,
+    ) -> DeviceManagerResult<(
+        Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
+        Arc<Mutex<dyn Migratable>>,
+    )> {
+        let prefer_uring = !disk_cfg.disable_io_uring && self.io_uring_is_supported();
+        let (image, id_path) = nbd::block_backend::NbdDisk::open_boxed(
+            nbd_uri,
+            disk_cfg.readonly,
+            disk_cfg.direct,
+            disk_cfg.num_queues,
+            prefer_uring,
+        )
+        .map_err(DeviceManagerError::Disk)?;
+
+        let virtio_block = Arc::new(Mutex::new(
+            virtio_devices::Block::new(
+                id.to_owned(),
+                image,
+                id_path,
+                disk_cfg.readonly,
+                self.force_iommu | disk_cfg.iommu,
+                disk_cfg.num_queues,
+                disk_cfg.queue_size,
+                self.seccomp_action.clone(),
+                disk_cfg.rate_limiter_config,
+                self.exit_evt
+                    .try_clone()
+                    .map_err(DeviceManagerError::EventFd)?,
+                state_from_id(self.snapshot.as_ref(), id)
+                    .map_err(DeviceManagerError::RestoreGetState)?,
+            )
+            .map_err(DeviceManagerError::CreateVirtioBlock)?,
+        ));
+
+        Ok((
+            Arc::clone(&virtio_block) as Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
+            virtio_block as Arc<Mutex<dyn Migratable>>,
+        ))
     }
 
     fn make_virtio_block_devices(&mut self) -> DeviceManagerResult<Vec<MetaVirtioDevice>> {
