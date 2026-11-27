@@ -167,7 +167,11 @@ func TestApplyMaxProcsOnlyLowers(t *testing.T) {
 	// already reflects the cgroup CPU quota, so a value above the width in
 	// effect must be ignored instead of over-subscribing the container.
 	orig := runtime.GOMAXPROCS(0)
-	t.Cleanup(func() { runtime.GOMAXPROCS(orig) })
+	narrowed := maxProcsApplied.Load()
+	t.Cleanup(func() {
+		runtime.GOMAXPROCS(orig)
+		maxProcsApplied.Store(narrowed)
+	})
 
 	runtime.GOMAXPROCS(16)
 	assert.Equal(t, 16, runtime.GOMAXPROCS(0))
@@ -199,23 +203,31 @@ func TestClassifyMaxProcsReload(t *testing.T) {
 		conf     *Config
 		prev     int
 		now      int
+		narrowed bool
 		want     maxProcsReloadAction
 	}{
-		{"narrowed by the edit", cfgWith(32), cfgWith(8), 32, 8, maxProcsNarrowed},
-		{"unchanged value and width", cfgWith(32), cfgWith(32), 32, 32, maxProcsUnchanged},
-		{"raise attempted by the edit", cfgWith(32), cfgWith(64), 32, 32, maxProcsIgnoredRaise},
+		{"narrowed by the edit", cfgWith(32), cfgWith(8), 32, 8, true, maxProcsNarrowed},
+		{"unchanged value and width", cfgWith(32), cfgWith(32), 32, 32, true, maxProcsUnchanged},
+		{"raise attempted by the edit", cfgWith(32), cfgWith(64), 32, 32, true, maxProcsNotApplied},
 		// A cap above the width in effect is a normal steady state (a bare-metal
 		// value carried into a CPU-limited pod). Warning only when the edit
 		// changed the value keeps unrelated reloads quiet.
-		{"raise already in steady state", cfgWith(300), cfgWith(300), 256, 256, maxProcsUnchanged},
-		{"key removed after narrowing", cfgWith(32), cfgWith(0), 32, 32, maxProcsIgnoredRemoval},
-		{"key never set", cfgWith(0), cfgWith(0), 256, 256, maxProcsUnchanged},
-		{"no previous config", nil, cfgWith(64), 32, 32, maxProcsIgnoredRaise},
-		{"new config without common", cfgWith(32), &Config{}, 32, 32, maxProcsUnchanged},
+		{"raise already in steady state", cfgWith(300), cfgWith(300), 256, 256, false, maxProcsUnchanged},
+		// Lowering 32 -> 20 on a pod running at 16 is not a raise, so the message
+		// must not claim one; the value simply still cannot be applied.
+		{"lowered but still above the width", cfgWith(32), cfgWith(20), 16, 16, false, maxProcsNotApplied},
+		{"key removed after narrowing", cfgWith(32), cfgWith(0), 32, 32, true, maxProcsLostNarrowing},
+		// Removing a cap that never bound changes nothing, not even after a
+		// restart, so there is nothing to warn about.
+		{"key removed but never applied", cfgWith(32), cfgWith(0), 16, 16, false, maxProcsUnchanged},
+		{"key never set", cfgWith(0), cfgWith(0), 256, 256, false, maxProcsUnchanged},
+		{"no previous config", nil, cfgWith(64), 32, 32, false, maxProcsNotApplied},
+		{"new config without common", cfgWith(32), &Config{}, 32, 32, true, maxProcsUnchanged},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyMaxProcsReload(tc.previous, tc.conf, tc.prev, tc.now); got != tc.want {
+			got := classifyMaxProcsReload(tc.previous, tc.conf, tc.prev, tc.now, tc.narrowed)
+			if got != tc.want {
 				t.Fatalf("classify = %d, want %d", got, tc.want)
 			}
 		})
