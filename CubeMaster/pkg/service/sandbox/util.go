@@ -1220,17 +1220,19 @@ func redactToken(token string) string {
 	return "***REDACTED***"
 }
 
-// firstImage returns the image of the first container, for the info level create
-// log. It is empty when the request carries no container or no image, which is
-// what an operator sees in that case rather than a misleading placeholder.
+// firstImage returns the image reference of the first container, for the info
+// level create log. It is deliberately Image.Image only: ImageSpec.Name is the
+// registry *username*, not an image reference (it is carried to cubelet as
+// constants.CubeAnnotationsImageName, i.e. "cube.master.image.username", and
+// cubelet masks it as credential material). Falling back to it would label a
+// username as an image and put auth material in the info stream. It is empty
+// when the request carries no image reference, which is what an operator sees
+// in that case rather than a misleading placeholder.
 func firstImage(req *types.CreateCubeSandboxReq) string {
 	if req == nil || len(req.Containers) == 0 || req.Containers[0] == nil || req.Containers[0].Image == nil {
 		return ""
 	}
-	if img := req.Containers[0].Image.Image; img != "" {
-		return img
-	}
-	return req.Containers[0].Image.Name
+	return req.Containers[0].Image.Image
 }
 
 func dealSecurity(volume *types.VolumeSource) *types.VolumeSource {
