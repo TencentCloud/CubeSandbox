@@ -63,6 +63,18 @@ cubemastercli tpl create-from-image \
 
 `POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
+### 探测方式与时机
+
+默认情况下，就绪探针对 `--probe` 端口上的 `--probe-path`（默认 `/health`）发起 HTTP `GET` 请求。另有三个参数可以调整探测行为：
+
+- `--probe-type <http|tcp>` — 探测方式，默认 `http`。`tcp`（原始 TCP 连接）适用于不提供 HTTP 服务的场景：安卓镜像上的 `adbd` :5555、数据库或 SSH 守护进程等。使用 `--probe-type tcp` 时 `--probe-path` 会被忽略。
+- `--probe-timeout <ms>` — 探测窗口，从初始延迟之后开始计，每 100 ms 尝试一次，默认 `30000`。启动较慢的镜像可以调大。
+- `--probe-initial-delay <ms>` — 探针开始轮询前的等待时间，默认 `0`，用于启动耗时固定的整操作系统镜像。该延迟仅作用于模板构建沙箱；从模板恢复的沙箱会立即开始探测。
+
+```bash
+cubemastercli tpl create-from-image   --image     <android-image>   --writable-layer-size 1G   --expose-port 5555   --probe      5555   --probe-type tcp   --probe-initial-delay 5000
+```
+
 ## 第三步 — 监控进度
 
 有两种方式跟踪构建任务。

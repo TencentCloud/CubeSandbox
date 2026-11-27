@@ -1271,6 +1271,25 @@ func TestParseContainerOverridesProbeTimeoutWindow(t *testing.T) {
 	}
 }
 
+func TestParseContainerOverridesProbeTimeoutThresholdRoundsUp(t *testing.T) {
+	// 250 ms is not a whole multiple of the 100 ms period: floor division
+	// would derive FailureThreshold=2 and let the loop exhaust its
+	// attempts at ~200 ms, inside the requested window. The threshold
+	// must round up so telnet.go's TimeoutMs deadline is what bounds the
+	// window, never the attempt count.
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-type", "tcp", "--probe-timeout", "250"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides.Probe.PeriodMs != probePeriodMs {
+		t.Fatalf("expected PeriodMs=%d, got %d", probePeriodMs, overrides.Probe.PeriodMs)
+	}
+	if overrides.Probe.FailureThreshold != 3 {
+		t.Fatalf("expected FailureThreshold=3 (ceiling of 250/100), got %d", overrides.Probe.FailureThreshold)
+	}
+}
+
 func TestParseContainerOverridesProbeTimeoutTooSmall(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-timeout", "50"})
 	_, err := parseContainerOverrides(ctx)

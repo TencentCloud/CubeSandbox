@@ -1701,6 +1701,12 @@ func parseExposePortFlags(values []string) ([]int32, error) {
 // the file path reads at most one byte beyond it to detect an oversized file.
 const maxCreateFromImageQosPayloadBytes = 64 << 10
 
+// probePeriodMs is the readiness probe attempt interval for template
+// builds. The FailureThreshold derived from --probe-timeout uses the
+// same constant, so the threshold and the period cannot silently
+// diverge if one of them is ever tuned.
+const probePeriodMs = 100
+
 func parseCreateFromImageQos(c *cli.Context) (*qos.Config, error) {
 	raw := strings.TrimSpace(c.String("qos"))
 	if raw == "" {
@@ -1846,11 +1852,16 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			}
 		}
 		overrides.Probe = &types.Probe{
-			ProbeHandler:     handler,
-			InitialDelayMs:   int32(probeInitialDelayMs),
-			TimeoutMs:        int32(probeTimeoutMs),
-			PeriodMs:         100,
-			FailureThreshold: int32(probeTimeoutMs / 100),
+			ProbeHandler:   handler,
+			InitialDelayMs: int32(probeInitialDelayMs),
+			TimeoutMs:      int32(probeTimeoutMs),
+			PeriodMs:       probePeriodMs,
+			// Ceiling division: a window that is not a whole multiple of
+			// the period still gets its full duration. Floor division
+			// would let the loop exhaust its attempts inside the
+			// requested window; telnet.go's TimeoutMs deadline only ever
+			// truncates, never extends.
+			FailureThreshold: int32((probeTimeoutMs + probePeriodMs - 1) / probePeriodMs),
 			SuccessThreshold: 1,
 			ProbeTimeoutMs:   300,
 		}
