@@ -636,6 +636,12 @@ func normalizeStoredTemplateRequest(req *sandboxtypes.CreateCubeSandboxReq, enab
 	// with services already running, so the stored probe must not inherit it.
 	// Strip it here — from the persisted definition only — so the build
 	// request generated in CreateTemplate keeps the caller-supplied delay.
+	// This is deliberately global: every path that stores a template
+	// definition (CreateTemplate, the from-image job, commit, snapshot
+	// create, redo) goes through this function, so an InitialDelayMs set
+	// via CubeAPI is stripped from the stored form the same way the CLI's
+	// --probe-initial-delay is — the delay is bake-time-only by design and
+	// never survives into a restoreable definition.
 	for _, c := range cloned.Containers {
 		if c != nil && c.Probe != nil {
 			p := *c.Probe

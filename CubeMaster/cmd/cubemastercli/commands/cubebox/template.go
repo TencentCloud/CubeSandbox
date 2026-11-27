@@ -918,8 +918,8 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
 		cli.IntFlag{Name: "probe", Usage: "enable readiness probe on the specified port (e.g. --probe 9000); sets period_ms=100"},
 		cli.StringFlag{Name: "probe-type", Value: "http", Usage: "readiness probe transport for --probe: http (GET probe-path) or tcp (raw connect, e.g. adbd :5555); case-insensitive"},
-		cli.IntFlag{Name: "probe-timeout", Value: 30000, Usage: "total readiness probe window in ms (default 30000, one attempt every 100ms); raise for slow-booting guests like full-OS containers; must be 100-3600000 when set explicitly, and is effectively capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)"},
-		cli.IntFlag{Name: "probe-initial-delay", Value: 0, Usage: "delay before the readiness probe starts polling, in ms (default 0); let slow-booting full-OS guests finish booting before probing. Must be 0-3600000 when set explicitly, and the effective window is capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s). Applies to the template build sandbox only: sandboxes restored from the snapshot resume with services already running and start probing immediately"},
+		cli.IntFlag{Name: "probe-timeout", Value: 30000, Usage: "readiness probe window in ms, counted after --probe-initial-delay, not from sandbox start (default 30000, one attempt every 100ms); raise for slow-booting guests like full-OS containers; must be 100-3600000 when set explicitly, and the total wait (initial-delay + this window) is effectively capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)"},
+		cli.IntFlag{Name: "probe-initial-delay", Value: 0, Usage: "delay before the readiness probe starts polling, in ms (default 0); let slow-booting full-OS guests finish booting before probing. Must be 0-3600000 when set explicitly, and the effective window is capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s). Applies to the template build sandbox only: the delay is deliberately stripped from the stored template definition in every path (CLI build, CubeAPI create/commit/snapshot), so sandboxes restored from the snapshot resume with services already running and start probing immediately"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set with --probe-type http"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
@@ -1799,6 +1799,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		var handler *types.ProbeHandler
 		switch probeType {
 		case "tcp":
+			if c.IsSet("probe-path") {
+				fmt.Fprintf(os.Stderr, "warning: --probe-path only applies to --probe-type http; ignoring it for the tcp probe\n")
+			}
 			handler = &types.ProbeHandler{
 				TCPSocket: &types.TCPSocketAction{
 					Port: int32(probePort),
@@ -1828,9 +1831,8 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 			if probeTimeoutMs > 3600000 {
 				return nil, fmt.Errorf("invalid --probe-timeout %d: must be at most 3600000 ms (1h); values above the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s) never get to finish", probeTimeoutMs)
 			}
-		} else if probeTimeoutMs < 100 {
-			probeTimeoutMs = 30000
 		}
+		// Not set: the flag's Value (30000) applies; no fallback branch needed.
 		probeInitialDelayMs := c.Int("probe-initial-delay")
 		if c.IsSet("probe-initial-delay") {
 			if probeInitialDelayMs < 0 {

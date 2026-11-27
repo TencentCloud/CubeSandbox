@@ -1333,3 +1333,70 @@ func TestParseContainerOverridesProbeFlagsAloneReachWarningPath(t *testing.T) {
 		t.Fatalf("expected no probe without --probe, got %+v", overrides.Probe)
 	}
 }
+
+func TestParseContainerOverridesProbeDefaultsToHTTP(t *testing.T) {
+	// --probe with no --probe-type is the historical default and must
+	// keep producing an HTTP probe: GET /health on the probed port,
+	// no TCP handler. This locks in the backward-compatibility contract
+	// the probe-type flag was layered on top of.
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Probe == nil || overrides.Probe.ProbeHandler == nil {
+		t.Fatalf("expected Probe with handler, got %+v", overrides)
+	}
+	if overrides.Probe.ProbeHandler.HttpGet == nil {
+		t.Fatalf("expected default HttpGet handler, got %+v", overrides.Probe.ProbeHandler)
+	}
+	if got := *overrides.Probe.ProbeHandler.HttpGet.Path; got != "/health" {
+		t.Fatalf("expected HttpGet.Path=/health, got %q", got)
+	}
+	if got := overrides.Probe.ProbeHandler.HttpGet.Port; got != 49999 {
+		t.Fatalf("expected HttpGet.Port=49999, got %d", got)
+	}
+	if overrides.Probe.ProbeHandler.TCPSocket != nil {
+		t.Fatalf("expected no TCPSocket handler for the default HTTP probe, got %+v", overrides.Probe.ProbeHandler.TCPSocket)
+	}
+	if overrides.Probe.TimeoutMs != 30000 || overrides.Probe.InitialDelayMs != 0 {
+		t.Fatalf("expected default TimeoutMs=30000 InitialDelayMs=0, got %+v", overrides.Probe)
+	}
+}
+
+func TestParseContainerOverridesProbeHTTPExplicitTypeAndPath(t *testing.T) {
+	ctx := newCreateFromImageContext(t, []string{"--probe", "49999", "--probe-type", "http", "--probe-path", "/readyz"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Probe == nil || overrides.Probe.ProbeHandler == nil || overrides.Probe.ProbeHandler.HttpGet == nil {
+		t.Fatalf("expected HttpGet handler, got %+v", overrides)
+	}
+	if got := *overrides.Probe.ProbeHandler.HttpGet.Path; got != "/readyz" {
+		t.Fatalf("expected HttpGet.Path=/readyz, got %q", got)
+	}
+	if overrides.Probe.ProbeHandler.TCPSocket != nil {
+		t.Fatalf("expected no TCPSocket handler for --probe-type http, got %+v", overrides.Probe.ProbeHandler.TCPSocket)
+	}
+}
+
+func TestParseContainerOverridesProbeTCPIgnoresProbePath(t *testing.T) {
+	// --probe-path with --probe-type tcp is a no-op for the probe config,
+	// but the user asked for something the flag cannot do — they must get
+	// a warning on stderr, not silence.
+	ctx := newCreateFromImageContext(t, []string{"--probe", "5555", "--probe-type", "tcp", "--probe-path", "/health"})
+	overrides, err := parseContainerOverrides(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if overrides == nil || overrides.Probe == nil || overrides.Probe.ProbeHandler == nil {
+		t.Fatalf("expected Probe with handler, got %+v", overrides)
+	}
+	if overrides.Probe.ProbeHandler.TCPSocket == nil {
+		t.Fatalf("expected TCPSocket handler, got %+v", overrides.Probe.ProbeHandler)
+	}
+	if overrides.Probe.ProbeHandler.HttpGet != nil {
+		t.Fatalf("expected no HttpGet handler for tcp probe, got %+v", overrides.Probe.ProbeHandler.HttpGet)
+	}
+}
