@@ -267,11 +267,6 @@ func countTrailingZeros(buf []byte) int {
 	return len(buf) - end
 }
 
-// isAllZeros checks if the byte slice consists entirely of zero bytes.
-func isAllZeros(buf []byte) bool {
-	return countLeadingZeros(buf) == len(buf)
-}
-
 const sparseHoleThreshold = int64(1024 * 1024)
 
 // sparseFile is the subset of *os.File used by sparseCopy.

@@ -88,12 +88,16 @@ func (discardSparseFile) Write(p []byte) (int, error)                  { return 
 func (discardSparseFile) Seek(offset int64, whence int) (int64, error) { return 0, nil }
 func (discardSparseFile) Truncate(int64) error                         { return nil }
 
-func BenchmarkSparseCopyCPU(b *testing.B) {
+// benchmarkPayloads returns the payloads used by the sparseCopy benchmarks.
+func benchmarkPayloads() []struct {
+	name    string
+	payload []byte
+} {
 	const size = 4 * 1024 * 1024
 	dense := bytes.Repeat([]byte{0xAB}, size)
 	mixed := bytes.Clone(dense)
 	clear(mixed[512*1024+3 : 3*1024*1024+7])
-	for _, tc := range []struct {
+	return []struct {
 		name    string
 		payload []byte
 	}{
@@ -101,7 +105,11 @@ func BenchmarkSparseCopyCPU(b *testing.B) {
 		{name: "mixed", payload: mixed},
 		{name: "zeros", payload: make([]byte, size)},
 		{name: "elf-like", payload: elfLikePayload(size)},
-	} {
+	}
+}
+
+func BenchmarkSparseCopyCPU(b *testing.B) {
+	for _, tc := range benchmarkPayloads() {
 		b.Run(tc.name, func(b *testing.B) {
 			b.SetBytes(int64(len(tc.payload)))
 			b.ReportAllocs()
@@ -110,34 +118,6 @@ func BenchmarkSparseCopyCPU(b *testing.B) {
 				if _, err := sparseCopy(discardSparseFile{}, nil, bytes.NewReader(tc.payload), 1024*1024, 0); err != nil {
 					b.Fatal(err)
 				}
-			}
-		})
-	}
-}
-
-func TestIsAllZeros(t *testing.T) {
-	cases := []struct {
-		name string
-		data []byte
-		want bool
-	}{
-		{"empty", []byte{}, true},
-		{"single zero", []byte{0}, true},
-		{"seven zeros", make([]byte, 7), true},
-		{"eight zeros", make([]byte, 8), true},
-		{"nine zeros", make([]byte, 9), true},
-		{"16 zeros", make([]byte, 16), true},
-		{"1MB zeros", make([]byte, 1024*1024), true},
-		{"first byte non-zero", append([]byte{1}, make([]byte, 15)...), false},
-		{"last byte non-zero", append(make([]byte, 15), 1), false},
-		{"middle byte non-zero", append(append(make([]byte, 7), 0xff), make([]byte, 8)...), false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := isAllZeros(tc.data)
-			if got != tc.want {
-				t.Fatalf("isAllZeros() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -189,20 +169,7 @@ func TestSparseCopyZeroRunsAtByteOffsets(t *testing.T) {
 }
 
 func BenchmarkSparseCopy(b *testing.B) {
-	const size = 4 * 1024 * 1024
-	dense := bytes.Repeat([]byte{0xAB}, size)
-	mixed := bytes.Clone(dense)
-	clear(mixed[512*1024+3 : 3*1024*1024+7])
-	for _, tc := range []struct {
-		name    string
-		payload []byte
-	}{
-		{name: "dense", payload: dense},
-		{name: "mixed", payload: mixed},
-		{name: "zeros", payload: make([]byte, size)},
-		// Binaries and filesystem metadata contain frequent short zero runs.
-		{name: "elf-like", payload: elfLikePayload(size)},
-	} {
+	for _, tc := range benchmarkPayloads() {
 		b.Run(tc.name, func(b *testing.B) {
 			f, err := os.CreateTemp(b.TempDir(), "sparse-bench")
 			if err != nil {
