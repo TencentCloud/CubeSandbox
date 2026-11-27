@@ -32,6 +32,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Command::Serve(config) => {
             let logs = telemetry::init(config.log_format);
+            let _trace_guard = telemetry::init_tracing();
             if let Err(error) = cube_envd::init::write_sandbox_marker(!config.is_not_fc) {
                 tracing::warn!(%error, "could not write sandbox marker");
             }

@@ -3265,6 +3265,63 @@ mod tests {
         assert_bad_request(err, reason);
     }
 
+    // CubeMaster serialises a sandbox without log entries as `"logs": null`.
+    // Both log endpoints must surface that as an empty list, not a 500.
+    #[tokio::test]
+    async fn get_logs_treats_null_logs_as_empty() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/logs",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-1",
+                    "ret": { "ret_code": 0, "ret_msg": "" },
+                    "logs": null,
+                    "hasMore": false
+                }))
+            }),
+        ))
+        .await;
+
+        let logs = service
+            .get_logs("sbx-1", None, 200)
+            .await
+            .expect("null logs must not fail GET /sandboxes/{id}/logs");
+        assert!(logs.logs.is_empty());
+        assert!(logs.log_entries.is_empty());
+
+        let logs_v2 = service
+            .get_logs_v2("sbx-1", None, 200)
+            .await
+            .expect("null logs must not fail GET /v2/sandboxes/{id}/logs");
+        assert!(logs_v2.logs.is_empty());
+    }
+
+    // Populated responses are untouched by the null tolerance.
+    #[tokio::test]
+    async fn get_logs_v2_keeps_populated_entries() {
+        let service = spawn_fake_cubemaster(Router::new().route(
+            "/cube/sandbox/logs",
+            post(|| async {
+                Json(serde_json::json!({
+                    "requestID": "req-1",
+                    "ret": { "ret_code": 0, "ret_msg": "" },
+                    "logs": [
+                        {"timestamp": "2026-11-24T06:03:55.455501721Z", "message": "create req start", "level": "info"}
+                    ],
+                    "hasMore": false
+                }))
+            }),
+        ))
+        .await;
+
+        let logs_v2 = service
+            .get_logs_v2("sbx-1", None, 200)
+            .await
+            .expect("populated logs must decode");
+        assert_eq!(logs_v2.logs.len(), 1);
+        assert_eq!(logs_v2.logs[0].message, "create req start");
+    }
+
     #[tokio::test]
     async fn update_network_maps_cubemaster_params_error_to_bad_request() {
         let reason = "network policy is invalid";

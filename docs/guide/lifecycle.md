@@ -19,10 +19,6 @@ A sandbox is always in exactly one of these states:
 
 `unknown` is not a synonym for "gone": CubeAPI reports it for a sandbox that is still being created, one whose container has exited, and one whose state could not be read from its node. The `terminated` row describes what `kill()` and `on_timeout="kill"` do; a container that exits on its own is reported as `unknown`, not as a separate terminal state. Because those cases share one value, `state` alone cannot tell a sandbox that is still coming up from one that is already dead — `POST /sandboxes/<id>/connect` is the signal: it fails with HTTP 409 (`... is not connectable in state 'stopped'`) once the container is gone, and still connects in the other two cases.
 
-`GET /sandboxes/<id>` can include `errorReason`, a CubeSandbox extension with no equivalent field in the e2b API. It contains the stored status or exit reason of the primary container: `FirstContainerName`, falling back to the sandbox ID (`box.ID`) for legacy records. Other containers' reasons and the internal status message are not exposed. The field is omitted when the reason is missing, empty, or whitespace-only, including with older Cubelet or CubeMaster versions.
-
-Ordinary container exits record `"Completed"` for exit code 0, `"Error"` for a non-zero exit (including a killed process), or `"SandboxCrashed"` when the shim disappears. `"OOMKilled"` identifies an out-of-memory exit and is preserved if a subsequent exit event arrives for the same run; recovery clears exit reasons when the container is no longer finished. Cubelet's exited state maps to public `state: "unknown"`; the detail API does not return an `"exited"` state. `"PauseFailed"` describes a failed pause while the container may still be alive: its state is usually `"unknown"`, but can be `"running"` after a Cubelet restart. A reason does not change `state` or retain history after sandbox deletion. `restartStatus` separately records the last exit and restart decisions. Use `errorReason` for the primary container's current stored status and `restartStatus.lastExitReason` for the restart manager's last recorded exit; they can differ while restart bookkeeping catches up, when pause/deletion suppresses that bookkeeping, or when `errorReason` is `"PauseFailed"`.
-
 Two settings drive transitions:
 
 - **`timeout`** (optional): seconds of **idle** time before a timeout fires (e2b uses milliseconds via `timeoutMs`; Cube uses seconds). When omitted, the server decides — the SDK no longer injects a hard-coded default.
@@ -57,6 +53,20 @@ Go: `cubesandbox.NeverTimeout`; Python: `from cubesandbox import NEVER_TIMEOUT`.
                      │ kill()               │ kill()
                      └──────────────────────┘
 ```
+
+### Error and exit reasons (`errorReason`)
+
+When a sandbox enters `unknown` or fails to pause, `GET /sandboxes/<id>` may include `errorReason` to explain why (a CubeSandbox extension with no equivalent in the e2b API; it reflects only the primary container and is omitted while running normally or when no reason is recorded):
+
+| Value | Meaning |
+|-------|---------|
+| `Completed` | Main process exited cleanly (exit code 0) |
+| `Error` | Main process exited abnormally (non-zero exit code or terminated by a signal) |
+| `OOMKilled` | Terminated due to out-of-memory (OOM) |
+| `SandboxCrashed` | Sandbox runtime terminated unexpectedly |
+| `PauseFailed` | Pause failed (the sandbox may still be running) |
+
+`errorReason` is diagnostic only and does not change `state`; old exit reasons are cleared once the sandbox is running again and are not retained after deletion. For sandboxes with automatic restart enabled, see [Restart status](#restart-status) for restart progress and the latest restart trigger.
 
 ## Create
 
@@ -163,7 +173,9 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # restore and reset 
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
-Open `cubecli exec` / interactive sessions block Pause. Cubelet returns `TaskPauseFailed` (130588) with a "pause forbidding / terminate exec tasks first" message while the sandbox stays `running` (not `unknown(failed)`). Auto-pause retries after the session ends. Cubelet, CubeMaster, and CubeShim must ship this busy-reject handling together (CubeShim owns the `CheckPauseAllowed` preflight) — a one-sided upgrade can leave the wrong status or snapshot lineage until all three land.
+Open `cubecli exec` / interactive sessions block Pause. Cubelet returns `TaskPauseFailed` (130588) with a "pause forbidding / terminate exec tasks first" message while the sandbox stays `running` (not `unknown(failed)`). Auto-pause retries after the session ends.
+
+Cubelet asks the shim whether a Pause is allowed only when the shim declares it routes `CheckPauseAllowed` (`update.check_pause_allowed` in the shim's capability declaration) — see [Snapshot capability declaration](#snapshot-capability-declaration). A shim that does not declare it is not asked, and Pause goes straight to `PauseToSnapshot`, which performs the same check before freezing. Cubelet, CubeMaster, and CubeShim must still ship the busy-reject handling together: CubeMaster classifies the refusal, and a one-sided upgrade can leave the wrong status or snapshot lineage until all three land. A new CubeShim prefixes the refusal with `shim_error_pause_busy`, and CubeMaster recognises both that code and the historical wording, so the classification survives a rolling upgrade in either direction.
 
 `pause()` does **not** cancel idle reclamation. With the default `on_timeout="kill"`, a later-paused sandbox is still destroyed once idle exceeds `timeout`. To keep a paused sandbox, pass `timeout=NEVER_TIMEOUT`, omit `timeout` (with no positive server default), or set a high `timeout` — see [Behaviour](#behaviour) below.
 
@@ -197,6 +209,24 @@ Resume recreates the guest NIC / host ports and rewrites the Redis sandbox proxy
 **CubeMaster and CubeProxy must share the same admin token**: on a Helm install the chart wires both sides automatically; hand-written deployments must align them. If the two tokens differ, the purge returns **403**, the stale route never expires on its own, and the sandbox stays unreachable.
 
 Rotating `lifecycleManager.adminToken` rolls the master, proxy and lifecycle-manager Pods in sequence during the same `helm upgrade`; a Resume issued before the rollout finishes can fail while the old token is still being validated. Wait for the rollout to complete and retry the Resume.
+
+## Snapshot capability declaration
+
+A snapshot's capture path depends on what the **components backing that sandbox** can do, so each component declares it instead of Cubelet inferring it. Every component publishes a `capabilities.json` next to its `version` marker (`CubeShim/docs/shimapi/README.md`):
+
+* `cube-shim` declares which capture actions it routes.
+* `cube-agent` declares whether the guest can freeze a filesystem.
+
+Cubelet reads these from the versioned component directories it already keeps for every installed version, so nothing is written or probed per sandbox, and a sandbox is always judged by the exact builds it was created with.
+
+Releases that predate the mechanism are covered by a frozen table inside Cubelet, so their sandboxes keep exactly the behaviour they had. A sandbox Cubelet learns nothing about keeps the historical best-effort path — **unknown is never treated as "cannot"**.
+
+What this means for you:
+
+* **Full snapshots of a sandbox with no pinned shim version now take the consistent (coordinated) path** when the shim running it supports it. Previously such a sandbox was silently downgraded to the legacy best-effort path, whose rootfs capture can tear on `jfs`. The snapshot is still a full snapshot; only how it is captured changed, and the result is strictly more consistent.
+* **A filesystem-only snapshot that cannot work is refused up front**: when the shim, or the guest agent behind it, positively reports that it cannot capture without memory, Cubelet returns `409 snapshot_filesystem_only_unsupported_node` before pausing the VM. Previously the same request paused the guest and then failed.
+* **Pause preflight is skipped for shims that do not route it.** This only removes a wasted round trip; Pause still refuses while exec sessions are open.
+* Nothing changes for a sandbox whose components cannot be identified at all: it behaves exactly as it did before the upgrade.
 
 ## Platform-managed Auto-pause / Auto-resume
 
@@ -398,6 +428,29 @@ It does not change `state`, and it only appears when the policy is `OnFailure` /
 Auto-pause is skipped during these two transient states; idle timeout still applies, and a restart operation does not reset the idle timer (idle time is based on [client activity](#what-counts-as-activity)). The object also carries `restartCount`, `lastExitCode`, `lastExitReason`, `lastRestartAt`, and similar fields for diagnosing exits.
 
 A pause is not a restart: `pause()` followed by resume keeps `restartCount` and the exit diagnostics, and the backoff schedule continues from that count. Only the stable-period reset clears it, so a sandbox that already reached `maxRestarts` stops restarting after the next exit even if it was paused and resumed in between.
+
+**`errorReason` vs `restartStatus.lastExitReason`**:
+
+- `errorReason` (detail endpoint only) reflects the primary container's **current** stored error or exit reason; it may be empty when no exit event was recorded (such as a host power loss).
+- `restartStatus.lastExitReason` reflects the **most recent reason recorded by the restart manager** (including liveness probe failures `LivenessProbeFailed` and host crashes `SandboxCrashed`). Use `restartStatus` as the source of truth when troubleshooting restarts.
+
+### Recovery after a host crash or a Cubelet restart
+
+A host power loss, kernel panic, or any other whole-machine restart leaves no exit event behind: container runtime state lives on tmpfs and disappears with the machine, so the sandbox never gets to record how it ended. On startup Cubelet re-reads each sandbox's real state and decides as follows:
+
+| What recovery finds | Verdict | Outcome |
+|---|---|---|
+| No container or no task, and no exit was ever recorded | **`SandboxCrashed`** (`lastExitCode` is `0`) | `OnFailure` and `Always` cold-restart under the normal backoff; `Never` does not restart |
+| The task is stopped with a real exit code | Judged by that code: `0` is `Completed`, non-zero is `Error` | `OnFailure` restarts only on non-zero; the code and reason are written to `restartStatus` |
+| The sandbox was already backing off after a failed liveness probe, OOM, etc. | The recorded reason is kept | Retries continue from the same backoff and `maxRestarts` count |
+
+A host crash is treated as a crash, so **a power cycle no longer leaves an `OnFailure` sandbox in `Succeeded`**; `restartStatus.lastExitReason` records `"SandboxCrashed"`.
+
+When only Cubelet restarts (not the host), the VM is normally still running: recovery just reattaches the liveness probes and changes no state. If the VM happens to exit cleanly (code 0) while Cubelet is down, `OnFailure` still judges it by that real code, settles on `Succeeded`, and does not restart it; a non-zero exit restarts it with the real code. The `lastExitCode` / `lastExitReason` left by an earlier run are diagnostics only and never decide the outcome of the current run.
+
+None of the following is ever brought back automatically: `Never`, a paused sandbox, any sandbox already in a terminal state (`GaveUp`, `Succeeded`, `Failed`), and a sandbox that is being deleted.
+
+When many sandboxes come back at once, the node rebuilds them in fixed-size batches (16 by default, well below the node's own create/destroy limits) and leaves the rest queued in `BackOff`. Queueing does not spend `maxRestarts`: an attempt rejected by the node's concurrency limit does not count as a failed restart.
 
 ## Next Steps
 

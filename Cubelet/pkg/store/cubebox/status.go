@@ -30,6 +30,10 @@ type Status struct {
 
 	Unknown bool `json:"-"`
 
+	// ExitUnobserved marks a run whose FinishedAt was synthesized during recovery
+	// without observing a real exit (treated as SandboxCrashed, not exit code 0).
+	ExitUnobserved bool `json:"-"`
+
 	Removing               bool `json:"-"`
 	PostStop               bool `json:"-"`
 	LifeTimeMetricReported bool `json:"-"`

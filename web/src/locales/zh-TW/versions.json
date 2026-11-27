@@ -20,7 +20,7 @@
   "error": "載入版本矩陣失敗。",
   "retry": "重試",
   "noMatch": "沒有匹配的項。",
-  "kpi.components": "已跟蹤元件",
+  "kpi.components": "已追蹤元件",
   "kpi.componentsHint": "叢集中正在上報的元件種類",
   "kpi.reporting": "線上節點",
   "kpi.reportingHint": "已上報版本 / 節點總數",

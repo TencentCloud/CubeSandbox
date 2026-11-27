@@ -34,6 +34,7 @@ type Task struct {
 	CallEp    string
 	TaskType  OpType
 
+	CreateFailover bool
 	DescribeTaskID string
 
 	retryTimes int64

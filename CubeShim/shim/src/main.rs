@@ -4,6 +4,7 @@
 
 use containerd_shim::asynchronous::run as shim_run;
 use containerd_shim::{parse, Config};
+use containerd_shim_cube_rs::capabilities;
 use containerd_shim_cube_rs::common;
 use containerd_shim_cube_rs::service::Service;
 
@@ -25,6 +26,21 @@ fn main() {
     let os_args: Vec<_> = std::env::args_os().collect();
     if is_version_request(&os_args[1..]) {
         print_version();
+        return;
+    }
+    // Emit the artifact's capability declaration.
+    if is_capabilities_request(&os_args[1..]) {
+        match capabilities::artifact_json() {
+            Ok(body) => {
+                println!("{body}");
+            }
+            Err(err) => {
+                eprintln!("render capabilities failed: {err}");
+                unsafe {
+                    libc::exit(1);
+                }
+            }
+        }
         return;
     }
     if is_runtime_info_request(&os_args[1..]) {
@@ -71,6 +87,14 @@ fn print_version() {
     );
 }
 
+fn is_capabilities_request(args: &[OsString]) -> bool {
+    args.iter().any(|arg| {
+        arg.to_str()
+            .map(|value| matches!(value, "-capabilities" | "--print-capabilities"))
+            .unwrap_or(false)
+    })
+}
+
 fn is_runtime_info_request(args: &[OsString]) -> bool {
     args.iter().any(|arg| {
         arg.to_str()
@@ -82,7 +106,7 @@ fn is_runtime_info_request(args: &[OsString]) -> bool {
 fn handle_runtime_info_request() -> io::Result<()> {
     // containerd v2 expects shim -info to print a RuntimeInfo protobuf.
     // An empty message is sufficient for CubeShim because we do not expose
-    // extra runtime capabilities through this probe yet.
+    // extra runtime capabilities through this probe.
     io::copy(&mut io::stdin().lock(), &mut io::sink())?;
     io::stdout().flush()?;
     Ok(())

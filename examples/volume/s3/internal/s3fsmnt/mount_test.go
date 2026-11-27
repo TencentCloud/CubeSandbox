@@ -275,6 +275,38 @@ func TestMountWithSpecPreservesPasswdWhenMountMayBeActive(t *testing.T) {
 	}
 }
 
+func TestMountFailureRequiresRemovedMountDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  string
+		residual bool
+		settled  bool
+	}{
+		{"normal unmounted exit", "exit 1", false, true},
+		{"directory already removed", "rmdir \"$1\"; exit 1", false, true},
+		{"nonempty mount directory", "exit 1", true, false},
+		{"killed mount process", "kill -KILL $$", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, id, spec := dynamicMountFixture(t)
+			base := t.TempDir()
+			m.mountChecker = func(string) (bool, error) { return false, nil }
+			m.commandRunner = func(string, ...string) ([]byte, error) {
+				if tc.residual {
+					if err := os.WriteFile(filepath.Join(m.MountPoint(base, id), "residual"), nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return exec.Command("sh", "-c", tc.command, "s3fs-fixture", m.MountPoint(base, id)).CombinedOutput()
+			}
+			_, err := m.MountWithSpec(base, id, spec)
+			if err == nil || errors.Is(err, ErrMountRolledBack) != tc.settled {
+				t.Fatalf("MountWithSpec err=%v, want confirmed rollback=%v", err, tc.settled)
+			}
+		})
+	}
+}
+
 func TestRemoveVolumePasswdFileIsBoundToVolume(t *testing.T) {
 	m, volumeID, _ := dynamicMountFixture(t)
 	path := m.cfg.PasswdFileForVolume(volumeID)
@@ -727,8 +759,12 @@ func TestMountRunsBeforeMountOnlyWhenMounting(t *testing.T) {
 
 	t.Run("not mounted", func(t *testing.T) {
 		t.Setenv("MOUNTPOINT_EXIT", "1")
-		if _, err := m.Mount(t.TempDir(), "v1"); !errors.Is(err, probeErr) {
-			t.Fatalf("Mount error = %v, want the BeforeMount error", err)
+		base := t.TempDir()
+		if _, err := m.Mount(base, "v1"); !errors.Is(err, probeErr) || !errors.Is(err, ErrMountRolledBack) {
+			t.Fatalf("Mount error = %v, want a clean rollback with the BeforeMount error", err)
+		}
+		if _, err := os.Stat(m.MountPoint(base, "v1")); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("mount directory was created after BeforeMount failed: %v", err)
 		}
 		if calls != 1 {
 			t.Errorf("BeforeMount called %d times, want 1", calls)

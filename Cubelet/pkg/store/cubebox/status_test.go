@@ -5,6 +5,7 @@
 package cubebox
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -52,4 +53,27 @@ func TestStatusIsPausedWhileFinishedAtSet(t *testing.T) {
 	st := StoreStatus(Status{StartedAt: now, PausingAt: now, FinishedAt: now})
 	assert.True(t, st.IsPaused())
 	assert.False(t, st.IsTerminated())
+}
+
+func TestExitUnobservedIsNotPersisted(t *testing.T) {
+	raw, err := json.Marshal(Status{StartedAt: 1, FinishedAt: 2, ExitUnobserved: true})
+	assert.NoError(t, err)
+	assert.NotContains(t, string(raw), "xitUnobserved")
+
+	var restored Status
+	assert.NoError(t, json.Unmarshal(raw, &restored))
+	assert.False(t, restored.ExitUnobserved, "a persisted row cannot claim an unobserved exit")
+}
+
+func TestExitUnobservedDoesNotChangeState(t *testing.T) {
+	now := time.Now().UnixNano()
+	assert.Equal(t, cubebox.ContainerState_CONTAINER_EXITED,
+		Status{StartedAt: now, FinishedAt: now, ExitUnobserved: true}.State())
+	assert.Equal(t, cubebox.ContainerState_CONTAINER_UNKNOWN,
+		Status{StartedAt: now, Unknown: true, ExitUnobserved: true}.State())
+}
+
+func TestExitUnobservedSurvivesDeepCopy(t *testing.T) {
+	st := StoreStatus(Status{StartedAt: 1, FinishedAt: 2, ExitUnobserved: true})
+	assert.True(t, st.DeepCopy().Get().ExitUnobserved)
 }

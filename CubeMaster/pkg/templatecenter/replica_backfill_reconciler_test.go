@@ -100,11 +100,11 @@ func stubBackfillSeams(t *testing.T, job *models.TemplateImageJob, artifact *mod
 	backfillPlacements = func(context.Context, string) ([]models.ArtifactNodePlacement, error) {
 		return placements, nil
 	}
-	backfillDistribute = func(ctx context.Context, req *sandboxtypes.CreateTemplateFromImageReq, generatedReq *sandboxtypes.CreateCubeSandboxReq, art *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, trackReplicas bool) ([]*node.Node, int32, int32, int32, error) {
+	backfillDistribute = func(ctx context.Context, req *sandboxtypes.CreateTemplateFromImageReq, generatedReq *sandboxtypes.CreateCubeSandboxReq, art *models.RootfsArtifact, templateID, jobID string, targets []*node.Node, write replicaWrite) ([]*node.Node, int32, int32, int32, error) {
 		recorder.calls = append(recorder.calls, backfillDistributeCall{
-			targets:       targets,
-			trackReplicas: trackReplicas,
-			generatedReq:  generatedReq,
+			targets:      targets,
+			write:        write,
+			generatedReq: generatedReq,
 		})
 		return targets, int32(len(targets)), int32(len(targets)), 0, nil
 	}
@@ -112,9 +112,9 @@ func stubBackfillSeams(t *testing.T, job *models.TemplateImageJob, artifact *mod
 }
 
 type backfillDistributeCall struct {
-	targets       []*node.Node
-	trackReplicas bool
-	generatedReq  *sandboxtypes.CreateCubeSandboxReq
+	targets      []*node.Node
+	write        replicaWrite
+	generatedReq *sandboxtypes.CreateCubeSandboxReq
 }
 
 type backfillDistributeRecorder struct {
@@ -126,7 +126,7 @@ type backfillDistributeRecorder struct {
 // pushed, without fabricating replica rows or needing a generated request.
 func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
-	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", WritableLayerSize: "4Gi"})
+	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 		}
 		t.Fatalf("push targets = %v, want [node-new]", got)
 	}
-	if call.trackReplicas {
+	if call.write != replicaWriteNone {
 		t.Fatal("jfs artifact push must not write replica rows")
 	}
 	if call.generatedReq != nil {
@@ -178,7 +178,7 @@ func TestBackfillTemplateReplicasJFSPushesToPlacementGaps(t *testing.T) {
 // every node is pure waste.
 func TestBackfillTemplateReplicasJFSSkipsFullyPlaced(t *testing.T) {
 	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
-	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox"})
+	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}

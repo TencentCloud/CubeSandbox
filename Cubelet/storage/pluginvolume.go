@@ -6,6 +6,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,7 +63,7 @@ func lookupPluginVolumeSource(annotations map[string]string, volumeName string) 
 	if annotations == nil {
 		return "", "", false
 	}
-	raw := annotations["plugin-volume-sources"]
+	raw := annotations[cubebox.AnnotationPluginVolumeSources]
 	if raw == "" {
 		return "", "", false
 	}
@@ -169,35 +170,27 @@ func (l *local) attachPluginVolume(
 		// RefCount (pre-attach) filled in by Manager.Attach after Acquire.
 	}
 
+	priorAttempt := opts.PluginVolumeAttachAttempted
+	opts.PluginVolumeAttachAttempted = true
+	opts.PluginVolumeAttachUncertain = true
 	res, err := mgr.Attach(ctx, req)
 	if err != nil {
+		var notStarted *volume.AttachNotStartedError
+		var rolledBack *volume.AttachRolledBackError
+		if errors.As(err, &notStarted) {
+			opts.PluginVolumeAttachAttempted = priorAttempt
+			opts.PluginVolumeAttachUncertain = false
+		} else if errors.As(err, &rolledBack) {
+			opts.PluginVolumeAttachUncertain = false
+			if len(opts.PluginVolumeIDs) == 0 && len(result.PluginVolumeBackendInfos) == 0 {
+				opts.PluginVolumeRollback = []workflow.VolumeRefEvent{}
+			}
+		}
 		return fmt.Errorf("plugin_volume %q (driver=%s): attach: %w", volumeName, driver, err)
 	}
 
-	// Enforce that the plugin honoured the required base directory: the
-	// returned hostPath must resolve to a path inside volumeBaseDir.
-	if err := validateHostPathUnderBase(res.HostPath, volumeBaseDir); err != nil {
-		// Roll back the attach we just performed so the ref-count and any host
-		// mount the plugin created are released.
-		detachReq := &volume.DetachRequest{
-			SandboxID: opts.SandboxID,
-			Namespace: ns,
-			VolumeID:  volumeID,
-			Driver:    driver,
-			Metadata:  res.Metadata,
-		}
-		if derr := mgr.Detach(ctx, detachReq); derr != nil {
-			log.G(ctx).Warnf("[plugin_volume] rollback detach after invalid hostPath failed: %v", derr)
-		}
-		return fmt.Errorf("plugin_volume %q (driver=%s): %w", volumeName, driver, err)
-	}
-
-	log.G(ctx).Infof("[plugin_volume] attached %q via driver=%s volumeID=%s hostPath=%s refcount_before=%d",
-		volumeName, driver, volumeID, res.HostPath, req.RefCount)
-
 	// Record backend info immediately after Attach so create-failure rollback
-	// (cleanupCreateResult → destroy → detachPluginVolumes) can Detach even if
-	// mkdir/bind/remount below fails.
+	// can Detach even if host-path validation or the bind mount fails.
 	if result.PluginVolumeBackendInfos == nil {
 		result.PluginVolumeBackendInfos = make(map[string]*PluginVolumeBackendInfo)
 	}
@@ -208,16 +201,13 @@ func (l *local) attachPluginVolume(
 		Metadata: res.Metadata,
 	}
 
-	// Report a 0→1 node-level transition to CubeMaster (via the create
-	// response ext_info) so it can increment its cross-node ref-count.
-	// Repeat references on this node (RefCount>0) emit nothing.
-	// Events are only published when create succeeds (see setCubeExtKey).
-	if req.NodeRefFirstAttach && opts != nil {
-		opts.VolumeRefEvents = append(opts.VolumeRefEvents, workflow.VolumeRefEvent{
-			VolumeID:   volumeID,
-			Referenced: 1,
-		})
+	opts.PluginVolumeIDs = append(opts.PluginVolumeIDs, volumeID)
+	opts.PluginVolumeAttachUncertain = false
+	if err := validateHostPathUnderBase(res.HostPath, volumeBaseDir); err != nil {
+		return fmt.Errorf("plugin_volume %q (driver=%s): %w", volumeName, driver, err)
 	}
+	log.G(ctx).Infof("[plugin_volume] attached %q via driver=%s volumeID=%s hostPath=%s refcount_before=%d",
+		volumeName, driver, volumeID, res.HostPath, req.RefCount)
 
 	// Bind-mount the plugin's hostPath into the virtiofs share directory so
 	// the existing host-dir mount infrastructure carries it into the sandbox VM.
@@ -285,14 +275,29 @@ func (l *local) detachPluginVolumes(
 
 	mgr := volume.Global()
 	var errs []error
+	var create *workflow.CreateContext
+	if opts != nil {
+		create = opts.CreateVolumeRollback
+	}
+	if create != nil {
+		if info.SandboxID != create.SandboxID {
+			return fmt.Errorf("rollback storage metadata belongs to sandbox %q", info.SandboxID)
+		}
+		for _, id := range create.PluginVolumeIDs {
+			if pbi := info.PluginVolumeBackendInfos[id]; pbi == nil || pbi.VolumeID != id {
+				return fmt.Errorf("rollback storage metadata missing plugin volume %q", id)
+			}
+		}
+	}
 
 	for volName, pbi := range info.PluginVolumeBackendInfos {
 		req := &volume.DetachRequest{
-			SandboxID: info.SandboxID,
-			Namespace: info.Namespace,
-			VolumeID:  pbi.VolumeID,
-			Driver:    pbi.Driver,
-			Metadata:  pbi.Metadata,
+			SandboxID:             info.SandboxID,
+			Namespace:             info.Namespace,
+			VolumeID:              pbi.VolumeID,
+			Driver:                pbi.Driver,
+			Metadata:              pbi.Metadata,
+			RequireRecordedHolder: create != nil,
 			// RefCount (post-detach) filled in by Manager.Detach after Release.
 		}
 		if err := mgr.Detach(ctx, req); err != nil {
@@ -307,12 +312,13 @@ func (l *local) detachPluginVolumes(
 				volName, pbi.Driver, pbi.VolumeID, req.RefCount)
 
 			// Report a 1→0 node-level transition only after a successful Detach.
-			// Skip rollback destroys (create failure cleanup): those must not
-			// emit refcount events to CubeMaster.
-			if opts != nil && !opts.IsRollBack && req.NodeRefLastDetach {
+			// A waiting Create can report this release even if the +1 came
+			// from a different successful holder of the same mount.
+			if opts != nil && (!opts.IsRollBack || create != nil) && req.NodeRefLastDetach {
 				opts.VolumeRefEvents = append(opts.VolumeRefEvents, workflow.VolumeRefEvent{
-					VolumeID:   pbi.VolumeID,
-					Referenced: 0,
+					VolumeID:            pbi.VolumeID,
+					Referenced:          0,
+					CreateReportClaimed: req.CreateReportClaimed,
 				})
 			}
 		}
@@ -323,6 +329,9 @@ func (l *local) detachPluginVolumes(
 		if pbi.BindPath != "" {
 			if err := unix.Unmount(pbi.BindPath, unix.MNT_DETACH); err != nil {
 				log.G(ctx).Warnf("[plugin_volume] unmount bind %q failed (ignored): %v", pbi.BindPath, err)
+				if create != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
+					errs = append(errs, fmt.Errorf("unmount plugin volume bind %q: %w", pbi.BindPath, err))
+				}
 			} else {
 				log.G(ctx).Infof("[plugin_volume] unmounted bind %q", pbi.BindPath)
 			}
@@ -331,6 +340,9 @@ func (l *local) detachPluginVolumes(
 
 	if len(errs) > 0 {
 		return fmt.Errorf("detachPluginVolumes: %v", errs)
+	}
+	if create != nil {
+		create.PluginVolumeRollback = append([]workflow.VolumeRefEvent{}, opts.VolumeRefEvents...)
 	}
 	return nil
 }

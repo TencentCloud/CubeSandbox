@@ -365,6 +365,7 @@ python3 verify_volume.py
 | `no plugin registered for driver "s3"` | Cubelet 缺少同名插件，或未重启 |
 | attach 失败，提示 `s3fs mount failed` | 检查 `ls /dev/fuse`、`volume-s3.conf` 中的凭证与 `ENDPOINT`；执行 [§5](#5-重启服务并验证) 的手动 attach 查看 s3fs 报错 |
 | attach 失败，s3fs 日志对 `volumes/<id>/` 报 `NoSuchKey` | Create 必须 PUT 带尾斜杠的目录对象（等同 s3fs mkdir）。前缀下的 `.keep` 是另一个 key。若机器上还是旧插件（只写 `.keep`），需要升级 |
+| attach 失败，提示 `process exited 0 but path is not a mountpoint`，`journalctl -t s3fs` 里有 `Remote mountpath /<prefix> not found`（旧版卷为 `/volumes/<id>`） | s3fs 1.96+ 只挂载满足以下条件的子目录：`<prefix>/` 对象带 `Content-Type: application/x-directory` 和 `x-amz-meta-{mode,uid,gid,atime,ctime,mtime}`。插件升级前创建的卷只有一个裸 marker。旧版卷（创建时未传 `private_data`）：升级插件后，对每个旧版卷执行 `cube-volume-s3 --op create --volume-id <id>` 重写 marker（幂等，只改这个空对象）。动态卷不能这样修：不传 `--private-data` 时，它写的是全局 `BUCKET` 下的 `volumes/<id>/`，不是该卷的前缀；传入该卷的 `private_data` 时，只要前缀里已有数据，create 就会拒绝（`prefix "..." already contains objects`）。动态卷请在每台 Cubelet 节点的 `S3FS_EXTRA_OPTS` 里加 `-ocompat_dir`。这个选项对两类卷都有效，不用升级插件，但 s3fs 1.90 不认这个选项 |
 | `open config ...: no such file or directory` | `volume-s3.conf` 必须与插件二进制同目录，或用 `CUBE_S3_CONFIG` 指向它 |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | 密钥对错误、缺少桶权限，或 `REGION` 与 Endpoint 期望的 SigV4 地域不匹配 |
 | 动态创建报 `bucket "..." does not exist` | 动态桶从不自动创建：先建桶，或修正 `private_data` 中的 `bucket` |

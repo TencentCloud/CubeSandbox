@@ -989,6 +989,7 @@ pub struct DeviceManager {
 
     // ivshmem device
     ivshmem_device: Option<Arc<Mutex<devices::IvshmemDevice>>>,
+    guest_reset_shutdown: bool,
 }
 
 impl DeviceManager {
@@ -1009,6 +1010,7 @@ impl DeviceManager {
         timestamp: Instant,
         snapshot: Option<Snapshot>,
         sandbox_id: String,
+        guest_reset_shutdown: bool,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         trace_scoped!("DeviceManager::new");
 
@@ -1141,6 +1143,7 @@ impl DeviceManager {
             snapshot,
             sandbox_id,
             ivshmem_device: None,
+            guest_reset_shutdown,
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -1250,10 +1253,8 @@ impl DeviceManager {
         }
 
         #[cfg(target_arch = "x86_64")]
-        // WORKAROUND: force reset event into shutdown.
         self.add_legacy_devices(
-            self.exit_evt
-                .try_clone()
+            crate::guest_reset_event(&self.reset_evt, &self.exit_evt, self.guest_reset_shutdown)
                 .map_err(DeviceManagerError::EventFd)?,
         )?;
 
@@ -1261,12 +1262,15 @@ impl DeviceManager {
         self.add_legacy_devices(&legacy_interrupt_manager)?;
 
         {
-            // WORKAROUND: force reset event into shutdown.
+            let reset_evt = crate::guest_reset_event(
+                &self.reset_evt,
+                &self.exit_evt,
+                self.guest_reset_shutdown,
+            )
+            .map_err(DeviceManagerError::EventFd)?;
             self.ged_notification_device = self.add_acpi_devices(
                 &legacy_interrupt_manager,
-                self.exit_evt
-                    .try_clone()
-                    .map_err(DeviceManagerError::EventFd)?,
+                reset_evt,
                 self.exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
@@ -3117,7 +3121,12 @@ impl DeviceManager {
         let virtio_watchdog_device = Arc::new(Mutex::new(
             virtio_devices::Watchdog::new(
                 id.clone(),
-                self.reset_evt.try_clone().unwrap(),
+                crate::guest_reset_event(
+                    &self.reset_evt,
+                    &self.exit_evt,
+                    self.guest_reset_shutdown,
+                )
+                .map_err(DeviceManagerError::EventFd)?,
                 self.seccomp_action.clone(),
                 self.exit_evt
                     .try_clone()

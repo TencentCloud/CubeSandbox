@@ -157,7 +157,7 @@ If the call fails, the error code tells you why:
 
 | HTTP | Error code | Cause | What to do |
 |---|---|---|---|
-| 409 | `snapshot_filesystem_only_unsupported_node` | The control plane or the node agent does not support the fs-only mode | Upgrade whichever side is older; it never falls back to a full snapshot silently |
+| 409 | `snapshot_filesystem_only_unsupported_node` | The control plane or the node agent does not support the fs-only mode | Upgrade whichever side is older; it never falls back to a full snapshot silently. Since the shim capability mechanism landed, this can also be returned **before** the guest is paused: a shim (or the guest agent behind it) that positively reports it cannot capture without memory is refused up front, so the sandbox keeps running |
 | 409 | `snapshot_filesystem_only_freeze_unsupported` / `snapshot_filesystem_only_rootfs_unsupported` | The node cannot freeze the filesystem / this rootfs type | Cluster-side capability gap; check the node before retrying |
 | 5xx | `snapshot_filesystem_only_freeze_failed` / `snapshot_filesystem_only_thaw_failed` | Freeze or thaw failed mid-capture | Cluster-side problem; check the node before retrying |
 | 409 | `snapshot_filesystem_only_shared_volume_unsupported` | The sandbox has a **writable** plugin volume | A writable plugin volume is not part of the captured rootfs; create the sandbox without it before taking the snapshot |

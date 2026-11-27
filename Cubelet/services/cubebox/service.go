@@ -39,6 +39,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/cubes"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -265,6 +266,10 @@ type service struct {
 	restarts              *restartMgr
 
 	otherRuntime *ociRuntime
+
+	// Instance-scoped seam so Create-from-pause wiring can be exercised through
+	// service.Create without an on-disk pause package. Nil uses the real loader.
+	expandPauseSnapshotPackageFn func(*cubebox.RunCubeSandboxRequest) error
 }
 
 func (s *service) RegisterTCP(server *grpc.Server) error {
@@ -346,6 +351,21 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 		ExtInfo:   map[string][]byte{},
 	}
+	var createInfo *workflow.CreateContext
+	defer func() {
+		if ret.IsSuccessCode(rsp.GetRet().GetRetCode()) || string(rsp.ExtInfo[cubebox.ExtVolumeCreateReportFailed]) == "true" {
+			return
+		}
+		if createInfo != nil && createInfo.PluginVolumeRollback != nil {
+			rsp.ExtInfo[cubebox.ExtVolumeCreateRolledBack] = []byte("true")
+			if events := marshalVolumeRefEvents(createInfo.PluginVolumeRollback); events != nil {
+				rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = events
+			}
+		} else if (createInfo == nil || !createInfo.PluginVolumeAttachAttempted) &&
+			(req.GetAnnotations()[cubebox.AnnotationPluginVolumeSources] != "" || resumeFromPauseSandboxID(req) != "") {
+			rsp.ExtInfo[cubebox.ExtVolumeAttachNotStarted] = []byte("true")
+		}
+	}()
 	// Registered first, so it runs after the defers below have filled rsp in.
 	defer func() {
 		span.SetAttributes(attribute.String(telemetry.AttrSandboxID, rsp.GetSandboxID()))
@@ -379,7 +399,11 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	ctx = preparedCtx
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
-	if err := expandPauseSnapshotPackage(req); err != nil {
+	expandPauseSnapshot := expandPauseSnapshotPackage
+	if s.expandPauseSnapshotPackageFn != nil {
+		expandPauseSnapshot = s.expandPauseSnapshotPackageFn
+	}
+	if err := expandPauseSnapshot(req); err != nil {
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
@@ -419,7 +443,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 
 	start := time.Now()
-	createInfo := &workflow.CreateContext{
+	createInfo = &workflow.CreateContext{
 		ReqInfo:      req,
 		Failover:     true,
 		SnapshotMode: mode,
@@ -460,9 +484,12 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		}
 		dealCreateInnerMetric(rsp, createInfo)
 
-		rt = CubeLog.GetTraceInfo(ctx)
-		rt.InstanceID = createInfo.SandboxID
-		go s.reportTrace(rt, createInfo.GetMetric())
+		// The trace in ctx is shared with the asynchronous create failover,
+		// which DeepCopy()s it once the flow fails. Never mutate that shared
+		// object here: hand reportTrace its own copy instead.
+		trace := CubeLog.GetTraceInfo(ctx).DeepCopy()
+		trace.InstanceID = createInfo.SandboxID
+		go s.reportTrace(trace, createInfo.GetMetric())
 	}()
 
 	defer recov.HandleCrash(func(panicError interface{}) {
@@ -476,7 +503,6 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.SandboxIP = getSandboxIp(createInfo)
 		rsp.PortMappings = getAllocatedPort(createInfo)
 
-		setCubeExtKey(rsp, createInfo)
 	}()
 
 	or, e := s.cubeboxMgr.getSandboxRuntime(req)
@@ -502,6 +528,17 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		return rsp, nil
 	}
+
+	if sid := resumeFromPauseSandboxID(req); sid != "" {
+		release, rejected := s.cubeboxMgr.admitAndReserveResume(ctx, sid)
+		if rejected != nil {
+			rsp.Ret.RetMsg = rejected.RetMsg
+			rsp.Ret.RetCode = rejected.RetCode
+			return rsp, nil
+		}
+		defer release()
+	}
+	s.cubeboxMgr.armPausedTombstone(ctx, req, createInfo)
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
@@ -535,6 +572,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	err, _ := ret.FromError(createErr)
 	rsp.Ret.RetMsg = err.Message()
 	rsp.Ret.RetCode = err.Code()
+	if ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
+		if err := setCreateVolumeRefEvents(rsp, ns, createInfo); err != nil {
+			log.G(ctx).Errorf("create volume reference report: %v", err)
+			rsp.Ret.RetMsg = "could not confirm plugin volume reference report"
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.ExtInfo[cubebox.ExtVolumeCreateReportFailed] = []byte("true")
+		}
+	}
 	if strings.Contains(rsp.Ret.RetMsg, "no space left") ||
 		strings.Contains(rsp.Ret.RetMsg, "No space left") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_NoSpaceLeftOnDevice
@@ -542,6 +587,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
+	}
+	// Fallback restore when create failed without running failover (for example
+	// on PreConditionFailed after local.Create removed the PAUSED row). Both
+	// this path and failover's Destroy check PausedTombstoneGuard so neither can
+	// overwrite a row owned by a newer attempt.
+	if !ret.IsSuccessCode(rsp.Ret.RetCode) && createInfo.PausedTombstone != nil {
+		if err := s.cubeboxMgr.restorePausedTombstone(ctx, createInfo.PausedTombstone,
+			createInfo.PausedTombstoneGuard); err != nil {
+			log.G(ctx).Warnf("restore paused tombstone after failed resume: %v", err)
+		}
 	}
 	if s.restarts != nil {
 		if armedID != "" {
@@ -574,19 +629,19 @@ func SetRunCubeSandboxRequestDefaultValue(req *cubebox.RunCubeSandboxRequest) {
 	}
 }
 
-func setCubeExtKey(rsp *cubebox.RunCubeSandboxResponse, createInfo *workflow.CreateContext) {
-	// Only report node-level volume ref-count transitions when the sandbox
-	// was created successfully. On failure the workflow rolls back (detach),
-	// so the net node transition is zero and nothing should be reported.
-	if !ret.IsSuccessCode(rsp.GetRet().GetRetCode()) {
-		return
+func setCreateVolumeRefEvents(rsp *cubebox.RunCubeSandboxResponse, namespace string, createInfo *workflow.CreateContext) error {
+	ids, err := volume.Global().TakeCreateReports(namespace, createInfo.SandboxID, createInfo.PluginVolumeIDs)
+	if err != nil {
+		return err
 	}
-	if data := marshalVolumeRefEvents(createInfo.VolumeRefEvents); data != nil {
-		if rsp.ExtInfo == nil {
-			rsp.ExtInfo = map[string][]byte{}
-		}
+	events := make([]workflow.VolumeRefEvent, 0, len(ids))
+	for _, id := range ids {
+		events = append(events, workflow.VolumeRefEvent{VolumeID: id, Referenced: 1})
+	}
+	if data := marshalVolumeRefEvents(events); data != nil {
 		rsp.ExtInfo[constants.CubeExtVolumeRefEvents] = data
 	}
+	return nil
 }
 
 // setDestroyVolumeRefEvents reports node-level volume ref-count transitions
@@ -906,6 +961,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	if isPauseDeleteTombstone(req) {
 		if getErr != nil {
 			if errors.Is(getErr, utils.ErrorKeyNotFound) {
+				s.cubeboxMgr.advancePausedTombstoneEpochIfTracked(req.SandboxID)
 				rsp.Ret.RetCode = errorcode.ErrorCode_Success
 				rsp.Ret.RetMsg = "success"
 				return rsp, nil
@@ -920,6 +976,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 			rsp.Ret.RetMsg = delErr.Error()
 			return rsp, nil
 		}
+		s.cubeboxMgr.advancePausedTombstoneEpochIfTracked(req.SandboxID)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Success
 		rsp.Ret.RetMsg = "success"
 		return rsp, nil
@@ -1294,17 +1351,15 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 		}
 		// Cubelet itself initiated the pause and already tracks the in-progress
 		// state via PausingAt (CONTAINER_PAUSING) or PausedAt (CONTAINER_PAUSED).
-		// Calling RecoverContainer -> shim state() while pause_vm() holds the
-		// sandbox mutex causes a ttrpc timeout; RecoverContainer then sets
-		// Unknown=true, making the sandbox appear Terminated and triggering a
-		// spurious Destroy cascade.
+		// Skip RecoverContainer here to avoid contending with pause_vm() on the
+		// shim's sandbox mutex (ttrpc state() timeout) or overwriting the
+		// in-flight pause status transitions.
 		//
 		// The same race exists for snapshot rollback: while updateTaskForRollback
 		// runs, the shim holds its sandbox mutex doing delete_vm +
-		// resume_vm_with_config and ttrpc state() either times out or returns
-		// task status=Unknown. RollbackSandbox sets RollingBack on every
+		// resume_vm_with_config. RollbackSandbox sets RollingBack on every
 		// container's Status before invoking the shim and clears it via defer,
-		// so DeadGC must respect the flag for the same reason.
+		// so DeadGC skips it to avoid ttrpc timeouts and status races.
 		if status := cb.GetStatus(); status != nil {
 			st := status.Get()
 			if st.RollingBack {
@@ -1335,8 +1390,8 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 			case cubebox.ContainerState_CONTAINER_PAUSING:
 				// PAUSING is meant to be a short transient. While a pause is
 				// genuinely in flight the shim holds its sandbox mutex, so a
-				// state() query would time out and stamp Unknown=true (see
-				// above) -- within the safety window we still skip. Past
+				// state() query would time out or race with pause state
+				// transitions -- within the safety window we still skip. Past
 				// pausingStuckThreshold the pause is no longer running (e.g. the
 				// cubelet restarted mid-pause and missed both the RPC and
 				// /tasks/paused reconcile windows); reconcile once against the

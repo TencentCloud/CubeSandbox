@@ -28,7 +28,7 @@
   "delete": "刪除倉庫副本",
   "deleteConfirm": "確定從倉庫中刪除 {{component}} {{version}} ({{arch}}) 嗎？節點上已存在的本地副本不會被刪除。",
   "preinstall": "預裝",
-  "preinstallHint": "下發任務後，目標節點將在後臺自動下載該版本元件。此操作不會建立沙箱執行個體。",
+  "preinstallHint": "下發任務後，目標節點將在後台自動下載該版本元件。此操作不會建立沙箱執行個體。",
   "source.github": "GitHub Release",
   "source.cnb": "CNB Release",
   "source.upload": "上傳 tar.gz",

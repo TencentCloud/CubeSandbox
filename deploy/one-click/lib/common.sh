@@ -995,6 +995,21 @@ ensure_file() {
   [[ -f "${path}" ]] || die "required file not found: ${path}"
 }
 
+# assert_component_capabilities FILE [COMPONENT]
+#
+# Rejects a declaration Cubelet could not read. An unreadable one degrades silently
+# at runtime, so the build has to be the thing that catches it. The check lives next
+# to CubeShim so every build path validates identically.
+assert_component_capabilities() {
+  local path="$1"
+  local component="${2:-}"
+  local validator="${ONE_CLICK_DIR}/../../CubeShim/scripts/check-component-capabilities.py"
+  ensure_file "${path}"
+  ensure_file "${validator}"
+  python3 "${validator}" "${path}" ${component:+"${component}"} \
+    || die "invalid ${component:-component} capability declaration: ${path}"
+}
+
 # sha256 hex of a file (no "sha256:" prefix).
 file_sha256_hex() {
   local path="$1"

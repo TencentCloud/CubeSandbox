@@ -122,6 +122,11 @@ _FAST_PROBE = {
 # After the terminal state is visible, a wrongful restart would already be in
 # BackOff, so a short hold proves the sandbox stays down.
 _TERMINAL_HOLD_SECONDS = 15
+# restartCount is the retry budget already spent, so a single exit may show more
+# than one (a rebuild that failed still counts). Wait for at least the expected
+# number and then hold, so a further attempt queued right after a successful
+# rebuild cannot be mistaken for a sandbox that settled.
+_RESTART_HOLD_SECONDS = 10
 # Past the default probe window (30s initial delay + 3 * 10s period) so the run
 # covers a full detection cycle with the default probe.
 _HEALTHY_WINDOW_SECONDS = 62
@@ -186,12 +191,14 @@ def _assert_backoff(
     multiplier: float,
     cap: float,
     jitter: float,
-    slack: float = 4,
+    slack: float = 5,
 ) -> None:
     """Delay is initial * multiplier^count, capped, plus up to jitter.
 
     nextRestartAt is compared with the API Date header. That header is whole
-    seconds, so the upper bound allows two extra seconds.
+    seconds, so the upper bound allows two extra seconds. The lower bound also
+    allows one status-report request deadline: BackOff is scheduled on the node
+    before the asynchronously reported status becomes visible through CubeAPI.
     """
     count = _count(status)
     raw = float(initial)
@@ -472,14 +479,20 @@ def test_max_restarts_gives_up(sdk_sandbox, sdk_e2e_config):
 
 
 def _assert_restarted(sdk_sandbox, sdk_e2e_config, sandbox_id: str, address: str, *, reason: str, code: int | None, count: int = 1):
+    # count is a floor, not an equality: restartCount is the retry budget already
+    # spent, so a rebuild that failed still leaves one behind (lifecycle.md).
+    # The hold rejects a status that is only momentarily true because the next
+    # attempt was queued the moment this rebuild succeeded.
     status = wait_for_restart_status(
         sdk_sandbox,
         lambda item: bool(item)
         and item.get("restartState") == "Running"
-        and _count(item) == count
+        and _count(item) >= count
         and item.get("lastExitReason") == reason
         and _exit_code(item) == code,
         timeout=sdk_e2e_config.restart_policy_wait,
+        interval=1,
+        hold=_RESTART_HOLD_SECONDS,
     )
     assert sdk_sandbox.sandbox_id == sandbox_id
     assert status is not None

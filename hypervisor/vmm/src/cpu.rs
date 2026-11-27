@@ -583,6 +583,7 @@ pub struct CpuManager {
     affinity: BTreeMap<u8, Vec<u8>>,
     dynamic: bool,
     vcpu_started: Arc<AtomicBool>,
+    guest_reset_shutdown: bool,
 }
 
 const CPU_ENABLE_FLAG: usize = 0;
@@ -731,6 +732,7 @@ impl CpuManager {
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         numa_nodes: &NumaNodes,
         vcpu_started: Arc<AtomicBool>,
+        guest_reset_shutdown: bool,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         let guest_memory = memory_manager.lock().unwrap().guest_memory();
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
@@ -867,6 +869,7 @@ impl CpuManager {
             affinity,
             dynamic,
             vcpu_started,
+            guest_reset_shutdown,
         }));
 
         if let Some(acpi_address) = acpi_address {
@@ -967,8 +970,9 @@ impl CpuManager {
         vcpu_thread_barrier: Arc<Barrier>,
         inserting: bool,
     ) -> Result<()> {
-        // WORKAROUND: force reset event into shutdown.
-        let reset_evt = self.exit_evt.try_clone().unwrap();
+        let reset_evt =
+            crate::guest_reset_event(&self.reset_evt, &self.exit_evt, self.guest_reset_shutdown)
+                .unwrap();
         let exit_evt = self.exit_evt.try_clone().unwrap();
         #[cfg(feature = "guest_debug")]
         let vm_debug_evt = self.vm_debug_evt.try_clone().unwrap();

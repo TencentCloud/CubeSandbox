@@ -199,7 +199,7 @@ func (s *Store) List(_ context.Context, prefix string, fn func(blobstore.ObjectI
 	if err := blobstore.ValidatePrefix(prefix); err != nil {
 		return err
 	}
-	want := s.full(prefix)
+	want := blobstore.JoinPrefix(s.prefix, prefix)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	keys := make([]string, 0, len(s.objects))
@@ -232,10 +232,14 @@ func (s *Store) SignedGetURL(context.Context, string, time.Duration) (string, er
 func (s *Store) Prepare(context.Context) error { return nil }
 
 func (s *Store) GC(_ context.Context, opts blobstore.GCOptions) (blobstore.GCResult, error) {
+	if err := blobstore.ValidatePrefix(opts.Prefix); err != nil {
+		return blobstore.GCResult{}, err
+	}
 	now := opts.Now
 	if now.IsZero() {
 		now = s.now()
 	}
+	requested := blobstore.JoinPrefix(s.prefix, opts.Prefix)
 	var result blobstore.GCResult
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -243,12 +247,9 @@ func (s *Store) GC(_ context.Context, opts blobstore.GCOptions) (blobstore.GCRes
 		if rule.ExpireAfter <= 0 {
 			continue
 		}
-		fullPrefix := s.full(rule.Prefix)
-		if opts.Prefix != "" && !strings.HasPrefix(fullPrefix, s.full(opts.Prefix)) && !strings.HasPrefix(s.full(opts.Prefix), fullPrefix) {
-			continue
-		}
+		rulePrefix := blobstore.JoinPrefix(s.prefix, rule.Prefix)
 		for k, obj := range s.objects {
-			if fullPrefix != "" && !strings.HasPrefix(k, fullPrefix) {
+			if !strings.HasPrefix(k, rulePrefix) || !strings.HasPrefix(k, requested) {
 				continue
 			}
 			if now.Sub(obj.lastModified) < rule.ExpireAfter {

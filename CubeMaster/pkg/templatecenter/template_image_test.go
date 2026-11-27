@@ -2869,6 +2869,11 @@ func TestRunRedoTemplateImageJobStopsOnArtifactCleanupFailure(t *testing.T) {
 	listRedoTemplateSandboxes = func(context.Context, *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
 		return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
 	}
+	origShared := redoArtifactShared
+	t.Cleanup(func() { redoArtifactShared = origShared })
+	redoArtifactShared = func(context.Context, string, string) (bool, error) {
+		return false, nil
+	}
 
 	runRedoTemplateImageJob(context.Background(), "job-1", &types.RedoTemplateFromImageReq{
 		Request:    &types.Request{RequestID: "req-redo"},
@@ -2999,6 +3004,11 @@ func TestRunRedoTemplateImageJobReloadsArtifactAfterBuildLock(t *testing.T) {
 	t.Cleanup(func() { listRedoTemplateSandboxes = origList })
 	listRedoTemplateSandboxes = func(context.Context, *types.ListCubeSandboxReq) *types.ListCubeSandboxRes {
 		return &types.ListCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success)}}
+	}
+	origShared := redoArtifactShared
+	t.Cleanup(func() { redoArtifactShared = origShared })
+	redoArtifactShared = func(context.Context, string, string) (bool, error) {
+		return false, nil
 	}
 	patches.ApplyFunc(distributeRootfsArtifact, func(ctx context.Context, req *types.CreateTemplateFromImageReq, generatedReq *types.CreateCubeSandboxReq, artifact *models.RootfsArtifact, templateID, jobID string) ([]*node.Node, int32, int32, int32, error) {
 		distributedToken = artifact.DownloadToken

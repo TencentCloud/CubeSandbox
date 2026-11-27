@@ -3,6 +3,7 @@
 
 import { fetch } from "undici";
 
+import { NOT_AN_ENVELOPE_HINT, htmlResponseError, streamHttpErrorDetail } from "./connect.js";
 import type { Sandbox } from "./sandbox.js";
 import { createIdleTimeout } from "./stream.js";
 
@@ -13,7 +14,7 @@ export const CONNECT_END_STREAM_FLAG = 0x02;
 export const CONNECT_COMPRESSED_FLAG = 0x01;
 export const MAX_CONNECT_ENVELOPE_SIZE = 64 * 1024 * 1024;
 export const DEFAULT_ENVD_USER = "root";
-
+const CONNECT_KNOWN_FLAGS = CONNECT_COMPRESSED_FLAG | CONNECT_END_STREAM_FLAG;
 /** Result of running a shell command inside the sandbox. */
 export interface CommandResult {
   stdout: string;
@@ -138,6 +139,15 @@ export async function* readConnectFrames(
     for (;;) {
       while (buffered >= 5) {
         const { flags, size } = peekHeader();
+        // A misrouted HTML, JSON or gzip body would otherwise be read as an
+        // envelope ("<!DOC" -> flags 0x3c, length 558124867) and reported as
+        // an oversized message. Reject unknown flags before the length.
+        if (flags & ~CONNECT_KNOWN_FLAGS) {
+          const head = take(5).toString("hex");
+          throw new Error(
+            `response is not a Connect envelope (first 5 bytes: ${head}); ${NOT_AN_ENVELOPE_HINT}`,
+          );
+        }
         if (size > MAX_CONNECT_ENVELOPE_SIZE) {
           throw new Error(`Connect stream message too large: ${size} bytes`);
         }
@@ -158,6 +168,9 @@ export async function* readConnectFrames(
       }
     }
   } finally {
+    // Cancel whatever the consumer did not read (an error above, or a
+    // consumer that stopped early) so the HTTP connection is released.
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
   if (buffered > 0) {
@@ -276,10 +289,17 @@ export class Commands {
     }
 
     if (resp.status >= 400) {
+      // The idle timer keeps bounding the error-body read.
+      const detail = await streamHttpErrorDetail(resp);
       idle.clear();
-      const detail = (await resp.text().catch(() => "")).trim();
       const suffix = detail ? `: ${detail}` : "";
       throw new Error(`command failed: HTTP ${resp.status}${suffix}`);
+    }
+    const htmlError = htmlResponseError(resp);
+    if (htmlError) {
+      idle.clear();
+      await resp.body?.cancel().catch(() => undefined);
+      throw new Error(`command failed: ${htmlError}`);
     }
     if (!resp.body) {
       idle.clear();

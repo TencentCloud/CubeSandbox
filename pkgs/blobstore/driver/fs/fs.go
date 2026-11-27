@@ -733,7 +733,7 @@ func (s *store) List(_ context.Context, prefix string, fn func(blobstore.ObjectI
 	if err := blobstore.ValidatePrefix(prefix); err != nil {
 		return err
 	}
-	fullPrefix := blobstore.JoinKey(s.prefix, prefix)
+	fullPrefix := blobstore.JoinPrefix(s.prefix, prefix)
 	dataRoot := filepath.Join(s.root, dirData)
 	start := dataRoot
 	if i := strings.LastIndex(fullPrefix, "/"); i >= 0 {
@@ -797,6 +797,9 @@ func (s *store) SignedGetURL(_ context.Context, key string, ttl time.Duration) (
 }
 
 func (s *store) GC(_ context.Context, opts blobstore.GCOptions) (blobstore.GCResult, error) {
+	if err := blobstore.ValidatePrefix(opts.Prefix); err != nil {
+		return blobstore.GCResult{}, err
+	}
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now()

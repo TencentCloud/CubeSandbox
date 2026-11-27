@@ -6,9 +6,11 @@ package templatecenter
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
@@ -33,18 +35,11 @@ import (
 //
 // In all three cases the node ends up schedulable for the template's
 // instance type but without the template's rootfs artifact, and nothing
-// pushed it again -- the only escape was a manual redo. The TC split did not
-// change this: TC builds, Master distributes, and Master's distribution set
-// was still point-in-time.
-//
-// The sweep closes the gap: for every READY template definition it computes
-// (healthy nodes in scope) MINUS (nodes holding a READY replica) and pushes
-// the artifact to exactly the difference. CreateImage is idempotent on the
-// cubelet, the artifact URL is re-signed at push time, and the per-artifact
-// resume lock serializes the sweep against live create/redo resumes, so a
-// pass is safe to run every tick. It runs inside the image-job reconcile
-// pass (advisory lock already held), so a multi-master deployment sweeps
-// once per tick, not once per master.
+// pushed it again — the only escape was a manual redo. The sweep closes the
+// gap by re-pushing the artifact to in-scope nodes that lack a READY
+// replica and converging the row. The sweep runs inside the image-job
+// reconcile pass (advisory lock already held), so a multi-master deployment
+// sweeps once per tick, not once per master.
 
 // backfillDefinition is the definition projection the sweep needs.
 type backfillDefinition struct {
@@ -68,11 +63,15 @@ var (
 	backfillLatestJob = func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
 		return getLatestCreateRedoImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
 	}
-	backfillArtifact     = getRootfsArtifactByID
-	backfillReplicas     = ListReplicas
-	backfillResolveNodes = resolveTemplateNodes
-	backfillDistribute   = distributeRootfsArtifactToNodes
-	backfillPlacements   = listArtifactNodePlacements
+	backfillArtifact        = getRootfsArtifactByID
+	backfillReplicas        = ListReplicas
+	backfillResolveNodes    = resolveTemplateNodes
+	backfillDistribute      = distributeRootfsArtifactToNodes
+	backfillPlacements      = listArtifactNodePlacements
+	backfillCreateReplica   = createReplicaOnNode
+	backfillUpsertReplica   = upsertReplicaKeepingReady
+	backfillGetDefinition   = GetDefinition
+	backfillCleanupReplicas = cleanupTemplateReplicasOnNodes
 )
 
 // reconcileTemplateReplicaBackfill pushes READY templates to healthy nodes
@@ -121,17 +120,15 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		return err
 	}
 
-	var req types.CreateTemplateFromImageReq
-	if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil {
+	// Decode like the redo/resume paths: the persisted snapshot has no
+	// transport envelope, and generate below reads req.RequestID.
+	req, err := unmarshalTemplateImageJobRequest(job.RequestJSON)
+	if err != nil {
 		return fmt.Errorf("decode job request snapshot: %w", err)
 	}
-	// A jfs template is one package on the shared volume: nodes never build
-	// their own replica, so replica rows say nothing about ext4 coverage and
-	// nodesWithoutReadyReplica would flag every non-builder node forever.
-	// The sweep still warms the ext4 cache for nodes that joined or
-	// recovered after create: create-time distribution recorded an artifact
-	// placement row per node, and only the in-scope nodes without one are
-	// pushed here.
+	// jfs templates live on the shared volume: nodes never build their own
+	// replica, so replica rows say nothing about ext4 coverage — only the
+	// create-time placement rows do.
 	if constants.IsJFSBackend(req.Backend) {
 		if strings.TrimSpace(req.WritableLayerSize) == "" {
 			req.WritableLayerSize = artifact.WritableLayerSize
@@ -152,31 +149,49 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		if len(missing) == 0 {
 			return nil
 		}
-		release := acquireResumeArtifactLock(artifact.ArtifactID)
-		defer release()
 		logger := log.G(ctx).WithFields(map[string]any{
 			"component":   "image_job_reconcile",
 			"template_id": def.TemplateID,
 			"artifact_id": artifact.ArtifactID,
 		})
-		// trackReplicas=false: a placement push must not fabricate replica
-		// rows on nodes that only hold the ext4 cache.
-		_, _, ready, failed, distErr := backfillDistribute(ctx, &req, nil, artifact, def.TemplateID, job.JobID, missing, false)
+		// Placement push only: no replica rows.
+		missingTotal := len(missing)
+		if len(missing) > backfillMaxTargetsPerSweep {
+			// jfs pushes leave no row behind on failure, so there is no
+			// FAILED-row signal to deprioritize a persistent failure block;
+			// rotate the window every tick instead — every node is covered
+			// within ceil(N/cap) sweeps.
+			tick := int(time.Now().Unix() / int64(snapshotReconcilerInterval/time.Second))
+			missing = backfillRotateWindow(missing, tick*backfillMaxTargetsPerSweep)
+			missing = missing[:backfillMaxTargetsPerSweep]
+		}
+		_, _, ready, failed, distErr := backfillDistribute(ctx, req, nil, artifact, def.TemplateID, job.JobID, missing, replicaWriteNone)
 		logger.Infof("jfs artifact backfill: %d node(s) missing the ext4 artifact, distributed ready=%d failed=%d err=%v",
-			len(missing), ready, failed, distErr)
+			missingTotal, ready, failed, distErr)
 		return distErr
 	}
-	// The generated create request and the writable layer size are persisted
-	// on the ARTIFACT row (finalizeRemoteArtifact), not on the job.
-	if strings.TrimSpace(artifact.GeneratedRequestJSON) == "" {
-		return fmt.Errorf("artifact %s has no generated request snapshot; redo the template once to materialize it", artifact.ArtifactID)
-	}
-	var generatedReq types.CreateCubeSandboxReq
-	if err := json.Unmarshal([]byte(artifact.GeneratedRequestJSON), &generatedReq); err != nil {
-		return fmt.Errorf("decode generated request snapshot: %w", err)
+	// The artifact row may be SHARED between templates (identical
+	// fingerprint): GeneratedRequestJSON carries the FIRST builder's
+	// template id, so the per-template request must be rebuilt from THIS
+	// job's request or the node gets prepared for the wrong template.
+	var imageCfg DockerImageConfig
+	if strings.TrimSpace(artifact.ImageConfigJSON) != "" {
+		imageCfg, err = decodeImageConfigJSON(artifact.ImageConfigJSON)
+		if err != nil {
+			return fmt.Errorf("decode artifact image config: %w", err)
+		}
 	}
 	if strings.TrimSpace(req.WritableLayerSize) == "" {
 		req.WritableLayerSize = artifact.WritableLayerSize
+	}
+	req.TemplateID = def.TemplateID
+	generatedReq, err := generateTemplateCreateRequest(ctx, withResolvedTemplateUser(req, resolvedTemplateUserFromArtifact(artifact)), artifact, imageCfg, artifact.MasterNodeIP)
+	if err != nil {
+		return fmt.Errorf("generate template create request: %w", err)
+	}
+	generatedTemplateID := strings.TrimSpace(generatedReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
+	if generatedTemplateID != def.TemplateID {
+		return fmt.Errorf("generated template request id mismatch: got %q, want %q", generatedTemplateID, def.TemplateID)
 	}
 
 	instanceType := def.InstanceType
@@ -196,20 +211,257 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		return nil
 	}
 
-	// Serialize against a live create/redo resume of the same artifact: the
-	// callback goroutine and the stuck-BUILT replay both take this lock.
-	release := acquireResumeArtifactLock(artifact.ArtifactID)
-	defer release()
-
+	// No artifact lock: replica-row safety is enforced at the write.
 	logger := log.G(ctx).WithFields(map[string]any{
 		"component":   "image_job_reconcile",
 		"template_id": def.TemplateID,
 		"artifact_id": artifact.ArtifactID,
 	})
-	_, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing, true)
+	// A redo can switch the definition to a new artifact mid-pass; acting
+	// from this stale view would delete the fresh package it just built.
+	// Skip — the next tick loads the new artifact. (Narrows, not closes, the
+	// window: the prepare-time recheck below still guards it.)
+	definition, err := backfillGetDefinition(ctx, def.TemplateID)
+	if err != nil {
+		if errors.Is(err, ErrTemplateNotFound) {
+			return nil
+		}
+		return fmt.Errorf("recheck definition before cleanup: %w", err)
+	}
+	if definition.Status != StatusReady {
+		logger.Infof("template replica backfill: definition status is %s, skipping this pass", definition.Status)
+		return nil
+	}
+	if want := strings.TrimSpace(definition.RootfsArtifactID); want != "" && want != artifact.ArtifactID {
+		logger.Infof("template replica backfill: definition switched artifact (%s -> %s), skipping this pass", artifact.ArtifactID, want)
+		return nil
+	}
+	if len(missing) > backfillMaxTargetsPerSweep {
+		missing = backfillPrioritizeFresh(replicas, missing)
+		logger.Infof("template replica backfill: %d node(s) missing, capping this sweep at %d", len(missing), backfillMaxTargetsPerSweep)
+		missing = missing[:backfillMaxTargetsPerSweep]
+	}
+	readyTargets, _, ready, failed, distErr := backfillDistribute(ctx, req, generatedReq, artifact, def.TemplateID, job.JobID, missing, replicaWriteRepair)
 	logger.Infof("template replica backfill: %d node(s) missing a READY replica, distributed ready=%d failed=%d err=%v",
 		len(missing), ready, failed, distErr)
+
+	// Stale rows mean leftover CoW state that AppSnapshot refuses to
+	// overwrite; clear them redo-style first. Distribute can take minutes
+	// and a redo may converge rows meanwhile, so derive the set from a
+	// fresh listing, not the pre-distribution view.
+	replicas, err = backfillReplicas(ctx, def.TemplateID)
+	if err != nil {
+		logger.Warnf("template replica backfill: skip stale cleanup, list replicas fail, template=%s err=%v", def.TemplateID, err)
+	} else {
+		stale := make([]models.TemplateReplica, 0, len(replicas))
+		for _, replica := range replicas {
+			// In-flight rows (just distributed) are included: the node's
+			// package may predate the row — a lost row does not remove the
+			// package, and AppSnapshot refuses to overwrite it.
+			if replicaNeedsRedo(replica) {
+				stale = append(stale, replica)
+			}
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, backfillCleanupTimeout)
+		if cerr := backfillCleanupReplicas(cleanupCtx, def.TemplateID, stale, readyTargets, storageBackendFromCreate(generatedReq)); cerr != nil {
+			logger.Warnf("template replica backfill: cleanup stale replicas fail, template=%s err=%v", def.TemplateID, cerr)
+		}
+		cleanupCancel()
+		// A concurrent redo may have converged nodes while distribute
+		// ran: skip preparing them instead of re-snapshotting into
+		// AppSnapshot's AlreadyExists.
+		readyTargets = nodesWithoutReadyReplica(replicas, readyTargets)
+	}
+	sem := make(chan struct{}, backfillPrepareConcurrency)
+	var wg sync.WaitGroup
+	var preparedMu sync.Mutex
+	prepared := make([]ReplicaStatus, 0, len(readyTargets))
+	for _, target := range readyTargets {
+		target := target
+		if target == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := ctx.Err(); err != nil {
+				return
+			}
+			replica, persisted := backfillPrepareReplicaOnNode(ctx, def, instanceType, artifact, job, target, generatedReq)
+			if persisted && replica.Status == ReplicaStatusReady {
+				preparedMu.Lock()
+				prepared = append(prepared, replica)
+				preparedMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	// Publish once for all rows: InvalidateImageState wipes the whole
+	// template's registrations, so per-goroutine publish would stomp.
+	if len(prepared) > 0 {
+		invalidateTemplateCaches(def.TemplateID)
+		// The re-register must cover the FULL READY set, not just the
+		// backfilled subset, or previously READY nodes lose locality until
+		// the next DB reload (same shape as refreshTemplateReplicaSummary).
+		fresh, ferr := backfillReplicas(ctx, def.TemplateID)
+		if ferr != nil {
+			logger.Warnf("template replica backfill: re-register from fresh listing fail, template=%s err=%v", def.TemplateID, ferr)
+			registerReadyTemplateReplicas(def.TemplateID, prepared)
+		} else {
+			current := make([]ReplicaStatus, 0, len(fresh))
+			for _, r := range fresh {
+				current = append(current, replicaModelToStatus(r))
+			}
+			registerReadyTemplateReplicas(def.TemplateID, current)
+		}
+	}
 	return distErr
+}
+
+// backfillCleanupTimeout bounds one cleanup batch (one RPC per node,
+// sequential) against a hung cubelet. shortcut: per-batch budget — a batch
+// with more stale nodes than fit in 60s partially fails and is retried next
+// tick; the real fix is a timeout on the CleanupTemplate RPC itself
+// (cubelet/actions.go), which also covers the delete path.
+const backfillCleanupTimeout = 60 * time.Second
+
+// backfillPrepareConcurrency bounds parallel AppSnapshot prepares so a
+// scale-out does not hold the cluster-wide reconcile lock serially.
+const backfillPrepareConcurrency = 4
+
+// backfillMaxTargetsPerSweep caps the nodes one sweep pushes + prepares: at
+// minutes per node an unbounded sweep would hold the cluster-wide reconcile
+// lock for hours. The remainder retries next tick.
+const backfillMaxTargetsPerSweep = 64
+
+// backfillRotateWindow left-rotates targets by offset so a capped sweep
+// starts at a different position each tick.
+func backfillRotateWindow(targets []*node.Node, offset int) []*node.Node {
+	if len(targets) == 0 {
+		return targets
+	}
+	offset %= len(targets)
+	if offset < 0 {
+		offset += len(targets)
+	}
+	return append(targets[offset:], targets[:offset]...)
+}
+
+// backfillPrioritizeFresh puts nodes with no replica row ahead of FAILED
+// retries: the cap truncates the tail and retries re-enter missing every
+// sweep, so a persistent failure block would otherwise starve the tail.
+func backfillPrioritizeFresh(replicas []models.TemplateReplica, missing []*node.Node) []*node.Node {
+	rowed := make(map[string]struct{}, len(replicas)*2)
+	for _, r := range replicas {
+		if id := strings.TrimSpace(r.NodeID); id != "" {
+			rowed[id] = struct{}{}
+		}
+		if ip := strings.TrimSpace(r.NodeIP); ip != "" {
+			rowed[ip] = struct{}{}
+		}
+	}
+	fresh := make([]*node.Node, 0, len(missing))
+	retries := make([]*node.Node, 0, len(missing))
+	for _, t := range missing {
+		if t == nil {
+			continue
+		}
+		if _, ok := rowed[t.ID()]; ok {
+			retries = append(retries, t)
+			continue
+		}
+		if _, ok := rowed[t.HostIP()]; ok {
+			retries = append(retries, t)
+			continue
+		}
+		fresh = append(fresh, t)
+	}
+	return append(fresh, retries...)
+}
+
+// backfillPrepareReplicaOnNode prepares one target and persists the outcome
+// (FAILED rows included — they are what the next sweep retries).
+//
+// It returns (replica, true) only when a READY row is in place (written by this
+// pass or kept from a concurrent job); failed and skipped outcomes are both
+// (replica, false).
+//
+// The definition is re-checked before every persist: a DeleteTemplate
+// mid-prepare must not be resurrected as a fresh READY row, and a redo that
+// switched the artifact must not have its fresh row clobbered by our stale
+// result.
+func backfillPrepareReplicaOnNode(ctx context.Context, def backfillDefinition, instanceType string, artifact *models.RootfsArtifact, job *models.TemplateImageJob, target *node.Node, generatedReq *types.CreateCubeSandboxReq) (ReplicaStatus, bool) {
+	logger := log.G(ctx).WithFields(map[string]any{
+		"component":   "image_job_reconcile",
+		"template_id": def.TemplateID,
+		"artifact_id": artifact.ArtifactID,
+	})
+	replica, _ := backfillCreateReplica(ctx, target, def.TemplateID, generatedReq, replicaRunOptions{
+		ArtifactID: artifact.ArtifactID,
+		JobID:      job.JobID,
+	})
+	dropNodePackage := func() {
+		dropCtx, cancel := context.WithTimeout(ctx, backfillCleanupTimeout)
+		defer cancel()
+		if cerr := backfillCleanupReplicas(dropCtx, def.TemplateID,
+			[]models.TemplateReplica{{NodeID: replica.NodeID, NodeIP: replica.NodeIP}},
+			[]*node.Node{target}, storageBackendFromCreate(generatedReq)); cerr != nil {
+			logger.Warnf("template replica backfill: drop node package cleanup fail, node=%s err=%v", target.ID(), cerr)
+		}
+	}
+	definition, err := backfillGetDefinition(ctx, def.TemplateID)
+	if err != nil {
+		if errors.Is(err, ErrTemplateNotFound) {
+			// DeleteTemplate won the race: drop the just-created node
+			// package and persist nothing, or it leaks on disk.
+			if replica.Status == ReplicaStatusReady {
+				dropNodePackage()
+			}
+			logger.Warnf("template replica backfill: definition gone mid-prepare, dropped node package, node=%s", target.ID())
+		} else {
+			logger.Warnf("template replica backfill: recheck definition before persist fail, node=%s err=%v", target.ID(), err)
+		}
+		return replica, false
+	}
+	if definition.Status != StatusReady && definition.Status != StatusPartiallyReady {
+		// Terminal status: the template is going away, so reclaim the package.
+		// A transitional one belongs to a concurrent build — leave it alone.
+		if backfillDefinitionTerminal(definition.Status) && replica.Status == ReplicaStatusReady {
+			dropNodePackage()
+		}
+		logger.Infof("template replica backfill: definition status is %s, dropped prepare outcome, node=%s", definition.Status, target.ID())
+		return replica, false
+	}
+	if want := strings.TrimSpace(definition.RootfsArtifactID); want != "" && want != artifact.ArtifactID {
+		// Redo switched the definition to a new artifact mid-prepare:
+		// persist nothing, or our stale-artifact outcome would clobber
+		// the redone row. Do NOT drop the node package — snapshots are
+		// keyed by template id, so the cleanup could delete the fresh
+		// package a concurrent redo just created on this node.
+		logger.Warnf("template replica backfill: definition points at artifact %s now, dropped stale prepare outcome, node=%s", want, target.ID())
+		return replica, false
+	}
+	if err := backfillUpsertReplica(ctx, def.TemplateID, instanceType, replica); err != nil {
+		logger.Warnf("template replica backfill: persist prepare result fail, node=%s err=%v", target.ID(), err)
+		return replica, false
+	}
+	if replica.Status != ReplicaStatusReady {
+		logger.Warnf("template replica backfill: prepare replica fail, node=%s err=%s", target.ID(), replica.ErrorMessage)
+		return replica, false
+	}
+	return replica, true
+}
+
+// backfillDefinitionTerminal reports whether the template is going away.
+func backfillDefinitionTerminal(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case StatusFailed, StatusDeleting:
+		return true
+	default:
+		return false
+	}
 }
 
 // nodesWithoutReadyReplica returns the targets that do not hold a READY,

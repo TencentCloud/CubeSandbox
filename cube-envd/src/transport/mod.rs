@@ -95,8 +95,14 @@ pub fn build_router_with_connect(state: Arc<AppState>, connect: ConnectRouter) -
                 .head(health_method_not_allowed)
                 .fallback(health_method_not_allowed),
         )
-        .fallback(http_not_found)
         .with_state(state.clone());
+    if let Some(tracer) = crate::telemetry::http_tracer() {
+        router = router.route_layer(middleware::from_fn_with_state(
+            tracer,
+            crate::telemetry::trace_http_request,
+        ));
+    }
+    router = router.fallback(http_not_found);
     router = connect::register(router, connect);
     router
         .layer(middleware::from_fn_with_state(

@@ -19,10 +19,6 @@
 
 `unknown` 并不等于"已经没了"：上述三种情况 CubeAPI 都会报 `unknown`。上表的 `terminated` 描述的是 `kill()` 与 `on_timeout="kill"` 的结果；容器自行退出时报的是 `unknown`，而不是另一个独立的终态。因为这几种情况共用一个取值，只看 `state` 无法区分沙箱是还在启动还是已经死了——判据是 `POST /sandboxes/<id>/connect`：容器已经退出时返回 HTTP 409（`... is not connectable in state 'stopped'`），另外两种情况仍能正常 connect。
 
-`GET /sandboxes/<id>` 可以返回 `errorReason`，这是 CubeSandbox 扩展，e2b API 中没有对应字段。它包含主容器已保存的状态或退出原因：主容器由 `FirstContainerName` 指定，旧记录中该字段为空时回退到沙箱 ID（`box.ID`）。其他容器的原因和内部状态消息不会返回。原因缺失、为空或仅包含空白字符时会省略该字段，使用旧版 Cubelet 或 CubeMaster 时也是如此。
-
-普通容器退出会记录 `"Completed"`（退出码为 0）、`"Error"`（非零退出码，包括进程被终止）或 `"SandboxCrashed"`（shim 消失）。`"OOMKilled"` 表示因内存不足退出，同一次运行的后续退出事件不会覆盖这个更具体的原因；恢复时若容器不再处于退出状态，则清除退出原因。Cubelet 的退出状态映射为公开 API 的 `state: "unknown"`；详情 API 不返回 `"exited"` 状态。`"PauseFailed"` 表示暂停失败，此时容器可能仍然存活：状态通常为 `"unknown"`，但 Cubelet 重启后可能为 `"running"`。原因字段不改变 `state`，也不会在沙箱删除后保留历史。`restartStatus` 单独记录最近一次退出和重启决策。查看主容器当前保存的状态时使用 `errorReason`，查看重启管理器最近记录的退出原因时使用 `restartStatus.lastExitReason`；重启记录尚未更新、暂停或删除导致跳过记录，或 `errorReason` 为 `"PauseFailed"` 时，两者可能不同。
-
 状态转换主要由两个参数驱动：
 
 - **`timeout`**（可选）：沙箱**空闲**多久后触发超时，单位为**秒**（e2b 的 `timeoutMs` 是毫秒）。不传时由服务端决定；SDK 不再自带 300 秒之类的默认值。
@@ -57,6 +53,20 @@ Go：`cubesandbox.NeverTimeout`；Python：`from cubesandbox import NEVER_TIMEOU
                      │ kill()               │ kill()
                      └──────────────────────┘
 ```
+
+### 异常与退出原因（`errorReason`）
+
+当沙箱进入 `unknown` 或发生暂停失败时，可通过 `GET /sandboxes/<id>` 返回的 `errorReason` 查看原因（CubeSandbox 扩展字段，e2b API 中无对应字段；仅反映主容器，正常运行或无异常记录时省略）：
+
+| 取值 | 含义 |
+|------|------|
+| `Completed` | 主进程正常退出（退出码 0） |
+| `Error` | 主进程异常退出（非零退出码或被信号终止） |
+| `OOMKilled` | 因内存不足被终止 |
+| `SandboxCrashed` | 沙箱运行时异常中断 |
+| `PauseFailed` | 暂停失败（沙箱可能仍在运行） |
+
+`errorReason` 仅提供诊断信息，不改变 `state`；沙箱恢复运行后会清除旧的退出原因，删除后不保留历史。若沙箱启用了自动重启，重启进度和最近一次触发重启的原因请看[查询重启状态](#查询重启状态)。
 
 ## 创建沙箱
 
@@ -163,7 +173,9 @@ sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300)  # 从快照恢复，
 sandbox.run_code("print('back!')")    # 像没暂停过一样继续用
 ```
 
-未关闭的 `cubecli exec` / 交互会话会阻止 Pause。Cubelet 仍返回 `TaskPauseFailed`（130588）和 “pause forbidding / terminate exec tasks first” 类错误，但沙箱保持 `running`（不会落成 `unknown(failed)`）。会话结束后 auto-pause 会重试。该 busy-reject 处理需要 Cubelet、CubeMaster 与 CubeShim 一起升级（`CheckPauseAllowed` 预检在 CubeShim）；只升一侧可能导致状态展示或快照血缘短暂不对。
+未关闭的 `cubecli exec` / 交互会话会阻止 Pause。Cubelet 仍返回 `TaskPauseFailed`（130588）和 “pause forbidding / terminate exec tasks first” 类错误，但沙箱保持 `running`（不会落成 `unknown(failed)`）。会话结束后 auto-pause 会重试。
+
+Cubelet 只有在 shim 声明支持 `CheckPauseAllowed`（shim 能力声明中的 `update.check_pause_allowed`）时才会先做该预检——见[快照能力声明](#快照能力声明)。没有声明的 shim 不再被调用，Pause 直接走 `PauseToSnapshot`，由它在冻结前做同样的检查。该 busy-reject 处理仍需要 Cubelet、CubeMaster 与 CubeShim 一起升级：分类发生在 CubeMaster，只升一侧可能导致状态展示或快照血缘短暂不对。新版 CubeShim 会在拒绝信息前加 `shim_error_pause_busy` 错误码，CubeMaster 同时识别该错误码与历史文案，因此无论滚动升级的先后顺序如何，分类都不会失效。
 
 `pause()` **不会取消**空闲回收。默认 `on_timeout="kill"` 时，之后被暂停的沙箱空闲仍超过 `timeout` 一样会被销毁。若要保住暂停中的沙箱，请传 `timeout=NEVER_TIMEOUT`、省略 `timeout`（且服务端未设正数默认）、或把 `timeout` 设得足够大——见下文 [行为说明](#行为说明)。
 
@@ -197,6 +209,24 @@ Resume 会重建 guest NIC／主机端口，并重写 Redis 沙箱代理路由�
 **CubeMaster 与 CubeProxy 必须配置相同的 admin token**：Helm 安装由 Chart 自动完成，手写部署需自行对齐。两端不一致时清理会返回 **403**，旧路由不会自行过期，沙箱将一直不可达。
 
 轮换 `lifecycleManager.adminToken` 时，master、proxy、lifecycle-manager 会在同一次 `helm upgrade` 中依次滚动；滚动完成前发起的 Resume 可能因旧 token 仍被校验而失败。请等滚动结束后重试。
+
+## 快照能力声明
+
+快照走哪条捕获路径取决于**该沙箱所用组件**的能力，因此由各组件自行声明，而不是靠 Cubelet 推断。每个组件都在自己的 `version` 标记旁发布一份 `capabilities.json`（详见 `CubeShim/docs/shimapi/README.md`）：
+
+* `cube-shim` 声明它路由了哪些捕获动作。
+* `cube-agent` 声明 guest 能否冻结文件系统。
+
+Cubelet 从本机已保存的各版本组件目录里直接读取，因此**不按沙箱写文件、也不按沙箱探测**，每个沙箱始终按它创建时所用的确切版本判定。
+
+早于该机制的发布版本由 Cubelet 内一张冻结的历史表覆盖，其沙箱行为与升级前完全一致。对于 Cubelet 完全无法识别的沙箱，仍沿用历史上的 best-effort 路径——**未知不会被当作“不支持”**。
+
+对用户可感知的影响：
+
+* **没有固定 shim 版本的沙箱，在所用 shim 支持时，full 快照改走协调一致的路径**。此前这类沙箱会被静默降级到 legacy best-effort 路径，其 rootfs 捕获在 `jfs` 上可能出现撕裂。快照仍然是 full 快照，改变的只是捕获方式，一致性严格更好。
+* **注定失败的 fs-only 快照会被提前拒绝**：当 shim 或其背后的 guest agent 明确表示无法在不捕获内存的情况下捕获时，Cubelet 会在暂停 VM 之前返回 `409 snapshot_filesystem_only_unsupported_node`。此前同一个请求会先暂停 guest 再失败。
+* **不对未声明预检的 shim 调用 Pause 预检**：这只是省掉一次无用的往返；存在 exec 会话时 Pause 仍会被拒绝。
+* 完全无法识别组件的沙箱行为不变，与升级前一致。
 
 ## 平台自动暂停 / 自动恢复
 
@@ -395,6 +425,29 @@ CubeSandbox 会按照 `OnFailure` 策略冷重启整个沙箱：
 这两个瞬时态期间不会自动暂停；但空闲超时照常生效，重启操作也不会重置空闲计时（空闲按[客户端活动](#何时算-活跃)计算）。对象里还有 `restartCount`、`lastExitCode`、`lastExitReason`、`lastRestartAt` 等字段，可用于定位退出原因。
 
 暂停不算一次重启：`pause()` 后恢复会保留 `restartCount` 与退出诊断信息，退避间隔也从该计数继续计算。只有稳定期重置才会清零它，因此已经达到 `maxRestarts` 的沙箱即便中间暂停再恢复，下一次退出后仍会停止重启。
+
+**`errorReason` 与 `restartStatus.lastExitReason` 的区别**：
+
+- `errorReason`（仅详情接口）反映主容器**当前**保存的异常或退出原因；宿主机断电这类未产生退出事件的场景下可能为空。
+- `restartStatus.lastExitReason` 反映重启管理器记录的**最近一次触发重启决策的原因**（包括存活探针失败 `LivenessProbeFailed`、宿主机断电 `SandboxCrashed` 等）。排查重启过程时以 `restartStatus` 为准。
+
+### 宿主机宕机与 Cubelet 重启后的恢复
+
+宿主机断电、内核崩溃或其他导致整机重启的故障不会留下退出事件：容器运行时状态在 tmpfs 上，随机器一起消失，沙箱来不及记录自己是怎么结束的。Cubelet 启动时会重新读取每个沙箱的真实状态，并按下列规则决定是否拉起：
+
+| 恢复时看到的状态 | 判定 | 结果 |
+|---|---|---|
+| 找不到容器或 task，且此前没有记录过退出 | **`SandboxCrashed`**（`lastExitCode` 为 `0`） | `OnFailure`、`Always` 按退避策略冷重启；`Never` 不重启 |
+| task 处于停止状态，带真实退出码 | 按真实退出码判定：`0` 为 `Completed`，非 0 为 `Error` | `OnFailure` 只在非 0 时重启；退出码与原因会写入 `restartStatus` |
+| 崩溃前已因存活探针失败、OOM 等进入退避 | 沿用那条记录的原因 | 继续按原退避与 `maxRestarts` 计数重试 |
+
+宿主机宕机按崩溃处理，因此**断电重启不会让 `OnFailure` 沙箱停在 `Succeeded`**；`restartStatus.lastExitReason` 会记录 `"SandboxCrashed"`。
+
+Cubelet 自身重启（不是宿主机宕机）时，VM 通常仍在运行，恢复只重挂存活探针，不改变任何状态。若 VM 恰好在 Cubelet 停止期间正常退出（退出码 0），`OnFailure` 仍按真实退出码判为 `Completed` 并进入 `Succeeded`，不会误重启；若它以非 0 退出，则按真实退出码重启。上一次运行留下的 `lastExitCode` / `lastExitReason` 只用于展示诊断信息，不参与本次判定。
+
+以下情况一律不会被自动拉起：`Never`、暂停中的沙箱、已进入终态（`GaveUp`、`Succeeded`、`Failed`）的沙箱，以及正在被删除的沙箱。
+
+大批量沙箱同时恢复时，节点按固定并发上限分批重建（默认 16，远低于节点自身的创建/销毁并发上限），其余沙箱保持 `BackOff` 排队。排队期间不消耗 `maxRestarts`：被节点并发限制拒绝的尝试不算一次重启失败。
 
 ## 下一步
 

@@ -189,7 +189,15 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	shimCapability := resolveShimSnapshotCapability(cb)
+	shimCapability := s.resolveSandboxShimCapabilities(prepareCtx, cb)
+
+	// Refuse fs-only up front only on a positive cannot (see fsOnlyRefusal).
+	guestCapability := s.resolveSandboxGuestCapabilities(prepareCtx, cb)
+	if refusal := fsOnlyRefusal(shimCapability, guestCapability, mode); refusal != "" {
+		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+		rsp.Ret.RetMsg = fsOnlyRefusalMessage(refusal, shimCapability, guestCapability)
+		return rsp, nil
+	}
 
 	sourceRootfs, err := storage.GetSandboxRootfsFor(prepareCtx, backend, rsp.SandboxID, rootVolumeName)
 	if err != nil {
@@ -333,6 +341,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 
 	if useCoordinatedSnapshotPath(shimCapability, mode) {
+		recordShimCapabilityDecision(decisionCoordinatedCapture, shimCapability)
 		captureStarted := false
 		var freezeLease *snapshotFreezeLease
 		snapshotErr, rootfsErr, resumeErr = runSnapshotWithRootfs(func() (err error) {
@@ -361,7 +370,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			if captureErr == nil {
 				captureErr = recordWritableLayer(layout.MetaWork, effectiveSandboxWritableLayer(cb))
 			}
-			if shimSnapshotUnsupported(captureErr) {
+			if shimRejectsCapture(captureErr, shimCapability) {
 				captureStarted = false
 				// A mislabeled shim rejected the action before touching the VM,
 				// so its previous incremental baseline is still valid.
@@ -369,14 +378,14 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 					cb.RestoreMemoryLineage(previousLineage)
 					if restoreErr := s.cubeboxMgr.cubeboxManger.SyncByID(captureCtx, cb.ID); restoreErr != nil {
 						cb.ClearRuntimeBase()
-						return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr), restoreErr)
+						return fmt.Errorf("%w; failed to restore runtime snapshot binding: %v", snapshotCaptureError(captureErr, shimCapability), restoreErr)
 					}
 				}
 			}
 			if captureErr == nil {
 				freezeLease = s.startSnapshotLeaseRenewal(frozenCtx, cb, rsp.TemplateID, frozenCancel)
 			}
-			return snapshotCaptureError(captureErr)
+			return snapshotCaptureError(captureErr, shimCapability)
 		}, func() (err error) {
 			rootfsCtx, span := telemetry.StartIfTraced(frozenCtx, telemetry.SpanTemplateCommitRootfs,
 				trace.WithAttributes(phaseAttrs...))
@@ -404,20 +413,15 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 			defer endCommitPhase(span, &err)
 			return errors.Join(leaseErr, s.resumeSnapshotWithShim(resumeSpanCtx, cb, rsp.TemplateID))
 		})
-		// A shim whose recorded pin is at or above the boundary but which rejects
-		// the action means the version gate guessed wrong about it. The shim
-		// rejects an unknown action at update_route's match arm, before entering
-		// any handler (CubeShim/shim/src/service/update_ext.rs), so the VM was
-		// never frozen and no artifact was committed -- the whole transaction can
-		// safely be redone on the legacy path, which also preserves this entry
-		// point's rootfs-then-memory order. The legacy path never re-enters the
-		// coordinated one, so this retries at most once.
-		if shouldRetryWithLegacy(snapshotErr, rootfsErr, mode) {
-			logShimDegradedToLegacy(stepLog, shimCapability.Version)
+		// The declaration was wrong for this shim: it rejected the action before
+		// freezing the VM, so the transaction can be redone on the legacy path,
+		// which keeps this entry point's rootfs-then-memory order. Retries happen once.
+		if shouldRetryWithLegacy(snapshotErr, rootfsErr, mode, shimCapability) {
+			logShimDegradedToLegacy(stepLog, shimCapability)
 			snapshotErr, rootfsErr = runLegacy()
 		}
 	} else {
-		logSnapshotPathSelection(stepLog, shimCapability)
+		_ = capturePathDecision(stepLog, shimCapability)
 		snapshotErr, rootfsErr = runLegacy()
 	}
 	if snapshotErr != nil {
@@ -426,7 +430,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		}
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		fsOnlyUnsupported := filesystemOnlyUnsupportedMessage(snapshotErr, shimCapability.Version, mode)
+		fsOnlyUnsupported := filesystemOnlyUnsupportedMessage(snapshotErr, shimCapability, mode)
 		if fsOnlyUnsupported != "" || errors.Is(snapshotErr, errSnapshotShimIncompatible) || filesystemOnlyPrecondition(snapshotErr) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		}
@@ -798,7 +802,7 @@ func declaredPluginVolumes(annotations map[string]string) (map[string]string, er
 	if annotations == nil {
 		return result, nil
 	}
-	raw := strings.TrimSpace(annotations["plugin-volume-sources"])
+	raw := strings.TrimSpace(annotations[cubebox.AnnotationPluginVolumeSources])
 	if raw == "" || raw == "[]" || strings.EqualFold(raw, "null") {
 		return result, nil
 	}

@@ -148,7 +148,7 @@ func (a *Adapter) List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 }
 
 // ListIncompleteUploads is a compatibility stub. Production cleanup is
-// Store.GC / bucket lifecycle, not Adapter MPU listing.
+// Store.GC, not Adapter MPU listing.
 func (a *Adapter) ListIncompleteUploads(context.Context, string) ([]IncompleteUpload, error) {
 	return nil, nil
 }
@@ -159,10 +159,6 @@ func (a *Adapter) AbortMultipartUpload(context.Context, string, string) error {
 }
 
 func (a *Adapter) EnsureBucket(ctx context.Context) error {
-	return a.Store.Prepare(ctx)
-}
-
-func (a *Adapter) EnsureLifecycle(ctx context.Context) error {
 	return a.Store.Prepare(ctx)
 }
 

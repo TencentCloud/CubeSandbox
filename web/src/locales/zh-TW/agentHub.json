@@ -179,10 +179,10 @@
     "confirmRollback": "確定要將該數位助手回檔到選中的存檔嗎？當前未儲存的狀態可能會被覆蓋。",
     "publishResult": "已釋出助手範本：{{templateId}}",
     "recover": {
-      "action": "一鍵自愈",
-      "recovering": "自愈中...",
+      "action": "一鍵自動修復",
+      "recovering": "自動修復中...",
       "hint": "重新啟動助手；若仍異常則自動回檔到最近的健康存檔",
-      "panelHint": "當前有 {{count}} 個健康存檔可用於自愈",
+      "panelHint": "當前有 {{count}} 個健康存檔可用於自動修復",
       "resultRestart": "已透過重新啟動恢復正常。",
       "resultRollback": "已回檔到最近的健康存檔並恢復正常。"
     },
@@ -224,13 +224,13 @@
       "renameSnapshotDescription": "為這個存檔起一個便於識別的名稱，用於版本時間線展示。",
       "markHealthyTitle": "標記為健康存檔",
       "unmarkHealthyTitle": "取消健康標記",
-      "recoverTitle": "確認一鍵自愈",
+      "recoverTitle": "確認一鍵自動修復",
       "cloneTitle": "確認建立分身",
       "publishTitle": "確認釋出助手範本"
     },
     "prompts": {
-      "markHealthy": "將該存檔標記為「健康」？崩潰自愈時會優先回滾到健康存檔。",
-      "unmarkHealthy": "取消該存檔的健康標記？取消後它將不再作為自愈回滾錨點。",
+      "markHealthy": "將該存檔標記為「健康」？崩潰自動修復時會優先回滾到健康存檔。",
+      "unmarkHealthy": "取消該存檔的健康標記？取消後它將不再作為自動修復回滾錨點。",
       "recover": "將先嚐試重新啟動助手；若仍異常會自動回檔到最近的健康存檔，期間助手會短暫中斷。確定繼續？",
       "clone": "將基於選中存檔建立 {{count}} 個獨立分身助手（約數秒）。分身與原助手相互獨立。確定繼續？",
       "publish": "將當前選中存檔釋出為助手範本，供團隊複用、批次孵化。確定繼續？"
@@ -266,7 +266,7 @@
         "rollback": "回檔",
         "clone": "建立分身",
         "publish_template": "釋出範本",
-        "recover": "自愈"
+        "recover": "自動修復"
       },
       "status": {
         "running": "進行中",

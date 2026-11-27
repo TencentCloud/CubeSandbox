@@ -89,6 +89,16 @@ func JoinKey(prefix, key string) string {
 	}
 }
 
+// JoinPrefix joins a namespace and a listing or GC prefix. An empty prefix
+// selects the whole namespace; a trailing slash limits matches to a directory.
+func JoinPrefix(namespace, prefix string) string {
+	full := JoinKey(namespace, prefix)
+	if full != "" && (prefix == "" || strings.HasSuffix(prefix, "/")) {
+		return full + "/"
+	}
+	return full
+}
+
 // ArtifactExt4Key is the object key CubeTemplateCenter and CubeMaster share
 // for a rootfs artifact: [prefix/]<artifactID>.ext4.
 func ArtifactExt4Key(prefix, artifactID string) string {

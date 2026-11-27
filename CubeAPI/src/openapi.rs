@@ -21,7 +21,7 @@ use crate::{
         TemplateAliasLookupResponse, TemplateBuildJob, TemplateBuildStatus,
         TemplateCompatAdoptResponseView, TemplateCompatMatrixView, TemplateCompatRowView,
         TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
-        UpdateSandboxNetworkRequest, Volume, VolumeAndToken,
+        UpdateSandboxNetworkRequest, Volume, VolumeAndToken, VolumeDetails,
     },
 };
 
@@ -149,7 +149,8 @@ impl Modify for SecurityAddon {
         NewVolume,
         NewVolumeV2,
         Volume,
-        VolumeAndToken
+        VolumeAndToken,
+        VolumeDetails
     )),
     modifiers(&SecurityAddon),
     tags(

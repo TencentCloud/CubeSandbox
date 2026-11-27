@@ -366,6 +366,20 @@ func TestDestroyDoesNotInterpretErrorKind(t *testing.T) {
 	})
 }
 
+func TestDestroyRejectsIncompleteOutcome(t *testing.T) {
+	for _, kind := range []string{"destroy_not_started", "destroy_retryable"} {
+		t.Run(kind, func(t *testing.T) {
+			p, _ := newTestBinaryPlugin(t, "")
+			setTestBinaryResponse(t, fmt.Sprintf(`{"error_kind":%q}`, kind), "", 0)
+			err := p.Destroy(context.Background(), "vol-kind", "")
+			var unstarted *plugin.NotStartedError
+			if err == nil || errors.As(err, &unstarted) || errors.Is(err, plugin.ErrDestroyRetryable) {
+				t.Fatalf("incomplete Destroy outcome must remain unknown: %v", err)
+			}
+		})
+	}
+}
+
 // waitTestBinaryReady ensures typed stdout was written before interruption,
 // so a generic result cannot pass merely because the child never produced it.
 func waitTestBinaryReady(t *testing.T, path string) *os.Process {

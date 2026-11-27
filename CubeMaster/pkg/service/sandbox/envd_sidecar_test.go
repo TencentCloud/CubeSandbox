@@ -28,7 +28,7 @@ func TestInjectEnvdSidecarWrapsEntrypoint(t *testing.T) {
 
 	injectEnvdSidecar(context.Background(), req, out)
 	assert.Equal(t, []string{"/bin/sh", "-c"}, req.Containers[0].Command)
-	assert.Contains(t, req.Containers[0].Args[0], constants.CubeEnvdInImagePath)
+	assert.Equal(t, constants.CubeEnvdInImagePath+` -isnotfc >/var/log/envd.log 2>&1 & exec "$@"`, req.Containers[0].Args[0])
 	assert.Equal(t, []string{"--", "python3", "app.py"}, req.Containers[0].Args[1:])
 	assert.Contains(t, out.ExposedPorts, int64(envdDefaultPort))
 }

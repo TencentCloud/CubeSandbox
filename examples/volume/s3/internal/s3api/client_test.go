@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -47,6 +49,139 @@ func TestPrefixHasDataDistinguishesEmptyDirectoryMarker(t *testing.T) {
 			got, err := testClient(t, srv.URL).PrefixHasData(context.Background(), "workspace/")
 			if err != nil || got != tc.want {
 				t.Fatalf("hasData=%v err=%v, want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreatePrefixWritesS3fsDirectoryMarker(t *testing.T) {
+	var got http.Header
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			got, gotPath = r.Header.Clone(), r.URL.Path
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := testClient(t, srv.URL).CreatePrefix(context.Background(), "volumes/mydata/"); err != nil {
+		t.Fatalf("CreatePrefix: %v", err)
+	}
+	if gotPath != "/test-bucket/volumes/mydata/" {
+		t.Fatalf("PUT path = %q", gotPath)
+	}
+	if ct := got.Get("Content-Type"); ct != "application/x-directory" {
+		t.Errorf("Content-Type = %q, want application/x-directory", ct)
+	}
+	if mode := got.Get("X-Amz-Meta-Mode"); mode != "16877" {
+		t.Errorf("x-amz-meta-mode = %q, want 16877 (S_IFDIR|0755)", mode)
+	}
+	for _, h := range []string{"Uid", "Gid", "Atime", "Ctime", "Mtime"} {
+		if got.Get("X-Amz-Meta-"+h) == "" {
+			t.Errorf("x-amz-meta-%s missing: s3fs rejects a mount-point marker without it", strings.ToLower(h))
+		}
+	}
+}
+
+func TestRemovePrefixDistinguishesDestroyOutcomes(t *testing.T) {
+	const objects = `<ListBucketResult><Name>test-bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>workspace/one</Key><Size>1</Size></Contents><Contents><Key>workspace/two</Key><Size>1</Size></Contents></ListBucketResult>`
+	const rejected = `<Error><Key>workspace/two</Key><Code>AccessDenied</Code><Message>rejected</Message></Error>`
+	const deleted = `<Deleted><Key>workspace/one</Key></Deleted>`
+	const unknown = `<Error><Key>workspace/one</Key><Code>InternalError</Code><Message>unknown</Message></Error>`
+	const throttle = `<Error><Code>SlowDown</Code></Error>`
+	const forbidden = `<Error><Code>AccessDenied</Code></Error>`
+	type reply struct {
+		status int
+		body   string
+	}
+	for _, tc := range []struct {
+		name      string
+		list      reply
+		retryList reply
+		deletes   []reply
+		want      error
+		unknown   bool
+	}{
+		{name: "confirmed missing bucket", list: reply{404, `<Error><Code>NoSuchBucket</Code><BucketName>test-bucket</BucketName></Error>`}},
+		{name: "different missing bucket", list: reply{404, `<Error><Code>NoSuchBucket</Code><BucketName>other</BucketName></Error>`}, want: errUnverifiedNotFound},
+		{name: "gateway 404 with request ID", list: reply{404, "route not found"}, want: errUnverifiedNotFound},
+		{name: "gateway 503 while listing", list: reply{503, "upstream unavailable"}, want: errUnverified503},
+		{name: "initial list failed before deletion", list: reply{403, forbidden}, want: ErrDestroyNotStarted},
+		{name: "partial delete acknowledged", deletes: []reply{{200, "<DeleteResult>" + deleted + rejected + "</DeleteResult>"}}, want: ErrDestroyRetryable},
+		{name: "unknown object outcome takes precedence", deletes: []reply{{200, "<DeleteResult>" + rejected + unknown + "</DeleteResult>"}}, unknown: true},
+		{name: "bare 503 while deleting", deletes: []reply{{503, "upstream unavailable"}}, want: errUnverified503},
+		{name: "connection dropped while deleting", deletes: []reply{{}}, unknown: true},
+		{name: "SlowDown recovers with one retry", deletes: []reply{{503, throttle}, {200, "<DeleteResult>" + deleted + "<Deleted><Key>workspace/two</Key></Deleted></DeleteResult>"}}},
+		{name: "SlowDown still retryable after exhaustion", deletes: []reply{{503, throttle}, {503, throttle}}, want: ErrDestroyRetryable},
+		{name: "failed relist after SlowDown stays delete-only", retryList: reply{403, forbidden}, deletes: []reply{{503, throttle}}, want: ErrDestroyRetryable},
+		{name: "unknown outcome on retry", deletes: []reply{{503, throttle}, {}}, unknown: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var deletes atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				result := tc.list
+				if r.Method == http.MethodPost {
+					if _, err := io.Copy(io.Discard, r.Body); err != nil {
+						t.Error(err)
+						return
+					}
+					index := int(deletes.Add(1)) - 1
+					if index >= len(tc.deletes) {
+						t.Error("unexpected extra delete")
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					result = tc.deletes[index]
+					if result.status == 0 {
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+						} else {
+							conn.Close()
+						}
+						return
+					}
+				} else if tc.retryList.status != 0 && deletes.Load() > 0 {
+					result = tc.retryList
+				} else if result.status == 0 {
+					result = reply{200, objects}
+				}
+				w.Header().Set("x-amz-request-id", "test-request")
+				if strings.HasPrefix(result.body, "<") {
+					w.Header().Set("Content-Type", "application/xml")
+				}
+				w.WriteHeader(result.status)
+				fmt.Fprint(w, result.body)
+			}))
+			defer srv.Close()
+			client, err := NewFor(t.Context(), Options{
+				Bucket: "test-bucket", Endpoint: srv.URL, Region: "us-east-1", MaxAttempts: 1,
+				Addressing: config.AddressingPath, AccessKeyID: "test-ak", SecretAccessKey: "test-sk",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.RemovePrefix(t.Context(), "workspace/")
+			if tc.want != ErrDestroyNotStarted && errors.Is(err, ErrDestroyNotStarted) {
+				t.Fatalf("RemovePrefix unexpectedly released the delete claim: %v", err)
+			}
+			switch {
+			case tc.want != nil:
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("RemovePrefix error = %v, want %v", err, tc.want)
+				}
+			case tc.unknown:
+				if err == nil || errors.Is(err, ErrDestroyRetryable) || errors.Is(err, ErrDestroyNotStarted) {
+					t.Fatalf("RemovePrefix error = %v, want unknown outcome", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("RemovePrefix error = %v, want success", err)
+				}
+			}
+			if got := int(deletes.Load()); got != len(tc.deletes) {
+				t.Fatalf("delete requests = %d, want %d", got, len(tc.deletes))
 			}
 		})
 	}
