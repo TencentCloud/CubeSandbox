@@ -658,6 +658,88 @@ func TestParseContainerOverridesNoDNS(t *testing.T) {
 	}
 }
 
+func TestParseContainerOverridesProbeTimeout(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantTimeout  int32
+		wantFailures int32
+	}{
+		{
+			name:         "default timeout",
+			args:         []string{"--probe", "9000"},
+			wantTimeout:  30000,
+			wantFailures: 300,
+		},
+		{
+			name:         "raised timeout for a slow guest",
+			args:         []string{"--probe", "9000", "--probe-timeout", "2m"},
+			wantTimeout:  120000,
+			wantFailures: 1200,
+		},
+		{
+			name:         "fractional duration",
+			args:         []string{"--probe", "9000", "--probe-timeout", "30.4s"},
+			wantTimeout:  30400,
+			wantFailures: 304,
+		},
+		{
+			name:         "failure threshold rounds up",
+			args:         []string{"--probe", "9000", "--probe-timeout", "150ms"},
+			wantTimeout:  150,
+			wantFailures: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := newCreateFromImageContext(t, tt.args)
+			overrides, err := parseContainerOverrides(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if overrides == nil || overrides.Probe == nil {
+				t.Fatal("expected probe to be set")
+			}
+			probe := overrides.Probe
+			if probe.TimeoutMs != tt.wantTimeout {
+				t.Fatalf("TimeoutMs=%d, want %d", probe.TimeoutMs, tt.wantTimeout)
+			}
+			if probe.FailureThreshold != tt.wantFailures {
+				t.Fatalf("FailureThreshold=%d, want %d", probe.FailureThreshold, tt.wantFailures)
+			}
+			if probe.PeriodMs != 100 {
+				t.Fatalf("PeriodMs=%d, want 100", probe.PeriodMs)
+			}
+			if probe.ProbeTimeoutMs != 300 {
+				t.Fatalf("ProbeTimeoutMs=%d, want 300", probe.ProbeTimeoutMs)
+			}
+		})
+	}
+}
+
+func TestParseContainerOverridesProbeTimeoutRejectsInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "zero", timeout: "0s"},
+		{name: "rounds down to zero milliseconds", timeout: "500us"},
+		{name: "exceeds int32 milliseconds", timeout: "600h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := newCreateFromImageContext(t, []string{"--probe", "9000", "--probe-timeout", tt.timeout})
+			overrides, err := parseContainerOverrides(ctx)
+			if err == nil {
+				t.Fatal("expected error for invalid probe timeout")
+			}
+			if overrides != nil {
+				t.Fatalf("expected overrides to be nil on invalid probe timeout, got %+v", overrides)
+			}
+		})
+	}
+}
+
 func TestParseContainerOverridesEnableInjectEnvd(t *testing.T) {
 	ctx := newCreateFromImageContext(t, []string{"--enable-inject-envd"})
 	overrides, err := parseContainerOverrides(ctx)

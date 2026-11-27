@@ -29,6 +29,8 @@ When building a template, Cube starts the container and probes it over HTTP to d
 
 A template build selects one probe port and path. Cube repeatedly requests `http://<sandbox>:<probe-port><probe-path>` until it receives an HTTP 2xx response, then takes the snapshot.
 
+The probe has an overall timeout of `30s` by default. For images that need longer to boot, raise it with `--probe-timeout <duration>`, such as `--probe-timeout 2m` or `--probe-timeout 90s`. The flag only takes effect together with `--probe`.
+
 `envd` is a background service preinstalled in CubeSandbox base images. After a sandbox is created, SDK operations such as running commands, reading and writing files, and opening a terminal send requests to `envd` inside the sandbox. By default, `envd` listens on port `49983`, and its `/health` endpoint returns 204 when it can accept those requests.
 
 The following common configuration exposes port 49983 for `envd`, probes that port, and takes the template snapshot after `/health` succeeds:
