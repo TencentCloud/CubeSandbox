@@ -28,6 +28,9 @@ import {
 import { cn, formatRelative } from '@/lib/utils';
 import { NodeLabelsSection } from '@/components/nodes/NodeLabelsSection';
 
+// Sandbox states the list can hold, in display order for the header breakdown.
+const SANDBOX_STATES = ['running', 'paused', 'pausing', 'unknown'] as const;
+
 // ── Resource bar ──────────────────────────────────────────────────────────────
 
 function ResourceBar({ pct }: { pct: number }) {
@@ -765,6 +768,13 @@ export default function NodeDetailPage() {
 
   const nodeSandboxes = (allSandboxes ?? []).filter((sb) => sb.clientID === data?.nodeID);
 
+  // Per-state breakdown shown next to the section title. Zero-count states are
+  // dropped so only the states this node actually holds are listed.
+  const sandboxStateCounts = SANDBOX_STATES.map((state) => ({
+    state,
+    count: nodeSandboxes.filter((sb) => (sb.state ?? 'running') === state).length,
+  })).filter(({ count }) => count > 0);
+
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -1114,7 +1124,15 @@ export default function NodeDetailPage() {
         title={t('section.sandboxes')}
         action={
           nodeSandboxes.length > 0 ? (
-            <span className="text-sm text-muted-foreground">{nodeSandboxes.length} running</span>
+            <span className="text-sm text-muted-foreground">
+              <span className="text-num">{nodeSandboxes.length}</span> total
+              {sandboxStateCounts.map(({ state, count }) => (
+                <span key={state}>
+                  {' · '}
+                  <span className="text-num">{count}</span> {state}
+                </span>
+              ))}
+            </span>
           ) : undefined
         }
       >
