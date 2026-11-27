@@ -146,11 +146,11 @@ func Images(nodeStatusMaxImages int32,
 			names.Insert(image.References...)
 
 			v := names.UnsortedList()
+			sort.Strings(v)
 			if len(v) > MaxNamesPerImageInNodeStatus {
 				v = v[0:MaxNamesPerImageInNodeStatus]
 			}
 
-			sort.Strings(v)
 			imagesOnNode = append(imagesOnNode, cubeletnodemeta.ContainerImage{
 				Names:     v,
 				SizeBytes: image.Size,
