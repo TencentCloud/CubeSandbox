@@ -38,6 +38,46 @@ func TestTemplateRequestCacheReturnsClone(t *testing.T) {
 	}
 }
 
+// TestTemplateRequestCacheMaterializesDroppedRequest pins the boundary contract
+// the JSON clone used to hold by accident: entries are stored normalized, i.e.
+// with the embedded *Request dropped, and UnmarshalJSON always materialized it
+// again, so a hit never handed out a request that panics on the promoted
+// RequestID field. GetTemplateRequest hydrates its result too, but that must not
+// be the only thing standing between a caller and a nil-pointer panic.
+func TestTemplateRequestCacheMaterializesDroppedRequest(t *testing.T) {
+	templateDefinitionCache.Flush()
+	templateID := "tpl-cache-dropped-request"
+	stored := &types.CreateCubeSandboxReq{Labels: map[string]string{"k": "v"}}
+	if stored.Request != nil {
+		t.Fatal("fixture must look like a normalized stored request")
+	}
+	setTemplateRequestCache(templateID, stored)
+
+	cached, hit := getCachedTemplateRequest(templateID)
+	if !hit {
+		t.Fatal("expected cache hit")
+	}
+	if cached.Request == nil {
+		t.Fatal("cache hit returned a request with a dropped embedded request")
+	}
+	if got := cached.RequestID; got != "" {
+		t.Fatalf("expected an empty request id before hydration, got %q", got)
+	}
+
+	// The stored entry stays normalized: hydrating is per hit, not a mutation.
+	cached.RequestID = "leaked"
+	again, hit := getCachedTemplateRequest(templateID)
+	if !hit {
+		t.Fatal("expected cache hit on second read")
+	}
+	if again.Request == nil {
+		t.Fatal("second hit lost the embedded request")
+	}
+	if got := again.RequestID; got != "" {
+		t.Fatalf("a hit mutated the cached entry, got request id %q", got)
+	}
+}
+
 func TestTemplateLocalityCacheReturnsCopy(t *testing.T) {
 	templateLocalityReadyCache.Flush()
 	templateID := "tpl-locality-test"

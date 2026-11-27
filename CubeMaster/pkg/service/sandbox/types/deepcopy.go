@@ -37,10 +37,16 @@ import (
 // marshals to the same JSON as r, with a single exception: when r.Request is
 // nil it stays nil, whereas the round trip this replaced always materialized
 // &Request{} (UnmarshalJSON does that unconditionally) and so emitted
-// `"requestID":""` for an input that has no requestID key at all. Nothing
-// serializes a request with its embedded request dropped, so the difference is
-// not reachable, but it is pinned by
-// TestCreateCubeSandboxReqDeepCopyKeepsNilRequest so the claim stays honest.
+// `"requestID":""` for an input that has no requestID key at all.
+//
+// That difference is observable in process, not only in JSON: stored template
+// requests drop the embedded request, so a copy of one holds a nil where the
+// clone produced &Request{} — and the promoted RequestID field panics on a nil
+// embedded pointer. DeepCopy stays a faithful copy and does not hydrate it;
+// callers that hand out a request to be used (the template cache on every hit)
+// materialize it themselves. Both halves are pinned by
+// TestCreateCubeSandboxReqDeepCopyKeepsNilRequest and
+// TestTemplateRequestCacheMaterializesDroppedRequest.
 func (r *CreateCubeSandboxReq) DeepCopy() *CreateCubeSandboxReq {
 	if r == nil {
 		return nil
