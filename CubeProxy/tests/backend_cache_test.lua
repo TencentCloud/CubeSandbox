@@ -31,6 +31,7 @@ ngx = {
 
 local backend_cache = require "backend_cache"
 
+store["sb-1:HostID"] = "node-1"
 store["sb-1:HostIP"] = "10.0.0.1"
 store["sb-1:SandboxIP"] = "192.168.0.10"
 store["sb-1:CreatedAt"] = "1786900000000000000"
@@ -44,9 +45,10 @@ store["sb-2:HostIP"] = "10.0.0.5"
 store["cube_proxy_heartbeat_last_pushed_ms"] = "1"
 
 local deleted = backend_cache.invalidate_sandbox("sb-1")
-assert(deleted == 6, "deleted=" .. tostring(deleted))
+assert(deleted == 7, "deleted=" .. tostring(deleted))
 
 local fixed_suffixes = {
+    "HostID",
     "HostIP",
     "SandboxIP",
     "CreatedAt",

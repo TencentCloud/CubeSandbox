@@ -21,6 +21,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"gorm.io/gorm"
 )
@@ -77,6 +78,10 @@ func GenerateSnapshotID() string {
 }
 
 // Record is the Master-side pause snapshot binding.
+// Note: NodeIP returned by store reads is resolved to the node's live IP via
+// localcache.ResolveNodeIP(row.NodeID, row.NodeIP), whereas ListOptions.HostID
+// filters against the persisted columns (node_id = ? OR node_ip = ?); callers
+// should pass the stable node_id when node IPs can change.
 type Record struct {
 	SandboxID           string
 	SnapshotID          string
@@ -372,7 +377,7 @@ func recordFromModel(row *models.PauseSnapshotRecord) *Record {
 		SandboxID:           row.SandboxID,
 		SnapshotID:          row.SnapshotID,
 		NodeID:              row.NodeID,
-		NodeIP:              row.NodeIP,
+		NodeIP:              localcache.ResolveNodeIP(row.NodeID, row.NodeIP),
 		InstanceType:        row.InstanceType,
 		Status:              row.Status,
 		LastError:           strings.TrimSpace(row.LastError),

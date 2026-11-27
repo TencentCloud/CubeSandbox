@@ -140,7 +140,7 @@ Deployments; MySQL/Redis/MinIO continue to use native StatefulSets.
 - `hostNetwork: true` (host network by default; `cubeNode.hostNetwork: false` opts into the Pod network); native `apps/v1` DaemonSet.
 - **initContainer**: `wait-node-prep` (**exits 0** when the fingerprint matches; not a long-running sidecar).
 - Image / resource / Pod template changes **recreate** the Big Pod. Sandbox tap devices and cubevs hooks live in the Pod netns: on the host network they survive that, on the Pod network they do not. See [Upgrade](./upgrade.md).
-- **NodeID** = `spec.nodeName`; **Endpoint** = `status.podIP` (the node IP on the host network).
+- **NodeID** = `spec.nodeName` (`CUBE_SANDBOX_NODE_ID`); **Endpoint** = `status.podIP` (`CUBE_SANDBOX_ENDPOINT_IP`, the node IP on the host network). Because `NodeID` stays stable on the same node, control-plane (`CubeOps` / `CubeMaster`) and data-plane (`CubeProxy`) traffic resolves the node's live `Endpoint` dynamically by `NodeID` when the Pod IP changes — see [Node Operations · Node identity and dynamic IP resolution](../node-operations.md#node-identity-and-dynamic-ip-resolution).
 - toolbox **whole tree** hostPath: `/usr/local/services/cubetoolbox`.
 
 | Container | Image | Responsibility |

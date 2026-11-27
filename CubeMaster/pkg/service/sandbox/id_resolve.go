@@ -24,6 +24,7 @@ const clusterSandboxCollectConcurrency = 32
 
 type clusterSandboxEntry struct {
 	SandboxID string
+	HostID    string
 	HostIP    string
 }
 
@@ -82,6 +83,7 @@ func cacheCollectedSandboxEntries(entries []clusterSandboxEntry) {
 		}
 		localcache.SetSandboxCache(entry.SandboxID, &localcache.SandboxCache{
 			SandboxID: entry.SandboxID,
+			HostID:    entry.HostID,
 			HostIP:    entry.HostIP,
 		})
 	}
@@ -106,6 +108,7 @@ func collectPausedSandboxIDs(ctx context.Context) []clusterSandboxEntry {
 		}
 		entries = append(entries, clusterSandboxEntry{
 			SandboxID: rec.SandboxID,
+			HostID:    rec.NodeID,
 			HostIP:    rec.NodeIP,
 		})
 	}
@@ -161,6 +164,7 @@ func collectClusterSandboxIDs(ctx context.Context) []clusterSandboxEntry {
 				mu.Lock()
 				entries = append(entries, clusterSandboxEntry{
 					SandboxID: sandboxID,
+					HostID:    nodeItem.ID(),
 					HostIP:    hostIP,
 				})
 				mu.Unlock()

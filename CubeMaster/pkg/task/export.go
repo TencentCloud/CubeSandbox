@@ -30,6 +30,7 @@ type Task struct {
 	Ctx       context.Context
 	RequestId string
 	Request   any
+	NodeID    string
 	CallEp    string
 	TaskType  OpType
 

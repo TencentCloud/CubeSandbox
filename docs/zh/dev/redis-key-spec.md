@@ -1,10 +1,10 @@
 # Redis Key 命名规范
 
-> 适用范围：CubeMaster、CubeProxy 共享的 Redis 实例；CubeAPI 未来接入时亦须遵循本规范。
+> 适用范围：CubeOps、CubeMaster、CubeProxy 共享的 Redis 实例；CubeAPI 未来接入时亦须遵循本规范。
 
 ## 1. 概述
 
-CubeSandbox 多个服务（CubeMaster、CubeProxy，以及未来可能接入的 CubeAPI）共用同一 Redis 实例。为避免 key 碰撞、误删、误覆盖，以及便于 `SCAN` 治理与审计，所有 Redis key 必须遵循统一的命名空间约定。
+CubeSandbox 多个服务（CubeOps、CubeMaster、CubeProxy，以及未来可能接入的 CubeAPI）共用同一 Redis 实例。为避免 key 碰撞、误删、误覆盖，以及便于 `SCAN` 治理与审计，所有 Redis key 必须遵循统一的命名空间约定。
 
 **核心原则**：
 
@@ -57,6 +57,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | 业务含义 | Key 模式 | 数据结构 | scope | 写入方 | 读取方 | TTL |
 | --- | --- | --- | --- | --- | --- | --- |
 | 节点资源指标 | `cube:v1:master:node:metric:{nodeID}` | Hash | master | CubeMaster | CubeMaster | 刷新式（心跳续期，默认 600s） |
+| 节点实时地址表 | `cube:v1:shared:node:endpoint` | Hash | shared | CubeOps | CubeProxy | 无（注册/心跳 `HSET`，节点删除 `HDEL`） |
 | 沙箱代理路由 | `cube:v1:shared:sandbox:proxy:{sandboxID}` | Hash | shared | CubeMaster | CubeProxy | 无（生命周期由 `DEL` 管理） |
 | 实例信息 | `cube:v1:master:instance:info:{insID}` | Hash | master | CubeMaster | CubeMaster | 无 |
 | Describe 任务结果 | `cube:v1:master:task:describe:{taskID}` | Hash | master | CubeMaster | CubeMaster / 外部 | 86400s（可配置） |
@@ -84,11 +85,18 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | `nic_queues` | 网卡队列数 |
 | `data_disk_usage_per` / `storage_disk_usage_per` / `sys_disk_usage_per` | 磁盘使用率（%） |
 
+**`node:endpoint`**（节点实时地址表，跨服务契约）
+
+| field | 含义 |
+| --- | --- |
+| `{nodeID}` | 计算节点当前可拨号的 `HostIP`（CubeOps 在节点注册与心跳时更新，删除节点时移除） |
+
 **`sandbox:proxy`**（沙箱路由，跨服务契约）
 
 | field | 含义 |
 | --- | --- |
-| `HostIP` | 宿主机 IP |
+| `HostID` | 稳定的计算节点 ID（老数据可选；CubeMaster 与 CubeProxy 据此动态解析节点最新 IP，缺失时降级使用 `HostIP`） |
+| `HostIP` | 路由写入时的宿主机 IP（`HostID` 缺失或未命中时的降级地址） |
 | `SandboxIP` | 沙箱内网 IP（可选） |
 | `CreatedAt` | 创建时间 |
 | `AllowPublicTraffic` | public URL 是否无需访问令牌 |
@@ -129,6 +137,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | Key 类型 | 策略 | 说明 |
 | --- | --- | --- |
 | `node:metric` | 刷新式 TTL | 每次心跳写入后 `EXPIRE`（默认 600s）；活跃节点持续续期，下线节点自动过期清理 |
+| `node:endpoint` | 无 TTL | 由 CubeOps 维护：节点注册与每次心跳时 `HSET`，删除节点时 `HDEL`。CubeProxy 在 `ngx.shared.local_cache` 中以固定 10s TTL（命中不续期）缓存查询结果 |
 | `sandbox:proxy` | 无 TTL | 仅在沙箱创建时写入、无续期路径；生命周期由 CubeMaster 在沙箱销毁时 `DEL`。**禁止**设置短于沙箱最大存活时间的 TTL |
 | `task:describe` | 固定 TTL | 写入后 `EXPIRE`，默认 86400s（`describe_task_expire_time`） |
 | `instance:info` / `instance:meta` | 无 TTL | 随实例生命周期管理；后续可按需补充 |
@@ -143,6 +152,10 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 
 ## 7. 各服务实现约定
 
+### CubeOps（Go）
+
+- 节点地址同步：[`internal/nodemanagement/nodemetric/node_snapshot_store.go`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeOps/internal/nodemanagement/nodemetric/node_snapshot_store.go) 在写入/删除节点快照时同步维护 `cube:v1:shared:node:endpoint`（注册/心跳 `HSET`，删除 `HDEL`）
+
 ### CubeMaster（Go）
 
 - Key 构造：[`pkg/base/rediskey`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeMaster/pkg/base/rediskey/rediskey.go)
@@ -154,6 +167,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 
 - Key 构造：[`lua/redis_keys.lua`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeProxy/lua/redis_keys.lua)
 - 业务读取：[`lua/sandbox_backend.lua`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeProxy/lua/sandbox_backend.lua)、[`lua/utils.lua`](https://github.com/tencentcloud/CubeSandbox/blob/master/CubeProxy/lua/utils.lua)
+- CubeProxy 通过 `cube:v1:shared:node:endpoint` 解析 `HostID` 对应的实时节点 IP（本地缓存固定 10s TTL），缺失或未命中时降级使用 `HostIP`
 - CubeProxy **只读** `shared` 命名空间下的 key，不负责写入
 
 ### CubeAPI（Rust，预留）

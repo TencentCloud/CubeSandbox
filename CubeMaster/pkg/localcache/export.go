@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -211,6 +212,19 @@ func GetNodesByIp(ip string) (*node.Node, bool) {
 	return nil, false
 }
 
+// ResolveNodeIP returns the node's current IP from localcache when nodeID is
+// known, falling back to fallbackIP for legacy entries or unknown nodes.
+func ResolveNodeIP(nodeID, fallbackIP string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return fallbackIP
+	}
+	if n, ok := GetNode(nodeID); ok && n.IP != "" {
+		return n.IP
+	}
+	return fallbackIP
+}
+
 func UpsertNode(n *node.Node) {
 	if n == nil {
 		return
@@ -237,6 +251,7 @@ func GetSandboxProxyMap(ctx context.Context, sandboxID string) (*types.SandboxPr
 	for _, key := range rediskey.ReadKeysWithFallback(rediskey.SandboxProxy(sandboxID), rediskey.LegacySandboxProxy(sandboxID)) {
 		proxyMap, err := l.getByPassProsyFromRedis(ctx, key)
 		if err == nil && proxyMap != nil {
+			proxyMap.HostIP = ResolveNodeIP(proxyMap.HostID, proxyMap.HostIP)
 			return proxyMap, true
 		}
 	}

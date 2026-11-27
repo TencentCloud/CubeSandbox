@@ -300,7 +300,7 @@ func TestWatchPauseSettlesWithoutWaitingForTheLoop(t *testing.T) {
 		return &snapshotv1.StatusResponse{State: constants.RemoteStatusReady, RemoteReady: true}
 	})
 
-	WatchPause(context.Background(), "pause-jfs", "10.0.0.2", constants.SnapshotBackendJFS)
+	WatchPause(context.Background(), "pause-jfs", "", "10.0.0.2", constants.SnapshotBackendJFS)
 	waitRemoteStatus(t, db, constants.PauseSnapshotTableName, "pause-jfs", constants.RemoteStatusReady)
 
 	mu.Lock()
@@ -330,7 +330,7 @@ func TestWatchSnapshotStopsOnceSettledElsewhere(t *testing.T) {
 		return &snapshotv1.StatusResponse{State: constants.RemoteStatusFailed}
 	})
 
-	WatchSnapshot(context.Background(), "snap-s3", "10.0.0.1", constants.SnapshotBackendS3, `{"rootfs":"r1","memory":"m1"}`, snapshotmode.Full)
+	WatchSnapshot(context.Background(), "snap-s3", "", "10.0.0.1", constants.SnapshotBackendS3, `{"rootfs":"r1","memory":"m1"}`, snapshotmode.Full)
 	time.Sleep(3 * watchRetryGap)
 	if calls.Load() != 1 {
 		t.Fatalf("queries=%d", calls.Load())

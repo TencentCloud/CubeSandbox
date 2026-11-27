@@ -138,7 +138,7 @@ flowchart TB
 - `hostNetwork: true`（默认宿主机网络；`cubeNode.hostNetwork: false` 可改用 Pod 网络）；原生 `apps/v1` DaemonSet。
 - **initContainer**：`wait-node-prep`（指纹匹配后 **exit 0**，不作为常驻 sidecar）。
 - 镜像 / 资源 / Pod template 变更会 **recreate** Big Pod。沙箱 tap 设备与 cubevs 钩子位于 Pod netns 中：宿主机网络下重建后保留，Pod 网络下会中断。详见 [升级](./upgrade.md)。
-- **NodeID** = `spec.nodeName`；**Endpoint** = `status.podIP`（宿主机网络下即节点 IP）。
+- **NodeID** = `spec.nodeName`（`CUBE_SANDBOX_NODE_ID`）；**Endpoint** = `status.podIP`（`CUBE_SANDBOX_ENDPOINT_IP`，宿主机网络下即节点 IP）。由于同一节点上 `NodeID` 保持不变，Pod IP 变化后控制面（`CubeOps` / `CubeMaster`）与数据面（`CubeProxy`）均按 `NodeID` 动态解析最新 `Endpoint`，详见[节点相关操作 · 节点标识与动态 IP 解析](../node-operations.md#节点标识与动态-ip-解析)。
 - toolbox **整树** hostPath：`/usr/local/services/cubetoolbox`。
 
 | 容器 | 镜像 | 职责 |

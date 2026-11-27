@@ -20,6 +20,7 @@ var (
 
 type SandboxCache struct {
 	SandboxID string
+	HostID    string
 	HostIP    string
 }
 
@@ -32,7 +33,9 @@ func GetSandboxCache(sandboxID string) *SandboxCache {
 	if !ok {
 		return nil
 	}
-	return val.(*SandboxCache)
+	cp := *val.(*SandboxCache)
+	cp.HostIP = ResolveNodeIP(cp.HostID, cp.HostIP)
+	return &cp
 }
 
 func DeleteSandboxCache(sandboxID string) {
@@ -40,7 +43,16 @@ func DeleteSandboxCache(sandboxID string) {
 }
 
 func SetSandboxCache(sandboxID string, cache *SandboxCache) {
-	listCache.Store(sandboxID, cache)
+	if cache == nil {
+		return
+	}
+	cp := *cache
+	if cp.HostID == "" && cp.HostIP != "" {
+		if n, ok := GetNodesByIp(cp.HostIP); ok {
+			cp.HostID = n.ID()
+		}
+	}
+	listCache.Store(sandboxID, &cp)
 }
 
 func ListKnownSandboxIDs() []string {

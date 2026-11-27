@@ -381,6 +381,7 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 
 		l.lockMetaData.Lock()
 		old := v.(*node.Node)
+		prevIP := old.IP
 		old.IP = n.IP
 		old.UUID = n.UUID
 		old.CpuTotal = n.CpuTotal
@@ -431,6 +432,14 @@ func (l *local) updateNodeFromMetaData(n *node.Node) error {
 		prevVersions := old.Versions
 		old.Versions = n.Versions
 		l.lockMetaData.Unlock()
+
+		if prevIP != "" && prevIP != n.IP {
+			if cfg := config.GetConfig(); cfg != nil && cfg.CubeletConf != nil {
+				if _, inUse := GetNodesByIp(prevIP); !inUse {
+					grpcconn.CloseWorkerConn(cubelet.GetCubeletAddr(prevIP))
+				}
+			}
+		}
 
 		l.updateSortedNodes(old)
 

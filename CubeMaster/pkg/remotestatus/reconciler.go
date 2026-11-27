@@ -24,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	snapshotv1 "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/snapshot/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/snapshotmode"
 	"gorm.io/gorm"
@@ -45,6 +46,7 @@ type workItem struct {
 	kind       string
 	table      string
 	snapshotID string
+	nodeID     string
 	hostIP     string
 	backend    string
 	// mode and exportUUIDs are only set for user snapshots; together they
@@ -67,11 +69,12 @@ const (
 )
 
 var (
-	startOnce    sync.Once
-	queryStatus  = cubelet.SnapshotStatus
-	cubeletAddr  = cubelet.GetCubeletAddr
-	nowTimestamp = func() any { return gorm.Expr("CURRENT_TIMESTAMP") }
-	watchDB      atomic.Pointer[gorm.DB]
+	startOnce     sync.Once
+	queryStatus   = cubelet.SnapshotStatus
+	cubeletAddr   = cubelet.GetCubeletAddr
+	resolveNodeIP = localcache.ResolveNodeIP
+	nowTimestamp  = func() any { return gorm.Expr("CURRENT_TIMESTAMP") }
+	watchDB       atomic.Pointer[gorm.DB]
 )
 
 // Start runs the inprogress poller until ctx is cancelled. Safe to call
@@ -117,16 +120,16 @@ func ReconcileOnce(ctx context.Context, db *gorm.DB) {
 
 // WatchPause settles the remote_status of a pause snapshot Pause just left
 // inprogress, without waiting for the next reconcile tick.
-func WatchPause(ctx context.Context, snapshotID, nodeIP, backend string) {
+func WatchPause(ctx context.Context, snapshotID, nodeID, nodeIP, backend string) {
 	watch(ctx, workItem{kind: kindPause, table: constants.PauseSnapshotTableName,
-		snapshotID: snapshotID, hostIP: nodeIP, backend: backend})
+		snapshotID: snapshotID, nodeID: strings.TrimSpace(nodeID), hostIP: nodeIP, backend: backend})
 }
 
 // WatchSnapshot is WatchPause for a snapshot CommitSandbox just left
 // inprogress. mode and exportUUIDs feed the remote-package defect gate.
-func WatchSnapshot(ctx context.Context, snapshotID, nodeIP, backend, exportUUIDs string, mode snapshotmode.Mode) {
+func WatchSnapshot(ctx context.Context, snapshotID, nodeID, nodeIP, backend, exportUUIDs string, mode snapshotmode.Mode) {
 	watch(ctx, workItem{kind: kindSnapshot, table: constants.SnapshotTableName,
-		snapshotID: snapshotID, hostIP: nodeIP, backend: backend,
+		snapshotID: snapshotID, nodeID: strings.TrimSpace(nodeID), hostIP: nodeIP, backend: backend,
 		mode: mode, exportUUIDs: exportUUIDs})
 }
 
@@ -165,6 +168,7 @@ func listInProgress(ctx context.Context, db *gorm.DB) ([]workItem, error) {
 			kind:        kindSnapshot,
 			table:       constants.SnapshotTableName,
 			snapshotID:  rec.SnapshotID,
+			nodeID:      rec.OriginNodeID,
 			hostIP:      rec.OriginNodeIP,
 			backend:     rec.Backend,
 			mode:        snapshotmode.Normalize(rec.Mode),
@@ -182,6 +186,7 @@ func listInProgress(ctx context.Context, db *gorm.DB) ([]workItem, error) {
 			kind:       kindPause,
 			table:      constants.PauseSnapshotTableName,
 			snapshotID: rec.SnapshotID,
+			nodeID:     rec.NodeID,
 			hostIP:     rec.NodeIP,
 			backend:    rec.Backend,
 		})
@@ -194,7 +199,7 @@ func listInProgress(ctx context.Context, db *gorm.DB) ([]workItem, error) {
 // row needs no more queries: settled now, already settled elsewhere, or
 // unqueryable.
 func settleItem(ctx context.Context, db *gorm.DB, item workItem, wait time.Duration) bool {
-	hostIP := strings.TrimSpace(item.hostIP)
+	hostIP := strings.TrimSpace(resolveNodeIP(item.nodeID, item.hostIP))
 	snapshotID := strings.TrimSpace(item.snapshotID)
 	if hostIP == "" || snapshotID == "" {
 		return true

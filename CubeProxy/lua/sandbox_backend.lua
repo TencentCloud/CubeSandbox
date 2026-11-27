@@ -76,9 +76,24 @@ local function decode_optional_cache_value(value)
     return value
 end
 
-local function load_sandbox_proxy_metadata(ins_id)
+local NODE_ENDPOINT_CACHE_PREFIX = "node_endpoint:"
+local NODE_ENDPOINT_LAST_PREFIX = "node_endpoint_last:"
+local NODE_ENDPOINT_LOCK_PREFIX = "node_endpoint_lock:"
+-- Short fixed TTL (not renewed on hit) so compute-node IP changes converge
+-- within seconds without scanning or purging per-sandbox caches.
+local NODE_ENDPOINT_CACHE_TTL = 10
+-- Retain the last successfully resolved live IP longer than the freshness TTL
+-- so a transient Redis outage keeps routing to the latest live IP rather than
+-- reverting to the static HostIP written at sandbox creation.
+local NODE_ENDPOINT_LAST_TTL = 300
+-- Short backoff after a Redis error so requests do not pile up waiting on
+-- Redis timeouts during an outage.
+local NODE_ENDPOINT_ERROR_BACKOFF_TTL = 1
+local NODE_ENDPOINT_LOCK_TTL = 1
+
+local function new_redis_client()
     local redis = require "redis_iresty"
-    local red = redis:new({
+    return redis:new({
         redis_ip = ngx.var.redis_ip,
         redis_port = ngx.var.redis_port,
         redis_pd = ngx.var.redis_pd,
@@ -88,6 +103,74 @@ local function load_sandbox_proxy_metadata(ins_id)
         redis_sentinel_nodes = ngx.var.redis_sentinel_nodes,
         redis_sentinel_pd = ngx.var.redis_sentinel_pd,
     })
+end
+
+local function load_node_endpoint(host_id)
+    local red = new_redis_client()
+    local value, err = red:hget(redis_keys.node_endpoint(), host_id)
+    if err then
+        ngx.log(ngx.ERR, "LEVEL_WARN||",
+            string.format("request %s load node endpoint %s err: %s",
+                ngx.var.http_x_cube_request_id, host_id, tostring(err)))
+        return nil, err
+    end
+    if type(value) ~= "string" or value == "" then
+        return nil, nil
+    end
+    return value, nil
+end
+
+-- Resolve a sandbox's host_id to the node's current dialable IP via the shared
+-- NodeID -> HostIP Hash, falling back to fallback_ip for legacy entries or
+-- when the endpoint table has no entry. On a Redis error, keep routing to the
+-- last known live IP (if any) with a short backoff so an outage neither stalls
+-- every request nor reverts traffic to a stale static HostIP.
+local function resolve_node_ip(cache, host_id, fallback_ip)
+    if utils:is_null(host_id) then
+        return fallback_ip
+    end
+    local cache_key = NODE_ENDPOINT_CACHE_PREFIX .. host_id
+    local cached = cache:get(cache_key)
+    if cached ~= nil then
+        return decode_optional_cache_value(cached) or fallback_ip
+    end
+
+    local last_key = NODE_ENDPOINT_LAST_PREFIX .. host_id
+    local lock_key = NODE_ENDPOINT_LOCK_PREFIX .. host_id
+    if cache.add then
+        local acquired = cache:add(lock_key, true, NODE_ENDPOINT_LOCK_TTL)
+        if not acquired then
+            return cache:get(last_key) or fallback_ip
+        end
+    end
+
+    local live_ip, err = load_node_endpoint(host_id)
+    if err then
+        local last_ip = cache:get(last_key)
+        if last_ip then
+            cache:set(last_key, last_ip, NODE_ENDPOINT_LAST_TTL)
+        end
+        cache:set(cache_key, encode_optional_cache_value(last_ip), NODE_ENDPOINT_ERROR_BACKOFF_TTL)
+        if cache.delete then
+            cache:delete(lock_key)
+        end
+        return last_ip or fallback_ip
+    end
+
+    if live_ip then
+        cache:set(last_key, live_ip, NODE_ENDPOINT_LAST_TTL)
+    elseif cache.delete then
+        cache:delete(last_key)
+    end
+    cache:set(cache_key, encode_optional_cache_value(live_ip), NODE_ENDPOINT_CACHE_TTL)
+    if cache.delete then
+        cache:delete(lock_key)
+    end
+    return live_ip or fallback_ip
+end
+
+local function load_sandbox_proxy_metadata(ins_id)
+    local red = new_redis_client()
 
     -- During migration we try the new namespaced key first and fall back to the
     -- legacy "bypass_host_proxy:<id>" key.
@@ -134,6 +217,7 @@ end
 -- once, so after an invalidate all ports converge on fresh data from one
 -- reload. On a hit the TTLs are refreshed.
 local function read_cached_backend(cache, ins_id, container_port, caller_host_ip, timeout)
+    local target_host_id = cache:get(ins_id .. ":HostID")
     local target_host_ip = cache:get(ins_id .. ":HostIP")
     local target_sandbox_ip = cache:get(ins_id .. ":SandboxIP")
     local mapped_port = cache:get(ins_id .. ":" .. container_port)
@@ -142,14 +226,18 @@ local function read_cached_backend(cache, ins_id, container_port, caller_host_ip
     local mask_request_host = cache:get(ins_id .. ":MaskRequestHost")
 
     if not (target_host_ip and target_sandbox_ip
+            and target_host_id ~= nil
             and allow_public ~= nil and traffic_token ~= nil
             and mask_request_host ~= nil) then
         return nil
     end
 
+    local resolved_host_ip = resolve_node_ip(
+        cache, decode_optional_cache_value(target_host_id), target_host_ip)
+
     -- Same-host callers dial the sandbox IP + container port directly; only a
     -- cross-host caller needs the mapped host port.
-    local same_host = not utils:is_null(caller_host_ip) and caller_host_ip == target_host_ip
+    local same_host = not utils:is_null(caller_host_ip) and caller_host_ip == resolved_host_ip
     if not same_host and mapped_port == nil then
         return nil
     end
@@ -165,10 +253,11 @@ local function read_cached_backend(cache, ins_id, container_port, caller_host_ip
         host_ip = target_sandbox_ip
         host_port = container_port
     else
-        host_ip = target_host_ip
+        host_ip = resolved_host_ip
         host_port = mapped_port
     end
 
+    cache:set(ins_id .. ":HostID", target_host_id, timeout)
     cache:set(ins_id .. ":HostIP", target_host_ip, timeout)
     cache:set(ins_id .. ":SandboxIP", target_sandbox_ip, timeout)
     if not same_host then
@@ -230,9 +319,11 @@ function _M.resolve_backend(ins_id, container_port)
     -- Optional fields must be re-written with encode_optional_cache_value so a
     -- missing Redis key becomes an explicit false negative-cache sentinel
     -- (ngx.shared.DICT returns nil for both "missing" and "evicted").
+    local target_host_id = metadata_map["HostID"]
     local allow_public = metadata_map["AllowPublicTraffic"]
     local traffic_token = metadata_map["TrafficAccessToken"]
     local mask_request_host = metadata_map["MaskRequestHost"]
+    cache:set(ins_id .. ":HostID", encode_optional_cache_value(target_host_id), timeout)
     cache:set(ins_id .. ":AllowPublicTraffic", encode_optional_cache_value(allow_public), timeout)
     cache:set(ins_id .. ":TrafficAccessToken", encode_optional_cache_value(traffic_token), timeout)
     cache:set(ins_id .. ":MaskRequestHost", encode_optional_cache_value(mask_request_host), timeout)
@@ -254,8 +345,9 @@ function _M.resolve_backend(ins_id, container_port)
                 ngx.var.http_x_cube_request_id, ins_id))
         utils:respond_not_found()
     end
+    local resolved_host_ip = resolve_node_ip(cache, target_host_id, target_host_ip)
 
-    if not utils:is_null(caller_host_ip) and caller_host_ip == target_host_ip then
+    if not utils:is_null(caller_host_ip) and caller_host_ip == resolved_host_ip then
         if utils:is_null(target_sandbox_ip) then
             ngx.log(ngx.ERR, "LEVEL_ERROR||",
                 string.format("request %s instance %s on local host %s misses SandboxIP",
@@ -265,7 +357,7 @@ function _M.resolve_backend(ins_id, container_port)
         host_ip = target_sandbox_ip
         host_port = container_port
     else
-        host_ip = target_host_ip
+        host_ip = resolved_host_ip
         host_port = metadata_map[container_port]
         if utils:is_null(host_port) then
             ngx.log(ngx.ERR, "LEVEL_ERROR||",
