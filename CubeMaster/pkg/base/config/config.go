@@ -881,7 +881,10 @@ func (l *listener) OnEvent(data interface{}) {
 	switch {
 	case prev != now:
 		CubeLog.Infof("config reload: gomaxprocs %d -> %d (max_procs=%d)", prev, now, conf.Common.MaxProcs)
-	case conf.Common.MaxProcs > 0 && conf.Common.MaxProcs >= prev:
+	case conf.Common.MaxProcs > prev:
+		// Strictly above the width in effect: this is the raise that cannot be
+		// honoured. Equality is not a problem -- the request is already met -- so
+		// warning there would fire on every reload that touches an unrelated key.
 		CubeLog.Warnf("config reload: max_procs=%d not applied (gomaxprocs already %d); raising needs a restart",
 			conf.Common.MaxProcs, prev)
 	case conf.Common.MaxProcs == 0 && previous != nil && previous.Common != nil && previous.Common.MaxProcs > 0:
