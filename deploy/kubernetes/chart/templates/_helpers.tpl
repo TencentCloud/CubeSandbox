@@ -1189,29 +1189,27 @@ Kubernetes API path prefix for the cube-node DaemonSet (health-test).
 {{/*
 Big Pod: shared volumeMounts for component install/run containers.
 Toolbox is mounted whole at the fixed path.
+Dataplane paths intentionally omit Bidirectional propagation: cubelet attaches
+them from the node-level anchor mount namespace (master:H, shared:C) so mounts
+survive Pod rolling upgrades without propagating back into host PID 1 / systemd.
 */}}
 {{- define "cube.nodeToolboxVolumeMounts" -}}
 - name: toolbox
   mountPath: /usr/local/services/cubetoolbox
 - name: data-cubelet
   mountPath: {{ .Values.hostPaths.dataCubelet }}
-  mountPropagation: Bidirectional
 - name: data-log
   mountPath: {{ .Values.hostPaths.dataLog }}
 - name: data-cube-shim
   mountPath: {{ .Values.hostPaths.dataCubeShim }}
-  mountPropagation: Bidirectional
 - name: data-snapshot-pack
   mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
 - name: data-cube-shared
   mountPath: {{ .Values.hostPaths.dataCubeShared }}
-  mountPropagation: Bidirectional
 - name: data-shared
   mountPath: {{ .Values.hostPaths.dataShared }}
-  mountPropagation: Bidirectional
 - name: tmp-cube
   mountPath: {{ .Values.hostPaths.tmpCube }}
-  mountPropagation: Bidirectional
 - name: run-containerd
   mountPath: /run/containerd
 - name: run-vc

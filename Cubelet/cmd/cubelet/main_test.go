@@ -81,6 +81,48 @@ func TestApplyFlagsCubeLogZeroCLIClampedByDefaults(t *testing.T) {
 	assert.Equal(t, srvconfig.DefaultCubeLogFileSizeMB, cfg.CubeLog.FileSizeMB())
 }
 
+func TestDeployedInBigPod(t *testing.T) {
+	t.Run("unset defaults to false", func(t *testing.T) {
+		t.Setenv(CubeDeployedInBigPodEnv, "")
+		got, err := deployedInBigPod()
+		require.NoError(t, err)
+		assert.False(t, got)
+	})
+
+	for _, raw := range []string{"1", "true", "TRUE", " true "} {
+		t.Run("truthy_"+raw, func(t *testing.T) {
+			t.Setenv(CubeDeployedInBigPodEnv, raw)
+			got, err := deployedInBigPod()
+			require.NoError(t, err)
+			assert.True(t, got)
+		})
+	}
+
+	for _, raw := range []string{"0", "false", "FALSE"} {
+		t.Run("falsy_"+raw, func(t *testing.T) {
+			t.Setenv(CubeDeployedInBigPodEnv, raw)
+			got, err := deployedInBigPod()
+			require.NoError(t, err)
+			assert.False(t, got)
+		})
+	}
+
+	t.Run("invalid value fails fast", func(t *testing.T) {
+		t.Setenv(CubeDeployedInBigPodEnv, "yes")
+		got, err := deployedInBigPod()
+		require.Error(t, err)
+		assert.False(t, got)
+		assert.Contains(t, err.Error(), CubeDeployedInBigPodEnv)
+	})
+}
+
+func TestResolveStartupMode(t *testing.T) {
+	assert.Equal(t, startupModeSpawnPrivateMnt, resolveStartupMode("", false))
+	assert.Equal(t, startupModeDirect, resolveStartupMode("", true))
+	assert.Equal(t, startupModeReexecChild, resolveStartupMode(CubeMntNsFilePath, false))
+	assert.Equal(t, startupModeReexecChild, resolveStartupMode(CubeMntNsFilePath, true))
+}
+
 func runApplyFlags(cfg *srvconfig.Config, args ...string) error {
 	app := &cli.App{
 		Flags: []cli.Flag{
