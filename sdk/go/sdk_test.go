@@ -128,8 +128,11 @@ func TestCreateSendsPythonCompatiblePayload(t *testing.T) {
 	assertNumber(t, got, "timeout", 600)
 	assertMapString(t, got["envVars"], "FOO", "bar")
 	assertMapString(t, got["metadata"], "network-policy", "custom")
-	if got["allowInternetAccess"] != false {
-		t.Fatalf("allowInternetAccess=%#v, want false", got["allowInternetAccess"])
+	if got["allow_internet_access"] != false {
+		t.Fatalf("allow_internet_access=%#v, want false", got["allow_internet_access"])
+	}
+	if _, ok := got["allowInternetAccess"]; ok {
+		t.Fatalf("the create body must not carry camelCase allowInternetAccess, the server ignores it: %#v", got)
 	}
 	network, ok := got["network"].(map[string]any)
 	if !ok {
@@ -167,8 +170,10 @@ func TestCreateOmitsOptionalFieldsAndRequiresTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if _, ok := got["allowInternetAccess"]; ok {
-		t.Fatalf("allowInternetAccess should be omitted when true: %#v", got)
+	for _, key := range []string{"allow_internet_access", "allowInternetAccess"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s should be omitted when true: %#v", key, got)
+		}
 	}
 	if _, ok := got["network"]; ok {
 		t.Fatalf("network should be omitted when empty: %#v", got)
@@ -2554,5 +2559,51 @@ func TestCommandsRunOmittedContentTypeSuccess(t *testing.T) {
 	}
 	if res.Stdout != "success\n" || res.ExitCode != 0 {
 		t.Fatalf("result=%+v, want stdout 'success\\n' and exitCode 0", res)
+	}
+}
+
+// The create body carries allow_internet_access only when the caller turns
+// internet access off. nil and true leave it out, so the server default
+// applies; the camelCase key never appears (CubeAPI ignores it).
+func TestCreateAllowInternetAccessWireName(t *testing.T) {
+	disabled, enabled := false, true
+	for _, tc := range []struct {
+		name    string
+		value   *bool
+		wantKey bool
+	}{
+		{"nil", nil, false},
+		{"true", &enabled, false},
+		{"false", &disabled, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprint(w, sandboxJSON(testSandboxID, "tpl-net"))
+			}))
+			defer server.Close()
+
+			client := NewClient(Config{APIURL: server.URL, TemplateID: "tpl-net"})
+			if _, err := client.Create(context.Background(), CreateOptions{AllowInternetAccess: tc.value}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			v, ok := got["allow_internet_access"]
+			if ok != tc.wantKey || (ok && v != false) {
+				t.Fatalf("allow_internet_access present=%v value=%#v, want present=%v false", ok, v, tc.wantKey)
+			}
+			if _, ok := got["allowInternetAccess"]; ok {
+				t.Fatalf("camelCase allowInternetAccess must not be sent on create: %#v", got)
+			}
+			if tc.wantKey {
+				if _, ok := got["network"]; ok {
+					t.Fatalf("turning internet off alone must not add a network body: %#v", got["network"])
+				}
+			}
+		})
 	}
 }

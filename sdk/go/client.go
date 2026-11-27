@@ -222,7 +222,11 @@ func (c *Client) createPayload(opts CreateOptions) (map[string]any, error) {
 	}
 	internetAccessDisabled := opts.AllowInternetAccess != nil && !*opts.AllowInternetAccess
 	if internetAccessDisabled {
-		payload["allowInternetAccess"] = false
+		// The create body takes this field in snake_case (CubeAPI and the E2B
+		// wire format read allow_internet_access; the camelCase key is
+		// ignored there). The network body of UpdateNetwork is different: it
+		// takes allowInternetAccess.
+		payload["allow_internet_access"] = false
 	}
 
 	network, err := buildNetworkPayload(opts.Network, internetAccessDisabled)
