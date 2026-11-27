@@ -282,9 +282,10 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 	// CommitSandbox snapshots a running sandbox whose memory artifact has
 	// just been prepared above. snapshotTypeForCmd carries the right type
-	// for the path we took: soft-dirty when reflink-cloning a base, or full
-	// when degrading because no base could be resolved. AppSnapshot keeps
-	// using the default full type via its own call site.
+	// for the path we took: soft-dirty or incremental when reflink-cloning
+	// a base, or sparse-full when degrading because no base could be
+	// resolved. AppSnapshot keeps using the default full type via its own
+	// call site.
 	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd, "snapshotMode": mode})
 	span.SetAttributes(attribute.String(telemetry.AttrSnapshotType, snapshotTypeForCmd))
 	endPhase()

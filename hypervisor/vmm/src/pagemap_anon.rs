@@ -104,6 +104,11 @@ pub(crate) fn coalesce_pages_to_ranges(
 /// Size of a pagemap entry in bytes
 const PAGEMAP_ENTRY_SIZE: u64 = 8;
 
+/// Default batch size (in host pages) when streaming `/proc/self/pagemap`:
+/// 8,192 entries = 64 KiB raw read buffer (= 32 MiB guest RAM per syscall on
+/// 4 KiB hosts, 512 MiB on 64 KiB hosts).
+pub(crate) const PAGEMAP_STREAM_BATCH_PAGES: usize = 8192;
+
 /// Bit 63: page is present in RAM
 const PAGEMAP_PRESENT_BIT: u64 = 1 << 63;
 
@@ -113,12 +118,140 @@ const PAGEMAP_SWAPPED_BIT: u64 = 1 << 62;
 /// Bit 61: `PM_FILE` (file-backed or shared-anon; private CoW anon has this clear).
 const PAGEMAP_FILE_BIT: u64 = 1 << 61;
 
+/// Mask for any resident page (`PRESENT` or `SWAPPED`).
+const PAGEMAP_RESIDENT_MASK: u64 = PAGEMAP_PRESENT_BIT | PAGEMAP_SWAPPED_BIT;
+
+/// `true` if this pagemap entry represents a resident (present or swapped) page.
+#[inline]
+pub(crate) fn pagemap_entry_is_resident(entry: u64) -> bool {
+    (entry & PAGEMAP_RESIDENT_MASK) != 0
+}
+
 /// `true` if this pagemap entry must be written into an incremental snapshot.
 pub(crate) fn pagemap_entry_is_cow_anon(entry: u64) -> bool {
     let swapped = (entry & PAGEMAP_SWAPPED_BIT) != 0;
     let present = (entry & PAGEMAP_PRESENT_BIT) != 0;
     let pm_file = (entry & PAGEMAP_FILE_BIT) != 0;
     swapped || (present && !pm_file)
+}
+
+/// Residency state of a single host virtual page decoded from `/proc/self/pagemap`.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageResidency {
+    NonPresent,
+    Present,
+    Swapped,
+}
+
+/// Classify a raw `/proc/self/pagemap` entry solely by residency (`PRESENT` or `SWAPPED`).
+///
+/// Unlike [`pagemap_entry_is_cow_anon`], this ignores `PM_FILE` (bit 61) so
+/// `SparseFull` preserves present file-backed/shared pages too.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn classify_pagemap_residency(entry: u64) -> PageResidency {
+    if (entry & PAGEMAP_SWAPPED_BIT) != 0 {
+        PageResidency::Swapped
+    } else if (entry & PAGEMAP_PRESENT_BIT) != 0 {
+        PageResidency::Present
+    } else {
+        PageResidency::NonPresent
+    }
+}
+
+/// Open `/proc/self/pagemap` once so callers scanning multiple guest memory
+/// regions can reuse the same file descriptor.
+pub(crate) fn open_pagemap() -> Result<File> {
+    File::open("/proc/self/pagemap").map_err(|e| PagemapAnonError::OpenFailed {
+        path: "/proc/self/pagemap".to_string(),
+        source: e,
+    })
+}
+
+/// Stream raw `/proc/self/pagemap` entry bytes for `[host_addr, host_addr + length)`
+/// in fixed-size batches of up to `batch_pages` entries into `raw_buf`.
+///
+/// Each invocation of `on_batch(first_page_idx, raw_bytes)` receives a slice of
+/// `count * 8` native-endian `u64` entries aligned to `batch_pages` (except for
+/// the final trailing batch). Reusing `pagemap_file` and `raw_buf` avoids
+/// multi-MiB transient allocations when scanning multi-GiB guest RAM.
+pub(crate) fn stream_pagemap_raw_batches<F>(
+    pagemap_file: &mut File,
+    host_addr: u64,
+    length: u64,
+    batch_pages: usize,
+    raw_buf: &mut Vec<u8>,
+    mut on_batch: F,
+) -> Result<()>
+where
+    F: FnMut(usize, &[u8]),
+{
+    let page_size = host_page_size();
+    if host_addr % page_size != 0 {
+        return Err(PagemapAnonError::NotPageAligned);
+    }
+
+    let total_pages = length.div_ceil(page_size) as usize;
+    if total_pages == 0 {
+        return Ok(());
+    }
+
+    let start_page = host_addr / page_size;
+    let pagemap_offset = start_page * PAGEMAP_ENTRY_SIZE;
+    pagemap_file
+        .seek(SeekFrom::Start(pagemap_offset))
+        .map_err(|e| PagemapAnonError::SeekFailed {
+            path: "/proc/self/pagemap".to_string(),
+            source: e,
+        })?;
+
+    let step_pages = batch_pages.max(1).min(total_pages);
+    let raw_cap = step_pages * PAGEMAP_ENTRY_SIZE as usize;
+    if raw_buf.len() < raw_cap {
+        raw_buf.resize(raw_cap, 0);
+    }
+
+    let mut page_offset = 0usize;
+    while page_offset < total_pages {
+        let count = (total_pages - page_offset).min(step_pages);
+        let byte_len = count * PAGEMAP_ENTRY_SIZE as usize;
+        let slice = &mut raw_buf[..byte_len];
+        pagemap_file
+            .read_exact(slice)
+            .map_err(|e| PagemapAnonError::ReadFailed {
+                path: "/proc/self/pagemap".to_string(),
+                source: e,
+            })?;
+        on_batch(page_offset, slice);
+        page_offset += count;
+    }
+
+    Ok(())
+}
+
+/// Scan `/proc/self/pagemap` for `[host_addr, host_addr + length)` and classify
+/// every host page's residency.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn scan_pagemap_residency(host_addr: u64, length: u64) -> Result<Vec<PageResidency>> {
+    let page_size = host_page_size();
+    let total_pages = length.div_ceil(page_size) as usize;
+    let mut pagemap_file = open_pagemap()?;
+    let mut raw_buf = Vec::new();
+    let mut out = Vec::with_capacity(total_pages);
+    stream_pagemap_raw_batches(
+        &mut pagemap_file,
+        host_addr,
+        length,
+        PAGEMAP_STREAM_BATCH_PAGES,
+        &mut raw_buf,
+        |_first_page, raw| {
+            out.extend(
+                raw.chunks_exact(PAGEMAP_ENTRY_SIZE as usize)
+                    .map(|c| classify_pagemap_residency(u64::from_ne_bytes(c.try_into().unwrap()))),
+            );
+        },
+    )?;
+    Ok(out)
 }
 
 /// Errors related to pagemap_anon operations
@@ -561,5 +694,122 @@ mod tests {
                 libc::munmap(self.ptr, self.len);
             }
         }
+    }
+
+    #[test]
+    fn pagemap_residency_classification_matrix() {
+        const SOFT_DIRTY_BIT: u64 = 1 << 55;
+
+        assert_eq!(classify_pagemap_residency(0), PageResidency::NonPresent);
+        assert_eq!(
+            classify_pagemap_residency(SOFT_DIRTY_BIT),
+            PageResidency::NonPresent
+        );
+        assert_eq!(
+            classify_pagemap_residency(PAGEMAP_PRESENT_BIT),
+            PageResidency::Present
+        );
+        assert_eq!(
+            classify_pagemap_residency(PAGEMAP_PRESENT_BIT | PAGEMAP_FILE_BIT),
+            PageResidency::Present
+        );
+        assert_eq!(
+            classify_pagemap_residency(PAGEMAP_SWAPPED_BIT),
+            PageResidency::Swapped
+        );
+        assert_eq!(
+            classify_pagemap_residency(PAGEMAP_PRESENT_BIT | PAGEMAP_SWAPPED_BIT),
+            PageResidency::Swapped
+        );
+    }
+
+    #[test]
+    fn scan_pagemap_residency_tracks_touched_vs_untouched_anon_pages() {
+        let page_size = host_page_size() as usize;
+        let num_pages = 4;
+        let len = page_size * num_pages;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+
+        unsafe {
+            std::ptr::write_volatile((ptr as *mut u8).add(page_size), 0x5a);
+            std::ptr::write_volatile((ptr as *mut u8).add(3 * page_size), 0);
+        }
+
+        let residency = scan_pagemap_residency(ptr as u64, len as u64);
+        unsafe {
+            libc::munmap(ptr, len);
+        }
+
+        let residency = residency.expect("scan_pagemap_residency should succeed");
+        assert_eq!(
+            residency,
+            vec![
+                PageResidency::NonPresent,
+                PageResidency::Present,
+                PageResidency::NonPresent,
+                PageResidency::Present,
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_pagemap_raw_batches_matches_residency_across_small_batches() {
+        let page_size = host_page_size() as usize;
+        let num_pages = 7;
+        let len = page_size * num_pages;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+
+        unsafe {
+            std::ptr::write_volatile((ptr as *mut u8).add(page_size), 0x11);
+            std::ptr::write_volatile((ptr as *mut u8).add(4 * page_size), 0x22);
+            std::ptr::write_volatile((ptr as *mut u8).add(6 * page_size), 0x33);
+        }
+
+        let mut pagemap_file = open_pagemap().expect("open /proc/self/pagemap");
+        let mut raw_buf = Vec::new();
+        let mut batches = Vec::new();
+        let mut resident = vec![false; num_pages];
+        let stream_res = stream_pagemap_raw_batches(
+            &mut pagemap_file,
+            ptr as u64,
+            len as u64,
+            2,
+            &mut raw_buf,
+            |first_page, raw| {
+                let count = raw.len() / PAGEMAP_ENTRY_SIZE as usize;
+                batches.push((first_page, count));
+                for (i, c) in raw.chunks_exact(PAGEMAP_ENTRY_SIZE as usize).enumerate() {
+                    let entry = u64::from_ne_bytes(c.try_into().unwrap());
+                    resident[first_page + i] = pagemap_entry_is_resident(entry);
+                }
+            },
+        );
+        unsafe {
+            libc::munmap(ptr, len);
+        }
+
+        stream_res.expect("stream_pagemap_raw_batches should succeed");
+        assert_eq!(batches, vec![(0, 2), (2, 2), (4, 2), (6, 1)]);
+        assert_eq!(resident, vec![false, true, false, false, true, false, true]);
     }
 }

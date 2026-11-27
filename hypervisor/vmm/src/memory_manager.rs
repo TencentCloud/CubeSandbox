@@ -7,7 +7,12 @@ use crate::coredump::{
     CoredumpMemoryRegion, CoredumpMemoryRegions, DumpState, GuestDebuggableError,
 };
 use crate::migration::{memory_blob_to_path, url_to_path};
-use crate::pagemap_anon::{filter_memory_ranges_by_pagemap_anon, host_page_size};
+use crate::pagemap_anon::{
+    filter_memory_ranges_by_pagemap_anon, host_page_size, open_pagemap, pagemap_entry_is_resident,
+    stream_pagemap_raw_batches, PAGEMAP_STREAM_BATCH_PAGES,
+};
+#[cfg(test)]
+use crate::pagemap_anon::{scan_pagemap_residency, PageResidency};
 use crate::soft_dirty::{
     clear_soft_dirty, filter_memory_ranges_by_anon_and_soft_dirty, probe_soft_dirty_support,
 };
@@ -3289,6 +3294,9 @@ impl Transportable for MemoryManager {
             SnapshotType::SoftDirty => {
                 self.send_soft_dirty_memory(destination_url, &config.memory_vol_url)?;
             }
+            SnapshotType::SparseFull => {
+                self.send_sparse_full_memory(&memory_file_target)?;
+            }
             SnapshotType::Full => {
                 let memory_file = memory_file_target.open_for_fresh_write()?;
 
@@ -3372,5 +3380,800 @@ impl Migratable for MemoryManager {
             table.extend(sub_table);
         }
         Ok(table)
+    }
+}
+
+/// Minimum chunk granularity for zero-hole skipping in `SparseFull` snapshots.
+/// Matches an integer multiple of Linux 4 KiB / 64 KiB host page sizes.
+const SPARSE_FULL_ZERO_CHUNK_MIN: u64 = 64 * 1024;
+
+#[derive(Debug, Default, Clone)]
+struct SparseFullStats {
+    total_bytes: u64,
+    saved_bytes: u64,
+    chunks_total: u64,
+    chunks_saved: u64,
+    skipped_non_present_chunks: u64,
+    skipped_zero_chunks: u64,
+    fallback_full_scan_regions: u64,
+}
+
+impl SparseFullStats {
+    fn savings_percentage(&self, written_bytes: u64) -> f64 {
+        if self.total_bytes == 0 {
+            return 0.0;
+        }
+        let saved = self.total_bytes.saturating_sub(written_bytes);
+        (saved as f64 / self.total_bytes as f64) * 100.0
+    }
+}
+
+struct FdOffsetGuard {
+    fd: RawFd,
+    saved_pos: libc::off_t,
+}
+
+impl Drop for FdOffsetGuard {
+    fn drop(&mut self) {
+        if self.saved_pos >= 0 {
+            // Best-effort restore of the shared file description cursor.
+            unsafe {
+                libc::lseek(self.fd, self.saved_pos, libc::SEEK_SET);
+            }
+        }
+    }
+}
+
+fn is_all_zero(buf: &[u8]) -> bool {
+    let mut chunks64 = buf.chunks_exact(64);
+    for c in &mut chunks64 {
+        let a = u128::from_ne_bytes(c[0..16].try_into().unwrap());
+        let b = u128::from_ne_bytes(c[16..32].try_into().unwrap());
+        let d = u128::from_ne_bytes(c[32..48].try_into().unwrap());
+        let e = u128::from_ne_bytes(c[48..64].try_into().unwrap());
+        if (a | b | d | e) != 0 {
+            return false;
+        }
+    }
+    let mut chunks16 = chunks64.remainder().chunks_exact(16);
+    for c in &mut chunks16 {
+        if u128::from_ne_bytes(c.try_into().unwrap()) != 0 {
+            return false;
+        }
+    }
+    chunks16.remainder().iter().all(|&b| b == 0)
+}
+
+fn mark_nonzero_chunks_in_span(
+    span_bytes: &[u8],
+    chunk_size: u64,
+    keep: &mut [bool],
+    stats: &mut SparseFullStats,
+) {
+    let chunk_size = chunk_size as usize;
+    let span_len = span_bytes.len();
+    for (chunk_idx, slot) in keep.iter_mut().enumerate() {
+        let chunk_off = chunk_idx * chunk_size;
+        let chunk_end = (chunk_off + chunk_size).min(span_len);
+        if !is_all_zero(&span_bytes[chunk_off..chunk_end]) {
+            *slot = true;
+        } else {
+            stats.skipped_zero_chunks += 1;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mark_candidate_chunks_in_span(
+    pagemap_file: &mut File,
+    raw_pagemap_buf: &mut Vec<u8>,
+    host_addr: u64,
+    span_gpa: u64,
+    span_bytes: &[u8],
+    page_size: u64,
+    chunk_size: u64,
+    seek_mask: Option<&[bool]>,
+    keep: &mut [bool],
+    stats: &mut SparseFullStats,
+) -> result::Result<(), MigratableError> {
+    let span_len = span_bytes.len() as u64;
+    let page_size_usize = page_size as usize;
+    let chunk_size_usize = chunk_size as usize;
+    let pages_per_chunk = (chunk_size / page_size) as usize;
+    let batch_pages = (PAGEMAP_STREAM_BATCH_PAGES / pages_per_chunk).max(1) * pages_per_chunk;
+
+    stream_pagemap_raw_batches(
+        pagemap_file,
+        host_addr,
+        span_len,
+        batch_pages,
+        raw_pagemap_buf,
+        |first_page, raw| {
+            let batch_entries = raw.len() / 8;
+            let first_chunk = first_page / pages_per_chunk;
+            let batch_chunks = batch_entries.div_ceil(pages_per_chunk);
+
+            for rel_chunk in 0..batch_chunks {
+                let chunk_idx = first_chunk + rel_chunk;
+                if chunk_idx >= keep.len() {
+                    break;
+                }
+                let chunk_off = chunk_idx * chunk_size_usize;
+                let chunk_end = (chunk_off + chunk_size_usize).min(span_bytes.len());
+                let file_has_data = seek_mask.is_some_and(|m| m[chunk_idx]);
+
+                if file_has_data {
+                    // Backing regular file has a data extent in this chunk, so
+                    // even non-present pages may hold non-zero baseline data.
+                    if !is_all_zero(&span_bytes[chunk_off..chunk_end]) {
+                        keep[chunk_idx] = true;
+                    } else {
+                        stats.skipped_zero_chunks += 1;
+                    }
+                    continue;
+                }
+
+                // Pure anonymous memory or a backing file hole: non-present
+                // pages are guaranteed zero, so inspect only resident pages
+                // without faulting untouched siblings.
+                let entry_start = rel_chunk * pages_per_chunk;
+                let entry_end = (entry_start + pages_per_chunk).min(batch_entries);
+                let mut any_resident = false;
+                let mut chunk_nonzero = false;
+
+                for (rel_page, entry_bytes) in raw[entry_start * 8..entry_end * 8]
+                    .chunks_exact(8)
+                    .enumerate()
+                {
+                    let entry = u64::from_ne_bytes(entry_bytes.try_into().unwrap());
+                    if !pagemap_entry_is_resident(entry) {
+                        continue;
+                    }
+                    any_resident = true;
+                    let page_off = chunk_off + rel_page * page_size_usize;
+                    let page_end = (page_off + page_size_usize).min(chunk_end);
+                    if !is_all_zero(&span_bytes[page_off..page_end]) {
+                        chunk_nonzero = true;
+                        break;
+                    }
+                }
+
+                if !any_resident {
+                    stats.skipped_non_present_chunks += 1;
+                } else if chunk_nonzero {
+                    keep[chunk_idx] = true;
+                } else {
+                    stats.skipped_zero_chunks += 1;
+                }
+            }
+        },
+    )
+    .map_err(|e| {
+        MigratableError::MigrateSend(anyhow!(
+            "Failed to scan pagemap residency at GPA 0x{:x} ({} bytes): {}",
+            span_gpa,
+            span_len,
+            e
+        ))
+    })
+}
+
+/// Probe data extents of a regular backing file in `[file_start, file_start + span_len)`
+/// using `lseek(SEEK_DATA / SEEK_HOLE)`. Returns `Ok(None)` when the fd is not a
+/// regular file (e.g. `S_ISBLK` for block devices) or `SEEK_DATA`/`SEEK_HOLE` is
+/// unsupported so callers safely fall back to scanning all chunks.
+fn file_seek_data_ranges(
+    file: &File,
+    file_start: u64,
+    span_len: u64,
+    page_size: u64,
+    chunk_size: u64,
+    num_chunks: usize,
+) -> result::Result<Option<Vec<bool>>, MigratableError> {
+    if span_len == 0 {
+        return Ok(Some(Vec::new()));
+    }
+
+    let fd = file.as_raw_fd();
+    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat_buf) } < 0 {
+        return Err(MigratableError::MigrateSend(anyhow!(
+            "fstat failed on backing file fd {}: {}",
+            fd,
+            io::Error::last_os_error()
+        )));
+    }
+    if (stat_buf.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Ok(None);
+    }
+
+    let file_size = u64::try_from(stat_buf.st_size).unwrap_or(0);
+    if file_start >= file_size {
+        return Ok(Some(vec![false; num_chunks]));
+    }
+    let probe_end = file_start.saturating_add(span_len).min(file_size);
+
+    let saved_pos = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };
+    let _offset_guard = FdOffsetGuard { fd, saved_pos };
+
+    let mut mask = vec![false; num_chunks];
+    let mut pos = file_start;
+    while pos < probe_end {
+        let off_arg = libc::off_t::try_from(pos).map_err(|_| {
+            MigratableError::MigrateSend(anyhow!("File offset {} overflows off_t", pos))
+        })?;
+        let data_off = unsafe { libc::lseek(fd, off_arg, libc::SEEK_DATA) };
+        if data_off < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENXIO) {
+                break;
+            }
+            return Ok(None);
+        }
+        let data_start = (data_off as u64).max(pos);
+        if data_start >= probe_end {
+            break;
+        }
+
+        let hole_arg = libc::off_t::try_from(data_start).map_err(|_| {
+            MigratableError::MigrateSend(anyhow!("File offset {} overflows off_t", data_start))
+        })?;
+        let hole_off = unsafe { libc::lseek(fd, hole_arg, libc::SEEK_HOLE) };
+        let data_end = if hole_off < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENXIO) {
+                probe_end
+            } else {
+                return Ok(None);
+            }
+        } else if (hole_off as u64) <= data_start {
+            // Broken SEEK_HOLE contract; fall back rather than risk stalling.
+            return Ok(None);
+        } else {
+            (hole_off as u64).min(probe_end)
+        };
+
+        if data_end > data_start {
+            let rel_start = ((data_start - file_start) / page_size) * page_size;
+            let rel_end = ((data_end - file_start).div_ceil(page_size) * page_size).min(span_len);
+            let c_start = (rel_start / chunk_size) as usize;
+            let c_end = rel_end.div_ceil(chunk_size) as usize;
+            for slot in &mut mask[c_start..c_end.min(num_chunks)] {
+                *slot = true;
+            }
+        }
+        pos = data_end;
+    }
+
+    Ok(Some(mask))
+}
+
+fn coalesce_chunks_to_ranges(
+    base_gpa: u64,
+    span_len: u64,
+    chunk_size: u64,
+    keep: &[bool],
+) -> (Vec<MemoryRange>, u64) {
+    let mut ranges = Vec::new();
+    let mut saved_bytes = 0u64;
+    let mut run_start: Option<u64> = None;
+    let mut run_len = 0u64;
+
+    for (chunk_idx, &kept) in keep.iter().enumerate() {
+        let off = (chunk_idx as u64) * chunk_size;
+        let len = (span_len - off).min(chunk_size);
+        if kept {
+            saved_bytes += len;
+            if run_start.is_none() {
+                run_start = Some(base_gpa + off);
+                run_len = len;
+            } else {
+                run_len += len;
+            }
+        } else if let Some(gpa) = run_start.take() {
+            ranges.push(MemoryRange {
+                gpa,
+                length: run_len,
+            });
+            run_len = 0;
+        }
+    }
+
+    if let Some(gpa) = run_start {
+        ranges.push(MemoryRange {
+            gpa,
+            length: run_len,
+        });
+    }
+
+    (ranges, saved_bytes)
+}
+
+fn filter_memory_ranges_for_sparse_full(
+    snapshot_ranges: &MemoryRangeTable,
+    guest_memory: &GuestMemoryMmap,
+) -> result::Result<(Vec<MemoryRange>, SparseFullStats), MigratableError> {
+    let page_size = host_page_size();
+    let chunk_size = SPARSE_FULL_ZERO_CHUNK_MIN.max(page_size);
+    debug_assert_eq!(chunk_size % page_size, 0);
+
+    let mut pagemap_file: Option<File> = None;
+    let mut raw_pagemap_buf: Vec<u8> = Vec::new();
+    let mut stats = SparseFullStats::default();
+    let mut result_ranges = Vec::new();
+
+    for range in snapshot_ranges.regions() {
+        let mut cursor_gpa = range.gpa;
+        let range_end = range.gpa.saturating_add(range.length);
+        while cursor_gpa < range_end {
+            let region = guest_memory
+                .find_region(GuestAddress(cursor_gpa))
+                .ok_or_else(|| {
+                    MigratableError::MigrateSend(anyhow!(
+                        "Guest memory region missing for GPA 0x{:x}",
+                        cursor_gpa
+                    ))
+                })?;
+            let region_start = region.start_addr().raw_value();
+            let region_len = region.len() as u64;
+            let region_end = region_start + region_len;
+            let span_end = range_end.min(region_end);
+            let span_len = span_end - cursor_gpa;
+            let offset_in_region = cursor_gpa - region_start;
+            let span_end_in_region = offset_in_region.checked_add(span_len).ok_or_else(|| {
+                MigratableError::MigrateSend(anyhow!(
+                    "Guest memory span overflow at GPA 0x{:x} ({} bytes)",
+                    cursor_gpa,
+                    span_len
+                ))
+            })?;
+            if span_end_in_region > region_len {
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Guest memory span at GPA 0x{:x} ({} bytes) exceeds region length {}",
+                    cursor_gpa,
+                    span_len,
+                    region_len
+                )));
+            }
+            let host_ptr = region.as_ptr();
+            let host_addr = (host_ptr as u64) + offset_in_region;
+            // SAFETY: `guest_memory` keeps `region`'s mmap alive for the duration of
+            // this function, `offset_in_region + span_len <= region.len()` is checked
+            // above, snapshot capture runs with vCPUs paused, and `vm-memory` never
+            // creates `&mut` Rust references to guest RAM.
+            let span_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    host_ptr.add(offset_in_region as usize),
+                    span_len as usize,
+                )
+            };
+            let num_chunks = span_len.div_ceil(chunk_size) as usize;
+
+            stats.total_bytes += span_len;
+            stats.chunks_total += num_chunks as u64;
+
+            let mut keep = vec![false; num_chunks];
+            let is_shared = (region.flags() & libc::MAP_SHARED) != 0;
+            if is_shared {
+                stats.fallback_full_scan_regions += 1;
+                mark_nonzero_chunks_in_span(span_bytes, chunk_size, &mut keep, &mut stats);
+            } else if let Some(fo) = region.file_offset() {
+                match file_seek_data_ranges(
+                    fo.file(),
+                    fo.start() + offset_in_region,
+                    span_len,
+                    page_size,
+                    chunk_size,
+                    num_chunks,
+                )? {
+                    Some(seek_mask) => {
+                        let pm = match pagemap_file.as_mut() {
+                            Some(f) => f,
+                            None => {
+                                let f = open_pagemap().map_err(|e| {
+                                    MigratableError::MigrateSend(anyhow!(
+                                        "Failed to open /proc/self/pagemap: {}",
+                                        e
+                                    ))
+                                })?;
+                                pagemap_file.insert(f)
+                            }
+                        };
+                        mark_candidate_chunks_in_span(
+                            pm,
+                            &mut raw_pagemap_buf,
+                            host_addr,
+                            cursor_gpa,
+                            span_bytes,
+                            page_size,
+                            chunk_size,
+                            Some(&seek_mask),
+                            &mut keep,
+                            &mut stats,
+                        )?;
+                    }
+                    None => {
+                        stats.fallback_full_scan_regions += 1;
+                        mark_nonzero_chunks_in_span(span_bytes, chunk_size, &mut keep, &mut stats);
+                    }
+                }
+            } else {
+                let pm = match pagemap_file.as_mut() {
+                    Some(f) => f,
+                    None => {
+                        let f = open_pagemap().map_err(|e| {
+                            MigratableError::MigrateSend(anyhow!(
+                                "Failed to open /proc/self/pagemap: {}",
+                                e
+                            ))
+                        })?;
+                        pagemap_file.insert(f)
+                    }
+                };
+                mark_candidate_chunks_in_span(
+                    pm,
+                    &mut raw_pagemap_buf,
+                    host_addr,
+                    cursor_gpa,
+                    span_bytes,
+                    page_size,
+                    chunk_size,
+                    None,
+                    &mut keep,
+                    &mut stats,
+                )?;
+            }
+
+            let (mut span_ranges, span_saved_bytes) =
+                coalesce_chunks_to_ranges(cursor_gpa, span_len, chunk_size, &keep);
+            stats.chunks_saved += keep.iter().filter(|&&k| k).count() as u64;
+            stats.saved_bytes += span_saved_bytes;
+            result_ranges.append(&mut span_ranges);
+            cursor_gpa = span_end;
+        }
+    }
+
+    Ok((result_ranges, stats))
+}
+
+impl MemoryManager {
+    fn send_sparse_full_memory(
+        &self,
+        memory_file_target: &MemorySnapshotFile,
+    ) -> result::Result<(), MigratableError> {
+        let memory_file = memory_file_target.open_for_fresh_write()?;
+        let guest_memory = self.guest_memory.memory();
+
+        let scan_started = std::time::Instant::now();
+        let (ranges, stats) =
+            filter_memory_ranges_for_sparse_full(&self.snapshot_memory_ranges, &guest_memory)?;
+        let scan_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
+
+        let mut gpa_to_file_offset =
+            Vec::with_capacity(self.snapshot_memory_ranges.regions().len());
+        let mut total_size = 0u64;
+        for r in self.snapshot_memory_ranges.regions() {
+            gpa_to_file_offset.push((r.gpa, r.length, total_size));
+            total_size += r.length;
+        }
+
+        // Only regular files we created (`memory-ranges`) need trailing size
+        // extension; pre-allocated external volumes (and S_ISBLK block devices)
+        // are already sized by cubecow and ftruncate fails on block devices.
+        if !memory_file_target.is_external() {
+            memory_file.set_len(total_size).map_err(|e| {
+                MigratableError::MigrateSend(anyhow!(
+                    "Failed to set sparse-full snapshot file length to {}: {}",
+                    total_size,
+                    e
+                ))
+            })?;
+        }
+
+        let align = snapshot_write_align(&memory_file);
+        let writes = snapshot_file_writes(&ranges, &gpa_to_file_offset, align)?;
+
+        let write_started = std::time::Instant::now();
+        let mut written_bytes = 0u64;
+        for (range, file_offset) in &writes {
+            self.save_range_to_file(&memory_file, range, *file_offset)?;
+            written_bytes += range.length;
+        }
+        let write_ms = write_started.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "SparseFull snapshot complete: total={} MiB, non_zero={} MiB, written={} MiB ({} writes, align={} KiB, scan_ms={:.1}, write_ms={:.1}, skipped_non_present_chunks={}, skipped_zero_chunks={}, fallback_regions={}, saved={:.1}%)",
+            total_size / (1024 * 1024),
+            stats.saved_bytes / (1024 * 1024),
+            written_bytes / (1024 * 1024),
+            writes.len(),
+            align / 1024,
+            scan_ms,
+            write_ms,
+            stats.skipped_non_present_chunks,
+            stats.skipped_zero_chunks,
+            stats.fallback_full_scan_regions,
+            stats.savings_percentage(written_bytes),
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sparse_full_tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::unix::fs::FileExt;
+    use vm_memory::Bytes;
+
+    fn make_table(guest_memory: &GuestMemoryMmap) -> (MemoryRangeTable, Vec<(u64, u64, u64)>, u64) {
+        let mut table = MemoryRangeTable::default();
+        let mut gpa_to_file_offset = Vec::new();
+        let mut total_size = 0u64;
+        for region in guest_memory.iter() {
+            let gpa = region.start_addr().raw_value();
+            let length = region.len() as u64;
+            table.push(MemoryRange { gpa, length });
+            gpa_to_file_offset.push((gpa, length, total_size));
+            total_size += length;
+        }
+        (table, gpa_to_file_offset, total_size)
+    }
+
+    fn write_sparse_ranges_to_temp_file(
+        guest_memory: &GuestMemoryMmap,
+        writes: &[(MemoryRange, u64)],
+        total_size: u64,
+    ) -> (PathBuf, Vec<u8>) {
+        let path = std::env::temp_dir().join(format!(
+            "cube_sparse_full_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(total_size).unwrap();
+        for (range, file_off) in writes {
+            let mut buf = vec![0u8; range.length as usize];
+            guest_memory
+                .read_slice(&mut buf, GuestAddress(range.gpa))
+                .unwrap();
+            file.write_all_at(&buf, *file_off).unwrap();
+        }
+        file.sync_all().unwrap();
+        let mut actual = Vec::with_capacity(total_size as usize);
+        File::open(&path).unwrap().read_to_end(&mut actual).unwrap();
+        (path, actual)
+    }
+
+    fn read_full_memory(guest_memory: &GuestMemoryMmap, table: &MemoryRangeTable) -> Vec<u8> {
+        let mut out = Vec::new();
+        for r in table.regions() {
+            let mut buf = vec![0u8; r.length as usize];
+            guest_memory
+                .read_slice(&mut buf, GuestAddress(r.gpa))
+                .unwrap();
+            out.extend_from_slice(&buf);
+        }
+        out
+    }
+
+    #[test]
+    fn sparse_full_pure_anon_preserves_nonzero_and_skips_holes_and_zero_pages() {
+        const MB: usize = 1024 * 1024;
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 4 * MB)]).unwrap();
+        // Write non-zero data at 64 KiB and zeroed-but-touched chunk at 1 MiB.
+        mem.write_slice(&[0x5A; 4096], GuestAddress(64 * 1024))
+            .unwrap();
+        mem.write_slice(&[0u8; 4096], GuestAddress(MB as u64))
+            .unwrap();
+
+        let (table, gpa_map, total_size) = make_table(&mem);
+        let (ranges, stats) = filter_memory_ranges_for_sparse_full(&table, &mem).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].gpa, 64 * 1024);
+        assert!(stats.skipped_non_present_chunks > 0);
+        assert!(stats.skipped_zero_chunks >= 1);
+
+        let writes = snapshot_file_writes(&ranges, &gpa_map, 0).unwrap();
+        let (path, sparse_bytes) = write_sparse_ranges_to_temp_file(&mem, &writes, total_size);
+        let expected = read_full_memory(&mem, &table);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(sparse_bytes, expected);
+    }
+
+    #[test]
+    fn sparse_full_file_backed_map_private_keeps_non_present_baseline_data() {
+        const MB: usize = 1024 * 1024;
+        let backing_path = std::env::temp_dir().join(format!(
+            "cube_sparse_full_base_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&backing_path)
+                .unwrap();
+            f.set_len((2 * MB) as u64).unwrap();
+            f.write_all_at(&[0xAA; 4096], 0).unwrap();
+            f.write_all_at(&[0xBB; 4096], MB as u64).unwrap();
+            f.sync_all().unwrap();
+        }
+        let backing_ro = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&backing_path)
+            .unwrap();
+        let mmap_region = MmapRegion::build(
+            Some(FileOffset::new(backing_ro, 0)),
+            2 * MB,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+        )
+        .unwrap();
+        let host_addr = mmap_region.as_ptr() as u64;
+        // Write CoW private byte inside an untouched sparse hole at 512 KiB.
+        unsafe {
+            std::ptr::write_volatile((host_addr as *mut u8).add(512 * 1024), 0xCC);
+        }
+
+        // Verify baseline offsets at 0 and 1 MiB remain NonPresent before filtering.
+        let residency = scan_pagemap_residency(host_addr, (2 * MB) as u64).unwrap();
+        let page_size = host_page_size() as usize;
+        assert_eq!(residency[0], PageResidency::NonPresent);
+        assert_eq!(residency[MB / page_size], PageResidency::NonPresent);
+        assert_eq!(residency[(512 * 1024) / page_size], PageResidency::Present);
+
+        let region = GuestRegionMmap::new(mmap_region, GuestAddress(0)).unwrap();
+        let mem = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+        let (table, gpa_map, total_size) = make_table(&mem);
+
+        let (ranges, stats) = filter_memory_ranges_for_sparse_full(&table, &mem).unwrap();
+        assert_eq!(stats.fallback_full_scan_regions, 0);
+        assert!(ranges.iter().any(|r| r.gpa == 0));
+        assert!(ranges.iter().any(|r| r.gpa == 512 * 1024));
+        assert!(ranges.iter().any(|r| r.gpa == MB as u64));
+
+        let writes = snapshot_file_writes(&ranges, &gpa_map, 0).unwrap();
+        let (out_path, sparse_bytes) = write_sparse_ranges_to_temp_file(&mem, &writes, total_size);
+        let expected = read_full_memory(&mem, &table);
+        let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&backing_path);
+        assert_eq!(sparse_bytes, expected);
+    }
+
+    #[test]
+    fn sparse_full_zero_chunk_fallback_matches_full_memory() {
+        const MB: usize = 1024 * 1024;
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MB)]).unwrap();
+        mem.write_slice(&[0x11, 0x22], GuestAddress(0)).unwrap();
+        mem.write_slice(&[0x33, 0x44], GuestAddress(5 * 64 * 1024 + 123))
+            .unwrap();
+
+        let chunk_size = SPARSE_FULL_ZERO_CHUNK_MIN.max(host_page_size());
+        let num_chunks = (MB as u64).div_ceil(chunk_size) as usize;
+        let mut keep = vec![false; num_chunks];
+        let mut stats = SparseFullStats::default();
+        let region = mem.find_region(GuestAddress(0)).unwrap();
+        let span_bytes = unsafe { std::slice::from_raw_parts(region.as_ptr(), MB) };
+        mark_nonzero_chunks_in_span(span_bytes, chunk_size, &mut keep, &mut stats);
+
+        assert!(keep[0]);
+        assert!(!keep[1]);
+        assert!(keep[5]);
+        let (ranges, _) = coalesce_chunks_to_ranges(0, MB as u64, chunk_size, &keep);
+        assert_eq!(ranges.len(), 2);
+
+        let (table, gpa_map, total_size) = make_table(&mem);
+        let writes = snapshot_file_writes(&ranges, &gpa_map, 0).unwrap();
+        let (out_path, sparse_bytes) = write_sparse_ranges_to_temp_file(&mem, &writes, total_size);
+        let expected = read_full_memory(&mem, &table);
+        let _ = std::fs::remove_file(&out_path);
+        assert_eq!(sparse_bytes, expected);
+    }
+
+    #[test]
+    fn sparse_full_multi_region_above_3gib_hole_and_fuse_align_coalesce() {
+        const MB: usize = 1024 * 1024;
+        const HIGH_GPA: u64 = 0x1_0000_0000;
+        let mem = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0), 2 * MB),
+            (GuestAddress(HIGH_GPA), 2 * MB),
+        ])
+        .unwrap();
+        mem.write_slice(&[0x11; 16], GuestAddress(64 * 1024))
+            .unwrap();
+        mem.write_slice(&[0x22; 16], GuestAddress(HIGH_GPA + 128 * 1024))
+            .unwrap();
+        mem.write_slice(&[0x33; 16], GuestAddress(HIGH_GPA + 512 * 1024))
+            .unwrap();
+
+        let (table, gpa_map, total_size) = make_table(&mem);
+        assert_eq!(total_size, (4 * MB) as u64);
+
+        let (ranges, _) = filter_memory_ranges_for_sparse_full(&table, &mem).unwrap();
+        let unaligned_writes = snapshot_file_writes(&ranges, &gpa_map, 0).unwrap();
+        assert_eq!(unaligned_writes.len(), 3);
+
+        let fused_writes =
+            snapshot_file_writes(&ranges, &gpa_map, FUSE_SNAPSHOT_WRITE_ALIGN).unwrap();
+        // Both high-region chunks fall inside the same 1 MiB FUSE align window.
+        assert_eq!(fused_writes.len(), 2);
+
+        let (out_path, sparse_bytes) =
+            write_sparse_ranges_to_temp_file(&mem, &fused_writes, total_size);
+        let expected = read_full_memory(&mem, &table);
+        let _ = std::fs::remove_file(&out_path);
+        assert_eq!(sparse_bytes, expected);
+    }
+
+    #[test]
+    fn sparse_full_seek_data_non_regular_fd_falls_back_to_none() {
+        use std::os::unix::net::UnixStream;
+        let (a, _b) = UnixStream::pair().unwrap();
+        let file = unsafe { File::from_raw_fd(libc::dup(a.as_raw_fd())) };
+        let res = file_seek_data_ranges(&file, 0, 128 * 1024, 4096, 64 * 1024, 2).unwrap();
+        assert!(res.is_none(), "non-S_IFREG fd must fall back to Ok(None)");
+    }
+
+    #[test]
+    fn sparse_full_skips_zero_resident_page_without_faulting_non_present_siblings() {
+        let page_size = host_page_size() as usize;
+        let chunk_size = SPARSE_FULL_ZERO_CHUNK_MIN.max(page_size as u64) as usize;
+        let pages_per_chunk = chunk_size / page_size;
+        if pages_per_chunk < 2 {
+            return;
+        }
+
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 2 * chunk_size)]).unwrap();
+        // Touch only the first page of chunk 0 with all-zero bytes; sibling pages
+        // in chunk 0 remain NonPresent.
+        mem.write_slice(&vec![0u8; page_size], GuestAddress(0))
+            .unwrap();
+        // Touch only the last page of chunk 1 with non-zero bytes.
+        let last_page_gpa = (chunk_size + (pages_per_chunk - 1) * page_size) as u64;
+        mem.write_slice(&[0x77; 16], GuestAddress(last_page_gpa))
+            .unwrap();
+
+        let (table, _, _) = make_table(&mem);
+        let (ranges, stats) = filter_memory_ranges_for_sparse_full(&table, &mem).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].gpa, chunk_size as u64);
+        assert_eq!(stats.skipped_zero_chunks, 1);
+
+        // Verify sibling pages in both chunk 0 and chunk 1 were never faulted in.
+        let region = mem.find_region(GuestAddress(0)).unwrap();
+        let residency = scan_pagemap_residency(region.as_ptr() as u64, (2 * chunk_size) as u64)
+            .expect("scan_pagemap_residency should succeed");
+        assert_eq!(residency[0], PageResidency::Present);
+        for &r in &residency[1..pages_per_chunk] {
+            assert_eq!(
+                r,
+                PageResidency::NonPresent,
+                "zero-page scan must not fault untouched sibling pages in chunk 0"
+            );
+        }
+        for &r in &residency[pages_per_chunk..2 * pages_per_chunk - 1] {
+            assert_eq!(
+                r,
+                PageResidency::NonPresent,
+                "non-zero page scan must not fault untouched sibling pages in chunk 1"
+            );
+        }
+        assert_eq!(residency[2 * pages_per_chunk - 1], PageResidency::Present);
     }
 }

@@ -87,14 +87,16 @@ pub struct SnapshotArgs {
     )]
     pub vm_id: Option<String>,
 
-    /// Snapshot type: 'full', 'incremental' (saves only CoW anonymous pages,
-    /// cumulative since restore) or 'soft-dirty' (true delta of pages
-    /// dirtied since the previous soft-dirty snapshot; falls back to
-    /// 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY).
+    /// Snapshot type: 'full', 'sparse-full' (skips zero holes in standalone
+    /// snapshots; requires a zero-initialized destination), 'incremental'
+    /// (saves only CoW anonymous pages, cumulative since restore) or
+    /// 'soft-dirty' (true delta of pages dirtied since the previous
+    /// soft-dirty snapshot; falls back to 'incremental' on kernels without
+    /// CONFIG_MEM_SOFT_DIRTY).
     #[arg(
         long = "snapshot-type",
         value_name = "snapshot type",
-        help = "snapshot type: 'full', 'incremental' or 'soft-dirty'",
+        help = "snapshot type: 'full', 'sparse-full', 'incremental' or 'soft-dirty'",
         default_value = "full"
     )]
     pub snapshot_type: String,

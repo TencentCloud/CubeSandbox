@@ -96,7 +96,7 @@ func TestFailedCommitDoesNotResolveOldDestinationBaseline(t *testing.T) {
 	}
 	_, snapshotType, err := prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "new", 4096, "s3")
 	require.NoError(t, err)
-	require.Equal(t, snapshotTypeFull, snapshotType)
+	require.Equal(t, snapshotTypeSparseFull, snapshotType)
 	// Failure to publish a completed package must leave the durable invalid
 	// baseline in memory too, so the next commit follows the same safe fallback.
 	syncer.err = errors.New("baseline publication unavailable")
@@ -104,7 +104,7 @@ func TestFailedCommitDoesNotResolveOldDestinationBaseline(t *testing.T) {
 	require.Equal(t, "", resolveBaseSnapshotID(cb))
 	_, snapshotType, err = prepareCommitMemoryArtifact(context.Background(), log.G(context.Background()), cb, "next", 4096, "s3")
 	require.NoError(t, err)
-	require.Equal(t, snapshotTypeFull, snapshotType)
+	require.Equal(t, snapshotTypeSparseFull, snapshotType)
 	syncer.err = nil
 	require.NoError(t, persistRuntimeSnapshotBinding(context.Background(), syncer, cb, "new"))
 	require.Equal(t, "new", resolveBaseSnapshotID(cb))

@@ -693,7 +693,7 @@ fn main() {
                 .arg(
                     Arg::new("snapshot_type")
                         .long("snapshot-type")
-                        .help("Snapshot type: 'full', 'incremental' (saves only CoW anonymous pages) or 'soft-dirty' (true delta of pages written since the previous soft-dirty snapshot; falls back to 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY)")
+                        .help("Snapshot type: 'full', 'sparse-full' (skips zero holes in standalone snapshots; requires a zero-initialized destination), 'incremental' (saves only CoW anonymous pages) or 'soft-dirty' (true delta of pages written since the previous soft-dirty snapshot; falls back to 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY)")
                         .num_args(1)
                         .default_value("full"),
                 )
@@ -724,7 +724,7 @@ fn main() {
                 .arg(
                     Arg::new("snapshot_type")
                         .long("snapshot-type")
-                        .help("Snapshot type: 'full', 'incremental' (saves only CoW anonymous pages) or 'soft-dirty' (true delta of pages written since the previous soft-dirty snapshot; falls back to 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY)")
+                        .help("Snapshot type: 'full', 'sparse-full' (skips zero holes in standalone snapshots; requires a zero-initialized destination), 'incremental' (saves only CoW anonymous pages) or 'soft-dirty' (true delta of pages written since the previous soft-dirty snapshot; falls back to 'incremental' on kernels without CONFIG_MEM_SOFT_DIRTY)")
                         .num_args(1)
                         .default_value("full"),
                 )

@@ -39,7 +39,7 @@ func TestPrepareCommitMemoryArtifactExpiryDuringClone(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, obj)
 			if restoreGone {
-				require.Equal(t, snapshotTypeFull, mode)
+				require.Equal(t, snapshotTypeSparseFull, mode)
 			} else {
 				require.Equal(t, snapshotTypeIncremental, mode)
 			}
