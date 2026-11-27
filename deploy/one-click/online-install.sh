@@ -36,6 +36,17 @@ detect_glibc_version() {
   printf '%s\n' "${glibc_ver}"
 }
 
+# Keep this standalone equivalent in sync with lib/common.sh: that library is
+# not available until after the release bundle has been downloaded.
+read_mem_total_kb() {
+  local mem_total_kb
+  mem_total_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+  if ! [[ "${mem_total_kb}" =~ ^[0-9]+$ ]]; then
+    mem_total_kb=0
+  fi
+  printf '%s\n' "${mem_total_kb}"
+}
+
 # Snap Docker cannot read /usr/local/services (#1753).
 reject_snap_docker() {
   local p resolved
@@ -195,8 +206,8 @@ EOF
 
   # 6. Memory check (>= 8GB or configurable threshold)
   local mem_total_kb
-  mem_total_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-  
+  mem_total_kb="$(read_mem_total_kb)"
+
   local min_mem_kb=7500000
   if [[ -n "${CUBE_MIN_MEMORY_KB:-}" ]]; then
     if [[ "${CUBE_MIN_MEMORY_KB}" =~ ^[0-9]+$ ]] && [[ "${CUBE_MIN_MEMORY_KB}" -gt 0 ]]; then

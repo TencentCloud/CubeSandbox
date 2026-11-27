@@ -999,8 +999,8 @@ check_hardware_preflight() {
   fi
 
   local mem_total_kb
-  mem_total_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-  
+  mem_total_kb="$(read_mem_total_kb)"
+
   local min_mem_kb=7500000
   if [[ -n "${CUBE_MIN_MEMORY_KB:-}" ]]; then
     if [[ "${CUBE_MIN_MEMORY_KB}" =~ ^[0-9]+$ ]] && [[ "${CUBE_MIN_MEMORY_KB}" -gt 0 ]]; then

@@ -565,6 +565,49 @@ test_run_with_timeout_if_available() {
   assert_contains "${direct_log}" "-h 127.0.0.1 -p 6389 ping"
 }
 
+test_read_mem_total_kb() {
+  local got
+
+  got="$(
+    awk() {
+      printf '%s\n' '2406981696'
+      return 1
+    }
+    read_mem_total_kb
+  )"
+  [[ "${got}" == "2406981696" ]] \
+    || fail "read_mem_total_kb should preserve numeric output from a failing awk (got '${got}')"
+
+  got="$(
+    awk() {
+      printf '%s\n' 'not-a-number'
+    }
+    read_mem_total_kb
+  )"
+  [[ "${got}" == "0" ]] \
+    || fail "read_mem_total_kb should replace malformed output with zero (got '${got}')"
+
+  got="$(
+    awk() {
+      return 1
+    }
+    read_mem_total_kb
+  )"
+  [[ "${got}" == "0" ]] \
+    || fail "read_mem_total_kb should replace missing output with zero (got '${got}')"
+}
+
+test_online_install_defines_memory_probe() {
+  local f="${ONE_CLICK_DIR}/online-install.sh"
+  local definition_line call_line
+
+  definition_line="$(grep -nF 'read_mem_total_kb() {' "${f}" | head -1 | cut -d: -f1 || true)"
+  call_line="$(grep -nF 'mem_total_kb="$(read_mem_total_kb)"' "${f}" | head -1 | cut -d: -f1 || true)"
+  if [[ -z "${definition_line}" || -z "${call_line}" || "${definition_line}" -ge "${call_line}" ]]; then
+    fail "online-install.sh must define read_mem_total_kb before its standalone preflight calls it"
+  fi
+}
+
 test_install_sh_wires_upgrade_flow() {
   local f="${ONE_CLICK_DIR}/install.sh"
   assert_contains "${f}" "resolve_install_mode"
@@ -645,6 +688,8 @@ test_upgrade_preflight_and_backup
 test_validation_library_fallback_die
 test_redis_cli_help_supports_flag
 test_run_with_timeout_if_available
+test_read_mem_total_kb
+test_online_install_defines_memory_probe
 test_install_sh_wires_upgrade_flow
 
 echo "install mode tests OK"

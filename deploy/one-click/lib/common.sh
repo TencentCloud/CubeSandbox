@@ -67,6 +67,17 @@ detect_glibc_version() {
   printf '%s\n' "${glibc_ver}"
 }
 
+# Preserve a numeric MemTotal value even if awk reports a later read error;
+# malformed or missing output is normalized to zero so callers can compare it.
+read_mem_total_kb() {
+  local mem_total_kb
+  mem_total_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+  if ! [[ "${mem_total_kb}" =~ ^[0-9]+$ ]]; then
+    mem_total_kb=0
+  fi
+  printf '%s\n' "${mem_total_kb}"
+}
+
 require_cmd() {
   local cmd="$1"
   command -v "${cmd}" >/dev/null 2>&1 || die "required command not found: ${cmd}"
