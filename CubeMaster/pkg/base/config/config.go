@@ -144,9 +144,11 @@ type CommonConf struct {
 	DisableCreateImageCluster       map[string]bool `yaml:"disable_create_image_cluster"`
 	EnableAGSColdStartSwitch        bool            `yaml:"enable_ags_cold_start_switch"`
 
-	// MaxProcs caps the Go scheduler width (runtime.GOMAXPROCS). Zero keeps the
-	// Go runtime default, which on Go 1.25+ is min(available CPUs, cgroup CPU
-	// quota), i.e. one P per core when the host or container has no CPU limit.
+	// MaxProcs lowers the Go scheduler width (runtime.GOMAXPROCS) when the
+	// runtime picked a wider one. It never raises it: on Go 1.25+ the default
+	// already accounts for the cgroup CPU quota, so a pod limited to 4 CPUs
+	// starts at 4 and a copied "16-32" recommendation must not push it back up.
+	// Zero (the default) keeps whatever the runtime computed.
 	//
 	// CubeMaster is I/O bound: goroutine time goes to MySQL, redis and cubelet
 	// HTTP, so on a many-core bare-metal host the default buys little real
@@ -154,8 +156,7 @@ type CommonConf struct {
 	// one shard per P in every sync.Pool, and the preemption signals that go
 	// with both. In a create-heavy profile on a 384-core host, GC was 73.5% of
 	// CubeMaster's CPU; capping at 32 cut CPU per create from 29.7ms to 8.6ms.
-	// 16-32 is the recommended range for such hosts. Leave 0 unless the process
-	// is not CPU limited.
+	// 16-32 is the recommended range for such hosts.
 	MaxProcs int `yaml:"max_procs"`
 }
 
@@ -870,7 +871,33 @@ func (l *listener) OnEvent(data interface{}) {
 		return
 	}
 	cfg = conf
+	// conf.yaml is hot-reloadable, so apply a narrowed max_procs here as well.
+	// Widening is not possible: once lowered, the runtime default this process
+	// started with is gone, so raising the value back needs a restart.
+	if prev, now := conf.ApplyMaxProcs(); prev != now {
+		CubeLog.Infof("config reload: gomaxprocs %d -> %d (max_procs=%d)", prev, now, conf.Common.MaxProcs)
+	}
 	notify(conf)
+}
+
+// ApplyMaxProcs lowers the Go scheduler width when common.max_procs asks for a
+// narrower one, and returns the width in effect before and after the call.
+//
+// It deliberately never raises the width. The Go runtime already picked one
+// from the CPU count, or on Go 1.25+ from the cgroup CPU quota (a pod limited
+// to 4 CPUs starts at 4), so raising would over-subscribe a limited container
+// and reintroduce the GC mark fan-out and per-P pool shards this knob exists to
+// remove. It also keeps a stricter GOMAXPROCS from the environment: the value
+// being compared is what the runtime actually chose, environment included.
+func (c *Config) ApplyMaxProcs() (prev, now int) {
+	prev = runtime.GOMAXPROCS(0)
+	if c == nil || c.Common == nil || c.Common.MaxProcs <= 0 || c.Common.MaxProcs >= prev {
+		return prev, prev
+	}
+	// runtime.GOMAXPROCS returns the value it replaced, hence the explicit
+	// width below rather than the call's result.
+	runtime.GOMAXPROCS(c.Common.MaxProcs)
+	return prev, c.Common.MaxProcs
 }
 
 func preHandle(config *Config) (*Config, error) {

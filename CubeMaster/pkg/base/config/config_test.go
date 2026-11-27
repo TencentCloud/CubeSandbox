@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -134,9 +135,9 @@ func TestPreComHandleConfDistributionWorkersDefault(t *testing.T) {
 }
 
 func TestPreComHandleConfMaxProcs(t *testing.T) {
-	// max_procs is a cap, not a requirement: 0 must survive the defaults pass
-	// untouched so the Go runtime keeps whatever it computed at startup (nproc,
-	// or the cgroup CPU quota on Go 1.25+).
+	// max_procs is a ceiling, not a requirement: 0 must survive the defaults
+	// pass untouched so the Go runtime keeps whatever it computed at startup
+	// (nproc, or the cgroup CPU quota on Go 1.25+).
 	cfg := &Config{Common: &CommonConf{}}
 	require.NoError(t, preComHandleConf(cfg))
 	assert.Equal(t, 0, cfg.Common.MaxProcs)
@@ -159,6 +160,33 @@ func TestPreHandlePropagatesMaxProcsError(t *testing.T) {
 	_, err := preHandle(&Config{Common: &CommonConf{MaxProcs: -1}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max_procs")
+}
+
+func TestApplyMaxProcsOnlyLowers(t *testing.T) {
+	// The knob is a ceiling, not an override: on Go 1.25+ the runtime default
+	// already reflects the cgroup CPU quota, so a value above the width in
+	// effect must be ignored instead of over-subscribing the container.
+	orig := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(orig) })
+
+	runtime.GOMAXPROCS(16)
+	assert.Equal(t, 16, runtime.GOMAXPROCS(0))
+
+	if prev, now := (&Config{Common: &CommonConf{MaxProcs: 32}}).ApplyMaxProcs(); prev != 16 || now != 16 {
+		t.Fatalf("max_procs above the current width must not raise it: prev=%d now=%d", prev, now)
+	}
+	if prev, now := (&Config{Common: &CommonConf{MaxProcs: 4}}).ApplyMaxProcs(); prev != 16 || now != 4 {
+		t.Fatalf("max_procs below the current width must lower it: prev=%d now=%d", prev, now)
+	}
+	// Both the reload path (value edited to 0) and a nil config must leave the
+	// width alone rather than resetting it to something the runtime no longer
+	// remembers.
+	if prev, now := (&Config{Common: &CommonConf{}}).ApplyMaxProcs(); prev != 4 || now != 4 {
+		t.Fatalf("unset max_procs must not touch the width: prev=%d now=%d", prev, now)
+	}
+	if prev, now := (*Config)(nil).ApplyMaxProcs(); prev != 4 || now != 4 {
+		t.Fatalf("nil config must not touch the width: prev=%d now=%d", prev, now)
+	}
 }
 
 func TestCommonConfMaxProcsYAML(t *testing.T) {
