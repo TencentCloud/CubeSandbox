@@ -18,11 +18,15 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/leader"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/registry"
 	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/resumer"
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/telemetry"
 )
 
 // FleetSizer is an optional dependency: when set, /readyz reports the
@@ -112,12 +116,23 @@ func (s *Server) handleResume(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	rid := req.URL.Query().Get("request_id")
+	parent := propagation.TraceContext{}.Extract(req.Context(), propagation.HeaderCarrier(req.Header))
+	ctx, span := telemetry.Start(parent, telemetry.SpanResume,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrSandboxID, sid),
+			attribute.String(telemetry.AttrRequestID, rid),
+		),
+	)
+
+	var resumeErr error
+	defer func() { telemetry.End(span, resumeErr) }()
 
 	// CubeProxy's proxy_read_timeout is 30s. Cap our own work at 25s so we
 	// always have time to flush a 5xx response before nginx gives up on us
 	// — otherwise nginx returns "504 upstream timed out" with no body and
 	// we lose the ability to report what actually went wrong.
-	ctx, cancel := context.WithTimeout(req.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 
 	start := time.Now()
@@ -125,13 +140,13 @@ func (s *Server) handleResume(w http.ResponseWriter, req *http.Request) {
 		zap.String("sandbox_id", sid),
 		zap.String("request_id", rid))
 
-	if err := s.resumer.Resume(ctx, sid); err != nil {
+	if resumeErr = s.resumer.Resume(ctx, sid); resumeErr != nil {
 		s.log.Warn("resume failed",
 			zap.String("sandbox_id", sid),
 			zap.String("request_id", rid),
 			zap.Duration("elapsed", time.Since(start)),
-			zap.Error(err))
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			zap.Error(resumeErr))
+		http.Error(w, resumeErr.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	s.log.Info("resume request completed",

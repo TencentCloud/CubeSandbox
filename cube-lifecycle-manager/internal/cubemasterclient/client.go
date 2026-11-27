@@ -19,6 +19,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/tencentcloud/CubeSandbox/cube-lifecycle-manager/internal/telemetry"
 )
 
 // CubeMaster ret_code constants CLM reasons about. The full set
@@ -153,9 +158,22 @@ func (c *Client) Resume(ctx context.Context, sandboxID, instanceType string) err
 }
 
 // Kill asks CubeMaster to destroy the given sandbox.
-func (c *Client) Kill(ctx context.Context, sandboxID, instanceType, reason string) error {
+func (c *Client) Kill(ctx context.Context, sandboxID, instanceType, reason string) (err error) {
 	if sandboxID == "" || instanceType == "" {
 		return errors.New("sandbox_id and instance_type are required")
+	}
+
+	span := trace.SpanFromContext(ctx)
+	if span.SpanContext().IsValid() {
+		ctx, span = telemetry.Start(ctx, telemetry.SpanCubeMasterKill,
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrSandboxID, sandboxID),
+				attribute.String(telemetry.AttrInstanceType, instanceType),
+				attribute.String(telemetry.AttrKillReason, reason),
+			),
+		)
+		defer func() { telemetry.End(span, err) }()
 	}
 
 	body, err := json.Marshal(killRequest{
@@ -175,6 +193,7 @@ func (c *Client) Kill(ctx context.Context, sandboxID, instanceType, reason strin
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
@@ -194,15 +213,31 @@ func (c *Client) Kill(ctx context.Context, sandboxID, instanceType, reason strin
 	if err := json.Unmarshal(raw, &ur); err != nil {
 		return fmt.Errorf("decode response: %w (body=%q)", err, raw)
 	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, ur.Ret.RetCode))
+	}
 	if ur.Ret.RetCode == RetCodeSuccess {
 		return nil
 	}
 	return &APIError{RetCode: ur.Ret.RetCode, RetMsg: ur.Ret.RetMsg}
 }
 
-func (c *Client) update(ctx context.Context, sandboxID, instanceType, action string) error {
+func (c *Client) update(ctx context.Context, sandboxID, instanceType, action string) (err error) {
 	if sandboxID == "" || instanceType == "" {
 		return errors.New("sandbox_id and instance_type are required")
+	}
+
+	span := trace.SpanFromContext(ctx)
+	if span.SpanContext().IsValid() {
+		ctx, span = telemetry.Start(ctx, telemetry.SpanCubeMasterUpdate,
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrSandboxID, sandboxID),
+				attribute.String(telemetry.AttrInstanceType, instanceType),
+				attribute.String(telemetry.AttrAction, action),
+			),
+		)
+		defer func() { telemetry.End(span, err) }()
 	}
 
 	body, err := json.Marshal(updateRequest{
@@ -221,6 +256,7 @@ func (c *Client) update(ctx context.Context, sandboxID, instanceType, action str
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
@@ -239,6 +275,9 @@ func (c *Client) update(ctx context.Context, sandboxID, instanceType, action str
 	var ur updateResponse
 	if err := json.Unmarshal(raw, &ur); err != nil {
 		return fmt.Errorf("decode response: %w (body=%q)", err, raw)
+	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Int(telemetry.AttrRetCode, ur.Ret.RetCode))
 	}
 	if ur.Ret.RetCode == RetCodeSuccess {
 		return nil

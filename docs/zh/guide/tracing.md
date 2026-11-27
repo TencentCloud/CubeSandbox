@@ -59,6 +59,14 @@ Cubelet 为每个沙箱启动一个全新的 CubeShim 进程；该进程在启�
 
 Cubelet 在 `task.Start` 前注册 containerd 的 `task.Wait`。任务启动后，等待会有意持续到任务退出；创建请求取消或超时不会丢失退出事件。等待上下文只保留 containerd 命名空间，不继承请求取消、日志字段或已结束的创建 Span。若任务启动失败，则取消等待。
 
+### Lifecycle Manager 自动生命周期操作
+
+在 Lifecycle Manager 进程上配置 OTLP/gRPC 地址可启用自动暂停、自动恢复和超时回收追踪。使用 Helm 时，将 `OTEL_EXPORTER_OTLP_ENDPOINT`（或 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`）添加到 `lifecycleManager.env`。
+
+`clm.sweep.kill` Span 记录沙箱 ID、空闲时长及配置的超时阈值。子 Span `clm.cubemaster.kill` 记录 CubeMaster 的业务返回码，并随 `DELETE /cube/sandbox` 传递追踪上下文。要在同一条 Trace 中看到 CubeMaster 和 Cubelet 的 Span，还需要这些组件支持删除追踪。
+
+自动暂停从 `clm.sweep.pause` 开始一条 Trace，并记录沙箱 ID、空闲时长和超时阈值。数据面请求唤醒已暂停的沙箱时，CubeProxy 将 W3C 追踪上下文传给 Lifecycle Manager。`clm.sandbox.resume` 记录恢复请求，`clm.sandbox.resume.ownership` 记录恢复所有权获取结果。暂停和恢复都通过 `clm.cubemaster.update` 将上下文传给 CubeMaster，用 `cube.action` 区分 `pause` 和 `resume`。
+
 ### Rust envd REST 追踪
 
 要启用 Rust envd 追踪，请在 envd 启动时读取的沙箱环境中设置
