@@ -393,3 +393,14 @@ scheduler:
 		assert.Equal(t, "spread", profile.Selection.Method)
 	}
 }
+
+// One-click CUBE_SET rejects unit-less durations because yaml.v3 does too.
+func TestSchedulerDurationRequiresUnit(t *testing.T) {
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte("scheduler:\n  metric_update_timeout: 600s\n"), &cfg))
+	assert.Equal(t, 600*time.Second, cfg.Scheduler.MetricUpdateTimeout)
+	for _, raw := range []string{"600", `"600"`} {
+		var bad Config
+		assert.Error(t, yaml.Unmarshal([]byte("scheduler:\n  metric_update_timeout: "+raw+"\n"), &bad), raw)
+	}
+}

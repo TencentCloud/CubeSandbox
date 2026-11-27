@@ -142,7 +142,15 @@ shared_kernel_path = "/usr/local/services/cubetoolbox/cube-kernel-scf/vmlinux"
 
 `image_base_path` 是 cubebox 模板工件的最终缓存目录，每个工件位于 `<image_base_path>/<artifact-id>/<artifact-id>.ext4`，并包含对应的 `.vm` 文件。`shared_kernel_path` 是模板工件以及无模板沙箱使用的 `vmlinux` 源文件。两个路径都必须是绝对路径。省略时，Cubelet 保留历史 toolbox 路径；`cubetool_base_dir` 仍作为旧配置的兼容 fallback。设置任一新路径后，该路径以新配置为准，旧配置不会覆盖它。如果旧 cbri 配置自定义了 `base_path`，应显式将 `shared_kernel_path` 设为该安装目录下匹配的内核路径；`base_path` 仍控制无模板沙箱使用的 guest 和 agent 镜像，但不再选择 `vmlinux`。配置的内核路径必须与节点当前选中的 bm/pvm 内核变体和 digest 一致；修改这个路径不会为节点或模板上报选择另一套 kernel identity。
 
-工件目录和内核路径相互独立。修改任一路径后都需要重启 Cubelet。Cubelet 不会自动搬迁已有工件；切换到新路径前，需要先让受影响的缓存或内核文件在新路径可用。已有 snapshot 还必须继续让历史工件路径可访问（例如通过部署层软链），或者重建相关 snapshot，因为 snapshot 元数据保存了 kernel 和 ext4 工件的绝对路径。旧 cbri 插件中的 `image_base_path` 和 `kernel_base_path` 不再作为工件路径来源，请改在 images 插件段配置工件路径。如果旧字段中有自定义值，应先把需要保留的值复制到 images 插件段，再删除或更新旧字段。
+工件目录和内核路径相互独立。一键安装的环境不要手改 `config.toml`：下一次 `--mode=upgrade` 会用安装包重建它，单纯重启也不会应用 `CUBE_SET_*`。请在安装包的 `.env` 中设置路径，再重新执行 `install.sh --mode=upgrade`（两者都必须是绝对路径）：
+
+```bash
+CUBE_SET_1_FILE=Cubelet/config/config.toml
+CUBE_SET_1_PATH='plugins."io.cubelet.internal.v1.images".image_base_path'
+CUBE_SET_1_VALUE=/data/cubebox_os_image
+```
+
+Cubelet 不会自动搬迁已有工件；切换到新路径前，需要先让受影响的缓存或内核文件在新路径可用。已有 snapshot 还必须继续让历史工件路径可访问（例如通过部署层软链），或者重建相关 snapshot，因为 snapshot 元数据保存了 kernel 和 ext4 工件的绝对路径。旧 cbri 插件中的 `image_base_path` 和 `kernel_base_path` 不再作为工件路径来源，请改在 images 插件段配置工件路径。如果旧字段中有自定义值，应先把需要保留的值复制到 images 插件段，再删除或更新旧字段。
 
 `cubelet config dump` 和 `cubelet config migrate` 会把解析后的工件路径写成显式的 `image_base_path` 和 `shared_kernel_path`。使用导出的配置文件后，如需调整路径，应修改这两个显式字段；只修改 `cubetool_base_dir` 不会覆盖它们。
 
