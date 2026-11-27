@@ -273,6 +273,17 @@ func testCreatePreinstallJobsRollsBackOnConflict(t *testing.T, s *store.Store) {
 	}
 }
 
+func backdateImportJob(t *testing.T, s *store.Store, id string) time.Time {
+	t.Helper()
+	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.DB().WithContext(t.Context()).Exec(
+		`UPDATE t_component_import_job SET updated_at = ? WHERE id = ?`, past, id,
+	).Error; err != nil {
+		t.Fatalf("backdate import job %s: %v", id, err)
+	}
+	return past
+}
+
 func TestClaimImportJob(t *testing.T) {
 	withWarehouseStores(t, testClaimImportJob)
 }
@@ -302,7 +313,7 @@ func testClaimImportJob(t *testing.T, s *store.Store) {
 		t.Fatalf("list pending work=%v", work)
 	}
 
-	ok, err := s.ClaimImportJob(ctx, "claim-pending", stale)
+	ok, err := s.ClaimImportJob(ctx, "claim-pending", "first", stale)
 	if err != nil || !ok {
 		t.Fatalf("claim pending: ok=%v err=%v", ok, err)
 	}
@@ -314,7 +325,7 @@ func testClaimImportJob(t *testing.T, s *store.Store) {
 		t.Fatalf("after claim status=%v", got)
 	}
 
-	ok, err = s.ClaimImportJob(ctx, "claim-pending", stale)
+	ok, err = s.ClaimImportJob(ctx, "claim-pending", "second", stale)
 	if err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
@@ -322,8 +333,9 @@ func testClaimImportJob(t *testing.T, s *store.Store) {
 		t.Fatal("second claim of running job succeeded")
 	}
 
-	mustCreate("claim-fresh-running", store.ImportRunning)
-	ok, err = s.ClaimImportJob(ctx, "claim-fresh-running", stale)
+	const legacyID = "claim-legacy-running"
+	mustCreate(legacyID, store.ImportRunning)
+	ok, err = s.ClaimImportJob(ctx, legacyID, "second", stale)
 	if err != nil {
 		t.Fatalf("fresh running claim: %v", err)
 	}
@@ -331,24 +343,22 @@ func testClaimImportJob(t *testing.T, s *store.Store) {
 		t.Fatal("fresh running job was reclaimed")
 	}
 
-	mustCreate("claim-stale-running", store.ImportRunning)
-	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := s.DB().WithContext(ctx).Exec(
-		`UPDATE t_component_import_job SET updated_at = ? WHERE id = ?`,
-		past, "claim-stale-running",
-	).Error; err != nil {
-		t.Fatalf("backdate stale running: %v", err)
+	const id = "claim-stale-running"
+	mustCreate(id, store.ImportPending)
+	if ok, err := s.ClaimImportJob(ctx, id, "old", stale); err != nil || !ok {
+		t.Fatalf("initial claim: ok=%v err=%v", ok, err)
 	}
+	backdateImportJob(t, s, id)
 	work, err = s.ListImportWork(ctx, stale)
 	if err != nil {
 		t.Fatalf("list stale work: %v", err)
 	}
 	foundStale := false
 	for _, job := range work {
-		if job.ID == "claim-stale-running" {
+		if job.ID == id {
 			foundStale = true
 		}
-		if job.ID == "claim-fresh-running" || job.ID == "claim-pending" {
+		if job.ID == legacyID || job.ID == "claim-pending" {
 			t.Fatalf("list work included non-stale %s", job.ID)
 		}
 	}
@@ -356,9 +366,47 @@ func testClaimImportJob(t *testing.T, s *store.Store) {
 		t.Fatal("list work missing stale running job")
 	}
 
-	ok, err = s.ClaimImportJob(ctx, "claim-stale-running", stale)
+	// Jobs that were already running before the migration have a NULL token.
+	backdateImportJob(t, s, legacyID)
+	if ok, err := s.ClaimImportJob(ctx, legacyID, "upgraded", stale); err != nil || !ok {
+		t.Fatalf("reclaim legacy running job: ok=%v err=%v", ok, err)
+	}
+
+	ok, err = s.ClaimImportJob(ctx, id, "new", stale)
 	if err != nil || !ok {
 		t.Fatalf("reclaim stale running: ok=%v err=%v", ok, err)
+	}
+	// A matching heartbeat must change the timestamp even at MySQL second precision.
+	backdateImportJob(t, s, id)
+	if ok, err := s.TouchImportJob(ctx, id, "old"); err != nil || ok {
+		t.Fatalf("stale heartbeat: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.TouchImportJob(ctx, id, "new"); err != nil || !ok {
+		t.Fatalf("current owner heartbeat: ok=%v err=%v", ok, err)
+	}
+	if err := s.RequeueImportJob(ctx, id, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateImportJob(ctx, id, "old", store.ImportFailed, "late failure", 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetImportJob(ctx, id)
+	if err != nil || got == nil || got.Status != store.ImportRunning {
+		t.Fatalf("stale owner changed the running job: %+v, err=%v", got, err)
+	}
+	if err := s.UpdateImportJob(ctx, id, "new", store.ImportSucceeded, "", 10); err != nil {
+		t.Fatal(err)
+	}
+	backdateImportJob(t, s, id)
+	if ok, err := s.TouchImportJob(ctx, id, "new"); err != nil || ok {
+		t.Fatalf("heartbeat after completion: ok=%v err=%v", ok, err)
+	}
+	if err := s.UpdateImportJob(ctx, id, "new", store.ImportFailed, "late failure", 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetImportJob(ctx, id)
+	if err != nil || got == nil || got.Status != store.ImportSucceeded || got.BytesTotal != 10 {
+		t.Fatalf("completed import changed: %+v, err=%v", got, err)
 	}
 }
 
@@ -575,41 +623,55 @@ func testTouchImportJob(t *testing.T, s *store.Store) {
 	ctx := context.Background()
 	if err := s.CreateImportJob(ctx, store.ImportJob{
 		ID: "touch-1", Source: "upload", SourceRef: "uploads/x.tar.gz",
-		Tag: "v0.6.0", Arch: "amd64", Status: store.ImportRunning,
+		Tag: "v0.6.0", Arch: "amd64", Status: store.ImportPending,
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	got, err := s.GetImportJob(ctx, "touch-1")
-	if err != nil || got == nil {
-		t.Fatalf("get: %v %+v", err, got)
+	if ok, err := s.ClaimImportJob(ctx, "touch-1", "owner", time.Minute); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := s.DB().WithContext(ctx).Exec(
-		`UPDATE t_component_import_job SET updated_at = ? WHERE id = ?`,
-		past, "touch-1",
-	).Error; err != nil {
-		t.Fatalf("backdate: %v", err)
-	}
-	ok, err := s.TouchImportJob(ctx, "touch-1")
+	past := backdateImportJob(t, s, "touch-1")
+	ok, err := s.TouchImportJob(ctx, "touch-1", "owner")
 	if err != nil || !ok {
 		t.Fatalf("touch running: ok=%v err=%v", ok, err)
 	}
-	got, err = s.GetImportJob(ctx, "touch-1")
+	got, err := s.GetImportJob(ctx, "touch-1")
 	if err != nil || got == nil {
 		t.Fatalf("get after touch: %v %+v", err, got)
 	}
 	if !got.UpdatedAt.After(past) {
 		t.Fatalf("updated_at did not advance: after=%v", got.UpdatedAt)
 	}
-	if err := s.UpdateImportJob(ctx, "touch-1", store.ImportSucceeded, "", 0); err != nil {
-		t.Fatalf("finish: %v", err)
+	if err := s.RequeueImportJob(ctx, "touch-1", "owner"); err != nil {
+		t.Fatal(err)
 	}
-	ok, err = s.TouchImportJob(ctx, "touch-1")
-	if err != nil {
-		t.Fatalf("touch finished: %v", err)
+	if err := s.UpdateImportJob(ctx, "touch-1", "owner", store.ImportSucceeded, "", 0); err != nil {
+		t.Fatal(err)
 	}
-	if ok {
-		t.Fatal("touch of non-running job returned true")
+	got, err = s.GetImportJob(ctx, "touch-1")
+	if err != nil || got == nil || got.Status != store.ImportPending {
+		t.Fatalf("late completion after requeue: %+v, err=%v", got, err)
+	}
+	// An older worker sets the job running without assigning a new token.
+	legacyClaim := s.DB().WithContext(ctx).Exec(
+		`UPDATE t_component_import_job SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
+		store.ImportRunning, "touch-1", store.ImportPending,
+	)
+	if legacyClaim.Error != nil || legacyClaim.RowsAffected != 1 {
+		t.Fatalf("legacy claim: rows=%d err=%v", legacyClaim.RowsAffected, legacyClaim.Error)
+	}
+	if err := s.UpdateImportJob(ctx, "touch-1", "owner", store.ImportFailed, "late failure", 0); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var tokenCleared bool
+	if err := s.DB().WithContext(ctx).Raw(
+		`SELECT status, claim_token IS NULL FROM t_component_import_job WHERE id = ?`, "touch-1",
+	).Row().Scan(&status, &tokenCleared); err != nil {
+		t.Fatal(err)
+	}
+	if status != store.ImportRunning || !tokenCleared {
+		t.Fatalf("after legacy claim and late write: status=%s tokenCleared=%v", status, tokenCleared)
 	}
 }
 
