@@ -271,7 +271,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	if err := checkParam(req); err != nil {
 		return nil, err
 	}
-	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: annotation_count=%d volumes_before_inject=%d",
+	log.G(ctx).Debugf("[hostdir] ConstructCubeletReq: annotation_count=%d volumes_before_inject=%d",
 		len(req.Annotations), len(req.Volumes))
 
 	// Normalize the sandbox idle timeout into a concrete value.
@@ -296,7 +296,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		out.Backend = b
 		out.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	log.G(ctx).Infof(
+	log.G(ctx).Debugf(
 		"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
 		req.InstanceType,
 		req.NetworkType,
@@ -311,7 +311,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	if err = injectHostDirMounts(ctx, req); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
-	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: volumes_after_inject=%d", len(req.Volumes))
+	log.G(ctx).Debugf("[hostdir] ConstructCubeletReq: volumes_after_inject=%d", len(req.Volumes))
 
 	if err = injectPluginVolumeMounts(ctx, req); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
