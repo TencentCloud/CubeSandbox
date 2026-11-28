@@ -19,9 +19,9 @@
 
 | 层级 | 部署载体 | 包含组件 | 职责说明 |
 | --- | --- | --- | --- |
-| **控制面与入口** | Kubernetes（Helm Chart，`cubeNode.enabled=false`） | `cube-master`、`cube-templatecenter`、`cube-api`、`cube-ops`、`cube-proxy`、`cube-lifecycle-manager`、`cube-webui`、`cubemastercli` | 集群调度、模板构建与分发、E2B API、节点管理、沙箱流量反代、自动暂停/恢复、控制台 |
+| **控制面与入口** | Kubernetes（Helm Chart，`cubeNode.enabled=false`） | `cube-master`、`cube-templatecenter`、`cube-api`、`cube-ops`、`cube-proxy`、`cube-lifecycle-manager`、`cube-webui`、`cubemastercli`；可选内置可观测性（`prometheus`、`loki`/`elasticsearch`、`grafana`、`component-otelcol`） | 集群调度、模板构建与分发、E2B API、节点管理、沙箱流量反代、自动暂停/恢复、控制台、可选集中监控与看板 |
 | **依赖存储** | K8s 内置 StatefulSet 或外部托管服务 | MySQL / PostgreSQL、Redis、S3 / COS / MinIO | 元数据存储、路由与生命周期状态、Volume / 模板制品 / 组件仓库存储 |
-| **数据面（计算节点）** | 物理机 / 裸金属 / 虚拟机（`install-compute.sh` + systemd） | `Cubelet`（内置 network runtime / CubeVS）、`CubeShim`、`CubeEgress`、`ops-agent` | 启动与管理 MicroVM 沙箱、节点状态上报、出站透明代理与策略执行、动态配额同步 |
+| **数据面（计算节点）** | 物理机 / 裸金属 / 虚拟机（`install-compute.sh` + systemd） | `Cubelet`（内置 network runtime / CubeVS）、`CubeShim`、`CubeEgress`、`ops-agent`；可选 `cube-sandbox-otelcol` | 启动与管理 MicroVM 沙箱、节点状态上报、出站透明代理与策略执行、动态配额同步、可选沙箱指标与日志采集 |
 
 ## 2. 部署前置要求
 
@@ -68,6 +68,9 @@
 | 客户端 → 入口 | SDK / 业务后端 | K8s `cube-api` Service | `3000/tcp`（或 LB/NodePort） | E2B 兼容沙箱控制 API | 按需内网或公网（公网须配[鉴权](./authentication.md)） |
 | 客户端 → 入口 | SDK / 浏览器 | K8s `cube-proxy` Service / Ingress | `80/tcp`、`443/tcp`、`9090/tcp` | 沙箱数据面访问入口（`*.domain` / `/sandbox/...`） | 按需内网或公网 |
 | 运维 → 入口 | 管理员浏览器 | K8s `cube-webui` Service | `12088/tcp`（或 `port-forward`） | WebUI 管理控制台 | **仅内网 / 办公网白名单** |
+| 数据面 → 可观测性（可选） | 计算节点（`cube-sandbox-otelcol`） | 外部或 K8s 暴露的 Prometheus | `9092/tcp`（或外部指标端口） | OTLP/HTTP（`/api/v1/otlp`）或 Remote Write 上报沙箱指标 | **仅内网** |
+| 数据面 → 可观测性（可选） | 计算节点（`cube-sandbox-otelcol`） | 外部或 K8s 暴露的 Loki / Elasticsearch | `3100/tcp`（Loki）或 `9200/tcp`（ES） | OTLP/HTTP（`/otlp`）或 ES Bulk 上报沙箱日志 | **仅内网** |
+| 运维 → 可观测性（可选） | 管理员浏览器 | 外部或 K8s `cube-grafana` Service | `3001/tcp`（或 `port-forward`） | 查看预置集群 / 节点 / 沙箱指标与日志看板 | **仅内网 / 办公网白名单** |
 
 ### 2.4 时钟同步（必需）
 
@@ -77,7 +80,7 @@ Kubernetes 控制面所在的所有节点，以及全部物理机 / 虚拟机计
 如果计算节点时间落后于控制面，其上报的心跳可能超过 15 秒的过期窗口，导致 `CubeOps` / `CubeMaster` 将该节点判定为不健康并拒绝调度与模板分发。
 :::
 
-### 2.5 持久化存储与外部依赖规划
+### 2.5 持久化存储、外部依赖与可观测性规划
 
 生产环境**强烈建议使用外部高可用 MySQL（或 PostgreSQL）、高可用 Redis（托管主从 / Sentinel / Redis Cluster）以及外部共享 S3 / COS / MinIO**，让 Kubernetes 控制面保持无状态且易于水平扩展：
 
@@ -89,8 +92,11 @@ Kubernetes 控制面所在的所有节点，以及全部物理机 / 虚拟机计
     - Helm 侧关闭内置 MinIO（`minio.enabled: false`），配置 `volumeS3.*` 并开启 `controlPlane.artifactStore.s3Backed: true`（CubeOps 组件仓库、S3 Volume 与模板制品存储自动复用该 S3 配置；控制面多副本时还可设置 `controlPlane.master.persistence.enabled: false` 与 `controlPlane.templateCenter.colocateWithMaster: false`，彻底摆脱 K8s PVC 依赖）。
     - 计算节点 `.env` 中填写相同的 `CUBE_S3_*` 配置，即可正常使用 S3 Volume 插件与组件多版本仓库。
   - **方案 B：无外部 S3（文件系统 / PVC 模式，适合快速验证）**
-    - Helm 侧关闭内置 MinIO（`minio.enabled: false`），并将模板制品与组件仓库均切换为文件系统后端：`controlPlane.artifactStore.backend: fs`、`cubeOps.store.backend: fs`，同时将 `cubeOps.store.fs.publicURL` 设为计算节点可达的 `http://<K8s-CubeOps-外部地址>`（此模式需要集群提供可用 StorageClass）。
+    - Helm 侧关闭内置 MinIO（`minio.enabled: false`）与 S3 制品模式（`controlPlane.artifactStore.s3Backed: false`），将模板制品与组件仓库切换为文件系统后端：`controlPlane.artifactStore.backend: fs`、`cubeOps.store.backend: fs`，开启 `controlPlane.master.persistence.enabled: true` 并保持 `controlPlane.templateCenter.colocateWithMaster: true`，同时将 `cubeOps.store.fs.publicURL` 设为计算节点可达的 `http://<K8s-CubeOps-外部地址>`（此模式需要集群提供可用 StorageClass）。使用默认 `ReadWriteOnce` PVC 时，`master`、`templateCenter`、`cubeOps` 均须设为单副本（`replicas: 1`）；如需多副本，请提供支持 `ReadWriteMany` 的共享存储（如 CFS / NFS）。
     - 此模式下模板构建、分发和组件仓库均可经 HTTP 正常工作，但 S3 Volume 插件不可用（计算节点安装时仅会打印黄色告警并继续）。
+- **可观测性规划（可选：指标、日志与看板）**：在混合部署中，沙箱运行在集群外的物理机 / 虚拟机上（K8s 侧 `cube-node-otelcol` DaemonSet 不会调度 Pod，`DESIRED=0` 属于正常现象），沙箱资源指标与 `stdout`/`stderr` 日志由每台计算节点本地的 systemd 服务 `cube-sandbox-otelcol.service` 采集并上报。如需启用可观测性，可在以下两种后端方案中二选一（完整指标口径与查询模板详见[沙箱可观测性部署](./observability.md)，链路追踪详见[分布式链路追踪](./tracing.md)）：
+  - **外部可观测性平台（生产推荐）**：复用团队已有的 Prometheus（或 VictoriaMetrics）+ Loki / Elasticsearch + Grafana。计算节点直接推送至外部端点，K8s 侧无需部署内置监控组件（如还需采集 K8s 控制面容器日志，可按需开启 `observability.logs.components.enabled: true`）。
+  - **K8s 内置可观测性栈（开箱即用）**：在控制面 Helm 中开启 `observability.enabled: true`，自动部署 Prometheus（`9092`）+ Loki（`3100`）或 Elasticsearch（`9200`）+ Grafana（`3001`，内置 4 张看板，依赖集群 `StorageClass`）。由于 Chart 默认创建的是 `ClusterIP` Service，需额外创建内网 `LoadBalancer` / `NodePort` 伴生 Service，让集群外计算节点能够推送指标与日志。
 
 ## 3. 部署步骤
 
@@ -99,13 +105,13 @@ Kubernetes 控制面所在的所有节点，以及全部物理机 / 虚拟机计
 ```text
 ① K8s 准备控制面节点（打标签 / 可选污点）
     ↓
-② 编写混合部署控制面 values（cubeNode.enabled=false + Service 暴露 + 存储配置）
+② 编写混合部署控制面 values（cubeNode.enabled=false + Service 暴露 + 存储 + 可选可观测性）
     ↓
-③ Helm 安装 K8s 控制面，并记录暴露出的 CubeMaster / CubeOps 地址
+③ Helm 安装 K8s 控制面，并记录暴露出的 CubeMaster / CubeOps（及可选 Prometheus / Loki）地址
     ↓
 ④ 准备物理机 / 虚拟机（KVM 或 PVM 内核、XFS 数据盘、Docker、时钟同步）
     ↓
-⑤ 在物理机 / 虚拟机配置 .env 并执行 install-compute.sh 接入控制面
+⑤ 在物理机 / 虚拟机配置 .env（含可选可观测性 Collector）并执行 install-compute.sh 接入控制面
     ↓
 ⑥ 多节点调度评分与客户端接入配置
 ```
@@ -228,7 +234,7 @@ minio:
   enabled: false
 
 volumeS3:
-  endpoint: "https://<s3-endpoint>"         # 必须同时被 K8s Pod 与物理机/虚拟机访问
+  endpoint: "https://<s3-endpoint>"         # 必须同时被 K8s Pod 与物理机/虚拟机访问（MinIO 示例：http://<s3-endpoint>:9000）
   accessKeyId: "<s3-access-key>"
   secretAccessKey: "<s3-secret-key>"
   bucket: "cube-volumes"
@@ -253,7 +259,7 @@ redis:
 :::
 
 ::: details 方案 B：无外部 S3 时的配置片段
-如果没有外部 S3 / COS，可替换上述 `minio` 与 `volumeS3` 段为以下配置（`cubeOps.store.fs.publicURL` 需设为计算节点可达的 CubeOps 地址；若使用 NodePort 可在首次获取端口后回填并再次 `helm upgrade`）：
+如果没有外部 S3 / COS，请删除（或留空）上方的 `volumeS3` 段，并将 `minio`、`controlPlane` 与 `cubeOps` 中的对应字段调整为以下配置（满足 Chart 模板强校验；`cubeOps.store.fs.publicURL` 需设为计算节点可达的 CubeOps 地址，若使用 NodePort 可在首次获取端口后回填并再次 `helm upgrade`）：
 
 ```yaml
 minio:
@@ -262,8 +268,17 @@ minio:
 controlPlane:
   artifactStore:
     backend: fs
+    s3Backed: false            # 必须关闭 s3Backed（fs 模式与 s3Backed=true 互斥）
+  master:
+    replicas: 1                # fs 模式使用默认 RWO PVC 时仅支持单副本；多副本需改用 ReadWriteMany PVC（如 CFS/NFS）
+    persistence:
+      enabled: true            # fs 模式必须开启持久化 PVC
+  templateCenter:
+    replicas: 1
+    colocateWithMaster: true   # 默认 RWO PVC 下必须与 master 同节点调度以共享制品卷
 
 cubeOps:
+  replicas: 1                  # fs 模式多副本需配置 cubeOps.store.fs.persistence 为 ReadWriteMany
   store:
     backend: fs
     fs:
@@ -314,6 +329,101 @@ spec:
 ```
 :::
 
+::: details 可选：在 K8s 控制面启用 Chart 内置可观测性栈（Prometheus + Loki / ES + Grafana）
+如不使用外部监控平台、希望直接在 K8s 控制面部署内置可观测性后端（依赖集群提供可用 `StorageClass`），可在 `hybrid-control-plane-values.yaml` 中追加以下片段（或单独保存为 `observability-values.yaml` 通过额外 `-f` 传入）：
+
+```yaml
+observability:
+  enabled: true
+  # 写入指标与日志的集群标签，需与物理机/虚拟机 .env 中的 CUBE_OBSERVABILITY_CLUSTER_ID 保持一致
+  clusterId: "cube-hybrid-prod"
+  backend:
+    enabled: true
+    grafana:
+      serviceType: ClusterIP        # 默认通过 port-forward 访问，也可改用内网 LB
+      # 生产环境建议提前创建 Secret 并配置 existingSecret 管理管理员密码
+      # existingSecret: "cube-grafana-admin-custom"
+  logs:
+    enabled: true
+    backend: loki                   # 默认 loki；如需使用 Elasticsearch 改为 elasticsearch
+    components:
+      enabled: true                 # 可选：同时采集 K8s 控制面组件容器日志
+```
+
+**关键步骤（暴露给集群外计算节点）**：Chart 默认创建 `ClusterIP` 类型的 `cube-prometheus`（`9092`），以及 `cube-loki`（`3100`）**或** `cube-elasticsearch`（`9200`）Service（按 `observability.logs.backend` 创建其一），集群外的物理机 / 虚拟机无法直接访问。Helm 安装完成后，需额外 apply 以下内网 `LoadBalancer`（或 `NodePort`）伴生 Service 将接收端口暴露到内网：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-prometheus-internal
+  namespace: cube-system
+  annotations:
+    # 按所用云厂商替换为内网 LB 注解，切勿暴露到公网
+spec:
+  type: LoadBalancer                # 无内网 LB 时可改为 NodePort
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: prometheus
+  ports:
+    - name: http
+      port: 9092
+      targetPort: 9092
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-loki-internal
+  namespace: cube-system
+  annotations:
+    # 按所用云厂商替换为内网 LB 注解，切勿暴露到公网
+spec:
+  type: LoadBalancer                # 无内网 LB 时可改为 NodePort
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: loki
+    # 若日志后端选用 elasticsearch，将上方 component 改为 elasticsearch，并将下方端口改为 9200
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+```
+:::
+
+::: details 可选：对接外部可观测性平台时同时采集 K8s 控制面组件容器日志
+如果团队已有外部 Prometheus + Loki / Elasticsearch + Grafana，且仅采集计算节点沙箱数据，**K8s 侧无需开启 `observability.enabled`**（直接跳到步骤 3.2 配置计算节点即可；如需将预置 Grafana 看板导入已有 Grafana，可参考[沙箱可观测性部署](./observability.md)执行 `./observability/install.sh dashboards`）。
+
+若希望一并采集 K8s 控制面组件（`cube-master`、`cube-api`、`cube-ops`、`cube-templatecenter`、`cube-proxy`、`cube-lifecycle-manager`）的容器日志并推送至外部后端，可追加以下配置（注意：关闭内置后端 `backend.enabled: false` 时，Chart 校验要求同时提供 `observability.metrics.otlpEndpoint` 或 `remoteWriteUrl`）：
+
+```yaml
+observability:
+  enabled: true
+  clusterId: "cube-hybrid-prod"
+  backend:
+    enabled: false
+  metrics:
+    otlpEndpoint: "https://prometheus.example.com/api/v1/otlp"
+    # 如外部后端需要鉴权，先在 cube-system 创建 Secret 并引用：
+    # auth:
+    #   existingSecret: cube-observability-auth
+    #   authorizationKey: metrics-authorization
+    #   tenantIdKey: metrics-tenant-id
+  logs:
+    enabled: true
+    backend: loki                                # 或 elasticsearch
+    otlpEndpoint: "https://loki.example.com/otlp"
+    # esEndpoint: "https://es.example.com:9200"  # backend=elasticsearch 时使用
+    # auth:
+    #   existingSecret: cube-observability-auth
+    #   authorizationKey: logs-authorization
+    #   tenantIdKey: logs-tenant-id
+    components:
+      enabled: true
+```
+:::
+
 #### 1.3 使用 Helm 安装控制面
 
 ::: tip 中国大陆用户
@@ -337,10 +447,17 @@ helm upgrade --install cube <chart-dir> \
 kubectl get svc -n cube-system -o wide
 ```
 
-记录以下两个地址（后续物理机 / 虚拟机接入会用到）：
+记录以下地址（后续物理机 / 虚拟机接入会用到）：
 
 - **`MASTER_ADDR`**：`cube-master` 对外可达的 `<内网LB-IP>:8089` 或 `<K8s节点IP>:<master-NodePort>`
 - **`OPS_ADDR`**：`cube-ops` 对外可达的 `<内网LB-IP>:3010` 或 `<K8s节点IP>:<ops-NodePort>`
+- **（可选，启用 K8s 内置可观测性时）`PROM_ADDR` 与 `LOKI_ADDR` / `ES_ADDR`**：`cube-prometheus-internal`（`9092`）与 `cube-loki-internal`（`3100`，Elasticsearch 场景为 `9200`）对外可达的内网 LB 或 NodePort 地址；同时读取 Grafana 初始管理员密码（用户名为 `admin`）：
+
+```bash
+kubectl get secret -n cube-system \
+  -l app.kubernetes.io/component=grafana-admin \
+  -o jsonpath='{.items[0].data.admin-password}' | base64 --decode; echo
+```
 
 同时记下 `cube-api`（`3000`）与 `cube-proxy`（`80`/`443`/`9090`）的访问入口供客户端和验收阶段使用。
 
@@ -463,18 +580,41 @@ CUBE_PVM_ENABLE=0
 # 若使用私有镜像仓库，可直接显式指定 cube-egress 镜像地址：
 # CUBE_SANDBOX_CUBE_EGRESS_IMAGE=registry.internal.example.com/cube-sandbox/cube-egress:<version>
 
-# 若 K8s 侧采用方案 A（外部 S3），填写完全一致的 S3 配置供 Volume 插件使用
-CUBE_S3_ENDPOINT=http://<s3-endpoint>:9000
+# 若 K8s 侧采用方案 A（外部 S3），填写与 Helm volumeS3 完全一致的 S3 配置
+# （协议 http/https、端口与 path-style 选项必须与控制面 Helm 配置保持一致）
+CUBE_S3_ENDPOINT=https://<s3-endpoint>      # MinIO 示例：http://<s3-endpoint>:9000
 CUBE_S3_ACCESS_KEY_ID=<s3-access-key>
 CUBE_S3_SECRET_ACCESS_KEY=<s3-secret-key>
 CUBE_S3_BUCKET=cube-volumes
 CUBE_S3_REGION=us-east-1
-CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+CUBE_S3_S3FS_EXTRA_OPTS=                    # MinIO 或 path-style S3 请填 -ouse_path_request_style
+
+# --- 可选：启用计算节点可观测性 Collector（采集本机 Cubelet 指标与沙箱日志） ---
+# 混合部署中若留空指标/日志端点，脚本会自动回退推导为 CubeMaster 地址（:9092 / :3100），
+# 该地址通常未暴露可观测性采集端口，因此必须显式填写可达端点；
+# OTLP 仅填基础路径，不要附加 /v1/metrics 或 /v1/logs；clusterId 需与 K8s 侧保持一致。
+# ONE_CLICK_ENABLE_OBSERVABILITY=1
+# ONE_CLICK_OBSERVABILITY_ROLE=cvm
+# CUBE_OBSERVABILITY_CLUSTER_ID=cube-hybrid-prod
+# CUBE_LOGS_BACKEND=loki                                      # 如使用 Elasticsearch 改为 elasticsearch
+# CUBE_METRICS_OTLP_HTTP_ENDPOINT=http://<PROM_ADDR>/api/v1/otlp
+# # 若外部 Prometheus 仅支持 Remote Write，改用下项（与 OTLP 互斥）：
+# # CUBE_METRICS_REMOTE_WRITE_URL=https://prometheus.example.com/api/v1/write
+# CUBE_LOGS_OTLP_HTTP_ENDPOINT=http://<LOKI_ADDR>/otlp
+# # 若日志后端使用 Elasticsearch，改用下项（与 Loki OTLP 互斥）：
+# # CUBE_LOGS_ES_ENDPOINT=http://<ES_ADDR>
+# # 外部后端需要鉴权时按需开启：
+# # CUBE_METRICS_AUTHORIZATION='Bearer <metrics-token>'
+# # CUBE_METRICS_TENANT_ID=cube-hybrid-prod
+# # CUBE_LOGS_AUTHORIZATION='Bearer <logs-token>'
+# # CUBE_LOGS_TENANT_ID=cube-hybrid-prod
+# # 外部 Elasticsearch 鉴权使用 CUBE_LOGS_ES_API_KEY 或成对的 CUBE_LOGS_ES_USER / CUBE_LOGS_ES_PASSWORD
 ```
 
-::: warning 两个常见配置陷阱
+::: warning 三个常见配置陷阱
 1. **不要同时混填 `ONE_CLICK_CONTROL_PLANE_IP` 与不同端口/IP 的 `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR`**：安装脚本预检会严格比对两者，若不一致将直接报错退出。在 K8s 混合部署中，最稳妥的做法是**将 `ONE_CLICK_CONTROL_PLANE_IP` 留空**，显式填写 `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` 和 `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR`。
 2. **PVM 虚拟机必须在 `.env` 中修改 `CUBE_PVM_ENABLE=1`**：由于安装脚本会加载同目录 `.env`，仅在命令行前置传入环境变量会被 `.env` 中的 `CUBE_PVM_ENABLE=0` 覆盖。
+3. **开启可观测性时必须显式指定指标与日志端点**：当 `ONE_CLICK_CONTROL_PLANE_IP` 留空且未填指标/日志端点时，安装脚本会自动回退到 `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` / `CUBEOPS_ADDR` 主机（拼出 `:9092` / `:3100`），而 CubeMaster 入口通常并未暴露采集端口，导致数据静默推送失败。同时 OTLP 端点需填基础路径（如 `.../api/v1/otlp` 与 `.../otlp`），不要附加 `/v1/metrics` 或 `/v1/logs`。
 :::
 
 #### 3.3 执行计算节点安装脚本
@@ -489,7 +629,28 @@ sudo ./install-compute.sh
 2. 将 `Cubelet/dynamicconf/conf.yaml` 中的 `meta_server_endpoint` 指向 K8s `CubeOps`（`OPS_ADDR`），将 `cubemaster_http_addr` 指向 K8s `CubeMaster`（`MASTER_ADDR`）——后续 CubeMaster 下发模板制品下载 URL 时，Cubelet 会自动将域名重写为 `cubemaster_http_addr`，无需计算节点解析 K8s 集群内 DNS。
 3. 将 `ops-agent` 指向 K8s `CubeOps`，并监听 `0.0.0.0:8890`。
 4. 通过 `cube-egress-prepare.sh` 自动从 K8s `CubeMaster`（`http://<MASTER_ADDR>/cube/ca/...`）拉取与控制面完全一致的 CubeEgress MITM 根 CA，确保 K8s 中构建的模板与计算节点上运行的 `CubeEgress` 信任链一致。
-5. 启动 `cube-sandbox-compute.target` 下的计算面服务，并自动运行 `quickcheck.sh` 完成基础自检。
+5. 若在 `.env` 中开启了 `ONE_CLICK_ENABLE_OBSERVABILITY=1`，自动安装并启动本机 OpenTelemetry Collector（`cube-sandbox-otelcol.service`），采集 Cubelet 指标与沙箱 `stdout`/`stderr` 日志并推送至指定后端。
+6. 启动 `cube-sandbox-compute.target` 下的计算面服务，并自动运行 `quickcheck.sh` 完成基础自检。
+
+::: details 可选：为已运行的计算节点增量启用可观测性（不影响存量沙箱）
+如果计算节点已经完成部署、事后想补装可观测性 Collector，无需重跑 `install-compute.sh`，直接在计算节点以 root 执行独立脚本即可（离线节点请额外传入 `CUBE_OTELCOL_BIN=/path/to/otelcol-contrib` 避免联网下载）：
+
+```bash
+# 示例：推送至 Loki + Prometheus OTLP（带鉴权时一并传入 *_AUTHORIZATION / *_TENANT_ID）
+sudo env \
+  CUBE_OBSERVABILITY_CLUSTER_ID=cube-hybrid-prod \
+  CUBE_LOGS_BACKEND=loki \
+  CUBE_METRICS_OTLP_HTTP_ENDPOINT="http://<PROM_ADDR>/api/v1/otlp" \
+  CUBE_LOGS_OTLP_HTTP_ENDPOINT="http://<LOKI_ADDR>/otlp" \
+  /usr/local/services/cubetoolbox/observability/install.sh cvm
+
+# 如日志后端使用 Elasticsearch，将上方两项日志变量替换为：
+#   CUBE_LOGS_BACKEND=elasticsearch \
+#   CUBE_LOGS_ES_ENDPOINT="http://<ES_ADDR>"
+```
+
+**升级持久化提示**：直接运行独立脚本不会将 `ONE_CLICK_ENABLE_OBSERVABILITY=1` 写入 `.one-click.env`。若后续通过 `install-compute.sh` 升级计算节点且 `.env` 中仍保留默认 `ONE_CLICK_ENABLE_OBSERVABILITY=0`，升级脚本会自动执行 `observability/install.sh uninstall all` 卸载 Collector。建议同时按步骤 3.2 在 `.env` 中配置 `ONE_CLICK_ENABLE_OBSERVABILITY=1` 及对应端点，确保后续升级持续保留。
+:::
 
 #### 3.4 扩容多台计算节点与客户端接入
 
@@ -512,8 +673,8 @@ kubectl get ds -n cube-system
 ```
 
 期望结果：
-- `cube-master`、`cube-templatecenter`、`cube-api`、`cube-ops`、`cube-proxy`、`cube-lifecycle-manager`、`cube-webui`、`cube-cubemastercli`（以及内置 MySQL / Redis）均为 `Running` 且 `READY`。
-- `kubectl get ds -n cube-system` 无 `cube-node`、`cube-node-installer`、`cube-node-bootstrap`、`cube-node-pvm` 资源。
+- `cube-master`、`cube-templatecenter`、`cube-api`、`cube-ops`、`cube-proxy`、`cube-lifecycle-manager`、`cube-webui`、`cube-cubemastercli`（以及启用的内置 MySQL / Redis / Prometheus / Loki 或 ES / Grafana / `component-otelcol`）均为 `Running` 且 `READY`。
+- `kubectl get ds -n cube-system` 无 `cube-node`、`cube-node-installer`、`cube-node-bootstrap`、`cube-node-pvm` 资源（若开启了 `observability.enabled`，`cube-node-otelcol` 的 `DESIRED=0` 属于正常现象，因计算节点由宿主机 systemd 负责采集）。
 
 2. **确认各 Service 暴露正常**：
 
@@ -583,6 +744,18 @@ lsmod | grep kvm_pvm           # 期望已加载 kvm_pvm
 grep CUBE_PVM_ENABLE /usr/local/services/cubetoolbox/.one-click.env   # 期望 =1
 ```
 
+5. **检查可观测性 Collector（如已启用）**：
+
+```bash
+# 确认 Collector 服务正常且本地健康端点与 Cubelet 指标接口可达
+sudo systemctl --no-pager --full status cube-sandbox-otelcol.service
+curl -fsS http://127.0.0.1:13133/
+curl -fsS http://127.0.0.1:9998/v1/metrics/resource | head -n 20
+
+# 检查最近日志确认无远端推送报错（连接拒绝、401/403、路径错误等）
+sudo journalctl -u cube-sandbox-otelcol.service -n 50 --no-pager
+```
+
 ### 4.3 跨平面注册与连通性检查
 
 1. **从 K8s 控制面查询已注册的计算节点列表与分组**：
@@ -601,8 +774,9 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 
 ```bash
 # 从 cubemastercli Pod 探测计算节点 Cubelet gRPC (9999) 与 ops-agent (8890)
+# （cubemastercli 镜像未预装 nc，使用 bash 内置 /dev/tcp 配合 timeout 探测）
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'nc -zv -w 3 <计算节点IP> 9999 && nc -zv -w 3 <计算节点IP> 8890'
+  bash -c 'timeout 3 bash -c "exec 3<>/dev/tcp/<计算节点IP>/9999" && timeout 3 bash -c "exec 3<>/dev/tcp/<计算节点IP>/8890" && echo "OK"'
 ```
 
 3. **确认 WebUI 控制台可见所有计算节点**：
@@ -656,6 +830,16 @@ curl -fsS "http://<PROXY_HTTP_ADDR>/sandbox/${SANDBOX_ID}/49999/health"
 curl -fsS -X DELETE "http://<API_ADDR>/sandboxes/${SANDBOX_ID}"
 ```
 
+3. **（可选）验证可观测性看板数据**：
+
+如果启用了 K8s 内置可观测性栈，在清理测试沙箱前（或短时间内）可通过端口转发打开 Grafana 核验监控与日志数据：
+
+```bash
+kubectl -n cube-system port-forward svc/cube-grafana 3001:3001
+```
+
+浏览器打开 `http://127.0.0.1:3001`（用户名 `admin`，密码见步骤 1.4），依次确认预置看板中出现集群（`cluster`）、各物理机 / 虚拟机节点（`node`）与沙箱数据：`cubesandbox-cluster`（集群汇总）、`cubesandbox-node`（节点汇总）、`cubesandbox-sandbox`（单沙箱明细）以及 `cubesandbox-logs`（沙箱 `stdout`/`stderr` 日志；开启控制面组件日志时同时包含折叠的 **Component logs** 分组）。
+
 上述步骤全部成功，即表明 Kubernetes 控制面与物理机 / 虚拟机数据面的全链路已完全打通。
 
 ---
@@ -684,7 +868,7 @@ curl -fsS -X DELETE "http://<API_ADDR>/sandboxes/${SANDBOX_ID}"
 | --- | --- | --- |
 | **Cube 自研控制面镜像**（保留 `/cube-sandbox/<镜像名>` 路径） | `global.imageRegistry` | **仅填写仓库主机名（含可选端口）**，如 `registry.internal.example.com`（不要加路径或末尾 `/`）。Chart 会自动把 `cube-master`、`cube-templatecenter`、`cube-api`、`cube-ops`、`cube-proxy`、`cube-lifecycle-manager`、`cube-webui`、`cubemastercli` 的官方域名替换为该主机 |
 | **Cube 自研控制面镜像**（自定义项目路径） | `images.<组件>.repository`（及 `tag`） | 若私有仓库路径不是 `/cube-sandbox/`，需逐项覆盖：`images.master`、`images.templateCenter`、`images.api`、`images.ops`、`images.proxy`、`images.lifecycleManager`、`images.webui`、`images.cubemastercli` |
-| **非自研辅助镜像**（**不受 `global.imageRegistry` 改写**，须单独指定） | `images.kubectl.repository`<br/>`helmTest.image.repository`<br/>`helmTest.dnsImage.repository` | `images.kubectl` 用于 `cubeProxy.configureClusterDNS: true` 时的 CoreDNS 配置 Job；`helmTest.*` 用于 `helm test` 验收。若测试环境启用内置数据库 / Redis StatefulSet，还需改写 `mysql.image.repository`、`redis.image.repository` |
+| **非自研辅助镜像**（**不受 `global.imageRegistry` 改写**，须单独指定） | `images.kubectl.repository`<br/>`helmTest.image.repository`<br/>`helmTest.dnsImage.repository` | `images.kubectl` 用于 `cubeProxy.configureClusterDNS: true` 时的 CoreDNS 配置 Job；`helmTest.*` 用于 `helm test` 验收。若测试环境启用内置数据库 / Redis StatefulSet，还需改写 `mysql.image.repository`、`redis.image.repository`；若在 K8s 启用了内置可观测性，还需改写 `observability.otelCollector.image` 及 `observability.backend.{prometheus,loki,elasticsearch,grafana}.image` |
 | **私有仓库拉取凭据** | `imagePullSecrets` | 顶层字段（非 `global` 下），引用已创建的 `docker-registry` Secret，如 `imagePullSecrets: [{ name: regcred }]` |
 | **私有仓库自签 / 内部 CA**（可选） | `trustedCACerts.enabled`<br/>`trustedCACerts.certs` 或 `existingConfigMap` | 当 `cube-templatecenter` 从自签证书的私有仓库拉取业务 OCI 镜像构建模板时启用 |
 
@@ -725,6 +909,18 @@ helmTest:
 #     repository: "registry.internal.example.com/cube-sandbox/redis"
 #     tag: "7-alpine"
 
+# 若在 K8s 启用了内置可观测性，同样需要覆盖为私有仓库镜像：
+# observability:
+#   otelCollector:
+#     image: "registry.internal.example.com/cube-sandbox/opentelemetry-collector-contrib:0.162.0"
+#   backend:
+#     prometheus:
+#       image: "registry.internal.example.com/cube-sandbox/prometheus:v3.2.1"
+#     loki:
+#       image: "registry.internal.example.com/cube-sandbox/loki:3.7.9"
+#     grafana:
+#       image: "registry.internal.example.com/cube-sandbox/grafana-oss:10.4.18"
+
 # 若私有仓库使用自签/企业根 CA（供 cube-templatecenter 拉取业务 OCI 镜像构建模板）：
 # trustedCACerts:
 #   enabled: true
@@ -733,7 +929,7 @@ helmTest:
 
 ### 5.2 物理机 / 虚拟机数据面（计算节点离线部署）
 
-一键部署包（`cube-sandbox-one-click-<version>-<arch>.tar.gz`）已内置计算节点的全部版本锁定二进制与镜像产物（`Cubelet`、`CubeShim`、`vmlinux`、guest 镜像、`cube-agent.ext4`、`ops-agent`、`mkcert` 等），离线部署计算节点只需提前准备以下三类内容：
+一键部署包（`cube-sandbox-one-click-<version>-<arch>.tar.gz`）已内置计算节点的全部版本锁定二进制与镜像产物（`Cubelet`、`CubeShim`、`vmlinux`、guest 镜像、`cube-agent.ext4`、`ops-agent`、`mkcert` 等），离线部署计算节点只需提前准备以下三类内容（若同时启用可观测性 Collector，另需准备同架构 `otelcol-contrib` 二进制并通过 `CUBE_OTELCOL_BIN` 指定）：
 
 1. **离线安装包（与控制面版本一致）**：
    - 在有公网的机器下载对应架构（`amd64` / `arm64`）的一键部署包 `cube-sandbox-one-click-<version>-<arch>.tar.gz` 并拷贝至计算节点。
@@ -810,6 +1006,8 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 | 节点健康状态反复在健康与 `(down)` 之间抖动 | K8s 控制面节点与计算节点系统时间不同步（偏差接近或超过 15 秒） | 在两侧节点检查并修复 `chrony` / NTP 同步，恢复后可按需执行 `template redo` |
 | S3 Volume 挂载失败或组件仓库下载失败 | 计算节点无法访问 S3 端点（例如误用 K8s 内置 MinIO 的 Headless Service 地址），或 `fs` 模式未配置 `cubeOps.store.fs.publicURL` | 确认外部 S3 地址可同时被 K8s Pod 与计算节点访问，且两侧凭据一致；`fs` 模式确认 `cubeOps.store.fs.publicURL` 为计算节点可达地址 |
 | 安装预检报 `/data/cubelet ... is not XFS` 或拒绝 Snap Docker | 计算节点磁盘非 XFS，或 Docker 通过 Snap 安装 | 按 2.2 / 2.3 节挂载 XFS 分区至 `/data/cubelet`，并改用官方 apt/dnf 源安装标准 Docker |
+| 计算节点开启可观测性后推送地址误指向 CubeMaster IP，或安装报错提示去掉 `/v1/metrics` / `/v1/logs` | 混合部署中未显式填写接收端点时，脚本会回退推导为 `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` / `CUBEOPS_ADDR` 主机（通常未暴露 `9092`/`3100`）；或 OTLP 地址多写了路径后缀 | 在 `.env` 中显式配置 `CUBE_METRICS_OTLP_HTTP_ENDPOINT`（或 `CUBE_METRICS_REMOTE_WRITE_URL`）和 `CUBE_LOGS_OTLP_HTTP_ENDPOINT`（或 `CUBE_LOGS_ES_ENDPOINT`），且 OTLP 仅填基础路径 |
+| Grafana 看板查不到物理机 / 虚拟机数据，或 `cube-sandbox-otelcol` 日志报连接拒绝 / 超时 | K8s 内置 Prometheus（`9092`）/ Loki（`3100`）/ ES（`9200`）仍为 `ClusterIP` 未对外暴露，或防火墙未放通，或 `clusterId` 不一致 | 按步骤 1.2 中内置可观测性折叠块通过内网 LB / NodePort 暴露接收端口，检查安全组放行，并确认 `CUBE_OBSERVABILITY_CLUSTER_ID` 与 Helm `observability.clusterId` 一致 |
 
 更多日志路径与通用排障手段请参阅[组件日志位置](./troubleshooting/component-log-locations.md)与[部署问题排查](./troubleshooting/deployment.md)。
 
@@ -820,9 +1018,12 @@ kubectl exec -n cube-system deploy/cube-cubemastercli -- \
 ### 下线或卸载单个计算节点
 
 1. 先按[节点相关操作](./node-operations.md)在控制面隔离并清理该节点上的存量沙箱。
-2. 在该物理机 / 虚拟机上执行卸载脚本：
+2. 在该物理机 / 虚拟机上执行卸载脚本（如启用了可观测性 Collector，一并卸载）：
 
 ```bash
+# 如本节点安装了可观测性 Collector，先卸载该服务
+sudo /usr/local/services/cubetoolbox/observability/install.sh uninstall cvm || true
+
 sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
 sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
 # 确认无残留且不再需要工具目录后手动删除
@@ -846,4 +1047,5 @@ kubectl delete namespace cube-system
 - [从客户端连接集群](./multi-node-deploy.md#从客户端连接集群) — SDK 直连、路径模式、泛域名 DNS 接入方式
 - [HTTPS 证书与域名解析](./https-and-domain.md) — 生产环境 TLS 与泛域名配置
 - [API 鉴权](./authentication.md) — 配置 `AUTH_CALLBACK_URL` 保护 CubeAPI
-- [沙箱可观测性部署](./observability.md) — 接入计算节点指标、日志与链路追踪
+- [沙箱可观测性部署](./observability.md) — 指标口径、PromQL / LogQL 查询模板与数据保留调优
+- [分布式链路追踪](./tracing.md) — 开启 `OTEL_EXPORTER_OTLP_ENDPOINT` 全链路追踪

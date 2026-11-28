@@ -19,9 +19,9 @@ Before exposing your cluster to untrusted networks, read [Network Hardening](./n
 
 | Layer | Deployment Runtime | Components | Responsibilities |
 | --- | --- | --- | --- |
-| **Control Plane & Entrypoints** | Kubernetes (Helm Chart, `cubeNode.enabled=false`) | `cube-master`, `cube-templatecenter`, `cube-api`, `cube-ops`, `cube-proxy`, `cube-lifecycle-manager`, `cube-webui`, `cubemastercli` | Scheduling, template build & distribution, E2B API, node management, sandbox traffic proxying, auto-pause/resume, WebUI console |
+| **Control Plane & Entrypoints** | Kubernetes (Helm Chart, `cubeNode.enabled=false`) | `cube-master`, `cube-templatecenter`, `cube-api`, `cube-ops`, `cube-proxy`, `cube-lifecycle-manager`, `cube-webui`, `cubemastercli`; optional built-in observability (`prometheus`, `loki`/`elasticsearch`, `grafana`, `component-otelcol`) | Scheduling, template build & distribution, E2B API, node management, sandbox traffic proxying, auto-pause/resume, WebUI console, optional centralized monitoring & dashboards |
 | **Stateful Dependencies** | K8s built-in StatefulSets or external managed services | MySQL / PostgreSQL, Redis, S3 / COS / MinIO | Metadata persistence, routing & lifecycle state, Volumes / template artifacts / component warehouse |
-| **Data Plane (Compute Nodes)** | Physical machines / bare metal / VMs (`install-compute.sh` + systemd) | `Cubelet` (with embedded network runtime / CubeVS), `CubeShim`, `CubeEgress`, `ops-agent` | MicroVM sandbox runtime, node status reporting, transparent L7 egress proxy & policy enforcement, dynamic quota sync |
+| **Data Plane (Compute Nodes)** | Physical machines / bare metal / VMs (`install-compute.sh` + systemd) | `Cubelet` (with embedded network runtime / CubeVS), `CubeShim`, `CubeEgress`, `ops-agent`; optional `cube-sandbox-otelcol` | MicroVM sandbox runtime, node status reporting, transparent L7 egress proxy & policy enforcement, dynamic quota sync, optional sandbox metrics & log collection |
 
 ## 2. Prerequisites
 
@@ -68,6 +68,9 @@ The most important requirement for hybrid deployment is **bidirectional L3 reach
 | Client -> Entrypoint | SDKs / Backend Services | K8s `cube-api` Service | `3000/tcp` (or LB/NodePort) | E2B-compatible sandbox management API | Private or public (enable [Auth](./authentication.md) if public) |
 | Client -> Entrypoint | SDKs / Browsers | K8s `cube-proxy` Service / Ingress | `80/tcp`, `443/tcp`, `9090/tcp` | Sandbox data-plane gateway (`*.domain` / `/sandbox/...`) | Private or public as needed |
 | Operator -> Entrypoint | Admin Browser | K8s `cube-webui` Service | `12088/tcp` (or `port-forward`) | WebUI dashboard | **Private network / IP allowlist only** |
+| Data Plane -> Observability (Optional) | Compute Node (`cube-sandbox-otelcol`) | External or K8s-exposed Prometheus | `9092/tcp` (or external metrics port) | OTLP/HTTP (`/api/v1/otlp`) or Remote Write sandbox metrics ingestion | **Private network only** |
+| Data Plane -> Observability (Optional) | Compute Node (`cube-sandbox-otelcol`) | External or K8s-exposed Loki / Elasticsearch | `3100/tcp` (Loki) or `9200/tcp` (ES) | OTLP/HTTP (`/otlp`) or ES bulk sandbox log ingestion | **Private network only** |
+| Operator -> Observability (Optional) | Admin Browser | External or K8s `cube-grafana` Service | `3001/tcp` (or `port-forward`) | Pre-provisioned cluster, node, sandbox, and log dashboards | **Private network / IP allowlist only** |
 
 ### 2.4 Time Synchronization (Mandatory)
 
@@ -77,7 +80,7 @@ Enable consistent time synchronization (`chrony`, `ntpd`, `systemd-timesyncd`, o
 If a compute node's clock lags behind the control plane, its heartbeats can appear older than the 15-second expiry window, causing `CubeOps` / `CubeMaster` to mark the node unhealthy and skip it for scheduling and template distribution.
 :::
 
-### 2.5 Persistent Storage & External Dependencies Planning
+### 2.5 Persistent Storage, External Dependencies & Observability Planning
 
 For production, **using external HA MySQL (or PostgreSQL), external HA Redis (managed primary/replica, Sentinel, or Redis Cluster), and external shared S3 / COS / MinIO is strongly recommended** so the Kubernetes control plane remains stateless and easy to scale horizontally:
 
@@ -89,8 +92,11 @@ For production, **using external HA MySQL (or PostgreSQL), external HA Redis (ma
     - Disable built-in MinIO (`minio.enabled: false`), configure `volumeS3.*`, and enable `controlPlane.artifactStore.s3Backed: true` (`cubeOps` warehouse, S3 Volumes, and template artifacts all reuse it; for multi-replica HA control planes, also set `controlPlane.master.persistence.enabled: false` and `controlPlane.templateCenter.colocateWithMaster: false` to remove K8s PVC coupling completely).
     - Configure the matching `CUBE_S3_*` variables in `.env` on each compute node so S3 Volumes and the component warehouse work end-to-end.
   - **Option B: No external S3 (Filesystem / PVC mode — minimal setup)**
-    - Disable built-in MinIO (`minio.enabled: false`), set `controlPlane.artifactStore.backend: fs` and `cubeOps.store.backend: fs`, and set `cubeOps.store.fs.publicURL` to the node-reachable `http://<K8s-CubeOps-Reachable-Addr>` (requires an available `StorageClass`).
+    - Disable built-in MinIO (`minio.enabled: false`) and S3 artifact storage (`controlPlane.artifactStore.s3Backed: false`), switch both template artifacts and the component warehouse to filesystem storage (`controlPlane.artifactStore.backend: fs`, `cubeOps.store.backend: fs`), enable `controlPlane.master.persistence.enabled: true` with `controlPlane.templateCenter.colocateWithMaster: true`, and set `cubeOps.store.fs.publicURL` to the node-reachable `http://<K8s-CubeOps-Reachable-Addr>` (requires an available `StorageClass`). With the default `ReadWriteOnce` PVC, set `replicas: 1` for `master`, `templateCenter`, and `cubeOps` (multi-replica `fs` mode requires a `ReadWriteMany` shared PVC such as CFS/NFS).
     - Template builds, template distribution, and component warehouse downloads work over HTTP without S3; the S3 Volume plugin remains disabled (compute-node install logs a warning and continues).
+- **Observability Planning (Optional: Metrics, Logs & Dashboards)**: Because sandboxes run on bare-metal / VM hosts outside Kubernetes (`cube-node-otelcol` schedules `DESIRED=0` Pods in hybrid mode, which is expected), sandbox resource metrics and `stdout`/`stderr` logs are collected by the local systemd service `cube-sandbox-otelcol.service` on each compute node. To enable observability, choose one of two backend options (for full metric semantics and PromQL/LogQL queries, see [Sandbox Observability Deployment](./observability.md); for request tracing, see [Distributed Tracing](./tracing.md)):
+  - **External Observability Platform (Recommended for Production)**: Push directly from compute nodes to your existing Prometheus (or VictoriaMetrics) + Loki / Elasticsearch + Grafana stack. No built-in observability components are needed in Kubernetes (you can still optionally enable `observability.logs.components.enabled: true` to ship K8s control-plane container logs).
+  - **Built-in Observability Stack on Kubernetes (Turnkey)**: Enable `observability.enabled: true` in Helm to deploy Prometheus (`9092`) + Loki (`3100`) or Elasticsearch (`9200`) + Grafana (`3001`, with 4 pre-provisioned dashboards; requires a `StorageClass`). Because the chart creates `ClusterIP` Services by default, apply companion internal `LoadBalancer` / `NodePort` Services so out-of-cluster compute nodes can ingest metrics and logs.
 
 ## 3. Deployment Steps
 
@@ -99,13 +105,13 @@ High-level installation workflow:
 ```text
 1. Label Kubernetes control-plane nodes (and optional taint)
     ↓
-2. Prepare control-plane Helm values (cubeNode.enabled=false + Service exposure + storage)
+2. Prepare control-plane Helm values (cubeNode.enabled=false + Service exposure + storage + optional observability)
     ↓
-3. Install the control plane with Helm and record the CubeMaster / CubeOps endpoints
+3. Install the control plane with Helm and record the CubeMaster / CubeOps (and optional Prometheus / Loki) endpoints
     ↓
 4. Prepare bare-metal / VM compute nodes (KVM or PVM kernel, XFS disk, Docker, NTP)
     ↓
-5. Configure .env on each compute node and run install-compute.sh
+5. Configure .env (including optional observability Collector) on each compute node and run install-compute.sh
     ↓
 6. Configure multi-node scheduler scoring and client access
 ```
@@ -228,7 +234,7 @@ minio:
   enabled: false
 
 volumeS3:
-  endpoint: "https://<s3-endpoint>"         # Must be reachable by both K8s Pods and compute nodes
+  endpoint: "https://<s3-endpoint>"         # Must be reachable by both K8s Pods and compute nodes (MinIO example: http://<s3-endpoint>:9000)
   accessKeyId: "<s3-access-key>"
   secretAccessKey: "<s3-secret-key>"
   bucket: "cube-volumes"
@@ -253,7 +259,7 @@ redis:
 :::
 
 ::: details Option B: Values snippet without external S3
-If you do not have an external S3 / COS store, replace the `minio` and `volumeS3` blocks above with the following (`cubeOps.store.fs.publicURL` must be reachable from compute nodes; if using NodePort, you can fill it in and re-run `helm upgrade` once the port is allocated):
+If you do not have an external S3 / COS store, remove (or leave empty) the `volumeS3` block above and update `minio`, `controlPlane`, and `cubeOps` as shown below so Helm chart validation passes (`cubeOps.store.fs.publicURL` must be reachable from compute nodes; if using NodePort, you can fill it in and re-run `helm upgrade` once the port is allocated):
 
 ```yaml
 minio:
@@ -262,8 +268,17 @@ minio:
 controlPlane:
   artifactStore:
     backend: fs
+    s3Backed: false            # Required: fs cannot be combined with s3Backed=true
+  master:
+    replicas: 1                # Single replica with default RWO PVC; multi-replica requires a ReadWriteMany PVC (e.g. CFS/NFS)
+    persistence:
+      enabled: true            # Required: fs backend requires master.persistence.enabled=true
+  templateCenter:
+    replicas: 1
+    colocateWithMaster: true   # Required to share the default RWO artifact PVC with master
 
 cubeOps:
+  replicas: 1                  # Multi-replica fs mode requires cubeOps.store.fs.persistence with ReadWriteMany
   store:
     backend: fs
     fs:
@@ -313,6 +328,101 @@ spec:
 ```
 :::
 
+::: details Optional: Enable the chart's built-in observability stack on Kubernetes (Prometheus + Loki / ES + Grafana)
+If you do not have an external observability platform and want to deploy the built-in stack on the Kubernetes control plane (requires an available `StorageClass`), append the block below to `hybrid-control-plane-values.yaml` (or save it as `observability-values.yaml` and pass an additional `-f`):
+
+```yaml
+observability:
+  enabled: true
+  # Cluster label attached to metrics and logs; match CUBE_OBSERVABILITY_CLUSTER_ID on compute nodes
+  clusterId: "cube-hybrid-prod"
+  backend:
+    enabled: true
+    grafana:
+      serviceType: ClusterIP        # Access via port-forward, or switch to an internal LB
+      # For production, manage admin credentials via an external Secret:
+      # existingSecret: "cube-grafana-admin-custom"
+  logs:
+    enabled: true
+    backend: loki                   # Default: loki; set elasticsearch if preferred
+    components:
+      enabled: true                 # Optional: also collect K8s control-plane container logs
+```
+
+**Required step (expose ingestion endpoints to out-of-cluster compute nodes)**: The chart creates `cube-prometheus` (`9092`) and either `cube-loki` (`3100`) or `cube-elasticsearch` (`9200`) (depending on `observability.logs.backend`) as `ClusterIP` Services, which external bare-metal / VM compute nodes cannot reach directly. After installing the chart, apply companion internal `LoadBalancer` (or `NodePort`) Services to expose the ingestion ports on your private network:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-prometheus-internal
+  namespace: cube-system
+  annotations:
+    # Add your cloud provider's internal LoadBalancer annotations; never expose publicly
+spec:
+  type: LoadBalancer                # Or NodePort when no internal LB is available
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: prometheus
+  ports:
+    - name: http
+      port: 9092
+      targetPort: 9092
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-loki-internal
+  namespace: cube-system
+  annotations:
+    # Add your cloud provider's internal LoadBalancer annotations; never expose publicly
+spec:
+  type: LoadBalancer                # Or NodePort when no internal LB is available
+  selector:
+    app.kubernetes.io/name: cube
+    app.kubernetes.io/instance: cube
+    app.kubernetes.io/component: loki
+    # If using Elasticsearch, change component to elasticsearch and port/targetPort to 9200
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+```
+:::
+
+::: details Optional: Ship K8s control-plane container logs to an external observability platform
+If you already run an external Prometheus + Loki / Elasticsearch + Grafana stack and only need sandbox telemetry from compute nodes, **leave `observability.enabled: false` in Helm** and jump directly to Step 3.2 (to import the 4 pre-built Grafana dashboards into an existing Grafana instance, run `./observability/install.sh dashboards` as described in [Sandbox Observability Deployment](./observability.md)).
+
+If you also want to forward Kubernetes control-plane container logs (`cube-master`, `cube-api`, `cube-ops`, `cube-templatecenter`, `cube-proxy`, `cube-lifecycle-manager`) into your external backend, append the snippet below (note: when `observability.backend.enabled: false`, chart validation requires setting `observability.metrics.otlpEndpoint` or `remoteWriteUrl` as well):
+
+```yaml
+observability:
+  enabled: true
+  clusterId: "cube-hybrid-prod"
+  backend:
+    enabled: false
+  metrics:
+    otlpEndpoint: "https://prometheus.example.com/api/v1/otlp"
+    # If your external backend requires authentication, create a Secret in cube-system and reference it:
+    # auth:
+    #   existingSecret: cube-observability-auth
+    #   authorizationKey: metrics-authorization
+    #   tenantIdKey: metrics-tenant-id
+  logs:
+    enabled: true
+    backend: loki                                # Or elasticsearch
+    otlpEndpoint: "https://loki.example.com/otlp"
+    # esEndpoint: "https://es.example.com:9200"  # Used when backend=elasticsearch
+    # auth:
+    #   existingSecret: cube-observability-auth
+    #   authorizationKey: logs-authorization
+    #   tenantIdKey: logs-tenant-id
+    components:
+      enabled: true
+```
+:::
+
 #### 1.3 Install the control plane with Helm
 
 ::: tip Mainland China Users
@@ -336,10 +446,17 @@ helm upgrade --install cube <chart-dir> \
 kubectl get svc -n cube-system -o wide
 ```
 
-Record the two addresses that compute nodes will connect to:
+Record the addresses that compute nodes will connect to:
 
 - **`MASTER_ADDR`**: Reachable `<internal-lb-ip>:8089` or `<k8s-node-ip>:<master-nodeport>` for `cube-master`
 - **`OPS_ADDR`**: Reachable `<internal-lb-ip>:3010` or `<k8s-node-ip>:<ops-nodeport>` for `cube-ops`
+- **(Optional, when K8s built-in observability is enabled) `PROM_ADDR` and `LOKI_ADDR` / `ES_ADDR`**: Reachable internal LB or NodePort addresses for `cube-prometheus-internal` (`9092`) and `cube-loki-internal` (`3100`, or `9200` for Elasticsearch). Also retrieve the generated Grafana admin password (username: `admin`):
+
+```bash
+kubectl get secret -n cube-system \
+  -l app.kubernetes.io/component=grafana-admin \
+  -o jsonpath='{.items[0].data.admin-password}' | base64 --decode; echo
+```
 
 Also note the `cube-api` (`3000`) and `cube-proxy` (`80`/`443`/`9090`) entrypoints for verification and client access.
 
@@ -462,17 +579,41 @@ CUBE_PVM_ENABLE=0
 # CUBE_SANDBOX_CUBE_EGRESS_IMAGE=registry.internal.example.com/cube-sandbox/cube-egress:<version>
 
 # If using Storage Option A (external S3), mirror the exact same S3 settings from Helm
-CUBE_S3_ENDPOINT=http://<s3-endpoint>:9000
+# (scheme http/https, port, and path-style options must match Helm volumeS3)
+CUBE_S3_ENDPOINT=https://<s3-endpoint>      # MinIO example: http://<s3-endpoint>:9000
 CUBE_S3_ACCESS_KEY_ID=<s3-access-key>
 CUBE_S3_SECRET_ACCESS_KEY=<s3-secret-key>
 CUBE_S3_BUCKET=cube-volumes
 CUBE_S3_REGION=us-east-1
-CUBE_S3_S3FS_EXTRA_OPTS=-ouse_path_request_style
+CUBE_S3_S3FS_EXTRA_OPTS=                    # Set -ouse_path_request_style for MinIO / path-style S3
+
+# --- Optional: Enable the node observability Collector (Cubelet metrics & sandbox logs) ---
+# When endpoints are left unset in hybrid mode, auto-derivation falls back to the CubeMaster /
+# CubeOps host (:9092 / :3100), which typically does not expose ingestion ports, so set them
+# explicitly. Provide OTLP base URLs without trailing /v1/metrics or /v1/logs, and keep
+# clusterId aligned with Helm observability.clusterId.
+# ONE_CLICK_ENABLE_OBSERVABILITY=1
+# ONE_CLICK_OBSERVABILITY_ROLE=cvm
+# CUBE_OBSERVABILITY_CLUSTER_ID=cube-hybrid-prod
+# CUBE_LOGS_BACKEND=loki                                      # Set elasticsearch if using ES
+# CUBE_METRICS_OTLP_HTTP_ENDPOINT=http://<PROM_ADDR>/api/v1/otlp
+# # Use Remote Write instead if your external Prometheus does not enable OTLP (mutually exclusive):
+# # CUBE_METRICS_REMOTE_WRITE_URL=https://prometheus.example.com/api/v1/write
+# CUBE_LOGS_OTLP_HTTP_ENDPOINT=http://<LOKI_ADDR>/otlp
+# # Use Elasticsearch endpoint instead when CUBE_LOGS_BACKEND=elasticsearch (mutually exclusive):
+# # CUBE_LOGS_ES_ENDPOINT=http://<ES_ADDR>
+# # Optional authentication for external backends:
+# # CUBE_METRICS_AUTHORIZATION='Bearer <metrics-token>'
+# # CUBE_METRICS_TENANT_ID=cube-hybrid-prod
+# # CUBE_LOGS_AUTHORIZATION='Bearer <logs-token>'
+# # CUBE_LOGS_TENANT_ID=cube-hybrid-prod
+# # For Elasticsearch auth, use CUBE_LOGS_ES_API_KEY or CUBE_LOGS_ES_USER + CUBE_LOGS_ES_PASSWORD
 ```
 
-::: warning Two common configuration pitfalls
+::: warning Three common configuration pitfalls
 1. **Do not set both `ONE_CLICK_CONTROL_PLANE_IP` and a non-matching `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR`**: Preflight explicitly rejects conflicting values. In hybrid deployments, always **leave `ONE_CLICK_CONTROL_PLANE_IP` empty** and set `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` and `ONE_CLICK_CONTROL_PLANE_CUBEOPS_ADDR` explicitly.
 2. **Set `CUBE_PVM_ENABLE=1` inside `.env` for PVM VMs**: The installer sources `.env`, which overrides shell-level environment variables if `CUBE_PVM_ENABLE=0` remains in `.env`.
+3. **Set explicit metrics and log endpoints when enabling observability**: With `ONE_CLICK_CONTROL_PLANE_IP` empty and endpoints unset, the installer falls back to the `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` / `CUBEOPS_ADDR` host (`:9092` / `:3100`), which typically does not expose the observability ingestion ports and causes exports to fail silently. Always set explicit endpoints, passing OTLP **base URLs** (such as `.../api/v1/otlp` and `.../otlp`) without trailing `/v1/metrics` or `/v1/logs`.
 :::
 
 #### 3.3 Run the compute-node installer
@@ -487,7 +628,28 @@ In hybrid mode, `install-compute.sh` automatically:
 2. Writes `meta_server_endpoint` (`OPS_ADDR`) and `cubemaster_http_addr` (`MASTER_ADDR`) into `Cubelet/dynamicconf/conf.yaml` — when `CubeMaster` distributes template artifacts, `Cubelet` automatically rewrites download URLs to `cubemaster_http_addr`, so compute nodes never need to resolve in-cluster Kubernetes DNS names.
 3. Configures `ops-agent` against K8s `CubeOps` and starts listening on `0.0.0.0:8890`.
 4. Pulls the cluster CubeEgress MITM root CA (`cube-root-ca.crt` and `cube-root-ca.key`) from K8s `CubeMaster` via `http://<MASTER_ADDR>/cube/ca/...`, keeping template-baked CA certificates and compute-node `CubeEgress` signing keys in sync.
-5. Enables and starts `cube-sandbox-compute.target` and runs `quickcheck.sh`.
+5. If `ONE_CLICK_ENABLE_OBSERVABILITY=1` is set in `.env`, installs and starts the local OpenTelemetry Collector (`cube-sandbox-otelcol.service`) to scrape Cubelet metrics and export sandbox `stdout`/`stderr` logs to the configured backend.
+6. Enables and starts `cube-sandbox-compute.target` and runs `quickcheck.sh`.
+
+::: details Optional: Enable observability on already-running compute nodes (zero impact on existing sandboxes)
+If a compute node is already running and you want to add the observability Collector later without re-running `install-compute.sh`, run the standalone script as root (for air-gapped nodes, also pass `CUBE_OTELCOL_BIN=/path/to/otelcol-contrib` to avoid downloading from the internet):
+
+```bash
+# Example: Loki + Prometheus OTLP (pass *_AUTHORIZATION / *_TENANT_ID if your backend requires auth)
+sudo env \
+  CUBE_OBSERVABILITY_CLUSTER_ID=cube-hybrid-prod \
+  CUBE_LOGS_BACKEND=loki \
+  CUBE_METRICS_OTLP_HTTP_ENDPOINT="http://<PROM_ADDR>/api/v1/otlp" \
+  CUBE_LOGS_OTLP_HTTP_ENDPOINT="http://<LOKI_ADDR>/otlp" \
+  /usr/local/services/cubetoolbox/observability/install.sh cvm
+
+# For Elasticsearch, replace the two log variables above with:
+#   CUBE_LOGS_BACKEND=elasticsearch \
+#   CUBE_LOGS_ES_ENDPOINT="http://<ES_ADDR>"
+```
+
+**Upgrade persistence note**: This standalone path does not record `ONE_CLICK_ENABLE_OBSERVABILITY=1` in `.one-click.env`. A later `install-compute.sh` upgrade run with the default `ONE_CLICK_ENABLE_OBSERVABILITY=0` in `.env` will run `observability/install.sh uninstall all` and remove the Collector. Also add `ONE_CLICK_ENABLE_OBSERVABILITY=1` and the endpoint variables to `.env` (Step 3.2) so future upgrades keep the Collector installed.
+:::
 
 #### 3.4 Scale compute nodes and connect clients
 
@@ -510,8 +672,8 @@ kubectl get ds -n cube-system
 ```
 
 Expected:
-- `cube-master`, `cube-templatecenter`, `cube-api`, `cube-ops`, `cube-proxy`, `cube-lifecycle-manager`, `cube-webui`, `cube-cubemastercli` (plus built-in MySQL / Redis if enabled) are all `Running` and `Ready`.
-- `kubectl get ds -n cube-system` shows no `cube-node`, `cube-node-installer`, `cube-node-bootstrap`, or `cube-node-pvm` DaemonSets.
+- `cube-master`, `cube-templatecenter`, `cube-api`, `cube-ops`, `cube-proxy`, `cube-lifecycle-manager`, `cube-webui`, `cube-cubemastercli` (plus built-in MySQL / Redis and optional Prometheus / Loki or ES / Grafana / `component-otelcol` if enabled) are all `Running` and `Ready`.
+- `kubectl get ds -n cube-system` shows no `cube-node`, `cube-node-installer`, `cube-node-bootstrap`, or `cube-node-pvm` DaemonSets (if `observability.enabled=true`, `cube-node-otelcol` having `DESIRED=0` is expected because bare-metal / VM nodes run the systemd Collector locally).
 
 2. **Verify Service endpoints**:
 
@@ -581,6 +743,18 @@ lsmod | grep kvm_pvm           # Expected: kvm_pvm loaded
 grep CUBE_PVM_ENABLE /usr/local/services/cubetoolbox/.one-click.env   # Expected: =1
 ```
 
+5. **Verify the observability Collector (if enabled)**:
+
+```bash
+# Confirm the Collector service, local health endpoint, and Cubelet metrics endpoint are healthy
+sudo systemctl --no-pager --full status cube-sandbox-otelcol.service
+curl -fsS http://127.0.0.1:13133/
+curl -fsS http://127.0.0.1:9998/v1/metrics/resource | head -n 20
+
+# Inspect recent logs to confirm there are no export errors (connection refused, 401/403, bad path)
+sudo journalctl -u cube-sandbox-otelcol.service -n 50 --no-pager
+```
+
 ### 4.3 Cross-Plane Registration & Connectivity Checks
 
 1. **Verify all bare-metal / VM compute nodes are registered and healthy from K8s**:
@@ -598,8 +772,10 @@ Expected: Every compute node appears with its `CUBE_SANDBOX_NODE_IP` and healthy
 2. **Verify K8s control-plane Pods can dial compute-node ports**:
 
 ```bash
+# Probe compute-node Cubelet gRPC (9999) and ops-agent (8890) from cubemastercli
+# (cubemastercli does not ship nc; use bash built-in /dev/tcp with timeout)
 kubectl exec -n cube-system deploy/cube-cubemastercli -- \
-  sh -lc 'nc -zv -w 3 <compute-node-ip> 9999 && nc -zv -w 3 <compute-node-ip> 8890'
+  bash -c 'timeout 3 bash -c "exec 3<>/dev/tcp/<compute-node-ip>/9999" && timeout 3 bash -c "exec 3<>/dev/tcp/<compute-node-ip>/8890" && echo "OK"'
 ```
 
 3. **Verify nodes in the WebUI dashboard**:
@@ -653,6 +829,16 @@ curl -fsS "http://<PROXY_HTTP_ADDR>/sandbox/${SANDBOX_ID}/49999/health"
 curl -fsS -X DELETE "http://<API_ADDR>/sandboxes/${SANDBOX_ID}"
 ```
 
+3. **(Optional) Verify observability dashboards**:
+
+If you enabled the Kubernetes built-in observability stack, open Grafana via `port-forward` before (or shortly after) cleaning up the test sandbox to verify end-to-end metrics and log ingestion:
+
+```bash
+kubectl -n cube-system port-forward svc/cube-grafana 3001:3001
+```
+
+Open `http://127.0.0.1:3001` (username `admin`, password from Step 1.4) and confirm your cluster (`cluster`), bare-metal / VM nodes (`node`), and sandboxes appear across the 4 pre-provisioned dashboards: `cubesandbox-cluster` (cluster overview), `cubesandbox-node` (per-node overview), `cubesandbox-sandbox` (per-sandbox detail), and `cubesandbox-logs` (sandbox `stdout`/`stderr` logs, plus a collapsed **Component logs** section when control-plane log collection is enabled).
+
 When all steps above succeed, your hybrid cluster is fully operational across control and data planes.
 
 ---
@@ -681,7 +867,7 @@ When deploying in an air-gapped environment (no public internet access) or when 
 | --- | --- | --- |
 | **Cube-owned control-plane images** (keeping `/cube-sandbox/<image>` path) | `global.imageRegistry` | **Host (and optional port) only**, e.g. `registry.internal.example.com` (no path or trailing `/`). Automatically rewrites the official registry host for `cube-master`, `cube-templatecenter`, `cube-api`, `cube-ops`, `cube-proxy`, `cube-lifecycle-manager`, `cube-webui`, and `cubemastercli` |
 | **Cube-owned control-plane images** (custom project path) | `images.<component>.repository` (and `tag`) | If your private registry does not use `/cube-sandbox/`, override each component explicitly: `images.master`, `images.templateCenter`, `images.api`, `images.ops`, `images.proxy`, `images.lifecycleManager`, `images.webui`, `images.cubemastercli` |
-| **Non-Cube helper images** (**not** rewritten by `global.imageRegistry`; must override explicitly) | `images.kubectl.repository`<br/>`helmTest.image.repository`<br/>`helmTest.dnsImage.repository` | `images.kubectl` is used by the CoreDNS patch Job when `cubeProxy.configureClusterDNS: true`; `helmTest.*` are used by `helm test`. If you use the chart's built-in StatefulSets in a test setup instead of external DB/Redis, also override `mysql.image.repository` and `redis.image.repository` |
+| **Non-Cube helper images** (**not** rewritten by `global.imageRegistry`; must override explicitly) | `images.kubectl.repository`<br/>`helmTest.image.repository`<br/>`helmTest.dnsImage.repository` | `images.kubectl` is used by the CoreDNS patch Job when `cubeProxy.configureClusterDNS: true`; `helmTest.*` are used by `helm test`. If you use the chart's built-in StatefulSets in a test setup instead of external DB/Redis, also override `mysql.image.repository` and `redis.image.repository`. If you enable built-in observability on Kubernetes, also override `observability.otelCollector.image` and `observability.backend.{prometheus,loki,elasticsearch,grafana}.image` |
 | **Registry pull credentials** | `imagePullSecrets` | Top-level key (not under `global`). References the `docker-registry` Secret created in `cube-system`, e.g. `imagePullSecrets: [{ name: regcred }]` |
 | **Private / self-signed CA** (optional) | `trustedCACerts.enabled`<br/>`trustedCACerts.certs` or `existingConfigMap` | Enable when `cube-templatecenter` pulls OCI images from a private registry backed by an internal or self-signed CA |
 
@@ -722,6 +908,18 @@ helmTest:
 #     repository: "registry.internal.example.com/cube-sandbox/redis"
 #     tag: "7-alpine"
 
+# Only needed if enabling built-in Kubernetes observability:
+# observability:
+#   otelCollector:
+#     image: "registry.internal.example.com/cube-sandbox/opentelemetry-collector-contrib:0.162.0"
+#   backend:
+#     prometheus:
+#       image: "registry.internal.example.com/cube-sandbox/prometheus:v3.2.1"
+#     loki:
+#       image: "registry.internal.example.com/cube-sandbox/loki:3.7.9"
+#     grafana:
+#       image: "registry.internal.example.com/cube-sandbox/grafana-oss:10.4.18"
+
 # Optional: trust a private / enterprise CA for cube-templatecenter OCI image pulls:
 # trustedCACerts:
 #   enabled: true
@@ -730,7 +928,7 @@ helmTest:
 
 ### 5.2 Bare-Metal / VM Data Plane (Offline Compute-Node Deployment)
 
-The one-click release tarball (`cube-sandbox-one-click-<version>-<arch>.tar.gz`) already bundles all version-locked compute-node binaries and guest assets (`Cubelet`, `CubeShim`, `vmlinux`, guest image, `cube-agent.ext4`, `ops-agent`, `mkcert`, etc.). For offline compute nodes, prepare three items in advance:
+The one-click release tarball (`cube-sandbox-one-click-<version>-<arch>.tar.gz`) already bundles all version-locked compute-node binaries and guest assets (`Cubelet`, `CubeShim`, `vmlinux`, guest image, `cube-agent.ext4`, `ops-agent`, `mkcert`, etc.). For offline compute nodes, prepare three items in advance (if also enabling the observability Collector, pre-stage the matching-architecture `otelcol-contrib` binary and set `CUBE_OTELCOL_BIN` in `.env`):
 
 1. **Offline release bundle (matching the control-plane version)**:
    - Download `cube-sandbox-one-click-<version>-<arch>.tar.gz` matching your node architecture (`amd64` / `arm64`) on a connected machine and transfer it to each compute node.
@@ -807,6 +1005,8 @@ If your private registry uses a self-signed or internal CA, make sure `trustedCA
 | Node alternates between healthy and `(down)` | Clock skew between K8s control-plane nodes and compute nodes exceeds the 15-second heartbeat window | Fix `chrony` / NTP synchronization on both sides; trigger `template redo` afterwards if needed |
 | S3 Volume mount or component warehouse download fails | Compute nodes cannot reach the S3 endpoint (for example, pointing at K8s built-in MinIO's Headless Service), or `cubeOps.store.fs.publicURL` is unset/unreachable in `fs` mode | Ensure the external S3 endpoint is reachable from both K8s Pods and compute nodes with matching credentials, or set a node-reachable `cubeOps.store.fs.publicURL` in `fs` mode |
 | Preflight fails with `/data/cubelet ... is not XFS` or rejects Snap Docker | `/data/cubelet` is not on XFS, or Docker was installed via Snap | Mount an XFS partition at `/data/cubelet` (Step 2.2) and install standard Docker from official OS/Docker packages |
+| Compute-node Collector exports to the CubeMaster IP, or install rejects `/v1/metrics` / `/v1/logs` suffix | With endpoints unset in hybrid mode, auto-derivation falls back to the `ONE_CLICK_CONTROL_PLANE_CUBEMASTER_ADDR` / `CUBEOPS_ADDR` host (which typically does not expose `9092`/`3100`), or an OTLP URL includes the trailing path suffix | Explicitly set `CUBE_METRICS_OTLP_HTTP_ENDPOINT` (or `CUBE_METRICS_REMOTE_WRITE_URL`) and `CUBE_LOGS_OTLP_HTTP_ENDPOINT` (or `CUBE_LOGS_ES_ENDPOINT`) in `.env` using base OTLP URLs only |
+| Grafana shows no data for bare-metal / VM nodes, or `cube-sandbox-otelcol` logs connection refused / timeout | Built-in K8s Prometheus (`9092`), Loki (`3100`), or ES (`9200`) Services are still `ClusterIP` only, firewall blocks the ports, or `clusterId` differs | Expose the K8s observability ingestion Services via internal LB / NodePort (Step 1.2 built-in observability details), verify firewall rules, and match `CUBE_OBSERVABILITY_CLUSTER_ID` with Helm `observability.clusterId` |
 
 For log locations and general troubleshooting, see [Component Log Locations](./troubleshooting/component-log-locations.md) and [Deployment Troubleshooting](./troubleshooting/deployment.md).
 
@@ -817,9 +1017,12 @@ For log locations and general troubleshooting, see [Component Log Locations](./t
 ### Removing a Compute Node
 
 1. Cordon and drain existing sandboxes on the node via `cubeopscli` (see [Node Operations](./node-operations.md)).
-2. Run the uninstall script on the physical machine / VM:
+2. Run the uninstall script on the physical machine / VM (and remove the observability Collector if enabled):
 
 ```bash
+# If observability Collector was installed on this node, uninstall it first
+sudo /usr/local/services/cubetoolbox/observability/install.sh uninstall cvm || true
+
 sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
 sudo /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh check
 # After verifying no leftovers remain, remove the toolbox directory
@@ -843,4 +1046,5 @@ kubectl delete namespace cube-system
 - [Connect Clients to the Cluster](./multi-node-deploy.md#connect-clients-to-the-cluster) — direct proxy, path mode, header mode, and wildcard DNS
 - [HTTPS & Domain Resolution](./https-and-domain.md) — production TLS certificates and wildcard DNS setup
 - [Authentication](./authentication.md) — protect CubeAPI with `AUTH_CALLBACK_URL`
-- [Sandbox Observability Deployment](./observability.md) — collect metrics, logs, and traces across compute nodes
+- [Sandbox Observability Deployment](./observability.md) — metric semantics, PromQL/LogQL queries, and retention tuning
+- [Distributed Tracing](./tracing.md) — enable `OTEL_EXPORTER_OTLP_ENDPOINT` end-to-end request tracing
