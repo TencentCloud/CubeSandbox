@@ -95,6 +95,12 @@ func LockSandbox(sandboxID string) string {
 	return join(Prefix, Version, ScopeMaster, "lock", "sandbox", sandboxID)
 }
 
+// SandboxCacheInvalidate is the Pub/Sub channel carrying sandbox IDs whose
+// cached host changed. It is a channel, not a key, so it has no TTL.
+func SandboxCacheInvalidate() string {
+	return join(Prefix, Version, ScopeShared, "sandbox", "cache", "invalidate")
+}
+
 // ---- legacy key builders (read fallback / delete cleanup only) ----
 
 // LegacyNodeMetric is the bare node ID used before namespacing.

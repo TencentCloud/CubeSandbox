@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/telemetry"
+	basetypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
@@ -245,6 +246,9 @@ func TestHandleSandboxCommitActionReportsRouteSpanBusinessStatus(t *testing.T) {
 			body: `{"requestID":"req-1","sandbox_id":"sb-missing"}`,
 			stub: func(p *gomonkey.Patches) {
 				p.ApplyFunc(localcache.GetSandboxCache, func(string) *localcache.SandboxCache { return nil })
+				p.ApplyFunc(localcache.GetSandboxProxyMap, func(context.Context, string) (*basetypes.SandboxProxyMap, bool) {
+					return nil, false
+				})
 				p.ApplyFunc(sandbox.SandboxInfo, func(context.Context, *types.GetCubeSandboxReq) *types.GetCubeSandboxRes {
 					return &types.GetCubeSandboxRes{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_NotFound), RetMsg: "no such sandbox"}}
 				})

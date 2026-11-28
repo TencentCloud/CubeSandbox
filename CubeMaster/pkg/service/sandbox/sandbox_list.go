@@ -382,7 +382,9 @@ func dealRspData(ctx context.Context, done chan struct{}, resChan chan *types.Sa
 			if res.Status == int32(cubebox.ContainerState_CONTAINER_RUNNING) && !config.GetConfig().Common.EnabledListRunningSandboxCache {
 				continue
 			}
-			localcache.SetSandboxCache(res.SandboxID, &localcache.SandboxCache{
+			// A List response is a weak source: never let it overwrite a host this
+			// replica already resolved from a create/resume or a proxy read.
+			localcache.SetSandboxCacheIfAbsent(res.SandboxID, &localcache.SandboxCache{
 				SandboxID: res.SandboxID,
 				HostID:    res.HostID,
 				HostIP:    res.HostIP,

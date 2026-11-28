@@ -58,7 +58,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | --- | --- | --- | --- | --- | --- | --- |
 | 节点资源指标 | `cube:v1:master:node:metric:{nodeID}` | Hash | master | CubeMaster | CubeMaster | 刷新式（心跳续期，默认 600s） |
 | 节点实时地址表 | `cube:v1:shared:node:endpoint` | Hash | shared | CubeOps | CubeProxy | 无（注册/心跳 `HSET`，节点删除 `HDEL`） |
-| 沙箱代理路由 | `cube:v1:shared:sandbox:proxy:{sandboxID}` | Hash | shared | CubeMaster | CubeProxy | 无（生命周期由 `DEL` 管理） |
+| 沙箱代理路由 | `cube:v1:shared:sandbox:proxy:{sandboxID}` | Hash | shared | CubeMaster | CubeProxy, CubeMaster | 无（生命周期由 `DEL` 管理） |
 | 实例信息 | `cube:v1:master:instance:info:{insID}` | Hash | master | CubeMaster | CubeMaster | 无 |
 | Describe 任务结果 | `cube:v1:master:task:describe:{taskID}` | Hash | master | CubeMaster | CubeMaster / 外部 | 86400s（可配置） |
 | 实例 metadata（预留） | `cube:v1:master:instance:meta:{...}` | string / list | master | CubeMaster | CubeMaster | 无 |
@@ -66,6 +66,7 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | 沙箱 lifecycle 事件流 | `cube:v1:shared:sandbox:lifecycle:events` | Stream | shared | CubeMaster | cube-lifecycle-manager | MAXLEN ~ 100000 |
 | 沙箱 lifecycle 状态 | `cube:v1:shared:sandbox:lifecycle:state:{sandboxID}` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET TTL（默认 60s）；纯文本状态（`paused` / `running` / 过渡标记） |
 | 沙箱 lifecycle 唤醒通知 | `cube:v1:shared:sandbox:lifecycle:notify` | Pub/Sub channel | shared | cube-lifecycle-manager | cube-lifecycle-manager | 不适用（best-effort 提示） |
+| 沙箱路由缓存失效 | `cube:v1:shared:sandbox:cache:invalidate` | Pub/Sub channel | shared | CubeMaster | CubeMaster | 不适用（消息体为 sandboxID） |
 | CLM leader 租约 | `cube:v1:shared:lock:lifecycle-manager:leader` | String | shared | cube-lifecycle-manager | cube-lifecycle-manager | SET NX PX，默认 10s；续租/释放使用单 key WATCH 事务 |
 | 沙箱操作锁（pause/resume/delete） | `cube:v1:master:lock:sandbox:{sandboxID}` | String | master | CubeMaster | CubeMaster | 按操作 SET NX EX：pause **180s**，resume/delete **120s**，其它 **60s**；解锁为 token 匹配的 Lua GET+DEL（不续期） |
 | CubeProxy 副本注册表 | `cube:v1:shared:cube_proxy:registry` | Hash | shared | CubeProxy | cube-lifecycle-manager | 无（心跳超时后由 `HDEL` 清理） |
@@ -138,7 +139,8 @@ cube:{ver}:{scope}:{resource}[:{sub}...]:{id}
 | --- | --- | --- |
 | `node:metric` | 刷新式 TTL | 每次心跳写入后 `EXPIRE`（默认 600s）；活跃节点持续续期，下线节点自动过期清理 |
 | `node:endpoint` | 无 TTL | 由 CubeOps 维护：节点注册与每次心跳时 `HSET`，删除节点时 `HDEL`。CubeProxy 在 `ngx.shared.local_cache` 中以固定 10s TTL（命中不续期）缓存查询结果 |
-| `sandbox:proxy` | 无 TTL | 仅在沙箱创建时写入、无续期路径；生命周期由 CubeMaster 在沙箱销毁时 `DEL`。**禁止**设置短于沙箱最大存活时间的 TTL |
+| `sandbox:proxy` | 无 TTL | 仅在沙箱创建时写入、无续期路径；生命周期由 CubeMaster 在沙箱销毁时 `DEL`。**禁止**设置短于沙箱最大存活时间的 TTL。CubeMaster 的进程内路由缓存以它为准，缺失时才回落到该 key |
+| `sandbox:cache:invalidate` | 不适用 | Pub/Sub channel，不是 key。每次写入或删除 `sandbox:proxy` 后（即使写入失败）发布一条 sandboxID，各 CubeMaster 副本据此丢弃本地路由缓存；订阅断连或消息丢失由 `sandbox_cache_ttl`（默认 60s）兜底，超时后路由会重新读取 `sandbox:proxy`：来自该 key 的 host 在新旧两个 proxy key 均被 `EXISTS` 确认不存在后丢弃；没有 proxy 背书的 host（由集群扫描或 List 写入）沿用最后已知值，直到 `clean_sandbox_cache_interval`（默认 2h）全量清空；Redis 故障期间任何 host 都沿用最后已知值。Sentinel 主从切换时，Sentinel 把旧主转为从节点会断开订阅连接，CubeMaster 随即重新订阅新主；`+switch-master` 到该转换之间发布的消息会丢失，同样由上述 TTL 兜底 |
 | `task:describe` | 固定 TTL | 写入后 `EXPIRE`，默认 86400s（`describe_task_expire_time`） |
 | `instance:info` / `instance:meta` | 无 TTL | 随实例生命周期管理；后续可按需补充 |
 | `sandbox:lifecycle:meta` | 无 TTL | 沙箱创建时写入，销毁时 `HDEL` |

@@ -9,6 +9,7 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	proxytypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/types"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
@@ -86,6 +87,10 @@ func TestRefreshProxyMapAfterResumeRewritesSandboxIP(t *testing.T) {
 	}
 	if stored.ContainerToHostPorts["49999"] != "20010" {
 		t.Fatalf("ports=%v, want 49999->20010", stored.ContainerToHostPorts)
+	}
+	t.Cleanup(func() { localcache.DeleteSandboxCache("sb-1") })
+	if c := localcache.GetSandboxCache("sb-1"); c == nil || c.HostIP != "10.0.0.1" || c.HostID != "node-1" || !c.FromProxy {
+		t.Fatalf("resume cache=%+v, want proxy-backed node-1/10.0.0.1", c)
 	}
 }
 

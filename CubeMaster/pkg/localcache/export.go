@@ -80,6 +80,8 @@ func Init(ctx context.Context) error {
 	CubeLog.WithContext(context.Background()).Debugf("init_all,cost:%v,:%v", time.Since(start), GetNodes(-1).String())
 
 	go l.cleanSandboxCache(ctx)
+	go l.runSandboxCacheInvalidatePublisher(ctx)
+	go l.runSandboxCacheInvalidateSubscriber(ctx)
 	return nil
 }
 
@@ -244,7 +246,10 @@ func NotifyEvent(e *Event) error {
 }
 
 func SetSandboxProxyMap(ctx context.Context, proxyInfo *types.SandboxProxyMap) error {
-	return l.setByPassProsyToRedis(ctx, rediskey.SandboxProxy(proxyInfo.SandboxID), proxyInfo)
+	err := l.setByPassProsyToRedis(ctx, rediskey.SandboxProxy(proxyInfo.SandboxID), proxyInfo)
+	// A failed HSET may still have applied (reply timeout), so invalidate either way.
+	publishSandboxCacheInvalidate(ctx, proxyInfo.SandboxID)
+	return err
 }
 
 func GetSandboxProxyMap(ctx context.Context, sandboxID string) (*types.SandboxProxyMap, bool) {
@@ -256,6 +261,18 @@ func GetSandboxProxyMap(ctx context.Context, sandboxID string) (*types.SandboxPr
 		}
 	}
 	return nil, false
+}
+
+// ProxyRouteGone reports that neither proxy key exists. Only teardown deletes
+// them, so true means destroyed; an unreachable Redis reports false.
+func ProxyRouteGone(ctx context.Context, sandboxID string) bool {
+	keys := rediskey.ReadKeysWithFallback(rediskey.SandboxProxy(sandboxID), rediskey.LegacySandboxProxy(sandboxID))
+	n, err := redis.Int64(redisExistsFn(keys[0], keys[1]))
+	if err != nil {
+		log.G(ctx).Warnf("proxy route exists check %s: %v", sandboxID, err)
+		return false
+	}
+	return n == 0
 }
 
 func GetInstanceInfoMap(ctx context.Context, insID string) (*types.InstanceInfoMap, bool) {
@@ -306,6 +323,7 @@ func DeleteSandboxProxyMap(ctx context.Context, sandboxID string) error {
 			firstErr = err
 		}
 	}
+	publishSandboxCacheInvalidate(ctx, sandboxID)
 	return firstErr
 }
 
