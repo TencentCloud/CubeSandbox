@@ -65,6 +65,10 @@ spec:
               value: cubelet
             - name: CUBE_ROLE
               value: run
+            - name: CUBELET_DEPLOYED_IN_BIG_POD
+              value: "true"
+            - name: CUBELET_SHARED_MNT_PATHS
+              value: {{ printf "%s:%s:%s:%s:%s" .Values.hostPaths.dataCubelet .Values.hostPaths.dataCubeShared .Values.hostPaths.dataShared .Values.hostPaths.dataCubeShim .Values.hostPaths.tmpCube | quote }}
             {{- with .Values.cubeNode.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

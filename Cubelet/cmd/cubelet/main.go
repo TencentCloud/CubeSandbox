@@ -52,11 +52,20 @@ import (
 )
 
 const (
-	CubeShimTopdir        = "/run/cube-containers/shared"
-	CubeShimSandboxes     = "/run/cube-containers/shared/sandboxes"
-	CubeMntNsDirPath      = "/usr/local/services/cubetoolbox/cubeletmnt"
-	CubeMntNsFilePath     = "/usr/local/services/cubetoolbox/cubeletmnt/mnt"
-	CubeMainProcMutexLock = "/run/cubelock.db"
+	CubeShimTopdir          = "/run/cube-containers/shared"
+	CubeShimSandboxes       = "/run/cube-containers/shared/sandboxes"
+	CubeMntNsDirPath        = "/usr/local/services/cubetoolbox/cubeletmnt"
+	CubeMntNsFilePath       = "/usr/local/services/cubetoolbox/cubeletmnt/mnt"
+	CubeMainProcMutexLock   = "/run/cubelock.db"
+	CubeDeployedInBigPodEnv = "CUBELET_DEPLOYED_IN_BIG_POD"
+)
+
+type startupMode int
+
+const (
+	startupModeSpawnPrivateMnt startupMode = iota
+	startupModeReexecChild
+	startupModeDirect
 )
 
 func main() {
@@ -74,35 +83,68 @@ func main() {
 
 	os.Setenv("CONTAINERD_SUPPRESS_DEPRECATION_WARNINGS", "true")
 	mntPath := os.Getenv("NEED_SET_MNT")
+	inBigPod, err := deployedInBigPod()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Cubelet: %v\n", err)
+		os.Exit(1)
+	}
 
-	if mntPath == "" {
+	switch resolveStartupMode(mntPath, inBigPod) {
+	case startupModeSpawnPrivateMnt:
 		runtime.LockOSThread()
 		if needNewMnt(CubeMntNsFilePath) {
-			err := newCubeMnt()
-			if err != nil {
+			if err := newCubeMnt(); err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "newCubeMnt fail,%v\n", err)
 				time.Sleep(time.Second)
 				os.Exit(1)
 			}
 		}
 
-		err := startSelf(os.Args[1:], []string{fmt.Sprintf("NEED_SET_MNT=%s", CubeMntNsFilePath)})
-		if err != nil {
+		if err := startSelf(os.Args[1:], []string{fmt.Sprintf("NEED_SET_MNT=%s", CubeMntNsFilePath)}); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "startSelf fail,%v\n", err)
 			time.Sleep(time.Second)
 			os.Exit(1)
 		}
-
-	} else {
-
+	case startupModeReexecChild:
 		parentExit()
-		app := App()
-		if err := app.Run(os.Args); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "Cubelet: %s\n", err)
+		runApp()
+	case startupModeDirect:
+		if err := os.MkdirAll(CubeShimSandboxes, 0755); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "mkdir %s fail,%v\n", CubeShimSandboxes, err)
 			os.Exit(1)
 		}
+		runApp()
 	}
+}
 
+func deployedInBigPod() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(CubeDeployedInBigPodEnv))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s=%q: %w", CubeDeployedInBigPodEnv, raw, err)
+	}
+	return v, nil
+}
+
+func resolveStartupMode(mntPath string, inBigPod bool) startupMode {
+	if mntPath != "" {
+		return startupModeReexecChild
+	}
+	if inBigPod {
+		return startupModeDirect
+	}
+	return startupModeSpawnPrivateMnt
+}
+
+func runApp() {
+	app := App()
+	if err := app.Run(os.Args); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Cubelet: %s\n", err)
+		os.Exit(1)
+	}
 }
 
 func needNewMnt(path string) bool {

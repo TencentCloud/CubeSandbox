@@ -17,6 +17,8 @@ DATA_CUBE_SHIM="${DATA_CUBE_SHIM:-/data/cube-shim}"
 DATA_CUBE_SHARED="${DATA_CUBE_SHARED:-/data/cube-shared}"
 TMP_CUBE="${TMP_CUBE:-/tmp/cube}"
 BOOTSTRAP_STATE="${BOOTSTRAP_STATE:-/var/lib/cube-node-bootstrap}"
+ANCHOR_PIN_DIR="${ANCHOR_PIN_DIR:-/run/cube-node-mntns}"
+ANCHOR_PIN_FILE="${ANCHOR_PIN_FILE:-${ANCHOR_PIN_DIR}/anchor}"
 DRY_RUN="${DRY_RUN:-0}"
 
 log() { printf '[cleanup-node-host] %s\n' "$*"; }
@@ -30,6 +32,15 @@ run() {
 }
 
 [[ "$(id -u)" -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
+
+log "unmounting Big Pod anchor mount namespace ${ANCHOR_PIN_DIR}"
+if mountpoint -q "${ANCHOR_PIN_FILE}" 2>/dev/null; then
+  run "umount '${ANCHOR_PIN_FILE}'"
+fi
+if mountpoint -q "${ANCHOR_PIN_DIR}" 2>/dev/null; then
+  run "umount '${ANCHOR_PIN_DIR}'"
+fi
+run "rm -rf '${ANCHOR_PIN_DIR}' '${ANCHOR_PIN_DIR}.lock'"
 
 log "removing toolbox hostPath ${TOOLBOX_ROOT}"
 run "rm -rf '${TOOLBOX_ROOT}'"

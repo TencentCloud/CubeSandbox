@@ -66,6 +66,8 @@ RUN set -eux; \
       -o /out/bin/cubelet ./cmd/cubelet; \
     GOOS=linux GOARCH="${goarch}" go build -ldflags "${ldflags}" \
       -o /out/bin/cubecli ./cmd/cubecli; \
+    gcc -O2 -Wall -Wextra -Werror \
+      -o /out/bin/cube-mntns-init ./cmd/cube-mntns-init/csrc/main.c; \
     cd /workspace/volume-s3; \
     go mod download; \
     CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build -trimpath -ldflags '-s -w' \
@@ -126,6 +128,7 @@ RUN chmod +x /tmp/docker-install-volume-deps.sh \
 
 COPY --from=builder /out/Cubelet ${IMAGE_ROOT}/Cubelet
 COPY --from=builder /out/cube-vs ${IMAGE_ROOT}/cube-vs
+COPY --from=builder /out/bin/cube-mntns-init /usr/local/bin/cube-mntns-init
 COPY examples/volume/cos/binary/cube-volume-cos.sh ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos
 COPY examples/volume/cos/volume-cos.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-cos.conf.example
 COPY examples/volume/s3/volume-s3.conf.example ${IMAGE_ROOT}/Cubelet/plugin/volume-s3.conf.example
@@ -141,6 +144,7 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       ${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-s3 \
+      /usr/local/bin/cube-mntns-init \
       /usr/local/bin/component-entrypoint.sh \
     && mkdir -p \
       /data/cubelet \
@@ -151,9 +155,10 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       /data/snapshot_pack/disks \
       /tmp/cube \
       /run/cube-node \
+    && /usr/local/bin/cube-mntns-init -- /bin/true \
     && "${IMAGE_ROOT}/Cubelet/bin/cubelet" --help >/dev/null \
     && "${IMAGE_ROOT}/Cubelet/bin/cubecli" --help >/dev/null \
     && "${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump" --help >/dev/null
 
 EXPOSE 9999 9998 9966
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/component-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/cube-mntns-init", "--", "/usr/bin/tini", "--", "/usr/local/bin/component-entrypoint.sh"]
