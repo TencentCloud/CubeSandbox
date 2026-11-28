@@ -221,9 +221,7 @@ func TestCreateTemplateUsesRequestedDistributionScope(t *testing.T) {
 	patches.ApplyFunc(createDefinitionWithOptions, func(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string, _ definitionCreateOptions) error {
 		return nil
 	})
-	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error {
-		return nil
-	})
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {})
 
 	var gotScope []string
 	patches.ApplyFunc(resolveTemplateNodes, func(instanceType string, scope []string) ([]*node.Node, error) {
@@ -509,11 +507,9 @@ func TestGetTemplateRequestAssignsRuntimeRequestID(t *testing.T) {
 	invalidateTemplateCaches(templateID)
 	defer invalidateTemplateCaches(templateID)
 
-	if err := setTemplateRequestCache(templateID, &sandboxtypes.CreateCubeSandboxReq{
+	setTemplateRequestCache(templateID, &sandboxtypes.CreateCubeSandboxReq{
 		Annotations: map[string]string{constants.CubeAnnotationDesiredSandboxID: "old-sandbox"},
-	}); err != nil {
-		t.Fatalf("setTemplateRequestCache returned error: %v", err)
-	}
+	})
 
 	first, err := GetTemplateRequest(context.Background(), templateID)
 	if err != nil {
@@ -550,9 +546,7 @@ func TestGetTemplateRequestSurfacesAliasAnnotation(t *testing.T) {
 			constants.CubeAnnotationAppSnapshotTemplateAlias: "python-runtime",
 		},
 	}
-	if err := setTemplateRequestCache(templateID, cached); err != nil {
-		t.Fatalf("setTemplateRequestCache returned error: %v", err)
-	}
+	setTemplateRequestCache(templateID, cached)
 
 	req, err := GetTemplateRequest(context.Background(), templateID)
 	if err != nil {

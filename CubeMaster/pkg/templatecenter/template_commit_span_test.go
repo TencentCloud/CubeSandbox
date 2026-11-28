@@ -100,7 +100,7 @@ func stubCommitJob(t *testing.T, stubs commitJobStubs) *jobWriteLog {
 		return stubs.cleanup(ctx, ep, req)
 	})
 	patches.ApplyFunc(createDefinition, stubs.create)
-	patches.ApplyFunc(setTemplateRequestCache, func(string, *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(setTemplateRequestCache, func(string, *sandboxtypes.CreateCubeSandboxReq) {})
 	patches.ApplyFunc(setTemplateLocalityCache, func(string, []ReplicaStatus) {})
 	patches.ApplyFunc(UpsertReplica, func(context.Context, string, string, ReplicaStatus) error { return nil })
 	patches.ApplyFunc(UpdateDefinitionStatus, func(context.Context, string, string, string) error { return nil })

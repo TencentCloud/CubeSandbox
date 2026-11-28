@@ -139,34 +139,38 @@ func (g *templateFetchGroup) Do(ctx context.Context, key string, fn func() (inte
 	return call.val, call.err
 }
 
-func getCachedTemplateRequest(templateID string) (*sandboxtypes.CreateCubeSandboxReq, bool, error) {
+func getCachedTemplateRequest(templateID string) (*sandboxtypes.CreateCubeSandboxReq, bool) {
 	v, ok := templateDefinitionCache.Get(templateID)
 	if !ok {
-		return nil, false, nil
+		return nil, false
 	}
 	req, ok := v.(*sandboxtypes.CreateCubeSandboxReq)
 	if !ok || req == nil {
 		templateDefinitionCache.Delete(templateID)
-		return nil, false, nil
+		return nil, false
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		templateDefinitionCache.Delete(templateID)
-		return nil, false, err
+	// The cache entry is shared by concurrent creates, so every hit hands out
+	// its own copy instead of the stored request.
+	out := req.DeepCopy()
+	// Entries are stored normalized, i.e. with the embedded *Request dropped
+	// (normalizeStoredTemplateRequest), and DeepCopy preserves that nil. The
+	// JSON clone this replaced went through UnmarshalJSON, which materializes
+	// the embedded request unconditionally, so a hit never used to hand out a
+	// request whose promoted RequestID access panics on a nil pointer. Keep
+	// that part of the contract here instead of leaning on GetTemplateRequest
+	// hydrating it further up: a second reader of this cache would otherwise
+	// inherit a nil the clone never produced.
+	if out.Request == nil {
+		out.Request = &sandboxtypes.Request{}
 	}
-	return cloned, true, nil
+	return out, true
 }
 
-func setTemplateRequestCache(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error {
+func setTemplateRequestCache(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {
 	if templateID == "" || req == nil {
-		return nil
+		return
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		return err
-	}
-	templateDefinitionCache.Set(templateID, cloned, templateCacheTTL())
-	return nil
+	templateDefinitionCache.Set(templateID, req.DeepCopy(), templateCacheTTL())
 }
 
 func getCachedTemplateLocality(templateID string) ([]ReplicaStatus, bool) {

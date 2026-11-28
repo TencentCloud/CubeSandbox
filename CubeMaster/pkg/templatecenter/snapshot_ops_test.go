@@ -576,7 +576,7 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 		return nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
-	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {})
 	// localcache.RegisterTemplateReplica is a one-line wrapper that gomonkey
 	// cannot patch reliably (it may inline). Skip its real implementation by
 	// short-circuiting via package init: defer-restored later.
@@ -642,7 +642,7 @@ func TestRunSnapshotCreateJobPersistsS3RemoteUUIDs(t *testing.T) {
 	})
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
-	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {})
 	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
 
 	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
@@ -693,7 +693,7 @@ func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T
 	})
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
-	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {})
 	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
 
 	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
@@ -763,7 +763,7 @@ func TestRunSnapshotCreateJobAnchorsTTLExpiryAtReady(t *testing.T) {
 	})
 	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
 	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
-	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) {})
 	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
 
 	finalizeStart := time.Now()

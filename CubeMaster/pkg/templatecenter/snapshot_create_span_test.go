@@ -108,7 +108,7 @@ func stubSnapshotCreateRun(t *testing.T, s snapshotCreateStubs) {
 		return nil
 	})
 	patches.ApplyFunc(setTemplateLocalityCache, func(string, []ReplicaStatus) {})
-	patches.ApplyFunc(setTemplateRequestCache, func(string, *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(setTemplateRequestCache, func(string, *sandboxtypes.CreateCubeSandboxReq) {})
 	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(string, string, int64) {})
 	patches.ApplyFunc(deleteReplicasByTemplateID, func(_ context.Context, _ string) error { return s.deleteReplicasErr })
 	patches.ApplyFunc(invalidateTemplateCaches, func(string) {})

@@ -523,10 +523,7 @@ func configureSnapshotRuntimeRefHooks() {
 // still surface them here so future callers of the hook can react.
 func configureSandboxSpecHooks() {
 	sandbox.SetAfterCreateSandboxSuccessHook(func(ctx context.Context, sandboxID, hostID, hostIP string, req *sandboxtypes.CreateCubeSandboxReq) error {
-		storedReq, err := cloneCreateRequest(req)
-		if err != nil {
-			return err
-		}
+		storedReq := req.DeepCopy()
 		delete(storedReq.Annotations, sandbox.AnnotationPluginVolumeSources)
 		return sandboxspec.Put(ctx, sandboxID, storedReq, sandboxspec.PutOptions{
 			HostID: hostID,
@@ -567,10 +564,7 @@ func NormalizeRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.Cre
 	if req == nil {
 		return nil, "", errors.New("request is nil")
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		return nil, "", err
-	}
+	cloned := req.DeepCopy()
 	if cloned.Annotations == nil {
 		cloned.Annotations = make(map[string]string)
 	}
@@ -693,9 +687,7 @@ func CreateTemplate(ctx context.Context, req *sandboxtypes.CreateCubeSandboxReq)
 			return err
 		}
 		definitionCreated = true
-		if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-			log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
-		}
+		setTemplateRequestCache(templateID, storedReq)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -929,13 +921,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, templateID stri
 			attribute.String(telemetry.AttrJobID, opts.JobID),
 			attribute.String(telemetry.AttrTemplateID, templateID),
 		))
-	nodeReq, err := cloneCreateRequest(req)
-	if err != nil {
-		telemetry.End(rpcSpan, err)
-		replica.Phase = ReplicaPhaseFailed
-		replica.ErrorMessage = err.Error()
-		return replica, ""
-	}
+	nodeReq := req.DeepCopy()
 	if constants.IsJFSBackend(storageBackendFromCreate(nodeReq)) &&
 		strings.EqualFold(strings.TrimSpace(nodeReq.Annotations[constants.CubeAnnotationsAppSnapshotCreate]), "true") {
 		logicalID := strings.TrimSpace(nodeReq.Annotations[constants.CubeAnnotationAppSnapshotTemplateID])
@@ -1096,9 +1082,7 @@ func ensureTemplateDefinitionWithOptions(ctx context.Context, templateID string,
 	if err := createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, opts); err != nil {
 		return false, err
 	}
-	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-		log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, cacheErr)
-	}
+	setTemplateRequestCache(templateID, storedReq)
 	// A new definition changes the aggregate list and the per-template info.
 	invalidateTemplateCaches(templateID)
 	return true, nil
@@ -1984,12 +1968,9 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 	cacheStart := time.Now()
 	_, cacheSpan := telemetry.StartIfTraced(ctx, telemetry.SpanTemplateCache,
 		trace.WithAttributes(attribute.String(telemetry.AttrTemplateID, templateID)))
-	cached, cacheHit, cacheErr := getCachedTemplateRequest(templateID)
+	cached, cacheHit := getCachedTemplateRequest(templateID)
 	cacheSpan.SetAttributes(attribute.Bool(telemetry.AttrCacheHit, cacheHit))
 	cacheSpan.End()
-	if cacheErr != nil {
-		return nil, cacheErr
-	}
 	if cacheHit {
 		reportTemplateCacheMetric(ctx, constants.ActionTemplateCacheHit, time.Since(cacheStart))
 		ensureRuntimeTemplateRequest(cached)
@@ -2025,9 +2006,7 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 				if err = applyStoredCreateBackend(req, rec.Backend); err != nil {
 					return err
 				}
-				if err = setTemplateRequestCache(templateID, req); err != nil {
-					log.G(ctx).Warnf("set snapshot request cache fail, snapshot=%s err=%v", templateID, err)
-				}
+				setTemplateRequestCache(templateID, req)
 				return nil
 			} else if snapErr != nil && !errors.Is(snapErr, ErrSnapshotNotFound) {
 				return snapErr
@@ -2057,9 +2036,7 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 			if err = applyStoredCreateBackend(req, def.StorageBackend); err != nil {
 				return err
 			}
-			if err = setTemplateRequestCache(templateID, req); err != nil {
-				log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, err)
-			}
+			setTemplateRequestCache(templateID, req)
 			return nil
 		})
 		if err != nil {
@@ -2074,10 +2051,7 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 	if !ok || req == nil {
 		return nil, errors.New("invalid template request cache entry")
 	}
-	cloned, err := cloneCreateRequest(req)
-	if err != nil {
-		return nil, err
-	}
+	cloned := req.DeepCopy()
 	ensureRuntimeTemplateRequest(cloned)
 	return cloned, nil
 }
@@ -2516,18 +2490,6 @@ func warmReadyTemplateLocality(ctx context.Context) error {
 		registerReadyTemplateReplicas(templateID, readyReplicas)
 	}
 	return nil
-}
-
-func cloneCreateRequest(req *sandboxtypes.CreateCubeSandboxReq) (*sandboxtypes.CreateCubeSandboxReq, error) {
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	out := &sandboxtypes.CreateCubeSandboxReq{}
-	if err = json.Unmarshal(payload, out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 func calculateRequestSpec(req *sandboxtypes.CreateCubeSandboxReq) string {

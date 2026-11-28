@@ -201,10 +201,7 @@ func prepareTemplateCommitRequest(ctx context.Context, requestID, sandboxID, tem
 
 	source := base
 	if override != nil {
-		source, err = cloneCreateRequest(override)
-		if err != nil {
-			return nil, err
-		}
+		source = override.DeepCopy()
 		// The public create_request response deliberately omits the
 		// template-managed QoS annotations. A commit override must recover
 		// them from the sandbox spec; failing that lookup must fail the
@@ -416,9 +413,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		return
 	}
 	definitionCreated = true
-	if cacheErr := setTemplateRequestCache(templateID, storedReq); cacheErr != nil {
-		logger.Warnf("set template request cache fail:%v", cacheErr)
-	}
+	setTemplateRequestCache(templateID, storedReq)
 
 	replica := ReplicaStatus{
 		NodeID:       nodeID,

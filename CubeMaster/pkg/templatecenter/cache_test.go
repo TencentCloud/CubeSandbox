@@ -21,28 +21,60 @@ func TestTemplateRequestCacheReturnsClone(t *testing.T) {
 		},
 		Labels: map[string]string{"k": "v"},
 	}
-	if err := setTemplateRequestCache(templateID, req); err != nil {
-		t.Fatalf("setTemplateRequestCache failed: %v", err)
-	}
+	setTemplateRequestCache(templateID, req)
 
-	cached, hit, err := getCachedTemplateRequest(templateID)
-	if err != nil {
-		t.Fatalf("getCachedTemplateRequest failed: %v", err)
-	}
+	cached, hit := getCachedTemplateRequest(templateID)
 	if !hit {
 		t.Fatal("expected cache hit")
 	}
 	cached.Labels["k"] = "changed"
 
-	cachedAgain, hit, err := getCachedTemplateRequest(templateID)
-	if err != nil {
-		t.Fatalf("getCachedTemplateRequest second read failed: %v", err)
-	}
+	cachedAgain, hit := getCachedTemplateRequest(templateID)
 	if !hit {
 		t.Fatal("expected cache hit on second read")
 	}
 	if got := cachedAgain.Labels["k"]; got != "v" {
 		t.Fatalf("cache should return an isolated clone, got %q", got)
+	}
+}
+
+// TestTemplateRequestCacheMaterializesDroppedRequest pins the boundary contract
+// the JSON clone used to hold by accident: entries are stored normalized, i.e.
+// with the embedded *Request dropped, and UnmarshalJSON always materialized it
+// again, so a hit never handed out a request that panics on the promoted
+// RequestID field. GetTemplateRequest hydrates its result too, but that must not
+// be the only thing standing between a caller and a nil-pointer panic.
+func TestTemplateRequestCacheMaterializesDroppedRequest(t *testing.T) {
+	templateDefinitionCache.Flush()
+	templateID := "tpl-cache-dropped-request"
+	stored := &types.CreateCubeSandboxReq{Labels: map[string]string{"k": "v"}}
+	if stored.Request != nil {
+		t.Fatal("fixture must look like a normalized stored request")
+	}
+	setTemplateRequestCache(templateID, stored)
+
+	cached, hit := getCachedTemplateRequest(templateID)
+	if !hit {
+		t.Fatal("expected cache hit")
+	}
+	if cached.Request == nil {
+		t.Fatal("cache hit returned a request with a dropped embedded request")
+	}
+	if got := cached.RequestID; got != "" {
+		t.Fatalf("expected an empty request id before hydration, got %q", got)
+	}
+
+	// The stored entry stays normalized: hydrating is per hit, not a mutation.
+	cached.RequestID = "leaked"
+	again, hit := getCachedTemplateRequest(templateID)
+	if !hit {
+		t.Fatal("expected cache hit on second read")
+	}
+	if again.Request == nil {
+		t.Fatal("second hit lost the embedded request")
+	}
+	if got := again.RequestID; got != "" {
+		t.Fatalf("a hit mutated the cached entry, got request id %q", got)
 	}
 }
 
@@ -84,17 +116,13 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 			constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
 		},
 	}
-	if err := setTemplateRequestCache(templateID, req); err != nil {
-		t.Fatalf("setTemplateRequestCache failed: %v", err)
-	}
+	setTemplateRequestCache(templateID, req)
 	setTemplateLocalityCache(templateID, []ReplicaStatus{
 		{NodeID: "node-a", Status: ReplicaStatusReady},
 	})
 	setTemplateKindCache(templateID, TemplateKindSnapshot)
 
-	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		t.Fatalf("getCachedTemplateRequest failed before invalidation: %v", err)
-	} else if !hit {
+	if _, hit := getCachedTemplateRequest(templateID); !hit {
 		t.Fatal("expected template request cache hit before invalidation")
 	}
 	if _, hit := getCachedTemplateLocality(templateID); !hit {
@@ -106,9 +134,7 @@ func TestInvalidateTemplateCachesClearsTemplateCaches(t *testing.T) {
 
 	invalidateTemplateCaches(templateID)
 
-	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		t.Fatalf("getCachedTemplateRequest failed after invalidation: %v", err)
-	} else if hit {
+	if _, hit := getCachedTemplateRequest(templateID); hit {
 		t.Fatal("expected template request cache miss after invalidation")
 	}
 	if _, hit := getCachedTemplateLocality(templateID); hit {
@@ -163,9 +189,7 @@ func TestTemplateWriteLockClearsConcurrentReadRefill(t *testing.T) {
 					constants.CubeAnnotationAppSnapshotTemplateVersion: DefaultTemplateVersion,
 				},
 			}
-			if err := setTemplateRequestCache(templateID, req); err != nil {
-				return err
-			}
+			setTemplateRequestCache(templateID, req)
 			setTemplateLocalityCache(templateID, []ReplicaStatus{
 				{NodeID: "node-a", Status: ReplicaStatusReady},
 			})
@@ -191,9 +215,7 @@ func TestTemplateWriteLockClearsConcurrentReadRefill(t *testing.T) {
 		t.Fatalf("writer invalidation failed: %v", err)
 	}
 
-	if _, hit, err := getCachedTemplateRequest(templateID); err != nil {
-		t.Fatalf("getCachedTemplateRequest failed after write lock invalidation: %v", err)
-	} else if hit {
+	if _, hit := getCachedTemplateRequest(templateID); hit {
 		t.Fatal("expected template request cache miss after concurrent delete invalidation")
 	}
 	if _, hit := getCachedTemplateLocality(templateID); hit {
