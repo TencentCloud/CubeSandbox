@@ -181,6 +181,7 @@ export default withMermaid(defineConfig({
               text: 'Deployment',
               items: [
                 { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
+                { text: 'macOS (Apple Silicon) with Lima', link: '/guide/macos-lima-deploy' },
                 { text: 'Bare-Metal Deployment', link: '/guide/bare-metal-deploy' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
@@ -431,6 +432,7 @@ export default withMermaid(defineConfig({
               text: '部署',
               items: [
                 { text: 'PVM 部署', link: '/zh/guide/pvm-deploy' },
+                { text: 'macOS（Apple Silicon）+ Lima', link: '/zh/guide/macos-lima-deploy' },
                 { text: '裸金属部署', link: '/zh/guide/bare-metal-deploy' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },

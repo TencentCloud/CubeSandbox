@@ -170,6 +170,25 @@ pub struct SandBox {
     trace_puller: Arc<Mutex<Option<TracePuller>>>,
 }
 
+/// Upper bound on the wait between booting or restoring the VM and the guest
+/// agent's vsock server coming up. Cubelet's own deadline is ~300 s for a
+/// template build and ~600 s for a create; a guest that never comes up must
+/// fail long before that, but a cold boot must not: under nested
+/// virtualization (Linux/KVM inside Apple's Virtualization.framework) a 2 GiB
+/// guest takes 9-12 s and a 4 GiB guest up to ~26 s on an M5 Pro.
+const MAX_VM_READY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for `VsockServerReady`: the caller's remaining ttrpc
+/// budget, capped at `MAX_VM_READY_TIMEOUT`. This used to be a fixed 10 s,
+/// which failed nested-virtualization cold boots although every caller would
+/// still have waited.
+fn vm_ready_timeout(caller_timeout_nano: i64) -> Duration {
+    if caller_timeout_nano <= 0 {
+        return MAX_VM_READY_TIMEOUT;
+    }
+    Duration::from_nanos(caller_timeout_nano as u64).min(MAX_VM_READY_TIMEOUT)
+}
+
 impl SandBox {
     pub fn new(
         id: String,
@@ -636,8 +655,12 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_sandbox(&mut self, trace: &Trace) -> CResult<()> {
-        let snapshot = self.start_vm(trace).await?;
+    /// `caller_timeout_nano` is the ttrpc deadline Cubelet attached to the
+    /// CreateTask request (0 when it set none). See `vm_ready_timeout`.
+    pub async fn create_sandbox(&mut self, trace: &Trace, caller_timeout_nano: i64) -> CResult<()> {
+        let snapshot = self
+            .start_vm(trace, vm_ready_timeout(caller_timeout_nano))
+            .await?;
 
         //todo: app snapshot
         if self.conf.notify_snapshot_ret {
@@ -1052,8 +1075,12 @@ impl SandBox {
 
         !self.conf.app_snapshot_create
     }
-    async fn start_vm(&mut self, trace: &Trace) -> CResult<bool> {
-        infof!(self.log, "start vm start");
+    async fn start_vm(&mut self, trace: &Trace, ready_timeout: Duration) -> CResult<bool> {
+        infof!(
+            self.log,
+            "start vm start, ready timeout:{}ms",
+            ready_timeout.as_millis()
+        );
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             trace
@@ -1088,14 +1115,14 @@ impl SandBox {
 
         if snapshot {
             let ch = self.ch.as_mut().unwrap().lock().await;
-            Self::wait_vsock_ready(&ch, &self.log).await?;
+            Self::wait_vsock_ready(&ch, &self.log, ready_timeout).await?;
         } else {
-            self.boot_vm(trace).await?;
+            self.boot_vm(trace, ready_timeout).await?;
         }
         Ok(snapshot)
     }
 
-    async fn boot_vm(&mut self, trace: &Trace) -> CResult<()> {
+    async fn boot_vm(&mut self, trace: &Trace, ready_timeout: Duration) -> CResult<()> {
         let config = trace
             .start(telemetry::SPAN_PREPARE_RESOURCE)
             .run(self.prepare_resource())
@@ -1106,17 +1133,19 @@ impl SandBox {
             .run(async {
                 ch.create_vm(&config).await?;
                 ch.boot_vm().await?;
-                Self::wait_vsock_ready(&ch, &self.log).await
+                Self::wait_vsock_ready(&ch, &self.log, ready_timeout).await
             })
             .await?;
         Ok(())
     }
 
-    async fn wait_vsock_ready(ch: &CH::CubeHypervisor, log: &Log) -> CResult<()> {
+    async fn wait_vsock_ready(
+        ch: &CH::CubeHypervisor,
+        log: &Log,
+        ready_timeout: Duration,
+    ) -> CResult<()> {
         let start = Instant::now();
-        let ev = ch
-            .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
-            .await?;
+        let ev = ch.wait_notify(ready_timeout).await?;
 
         if CH::NotifyEvent::VsockServerReady != ev {
             return Err(format!(
@@ -2275,6 +2304,24 @@ fn normalize_dns_for_agent(entry: &str) -> CResult<String> {
 }
 
 #[cfg(test)]
+mod vm_ready_timeout_tests {
+    use super::{vm_ready_timeout, MAX_VM_READY_TIMEOUT};
+    use std::time::Duration;
+
+    #[test]
+    fn vm_ready_timeout_follows_the_caller_deadline_up_to_the_cap() {
+        // Cubelet sends ~600 s; a hung guest must not hold the create that long.
+        assert_eq!(vm_ready_timeout(600_000_000_000), MAX_VM_READY_TIMEOUT);
+        assert_eq!(MAX_VM_READY_TIMEOUT, Duration::from_secs(120));
+        // No caller deadline: the cap.
+        assert_eq!(vm_ready_timeout(0), MAX_VM_READY_TIMEOUT);
+        assert_eq!(vm_ready_timeout(-1), MAX_VM_READY_TIMEOUT);
+        // A shorter caller budget wins: waiting past it helps nobody.
+        assert_eq!(vm_ready_timeout(14_000_000_000), Duration::from_secs(14));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
     use oci_spec::runtime::SpecBuilder;
@@ -2300,6 +2347,7 @@ mod tests {
     use super::SandBox;
     use super::SandBoxState;
     use super::Trace;
+    use super::MAX_VM_READY_TIMEOUT;
     use super::{
         freeze_rpc_context, SnapshotFreezeState, SnapshotHold, SnapshotMode,
         ERR_FREEZE_UNSUPPORTED, ERR_ROOTFS_UNSUPPORTED, FREEZE_CALL_BACKSTOP, FREEZE_RPC_TIMEOUT,
@@ -2578,7 +2626,7 @@ mod tests {
             Log::default(),
         );
 
-        let err = SandBox::wait_vsock_ready(&ch, &Log::default())
+        let err = SandBox::wait_vsock_ready(&ch, &Log::default(), MAX_VM_READY_TIMEOUT)
             .await
             .unwrap_err();
         assert!(err.contains("uninitialized"), "{err}");

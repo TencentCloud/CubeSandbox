@@ -43,13 +43,21 @@ func runDeclaredAppSnapshotReadinessProbe(c *cubebox.ContainerConfig, probe func
 	return probe()
 }
 
+// defaultSnapshotReadinessTimeout bounds the one readiness attempt before a
+// snapshot when the template sets no probe timeout (CubeAPI templates never
+// do). Create's probe can afford 100 ms per attempt because it retries for
+// 30 s; this check has one attempt, and a guest that just booted can answer a
+// health request in more than 100 ms (seen under nested virtualization),
+// failing an otherwise ready template build.
+const defaultSnapshotReadinessTimeout = time.Second
+
 func snapshotReadinessProbeTimeout(c *cubebox.ContainerConfig) time.Duration {
 	if c == nil || c.GetProbe() == nil {
-		return time.Second
+		return defaultSnapshotReadinessTimeout
 	}
 	timeout := time.Duration(c.GetProbe().GetProbeTimeoutMs()) * time.Millisecond
 	if timeout <= 5*time.Millisecond {
-		return 100 * time.Millisecond
+		return defaultSnapshotReadinessTimeout
 	}
 	return timeout
 }
