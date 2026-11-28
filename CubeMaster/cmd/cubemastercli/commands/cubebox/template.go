@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -916,8 +917,9 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs. Merged over the image ENV (same key overrides, like docker run -e)"},
 		cli.StringFlag{Name: "user", Usage: "container user for the template build and later sandboxes: uid, uid:gid, username, or username:gid (gid must be numeric). Omit to keep the default root user"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
-		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=100, probe_timeout_ms=300"},
+		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets period_ms=100 and probe_timeout_ms=300, with timeout_ms taken from --probe-timeout"},
 		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
+		cli.DurationFlag{Name: "probe-timeout", Value: 30 * time.Second, Usage: "overall probe timeout as a duration (default: 30s, e.g. 90s or 2m); only effective when --probe is set; raise it for guests that need a long boot before the probe endpoint listens, e.g. Android starts adbd after 1-2 minutes"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
@@ -1746,6 +1748,7 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	rawEnvs := c.StringSlice("env")
 	dnsServers := c.StringSlice("dns")
 	probePort := c.Int("probe")
+	probeTimeout := c.Duration("probe-timeout")
 	cpuMillicores := c.Int("cpu")
 	memoryMB := c.Int("memory")
 	enableInjectEnvd := c.Bool("enable-inject-envd")
@@ -1787,11 +1790,22 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		}
 	}
 	if probePort > 0 {
+		timeoutMs := probeTimeout.Milliseconds()
+		if timeoutMs <= 0 {
+			return nil, fmt.Errorf("invalid probe-timeout %s: must be at least 1ms", probeTimeout)
+		}
+		if timeoutMs > math.MaxInt32 {
+			return nil, fmt.Errorf("invalid probe-timeout %s: must not exceed %dms", probeTimeout, math.MaxInt32)
+		}
 		probePath := c.String("probe-path")
 		if probePath == "" {
 			probePath = "/health"
 		}
 		host := ""
+		// FailureThreshold bounds the overall budget: the probe gives up after
+		// timeout/period failed attempts. Keep the period fixed so changing the
+		// timeout only changes how long a slow guest may take to come up.
+		const probePeriodMs = int32(100)
 		overrides.Probe = &types.Probe{
 			ProbeHandler: &types.ProbeHandler{
 				HttpGet: &types.HTTPGetAction{
@@ -1800,9 +1814,9 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 					Host: &host,
 				},
 			},
-			TimeoutMs:        30000,
-			PeriodMs:         100,
-			FailureThreshold: 300,
+			TimeoutMs:        int32(timeoutMs),
+			PeriodMs:         probePeriodMs,
+			FailureThreshold: int32((timeoutMs + int64(probePeriodMs) - 1) / int64(probePeriodMs)),
 			SuccessThreshold: 1,
 			ProbeTimeoutMs:   300,
 		}

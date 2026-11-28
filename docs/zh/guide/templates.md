@@ -29,6 +29,8 @@ Cube 平台在制作模板时，会启动容器并通过 HTTP 探测容器是否
 
 一次模板构建选择一个探针端口和路径，Cube 会持续请求 `http://<sandbox>:<probe-port><probe-path>`，直到收到 HTTP 2xx 响应后制作快照。
 
+探针默认的整体超时为 `30s`。对于启动较慢、需要更久才能就绪的镜像，可用 `--probe-timeout <duration>` 调大，例如 `--probe-timeout 2m` 或 `--probe-timeout 90s`。该参数仅在同时指定 `--probe` 时生效。
+
 `envd` 是预装在 CubeSandbox 基础镜像中的一个后台服务：沙箱创建后，SDK 的“执行命令”“读写文件”和“打开终端”等操作，实际都会请求沙箱内的 `envd`。`envd` 默认监听 `49983`，其 `/health` 接口会在 `envd` 可以接收这些请求时返回 204。
 
 下面的参数配置是一个最常见的例子，表示开放 `envd` 的 49983 端口，监听探测 49983 端口，并在 `/health` 返回成功后制作模板快照：
