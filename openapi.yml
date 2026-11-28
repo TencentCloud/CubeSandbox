@@ -1806,6 +1806,14 @@ components:
           description: |-
             CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
             Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
+        cgroupMode:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Cgroup hierarchy for the template and every sandbox created from it:
+            `""`/omitted (default, unified v2) or `"legacy"` (cgroup v1, required
+            by Android-based guests). Validated at the API edge.
         command:
           type:
           - array

@@ -63,6 +63,17 @@ cubemastercli tpl create-from-image \
 
 The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
 
+`--cgroup-mode legacy` boots the template — and every sandbox created from it — with the cgroup v1 hierarchy instead of the default unified v2. Android-based images (such as redroid) require cgroup v1. The flag accepts only `legacy`; any other value fails fast instead of silently building a template that boots with the wrong hierarchy.
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <android-image> \
+  --writable-layer-size 1G \
+  --cgroup-mode legacy
+```
+
+The same field on `POST /templates` is `cgroupMode`, and the Python SDK exposes it as `Template.build(cgroup_mode="legacy")`.
+
 ## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.

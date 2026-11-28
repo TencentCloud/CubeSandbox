@@ -15,7 +15,7 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        CreateTemplateRequest, RebuildTemplateRequest, TemplateAliasLookupResponse,
+        cgroup_mode, CreateTemplateRequest, RebuildTemplateRequest, TemplateAliasLookupResponse,
         TemplateBuildJob, TemplateBuildStatus, TemplateCompatMatrixView, TemplateCompatRowView,
         TemplateCompatSummaryView, TemplateDetail, TemplateNodeCompatView, TemplateSummary,
     },
@@ -140,6 +140,10 @@ impl TemplateService {
         let cube_network_config = build_template_cube_network_config(&body)?;
         let alias = template_alias_from_request(&body);
         let qos = build_template_qos(&body)?;
+        // Fail fast at the API edge with the same wording CubeMaster uses,
+        // so an invalid mode never reaches the build job.
+        let cgroup_mode = cgroup_mode::normalize_request(body.cgroup_mode.as_deref())
+            .map_err(|e| AppError::BadRequest(e.message()))?;
 
         let req = CreateTemplateFromImageReq {
             request_id: new_request_id(),
@@ -161,6 +165,7 @@ impl TemplateService {
             container_overrides,
             cube_network_config,
             enable_ivshmem: body.enable_ivshmem,
+            cgroup_mode,
             qos,
             with_cube_ca: body.with_cube_ca,
             backend: non_empty_option(body.backend),
@@ -843,6 +848,7 @@ mod tests {
             allow_out: Some(vec!["172.67.0.0/16".to_string()]),
             deny_out: Some(vec!["10.0.0.0/8".to_string()]),
             enable_ivshmem: Some(true),
+            cgroup_mode: None,
             qos: None,
             with_cube_ca: Some(false),
             backend: Some("s3".to_string()),
@@ -1168,6 +1174,196 @@ mod tests {
             .clone()
             .expect("request body should be captured");
         assert_eq!(body["alias"], "stable-python");
+    }
+
+    #[tokio::test]
+    async fn create_template_forwards_cgroup_mode_legacy() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+        let mut req = sample_request();
+        req.cgroup_mode = Some("legacy".to_string());
+
+        service
+            .create_template(req)
+            .await
+            .expect("template create should succeed");
+
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert_eq!(body["cgroup_mode"], "legacy");
+    }
+
+    #[tokio::test]
+    async fn create_template_rejects_invalid_cgroup_mode_without_forwarding() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+        let mut req = sample_request();
+        req.cgroup_mode = Some("v1".to_string());
+
+        let err = match service.create_template(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("invalid cgroup_mode must fail fast"),
+        };
+        assert!(matches!(err, AppError::BadRequest(_)));
+        assert!(
+            err.to_string().contains("cgroup_mode_invalid"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            capture.body.lock().await.is_none(),
+            "invalid cgroup_mode must not reach CubeMaster"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_template_normalizes_blank_cgroup_mode_to_omitted() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::Value;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Capture {
+            body: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn create_handler(
+            State(capture): State<Capture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *capture.body.lock().await = Some(body);
+            Json(serde_json::json!({
+                "RequestID": "req-1",
+                "ret": { "ret_code": 0, "ret_msg": "success" },
+                "job": {
+                    "job_id": "job-1",
+                    "template_id": "tpl-1",
+                    "status": "accepted",
+                    "phase": "",
+                    "progress": 0,
+                    "error_message": "",
+                    "attempt_no": 1,
+                    "retry_of_job_id": ""
+                }
+            }))
+        }
+
+        let capture = Capture::default();
+        let cubemaster_url = spawn_server(
+            Router::new()
+                .route("/cube/template/from-image", post(create_handler))
+                .with_state(capture.clone()),
+        )
+        .await;
+
+        let service = TemplateService::new(
+            CubeMasterClient::new(cubemaster_url, reqwest::Client::new()),
+            "cubebox".to_string(),
+        );
+        let mut req = sample_request();
+        req.cgroup_mode = Some("   ".to_string());
+
+        service
+            .create_template(req)
+            .await
+            .expect("blank cgroup_mode means the default unified mode");
+
+        let body = capture
+            .body
+            .lock()
+            .await
+            .clone()
+            .expect("request body should be captured");
+        assert!(
+            body.get("cgroup_mode").is_none(),
+            "blank cgroup_mode must be omitted, got {body}"
+        );
     }
 
     #[tokio::test]

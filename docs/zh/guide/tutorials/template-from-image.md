@@ -63,6 +63,17 @@ cubemastercli tpl create-from-image \
 
 `POST /templates` 的字段名也是 `user`。模板构建仍然保持 privileged，构建过程才能准备设备；变的只是容器进程的用户。
 
+`--cgroup-mode legacy` 让模板（以及之后从它创建的每个沙箱）使用 cgroup v1 层级，替代默认的 cgroup v2 统一层级。基于安卓的镜像（如 redroid）需要 cgroup v1。该参数只接受 `legacy`，传其他值会立即报错，而不是默默烘出一个用错层级的模板。
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <安卓镜像> \
+  --writable-layer-size 1G \
+  --cgroup-mode legacy
+```
+
+`POST /templates` 的字段名是 `cgroupMode`，Python SDK 为 `Template.build(cgroup_mode="legacy")`。
+
 ## 第三步 — 监控进度
 
 有两种方式跟踪构建任务。

@@ -65,7 +65,7 @@ Cubelet 通过 containerd `Task.Stats` 调用 CubeShim，再由 CubeShim 调用�
 - CubeShim 能够通过 `Task.Stats` 返回完整的工作负载统计；
 - Cubelet 能够根据沙箱生命周期维护统计周期和计数器基线。
 
-CubeShim 会在启动沙箱时通过 `agent.unified_cgroup_hierarchy=true` 为 `cube-agent` 启用 cgroup v2 统一层级。
+CubeShim 会在启动沙箱时通过 `agent.unified_cgroup_hierarchy=true` 为 `cube-agent` 启用 cgroup v2 统一层级；但如果沙箱的模板以 legacy cgroup 模式（CLI 为 `--cgroup-mode legacy`，`POST /templates` 为 `cgroupMode: "legacy"`）创建，则跳过该注入，此时 `guest_workload` 不可用。
 
 旧模板中的 `cube-agent` 可能不支持上述能力。这类沙箱不会导出 `guest_workload`，但仍可导出 `host_sandbox`。
 
