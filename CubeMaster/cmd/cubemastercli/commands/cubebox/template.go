@@ -916,8 +916,11 @@ var TemplateCreateFromImageCommand = cli.Command{
 		cli.StringSliceFlag{Name: "env", Usage: "set environment variable, KEY=VALUE format; repeat for multiple envs. Merged over the image ENV (same key overrides, like docker run -e)"},
 		cli.StringFlag{Name: "user", Usage: "container user for the template build and later sandboxes: uid, uid:gid, username, or username:gid (gid must be numeric). Omit to keep the default root user"},
 		cli.StringSliceFlag{Name: "dns", Usage: "set container DNS nameserver; repeat for multiple servers"},
-		cli.IntFlag{Name: "probe", Usage: "enable HTTP GET probe on the specified port (e.g. --probe 9000); sets timeout_ms=30000, period_ms=100, probe_timeout_ms=300"},
-		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set"},
+		cli.IntFlag{Name: "probe", Usage: "enable readiness probe on the specified port (e.g. --probe 9000); sets period_ms=100"},
+		cli.StringFlag{Name: "probe-type", Value: "http", Usage: "readiness probe transport for --probe: http (GET probe-path) or tcp (raw connect, e.g. adbd :5555); case-insensitive"},
+		cli.IntFlag{Name: "probe-timeout", Value: 30000, Usage: "readiness probe window in ms, counted after --probe-initial-delay, not from sandbox start (default 30000, one attempt every 100ms); raise for slow-booting guests like full-OS containers; must be 100-3600000 when set explicitly, and the total wait (initial-delay + this window) is effectively capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)"},
+		cli.IntFlag{Name: "probe-initial-delay", Value: 0, Usage: "delay before the readiness probe starts polling, in ms (default 0); let slow-booting full-OS guests finish booting before probing. Must be 0-3600000 when set explicitly, and the effective window is capped by the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s). Applies to the template build sandbox only: the delay is deliberately stripped from the stored template definition in every path (CLI build, CubeAPI create/commit/snapshot), so sandboxes restored from the snapshot resume with services already running and start probing immediately"},
+		cli.StringFlag{Name: "probe-path", Value: "/health", Usage: "HTTP path for the readiness probe (default: /health); only effective when --probe is set with --probe-type http"},
 		cli.IntFlag{Name: "cpu", Value: 2000, Usage: "CPU millicores for the template container (default: 2000, i.e. 2 cores)"},
 		cli.IntFlag{Name: "memory", Value: 2000, Usage: "Memory for the template container in MB (default: 2000 MB)"},
 		cli.BoolTFlag{Name: "with-cube-ca", Usage: "bake the CubeEgress root CA at /etc/cube/ca/cube-root-ca.crt into the template rootfs so sandboxes trust CubeEgress's MITM. Pass --with-cube-ca=false to skip (default: true)"},
@@ -1698,6 +1701,12 @@ func parseExposePortFlags(values []string) ([]int32, error) {
 // the file path reads at most one byte beyond it to detect an oversized file.
 const maxCreateFromImageQosPayloadBytes = 64 << 10
 
+// probePeriodMs is the readiness probe attempt interval for template
+// builds. The FailureThreshold derived from --probe-timeout uses the
+// same constant, so the threshold and the period cannot silently
+// diverge if one of them is ever tuned.
+const probePeriodMs = 100
+
 func parseCreateFromImageQos(c *cli.Context) (*qos.Config, error) {
 	raw := strings.TrimSpace(c.String("qos"))
 	if raw == "" {
@@ -1751,7 +1760,12 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 	enableInjectEnvd := c.Bool("enable-inject-envd")
 	user := strings.TrimSpace(c.String("user"))
 
-	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" {
+	// The probe flags are part of the guard: without them, passing only
+	// --probe-type/--probe-timeout/--probe-initial-delay/--probe-path would
+	// take the "no overrides" shortcut and silently produce a template with
+	// no readiness probe instead of the "requires --probe" warning below.
+	if len(cmds) == 0 && len(args) == 0 && len(rawEnvs) == 0 && len(dnsServers) == 0 && probePort == 0 && !c.IsSet("cpu") && !c.IsSet("memory") && !enableInjectEnvd && user == "" &&
+		!c.IsSet("probe-type") && !c.IsSet("probe-timeout") && !c.IsSet("probe-initial-delay") && !c.IsSet("probe-path") {
 		return nil, nil
 	}
 
@@ -1787,25 +1801,72 @@ func parseContainerOverrides(c *cli.Context) (*types.ContainerOverrides, error) 
 		}
 	}
 	if probePort > 0 {
-		probePath := c.String("probe-path")
-		if probePath == "" {
-			probePath = "/health"
-		}
-		host := ""
-		overrides.Probe = &types.Probe{
-			ProbeHandler: &types.ProbeHandler{
+		probeType := strings.ToLower(strings.TrimSpace(c.String("probe-type")))
+		var handler *types.ProbeHandler
+		switch probeType {
+		case "tcp":
+			if c.IsSet("probe-path") {
+				fmt.Fprintf(os.Stderr, "warning: --probe-path only applies to --probe-type http; ignoring it for the tcp probe\n")
+			}
+			handler = &types.ProbeHandler{
+				TCPSocket: &types.TCPSocketAction{
+					Port: int32(probePort),
+				},
+			}
+		case "http":
+			probePath := c.String("probe-path")
+			if probePath == "" {
+				probePath = "/health"
+			}
+			host := ""
+			handler = &types.ProbeHandler{
 				HttpGet: &types.HTTPGetAction{
 					Path: &probePath,
 					Port: int32(probePort),
 					Host: &host,
 				},
-			},
-			TimeoutMs:        30000,
-			PeriodMs:         100,
-			FailureThreshold: 300,
+			}
+		default:
+			return nil, fmt.Errorf("invalid --probe-type %q: must be http or tcp", c.String("probe-type"))
+		}
+		probeTimeoutMs := c.Int("probe-timeout")
+		if c.IsSet("probe-timeout") {
+			if probeTimeoutMs < 100 {
+				return nil, fmt.Errorf("invalid --probe-timeout %d: must be at least 100 ms (one probe period) when set explicitly", probeTimeoutMs)
+			}
+			if probeTimeoutMs > 3600000 {
+				return nil, fmt.Errorf("invalid --probe-timeout %d: must be at most 3600000 ms (1h); values above the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s) never get to finish", probeTimeoutMs)
+			}
+		}
+		// Not set: the flag's Value (30000) applies; no fallback branch needed.
+		probeInitialDelayMs := c.Int("probe-initial-delay")
+		if c.IsSet("probe-initial-delay") {
+			if probeInitialDelayMs < 0 {
+				return nil, fmt.Errorf("invalid --probe-initial-delay %d: must be >= 0", probeInitialDelayMs)
+			}
+			// Bound before the int32 cast below: on 64-bit builds
+			// 4294967296 casts to 0 and 2147483648 to a negative value,
+			// silently dropping the delay instead of rejecting it.
+			if probeInitialDelayMs > 3600000 {
+				return nil, fmt.Errorf("invalid --probe-initial-delay %d: must be at most 3600000 ms (1h); the probe never gets to finish above the build sandbox lifecycle timeout (app_snapshot_timeout_insec, default 300s)", probeInitialDelayMs)
+			}
+		}
+		overrides.Probe = &types.Probe{
+			ProbeHandler:   handler,
+			InitialDelayMs: int32(probeInitialDelayMs),
+			TimeoutMs:      int32(probeTimeoutMs),
+			PeriodMs:       probePeriodMs,
+			// Ceiling division: a window that is not a whole multiple of
+			// the period still gets its full duration. Floor division
+			// would let the loop exhaust its attempts inside the
+			// requested window; telnet.go's TimeoutMs deadline only ever
+			// truncates, never extends.
+			FailureThreshold: int32((probeTimeoutMs + probePeriodMs - 1) / probePeriodMs),
 			SuccessThreshold: 1,
 			ProbeTimeoutMs:   300,
 		}
+	} else if c.IsSet("probe-type") || c.IsSet("probe-timeout") || c.IsSet("probe-initial-delay") || c.IsSet("probe-path") {
+		fmt.Fprintf(os.Stderr, "warning: --probe-type/--probe-timeout/--probe-initial-delay/--probe-path require --probe <port>; ignoring them\n")
 	}
 	if user != "" {
 		securityContext, err := templatecenter.ParseTemplateUser(user)

@@ -12,22 +12,28 @@ CubeSandbox does not run an OCI image directly as a sandbox. It pulls and unpack
 
 ### When the Template Snapshot Is Taken
 
-After pulling the OCI image, CubeSandbox boots it in a temporary MicroVM. The image entrypoint, system services, and application start just as they would in a normal sandbox. Cube does not take the template snapshot as soon as the processes start. It **waits for the configured HTTP probe to return 2xx**, which signals that the environment has reached the state worth preserving. Cube then freezes the filesystem and memory state and creates the template snapshot.
+After pulling the OCI image, CubeSandbox boots it in a temporary MicroVM. The image entrypoint, system services, and application start just as they would in a normal sandbox. Cube does not take the template snapshot as soon as the processes start. It **waits for the configured readiness probe to succeed** — an HTTP probe returning 2xx by default, or a raw TCP connect with `--probe-type tcp` — which signals that the environment has reached the state worth preserving. Cube then freezes the filesystem and memory state and creates the template snapshot.
 
 Choosing a probe therefore means defining when startup is complete. If it succeeds too early, the snapshot may be taken while the application is still initializing or its dependencies are not yet warm. If it never succeeds, the template build times out. Ideally, the endpoint should return 2xx only after every service that should be pre-warmed in the template is ready.
 
 ### Using Ports and Probes to Define Readiness
 
-When building a template, Cube starts the container and probes it over HTTP to determine whether it is ready. Therefore:
+When building a template, Cube starts the container and probes it to determine whether it is ready — over HTTP by default, or via a raw TCP connect with `--probe-type tcp` for services that speak no HTTP (such as `adbd` :5555 on Android-based images, databases, or SSH). Therefore:
 
-1. The container image **must** start an HTTP server on a fixed port and provide a readiness endpoint that returns 2xx. The endpoint may be served by `envd` or by the application.
+1. With the default HTTP probe, the container image **must** start an HTTP server on a fixed port and provide a readiness endpoint that returns 2xx; the endpoint may be served by `envd` or by the application. With `--probe-type tcp`, any port that accepts a TCP connection works as the readiness signal — no HTTP server is required.
 2. The following options **must** be specified when creating the template:
-   - `--expose-port <port>` — declare the port on which the HTTP service listens
+   - `--expose-port <port>` — declare the port on which the readiness service listens
    - `--probe <port>` — tell Cube which port to probe
-   - `--probe-path <path>` — set the HTTP path that Cube requests with `GET`, such as `/` or `/health`
-3. The selected endpoint should return HTTP 2xx **only after the services that need to be pre-warmed are fully ready**. Cube uses this response as the signal to take the snapshot. When probing `envd`, the signal only confirms that `envd` itself is ready.
+   - `--probe-path <path>` — set the HTTP path that Cube requests with `GET` (HTTP probe only), such as `/` or `/health`
+3. The selected endpoint should signal readiness **only after the services that need to be pre-warmed are fully ready**. With the HTTP probe that means returning 2xx only at that point; with the TCP probe it means accepting connections only at that point. Cube uses the probe result as the signal to take the snapshot. When probing `envd`, the signal only confirms that `envd` itself is ready.
 
-A template build selects one probe port and path. Cube repeatedly requests `http://<sandbox>:<probe-port><probe-path>` until it receives an HTTP 2xx response, then takes the snapshot.
+A template build selects one probe port (and, for HTTP, one path). Cube repeatedly requests `http://<sandbox>:<probe-port><probe-path>` — or, with `--probe-type tcp`, attempts a TCP connect to `<probe-port>` — until it succeeds, then takes the snapshot.
+
+Additional probe tuning flags:
+
+- `--probe-type <http|tcp>` — probe transport; default `http`
+- `--probe-timeout <ms>` — probe window counted after the initial delay, one attempt every 100 ms; default `30000`
+- `--probe-initial-delay <ms>` — delay before the probe starts polling, for slow-booting full-OS guests; default `0`; build-sandbox-only and never persisted in the stored template
 
 `envd` is a background service preinstalled in CubeSandbox base images. After a sandbox is created, SDK operations such as running commands, reading and writing files, and opening a terminal send requests to `envd` inside the sandbox. By default, `envd` listens on port `49983`, and its `/health` endpoint returns 204 when it can accept those requests.
 
@@ -43,7 +49,7 @@ However, `envd` readiness only proves that the SDK data plane is ready; it does 
 
 ### Sandbox Readiness Semantics
 
-The probed port is also the sandbox readiness contract. Because a template is marked ready only after the probe returns HTTP 2xx, that port is expected to be available as soon as creation of a **running** sandbox from the template returns. Clients do not need an additional wait or retry after `create` returns. The same applies to sandboxes brought back by resume or auto-resume.
+The probed port is also the sandbox readiness contract. Because a template is marked ready only after the probe succeeds, that port is expected to be available as soon as creation of a **running** sandbox from the template returns. Clients do not need an additional wait or retry after `create` returns. The same applies to sandboxes brought back by resume or auto-resume.
 
 Two limits are worth noting:
 

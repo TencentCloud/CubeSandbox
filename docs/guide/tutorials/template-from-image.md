@@ -63,6 +63,24 @@ cubemastercli tpl create-from-image \
 
 The same field on `POST /templates` is `user`. The template build stays privileged so the guest can set up its devices; only the container process user changes.
 
+### Probe Transport and Timing
+
+By default the readiness probe performs HTTP `GET` requests against `--probe-path` (default `/health`) on the `--probe` port. Three additional flags adjust the probe:
+
+- `--probe-type <http|tcp>` — probe transport, default `http`. `tcp` (a raw connect) suits services that speak no HTTP: an Android-based image's `adbd` on :5555, a database, or an SSH daemon. With `--probe-type tcp`, `--probe-path` is ignored.
+- `--probe-timeout <ms>` — probe window counted after the initial delay, one attempt every 100 ms, default `30000`. Raise it for slow-booting guests.
+- `--probe-initial-delay <ms>` — delay before the probe starts polling, default `0`, for full-OS guests whose boot takes a fixed long time. The delay applies to the template build sandbox only; sandboxes restored from the template start probing immediately.
+
+```bash
+cubemastercli tpl create-from-image \
+  --image     <android-image> \
+  --writable-layer-size 1G \
+  --expose-port 5555 \
+  --probe      5555 \
+  --probe-type tcp \
+  --probe-initial-delay 5000
+```
+
 ## Step 3 — Monitor Progress
 
 There are two ways to follow the build job.
