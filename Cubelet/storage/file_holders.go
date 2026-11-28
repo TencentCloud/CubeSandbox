@@ -29,8 +29,12 @@ var procRoot = "/proc"
 // Only "does not exist" errors are skipped: the process exited, or the
 // descriptor was closed, during the scan. Any other error, such as a process
 // whose /proc entries cannot be read, is returned, and the caller must then
-// treat the file as in use.
+// treat the file as in use. So is a scan from outside the host PID namespace,
+// which cannot see every process.
 func fileHolders(root, path string) ([]int, error) {
+	if err := seesAllPIDs(root); err != nil {
+		return nil, err
+	}
 	target, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -63,6 +67,26 @@ func fileHolders(root, path string) ([]int, error) {
 		}
 	}
 	return pids, nil
+}
+
+// initPIDNamespace is how /proc/<pid>/ns/pid reads in the initial PID
+// namespace; the kernel gives that namespace a fixed inode (PROC_PID_INIT_INO).
+const initPIDNamespace = "pid:[4026531836]"
+
+// seesAllPIDs reports an error unless the scanning process is in the initial
+// PID namespace. From a nested one (a container without host PID) processes
+// outside it are not listed at all, so an empty scan proves nothing.
+// NSpid in /proc/self/status cannot tell: it starts at the namespace of the
+// /proc mount, so a container with its own /proc shows a single level.
+func seesAllPIDs(root string) error {
+	ns, err := os.Readlink(filepath.Join(root, "self", "ns", "pid"))
+	if err != nil {
+		return err
+	}
+	if ns != initPIDNamespace {
+		return fmt.Errorf("not in the host PID namespace (%s), processes outside it are not visible", ns)
+	}
+	return nil
 }
 
 func holdsFD(procDir string, target os.FileInfo) (bool, error) {

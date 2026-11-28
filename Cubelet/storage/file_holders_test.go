@@ -16,7 +16,8 @@ import (
 
 // ownProcRoot returns a /proc look-alike that lists only this process, plus a
 // pid that does not exist, so the result does not depend on other processes
-// on the host (which a non-root test run may not be allowed to read).
+// on the host (which a non-root test run may not be allowed to read). Its
+// self/ns/pid claims the host PID namespace, so tests also run in containers.
 func ownProcRoot(t *testing.T) string {
 	t.Helper()
 	self := filepath.Join("/proc", strconv.Itoa(os.Getpid()))
@@ -26,7 +27,14 @@ func ownProcRoot(t *testing.T) string {
 	root := t.TempDir()
 	require.NoError(t, os.Symlink(self, filepath.Join(root, strconv.Itoa(os.Getpid()))))
 	require.NoError(t, os.Symlink("/proc/2147483646", filepath.Join(root, "2147483646")))
+	writeSelfPIDNamespace(t, root, initPIDNamespace)
 	return root
+}
+
+func writeSelfPIDNamespace(t *testing.T, root, ns string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "self", "ns"), 0o700))
+	require.NoError(t, os.Symlink(ns, filepath.Join(root, "self", "ns", "pid")))
 }
 
 func TestFileHolders(t *testing.T) {
@@ -71,16 +79,41 @@ func TestFileHolders(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A process whose entries cannot be read is reported as an error, so the
-// caller keeps the file instead of assuming nobody holds it.
+// When the scan cannot tell, it reports an error, so the caller keeps the
+// file instead of assuming nobody holds it.
 func TestFileHoldersFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "disk")
 	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
-	root := t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(root, "1"), 0o700))
-	// fd is a file, not a directory: reading it fails with ENOTDIR.
-	require.NoError(t, os.WriteFile(filepath.Join(root, "1", "fd"), nil, 0o600))
-
-	_, err := fileHolders(root, path)
-	require.ErrorIs(t, err, syscall.ENOTDIR)
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+	}{
+		{
+			// fd is a file, not a directory: reading it fails with ENOTDIR.
+			name: "unreadable process",
+			setup: func(t *testing.T, root string) {
+				writeSelfPIDNamespace(t, root, initPIDNamespace)
+				require.NoError(t, os.Mkdir(filepath.Join(root, "1"), 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "1", "fd"), nil, 0o600))
+			},
+		},
+		{
+			name: "nested PID namespace",
+			setup: func(t *testing.T, root string) {
+				writeSelfPIDNamespace(t, root, "pid:[4026533584]")
+			},
+		},
+		{
+			name:  "no self/ns/pid",
+			setup: func(*testing.T, string) {},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tc.setup(t, root)
+			_, err := fileHolders(root, path)
+			require.Error(t, err)
+		})
+	}
 }

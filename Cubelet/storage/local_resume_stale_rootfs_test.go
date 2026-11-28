@@ -107,7 +107,7 @@ func requirePrefix(t *testing.T, path string, want []byte) {
 	t.Helper()
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.True(t, bytes.HasPrefix(got, want), "%s starts with %q, want %q", path, got[:len(want)], want)
+	require.True(t, bytes.HasPrefix(got, want), "%s starts with %q, want %q", path, got[:min(len(got), len(want))], want)
 }
 
 func TestResumeRetryReplacesStaleRootfsOnReflink(t *testing.T) {
