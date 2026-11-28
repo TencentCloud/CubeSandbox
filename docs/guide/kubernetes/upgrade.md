@@ -218,6 +218,78 @@ helm upgrade --install cube ./deploy/kubernetes/chart \
 
 This removes Chart-managed objects; hostPath / kernel changes need the script and platform runbooks separately.
 
+### C. Upgrading to v0.8.0+ from v0.7.0 or earlier: scheduler overcommit deprecated
+
+::: warning Resume failure risk on local-storage nodes
+Starting in **v0.7.2**, the CubeMaster scheduler's `overcommit_ratio` configuration is **deprecated and ignored**. The scheduler now uses the Quota values reported by Cubelet directly — no secondary overcommit multiplication.
+
+If your old deployment relied on the scheduler-side `overcommit_ratio` (default CPU 3×, Mem 2×) **on top of** Cubelet's own default overcommit (CPU 2×, Mem 1.25×), the effective scheduling capacity drops sharply after upgrade:
+
+| Resource | Old effective overcommit | New default overcommit | Change |
+|----------|--------------------------|------------------------|--------|
+| CPU | 2 × 3 = **6×** physical | **2×** physical | ↓ to 1/3 |
+| Memory | 1.25 × 2 = **2.5×** physical | **1.25×** physical | ↓ to 1/2 |
+
+**Risk**: when a node is upgraded and restarts, paused sandboxes on that node attempt to **resume on the origin node**. If the node's current `Used` resources (which includes paused sandboxes when `paused_resource_release_ratio=0`) exceed the new (lower) Quota, resume will fail with `no more resource`, because the scheduler's CPU/memory filter rejects the node:
+
+```
+quotaCpuFree = QuotaCpu(new) - Allocated = 64000m - 80000m = -16000m  →  rejected
+```
+
+This risk is **specific to resume on the origin node after upgrade**:
+- Without cross-node storage (XFS local disk): resume is pinned to the origin node with no fallback, so if the origin node's Quota is insufficient, resume fails.
+- With cross-node storage (S3 / JuiceFS): resume can fall back to other nodes, reducing but not eliminating the risk.
+:::
+
+#### Why this happens
+
+In old versions (< v0.7.2), two layers of overcommit stacked:
+
+1. **Cubelet reporting layer**: `defaultHostQuotaCPUOvercommitFactor = 2` — a 32-core host reports `QuotaCpu = 64000m` to CubeMaster.
+2. **Scheduler multiplication layer**: `overcommit_ratio.cpu_ratio = 3.0` — CubeMaster multiplies the reported Quota by 3, yielding an effective scheduling capacity of `64000m × 3 = 192000m`.
+
+In **v0.7.2+**, the scheduler layer is removed. Cubelet still defaults to 2× CPU overcommit (64000m on a 32-core host), but the scheduler now uses this value directly — no further multiplication. The effective scheduling capacity drops from 192000m to 64000m.
+
+#### Interaction with `paused_resource_release_ratio`
+
+The `paused_resource_release_ratio` setting (default `0.0`) controls whether paused sandboxes release their scheduling quota. With the default `0.0`, paused sandboxes **retain 100% of their quota** — they count fully toward `Allocated`. This means:
+
+- After upgrade, the new (lower) Quota may be less than the current Allocated (which includes all paused sandboxes).
+- `quotaCpuFree` becomes negative → resume scheduling filter rejects the origin node.
+- Without cross-node storage, there is no fallback → resume fails with `no more resource`.
+
+Setting `paused_resource_release_ratio = 1.0` would release paused sandbox quota, but resume then becomes best-effort (may still be rejected if the node is full). For upgrade scenarios, **keeping the default `0.0` and raising Quota via CubeOps** is the safer approach.
+
+#### Future direction
+
+A future release plans to:
+
+- Enable **cross-node resume by default** when a shared storage backend (S3 / JuiceFS) is available — paused sandboxes can resume on any compatible node, eliminating the "pinned to origin with no fallback" risk.
+- Change the quota model so that **pause releases quota** (used drops immediately) and **resume acquires quota** (treated as a new scheduling request). This removes the capacity risk entirely: paused sandboxes no longer block resume of other sandboxes, and cross-node fallback handles origin-node resource shortage.
+
+Until then, use the safe upgrade procedures below.
+
+#### Safe upgrade procedure
+
+**Per-node drain-and-upgrade**
+
+Versions earlier than v0.8.0 do not have the OpsAgent component and `cubeopscli node quota` command for centralized quota management. The safe upgrade method is to drain each node before upgrading, ensuring sandboxes are rescheduled to nodes with sufficient capacity.
+
+**Upgrade procedure (per node, canary rollout):**
+
+1. **Drain the node**: Migrate all sandboxes to other nodes. The scheduler will automatically reschedule paused sandboxes to available nodes with sufficient Quota.
+
+2. **Upgrade the node**: After the node is drained, upgrade the node components.
+
+3. **Verify the node**: Confirm the upgraded node is healthy and re-registered with the control plane. The node is now ready to accept new sandbox scheduling.
+
+4. **(Optional) Adjust Quota**: After upgrading to v0.8.0+, if OpsAgent is available, observe the resource usage and determine whether to adjust the node's Quota based on actual needs. This step is only necessary if you need to restore the previous overcommit capacity or fine-tune resource allocation.
+
+5. **Proceed to the next node**: Repeat the drain-upgrade-verify cycle for each compute node, one at a time.
+
+As each node is drained and upgraded, sandboxes are automatically rescheduled to the remaining available nodes. After all nodes have been upgraded, sandboxes can be recreated on any of the upgraded nodes as needed.
+
+
 ---
 
 ## Appendix: image key cheat sheet
