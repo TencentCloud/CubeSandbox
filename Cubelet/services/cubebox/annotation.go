@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/disk"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/kernelcmdline"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -84,7 +85,15 @@ func genContainerAnnotationReq(ctx context.Context, c *cubebox.ContainerConfig, 
 	}
 	anno[constants.SandboxID] = ci.SandboxID
 
-	return oci.WithAnnotations(anno)
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		for k, v := range anno {
+			kernelcmdline.MergeAnnotation(s.Annotations, k, v)
+		}
+		return nil
+	}
 }
 
 func (l *local) genListFilterLabels(ctx context.Context, req *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) map[string]string {

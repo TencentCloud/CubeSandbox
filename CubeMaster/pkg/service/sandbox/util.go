@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -36,8 +37,12 @@ import (
 
 const (
 	maxCreateTimeEnvVarsAnnotationBytes = 16 * 1024
-	maxMaskRequestHostBytes             = 512
-	maskRequestHostPortPlaceholder      = "${PORT}"
+	// maxVMKernelCmdlineBytes bounds the whole annotation well below the
+	// smallest guest cmdline buffer (aarch64: 2048 bytes), leaving room for
+	// the video params and the auto-filled monitor region.
+	maxVMKernelCmdlineBytes        = 1024
+	maxMaskRequestHostBytes        = 512
+	maskRequestHostPortPlaceholder = "${PORT}"
 )
 
 func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
@@ -576,9 +581,10 @@ func getExposedPorts(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandbo
 	}
 	return nil
 }
+
 func checkAndGetContainers(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 
-	for _, cnt := range req.Containers {
+	for i, cnt := range req.Containers {
 		if cnt.Resources == nil {
 			return errors.New("request Resources nil")
 		}
@@ -631,7 +637,7 @@ func checkAndGetContainers(req *types.CreateCubeSandboxReq, out *cubebox.RunCube
 		if err := checkAndGetProbe(c, cnt); err != nil {
 			return err
 		}
-		if err := checkAndGetContainerAnnotation(c, cnt); err != nil {
+		if err := checkAndGetContainerAnnotation(c, cnt, i == 0); err != nil {
 			return err
 		}
 		if err := checkAndGetContainerHooks(c, cnt); err != nil {
@@ -668,7 +674,73 @@ func checkAndGetImageSpec(c *cubebox.ContainerConfig, cnt *types.Container) erro
 	return nil
 }
 
-func checkAndGetContainerAnnotation(c *cubebox.ContainerConfig, cnt *types.Container) error {
+// allowedVMKernelCmdlinePattern matches a single kernel cmdline entry whose
+// module is allowlisted, e.g. "page_reporting.page_reporting_order=6".
+// Matching the whole entry (not just the prefix) rejects embedded whitespace
+// that would otherwise smuggle extra tokens into the guest cmdline.
+var allowedVMKernelCmdlinePattern = regexp.MustCompile(
+	`^(page_reporting|damon_reclaim)\.[A-Za-z0-9_.]+(=[A-Za-z0-9_,.:/-]*)?$`)
+
+// FilterVMKernelCmdline parses a JSON array of strings and keeps only
+// allowlisted module params. Exported so the CLI can validate early.
+func FilterVMKernelCmdline(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > maxVMKernelCmdlineBytes {
+		return "", fmt.Errorf("kernel cmdline append is %d bytes, exceeds the %d-byte limit",
+			len(raw), maxVMKernelCmdlineBytes)
+	}
+	var params []string
+	if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		return "", fmt.Errorf("kernel cmdline append must be a JSON array of strings: %w", err)
+	}
+	out := make([]string, 0, len(params))
+	for _, p := range params {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !allowedVMKernelCmdlinePattern.MatchString(p) {
+			return "", fmt.Errorf("kernel cmdline param %q is not allowed", p)
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func checkAndGetContainerAnnotation(c *cubebox.ContainerConfig, cnt *types.Container,
+	isFirst bool) error {
+	// This annotation lives outside the cube.master.* namespace but must
+	// reach CubeShim; validate and normalize it before the loop below drops it.
+	// The DAMON monitor region is filled in Cubelet, where the worker arch and
+	// the finalized guest RAM are known.
+	if raw, ok := cnt.Annotations[constants.CubeAnnotationVMKernelCmdlineAppend]; ok {
+		// The guest kernel command line is sandbox-wide and only the first
+		// container's annotations are copied into the sandbox spec, so an
+		// annotation on any other container would be silently dropped.
+		if !isFirst {
+			return fmt.Errorf("annotation %q must be set on the first container; "+
+				"the guest kernel command line is sandbox-wide",
+				constants.CubeAnnotationVMKernelCmdlineAppend)
+		}
+		filtered, err := FilterVMKernelCmdline(raw)
+		if err != nil {
+			return err
+		}
+		if filtered != "" {
+			c.Annotations[constants.CubeAnnotationVMKernelCmdlineAppend] = filtered
+		}
+	}
+
 	for k, v := range cnt.Annotations {
 
 		if !strings.HasPrefix(k, "cube.") &&
@@ -1014,6 +1086,15 @@ func checkAndGetHostDirVolumeSource(src *types.HostDirVolumeSources, out *cubebo
 func checkAndGetAnnotation(req *types.CreateCubeSandboxReq, out *cubebox.RunCubeSandboxRequest) error {
 	if req.Annotations == nil {
 		return errors.New("annotation param is nil")
+	}
+
+	// The guest kernel command line is sandbox-wide, but this annotation has no
+	// passthrough from the sandbox request to the shim; it is read from the
+	// first container's annotations instead. Reject a sandbox-level value so it
+	// is not silently dropped.
+	if _, ok := req.Annotations[constants.CubeAnnotationVMKernelCmdlineAppend]; ok {
+		return fmt.Errorf("annotation %q must be set on the first container, not the sandbox request",
+			constants.CubeAnnotationVMKernelCmdlineAppend)
 	}
 
 	if out.Annotations == nil {
