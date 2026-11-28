@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +34,11 @@ import (
 var pmemFileLocks = utils.NewResourceLocks()
 
 func EnsurePmemFile(ctx context.Context, instanceType, imageRef string) error {
+	release, err := pmem.PinArtifact(ctx, instanceType, imageRef)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := EnsurePmemRootfs(ctx, instanceType, imageRef); err != nil {
 		return err
 	}
@@ -51,6 +57,11 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 		return fmt.Errorf("invalid imageRef: %w", err)
 	}
 	imagePath := pmem.GetRawImageFilePath(instanceType, imageRef)
+	release, pinErr := pmem.PinArtifact(ctx, instanceType, imageRef)
+	if pinErr != nil {
+		return pinErr
+	}
+	defer release()
 	// CreateImage and node-distribution requests may legitimately reuse the
 	// same artifact. Lock at this shared entry point so every writer of the
 	// fixed .download path is serialized and waiters recheck the final file.
@@ -66,10 +77,7 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 	}
 	if !exist {
 		spec := constants.GetImageSpec(ctx)
-		if spec == nil {
-			return fmt.Errorf("pmem file %s not exist", imagePath)
-		}
-		if err := tryDownloadPmemFile(ctx, imagePath, spec); err != nil {
+		if err := tryDownloadPmemFile(ctx, instanceType, imagePath, spec); err != nil {
 			return fmt.Errorf("pmem file %s not exist and download failed: %v", imagePath, err)
 		}
 		exist, err = utils.FileExistAndValid(imagePath)
@@ -80,21 +88,51 @@ func EnsurePmemRootfs(ctx context.Context, instanceType, imageRef string) error 
 			return fmt.Errorf("downloaded pmem file %s not exist", imagePath)
 		}
 	}
+	if err := recordCacheUse(ctx, instanceType, imageRef); err != nil {
+		// Missing source information prevents GC, not legacy template use.
+		log.G(ctx).Warnf("record rootfs cache use for %s failed: %v", imageRef, err)
+	}
 	return nil
 }
 
-func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages.ImageSpec) error {
-	if spec == nil || spec.Annotations == nil {
-		return fmt.Errorf("image spec annotations are empty")
+func tryDownloadPmemFile(ctx context.Context, instanceType, imagePath string, spec *cubeimages.ImageSpec) error {
+	annotations := spec.GetAnnotations()
+	downloadURL := strings.TrimSpace(annotations[constants.MasterAnnotationRootfsArtifactURL])
+	expectedSHA := strings.TrimSpace(annotations[constants.MasterAnnotationRootfsArtifactSHA256])
+	expectedSize, sizeKnown := artifactSizeFromSpec(spec)
+	token := strings.TrimSpace(annotations[constants.MasterAnnotationRootfsArtifactToken])
+	var source *CacheSource
+	var err error
+	if instanceType == "cubebox" {
+		source, err = sourceFromSpec(instanceType, filepath.Base(filepath.Dir(imagePath)), spec)
 	}
-	downloadURL := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactURL])
+	if err != nil {
+		// Recovery metadata controls eligibility for GC, not legacy downloads.
+		log.G(ctx).Warnf("rootfs cache source is not eligible for GC: %v", err)
+		source = nil
+	}
+	if instanceType == "cubebox" && source == nil && annotations[constants.MasterAnnotationRootfsArtifactCacheable] != "false" {
+		if entry, err := readCacheEntry(imagePath); err == nil {
+			source = &entry.CacheSource
+		}
+	}
+	if source != nil {
+		downloadURL, expectedSHA, expectedSize, token = source.downloadURL(), source.SHA256, source.SizeBytes, source.Token
+		sizeKnown = expectedSize > 0
+	}
 	if downloadURL == "" {
 		return fmt.Errorf("artifact download url is empty")
 	}
 	downloadURL = rewriteDownloadHost(downloadURL, cubeMasterHTTPAddr())
-	expectedSHA := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSHA256])
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return err
+	}
+	if instanceType == "cubebox" {
+		releaseSpace, err := reserveCacheDownload(ctx, expectedSize)
+		if err != nil {
+			return err
+		}
+		defer releaseSpace()
 	}
 	tmpPath := imagePath + ".download"
 	// imagePath is keyed by artifact ID, not by content: leftover bytes may
@@ -106,7 +144,7 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		resumeFrom = st.Size()
 		havePartial = true
 	}
-	resp, err := fetchArtifactResp(ctx, downloadURL, spec, havePartial, resumeFrom)
+	resp, err := fetchArtifactResp(ctx, downloadURL, token, havePartial, resumeFrom)
 	if err != nil {
 		return err
 	}
@@ -134,9 +172,9 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 			total, ok = cr.total, true
 		}
 		if !ok {
-			total, ok = artifactSizeFromSpec(spec)
+			total, ok = expectedSize, sizeKnown
 		}
-		if ok && total == resumeFrom {
+		if ok && total == resumeFrom && (!sizeKnown || total == expectedSize) {
 			verifyOnly = true
 		} else {
 			restart = true
@@ -152,7 +190,7 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		// without Range in the same call so the caller sees no failure.
 		resp.Body.Close()
 		_ = os.Remove(tmpPath)
-		resp, err = fetchArtifactResp(ctx, downloadURL, spec, false, 0)
+		resp, err = fetchArtifactResp(ctx, downloadURL, token, false, 0)
 		if err != nil {
 			return err
 		}
@@ -201,7 +239,29 @@ func tryDownloadPmemFile(ctx context.Context, imagePath string, spec *cubeimages
 		if expectedSHA != "" {
 			copyHasher = hasher
 		}
-		if _, err := sparseCopy(f, copyHasher, resp.Body, sparseBufSize, startOffset); err != nil {
+		var body io.Reader = resp.Body
+		remaining := expectedSize - startOffset
+		if sizeKnown {
+			if remaining < 0 || (resp.ContentLength >= 0 && resp.ContentLength != remaining) {
+				_ = f.Close()
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("artifact size mismatch")
+			}
+			if remaining < math.MaxInt64 {
+				body = io.LimitReader(body, remaining+1)
+			}
+		}
+		written, err := sparseCopy(f, copyHasher, body, sparseBufSize, startOffset)
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		if sizeKnown && written != remaining {
+			_ = f.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("artifact size mismatch")
+		}
+		if err := f.Sync(); err != nil {
 			_ = f.Close()
 			return err
 		}
@@ -390,18 +450,25 @@ func sparseCopy(dst sparseFile, hasher hash.Hash, src io.Reader, bufSize int, st
 	return totalBytes, nil
 }
 
-func fetchArtifactResp(ctx context.Context, downloadURL string, spec *cubeimages.ImageSpec, withRange bool, resumeFrom int64) (*http.Response, error) {
+func fetchArtifactResp(ctx context.Context, downloadURL, token string, withRange bool, resumeFrom int64) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid artifact download request")
 	}
 	if withRange {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
-	if token := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactToken]); token != "" {
+	if token != "" {
 		req.Header.Set("X-Cube-Artifact-Token", token)
 	}
-	return http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("artifact download request failed")
+	}
+	return resp, nil
 }
 
 // contentRange is a parsed Content-Range header value. start and end are -1
@@ -459,7 +526,7 @@ func parseContentRange(v string) (contentRange, bool) {
 }
 
 func artifactSizeFromSpec(spec *cubeimages.ImageSpec) (int64, bool) {
-	v := strings.TrimSpace(spec.Annotations[constants.MasterAnnotationRootfsArtifactSizeBytes])
+	v := strings.TrimSpace(spec.GetAnnotations()[constants.MasterAnnotationRootfsArtifactSizeBytes])
 	if v == "" {
 		return 0, false
 	}
@@ -538,6 +605,14 @@ func rewriteDownloadHost(rawURL, endpoint string) string {
 	if isS3PresignedURL(u) {
 		return rawURL
 	}
-	u.Host = endpoint
+	if strings.Contains(endpoint, "://") {
+		target, err := url.Parse(endpoint)
+		if err != nil || target.Host == "" {
+			return rawURL
+		}
+		u.Host, u.Scheme = target.Host, target.Scheme
+	} else {
+		u.Host = endpoint
+	}
 	return u.String()
 }

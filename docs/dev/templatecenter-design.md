@@ -230,6 +230,10 @@ A background sweep on CubeMaster removes artifacts whose reference count
 dropped to zero (template deleted, build failed) past their GC deadline,
 running the same three-phase cleanup as online deletion (§9.5).
 
+S3 artifacts still referenced by templates can independently evict worker `.ext4`
+cache files. See [Worker rootfs cache GC](./rootfs-cache-gc); definitions,
+snapshots and remote objects remain intact.
+
 ### 9.4 Job ownership
 
 The jobs table has no owner column: after a TC restart any TC instance
