@@ -49,7 +49,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 // Result describes the outcome of a bake. Callers persist these onto
@@ -117,9 +119,36 @@ var bundleFiles = []string{
 // a workload that runs apt install some-package and triggers a
 // post-install hook) pick the CA up too.
 var anchorDirs = []string{
-	"usr/local/share/ca-certificates",  // Debian/Ubuntu
-	"etc/pki/ca-trust/source/anchors",  // RHEL/Fedora/CentOS
-	"etc/ca-certificates/trust-source", // Arch
+	"usr/local/share/ca-certificates",           // Debian/Ubuntu
+	"etc/pki/ca-trust/source/anchors",           // RHEL/Fedora/CentOS
+	"etc/ca-certificates/trust-source",          // Arch
+	"system/etc/security/cacerts",               // Android system trust store (pre-APEX location)
+	"system/apex/com.android.conscrypt/cacerts", // Android 14+ conscrypt APEX system store
+}
+
+// androidCacertsDirs are the Android system trust store entries from
+// anchorDirs. Unlike the Linux anchor dirs (where update-ca-* parses any
+// PEM file), Android's TLS stack loads system CAs by their OpenSSL
+// X509_NAME_hash_old file name (<hash>.<n>, as produced by
+// `openssl x509 -subject_hash_old`; see opensslSubjectHashOld), so the
+// anchor copies in these directories must be written under that name to
+// be honoured at runtime.
+//
+// Android 14 moved the system store into the conscrypt APEX: the
+// runtime reads the copy under system/apex/com.android.conscrypt, while
+// system/etc/security/cacerts remains for older releases and legacy
+// tooling. Stock A14 images ship both directories with identical
+// content, so the bake writes both and whichever the runtime reads has
+// the root.
+var androidCacertsDirs = map[string]bool{
+	"system/etc/security/cacerts":               true,
+	"system/apex/com.android.conscrypt/cacerts": true,
+}
+
+// isAndroidCacertsDir reports whether rel is one of the Android system
+// trust store directories that load anchors by subject-hash name.
+func isAndroidCacertsDir(rel string) bool {
+	return androidCacertsDirs[rel]
 }
 
 // seedBundlePath is the bundle file we *create* from scratch when an
@@ -164,6 +193,12 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 		return Result{}, err
 	}
 	canonical := pem.EncodeToMemory(caBlock)
+	// parseCA already validated the block parses as x509; keep the parsed
+	// form for the Android anchor's subject-hash file name.
+	caCert, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		return Result{}, fmt.Errorf("cube_egress_ca: re-parse caPEM: %w", err)
+	}
 
 	res := Result{Fingerprint: fingerprint}
 	// caPresent tracks whether the CA already lives in some bundle/anchor
@@ -172,7 +207,10 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	caPresent := false
 
 	for _, rel := range bundleFiles {
-		full := filepath.Join(rootfsDir, rel)
+		full, err := resolveUnderRootfs(rootfsDir, rel)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: append %s: %w", rel, err)
+		}
 		written, reason, err := appendBundle(full, canonical, caBlock.Bytes)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: append %s: %w", rel, err)
@@ -190,8 +228,18 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	}
 
 	for _, rel := range anchorDirs {
-		full := filepath.Join(rootfsDir, rel)
-		written, reason, err := dropAnchor(full, canonical)
+		anchorName := AnchorFileName
+		if isAndroidCacertsDir(rel) {
+			// Android loads system CAs by their X509_NAME_hash_old
+			// subject-hash file name; any other file name in these
+			// directories is silently ignored.
+			anchorName = fmt.Sprintf("%08x.0", opensslSubjectHashOld(caCert))
+		}
+		full, err := resolveUnderRootfs(rootfsDir, rel)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: drop anchor in %s: %w", rel, err)
+		}
+		written, reason, err := dropAnchor(full, anchorName, canonical)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: drop anchor in %s: %w", rel, err)
 		}
@@ -213,7 +261,10 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	// (see package doc) and never clobbers an image's own roots because
 	// it only runs when nothing else matched.
 	if !res.Baked && !caPresent {
-		full := filepath.Join(rootfsDir, seedBundlePath)
+		full, err := resolveUnderRootfs(rootfsDir, seedBundlePath)
+		if err != nil {
+			return res, fmt.Errorf("cube_egress_ca: seed %s: %w", seedBundlePath, err)
+		}
 		written, reason, err := seedBundle(full, canonical)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: seed %s: %w", seedBundlePath, err)
@@ -230,6 +281,186 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// symlinkHopLimit matches Linux's SYMLOOP_MAX: a symlink chain longer
+// than 40 hops cannot be resolved and is rejected, mirroring ELOOP.
+const symlinkHopLimit = 40
+
+// errDanglingSymlink reports a symlink whose target does not exist
+// inside the rootfs. The target may well exist on the build host — that
+// must not matter: the host is never consulted during resolution.
+var errDanglingSymlink = errors.New("cube_egress_ca: symlink dangling inside the rootfs")
+
+// containedInRoot reports whether fs is cleanRoot itself or a path
+// under it. cleanRoot == "/" (a rootfs at the filesystem root, which
+// never happens for template artifacts but costs nothing to allow)
+// trivially contains every absolute path.
+func containedInRoot(cleanRoot, fs string) bool {
+	if cleanRoot == string(os.PathSeparator) {
+		return true
+	}
+	return fs == cleanRoot || strings.HasPrefix(fs, cleanRoot+string(os.PathSeparator))
+}
+
+// resolveUnderRootfs joins rel onto rootfsDir and resolves the path,
+// verifying every existing component — including the final one — stays
+// inside the rootfs.
+//
+// Resolution semantics:
+//
+//   - The verified root is the symlink-resolved rootfsDir (cleanRoot),
+//     and every returned path is built from it, so a rootfsDir spelled
+//     through symlinks compares like with like (its raw spelling never
+//     reaches the containment checks).
+//   - Symlinks are resolved entirely inside the rootfs, component by
+//     component: absolute targets are clamped at the guest root
+//     (leading ".." collapses at "/" POSIX style) and then rebased onto
+//     cleanRoot; relative targets join the symlink's own directory in
+//     guest terms; targets that themselves pass through further
+//     symlinks are re-walked the same way. Every filesystem lookup is a
+//     single-component Lstat whose earlier components are already
+//     verified symlink-free, so the kernel never resolves an
+//     intermediate symlink for us and the walk cannot be steered to
+//     build-host files. Android's /etc -> /system/etc and RHEL's
+//     /etc/pki/tls/certs/ca-bundle.crt -> /etc/pki/ca-trust/... land
+//     where they exist in the guest tree; host paths an image may
+//     reuse are simply absent from the rootfs.
+//   - A missing component ends the walk: the remainder is joined onto
+//     the guest-visible location the walk stopped at. Callers create
+//     the remainder fresh (MkdirAll/WriteFile), and anchoring it on
+//     the walked location keeps MkdirAll from traversing an earlier
+//     symlink into a location that only partially exists elsewhere.
+//   - A symlink whose target is missing inside the rootfs (dangling,
+//     e.g. a link to a host-only path) keeps "missing" semantics, with
+//     the remainder joined onto the rebased target: a later MkdirAll
+//     creates the guest-visible location inside the rootfs, mirroring
+//     what the guest itself would see through the link, and never
+//     touching the build host.
+//   - The final component is resolved too: callers Stat/Read/Write the
+//     returned path, and an unresolved leaf symlink would let those
+//     reach files outside the verified chain.
+func resolveUnderRootfs(rootfsDir, rel string) (string, error) {
+	cleanRoot, err := filepath.EvalSymlinks(rootfsDir)
+	if err != nil {
+		// The rootfs itself must exist (Bake stats it earlier); treat any
+		// failure as "cannot resolve" and fall through to the raw path.
+		return filepath.Join(rootfsDir, rel), nil
+	}
+	relParts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
+	for _, part := range relParts {
+		if part == ".." {
+			return "", fmt.Errorf("path %q escapes rootfs %q lexically", rel, cleanRoot)
+		}
+	}
+	resolvedFS := cleanRoot
+	resolvedGuest := "/"
+	hops := 0
+	for i, part := range relParts {
+		if part == "" || part == "." {
+			continue
+		}
+		fs, guest, err := resolveGuestPath(cleanRoot, path.Join(resolvedGuest, part), &hops)
+		if errors.Is(err, errDanglingSymlink) {
+			// Missing at this component: the remainder is created fresh
+			// by the caller, anchored on the guest-visible location the
+			// walk stopped at.
+			return filepath.Join(append([]string{fs}, relParts[i+1:]...)...), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		resolvedFS, resolvedGuest = fs, guest
+	}
+	return resolvedFS, nil
+}
+
+// resolveGuestPath resolves guest — an absolute guest-space path — under
+// cleanRoot, walking one component at a time. Each component is Lstat'ed
+// on a path whose earlier components are already verified symlink-free,
+// so the kernel never resolves an intermediate symlink for us; when a
+// component is a symlink its target is clamped at the guest root
+// (path.Clean collapses leading ".." at "/"), rebased onto cleanRoot,
+// and re-walked the same way. Symlink resolutions are counted through
+// hops and capped at symlinkHopLimit (Linux SYMLOOP_MAX semantics).
+//
+// Returns (fsPath, guestPath, nil) when every component exists and is
+// symlink-free — fsPath is safe for direct use by the caller. Returns
+// (fsPath, guestPath, errDanglingSymlink) when the guest path is
+// missing inside the rootfs; fsPath is the full guest-visible location
+// (missing middle components included) where the caller can create the
+// remainder. Any fsPath handed back is asserted to stay under
+// cleanRoot: a future walk bug fails loudly instead of escaping.
+func resolveGuestPath(cleanRoot, guest string, hops *int) (string, string, error) {
+walk:
+	for {
+		guest = path.Clean(guest)
+		if !path.IsAbs(guest) {
+			return "", "", errors.New("cube_egress_ca: guest path must be absolute")
+		}
+		parts := strings.Split(guest, "/")
+		fs := cleanRoot
+		for i := 1; i < len(parts); i++ {
+			fs = filepath.Join(fs, parts[i])
+			info, err := os.Lstat(fs)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					// Hand back the full guest-visible location; the
+					// caller creates the remainder (MkdirAll builds any
+					// missing middle components inside the rootfs).
+					fs = filepath.Join(cleanRoot, guest)
+					if !containedInRoot(cleanRoot, fs) {
+						return "", "", fmt.Errorf("symlink resolution escaped the rootfs: %q", guest)
+					}
+					return fs, guest, errDanglingSymlink
+				}
+				return "", "", err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				target, err := os.Readlink(fs)
+				if err != nil {
+					return "", "", err
+				}
+				*hops++
+				if *hops > symlinkHopLimit {
+					return "", "", fmt.Errorf("symlink chain too deep at %q (limit %d hops)", guest, symlinkHopLimit)
+				}
+				t := filepath.ToSlash(target)
+				if path.IsAbs(t) {
+					// Clamp at the guest root first: path.Clean collapses
+					// leading ".." at "/", so the target can never climb
+					// out of the guest namespace before it is rebased
+					// onto cleanRoot.
+					guest = path.Clean(t)
+				} else {
+					// Resolve against the symlink's own directory, in
+					// guest terms.
+					guest = path.Join("/"+strings.Join(parts[1:i], "/"), t)
+				}
+				// The components that follow the symlink in the current
+				// path continue past the target. The substituted path may
+				// traverse further symlinks, so the walk restarts on it.
+				guest = path.Join(guest, strings.Join(parts[i+1:], "/"))
+				continue walk
+			}
+		}
+		if !containedInRoot(cleanRoot, fs) {
+			return "", "", fmt.Errorf("symlink resolution escaped the rootfs: %q", guest)
+		}
+		return fs, guest, nil
+	}
+}
+
+// writeFileNotThroughSymlink writes data to path, refusing when path itself
+// is a symlink: an image could ship <target>.cube-egress-tmp as a symlink
+// to a build-host file, and os.WriteFile would follow it out of the rootfs.
+// The Lstat/Write pair is not atomic, but the extracted rootfs is a static
+// artifact during the bake, so no concurrent mutation races it.
+func writeFileNotThroughSymlink(path string, data []byte, perm os.FileMode) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("cube_egress_ca: refusing to write through symlink %q", path)
+	}
+	return os.WriteFile(path, data, perm)
 }
 
 // parseCA validates that caPEM contains exactly one CERTIFICATE PEM
@@ -302,7 +533,7 @@ func appendBundle(full string, canonical, derNeedle []byte) (bool, string, error
 	merged = append(merged, existing...)
 	merged = append(merged, separator...)
 	merged = append(merged, canonical...)
-	if err := os.WriteFile(tmp, merged, 0o644); err != nil {
+	if err := writeFileNotThroughSymlink(tmp, merged, 0o644); err != nil {
 		return false, "", err
 	}
 	if err := os.Rename(tmp, full); err != nil {
@@ -319,7 +550,7 @@ func appendBundle(full string, canonical, derNeedle []byte) (bool, string, error
 // Idempotent: if the file already exists with identical content, we
 // don't bump its mtime (the result is the same as a re-write but it's
 // nicer for diff/debug to leave it alone).
-func dropAnchor(dir string, canonical []byte) (bool, string, error) {
+func dropAnchor(dir, fileName string, canonical []byte) (bool, string, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -330,7 +561,7 @@ func dropAnchor(dir string, canonical []byte) (bool, string, error) {
 	if !info.IsDir() {
 		return false, "not a directory", nil
 	}
-	full := filepath.Join(dir, AnchorFileName)
+	full := filepath.Join(dir, fileName)
 	existing, err := os.ReadFile(full) // #nosec G304 — fixed basename
 	if err == nil && bytes.Equal(existing, canonical) {
 		return false, "present", nil
@@ -339,7 +570,7 @@ func dropAnchor(dir string, canonical []byte) (bool, string, error) {
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"
-	if err := os.WriteFile(tmp, canonical, 0o644); err != nil {
+	if err := writeFileNotThroughSymlink(tmp, canonical, 0o644); err != nil {
 		return false, "", err
 	}
 	if err := os.Rename(tmp, full); err != nil {
@@ -371,10 +602,17 @@ func seedBundle(full string, canonical []byte) (bool, string, error) {
 		return false, "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		// Distros whose /etc is a symlink (e.g. Android: /etc -> /system/etc)
+		// make MkdirAll fail with EEXIST — reachable through the raw-path
+		// fallback when the rootfs itself cannot be resolved. Anchor dirs
+		// cover those distros; skip seeding instead of failing the bake.
+		if errors.Is(err, os.ErrExist) {
+			return false, "seed skipped: parent path occupied (symlink?)", nil
+		}
 		return false, "", err
 	}
 	tmp := full + ".cube-egress-tmp"
-	if err := os.WriteFile(tmp, canonical, 0o644); err != nil {
+	if err := writeFileNotThroughSymlink(tmp, canonical, 0o644); err != nil {
 		return false, "", err
 	}
 	if err := os.Rename(tmp, full); err != nil {

@@ -404,3 +404,475 @@ func TestFingerprintOfIgnoresPEMWhitespace(t *testing.T) {
 		t.Fatalf("FingerprintOf differs on cosmetic re-encoding: %s vs %s", fpA, fpB)
 	}
 }
+
+// Test vectors generated with OpenSSL 3.x `openssl x509 -subject_hash_old`
+// (X509_NAME_hash_old, the MD5-based convention Android's trust stores
+// use; see opensslSubjectHashOld). Subject shapes: single CN; O+CN
+// (multi RDN); C/ST/L/O/OU/CN (six RDNs). The SHA1-based
+// `openssl x509 -subject_hash` values for the same certs are
+// 0x43203952 / 0x3330afd4 / 0x101024f9 — Android does not read those.
+var subjectHashOldVectors = []struct {
+	name string
+	pem  string
+	hash uint32
+}{
+	{
+		name: "single CN",
+		pem: `-----BEGIN CERTIFICATE-----
+MIIDDjCCAfagAwIBAgITK01MJagyN/WtCMt79QuhqXg6vTANBgkqhkiG9w0BAQsF
+ADAXMRUwEwYDVQQDDAxUZXN0IFJvb3QgQ0EwHhcNMjYxMDE1MDg1OTU1WhcNMjYx
+MTE0MDg1OTU1WjAXMRUwEwYDVQQDDAxUZXN0IFJvb3QgQ0EwggEiMA0GCSqGSIb3
+DQEBAQUAA4IBDwAwggEKAoIBAQCZ0SrWe4jSxmBozUMYb9AgRb8E2/abxO/6gODS
+3wrIY8GrpNZ+cni5dSgJ57P+BVP3OLLc1Upyjp4JWoKrcQrNmauJboL/PKO7RFCE
+BgTWTWpjian9lUpz40GM45X2IBWzfCd0cTtR+/R6zKHyNjR0Vk6fJVmsHB6bzSEb
+AWjAHKBV2IaMxIO33YqtBJlJy85lL30lvLZGJtbQkkiywZQSw23XlCdVfc6yivHO
+aXGJ3kCVmqpBg8GgkbpeNm+oeWnWEXVeUZEXp8WFwe+vy+RwfSBq2rpkrmDEglWz
+8AMeaBsBVd1UhCVpPpGLdx1YG55DousBvm6MqLYcyrOhCBg3AgMBAAGjUzBRMB0G
+A1UdDgQWBBQ2sebnET8NCP+X13PKTEm7e+ewNjAfBgNVHSMEGDAWgBQ2sebnET8N
+CP+X13PKTEm7e+ewNjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IB
+AQB2winrAxjXIbtKQshnGk+vbP9/CWzh1rkHafhgciNd1XnP6ejvGxr4hNiC51L7
+rKt1JcmtX70KWIUX9EF5jis33535zMtPM9bWbtl/qXJwuqNsD//Yrb5tsFLNaQAG
+03W4JNHxiZCSMuzQNiCsvnlL8pG2Rj4ewPcao7hejhTgx/JXHBFWAQekGrXFLwJI
+N8Asf92BmH5N4AbZ+thShPdFO4w7sXnHmcQY/egNC5ZQw3VTZLPKGJSzo114R8tu
+RRyD7FUq3+SAU4PM1EpDN/Ah1HYS500Tc1QtOtl70y1+JURSJsbzU76iRDFEswDc
+yoKrYRyh/Zb6ZhLbsJtgT5v4
+-----END CERTIFICATE-----`,
+		hash: 0x13fbaf3f,
+	},
+	{
+		name: "O + CN",
+		pem: `-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgIULizYQ2ti0rLac/14MXf1Pu5ZMmYwDQYJKoZIhvcNAQEL
+BQAwMDEVMBMGA1UECgwMVGVzdCBPcmcgTHRkMRcwFQYDVQQDDA5TZWNvbmQgUm9v
+dCBDQTAeFw0yNjEwMTUwOTI2MzlaFw0yNjExMTQwOTI2MzlaMDAxFTATBgNVBAoM
+DFRlc3QgT3JnIEx0ZDEXMBUGA1UEAwwOU2Vjb25kIFJvb3QgQ0EwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCrhE0Eo0hV31KBDZB1hEZpJa+VcuzlCev7
+P3r6YQM4eAdOuhuSB3Xxe7IuG8qcRw4YzdSvLd1dTmhAMaDHH/6/Nw2IiPc2fyow
+kWVBRJ8hYRI7FSg3nlQP6zArO/D/LiPzlYGKU79YJiQ+mwftSWBe+vrCOkdy0Inx
+YRc0pbXWDvVEgY7IVbrQUosCf0Mf7EYU6Mo4c+BLgTW0Ypr04bHTFeZ3QaegKcDR
+bsyKOUm4lpdPBBGhdOR1qreDvrjvl1Mtrf8xdSnGWHE7UdfDDIr7qXz4UiCPqrGX
+R7XmYuqH5RvZX3XgHDzzD8SXJVGJGA1to2wWvh1/lhddsOe5hxNrAgMBAAGjUzBR
+MB0GA1UdDgQWBBTw4V3YL0eTMAhjdcB2Usccjuv7rjAfBgNVHSMEGDAWgBTw4V3Y
+L0eTMAhjdcB2Usccjuv7rjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUA
+A4IBAQAdZO9NYMldZKtHgV3jRxc7gLIg9kPJ5mXPAHqbao20b5rXfL8mDTiRE/oA
+9NXHotr5mNSc8/5cXCz0abh+CRnufI2mEc/KwwtlLX04p9ZGX4jZb1tly3OOg5mQ
+hnTOcYvRqrLgsLkdLtEANYt8AYjuESL+W/SrfROAjehW7pUSYfoF+UBR0z2MYJkQ
+760wjO7VzbG4b3aoHKBgbvwQZZqbxGKlSBmDcCeYF3DqsanVuh5xaXkOufbS2RUV
+Wlz418iFkb9ZFqw9uzSZRR6VUPa+DBu5mMLhLrByCzLbQc5Z/w/cPwY7LcoGdh4h
+wGgoybf3zSGfzZaH0OHjb2SPZAPm
+-----END CERTIFICATE-----`,
+		hash: 0xf19be30c,
+	},
+	{
+		name: "C/ST/L/O/OU/CN",
+		pem: `-----BEGIN CERTIFICATE-----
+MIID0TCCArmgAwIBAgIUJADgX3+Xn6RhZIebftF2N1JzEOQwDQYJKoZIhvcNAQEL
+BQAweDELMAkGA1UEBhMCQ04xEjAQBgNVBAgMCUd1YW5nZG9uZzERMA8GA1UEBwwI
+U2hlbnpoZW4xEDAOBgNVBAoMB1RlbmNlbnQxFDASBgNVBAsMC0N1YmVTYW5kYm94
+MRowGAYDVQQDDBFNdWx0aSBSRE4gVGVzdCBDQTAeFw0yNjEwMTUwODU5NTVaFw0y
+NjExMTQwODU5NTVaMHgxCzAJBgNVBAYTAkNOMRIwEAYDVQQIDAlHdWFuZ2Rvbmcx
+ETAPBgNVBAcMCFNoZW56aGVuMRAwDgYDVQQKDAdUZW5jZW50MRQwEgYDVQQLDAtD
+dWJlU2FuZGJveDEaMBgGA1UEAwwRTXVsdGkgUkROIFRlc3QgQ0EwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCR9a9wna5LAbfffhxXzhBzjxs8zYgOtNn3
+yM3pVWjnmJjdEmIvNp+dryrUeWrhMp1IOnnBS+GgbOJFLzyhU9V/Vrdp+nrOUd1b
+TJOBSmd7rWpEuABTL/uHgJe4w+r0TvNYsT4MAh9r3cE7M3e2xMiOPGxXcbKoPXoW
+9qPTh3Alm0wyUp7XGAee6zUrijt9k5G7bjzHX7AGFSh8dBJuD0FamuSt1eAJzylt
+GgGmeDnqrytFnJDKwSCYWkmfvVizSEl6B7p93SeNWKmZ0XRDgeVRJYiWWxGhKD5C
+g7lCKoYCD406QV00tyNuFxpIUUnCRmFl7BJVFyNAmfK/h3SUOjpbAgMBAAGjUzBR
+MB0GA1UdDgQWBBTmmDBkFqSL4Rfkc8ULEjod2rpI4zAfBgNVHSMEGDAWgBTmmDBk
+FqSL4Rfkc8ULEjod2rpI4zAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUA
+A4IBAQCKUO83Qpv9In+4FrvnTZMFTp6TztjmPvQamIkzjFzo5X7raMNQz+3a5lgu
+LD+fMuCXjs6BZG/ZkGH7NbypZrvTKWOq2o+bc5l1obOSGPDGKh8BiXVInB1NBKr5
+yTSrK/P7yCtOP7GVtCBg7mPxwA3N2H0d2CX11OK6/v6pZbsDZ3aO8frMNqw8Xt8Y
+YCeo+bSB+skgJx0bkzDy/9Zt+es6LPX5oLDmx+YIXWeYXeSxVSrM7jZlRMm++BSl
+7PlcW6rgBYNUZLhNgO7+P+FmgpklUxxjGCFvrpP/u5P2rFCBcrbCqEBAC4tJ2SCc
+atzG+Xu+JPNiwGGsLfkNFxpunyXJ
+-----END CERTIFICATE-----`,
+		hash: 0xadd262b0,
+	},
+}
+
+func TestOpenSSLSubjectHashOldVectors(t *testing.T) {
+	for _, tc := range subjectHashOldVectors {
+		t.Run(tc.name, func(t *testing.T) {
+			block, _ := pem.Decode([]byte(tc.pem))
+			if block == nil {
+				t.Fatalf("vector PEM does not decode")
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				t.Fatalf("vector PEM does not parse: %v", err)
+			}
+			got := opensslSubjectHashOld(cert)
+			if got != tc.hash {
+				t.Fatalf("subject hash = %08x, want %08x (openssl x509 -subject_hash_old)", got, tc.hash)
+			}
+		})
+	}
+}
+
+func TestBakeAndroidAnchorUsesSubjectHashOldName(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, root, "system/etc/security/cacerts")
+	mustMkdir(t, root, "system/apex/com.android.conscrypt/cacerts")
+
+	vector := subjectHashOldVectors[0] // CN=Test Root CA, hash_old 13fbaf3f
+	res, err := Bake(root, []byte(vector.pem))
+	if err != nil {
+		t.Fatalf("Bake: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true, got %+v", res)
+	}
+	// Both Android store locations must carry the anchor under the
+	// X509_NAME_hash_old name: the conscrypt APEX copy is what
+	// Android 14+ reads, the classic path serves older releases and
+	// legacy tooling.
+	for _, dir := range []string{
+		"system/etc/security/cacerts",
+		"system/apex/com.android.conscrypt/cacerts",
+	} {
+		wantName := filepath.Join(root, dir, "13fbaf3f.0")
+		if _, err := os.Stat(wantName); err != nil {
+			t.Fatalf("Android anchor must be written as <subject_hash_old>.0 in %s: %v", dir, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, dir, AnchorFileName)); err == nil {
+			t.Fatalf("Android trust store %s must not carry the generic %s name", dir, AnchorFileName)
+		}
+	}
+}
+
+func TestBakeAbsoluteHostSymlinkNeverReachesHost(t *testing.T) {
+	// etc -> <absolute build-host path> (like Android's /etc ->
+	// /system/etc in shape, but pointing at a location that exists on
+	// the host and is NOT inside the rootfs). Resolution must rebase the
+	// target into the rootfs: the host side is never consulted, the
+	// tempting host bundle is neither read nor modified, and the bake
+	// succeeds with the seed landing at the guest-visible location
+	// inside the rootfs.
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// The "host" side carries a bundle file to tempt the append.
+	if err := os.MkdirAll(filepath.Join(outside, "ssl/certs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostBundle := filepath.Join(outside, "ssl/certs/ca-certificates.crt")
+	if err := os.WriteFile(hostBundle, []byte("existing host content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Escape Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("host-pointing symlink must be rebased, not a hard error: %v", err)
+	}
+	if !res.Baked || !res.Seeded {
+		t.Fatalf("expected Baked=true Seeded=true (seed at rebased target), got %+v", res)
+	}
+	if got := mustReadFile(t, hostBundle); got != "existing host content" {
+		t.Fatalf("host file was read or modified through the symlink: %q", got)
+	}
+	// The seed must land at the rebased target inside the rootfs
+	// (rootfs/<full absolute target>/ssl/certs/ca-certificates.crt),
+	// which is exactly what the guest itself would see through the
+	// link — not in the build host's directory.
+	seeded := filepath.Join(root, outside, "ssl/certs/ca-certificates.crt")
+	if _, err := os.Stat(seeded); err != nil {
+		t.Fatalf("seed must land inside the rootfs at the rebased target %q: %v", seeded, err)
+	}
+}
+
+func TestBakeAndroidEtcSymlinkResolvesInRootfs(t *testing.T) {
+	// Android layout: /etc -> /system/etc (absolute symlink), and the
+	// bundle lives under /system/etc/ssl/certs. Resolution must follow
+	// the link *inside the rootfs* and append to the real file, the
+	// same file the guest reaches through its own /etc.
+	root := t.TempDir()
+	mustWrite(t, root, "system/etc/ssl/certs/ca-certificates.crt", "-----BEGIN CERTIFICATE-----\n")
+	if err := os.Symlink("/system/etc", filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, der := makeCA(t, "Android Etc Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("Android /etc symlink must resolve inside the rootfs: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true, got %+v", res)
+	}
+	got := mustReadFile(t, filepath.Join(root, "system/etc/ssl/certs/ca-certificates.crt"))
+	if !bundleContainsDER([]byte(got), der) {
+		t.Fatalf("appended bundle must contain the CA DER through the /etc symlink")
+	}
+}
+
+func TestBakeRHLEAbsoluteSymlinkResolvesInRootfs(t *testing.T) {
+	// RHEL/Fedora layout: etc/pki/tls/certs/ca-bundle.crt is an absolute
+	// symlink to /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem, and
+	// the build host (also RHEL-family) happens to carry the same path
+	// with different content. The append must resolve the link inside
+	// the rootfs and write the in-rootfs target — never the host's
+	// file. Previously this hard-failed as a symlink escape.
+	root := t.TempDir()
+	host := t.TempDir()
+	mustMkdir(t, host, "etc/pki/ca-trust/extracted/pem")
+	hostBundle := filepath.Join(host, "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem")
+	if err := os.WriteFile(hostBundle, []byte("host bundle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, root, "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "-----BEGIN CERTIFICATE-----\n")
+	mustMkdir(t, root, "etc/pki/tls/certs")
+	if err := os.Symlink("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+		filepath.Join(root, "etc/pki/tls/certs/ca-bundle.crt")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, der := makeCA(t, "RHEL Symlink Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("RHEL absolute symlink must resolve inside the rootfs: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true, got %+v", res)
+	}
+	got := mustReadFile(t, filepath.Join(root, "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"))
+	if !bundleContainsDER([]byte(got), der) {
+		t.Fatalf("in-rootfs symlink target must contain the appended CA")
+	}
+	if got := mustReadFile(t, hostBundle); got != "host bundle" {
+		t.Fatalf("build-host bundle must be untouched, got %q", got)
+	}
+}
+
+func TestBakeRootfsDirItselfSymlinked(t *testing.T) {
+	// The rootfs is reached through a symlinked spelling (artifact dir
+	// behind a link). The walk must compare like with like: containment
+	// checks are anchored on the resolved root, so every path still
+	// resolves and the bake succeeds instead of rejecting everything.
+	realRoot := t.TempDir()
+	linkFarm := t.TempDir()
+	link := filepath.Join(linkFarm, "rootfs")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, realRoot, "usr/local/share/ca-certificates")
+
+	caPEM, _ := makeCA(t, "Linked Rootfs Test CA")
+	res, err := Bake(link, caPEM)
+	if err != nil {
+		t.Fatalf("rootfsDir behind a symlink must not reject everything: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true, got %+v", res)
+	}
+	anchor := filepath.Join(realRoot, "usr/local/share/ca-certificates", AnchorFileName)
+	if _, err := os.Stat(anchor); err != nil {
+		t.Fatalf("anchor must be written into the real rootfs: %v", err)
+	}
+}
+
+func TestBakeSymlinkLoopRejected(t *testing.T) {
+	// The bundle leaf resolves to a -> b -> a chain: the walk must
+	// reject it like Linux ELOOP instead of spinning forever.
+	root := t.TempDir()
+	mustMkdir(t, root, "etc/ssl/certs")
+	if err := os.Symlink("a", filepath.Join(root, "etc/ssl/certs/ca-certificates.crt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("b", filepath.Join(root, "etc/ssl/certs/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a", filepath.Join(root, "etc/ssl/certs/b")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Loop Test CA")
+	_, err := Bake(root, caPEM)
+	if err == nil || !strings.Contains(err.Error(), "symlink chain too deep") {
+		t.Fatalf("expected symlink-loop rejection, got %v", err)
+	}
+}
+
+func TestResolveUnderRootfsAbsoluteTargetDotDotClamped(t *testing.T) {
+	// etc -> "/../../../../system/etc": the absolute target carries
+	// leading "..", which must collapse at the guest root (POSIX: ".."
+	// at "/" is "/") *before* the target is rebased onto the rootfs.
+	// Joining the raw target instead lets filepath.Clean eat into the
+	// cleanRoot prefix and hand back a build-host path.
+	root := t.TempDir()
+	mustMkdir(t, root, "system/etc")
+	if err := os.Symlink("/../../../../../../../../system/etc", filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveUnderRootfs(root, "etc/x/y")
+	if err != nil {
+		t.Fatalf("leading-dotdot absolute target must clamp at the guest root, got: %v", err)
+	}
+	if !strings.HasPrefix(got, root+string(os.PathSeparator)) {
+		t.Fatalf("resolved path %q escaped the rootfs %q", got, root)
+	}
+	want := filepath.Join(root, "system/etc/x/y")
+	if got != want {
+		t.Fatalf("expected guest-faithful %q, got %q", want, got)
+	}
+}
+
+func TestResolveUnderRootfsSymlinkInsideTargetResolvesInRootfs(t *testing.T) {
+	// etc -> "link/ssl" and link -> "/tmp": the symlink target passes
+	// through a second symlink, so no single filesystem lookup may be
+	// handed the whole "rootfs/link/ssl" path — lstat(2) would follow
+	// link against the build host and steer the result out of the
+	// rootfs. The walk must resolve link as its own component, inside
+	// the rootfs, and land at the guest-visible tmp/ssl.
+	root := t.TempDir()
+	if err := os.Symlink("/tmp", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("link/ssl", filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, root, "tmp/ssl") // guest-faithful destination of etc
+
+	got, err := resolveUnderRootfs(root, "etc/ca.crt")
+	if err != nil {
+		t.Fatalf("symlinked target prefix must resolve inside the rootfs, got: %v", err)
+	}
+	if !strings.HasPrefix(got, root+string(os.PathSeparator)) {
+		t.Fatalf("resolved path %q escaped the rootfs %q", got, root)
+	}
+	want := filepath.Join(root, "tmp/ssl/ca.crt")
+	if got != want {
+		t.Fatalf("expected guest-faithful %q, got %q", want, got)
+	}
+	// The escape would materialize only at use time: with a buggy walk
+	// the returned path is lexically inside the rootfs but crosses the
+	// `link` symlink, so a MkdirAll on its parent would create
+	// directories on the build host. The walk must return a path whose
+	// *every component* is verified symlink-free.
+	if got == filepath.Join(root, "link/ssl/ca.crt") {
+		t.Fatalf("walk returned the unresolved link crossing %q", got)
+	}
+}
+
+func TestBakeDanglingSymlinkTreatedAsMissing(t *testing.T) {
+	// Android-style: etc -> <absolute path> that exists nowhere relevant.
+	// Resolution rebases the target into the rootfs; the rebased target
+	// is missing there, so the link keeps "missing" semantics for
+	// readers. The bake must still succeed via the anchor dirs and
+	// never touch the build host.
+	root := t.TempDir()
+	// Point at a path guaranteed not to exist: t.TempDir creates fresh
+	// unique dirs, so a subpath of it that was never created is safe.
+	dangling := filepath.Join(t.TempDir(), "nonexistent", "sub", "path")
+	if err := os.Symlink(dangling, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	// The anchor dirs exist as plain dirs inside the rootfs so something
+	// gets written and the bake is not a distroless seed.
+	mustMkdir(t, root, "usr/local/share/ca-certificates")
+
+	caPEM, _ := makeCA(t, "Dangling Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("dangling symlink must be treated as missing, got: %v", err)
+	}
+	if !res.Baked {
+		t.Fatalf("expected Baked=true via anchor dir, got %+v", res)
+	}
+}
+
+func TestBakeSeedRedirectedIntoRootfsNotHost(t *testing.T) {
+	// etc -> <absolute build-host dir that exists but has no ssl/certs
+	// under it>. The walk rebases the target into the rootfs, so the
+	// seed's MkdirAll builds the guest-visible directory tree *inside
+	// the rootfs* — the old raw-path fallback used to create the same
+	// directories on the build host through the symlink.
+	root := t.TempDir()
+	outside := t.TempDir() // exists on the host, empty
+	if err := os.Symlink(outside, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	// No other trust store: the seed path must be reachable.
+	caPEM, _ := makeCA(t, "Seed Escape Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("seed must be redirected into the rootfs, not fail: %v", err)
+	}
+	if !res.Baked || !res.Seeded {
+		t.Fatalf("expected Baked=true Seeded=true, got %+v", res)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("directories were created on the build host: %v", entries)
+	}
+	seeded := filepath.Join(root, outside, "ssl/certs/ca-certificates.crt")
+	if _, err := os.Stat(seeded); err != nil {
+		t.Fatalf("seed must land inside the rootfs at %q: %v", seeded, err)
+	}
+}
+
+func TestBakeSeedThroughSymlinkedLeafLandsAtGuestTarget(t *testing.T) {
+	// The seed leaf itself is a symlink to an absolute build-host file.
+	// Writing through the link must land at the guest-visible (rebased)
+	// location inside the rootfs — the host file itself is never
+	// opened, read, or modified.
+	root := t.TempDir()
+	outside := t.TempDir()
+	hostFile := filepath.Join(outside, "host-bundle")
+	if err := os.WriteFile(hostFile, []byte("existing host content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, root, "etc/ssl/certs")
+	if err := os.Symlink(hostFile, filepath.Join(root, "etc/ssl/certs/ca-certificates.crt")); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Leaf Escape Test CA")
+	res, err := Bake(root, caPEM)
+	if err != nil {
+		t.Fatalf("leaf symlink must resolve to the guest target, not fail: %v", err)
+	}
+	if !res.Baked || !res.Seeded {
+		t.Fatalf("expected Baked=true Seeded=true, got %+v", res)
+	}
+	if got := mustReadFile(t, hostFile); got != "existing host content" {
+		t.Fatalf("host file was modified through the leaf symlink: %q", got)
+	}
+	seeded := filepath.Join(root, hostFile)
+	if _, err := os.Stat(seeded); err != nil {
+		t.Fatalf("seed must land at the rebased guest target %q: %v", seeded, err)
+	}
+}
+
+func TestBakeRefusesWriteThroughSymlinkedTmp(t *testing.T) {
+	// appendBundle writes the merged bundle to a tmp path before renaming.
+	// An image could ship that exact tmp path as a symlink to a host file;
+	// writeFileNotThroughSymlink must refuse.
+	root := t.TempDir()
+	outside := t.TempDir()
+	hostFile := filepath.Join(outside, "host-tmp-target")
+	if err := os.WriteFile(hostFile, []byte("host target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, root, "etc/ssl/certs")
+	bundle := filepath.Join(root, "etc/ssl/certs/ca-certificates.crt")
+	if err := os.WriteFile(bundle, []byte("-----BEGIN CERTIFICATE-----\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(hostFile, bundle+".cube-egress-tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	caPEM, _ := makeCA(t, "Tmp Escape Test CA")
+	_, err := Bake(root, caPEM)
+	if err == nil || !strings.Contains(err.Error(), "refusing to write through symlink") {
+		t.Fatalf("expected tmp-symlink refusal, got %v", err)
+	}
+	if got := mustReadFile(t, hostFile); got != "host target" {
+		t.Fatalf("host file was modified through the tmp symlink: %q", got)
+	}
+}

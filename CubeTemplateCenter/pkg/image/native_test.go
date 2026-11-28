@@ -14,8 +14,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -785,4 +787,210 @@ func assertNotExists(t *testing.T, path string) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to NOT exist", filepath.Base(path))
 	}
+}
+
+func TestStripSelinuxXattrsRoundTrip(t *testing.T) {
+	// Build a layer tar carrying: a file with a selinux PAX record plus a
+	// non-selinux xattr (both must survive processing minus the selinux
+	// one), a plain file, and a directory.
+	var src bytes.Buffer
+	tw := tar.NewWriter(&src)
+	withXattrs := &tar.Header{
+		Name: "usr/bin/tool",
+		Mode: 0o755,
+		Size: int64(len("payload-with-xattrs")),
+		PAXRecords: map[string]string{
+			"SCHILY.xattr.security.selinux": "system_u:object_r:container_file_t:s0",
+			"SCHILY.xattr.user.keep":        "keep-me",
+		},
+	}
+	if err := tw.WriteHeader(withXattrs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("payload-with-xattrs")); err != nil {
+		t.Fatal(err)
+	}
+	plain := &tar.Header{Name: "etc/config", Mode: 0o644, Size: int64(len("plain"))}
+	if err := tw.WriteHeader(plain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("plain")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "var/tmp", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil { // writes the trailer
+		t.Fatal(err)
+	}
+
+	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()), nil, nil)
+	got, err := io.ReadAll(filtered)
+	if err != nil {
+		t.Fatalf("read filtered stream: %v", err)
+	}
+	if err := filtered.Close(); err != nil {
+		t.Fatalf("close after EOF: %v", err)
+	}
+
+	tr := tar.NewReader(bytes.NewReader(got))
+	entries := 0
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("filtered stream is not a valid tar (entry %d): %v", entries, err)
+		}
+		entries++
+		switch hdr.Name {
+		case "usr/bin/tool":
+			if _, ok := hdr.PAXRecords["SCHILY.xattr.security.selinux"]; ok {
+				t.Fatal("security.selinux PAX record must be stripped")
+			}
+			if hdr.PAXRecords["SCHILY.xattr.user.keep"] != "keep-me" {
+				t.Fatalf("non-selinux xattr must survive, got PAXRecords=%v", hdr.PAXRecords)
+			}
+			body, err := io.ReadAll(tr)
+			if err != nil || string(body) != "payload-with-xattrs" {
+				t.Fatalf("content corrupted: %q err=%v", body, err)
+			}
+		case "etc/config":
+			body, err := io.ReadAll(tr)
+			if err != nil || string(body) != "plain" {
+				t.Fatalf("plain content corrupted: %q err=%v", body, err)
+			}
+		case "var/tmp":
+			if hdr.Typeflag != tar.TypeDir {
+				t.Fatalf("dir entry corrupted: typeflag=%q", hdr.Typeflag)
+			}
+		default:
+			t.Fatalf("unexpected entry %q in filtered stream", hdr.Name)
+		}
+	}
+	if entries != 3 {
+		t.Fatalf("expected 3 entries, got %d", entries)
+	}
+}
+
+func TestStripSelinuxXattrsClosesCleanlyOnEarlyClose(t *testing.T) {
+	// A consumer that stops reading before EOF (archive.Apply error path)
+	// must be able to Close the reader without hanging or panicking; this
+	// is the contract that prevents the filter goroutine from leaking.
+	var src bytes.Buffer
+	tw := tar.NewWriter(&src)
+	for i := 0; i < 64; i++ {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: fmt.Sprintf("file-%03d", i), Mode: 0o644, Size: 1 << 20,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(make([]byte, 1<<20)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	filtered := stripSelinuxXattrs(bytes.NewReader(src.Bytes()), nil, nil)
+	if _, err := io.CopyN(io.Discard, filtered, 4096); err != nil {
+		t.Fatalf("partial read: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = filtered.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked: filter goroutine does not observe early close")
+	}
+}
+
+func TestStripSelinuxXattrsCloseClosesDecoderLast(t *testing.T) {
+	// Regression for the shutdown order: Close must drain pipe → underlying
+	// file → filter goroutine → decompress stream. The goroutine parks
+	// mid-read on the blocking source (no tar trailer), so the join can
+	// only complete via the file close; a spy decoder close asserts it
+	// runs after that file close, never before.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pw.Close()
+
+	// One tar header + payload WITHOUT the closing trailer: the goroutine
+	// consumes the entry and parks in tar.Reader.Next waiting for more.
+	// No need to read any filtered output — Close is tested from cold.
+	var src bytes.Buffer
+	tw := tar.NewWriter(&src)
+	if err := tw.WriteHeader(&tar.Header{Name: "a", Mode: 0o644, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write(src.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	spy := &decoderSpy{f: pr}
+	filtered := stripSelinuxXattrs(pr, pr, spy)
+	// Give the goroutine a moment to consume the entry and park.
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		_ = filtered.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked: the parked filter read must be unblocked by the file close")
+	}
+	if !spy.fileClosedAtDecoderClose() {
+		t.Fatal("decoder close must run after the underlying file close")
+	}
+	if spy.closeCount() != 1 {
+		t.Fatalf("decoder must be closed exactly once, got %d", spy.closeCount())
+	}
+}
+
+// decoderSpy records when the decompress stream is closed relative to the
+// underlying file. If Close's file step has not run yet, a read on the pipe
+// blocks (producer still open) and the 5 s test timeout fires; once the
+// file is closed the read returns immediately with ErrFileClosed.
+type decoderSpy struct {
+	mu     sync.Mutex
+	f      *os.File
+	closed bool
+	count  int
+}
+
+func (d *decoderSpy) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.count++
+	_, err := d.f.Read(make([]byte, 1))
+	if err == nil {
+		return errors.New("decoder spy read should fail on the closed source file")
+	}
+	d.closed = true
+	return nil
+}
+
+func (d *decoderSpy) fileClosedAtDecoderClose() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closed
+}
+
+func (d *decoderSpy) closeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.count
 }
