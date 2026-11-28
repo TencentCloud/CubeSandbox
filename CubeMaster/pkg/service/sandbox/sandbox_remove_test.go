@@ -65,6 +65,11 @@ func TestSetSyncDestroyFailurePreservesDeleteAutoResumeBusinessCodes(t *testing.
 		msg  string
 	}{
 		{
+			name: "resume rollback pending",
+			code: errorcode.MasterCode(cubeleterrorcode.ErrorCode_ResumeRollbackPending),
+			msg:  "previous resume rollback is in progress; retry after 2 seconds",
+		},
+		{
 			name: "capacity admission conflict",
 			code: errorcode.ErrorCode_Conflict,
 			msg:  "resume rejected by paused_resource_release_ratio policy: node capacity is unavailable",

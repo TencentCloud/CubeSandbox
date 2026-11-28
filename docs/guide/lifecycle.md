@@ -190,6 +190,18 @@ Cubelet asks the shim whether a Pause is allowed only when the shim declares it 
 
 When connecting or resuming a paused sandbox while another lifecycle operation on it is still settling, CubeAPI returns HTTP 503 with `Retry-After: 2` if the sandbox is not running yet; wait at least that long and retry. If a concurrent request has already resumed it, connect succeeds and returns the connection info, while `POST /sandboxes/<id>/resume` returns 409 (already running). A connect 409 can also mean the sandbox's container has already exited: that state is permanent, so retrying will not help — see [State Model](#state-model).
 
+A resume retry during cleanup of a failed resume on the same Cubelet returns HTTP 503 with `Retry-After: 2` through CubeAPI and the CubeOps SDK endpoints. An independent rollback coordinator retries cleanup in the background and preserves the original pause snapshot. DELETE joins an active cleanup or immediately retries a waiting cleanup, including one whose background retries have been slowed down. After cleanup succeeds, DELETE continues its normal deletion path. If cleanup does not complete within the request budget, DELETE returns the retryable HTTP 503 response while shared cleanup continues.
+
+After 60 actual cleanup failures, Cubelet emits an error log requesting operator investigation and reduces background retries to once every 10 minutes. Lifecycle-lock contention and destroy-workflow concurrency limits do not consume this failure budget. Operators can monitor `cubelet_resume_rollback_pending`, inspect rollback errors for the sandbox ID, and retry DELETE after fixing runtime or storage problems. Neither DELETE nor exhaustion of the retry budget bypasses runtime-exit verification.
+
+Treat `Retry-After` as the minimum delay before another request; cleanup can take longer. Retry the intended operation with the same sandbox ID, and bound the total retry time in your client. If HTTP 503 persists, inspect the Cubelet rollback error logs for that ID.
+
+Cubelet journals resume intents under `<cubebox-root>/resume-rollbacks/` before entering the create workflow and atomically persists runtime process identities and unresolved PID candidates before removing their bundle. Startup restores these tasks and their safety gates before serving resume requests, then resumes background cleanup. A journal write failure prevents entry to the create workflow or the corresponding teardown; unreadable or corrupt journals fail service initialization rather than silently discarding pending state. Keep this directory with the Cubelet's persistent state, and investigate journal errors rather than removing records while a runtime may still own resources.
+
+A successful resume is acknowledged only after its completed state is durably recorded. Failure to persist that state leaves the resume uncommitted and eligible for rollback. Once completion is durable, failure to remove the journal record is logged without failing the resume or tearing down the sandbox; startup recognizes completed records and only retries their removal.
+
+The journal coordinates requests reaching the same Cubelet, including after a Cubelet restart. It does not provide cluster-wide coordination when an S3-backed resume retry is placed on another node; cross-node rollback coordination remains outside this mechanism's scope.
+
 The deprecated `resume(timeout=...)` keeps its legacy `0` behavior:
 
 | `resume(timeout=...)` | Effect |

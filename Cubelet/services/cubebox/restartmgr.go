@@ -431,6 +431,9 @@ func (m *restartMgr) Recover() {
 		if cb.UserMarkDeletedTime != nil {
 			continue
 		}
+		if s, ok := m.restarter.(*service); ok && s.resumeRollbackPending(cb.ID) {
+			continue
+		}
 		req, err := cb.CopyOriginalRequest()
 		if err != nil || req == nil || !restartpolicy.KeepsRequest(req.GetRestartPolicy()) {
 			continue

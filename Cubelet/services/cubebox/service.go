@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/restartpolicy"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/rollback"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -222,6 +224,12 @@ func init() {
 				},
 			}
 
+			s.rollbacks, err = newResumeRollbackCoordinator(ic.Context, s, rollbackJournalDir(s))
+			if err != nil {
+				return nil, fmt.Errorf("recover resume rollback tasks: %w", err)
+			}
+			go s.rollbacks.Run()
+
 			// Publish the cubebox manager as the authoritative source of
 			// allocated-resource metrics so the cubelet heartbeat loop can
 			// pick it up without taking a hard dependency on this package.
@@ -263,6 +271,7 @@ type service struct {
 	cubebox.UnimplementedCubeboxMgrServer
 	numaNodeIndex         uint32
 	sandboxLifecycleLocks *utils.ResourceLocks
+	rollbacks             *rollback.Coordinator
 	restarts              *restartMgr
 
 	otherRuntime *ociRuntime
@@ -372,14 +381,40 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode()))
 	}()
 
-	// Stamped before any early failure so a failed restore is still attributed to the resume path.
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
+	resumeID := resumeFromPauseSandboxID(req)
+	if resumeID != "" {
+		// createid must allocate under the same canonical ID as the journal.
+		req.Annotations[constants.MasterAnnotationDesiredSandboxID] = resumeID
+		// Stamp resume attributes before the rollback gate or any other early failure.
 		span.SetAttributes(
 			attribute.String(telemetry.AttrAction, "resume"),
 			attribute.String(telemetry.AttrSnapshotID,
 				strings.TrimSpace(req.GetAnnotations()[constants.MasterAnnotationPauseSnapshotID])),
 		)
+		if s.resumeRollbackPending(resumeID) {
+			setResumeRollbackPending(rsp.Ret)
+			return rsp, nil
+		}
+		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
+			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, resumeID)))
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, resumeID)
+		lockSpan.End()
+		if lockErr != nil {
+			if s.resumeRollbackPending(resumeID) {
+				setResumeRollbackPending(rsp.Ret)
+				return rsp, nil
+			}
+			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		defer unlock()
+		if s.resumeRollbackPending(resumeID) {
+			setResumeRollbackPending(rsp.Ret)
+			return rsp, nil
+		}
 	}
+
 	if b := strings.TrimSpace(req.GetBackend()); b != "" {
 		if req.Annotations == nil {
 			req.Annotations = map[string]string{}
@@ -407,19 +442,6 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
-	}
-	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
-		lockCtx, lockSpan := telemetry.Start(ctx, telemetry.SpanCreateLock,
-			trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, sid)))
-		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, sid)
-		lockSpan.End()
-		if lockErr != nil {
-			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
-			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
-			return rsp, nil
-		}
-		defer unlock()
 	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
@@ -540,6 +562,31 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	s.cubeboxMgr.armPausedTombstone(ctx, req, createInfo)
 	ctx = workflow.WithCreateContext(ctx, createInfo)
+	var createErr error
+	var resumeTask *rollback.Task
+	// Services without a coordinator retain the original workflow failover.
+	// Production initialization requires a coordinator before serving requests.
+	if constants.IsCubeRuntime(ctx) && resumeID != "" && createInfo.Failover && s.rollbacks != nil {
+		resumeTask, createErr = s.prepareResumeRollback(ctx, resumeID, req.RequestID)
+		if createErr != nil {
+			rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
+			if status, ok := ret.FromError(createErr); ok {
+				rsp.Ret.RetCode = status.Code()
+			}
+			rsp.Ret.RetMsg = createErr.Error()
+			return rsp, nil
+		}
+		createInfo.RollbackCoordinator = s
+		defer func() {
+			// Cover a panic outside workflow step recovery as well as normal
+			// failures. An unfinished create must not stay unscheduled.
+			if resumeTask.Snapshot().Preparing && s.rollbacks.Current(resumeTask) {
+				if err := s.rollbacks.Activate(resumeID); err != nil {
+					log.G(ctx).Errorf("activate interrupted resume cleanup: %v", err)
+				}
+			}
+		}()
+	}
 	armedID := ""
 	if s.restarts != nil && restartpolicy.KeepsRequest(req.GetRestartPolicy()) && !createInfo.IsCreateSnapshot() {
 		id := ""
@@ -559,9 +606,20 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 			armedID = id
 		}
 	}
-	var createErr error
 	if constants.IsCubeRuntime(ctx) {
 		createErr = s.engine.Create(ctx, createInfo)
+		if resumeTask != nil {
+			if createErr == nil {
+				// Success requires a durable completion marker. Once saved,
+				// journal removal errors are non-fatal and cannot activate cleanup.
+				createErr = s.rollbacks.Complete(resumeTask)
+			}
+			if createErr != nil {
+				if err := s.rollbacks.Activate(resumeID); err != nil {
+					log.G(ctx).Errorf("activate resume cleanup for %s: %v", resumeID, err)
+				}
+			}
+		}
 	} else {
 		if createInfo.SandboxID == "" {
 			createInfo.SandboxID = utils.GenerateID()
@@ -899,11 +957,28 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
 	ctx = log.WithLogger(ctx, stepLog)
 
-	if getErr == nil && constants.IsCubeRuntime(ctx) {
+	if (getErr == nil && constants.IsCubeRuntime(ctx)) || s.resumeRollbackPending(req.SandboxID) {
+		if getErr == nil && !sandboxDeletable(sb, req.GetFilter()) {
+			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
+			rsp.Ret.RetMsg = "unmatched filter"
+			return rsp, nil
+		}
+		if s.resumeRollbackPending(req.SandboxID) {
+			// Join the shared cleanup without holding its lifecycle lock. This
+			// also bypasses the slow retry interval for an explicit DELETE.
+			if err := s.joinResumeRollback(ctx, req.SandboxID); err != nil {
+				setResumeRollbackPending(rsp.Ret)
+				return rsp, nil
+			}
+		}
 		// Serialize Destroy with Pause/Resume. CoW Pause already exited the shim;
 		// Destroy never wakes a paused sandbox (no resume-before-delete).
 		lockDeadline, ok := deleteLifecycleLockDeadline(ctx, time.Now())
 		if !ok {
+			if s.resumeRollbackPending(req.SandboxID) {
+				setResumeRollbackPending(rsp.Ret)
+				return rsp, nil
+			}
 			rsp.Ret.RetMsg = "cannot start delete: insufficient time remains for the Cubelet RPC response; retry DELETE after 5 seconds"
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 			return rsp, nil
@@ -912,12 +987,20 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		defer lockCancel()
 		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(lockCtx, req.SandboxID)
 		if lockErr != nil {
+			if s.resumeRollbackPending(req.SandboxID) {
+				setResumeRollbackPending(rsp.Ret)
+				return rsp, nil
+			}
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry DELETE after 2 seconds"
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 			return rsp, nil
 		}
 		defer unlock()
 
+		if s.resumeRollbackPending(req.SandboxID) {
+			setResumeRollbackPending(rsp.Ret)
+			return rsp, nil
+		}
 		sb, ctx, getErr = s.loadDestroySandboxRuntime(destroyCtx, req.SandboxID)
 		ctx = log.WithLogger(ctx, stepLog)
 	}
@@ -1120,6 +1203,9 @@ func (s *service) List(ctx context.Context, req *cubebox.ListCubeSandboxRequest)
 	}
 	var cbs []*cubebox.CubeSandbox
 	for _, cb := range cubeboxInStore {
+		if s.resumeRollbackPending(cb.ID) {
+			continue
+		}
 		cbs = append(cbs, toGRPCCubeBox(cb, req.GetOption()))
 	}
 
@@ -1188,6 +1274,11 @@ func (s *service) filterGRPCContainer(sbs []*cubebox.CubeSandbox, req *cubebox.L
 	}
 
 	if req.GetId() != "" {
+		// The failed runtime can still look RUNNING to containerd. Let
+		// CubeMaster use its pause binding while the runtime is being reaped.
+		if s.resumeRollbackPending(req.GetId()) {
+			return nil
+		}
 		sb, err := s.cubeboxMgr.cubeboxManger.Get(context.Background(), req.GetId())
 		if err != nil {
 			return nil
@@ -1330,7 +1421,9 @@ func (s *service) destroyDeadContainers() {
 	ctx := CubeLog.WithRequestTrace(context.Background(), rt)
 	ctx = log.WithLogger(ctx, log.NewWrapperLogEntry(log.AuditLogger.WithContext(ctx)))
 	for range s.cleaner.heartbeat.C() {
-		dc := s.cubeboxMgr.cubeboxManger.List()
+		dc := slices.DeleteFunc(s.cubeboxMgr.cubeboxManger.List(), func(sb *cubeboxstore.CubeBox) bool {
+			return s.resumeRollbackPending(sb.ID)
+		})
 		if len(dc) == 0 {
 			continue
 		}

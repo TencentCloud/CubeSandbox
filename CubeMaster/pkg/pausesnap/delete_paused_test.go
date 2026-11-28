@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	cubeleterrorcode "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
 	"gorm.io/gorm"
@@ -331,6 +333,49 @@ func TestCheckDestroyRet(t *testing.T) {
 	require.Error(t, checkDestroyRet(&cubebox.DestroyCubeSandboxResponse{
 		Ret: &cubeleterrorcode.Ret{RetCode: cubeleterrorcode.ErrorCode_Unknown, RetMsg: "disk full"},
 	}, "sb", "destroy"))
+}
+
+func TestCheckDestroyRetPreservesRetryableLifecycleErrors(t *testing.T) {
+	for _, code := range []cubeleterrorcode.ErrorCode{
+		cubeleterrorcode.ErrorCode_ResumeRollbackPending,
+		cubeleterrorcode.ErrorCode_TaskStateInvalid,
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			message := "sandbox lifecycle operation is in progress; retry DELETE after 2 seconds"
+			err := checkDestroyRet(&cubebox.DestroyCubeSandboxResponse{
+				Ret: &cubeleterrorcode.Ret{RetCode: code, RetMsg: message},
+			}, "sb", "delete paused tombstone")
+			status, ok := ret.FromError(err)
+			require.True(t, ok)
+			require.Equal(t, errorcode.MasterCode(code), status.Code())
+			require.Equal(t, message, status.Message())
+		})
+	}
+}
+
+func TestTryDeletePausedKeepsBindingDuringResumeRollback(t *testing.T) {
+	for _, status := range []string{statusReady, statusFailed} {
+		t.Run(status, func(t *testing.T) {
+			db := setupPauseDeleteTest(t)
+			seedPauseBinding(t, db, "sb-rollback", "snap-rollback", status, "10.0.0.8")
+			_, cleans := mockCubeletOK(t)
+			destroyOnCubelet = func(context.Context, string, *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+				return &cubebox.DestroyCubeSandboxResponse{Ret: &cubeleterrorcode.Ret{
+					RetCode: cubeleterrorcode.ErrorCode_ResumeRollbackPending,
+					RetMsg:  "resume rollback pending",
+				}}, nil
+			}
+			handled, err := TryDeletePaused(context.Background(), "req", "sb-rollback", "10.0.0.8")
+			require.True(t, handled)
+			statusErr, ok := ret.FromError(err)
+			require.True(t, ok)
+			require.Equal(t, errorcode.MasterCode(cubeleterrorcode.ErrorCode_ResumeRollbackPending), statusErr.Code())
+			require.Empty(t, *cleans, "pending rollback must preserve the pause package")
+			rec, err := GetBySandbox(context.Background(), "sb-rollback")
+			require.NoError(t, err)
+			require.Equal(t, status, rec.Status)
+		})
+	}
 }
 
 func TestDropPausedTombstoneLeavesPausePackage(t *testing.T) {
