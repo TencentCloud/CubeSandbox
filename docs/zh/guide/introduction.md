@@ -37,7 +37,7 @@ CubeSandbox 是一款**专为 AI Agent 打造的开源沙箱基础设施** —�
 
 ### 极简部署与生产级运维
 
-* **🚀 全场景开箱即用**：提供一键部署脚本，几分钟即可拉起完整环境。支持在无 `/dev/kvm` 的普通云服务器上通过 [PVM](./pvm-deploy.md) 部署，也支持[裸金属部署](./bare-metal-deploy.md)、[多机集群部署](./multi-node-deploy.md)、[Kubernetes（Helm）部署](./kubernetes/)与[腾讯云 Terraform 部署](./tencentcloud-terraform-deploy.md)。
+* **🚀 全场景开箱即用**：提供一键部署脚本，几分钟即可拉起完整环境。支持在无 `/dev/kvm` 的普通云服务器上通过 [PVM](./pvm-deploy.md) 部署，也支持[裸金属部署](./bare-metal-deploy.md)、[多机集群部署](./multi-node-deploy.md)、[Kubernetes（Helm）部署](./kubernetes/)、[混合部署（K8s 控制面 + 物理机/虚拟机数据面）](./hybrid-deploy.md)与[腾讯云 Terraform 部署](./tencentcloud-terraform-deploy.md)。
 
 * **📦 模板系统**：一步将 [OCI 镜像转化为模板](./tutorials/template-from-image.md)，支持模板别名、将运行中沙箱提交为模板、从模板商店安装预设及多节点自动分发。详见[模板概览](./templates.md)。
 
@@ -98,7 +98,7 @@ with Sandbox.create(template="<你的模板ID>") as sandbox:
 * [PVM 部署](./pvm-deploy.md) — 在无 `/dev/kvm` 的普通云服务器上快速部署。
 * [裸金属部署](./bare-metal-deploy.md) / [本地构建部署](./self-build-deploy.md) — 原生 KVM 物理机或源码构建单机部署。
 * [多机集群部署](./multi-node-deploy.md) — 横向扩展到多节点生产集群。
-* [Kubernetes 部署](./kubernetes/) / [腾讯云集群（Terraform）](./tencentcloud-terraform-deploy.md) — 使用 Helm 或 Terraform 自动化部署。
+* [Kubernetes 部署](./kubernetes/) / [混合部署](./hybrid-deploy.md) / [腾讯云集群（Terraform）](./tencentcloud-terraform-deploy.md) — 使用 Helm、K8s 控制面 + 物理机/虚拟机数据面混合架构或 Terraform 自动化部署。
 
 ### 深入了解与运维
 

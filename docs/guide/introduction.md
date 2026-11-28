@@ -37,7 +37,7 @@ CubeSandbox is an **open-source sandbox infrastructure purpose-built for AI Agen
 
 ### Simple Deployment & Production Operations
 
-* **🚀 Ready Out of the Box**: A minimal one-click script brings up a complete environment in minutes. Deploy on standard cloud VMs without `/dev/kvm` via [PVM](./pvm-deploy.md), or run on [bare metal](./bare-metal-deploy.md), [multi-node clusters](./multi-node-deploy.md), [Kubernetes (Helm)](./kubernetes/), and [Tencent Cloud (Terraform)](./tencentcloud-terraform-deploy.md).
+* **🚀 Ready Out of the Box**: A minimal one-click script brings up a complete environment in minutes. Deploy on standard cloud VMs without `/dev/kvm` via [PVM](./pvm-deploy.md), or run on [bare metal](./bare-metal-deploy.md), [multi-node clusters](./multi-node-deploy.md), [Kubernetes (Helm)](./kubernetes/), [hybrid deployments (K8s control plane + bare-metal/VM data plane)](./hybrid-deploy.md), and [Tencent Cloud (Terraform)](./tencentcloud-terraform-deploy.md).
 
 * **📦 Template System**: Convert [OCI images into templates](./tutorials/template-from-image.md) in one step, use template aliases, commit running sandboxes as templates, install presets from the Template Store, and auto-distribute across nodes. See [Templates Overview](./templates.md).
 
@@ -98,7 +98,7 @@ Explore real-world production deployments in [Case Studies](./usecases/) and run
 * [PVM Deployment](./pvm-deploy.md) — deploy on standard cloud servers without `/dev/kvm`.
 * [Bare-Metal Deployment](./bare-metal-deploy.md) / [Self-Build Deployment](./self-build-deploy.md) — deploy on native KVM hosts or build from source.
 * [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale out to a multi-node production cluster.
-* [Kubernetes Deployment](./kubernetes/) / [Tencent Cloud Cluster (Terraform)](./tencentcloud-terraform-deploy.md) — automated Helm or Terraform installation.
+* [Kubernetes Deployment](./kubernetes/) / [Hybrid Deployment](./hybrid-deploy.md) / [Tencent Cloud Cluster (Terraform)](./tencentcloud-terraform-deploy.md) — automated Helm installation, hybrid K8s control plane + bare-metal/VM data plane, or Terraform provisioning.
 
 ### Dive Deeper & Operate
 

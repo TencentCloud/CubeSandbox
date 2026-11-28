@@ -1,0 +1,293 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="776" viewBox="0 0 1160 776">
+  <defs>
+    <style>
+      .f { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .title { font-size: 18px; font-weight: 700; fill: #0f172a; }
+      .subtitle { font-size: 12.5px; fill: #64748b; }
+      .legend { font-size: 11.5px; font-weight: 500; fill: #475569; }
+      .badge-text { font-size: 11px; font-weight: 700; fill: #ffffff; }
+      .sec-label { font-size: 10.5px; font-weight: 700; fill: #64748b; letter-spacing: 0.4px; }
+      .card-title { font-size: 13px; font-weight: 700; fill: #0f172a; }
+      .card-sub { font-size: 11px; fill: #475569; }
+      .port-text { font-size: 10.5px; font-weight: 600; }
+      .edge-title { font-size: 11px; font-weight: 700; }
+      .edge-port { font-size: 10.5px; font-weight: 600; }
+      .vm-title { font-size: 11.5px; font-weight: 700; fill: #f8fafc; }
+      .vm-sub { font-size: 10px; fill: #94a3b8; }
+      .note-sm { font-size: 10.5px; fill: #78350f; }
+    </style>
+    <marker id="arr-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 1.2 L9.5 5 L0 8.8 Z" fill="#059669"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 1.2 L9.5 5 L0 8.8 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 1.2 L9.5 5 L0 8.8 Z" fill="#0d9488"/>
+    </marker>
+    <marker id="arr-slate" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 1.2 L9.5 5 L0 8.8 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 1.2 L9.5 5 L0 8.8 Z" fill="#d97706"/>
+    </marker>
+    <marker id="arr-amber-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M10 1.2 L0.5 5 L10 8.8 Z" fill="#d97706"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas -->
+  <rect x="0.75" y="0.75" width="1158.5" height="774.5" rx="14" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="110" height="24" rx="6" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="83" y="34" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#1d4ed8">CUBESANDBOX</text>
+  <text x="150" y="36" class="f title">混合部署架构</text>
+  <text x="272" y="36" class="f subtitle">Kubernetes 控制面 · 物理机 / 虚拟机数据面</text>
+
+  <!-- Legend -->
+  <circle cx="820" cy="31" r="4.5" fill="#059669"/>
+  <text x="830" y="35" class="f legend">控制面链路</text>
+  <circle cx="916" cy="31" r="4.5" fill="#2563eb"/>
+  <text x="926" y="35" class="f legend">数据面流量</text>
+  <circle cx="1012" cy="31" r="4.5" fill="#d97706"/>
+  <text x="1022" y="35" class="f legend">共享对象存储</text>
+  <line x1="28" y1="54" x2="1132" y2="54" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Band 1: External Clients -->
+  <rect x="28" y="66" width="836" height="46" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+  <rect x="52" y="74" width="242" height="30" rx="7" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="173" y="93.5" text-anchor="middle" class="f card-title" font-size="12.5">AI Agent / E2B SDK</text>
+
+  <rect x="325" y="74" width="242" height="30" rx="7" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="446" y="93.5" text-anchor="middle" class="f card-title" font-size="12.5">外部客户端 / 浏览器</text>
+
+  <rect x="598" y="74" width="242" height="30" rx="7" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="719" y="93.5" text-anchor="middle" class="f card-title" font-size="12.5">集群运维 / 管理员</text>
+
+  <!-- Client -> K8s arrows (cleanly stop at K8s top border y=156) -->
+  <line x1="173" y1="112" x2="173" y2="150" stroke="#059669" stroke-width="1.8" marker-end="url(#arr-green)"/>
+  <rect x="121" y="121" width="104" height="19" rx="5" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1"/>
+  <text x="173" y="134" text-anchor="middle" class="mono port-text" fill="#047857">REST API :3000</text>
+
+  <line x1="446" y1="112" x2="446" y2="150" stroke="#2563eb" stroke-width="2" marker-end="url(#arr-blue)"/>
+  <rect x="386" y="121" width="120" height="19" rx="5" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="446" y="134" text-anchor="middle" class="mono port-text" fill="#1d4ed8">HTTP / WS / gRPC</text>
+
+  <line x1="719" y1="112" x2="719" y2="150" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr-slate)"/>
+  <rect x="673" y="121" width="92" height="19" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="719" y="134" text-anchor="middle" class="mono port-text" fill="#475569">WebUI :12088</text>
+
+  <!-- Band 2: Kubernetes Control Plane -->
+  <rect x="28" y="156" width="836" height="276" rx="12" fill="#f4f8ff" stroke="#3b82f6" stroke-width="1.6" stroke-dasharray="6 4"/>
+  <rect x="44" y="166" width="352" height="24" rx="12" fill="#2563eb"/>
+  <text x="220" y="182" text-anchor="middle" class="f badge-text">Kubernetes 控制面（Helm: cubeNode.enabled=false）</text>
+  <text x="848" y="182" text-anchor="end" class="f sec-label">仅部署控制面与入口 · 不启用 cube-node DaemonSet</text>
+
+  <!-- K8s Tier 1: Entrypoints -->
+  <text x="44" y="203" class="f sec-label">对外入口层 · Ingress / LoadBalancer / NodePort</text>
+
+  <rect x="44" y="209" width="258" height="52" rx="8" fill="#ffffff" stroke="#10b981" stroke-width="1.5"/>
+  <text x="58" y="230" class="f card-title" fill="#065f46">cube-api</text>
+  <rect x="242" y="216" width="48" height="19" rx="5" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1"/>
+  <text x="266" y="229.5" text-anchor="middle" class="mono port-text" fill="#047857">:3000</text>
+  <text x="58" y="249" class="f card-sub">E2B 兼容沙箱控制 API</text>
+
+  <rect x="317" y="209" width="258" height="52" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6"/>
+  <text x="331" y="230" class="f card-title" fill="#1e3a8a">cube-proxy</text>
+  <rect x="467" y="216" width="96" height="19" rx="5" fill="#dbeafe" stroke="#93c5fd" stroke-width="1"/>
+  <text x="515" y="229.5" text-anchor="middle" class="mono port-text" fill="#1d4ed8">:80 / 443 / 9090</text>
+  <text x="331" y="249" class="f card-sub">沙箱数据面反向代理入口</text>
+
+  <rect x="590" y="209" width="258" height="52" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.3"/>
+  <text x="604" y="230" class="f card-title">cube-webui</text>
+  <rect x="782" y="216" width="54" height="19" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="809" y="229.5" text-anchor="middle" class="mono port-text" fill="#334155">:12088</text>
+  <text x="604" y="249" class="f card-sub">集群与沙箱管理控制台</text>
+
+  <!-- K8s Tier 2: Core Orchestration -->
+  <text x="44" y="277" class="f sec-label">核心编排与运维 · Deployments</text>
+
+  <rect x="44" y="283" width="192" height="62" rx="8" fill="#ffffff" stroke="#059669" stroke-width="1.5"/>
+  <text x="56" y="303" class="f card-title" fill="#065f46">cube-master</text>
+  <rect x="180" y="289" width="46" height="19" rx="5" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1"/>
+  <text x="203" y="302.5" text-anchor="middle" class="mono port-text" fill="#047857">:8089</text>
+  <text x="56" y="321" class="f card-sub">调度 · 生命周期管理</text>
+  <text x="56" y="336" class="f card-sub">模板分发 · 根 CA 下发</text>
+
+  <rect x="248" y="283" width="192" height="62" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="260" y="303" class="f card-title">templatecenter</text>
+  <rect x="386" y="289" width="44" height="19" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="408" y="302.5" text-anchor="middle" class="mono port-text" fill="#334155">:8090</text>
+  <text x="260" y="321" class="f card-sub">OCI 镜像转沙箱模板</text>
+  <text x="260" y="336" class="f card-sub">模板构建与版本管理</text>
+
+  <rect x="452" y="283" width="192" height="62" rx="8" fill="#ffffff" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="464" y="303" class="f card-title" fill="#115e59">cube-ops</text>
+  <rect x="588" y="289" width="46" height="19" rx="5" fill="#f0fdfa" stroke="#99f6e4" stroke-width="1"/>
+  <text x="611" y="302.5" text-anchor="middle" class="mono port-text" fill="#0f766e">:3010</text>
+  <text x="464" y="321" class="f card-sub">节点注册 · 心跳探测</text>
+  <text x="464" y="336" class="f card-sub">配额下发 · 组件仓库</text>
+
+  <rect x="656" y="283" width="192" height="62" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="668" y="303" class="f card-title">lifecycle-manager</text>
+  <rect x="794" y="289" width="44" height="19" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="816" y="302.5" text-anchor="middle" class="mono port-text" fill="#334155">:8083</text>
+  <text x="668" y="321" class="f card-sub">自动暂停 / 按需唤醒</text>
+  <text x="668" y="336" class="f card-sub">CLI（cubemastercli）</text>
+
+  <!-- K8s Tier 3: State Dependencies -->
+  <text x="44" y="361" class="f sec-label">状态与依赖存储 · K8s 内置 StatefulSet 或外部托管</text>
+
+  <rect x="44" y="367" width="395" height="51" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="60" y="389" class="f card-title">MySQL / PostgreSQL</text>
+  <text x="60" y="407" class="f card-sub">沙箱记录、模板元数据、节点分组与权限配置</text>
+
+  <rect x="453" y="367" width="395" height="51" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.3"/>
+  <text x="469" y="389" class="f card-title">Redis</text>
+  <text x="469" y="407" class="f card-sub">CubeProxy 沙箱路由表、节点心跳与生命周期状态</text>
+
+  <!-- Right Column: Shared Object Storage -->
+  <rect x="888" y="156" width="244" height="276" rx="12" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="6 4"/>
+  <rect x="904" y="166" width="154" height="24" rx="12" fill="#d97706"/>
+  <text x="981" y="182" text-anchor="middle" class="f badge-text">共享对象存储（推荐）</text>
+
+  <rect x="904" y="209" width="212" height="146" rx="8" fill="#ffffff" stroke="#fbbf24" stroke-width="1.4"/>
+  <text x="918" y="232" class="f card-title" fill="#92400e">外部 S3 / COS / MinIO</text>
+  <rect x="918" y="241" width="84" height="19" rx="5" fill="#fef3c7" stroke="#fde68a" stroke-width="1"/>
+  <text x="960" y="254.5" text-anchor="middle" class="mono port-text" fill="#b45309">:443 / :9000</text>
+  <text x="918" y="281" class="f card-sub">• S3 Volume 持久化卷</text>
+  <text x="918" y="301" class="f card-sub">• 模板制品存储（支持多副本）</text>
+  <text x="918" y="321" class="f card-sub">• 多版本组件仓库</text>
+  <text x="918" y="341" class="f card-sub">• 可选跨机快照（JuiceFS/S3lvol）</text>
+
+  <rect x="904" y="367" width="212" height="51" rx="8" fill="#fef3c7" stroke="#fde68a" stroke-width="1"/>
+  <text x="918" y="388" class="f note-sm" font-weight="700">K8s 与计算节点均需可达</text>
+  <text x="918" y="406" class="f note-sm">无 S3 时可降级为 fs 模式</text>
+
+  <!-- K8s <-> S3 horizontal arrow -->
+  <line x1="866" y1="306" x2="886" y2="306" stroke="#d97706" stroke-width="1.8" marker-start="url(#arr-amber-start)" marker-end="url(#arr-amber)"/>
+
+  <!-- Inter-Plane L3 Network Boundary -->
+  <line x1="28" y1="473" x2="1132" y2="473" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="4 4"/>
+
+  <!-- 5 clean vertical cross-plane arrows (y=432 to y=514) -->
+  <!-- 1: Schedule/Lifecycle gRPC :9999 (K8s -> Compute) -->
+  <line x1="140" y1="432" x2="140" y2="508" stroke="#059669" stroke-width="2" marker-end="url(#arr-green)"/>
+  <rect x="44" y="455" width="192" height="36" rx="7" fill="#ecfdf5" stroke="#10b981" stroke-width="1.3"/>
+  <text x="140" y="470" text-anchor="middle" class="f edge-title" fill="#065f46">调度 / 生命周期指令</text>
+  <text x="140" y="485" text-anchor="middle" class="mono edge-port" fill="#047857">gRPC :9999</text>
+
+  <!-- 2: Sandbox Traffic :20000-29999 (K8s CubeProxy -> Compute) -->
+  <line x1="358" y1="432" x2="358" y2="508" stroke="#2563eb" stroke-width="2.2" marker-end="url(#arr-blue)"/>
+  <rect x="262" y="455" width="192" height="36" rx="7" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.3"/>
+  <text x="358" y="470" text-anchor="middle" class="f edge-title" fill="#1e3a8a">沙箱数据面流量代理</text>
+  <text x="358" y="485" text-anchor="middle" class="mono edge-port" fill="#1d4ed8">TCP :20000-29999</text>
+
+  <!-- 3: Register/Heartbeat/Templates/CA (Compute -> K8s) -->
+  <line x1="576" y1="514" x2="576" y2="438" stroke="#0d9488" stroke-width="2" marker-end="url(#arr-teal)"/>
+  <rect x="480" y="455" width="192" height="36" rx="7" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.3"/>
+  <text x="576" y="470" text-anchor="middle" class="f edge-title" fill="#115e59">注册心跳 · 拉取模板/CA</text>
+  <text x="576" y="485" text-anchor="middle" class="mono edge-port" fill="#0f766e">:3010 · :8089</text>
+
+  <!-- 4: Quota Config Push (K8s CubeOps -> Compute ops-agent) -->
+  <line x1="794" y1="432" x2="794" y2="508" stroke="#64748b" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-slate)"/>
+  <rect x="698" y="455" width="192" height="36" rx="7" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.3"/>
+  <text x="794" y="470" text-anchor="middle" class="f edge-title" fill="#334155">动态配额推送（可选）</text>
+  <text x="794" y="485" text-anchor="middle" class="mono edge-port" fill="#475569">HTTP :8890</text>
+
+  <!-- 5: S3 Volume / Components (S3 <-> Compute) -->
+  <line x1="1010" y1="438" x2="1010" y2="508" stroke="#d97706" stroke-width="1.8" marker-start="url(#arr-amber-start)" marker-end="url(#arr-amber)"/>
+  <rect x="920" y="455" width="180" height="36" rx="7" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.3"/>
+  <text x="1010" y="470" text-anchor="middle" class="f edge-title" fill="#92400e">Volume / 组件下载</text>
+  <text x="1010" y="485" text-anchor="middle" class="mono edge-port" fill="#b45309">S3 :443 / :9000</text>
+
+  <!-- Band 3: Data Plane (Bare-Metal / VM Compute Nodes) -->
+  <rect x="28" y="514" width="1104" height="244" rx="12" fill="#f8fafc" stroke="#0f766e" stroke-width="1.6"/>
+  <rect x="44" y="524" width="494" height="24" rx="12" fill="#0f766e"/>
+  <text x="291" y="540" text-anchor="middle" class="f badge-text">数据面 · 物理机 / 虚拟机计算节点（install-compute.sh + systemd · 无 K8s DaemonSet）</text>
+
+  <rect x="916" y="525" width="200" height="22" rx="11" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+  <text x="1016" y="539.5" text-anchor="middle" class="f" font-size="10.5" font-weight="700" fill="#047857">内网 L3 与 K8s 控制面双向互通</text>
+
+  <!-- Compute Node #1 -->
+  <rect x="44" y="558" width="432" height="186" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="60" y="582" class="f card-title" font-size="13.5">计算节点 #1</text>
+  <rect x="152" y="567" width="102" height="20" rx="5" fill="#f0fdfa" stroke="#99f6e4" stroke-width="1"/>
+  <text x="203" y="580.5" text-anchor="middle" class="f port-text" fill="#0f766e">原生 KVM / PVM</text>
+  <rect x="262" y="567" width="128" height="20" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="326" y="580.5" text-anchor="middle" class="mono port-text" fill="#475569">XFS /data/cubelet</text>
+
+  <!-- Node 1 Left: Sandboxes + Cubelet -->
+  <rect x="60" y="597" width="112" height="52" rx="7" fill="#0f172a"/>
+  <text x="116" y="619" text-anchor="middle" class="f vm-title">Sandbox #1</text>
+  <text x="116" y="636" text-anchor="middle" class="f vm-sub">MicroVM + CubeShim</text>
+
+  <rect x="180" y="597" width="112" height="52" rx="7" fill="#0f172a"/>
+  <text x="236" y="619" text-anchor="middle" class="f vm-title">Sandbox #2</text>
+  <text x="236" y="636" text-anchor="middle" class="f vm-sub">MicroVM + CubeShim</text>
+
+  <rect x="60" y="659" width="232" height="71" rx="8" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.3"/>
+  <text x="74" y="680" class="f card-title" fill="#115e59">Cubelet</text>
+  <text x="134" y="680" class="f card-sub" fill="#0f766e">+ 内嵌 CubeVS 网络</text>
+  <text x="74" y="699" class="mono port-text" fill="#0f766e">gRPC :9999  ·  HTTP :9998</text>
+  <text x="74" y="717" class="f card-sub">沙箱映射端口 20000-29999</text>
+
+  <!-- Node 1 Right: CubeEgress + ops-agent -->
+  <rect x="304" y="597" width="158" height="66" rx="8" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.2"/>
+  <text x="316" y="618" class="f card-title" fill="#1e3a8a">CubeEgress</text>
+  <text x="316" y="635" class="mono port-text" fill="#1d4ed8">Docker hostNet</text>
+  <text x="316" y="652" class="f card-sub">透明出站代理与策略</text>
+
+  <rect x="304" y="673" width="158" height="57" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="316" y="694" class="f card-title">ops-agent</text>
+  <rect x="406" y="681" width="46" height="18" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="429" y="693.5" text-anchor="middle" class="mono port-text" fill="#334155">:8890</text>
+  <text x="316" y="716" class="f card-sub">配额同步与节点管理</text>
+
+  <!-- Compute Node #2 -->
+  <rect x="492" y="558" width="432" height="186" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="508" y="582" class="f card-title" font-size="13.5">计算节点 #2</text>
+  <rect x="600" y="567" width="102" height="20" rx="5" fill="#f0fdfa" stroke="#99f6e4" stroke-width="1"/>
+  <text x="651" y="580.5" text-anchor="middle" class="f port-text" fill="#0f766e">原生 KVM / PVM</text>
+  <rect x="710" y="567" width="128" height="20" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="774" y="580.5" text-anchor="middle" class="mono port-text" fill="#475569">XFS /data/cubelet</text>
+
+  <!-- Node 2 Left: Sandboxes + Cubelet -->
+  <rect x="508" y="597" width="112" height="52" rx="7" fill="#0f172a"/>
+  <text x="564" y="619" text-anchor="middle" class="f vm-title">Sandbox #3</text>
+  <text x="564" y="636" text-anchor="middle" class="f vm-sub">MicroVM + CubeShim</text>
+
+  <rect x="628" y="597" width="112" height="52" rx="7" fill="#0f172a"/>
+  <text x="684" y="619" text-anchor="middle" class="f vm-title">Sandbox #4</text>
+  <text x="684" y="636" text-anchor="middle" class="f vm-sub">MicroVM + CubeShim</text>
+
+  <rect x="508" y="659" width="232" height="71" rx="8" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.3"/>
+  <text x="522" y="680" class="f card-title" fill="#115e59">Cubelet</text>
+  <text x="582" y="680" class="f card-sub" fill="#0f766e">+ 内嵌 CubeVS 网络</text>
+  <text x="522" y="699" class="mono port-text" fill="#0f766e">gRPC :9999  ·  HTTP :9998</text>
+  <text x="522" y="717" class="f card-sub">沙箱映射端口 20000-29999</text>
+
+  <!-- Node 2 Right: CubeEgress + ops-agent -->
+  <rect x="752" y="597" width="158" height="66" rx="8" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.2"/>
+  <text x="764" y="618" class="f card-title" fill="#1e3a8a">CubeEgress</text>
+  <text x="764" y="635" class="mono port-text" fill="#1d4ed8">Docker hostNet</text>
+  <text x="764" y="652" class="f card-sub">透明出站代理与策略</text>
+
+  <rect x="752" y="673" width="158" height="57" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="764" y="694" class="f card-title">ops-agent</text>
+  <rect x="854" y="681" width="46" height="18" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="877" y="693.5" text-anchor="middle" class="mono port-text" fill="#334155">:8890</text>
+  <text x="764" y="716" class="f card-sub">配额同步与节点管理</text>
+
+  <!-- Scale-out Node #N -->
+  <rect x="940" y="558" width="176" height="186" rx="10" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <text x="1028" y="593" text-anchor="middle" class="f card-title" fill="#334155">+ 计算节点 #N</text>
+  <text x="1028" y="613" text-anchor="middle" class="f card-sub">按需横向扩容</text>
+  <line x1="964" y1="628" x2="1092" y2="628" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="956" y="652" class="f card-sub">• 支持 x86_64 / ARM64</text>
+  <text x="956" y="674" class="f card-sub">• 物理机或 PVM 虚机</text>
+  <text x="956" y="696" class="f card-sub">• 独立执行脚本即可接入</text>
+  <text x="956" y="718" class="f card-sub">• 自动注册至 CubeOps</text>
+</svg>
