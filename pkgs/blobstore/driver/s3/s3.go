@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -36,17 +37,18 @@ const (
 
 	metaSHA256Key = "sha256"
 
-	extraEndpoint      = "endpoint"
-	extraNodeEndpoint  = "node_endpoint"
-	extraAccessKey     = "access_key_id"
-	extraSecretKey     = "secret_access_key"
-	extraRegion        = "region"
-	extraPathStyle     = "path_style"
-	extraUseSSL        = "use_ssl"
-	extraCreateBucket  = "create_bucket"
-	extraPutTimeout    = "put_timeout"
-	extraPresignExpiry = "presign_expiry"
-	extraAttachment    = "attachment_basename"
+	extraEndpoint        = "endpoint"
+	extraNodeEndpoint    = "node_endpoint"
+	extraAccessKey       = "access_key_id"
+	extraSecretKey       = "secret_access_key"
+	extraRegion          = "region"
+	extraPathStyle       = "path_style"
+	extraAddressingStyle = "addressing_style"
+	extraUseSSL          = "use_ssl"
+	extraCreateBucket    = "create_bucket"
+	extraPutTimeout      = "put_timeout"
+	extraPresignExpiry   = "presign_expiry"
+	extraAttachment      = "attachment_basename"
 )
 
 // Options is the typed configuration for the s3 driver.
@@ -58,6 +60,10 @@ type Options struct {
 	Bucket          string
 	Region          string
 	PathStyle       bool
+	// A non-empty AddressingStyle overrides PathStyle even when both are set.
+	// Valid values are auto, path, and virtual.
+	// Empty preserves the legacy PathStyle behavior (false means auto).
+	AddressingStyle string
 	UseSSL          *bool
 	CreateBucket    bool
 	PutTimeout      time.Duration
@@ -69,16 +75,17 @@ type Options struct {
 
 func (o Options) Config(prefix string) blobstore.Config {
 	extra := map[string]string{
-		extraEndpoint:      o.Endpoint,
-		extraNodeEndpoint:  o.NodeEndpoint,
-		extraAccessKey:     o.AccessKeyID,
-		extraSecretKey:     o.SecretAccessKey,
-		extraRegion:        o.Region,
-		extraPathStyle:     strconv.FormatBool(o.PathStyle),
-		extraCreateBucket:  strconv.FormatBool(o.CreateBucket),
-		extraPutTimeout:    o.PutTimeout.String(),
-		extraPresignExpiry: o.PresignExpiry.String(),
-		extraAttachment:    strconv.FormatBool(o.AttachmentBasename),
+		extraEndpoint:        o.Endpoint,
+		extraNodeEndpoint:    o.NodeEndpoint,
+		extraAccessKey:       o.AccessKeyID,
+		extraSecretKey:       o.SecretAccessKey,
+		extraRegion:          o.Region,
+		extraPathStyle:       strconv.FormatBool(o.PathStyle),
+		extraAddressingStyle: o.AddressingStyle,
+		extraCreateBucket:    strconv.FormatBool(o.CreateBucket),
+		extraPutTimeout:      o.PutTimeout.String(),
+		extraPresignExpiry:   o.PresignExpiry.String(),
+		extraAttachment:      strconv.FormatBool(o.AttachmentBasename),
 	}
 	if o.UseSSL != nil {
 		extra[extraUseSSL] = strconv.FormatBool(*o.UseSSL)
@@ -131,16 +138,15 @@ func open(cfg blobstore.Config) (*store, error) {
 	if region == "" {
 		region = "us-east-1"
 	}
-	pathStyle := extra(cfg, extraPathStyle) != "false"
-	lookup := minio.BucketLookupAuto
-	if pathStyle {
-		lookup = minio.BucketLookupPath
+	nodeEP := extra(cfg, extraNodeEndpoint)
+	lookup, err := addressingLookup(extra(cfg, extraAddressingStyle), endpoint, nodeEP, extra(cfg, extraPathStyle) != "false")
+	if err != nil {
+		return nil, err
 	}
 	client, err := newMinioClient(endpoint, ak, sk, region, lookup, extra(cfg, extraUseSSL))
 	if err != nil {
 		return nil, err
 	}
-	nodeEP := extra(cfg, extraNodeEndpoint)
 	if nodeEP == "" {
 		nodeEP = endpoint
 	}
@@ -181,6 +187,52 @@ func open(cfg blobstore.Config) (*store, error) {
 	}, nil
 }
 
+// ValidateAddressing checks the configured policy and endpoint forms without
+// contacting S3. Services use it before startup to catch explicit mistakes.
+func (o Options) ValidateAddressing() error {
+	_, err := addressingLookup(o.AddressingStyle, o.Endpoint, o.NodeEndpoint, o.PathStyle)
+	return err
+}
+
+func addressingLookup(rawStyle, endpoint, nodeEndpoint string, pathStyle bool) (minio.BucketLookupType, error) {
+	switch strings.ToLower(strings.TrimSpace(rawStyle)) {
+	case "":
+		if pathStyle {
+			return minio.BucketLookupPath, nil
+		}
+		return minio.BucketLookupAuto, nil
+	case "auto":
+		return minio.BucketLookupAuto, nil // Keep minio-go's endpoint heuristics.
+	case "path":
+		return minio.BucketLookupPath, nil
+	case "virtual":
+		if err := validateVirtualEndpoint(endpoint); err != nil {
+			return minio.BucketLookupAuto, fmt.Errorf("blobstore/s3: data endpoint: %w", err)
+		}
+		if err := validateVirtualEndpoint(nodeEndpoint); err != nil {
+			return minio.BucketLookupAuto, fmt.Errorf("blobstore/s3: presign endpoint: %w", err)
+		}
+		return minio.BucketLookupDNS, nil
+	default:
+		return minio.BucketLookupAuto, fmt.Errorf("blobstore/s3: invalid addressing_style %q (want auto, path, or virtual)", rawStyle)
+	}
+}
+
+func validateVirtualEndpoint(endpoint string) error {
+	if strings.TrimSpace(endpoint) == "" {
+		return nil
+	}
+	host, _, err := parseEndpoint(endpoint, "")
+	if err != nil {
+		return err
+	}
+	u := url.URL{Host: host}
+	if _, err := netip.ParseAddr(u.Hostname()); err == nil {
+		return fmt.Errorf("virtual addressing requires a DNS hostname, got IP endpoint %q", host)
+	}
+	return nil
+}
+
 func extra(cfg blobstore.Config, k string) string {
 	if cfg.Extra == nil {
 		return ""
@@ -191,7 +243,7 @@ func extra(cfg blobstore.Config, k string) string {
 func newMinioClient(endpoint, accessKey, secret, region string, lookup minio.BucketLookupType, useSSL string) (*minio.Client, error) {
 	host, secure, err := parseEndpoint(endpoint, useSSL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("blobstore/s3: %w", err)
 	}
 	c, err := minio.New(host, &minio.Options{
 		Creds:        credentials.NewStaticV4(accessKey, secret, ""),
@@ -208,7 +260,7 @@ func newMinioClient(endpoint, accessKey, secret, region string, lookup minio.Buc
 func parseEndpoint(endpoint, useSSL string) (host string, secure bool, err error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
-		return "", false, fmt.Errorf("blobstore/s3: endpoint is empty")
+		return "", false, fmt.Errorf("endpoint is empty")
 	}
 	if !strings.Contains(endpoint, "://") {
 		switch strings.ToLower(useSSL) {
@@ -222,7 +274,7 @@ func parseEndpoint(endpoint, useSSL string) (host string, secure bool, err error
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", false, fmt.Errorf("blobstore/s3: parse endpoint %q: %w", endpoint, err)
+		return "", false, fmt.Errorf("parse endpoint %q: %w", endpoint, err)
 	}
 	switch u.Scheme {
 	case "https":
@@ -230,13 +282,13 @@ func parseEndpoint(endpoint, useSSL string) (host string, secure bool, err error
 	case "http":
 		secure = false
 	default:
-		return "", false, fmt.Errorf("blobstore/s3: endpoint %q: unsupported scheme %q", endpoint, u.Scheme)
+		return "", false, fmt.Errorf("endpoint %q: unsupported scheme %q", endpoint, u.Scheme)
 	}
 	if u.Host == "" {
-		return "", false, fmt.Errorf("blobstore/s3: endpoint %q has no host", endpoint)
+		return "", false, fmt.Errorf("endpoint %q has no host", endpoint)
 	}
 	if u.Path != "" && u.Path != "/" {
-		return "", false, fmt.Errorf("blobstore/s3: endpoint %q: path-prefixed endpoints are not supported", endpoint)
+		return "", false, fmt.Errorf("endpoint %q: path-prefixed endpoints are not supported", endpoint)
 	}
 	return u.Host, secure, nil
 }

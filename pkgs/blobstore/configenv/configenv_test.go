@@ -4,17 +4,45 @@
 
 package configenv
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func clearArtifactEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		EnvS3Endpoint, EnvS3Bucket, EnvS3AccessKeyID, LegacyEnvS3AccessKey,
 		EnvS3SecretAccessKey, LegacyEnvS3SecretKey, EnvS3Region, EnvS3UsePathStyle,
+		EnvS3AddressingStyle,
 		EnvS3UseSSL, EnvS3ArtifactPrefix, EnvArtifactStoreBackend, EnvArtifactStoreFSRoot,
 		EnvRootfsArtifactStoreDir,
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestValidateArtifactS3Addressing(t *testing.T) {
+	clearArtifactEnv(t)
+	t.Setenv(EnvS3AddressingStyle, " Vritual ")
+	t.Setenv(EnvS3Endpoint, "https://store.example.test")
+	t.Setenv(EnvS3Bucket, "artifacts")
+	t.Setenv(EnvS3AccessKeyID, "ak")
+	if err := ValidateArtifactS3Addressing(); err != nil {
+		t.Fatalf("incomplete S3 config must keep the existing fallback: %v", err)
+	}
+	t.Setenv(EnvS3SecretAccessKey, "sk")
+	if err := ValidateArtifactS3Addressing(); err == nil || !strings.Contains(err.Error(), EnvS3AddressingStyle) {
+		t.Fatalf("invalid explicit style must fail before configuring clients: %v", err)
+	}
+	t.Setenv(EnvArtifactStoreBackend, "fs")
+	if err := ValidateArtifactS3Addressing(); err != nil {
+		t.Fatalf("filesystem backend must ignore S3: %v", err)
+	}
+	t.Setenv(EnvArtifactStoreBackend, "s3")
+	t.Setenv(EnvS3AddressingStyle, " ViRtUaL ")
+	if err := ValidateArtifactS3Addressing(); err != nil {
+		t.Fatalf("valid style must work with whitespace and mixed case: %v", err)
 	}
 }
 
@@ -27,18 +55,20 @@ func TestParseArtifactS3Complete(t *testing.T) {
 	t.Setenv(EnvS3Region, "us-east-1")
 	t.Setenv(EnvS3ArtifactPrefix, "template-artifacts")
 	t.Setenv(EnvS3UsePathStyle, "true")
+	t.Setenv(EnvS3AddressingStyle, "virtual")
 	t.Setenv(EnvS3UseSSL, "1")
 	got := ParseArtifactS3()
 	want := ArtifactS3{
-		Enabled:      true,
-		Endpoint:     "http://minio:9000",
-		Bucket:       "artifacts",
-		AccessKey:    "ak",
-		SecretKey:    "sk",
-		Region:       "us-east-1",
-		Prefix:       "template-artifacts",
-		UsePathStyle: true,
-		UseSSL:       true,
+		Enabled:         true,
+		Endpoint:        "http://minio:9000",
+		Bucket:          "artifacts",
+		AccessKey:       "ak",
+		SecretKey:       "sk",
+		Region:          "us-east-1",
+		Prefix:          "template-artifacts",
+		UsePathStyle:    true,
+		AddressingStyle: "virtual",
+		UseSSL:          true,
 	}
 	if got != want {
 		t.Fatalf("got %+v, want %+v", got, want)

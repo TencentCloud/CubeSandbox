@@ -20,17 +20,18 @@ import (
 
 // Config holds S3/MinIO or fs connection parameters.
 type Config struct {
-	Driver         string // "s3" (default) or "fs"
-	Endpoint       string
-	Bucket         string
-	AccessKey      string
-	SecretKey      string
-	Region         string
-	UsePathStyle   bool
-	UseSSL         bool
-	PresignExpiry  time.Duration
-	ArtifactPrefix string
-	FSRoot         string
+	Driver          string // "s3" (default) or "fs"
+	Endpoint        string
+	Bucket          string
+	AccessKey       string
+	SecretKey       string
+	Region          string
+	UsePathStyle    bool
+	AddressingStyle string
+	UseSSL          bool
+	PresignExpiry   time.Duration
+	ArtifactPrefix  string
+	FSRoot          string
 }
 
 // DefaultPresignExpiry is the default presigned URL validity (7 days, the
@@ -96,6 +97,7 @@ func openConfiguredStore(cfg Config) (blobstore.Store, error) {
 			Bucket:             cfg.Bucket,
 			Region:             cfg.Region,
 			PathStyle:          cfg.UsePathStyle,
+			AddressingStyle:    cfg.AddressingStyle,
 			UseSSL:             &useSSL,
 			PresignExpiry:      cfg.PresignExpiry,
 			AttachmentBasename: true,

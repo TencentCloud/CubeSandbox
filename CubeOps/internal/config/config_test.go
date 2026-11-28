@@ -201,6 +201,66 @@ warehouse:
 	}
 }
 
+func TestLoad_S3AddressingStyle(t *testing.T) {
+	for _, tc := range []struct {
+		name, yamlStyle, envStyle, want string
+		pathStyle                       bool
+	}{
+		{name: "unset preserves default", pathStyle: true},
+		{name: "unset preserves false"},
+		{name: "YAML auto", yamlStyle: "auto", want: "auto", pathStyle: true},
+		{name: "YAML path", yamlStyle: "path", want: "path"},
+		{name: "YAML virtual", yamlStyle: "virtual", want: "virtual", pathStyle: true},
+		{name: "env overrides YAML", yamlStyle: "path", envStyle: "virtual", want: "virtual", pathStyle: true},
+		{name: "empty env preserves YAML", yamlStyle: "virtual", want: "virtual"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			pathStyle := "false"
+			if tc.pathStyle {
+				pathStyle = "true"
+			}
+			yaml := "database_url: mysql://root:pass@127.0.0.1:3306/testdb\ns3:\n  path_style: " + pathStyle + "\n  addressing_style: \"" + tc.yamlStyle + "\"\n"
+			if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CUBE_OPS_CONFIG", path)
+			t.Setenv("CUBE_OPS_S3_ADDRESSING_STYLE", tc.envStyle)
+			t.Setenv("CUBE_OPS_S3_PATH_STYLE", "")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.S3.AddressingStyle != tc.want || cfg.S3.UsePathStyle() != tc.pathStyle {
+				t.Fatalf("S3 addressing style=%q path style=%v, want %q/%v", cfg.S3.AddressingStyle, cfg.S3.UsePathStyle(), tc.want, tc.pathStyle)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidS3AddressingStyle(t *testing.T) {
+	t.Setenv("CUBE_OPS_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CUBE_OPS_STORE_BACKEND", "s3")
+	t.Setenv("CUBE_OPS_S3_ADDRESSING_STYLE", "vritual")
+	t.Setenv("CUBE_OPS_S3_ENDPOINT", "https://storage.example.test")
+	t.Setenv("CUBE_OPS_S3_ACCESS_KEY_ID", "ak")
+	t.Setenv("CUBE_OPS_S3_SECRET_ACCESS_KEY", "")
+	if _, err := Load(); err != nil {
+		t.Fatalf("incomplete S3 config must keep the existing fallback: %v", err)
+	}
+	t.Setenv("CUBE_OPS_S3_SECRET_ACCESS_KEY", "sk")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CUBE_OPS_S3_ADDRESSING_STYLE") {
+		t.Fatalf("invalid warehouse style must fail config loading: %v", err)
+	}
+	t.Setenv("CUBE_OPS_STORE_BACKEND", "fs")
+	t.Setenv("CUBE_OPS_STORE_FS_ROOT", t.TempDir())
+	t.Setenv("CUBE_OPS_STORE_FS_PUBLIC_URL", "https://ops.example.test")
+	t.Setenv("CUBE_OPS_STORE_FS_SIGNING_KEY", "test-signing-key")
+	if _, err := Load(); err != nil {
+		t.Fatalf("filesystem backend must ignore S3: %v", err)
+	}
+}
+
 func TestLoad_DefaultS3Bucket(t *testing.T) {
 	t.Setenv("CUBE_OPS_CONFIG", "/nonexistent/path/config.yaml")
 	t.Setenv("DATABASE_URL", "mysql://root:pass@127.0.0.1:3306/envdb")

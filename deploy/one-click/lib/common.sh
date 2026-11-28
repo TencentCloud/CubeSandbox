@@ -55,6 +55,24 @@ warn() {
 # shellcheck source=../scripts/common/validation.sh
 source "${ONE_CLICK_DIR}/scripts/common/validation.sh"
 
+ONE_CLICK_S3_ADDRESSING_KEYS=(CUBE_S3_ADDRESSING_STYLE CUBE_OPS_S3_ADDRESSING_STYLE)
+
+# These two settings use one assignment per line, with an optional export.
+normalize_s3_addressing_env() {
+  sed -E 's/^[[:blank:]]*(export[[:blank:]]+)?(CUBE_(OPS_)?S3_ADDRESSING_STYLE=)/\2/' "$1"
+}
+
+validate_s3_addressing_styles() {
+  local key style
+  for key in "${ONE_CLICK_S3_ADDRESSING_KEYS[@]}"; do
+    style="$(normalize_s3_addressing_style "${!key-}")"
+    case "${style}" in
+      ""|auto|path|virtual) ;;
+      *) die "invalid ${key}. Use auto, path, virtual, or an empty value." ;;
+    esac
+  done
+}
+
 # Avoid `ldd --version | head -1` under strict mode: `head` may exit early and
 # SIGPIPE `ldd`, which turns a valid glibc probe into a false failure.
 detect_glibc_version() {
@@ -482,6 +500,46 @@ validate_cubelet_s3lvol_startup_deps() {
   log "CubeS3lvol startup dependencies OK: ${cmds[*]} + $(ldd "${s3lvol_bin}" 2>/dev/null | awk '/=> \//{n++} END{print n+0}') shared libs resolved; S3 config at ${s3_cfg}"
 }
 
+# Called after fill_s3_from_local_minio so the effective endpoint is known.
+validate_bundled_minio_addressing() {
+  [[ "${DEPLOY_ROLE}" != compute && "${CUBE_SANDBOX_MINIO_ENABLED}" == 1 ]] || return 0
+
+  local shared_style ops_style ops_backend ops_endpoint endpoint minio_authority
+  shared_style="$(normalize_s3_addressing_style "${CUBE_S3_ADDRESSING_STYLE:-}")"
+  ops_style="$(normalize_s3_addressing_style "${CUBE_OPS_S3_ADDRESSING_STYLE:-}")"
+  if [[ "${shared_style}" == virtual &&
+        "$(normalize_s3_addressing_style "${CUBE_ARTIFACT_STORE_BACKEND}")" != fs ]]; then
+    die "CUBE_S3_ADDRESSING_STYLE=virtual requires an external S3 endpoint; bundled MinIO uses path style"
+  fi
+
+  ops_backend="$(normalize_s3_addressing_style "${CUBE_OPS_STORE_BACKEND:-}")"
+  [[ "${ops_style:-${shared_style}}" == virtual && "${ops_backend:-s3}" == s3 ]] || return 0
+  ops_endpoint="${CUBE_OPS_S3_ENDPOINT:-${CUBE_S3_ENDPOINT}}"
+  minio_authority="${CUBE_S3_ENDPOINT#*://}"
+  for endpoint in "${ops_endpoint}" "${CUBE_OPS_S3_NODE_ENDPOINT:-${ops_endpoint}}"; do
+    endpoint="$(normalize_s3_addressing_style "${endpoint}")"
+    endpoint="${endpoint#*://}"
+    endpoint="${endpoint%%[/?#]*}"
+    if [[ "${endpoint##*@}" == "${minio_authority,,}" ]]; then
+      die "CubeOps virtual addressing requires external S3 data and download endpoints; bundled MinIO uses path style"
+    fi
+  done
+}
+
+# Preserve .env expressions on install. On upgrade, only rewrite settings
+# explicitly supplied for this run. The merger carries forward omitted keys.
+persist_s3_addressing_styles() {
+  local env_file="$1" mode="$2" key
+  for key in "${ONE_CLICK_S3_ADDRESSING_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      [[ "${mode}" == upgrade ]] || continue
+    elif [[ -z "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      continue
+    fi
+    upsert_env_kv "${env_file}" "${key}" "${!key}"
+  done
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "this script must run as root"
@@ -527,6 +585,7 @@ ONE_CLICK_TOGGLE_KEYS=(
   CUBE_PVM_ENABLE
   OTEL_EXPORTER_OTLP_ENDPOINT
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+  "${ONE_CLICK_S3_ADDRESSING_KEYS[@]}"
 )
 
 # snapshot_one_click_toggles: capture this-run operator intent for
@@ -553,6 +612,15 @@ snapshot_one_click_toggles() {
     if [[ -n "${!key+x}" ]]; then
       ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
     fi
+    # S3 styles use the presence of a standalone assignment as intent.
+    case "${key}" in
+      CUBE_S3_ADDRESSING_STYLE|CUBE_OPS_S3_ADDRESSING_STYLE)
+        if [[ -f "${env_file}" ]] && grep -Eq "^[[:blank:]]*(export[[:blank:]]+)?${key}=" "${env_file}"; then
+          ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]=""
+        fi
+        continue
+        ;;
+    esac
     if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
       value="$(read_env_key "${env_file}" "${key}")"
       case "${key}" in

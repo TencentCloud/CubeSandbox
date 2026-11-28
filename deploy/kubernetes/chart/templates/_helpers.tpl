@@ -768,13 +768,76 @@ cannot feed env injection -- combine it with global.env instead.
 {{- if and (ne (include "cube.volumeS3EffectiveEndpoint" .) "") (or $hasPlainCreds (eq (include "cube.minioBuiltinEnabled" .) "true")) -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{/* Select the last entry for a name, using the same order as the pod. */}}
+{{- define "cube.lastEnvEntry" -}}
+{{- $entry := dict -}}
+{{- range .env -}}
+{{- if eq .name $.name -}}{{- $entry = . -}}{{- end -}}
+{{- end -}}
+{{- toJson $entry -}}
+{{- end -}}
+
+{{/* Match the bundled MinIO Service's DNS names, regardless of URL spelling. */}}
+{{- define "cube.isBuiltinMinioEndpoint" -}}
+{{- $endpoint := .endpoint | trim | lower -}}
+{{- $address := regexReplaceAll "^https?://" $endpoint "" -}}
+{{- $authority := regexFind "^[^/?#]*" $address -}}
+{{- $hostPort := regexReplaceAll "^.*@" $authority "" -}}
+{{- $host := regexReplaceAll ":[0-9]*$" $hostPort "" | trimSuffix "." -}}
+{{- $service := include "cube.minioName" .root | lower -}}
+{{- $namespace := .root.Release.Namespace | lower -}}
+{{- $domain := include "cube.clusterDomain" .root | lower | trimSuffix "." -}}
+{{- $serviceInNamespace := printf "%s.%s" $service $namespace -}}
+{{- $svc := printf "%s.svc" $serviceInNamespace -}}
+{{- if has $host (list $service $serviceInNamespace $svc (printf "%s.%s" $svc $domain)) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/* Apply the last pod env override. A valueFrom reference is unknown at render time. */}}
+{{- define "cube.effectiveEnvValue" -}}
+{{- $entry := include "cube.lastEnvEntry" . | fromJson -}}
+{{- if $entry -}}
+{{- $entry.value | default "" | toString -}}
+{{- else -}}
+{{- .default | default "" | toString -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Validate the effective style, preserving the type of Helm values. */}}
+{{- define "cube.s3AddressingStyle" -}}
+{{- $style := .default -}}
+{{- $setting := .setting -}}
+{{- $entry := include "cube.lastEnvEntry" . | fromJson -}}
+{{- if $entry -}}
+{{- $setting = printf "%s %s" .envSetting .name -}}
+{{- $style = $entry.value -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $style) -}}
+{{- if not (and (kindIs "string" $style) (has ($style | toString | trim | lower) (list "" "auto" "path" "virtual"))) -}}
+{{- fail (printf "%s must be empty, auto, path, or virtual" $setting) -}}
+{{- end -}}
+{{- $style | trim | lower -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Render a chart style only when the operator does not supply that env name. */}}
+{{- define "cube.s3AddressingStyleEnv" -}}
+{{- $style := .default | default "" | toString | trim | lower -}}
+{{- if and $style (empty (include "cube.lastEnvEntry" . | fromJson)) -}}
+- name: {{ .name }}
+  value: {{ $style | quote }}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Path style for the artifact store S3 client (CUBE_S3_USE_PATH_STYLE). The
 builtin MinIO is only reachable path-style: virtual-host addressing would
 resolve <bucket>.cube-minio.<ns>.svc..., which cluster DNS cannot resolve
 (the chart already writes -ouse_path_request_style into volume-s3.conf for
 the same reason). An external volumeS3 endpoint keeps the binary default
-(false = virtual-host, AWS-style) unless the operator sets volumeS3.pathStyle.
+(false = SDK automatic selection) unless the operator sets volumeS3.pathStyle.
+An explicit artifactStore.s3AddressingStyle takes precedence in the binaries.
 */}}
 {{- define "cube.artifactS3PathStyle" -}}
 {{- $volumeS3 := default dict .Values.volumeS3 -}}
@@ -791,10 +854,8 @@ true
 
 {{/*
 The CUBE_S3_* env block rendered into BOTH the cube-master and
-cube-templatecenter Deployments. Emitted only when s3Backed=true and
-global.env does not already carry the set; placed BEFORE the global.env block
-so an operator entry with the same name still wins (on duplicate env names
-kubelet keeps the last one).
+cube-templatecenter Deployments. Credentials are injected only when
+s3Backed=true and global.env does not already carry the set.
 */}}
 {{- define "cube.artifactS3Env" -}}
 {{- if and (((.Values.controlPlane.artifactStore).s3Backed) | default false) (eq (include "cube.globalEnvS3State" .) "absent") (eq (include "cube.artifactS3Injectable" .) "true") }}

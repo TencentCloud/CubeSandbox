@@ -53,10 +53,22 @@ export CUBE_OPS_S3_BUCKET="${CUBE_OPS_S3_BUCKET:-cube-ops}"
 if [[ -z "${CUBE_OPS_S3_REGION:-}" && -n "${CUBE_S3_REGION:-}" ]]; then
   export CUBE_OPS_S3_REGION="${CUBE_S3_REGION}"
 fi
+if [[ -z "$(normalize_s3_addressing_style "${CUBE_OPS_S3_ADDRESSING_STYLE:-}")" && -n "${CUBE_S3_ADDRESSING_STYLE:-}" ]]; then
+  export CUBE_OPS_S3_ADDRESSING_STYLE="${CUBE_S3_ADDRESSING_STYLE}"
+fi
 if [[ -z "${CUBE_OPS_S3_PATH_STYLE:-}" && -n "${CUBE_S3_S3FS_EXTRA_OPTS:-}" ]]; then
   if [[ "${CUBE_S3_S3FS_EXTRA_OPTS}" == *use_path_request_style* ]]; then
     export CUBE_OPS_S3_PATH_STYLE=true
   fi
+fi
+s3_backend="$(normalize_s3_addressing_style "${CUBE_OPS_STORE_BACKEND:-}")"
+if [[ "${s3_backend:-s3}" == "s3" ]]; then
+  s3_style="$(normalize_s3_addressing_style "${CUBE_OPS_S3_ADDRESSING_STYLE:-}")"
+  case "$(normalize_s3_addressing_style "${CUBE_OPS_S3_PATH_STYLE:-}"):${s3_style}" in
+    true:auto|true:virtual|1:auto|1:virtual|yes:auto|yes:virtual|on:auto|on:virtual)
+      log "WARNING: CUBE_OPS_S3_ADDRESSING_STYLE=${s3_style} overrides CUBE_OPS_S3_PATH_STYLE"
+      ;;
+  esac
 fi
 # Optional warehouse knobs from .one-click.env (defaults live in CubeOps):
 #   CUBE_OPS_WAREHOUSE_UPLOAD_TIMEOUT

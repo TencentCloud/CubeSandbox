@@ -179,6 +179,21 @@ One-click does not create an extra global `configs/` layer on the target machine
 
 `Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is, and its embedded network runtime reads the network plugin configuration from `Cubelet/config/config.toml` directly. `cube-api` and `cubeops` read environment variables from `.one-click.env` on startup. CubeOps warehouse knobs are `CUBE_OPS_WAREHOUSE_*` (timeouts, GitHub/CNB allow-lists and tokens) plus `CUBE_OPS_S3_*`; by default the warehouse reuses the volume MinIO/S3 connection with a dedicated `cube-ops` bucket, so no extra S3 setup is needed. There is no CubeOps YAML file in the one-click layout. `cube-api` listens on `0.0.0.0:3000` by default and forwards to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and run in Docker containers managed by dedicated systemd services on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy`, built locally from the bundled build context, and managed by systemd. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway` under systemd management.
 
+For COS/OBS endpoints that require virtual-hosted addressing, set
+`CUBE_S3_ADDRESSING_STYLE=virtual` in `.env`. CubeMaster and CubeTemplateCenter use
+the shared setting. CubeOps inherits it unless `CUBE_OPS_S3_ADDRESSING_STYLE`
+has a non-empty value after trimming whitespace. The installer rejects
+`virtual` for services using bundled MinIO before stopping them. Use an
+external endpoint that supports bucket subdomains for `virtual`.
+
+Both keys accept `auto`, `path`, or `virtual` and default to unset. Assign a
+literal mode with one `KEY=VALUE` per line, optionally prefixed by `export`. The installer
+saves the keys that are set to `.one-click.env`. On upgrades, `.env` takes
+precedence over the installer environment, and an explicit empty value
+clears a previous setting. Omitted keys retain their previous runtime value.
+The existing upgrade merge requires `python3`. The warehouse keeps its separate
+`cube-ops` bucket. The S3 volume plugin and S3lvol use their own settings.
+
 ### OpenTelemetry tracing (optional)
 
 Tracing is off by default. Configure it **before install** by setting

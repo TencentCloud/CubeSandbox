@@ -108,6 +108,7 @@ func loadArtifactStore() *artifactStore {
 		Bucket:             s3.Bucket,
 		Region:             s3.Region,
 		PathStyle:          s3.UsePathStyle,
+		AddressingStyle:    s3.AddressingStyle,
 		UseSSL:             &useSSL,
 		PresignExpiry:      s3PresignExpiry,
 		AttachmentBasename: true,
@@ -125,8 +126,11 @@ func noteArtifactStoreErr(phase, backend string, err error) {
 }
 
 // InitArtifactStore logs the selected backend, records it on the shared
-// artifact volume, and fails fast when backend=fs cannot be opened.
+// artifact volume, and fails fast on invalid addressing or an unusable fs store.
 func InitArtifactStore(ctx context.Context) error {
+	if err := configenv.ValidateArtifactS3Addressing(); err != nil {
+		return err
+	}
 	backend := configenv.ArtifactStoreBackend()
 	if err := blobstore.AnnounceIfFS(configenv.ResolveArtifactFSRoot(), backend); err != nil {
 		return err
