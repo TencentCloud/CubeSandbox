@@ -24,7 +24,7 @@ After deployment, you will have a fully functional Cube Sandbox instance with:
 
 | Requirement | Notes |
 |-------------|-------|
-| Linux | OpenCloudOS 9 (recommended) or Ubuntu 22.04+ |
+| Linux | Kernel ≥ 5.4 (`uname -r`); OpenCloudOS 9 (recommended) or Ubuntu 22.04+ |
 | Docker | Must be installed and running |
 | root access | `install.sh` requires root privileges |
 | DNS routing | `systemd-resolved` (preferred) or `NetworkManager + dnsmasq` |

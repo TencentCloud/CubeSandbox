@@ -11,6 +11,7 @@
 ## 前置条件
 
 - **x86_64** 或 **aarch64**（ARM64）架构的 Linux 机器
+- **Linux 内核版本 ≥ 5.4**（`uname -r`）
 - `/dev/kvm` 存在且可读写（`ls -la /dev/kvm`）
 - 有 **root 权限**
 - **Docker** 已安装并正常运行

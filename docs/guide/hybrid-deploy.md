@@ -46,7 +46,7 @@ Each physical machine or VM serving as a compute node must satisfy:
 - **Hardware specs**: Minimum **4 vCPU, 8 GiB RAM**, >= 50 GB system disk; for production, **16 vCPU, 32 GiB+ RAM** with a dedicated data disk is recommended.
 - **Filesystem (mandatory)**: `/data/cubelet` **must** be on an **XFS** filesystem (`df -T /data/cubelet` reports `xfs`). Otherwise `install-compute.sh` fails fast during preflight. For production, format and mount a dedicated data disk as XFS at `/data/cubelet`.
 - **Container runtime (mandatory)**: **Docker** installed and running (**Snap Docker is not supported** and rejected by preflight). Even though compute nodes run MicroVMs rather than Docker containers for sandboxes, `cube-egress` runs as a host-network Docker container.
-- **cgroup & privileges**: cgroup v2 must have the `cpu` controller enabled (or use cgroup v1), and installation requires **root** privileges.
+- **Kernel, cgroup & privileges**: Linux kernel **>= 5.4** (`uname -r`), cgroup v2 must have the `cpu` controller enabled (or use cgroup v1), and installation requires **root** privileges.
 - **Version parity**: Use the **same release version** of the one-click bundle (`cube-sandbox-one-click-<version>.tar.gz`) as the Helm Chart component images.
 
 ### 2.3 Network Connectivity & Port Matrix
@@ -738,7 +738,7 @@ The one-click release tarball (`cube-sandbox-one-click-<version>-<arch>.tar.gz`)
 
 2. **Host OS packages (only when no internal apt/dnf mirror is available)**:
    - Skip this if your internal OS repository already provides standard **Docker Engine** (non-Snap).
-   - Otherwise, pre-install **Docker Engine (non-Snap)**, `e2fsprogs`, `util-linux`, `s3fs`, `jq`, and `dnsmasq` (if the host does not use `systemd-resolved`). See [Offline Deployment — Step 2](./offline-deploy.md) for the complete package checklist.
+   - Otherwise, pre-install **Docker Engine (non-Snap)**, `e2fsprogs`, `util-linux`, `s3fs`, `jq`, and `dnsmasq` (if the host does not use `systemd-resolved`). See [Offline Deployment — 1.3 Pre-install Host OS Packages](./offline-deploy.md#preinstall-os-packages) for the complete package checklist.
 
 3. **Compute-node container image (`cube-egress` required)**:
 

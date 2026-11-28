@@ -24,7 +24,7 @@
 
 | 要求 | 说明 |
 |------|------|
-| Linux | 推荐 Ubuntu 22.04+ |
+| Linux | 内核版本 ≥ 5.4（`uname -r`），推荐 OpenCloudOS 9 或 Ubuntu 22.04+ |
 | Docker | 已安装并正常运行 |
 | root 权限 | `install.sh` 需要 root 执行 |
 | DNS 路由 | `systemd-resolved`（推荐）或 `NetworkManager + dnsmasq` |

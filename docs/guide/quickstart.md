@@ -17,6 +17,7 @@ If you already have an x86_64 or aarch64 (ARM64) Linux server with KVM enabled (
 ## Prerequisites
 
 - **x86_64** cloud server (any standard cloud VM works — `/dev/kvm` not required)
+- **Linux kernel ≥ 5.4** (`uname -r`)
 - **Root access**
 - Internet access (for downloading release packages and Docker images)
 

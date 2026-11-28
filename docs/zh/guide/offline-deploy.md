@@ -1,232 +1,314 @@
 # 离线部署
 
-> **适用场景：** 目标机器**没有公网**（内网机房、隔离网段、受限环境），需要离线部署 CubeSandbox。这类机器通常接入内网，并配有内网软件源。
+## 1. 离线部署提前做的工作
 
-**离线部署完全可行。** 只需提前准备以下产物，然后按正常流程安装。安装步骤与正常部署完全相同。
+在进入目标机执行安装前，先在**有公网的准备机**和**目标节点**上完成以下准备工作：
 
-| 提前准备 | 怎么准备 | 详见 |
-| --- | --- | --- |
-| 安装包（含可选的 PVM 内核包） | 在有公网的机器上从 Releases 下载，拷贝到目标节点 | 步骤 1 |
-| 系统软件包（Docker、Compose 等） | 有**内网软件源**即可跳过；无源才需手动安装 | 步骤 2 |
-| 容器镜像（**核心**） | 在有公网的机器上拉取打包，`docker load` 到目标节点；或推送到**内网镜像仓库** | 步骤 3 |
-| 模板源镜像（可选） | 推送到**内网镜像仓库**，创建模板时直接引用 | 步骤 5 |
+| 准备项 | 是否必需 | 执行位置 | 对应小节 |
+| --- | --- | --- | --- |
+| 确认宿主机软硬件条件 | 必需 | 目标节点 | [1.1 确认宿主机条件](#host-requirements) |
+| 下载一键部署包（及可选的 PVM 内核包） | 必需 | 公网准备机 → 目标节点 | [1.2 下载离线安装产物](#download-artifacts) |
+| 准备并安装宿主机系统软件包 | 无内网源时必需 | 公网准备机 → 目标节点 | [1.3 准备宿主机系统软件包](#preinstall-os-packages) |
+| 准备并导入组件容器镜像（**核心**） | 必需 | 公网准备机 → 内网仓库 / 目标节点 | [1.4 准备容器镜像](#prepare-container-images) |
+| 推送沙箱模板源镜像到内网仓库 | 离线建模板时必需 | 公网准备机 → 内网仓库 | [1.5 准备沙箱模板源镜像](#prepare-template-images) |
 
-备好前 3 类，即可按步骤 4 安装；模板源镜像在安装完成后再推入内网仓库（步骤 5）。
+### 1.1 确认宿主机条件 {#host-requirements}
 
-::: tip 适用范围
-本指南覆盖**一键部署**（单机、裸金属、多机集群）。以下两种部署方式不适用：
+目标节点的软硬件要求与在线部署完全一致（详见[快速开始 — 前置条件](./quickstart.md#前置条件)）：
 
-- **腾讯云 Terraform 部署器**：需要访问腾讯云 API 创建云资源。
-- **Kubernetes（Helm）部署**：集群必须能访问存放组件镜像的仓库。若已有内网仓库（如 Harbor），按 [Kubernetes 部署指南](./kubernetes/)操作，把 chart 指向该仓库即可。
+- **架构与系统**：`x86_64` 或 `aarch64` Linux，内核版本 **≥ 5.4**（`uname -r`），`glibc >= 2.31`，具备 `root` 权限。
+- **内存**：至少 **8 GB**（安装脚本会做硬性检查，低于该值将直接中止）。
+- **磁盘**：`/data/cubelet` 挂载点须使用 **XFS** 文件系统，可用空间至少 **50 GB**。
+- **虚拟化支持（KVM / PVM）**：
+  - 物理机 / 裸金属服务器原生提供 `/dev/kvm`。
+  - 无 `/dev/kvm` 的 `x86_64` 云服务器需提前准备 PVM 宿主机内核包（见 [1.2](#download-artifacts) 与 [2.1](#install-pvm-kernel)）。
+  - `aarch64`（ARM64）节点不支持 PVM，宿主机必须本身已启用 KVM。
+- **多节点集群额外要求**：控制节点与所有计算节点之间需配置时间同步（如内网 `chrony` / NTP，避免心跳偏差超过 15 秒导致节点抖动），且内网端口互通（详见[多机集群部署](./multi-node-deploy.md)）。
+
+### 1.2 下载离线安装产物 {#download-artifacts}
+
+在有公网的机器上下载下列产物（若内网已有制品中转站或 Release 镜像站，可直接从内网获取）：
+
+1. **一键部署包**：`cube-sandbox-one-click-<version>-<arch>.tar.gz`
+   - `<arch>` 须与目标节点架构一致（`amd64` 或 `arm64`），下载渠道见[下载与 Release 说明](./downloads.md)。
+   - 控制节点与计算节点复用**同一份**部署包。
+2. **PVM 宿主机内核包（RPM / DEB，按需）**：
+   - 仅当目标节点为无 `/dev/kvm` 的 `x86_64` 云服务器时需要。
+   - 从最新的 `kernel-release-*` Release 下载与目标发行版匹配的内核包。
+
+下载完成后，通过 `scp`、内网制品库或离线介质拷贝到目标节点。
+
+### 1.3 准备宿主机系统软件包（无内网软件源时） {#preinstall-os-packages}
+
+**若目标节点已配置内网 apt / dnf / yum 软件源，且确认源内包含标准 Docker Engine 与 Compose，可直接跳至 [1.4](#prepare-container-images)。**
+
+::: warning 跳过前请确认 Docker 可用
+许多企业内网 OS 软件源仅包含系统基础包，**不包含 Docker Engine 和 Docker Compose**。若跳过本步且内网源缺失 Docker，安装器会尝试联网安装并失败。
 :::
 
-::: details 为什么离线可行（原理）
-一键安装脚本原生支持离线：
+当目标节点完全没有可用软件源（或内网源缺少下列依赖）时，请在有公网的同发行版机器上提前下载离线安装包，拷贝至目标节点完成安装：
 
-- 预载的容器镜像直接生效，无需改动脚本。
-- 部署包自带全部版本锁定产物（组件二进制、`vmlinux`、guest 镜像、`mkcert`）。
-- 真正需要**公网**的只有三件事：下载安装包、安装缺失的软件包、拉取容器镜像。它们对应步骤 1–3：内网源能覆盖的直接走内网，其余提前准备好。
-:::
-
-## 开始之前：确认宿主机条件
-
-宿主机要求与正常部署完全相同（详见[快速开始 — 前置条件](./quickstart.md#前置条件)）：
-
-- x86_64 或 aarch64 Linux，glibc ≥ 2.31，root 权限
-- 内存至少 8 GB（安装器硬性检查，不足会直接终止安装）
-- `/data/cubelet` 使用 XFS，至少 50 GB
-- KVM 可用：裸金属原生支持；x86_64 云服务器可先安装 PVM 内核（见步骤 1，不支持 aarch64——ARM 机器必须本身已有 KVM）
-
-## 步骤 1：下载安装产物
-
-**做什么：** 在有公网的机器上下载下列产物，拷贝到目标节点。内网若已有制品中转站或 Release 镜像，直接走内网获取即可。
-
-1. **一键部署包**：`cube-sandbox-one-click-<version>-<arch>.tar.gz`。`<arch>` 与目标节点的架构一致（`amd64` / `arm64`），下载渠道见[下载与 Release 说明](./downloads.md)。
-2. **PVM 宿主内核包**（rpm/deb）：仅当目标是无 `/dev/kvm` 的云服务器时需要。从最新的 `kernel-release-*` release 下载，按 [PVM 部署 — 第一步](./pvm-deploy.md#第一步安装-pvm-宿主机内核) 安装并重启，再继续本指南。
-
-用 scp、U 盘等方式把文件传到目标节点。
-
-## 步骤 2：提前安装系统软件包（无内网源时）
-
-**已配置内网软件源？直接跳到步骤 3。**
-
-没有内网源的机器才需要本步：在有公网的机器上下载下列软件包，拷贝到目标节点安装。
-
-::: details 软件包清单（点击展开）
-
-跳过本步前，确认内网源里收录了 Docker 和 Compose——不少内网源不带它们。
+::: details 系统软件包清单（点击展开）
 
 **每个节点必装：**
 
-- **Docker Engine 和 Compose**。只要 `docker` 和 `docker compose version`（或 `docker-compose`）都能运行，`install.sh` 就跳过联网安装。装好后验证：
+- **Docker Engine 和 Docker Compose**：只要 `docker` 和 `docker compose version`（或 `docker-compose`）均能正常执行，`install.sh` 就会自动跳过联网安装。装好后执行以下命令验证：
 
   ```bash
   docker version && docker compose version   # 或：docker-compose --version
   ```
 
-  > ⚠️ 不支持 snap Docker（读不到 `/usr/local/services`）。请用软件包方式安装 docker-ce / docker.io。
+  > ⚠️ **严禁使用 Snap 版 Docker**（其沙箱限制无法读取 `/usr/local/services`，安装器会自动检测并中止）。请使用系统软件包方式安装 `docker-ce` 或 `docker.io`。
 
-- 基础命令：`tar`、`ss`、`ip`（`iproute2`）、`bash`、`curl`、`grep`、`sed`、`pgrep`（`procps`）、`awk`、`date`、`openssl`
-- `e2fsprogs` + `util-linux`：默认存储后端 `cubecow` 依赖 `mkfs.ext4`、`mount`、`umount`、`losetup`
+- **基础命令工具**：`tar`、`ss`、`ip`（`iproute2`）、`bash`、`curl`、`grep`、`sed`、`pgrep`（`procps`）、`awk`、`date`、`openssl`
+- **存储依赖**：`e2fsprogs`、`util-linux`（默认 `cubecow` 存储后端依赖 `mkfs.ext4`、`mount`、`umount`、`losetup`）
 
 **按需安装：**
 
-- `dnsmasq`：宿主机没有 `systemd-resolved`/`resolvectl` 时必装，否则 DNS 兜底逻辑会自动安装它
-- `s3fs` + `jq`：S3 卷挂载依赖。安装器会尝试自动补装，失败当时不报错——务必提前装好
-- `python3`、`nvme-cli`、`libaio`、`libnuma`、`libuuid`：仅当启用 CubeS3lvol（`ONE_CLICK_ENABLE_S3LVOL=1`）
-- `logrotate`：最小化系统镜像若未自带，请补装
+- `dnsmasq`：宿主机没有 `systemd-resolved` / `resolvectl` 时**必装**，否则安装器的 DNS 兜底逻辑会尝试联网安装它。
+- `s3fs` + `jq`：S3 Volume 挂载依赖。安装器会尝试自动补装但失败时仅告警不中断，为避免后续挂载卷报错，离线环境务必提前装好。
+- `python3`、`nvme-cli`、`libaio`、`libnuma`、`libuuid`：仅当开启 CubeS3lvol（`ONE_CLICK_ENABLE_S3LVOL=1`）时需要。
+- `logrotate`：若最小化系统镜像未自带，建议提前补装。
 
 :::
 
-## 步骤 3：预载容器镜像
+### 1.4 准备容器镜像（核心） {#prepare-container-images}
 
-**做什么：** 把步骤 3.1 清单中的镜像导入目标节点的本地 Docker，两种方式任选其一：
+离线部署最关键的准备工作是提供安装器所需的容器镜像。请根据节点规模在以下两种方式中任选其一：
 
-- **逐台搬运（下文以此为例）**：在有公网、与目标同架构的机器上 `docker pull` → `docker save` 打包 → 目标节点 `docker load`。
-- **走内网镜像仓库（多节点推荐）**：把镜像推到内网仓库（如 Harbor），用覆盖变量把引用指向它。安装器直接从内网拉取，不用逐台 load。
+- **方式 A：推送至内网镜像仓库（如 Harbor，多节点集群推荐）**
+  - 在有公网的机器上拉取镜像并推送到内网镜像仓库（或先打包导入中转机后再推送）。
+  - 在目标节点的 `.env` 中通过覆盖变量指定内网仓库地址（若需认证，在目标节点执行一次 `docker login`）。安装器会直接从内网拉取，无需逐台导入。
+- **方式 B：纯离线打包与 `docker load`（无内网仓库或单机 / 少量节点适用）**
+  - 在有公网且与目标节点**相同 CPU 架构（`amd64` / `arm64`）**的机器上执行 `docker pull` → `docker save`，拷贝 `.tar` 文件至目标节点后执行 `docker load`。
 
-逐台搬运方式的命令：
+#### 所需镜像清单（按节点角色）
+
+**1. 控制节点 / All-in-One 单机（`./install.sh`）：**
+
+| 镜像 | 默认引用 | `.env` 覆盖变量 | 说明 |
+| --- | --- | --- | --- |
+| MySQL | `cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0` | `CUBE_SANDBOX_MYSQL_IMAGE` | 若使用外部 MySQL / PostgreSQL 可跳过 |
+| Redis | `cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine` | `CUBE_SANDBOX_REDIS_IMAGE` | 若使用外部 Redis 可跳过 |
+| MinIO | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/minio:<release>` | `CUBE_SANDBOX_MINIO_IMAGE` | 默认开启；关闭内置 MinIO 时可跳过 |
+| CoreDNS | `cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2` | `CUBE_PROXY_COREDNS_IMAGE` | 必需 |
+| WebUI（OpenResty） | `cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat` | `WEB_UI_IMAGE` | 必需 |
+| cube-proxy | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:<tag>` | `CUBE_SANDBOX_CUBE_PROXY_IMAGE` | 必需 |
+| cube-lifecycle-manager | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:<tag>` | `CUBE_SANDBOX_CUBE_LCM_IMAGE` | 必需 |
+| cube-egress | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:<tag>` | `CUBE_SANDBOX_CUBE_EGRESS_IMAGE` | 必需 |
+
+**2. 计算节点（`./install-compute.sh`）：**
+
+| 镜像 | 默认引用 | `.env` 覆盖变量 | 说明 |
+| --- | --- | --- | --- |
+| cube-egress | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:<tag>` | `CUBE_SANDBOX_CUBE_EGRESS_IMAGE` | **必需**（出口透明代理运行在每个计算节点） |
+| JuiceFS mount | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1` | `CUBE_JFS_IMAGE` | 仅当 `ONE_CLICK_ENABLE_JFS=1` 时需要；`MIRROR=cn` 时默认走 `-cn` 域名 |
+
+> **查询精确版本 `<tag>` / `<release>`：** 先在准备机或目标机解压部署包，在解压后的根目录执行：
+>
+> ```bash
+> grep -rhE '_IMAGE.*_DEFAULT="' scripts/
+> ```
+>
+> 即可查出当前版本对应的 `cube-proxy`、`cube-lifecycle-manager`、`cube-egress`、`minio` 和 `juicefs` 精确镜像地址（包含 `-int` 与 `-cn` 两种默认引用）。
+
+#### 方式 B（纯离线打包与导入）操作示例
 
 ```bash
-# 有公网的机器：拉取清单中的每个镜像
-docker pull <镜像引用>
+# 1. 在有公网且与目标同架构的机器上拉取清单中的每个镜像
+docker pull <镜像引用1>
+docker pull <镜像引用2>
+# ...
 
-# 按节点角色分别打包（传输量更小）
+# 2. 按节点角色分别打包（计算节点只需打包 cube-egress，可大幅减小传输体积）
 docker save -o cube-images-control.tar <镜像1> <镜像2> ...
+docker save -o cube-images-compute.tar <cube-egress镜像>
 
-# 目标节点
+# 3. 拷贝到目标节点并导入本地 Docker
 docker load -i cube-images-control.tar
+
+# 4. 在目标节点核对镜像列表（名称和 tag 必须与安装器预期完全一致）
+docker images
 ```
 
-### 3.1 每个节点需要哪些镜像
+::: tip 镜像引用一致性原则
+- 如果拉取并导入了 `-cn` 域名的默认镜像，部署时必须在 `.env` 中设置 `MIRROR=cn`；如果拉取了 `-int` 域名镜像，则保持 `MIRROR` 不设置。
+- 如果将镜像推送到了内网仓库或使用了自定义镜像名，必须在 `.env` 中通过上表对应的覆盖变量显式指定。
+:::
 
-**控制节点**（默认 `install.sh` 的 all-in-one 单机部署，或集群中的每个控制节点）：
+### 1.5 准备沙箱模板源镜像（可选，离线建模板必需） {#prepare-template-images}
 
-| 镜像 | 默认引用 | 覆盖变量 |
-| --- | --- | --- |
-| MySQL | `cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0` | `CUBE_SANDBOX_MYSQL_IMAGE` |
-| Redis | `cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine` | `CUBE_SANDBOX_REDIS_IMAGE` |
-| MinIO（S3 后端，默认开启） | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/minio:<release>` | `CUBE_SANDBOX_MINIO_IMAGE` |
-| CoreDNS | `cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2` | `CUBE_PROXY_COREDNS_IMAGE` |
-| WebUI（nginx） | `cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat` | `WEB_UI_IMAGE` |
-| cube-proxy | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-proxy:<tag>` | `CUBE_SANDBOX_CUBE_PROXY_IMAGE` |
-| cube-lifecycle-manager | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-lifecycle-manager:<tag>` | `CUBE_SANDBOX_CUBE_LCM_IMAGE` |
-| cube-egress | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress:<tag>` | `CUBE_SANDBOX_CUBE_EGRESS_IMAGE` |
+如果需要在离线环境中构建沙箱模板（例如官方代码解释器镜像 `sandbox-code:latest`），建议提前把模板源镜像推送至**内网镜像仓库**：
 
-**计算节点**（`install-compute.sh`）：
+- **工作原理**：`CubeMaster` / `CubeTemplateCenter` 构建模板时会从指定的容器仓库拉取源镜像，构建完成后通过内网将模板产物分发至各计算节点；计算节点不需要单独拉取源镜像。
+- **自定义业务镜像**：若需在离线环境下基于 Dockerfile 制作自定义模板镜像，由于 `docker build` 通常需要访问 `apt` / `pip` 等软件源，请将基础源指向内网镜像站，或在有公网的环境中提前构建好完整镜像后再导入内网仓库（做法见[本地与远程镜像实践 — 常见问题](./tutorials/template-build-practice.md#常见问题)）。
 
-| 镜像 | 默认引用 | 说明 |
-| --- | --- | --- |
-| cube-egress | 同上 | 必需——出口 MITM 代理跑在每个节点上 |
-| JuiceFS mount | `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/juicefs:ce-v1.4.1` | 仅当 `ONE_CLICK_ENABLE_JFS=1`；`MIRROR=cn` 时走 `-cn` 域名 |
-
-cube-proxy / cube-lifecycle-manager / cube-egress / MinIO 四个镜像的 `<tag>` / `<release>` 占位符，在解压后的部署包根目录执行以下命令查询：
+导入内网仓库的命令示例（以官方 `sandbox-code:latest` 为例）：
 
 ```bash
-grep -rhE '_IMAGE.*_DEFAULT="' scripts/
+# 1. 在有公网的机器上拉取并打包
+docker pull cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
+docker save -o sandbox-code.tar cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
+
+# 2. 拷贝到能访问内网仓库的机器（如控制节点），导入并推送到内网仓库
+docker load -i sandbox-code.tar
+docker tag cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  <内网仓库>/cube/sandbox-code:latest
+docker push <内网仓库>/cube/sandbox-code:latest
 ```
 
-### 3.2 镜像引用必须完全一致
+---
 
-- 拉了 `-cn` 引用，就在 `.env` 里设 `MIRROR=cn`；拉了 `-int` 引用则不设。
-- 使用内网仓库或自定义镜像名时，通过上表的覆盖变量在 `.env` 中指定。
+## 2. 如何部署
 
-### 3.3 在目标节点上验证
-
-```bash
-docker images   # 清单里的每个引用都必须出现，名字和 tag 完全一致
-```
-
-## 步骤 4：安装——与正常部署相同
-
-**做什么：** 按正常流程安装即可，唯一区别是用搬运过来的部署包代替在线安装命令。
-
-**所有命令必须以 root 身份执行**，先切换到 root：
+完成第 1 节的全部准备工作后，即可在目标离线环境中按正常流程执行安装。**以下所有安装命令均须以 `root` 身份运行**：
 
 ```bash
 sudo su root
 ```
 
-解压部署包后安装：
+### 2.1（仅无 `/dev/kvm` 的 x86_64 云服务器）安装 PVM 宿主内核 {#install-pvm-kernel}
+
+若目标机已有 `/dev/kvm`（物理机 / 裸金属 / 已启用 KVM 的 ARM64 机器），直接跳过本步进入 [2.2](#deploy-control-node)。
+
+对于无 `/dev/kvm` 的 `x86_64` 云服务器，先离线安装 [1.2](#download-artifacts) 拷贝过来的 PVM 宿主内核包（RPM / DEB）并重启机器，确认新内核生效后再继续部署（详细命令见 [PVM 部署 — 第一步](./pvm-deploy.md#第一步安装-pvm-宿主机内核)）。
+
+### 2.2 部署控制节点（或 All-in-One 单机） {#deploy-control-node}
+
+1. **解压离线部署包并初始化 `.env`：**
 
 ```bash
 tar -xzf cube-sandbox-one-click-<version>-<arch>.tar.gz
 cd cube-sandbox-one-click-<version>-<arch>
 cp env.example .env
-# 按需编辑 .env（节点 IP、外部 MySQL/Redis、MIRROR、镜像覆盖变量……）
+```
+
+2. **按离线环境编辑 `.env`：**
+
+按需配置节点 IP、外部数据库/Redis、PVM 开关以及镜像引用。
+
+- **使用 `docker load` 预载官方默认镜像时**：
+  - 导入 `-int` 镜像：无需额外设置镜像变量。
+  - 导入 `-cn` 镜像：在 `.env` 中取消注释并设置 `MIRROR=cn`。
+- **使用内网镜像仓库时**：在 `.env` 中配置对应镜像覆盖变量（示例）：
+
+```bash
+# 按需指定当前节点内网 IP（留空则自动探测 eth0）
+CUBE_SANDBOX_NODE_IP=10.0.0.10
+
+# 若使用 PVM 虚拟机环境，取消注释设为 1
+# CUBE_PVM_ENABLE=1
+
+# 使用内网仓库覆盖各组件镜像（按实际仓库地址与版本 tag 替换）
+CUBE_SANDBOX_MYSQL_IMAGE=harbor.internal/cube/mysql:8.0
+CUBE_SANDBOX_REDIS_IMAGE=harbor.internal/cube/redis:7-alpine
+CUBE_SANDBOX_MINIO_IMAGE=harbor.internal/cube/minio:<release>
+CUBE_PROXY_COREDNS_IMAGE=harbor.internal/cube/coredns:1.14.2
+WEB_UI_IMAGE=harbor.internal/cube/openresty:1.21.4.1-6-alpine-fat
+CUBE_SANDBOX_CUBE_PROXY_IMAGE=harbor.internal/cube/cube-proxy:<tag>
+CUBE_SANDBOX_CUBE_LCM_IMAGE=harbor.internal/cube/cube-lifecycle-manager:<tag>
+CUBE_SANDBOX_CUBE_EGRESS_IMAGE=harbor.internal/cube/cube-egress:<tag>
+```
+
+3. **执行安装：**
+
+```bash
 ./install.sh
 ```
 
-按你的场景对号入座：
+按机器形态对照参考文档（仅用上述本地包安装步骤替代在线安装命令，其余流程一致）：
+- **无 `/dev/kvm` 的云服务器（PVM）**：参考[快速开始](./quickstart.md)。
+- **裸金属 / 已有 KVM 的机器**：参考[裸金属部署](./bare-metal-deploy.md)。
 
-- **无 `/dev/kvm` 的云服务器（PVM）**：跟[快速开始](./quickstart.md)走，只把它的步骤 2（在线安装）换成上面的部署包安装，其余照旧。
-- **裸金属 / 已有 KVM 的机器**：见[裸金属部署](./bare-metal-deploy.md)。
-- **添加计算节点**：见[多机集群部署](./multi-node-deploy.md)。部署包原样复用，计算节点只需提前 load 好 cube-egress 镜像（步骤 3.1）。
+::: tip 离线安装日志说明
+当公网 registry 不可达时，`cube-proxy`、`cube-lifecycle-manager`、`cube-egress` 会各输出一行 `WARN: pull failed but local image exists; using cached copy` 并自动使用预载镜像，其余服务也会静默使用本地镜像。**这些均属正常预期行为，并非报错。** 仅当出现 `pull failed ... and no local copy is cached` 时，才表示对应镜像未导入或名称不匹配，请回到 [1.4](#prepare-container-images) 核对。
+:::
 
-安装完成后，按正常流程验收：
+### 2.3（可选）添加离线计算节点 {#deploy-compute-node}
+
+如需扩展为多机集群，在每台新计算节点上复用同一份部署包（并确保已完成 `cube-egress` 镜像预载或可访问内网镜像仓库）：
+
+```bash
+tar -xzf cube-sandbox-one-click-<version>-<arch>.tar.gz
+cd cube-sandbox-one-click-<version>-<arch>
+cp env.example .env
+```
+
+编辑 `.env`，设置计算节点角色、控制面地址、S3 凭据与镜像配置（完整参数与从控制节点获取 `CUBE_S3_*` 的方式见[多机集群部署](./multi-node-deploy.md)）：
+
+```bash
+ONE_CLICK_DEPLOY_ROLE=compute
+CUBE_SANDBOX_NODE_IP=10.0.0.11
+ONE_CLICK_CONTROL_PLANE_IP=10.0.0.10
+
+# 与所准备镜像保持一致（二选一：使用 MIRROR=cn 或显式指定内网仓库镜像）
+# MIRROR=cn
+# CUBE_SANDBOX_CUBE_EGRESS_IMAGE=harbor.internal/cube/cube-egress:<tag>
+```
+
+执行计算节点安装脚本：
+
+```bash
+./install-compute.sh
+```
+
+### 2.4 安装验收与离线创建模板 {#verify-and-create-template}
+
+1. **运行端到端健康校验：**
+
+在控制节点部署目录下执行：
 
 ```bash
 ./smoke.sh
 ```
 
-控制台地址是 `http://<目标主机>:12088`，E2B 兼容 API 在 3000 端口（[快速开始 — 第四步](./quickstart.md#第四步运行第一段-agent-代码)）。
+验收通过后即可访问服务：
+- **Web 控制台**：`http://<控制节点IP>:12088`
+- **E2B 兼容 API**：`http://<控制节点IP>:3000`（使用示例见[快速开始 — 第四步](./quickstart.md#第四步运行第一段-agent-代码)）
 
-::: tip 离线安装的日志长什么样？
-registry 不可达时，三个组件镜像各打一行 `WARN: pull failed but local image exists; using cached copy` 后改用预载镜像，其余服务静默使用预载镜像。**都是预期行为，不是错误。** 只有出现 `pull failed … and no local copy is cached` 才说明某个镜像没 load，回步骤 3 检查。
-:::
+2. **使用内网仓库镜像创建首个沙箱模板（可选）：**
 
-## 步骤 5（安装后，可选）：把模板源镜像推入内网仓库
+将 [1.5](#prepare-template-images) 推入内网仓库的源镜像传入 `cubemastercli` 创建模板（详见[快速开始 — 第三步](./quickstart.md#第三步制作模板)）：
 
-**做什么：** 想在离线环境创建模板，就把模板源镜像推送到**内网镜像仓库**，创建模板时直接引用内网仓库地址。
+```bash
+cubemastercli tpl create-from-image \
+  --image <内网仓库>/cube/sandbox-code:latest \
+  --writable-layer-size 1G \
+  --expose-port 49999 \
+  --expose-port 49983 \
+  --probe 49999
+```
 
-原理：CubeMaster 构建模板时从 registry 拉取源镜像——内网仓库可达即可，不需要公网。多机集群无需额外处理：CubeMaster 通过内网分发构建产物，计算节点不拉源镜像。
+两个常见内网仓库细节：
+- **需要登录认证**：追加 `--registry-username <user> --registry-password <pass>`。
+- **使用纯 HTTP（无 TLS）**：镜像引用必须显式带上 `http://` 前缀，例如 `http://harbor.internal:5000/ns/app:tag`。
 
-操作分两步：
+> 若环境没有内网镜像仓库、希望直接基于本地镜像制作模板，可参考 [run-code-env-inheritance 示例](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/run-code-env-inheritance/README.md)。
 
-1. 把源镜像推入内网仓库。在有公网的机器上拉取打包，传到能访问内网仓库的机器（如控制节点）上 load、tag、push（以官方代码解释器镜像为例）：
+### 2.5 离线升级与卸载 {#upgrade-and-uninstall}
 
-   ```bash
-   # 有公网的机器
-   docker pull cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
-   docker save -o sandbox-code.tar cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest
+- **离线升级**：升级本质上是 **新版本部署包 + 新版本容器镜像**（各组件镜像 tag 会随版本更新）。按 [1.2](#download-artifacts) 和 [1.4](#prepare-container-images) 备好新版本产物后，在新部署包目录执行：
 
-   # 能访问内网仓库的机器
-   docker load -i sandbox-code.tar
-   docker tag cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
-     <内网仓库>/cube/sandbox-code:latest
-   docker push <内网仓库>/cube/sandbox-code:latest
-   ```
+  ```bash
+  ./install.sh --mode=upgrade
+  ```
 
-2. 用内网仓库引用创建模板（详见[快速开始 — 第三步](./quickstart.md#第三步制作模板)）：
+  > 关于升级时的 `.env` 三方合并规则及开关项注意事项，请参阅 [one-click README — Target Machine Installation](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md)。
 
-   ```bash
-   cubemastercli tpl create-from-image \
-     --image <内网仓库>/cube/sandbox-code:latest \
-     --writable-layer-size 1G \
-     --expose-port 49999 \
-     --expose-port 49983 \
-     --probe 49999
-   ```
+- **卸载**：与在线部署一致，直接执行：
 
-两个细节：
+  ```bash
+  /usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh
+  ```
 
-- 内网仓库需要认证时，加 `--registry-username` / `--registry-password`。
-- 内网仓库走 HTTP（无 TLS）时，引用必须带 `http://` 前缀，例如 `http://harbor.internal:5000/ns/app:tag`。
+---
 
-> 也可跳过内网仓库、直接用本地镜像，完整做法见 [run-code-env-inheritance 示例](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/run-code-env-inheritance/README.md)。
+## 3. 常见问题排查
 
-## 升级、模板构建与卸载
-
-- **升级 = 新部署包 + 新镜像**（tag 会随版本变化）。升级新版本时，重新执行步骤 1 和步骤 3，然后运行 `./install.sh --mode=upgrade`（详见 [one-click README — Target Machine Installation](https://github.com/TencentCloud/CubeSandbox/blob/master/deploy/one-click/README.md)）。
-- **离线构建自定义模板镜像**：Dockerfile 构建通常要访问 `apt`/`pip`。把 `apt`/`pip` 软件源指向内网镜像，或在有公网的环境中提前构建好完整镜像，再按步骤 5 推入内网仓库（做法见[本地与远程镜像实践 — 常见问题](./tutorials/template-build-practice.md#常见问题)）。
-- **卸载**流程不变：`/usr/local/services/cubetoolbox/scripts/one-click/uninstall.sh`。
-
-## 故障排查
-
-| 现象 | 原因 | 解决 |
+| 现象 | 可能原因 | 处理方式 |
 | --- | --- | --- |
-| `pull failed for <ref> and no local copy is cached` | load 的镜像引用与安装器解析出的不一致（tag 或仓库选错） | 把 `docker images` 的输出与部署包的默认引用对照（`env.example`，或用 3.1 的 grep 查）；检查 `MIRROR` 是否一致（步骤 3.2） |
-| 找不到 `docker`，安装器执行 `apt-get/yum install docker` 并失败 | 内网软件源中没有 Docker 软件包，且未提前安装 | 把 Docker 加入内网源，或提前装好 Docker Engine + Compose（步骤 2） |
-| 安装器因 snap Docker 中止 | `snap install docker` 的沙箱读不到 `/usr/local/services` | `sudo snap remove docker`，用软件包方式安装 docker-ce |
-| 安装器安装 `dnsmasq` 时中止 | 宿主机没有 `systemd-resolved`，内网源中也没有 `dnsmasq` | 将 `dnsmasq` 加入内网源或提前装好；或使用带 `systemd-resolved` 的操作系统 |
-| 模板构建卡在 `phase: PULLING` | `--image` 引用不在内网仓库中，或 CubeMaster 访问不了该仓库 | 确认镜像已推入内网仓库、引用正确；HTTP 仓库检查 `http://` 前缀，需要认证时加 `--registry-username` / `--registry-password` |
+| `pull failed for <ref> and no local copy is cached` | 导入的镜像名称/tag 与安装器解析出的引用不一致（如 `-int`/`-cn` 或 tag 不匹配） | 用 `docker images` 对照部署包默认引用（`env.example` 或 [1.4](#prepare-container-images) 的 `grep` 命令）；检查 `.env` 中 `MIRROR` 与覆盖变量是否一致 |
+| 找不到 `docker`，安装器执行 `apt-get` / `yum install docker` 失败 | 内网软件源未收录 Docker 且未提前安装 | 将 Docker 加入内网软件源，或按 [1.3](#preinstall-os-packages) 提前离线安装 Docker Engine + Compose |
+| 安装器因 Snap Docker 中止 | `snap install docker` 的沙箱无法读取 `/usr/local/services` | 执行 `sudo snap remove docker`，改用软件包方式安装 `docker-ce` / `docker.io` |
+| 安装器安装 `dnsmasq` 时中止 | 宿主机缺少 `systemd-resolved`，且内网源没有 `dnsmasq` | 将 `dnsmasq` 加入内网源或提前离线安装；或换用带 `systemd-resolved` 的操作系统 |
+| 模板构建长时间停留在 `phase: PULLING` | `--image` 镜像未推入内网仓库，或 `CubeMaster` / `CubeTemplateCenter` 无法访问该仓库 | 确认镜像已成功推送且地址拼写正确；HTTP 仓库需加 `http://` 前缀；需认证时补充 `--registry-username` / `--registry-password` |
