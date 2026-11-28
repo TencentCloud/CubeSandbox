@@ -15,6 +15,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"time"
 
@@ -148,6 +149,20 @@ func (a *App) Run() {
 func coreInit(ctx context.Context, cfg *config.Config) error {
 
 	log.Init(config.GetLogConfig())
+
+	// Narrow the scheduler before anything sizes itself from it: the runtime
+	// derives the GC mark worker count and every sync.Pool's per-P shard array
+	// from GOMAXPROCS. Doing it here rather than in cmd/cubemaster covers every
+	// entrypoint that runs the app (integration tests included), and keeps the
+	// mutation next to the line that reports it.
+	cfg.ApplyMaxProcs()
+
+	// Surface the scheduler width: a many-core host defaults to one P per core,
+	// which is invisible in logs and metrics yet drives the GC mark worker count
+	// and every sync.Pool's per-P shard array. max_procs=0 means "runtime
+	// default", so this line is also the only record of what was in effect.
+	CubeLog.WithContext(ctx).Infof("runtime: num_cpu=%d gomaxprocs=%d max_procs=%d",
+		runtime.NumCPU(), runtime.GOMAXPROCS(0), cfg.Common.MaxProcs)
 
 	if err := templatecenter.InitArtifactStore(ctx); err != nil {
 		return fmt.Errorf("artifact store: %w", err)

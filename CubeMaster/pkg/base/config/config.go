@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -143,6 +144,21 @@ type CommonConf struct {
 	MaxNICQueue                     int             `yaml:"max_nic_queue"`
 	DisableCreateImageCluster       map[string]bool `yaml:"disable_create_image_cluster"`
 	EnableAGSColdStartSwitch        bool            `yaml:"enable_ags_cold_start_switch"`
+
+	// MaxProcs lowers the Go scheduler width (runtime.GOMAXPROCS) when the
+	// runtime picked a wider one. It never raises it: on Go 1.25+ the default
+	// already accounts for the cgroup CPU quota, so a pod limited to 4 CPUs
+	// starts at 4 and a copied "16-32" recommendation must not push it back up.
+	// Zero (the default) keeps whatever the runtime computed.
+	//
+	// CubeMaster is I/O bound: goroutine time goes to MySQL, redis and cubelet
+	// HTTP, so on a many-core bare-metal host the default buys little real
+	// parallelism and a lot of runtime overhead — GOMAXPROCS/4 GC mark workers,
+	// one shard per P in every sync.Pool, and the preemption signals that go
+	// with both. In a create-heavy profile on a 384-core host, GC was 73.5% of
+	// CubeMaster's CPU; capping at 32 cut CPU per create from 29.7ms to 8.6ms.
+	// 16-32 is the recommended range for such hosts.
+	MaxProcs int `yaml:"max_procs"`
 }
 
 type AuthConf struct {
@@ -855,27 +871,121 @@ func (l *listener) OnEvent(data interface{}) {
 		CubeLog.Fatalf("validate Config:%v fail:%v", data, err)
 		return
 	}
+	previous := cfg
 	cfg = conf
+	// conf.yaml is hot-reloadable, so apply a narrowed max_procs here as well.
+	// Widening is not possible: once lowered, the runtime default this process
+	// started with is gone, so raising the value back needs a restart. Only an
+	// edit that actually asks for something unapplied is worth a warning.
+	prev, now := conf.ApplyMaxProcs()
+	switch classifyMaxProcsReload(previous, conf, prev, now, maxProcsApplied.Load()) {
+	case maxProcsNarrowed:
+		CubeLog.Infof("config reload: gomaxprocs %d -> %d (max_procs=%d)", prev, now, conf.Common.MaxProcs)
+	case maxProcsNotApplied:
+		CubeLog.Warnf("config reload: max_procs=%d not applied (gomaxprocs is already %d); max_procs only lowers the scheduler width",
+			conf.Common.MaxProcs, prev)
+	case maxProcsLostNarrowing:
+		CubeLog.Warnf("config reload: max_procs removed, gomaxprocs stays %d until restart", prev)
+	}
 	notify(conf)
 }
+
+type maxProcsReloadAction int
+
+const (
+	// maxProcsUnchanged covers "nothing to do" and "the edit asked for a value
+	// that is already meaningless here": both stay silent, so a reload that only
+	// touches an unrelated key does not produce a warning about a raise nobody
+	// made.
+	maxProcsUnchanged maxProcsReloadAction = iota
+	maxProcsNarrowed
+	maxProcsNotApplied
+	maxProcsLostNarrowing
+)
+
+// classifyMaxProcsReload decides what a reload did with common.max_procs, for
+// logging only. prev/now are the widths reported by ApplyMaxProcs, and narrowed
+// says whether max_procs is what set the current width (as opposed to sitting
+// above a runtime default it never touched).
+//
+// The messages have to stay true in the steady state, which is a value at or
+// above the width in effect: that is normal on a CPU-limited pod (Go 1.25
+// starts at the cgroup quota) and on any host where the cap was copied from a
+// bigger machine. So an edit that changes the value and still cannot be applied
+// is reported as "not applied", never as a raise -- the edit may well have been
+// a decrease -- and a removal is only worth a warning when a narrowing really
+// happened, because otherwise a restart would land on the same width.
+func classifyMaxProcsReload(previous, conf *Config, prev, now int, narrowed bool) maxProcsReloadAction {
+	if prev != now {
+		return maxProcsNarrowed
+	}
+	if conf == nil || conf.Common == nil {
+		return maxProcsUnchanged
+	}
+	before, hadBefore := 0, false
+	if previous != nil && previous.Common != nil {
+		before, hadBefore = previous.Common.MaxProcs, true
+	}
+	changed := !hadBefore || before != conf.Common.MaxProcs
+	switch {
+	case conf.Common.MaxProcs > prev && changed:
+		return maxProcsNotApplied
+	case conf.Common.MaxProcs == 0 && narrowed && changed:
+		// The key was deleted after it had narrowed the process; the runtime
+		// default it would restore is no longer known. `changed` keeps later,
+		// unrelated reloads quiet: once the key is gone, deleting it again is not
+		// an event, and maxProcsApplied stays set for the life of the process.
+		return maxProcsLostNarrowing
+	}
+	return maxProcsUnchanged
+}
+
+// ApplyMaxProcs lowers the Go scheduler width when common.max_procs asks for a
+// narrower one, and returns the width in effect before and after the call.
+//
+// It deliberately never raises the width. The Go runtime already picked one
+// from the CPU count, or on Go 1.25+ from the cgroup CPU quota (a pod limited
+// to 4 CPUs starts at 4), so raising would over-subscribe a limited container
+// and reintroduce the GC mark fan-out and per-P pool shards this knob exists to
+// remove. It also keeps a stricter GOMAXPROCS from the environment: the value
+// being compared is what the runtime actually chose, environment included.
+func (c *Config) ApplyMaxProcs() (prev, now int) {
+	prev = runtime.GOMAXPROCS(0)
+	if c == nil || c.Common == nil || c.Common.MaxProcs <= 0 || c.Common.MaxProcs >= prev {
+		return prev, prev
+	}
+	// runtime.GOMAXPROCS returns the value it replaced, hence the explicit
+	// width below rather than the call's result.
+	runtime.GOMAXPROCS(c.Common.MaxProcs)
+	maxProcsApplied.Store(true)
+	return prev, c.Common.MaxProcs
+}
+
+// maxProcsApplied records that max_procs actually set the width, as opposed to
+// sitting at or above a runtime default it never touched. A reload needs this
+// to tell "the key is what made this process narrow" from "the key has always
+// been inert here": only the former makes deleting it worth a warning, because
+// otherwise a restart would land on the same width.
+var maxProcsApplied atomic.Bool
 
 func preHandle(config *Config) (*Config, error) {
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
-	if preComHandleConf(config) != nil {
-		return nil, errors.New("preComHandleConf fail")
+	// Keep the wrapped reason: reporting only "xxx fail" hides why the
+	// configuration was rejected, which is all an operator sees at startup when
+	// a value is out of range (e.g. a negative max_procs).
+	if err := preComHandleConf(config); err != nil {
+		return nil, fmt.Errorf("preComHandleConf fail: %w", err)
 	}
-
-	if preHandleCubeletConf(config) != nil {
-		return nil, errors.New("preHandleCubeletConf fail")
+	if err := preHandleCubeletConf(config); err != nil {
+		return nil, fmt.Errorf("preHandleCubeletConf fail: %w", err)
 	}
-
-	if preHandleScheduler(config) != nil {
-		return nil, errors.New("preHandleScheduler failed")
+	if err := preHandleScheduler(config); err != nil {
+		return nil, fmt.Errorf("preHandleScheduler failed: %w", err)
 	}
-	if preHandleAuthConf(config) != nil {
-		return nil, errors.New("preHandleAuthConf failed")
+	if err := preHandleAuthConf(config); err != nil {
+		return nil, fmt.Errorf("preHandleAuthConf failed: %w", err)
 	}
 	return config, nil
 }
@@ -885,6 +995,11 @@ func preComHandleConf(config *Config) error {
 	}
 	if config.Common == nil {
 		return errors.New("config.Common is nil")
+	}
+	if config.Common.MaxProcs < 0 {
+		// Reject instead of silently ignoring: a negative cap would otherwise
+		// look like "keep the default" while reading like a deliberate value.
+		return errors.New("common.max_procs must be >= 0")
 	}
 	if config.Common.HttpPort == 0 {
 		config.Common.HttpPort = 8089

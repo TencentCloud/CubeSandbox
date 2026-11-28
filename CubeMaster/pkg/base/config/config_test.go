@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -131,6 +132,120 @@ func TestPreComHandleConfDistributionWorkersDefault(t *testing.T) {
 	cfg = &Config{Common: &CommonConf{DistributionWorkers: 16}}
 	assert.NoError(t, preComHandleConf(cfg))
 	assert.Equal(t, 16, cfg.Common.DistributionWorkers)
+}
+
+func TestPreComHandleConfMaxProcs(t *testing.T) {
+	// max_procs is a ceiling, not a requirement: 0 must survive the defaults
+	// pass untouched so the Go runtime keeps whatever it computed at startup
+	// (nproc, or the cgroup CPU quota on Go 1.25+).
+	cfg := &Config{Common: &CommonConf{}}
+	require.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 0, cfg.Common.MaxProcs)
+
+	cfg = &Config{Common: &CommonConf{MaxProcs: 32}}
+	require.NoError(t, preComHandleConf(cfg))
+	assert.Equal(t, 32, cfg.Common.MaxProcs)
+
+	// Negative is a configuration error, not a silent fallback to the default:
+	// it would otherwise read like a deliberate value while doing nothing.
+	cfg = &Config{Common: &CommonConf{MaxProcs: -1}}
+	err := preComHandleConf(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_procs")
+}
+
+func TestPreHandlePropagatesMaxProcsError(t *testing.T) {
+	// The startup path wraps preComHandleConf; a rejected max_procs must reach
+	// the operator with the reason attached instead of a bare "preHandle fail".
+	_, err := preHandle(&Config{Common: &CommonConf{MaxProcs: -1}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_procs")
+}
+
+func TestApplyMaxProcsOnlyLowers(t *testing.T) {
+	// The knob is a ceiling, not an override: on Go 1.25+ the runtime default
+	// already reflects the cgroup CPU quota, so a value above the width in
+	// effect must be ignored instead of over-subscribing the container.
+	orig := runtime.GOMAXPROCS(0)
+	narrowed := maxProcsApplied.Load()
+	t.Cleanup(func() {
+		runtime.GOMAXPROCS(orig)
+		maxProcsApplied.Store(narrowed)
+	})
+
+	runtime.GOMAXPROCS(16)
+	assert.Equal(t, 16, runtime.GOMAXPROCS(0))
+
+	if prev, now := (&Config{Common: &CommonConf{MaxProcs: 32}}).ApplyMaxProcs(); prev != 16 || now != 16 {
+		t.Fatalf("max_procs above the current width must not raise it: prev=%d now=%d", prev, now)
+	}
+	if prev, now := (&Config{Common: &CommonConf{MaxProcs: 4}}).ApplyMaxProcs(); prev != 16 || now != 4 {
+		t.Fatalf("max_procs below the current width must lower it: prev=%d now=%d", prev, now)
+	}
+	// Both the reload path (value edited to 0) and a nil config must leave the
+	// width alone rather than resetting it to something the runtime no longer
+	// remembers.
+	if prev, now := (&Config{Common: &CommonConf{}}).ApplyMaxProcs(); prev != 4 || now != 4 {
+		t.Fatalf("unset max_procs must not touch the width: prev=%d now=%d", prev, now)
+	}
+	if prev, now := (*Config)(nil).ApplyMaxProcs(); prev != 4 || now != 4 {
+		t.Fatalf("nil config must not touch the width: prev=%d now=%d", prev, now)
+	}
+}
+
+func TestClassifyMaxProcsReload(t *testing.T) {
+	// The switch in listener.OnEvent is the only place that mutates the
+	// process-wide width at runtime, so the decision it takes is pinned here.
+	cfgWith := func(n int) *Config { return &Config{Common: &CommonConf{MaxProcs: n}} }
+	cases := []struct {
+		name     string
+		previous *Config
+		conf     *Config
+		prev     int
+		now      int
+		narrowed bool
+		want     maxProcsReloadAction
+	}{
+		{"narrowed by the edit", cfgWith(32), cfgWith(8), 32, 8, true, maxProcsNarrowed},
+		{"unchanged value and width", cfgWith(32), cfgWith(32), 32, 32, true, maxProcsUnchanged},
+		{"raise attempted by the edit", cfgWith(32), cfgWith(64), 32, 32, true, maxProcsNotApplied},
+		// A cap above the width in effect is a normal steady state (a bare-metal
+		// value carried into a CPU-limited pod). Warning only when the edit
+		// changed the value keeps unrelated reloads quiet.
+		{"raise already in steady state", cfgWith(300), cfgWith(300), 256, 256, false, maxProcsUnchanged},
+		// Lowering 32 -> 20 on a pod running at 16 is not a raise, so the message
+		// must not claim one; the value simply still cannot be applied.
+		{"lowered but still above the width", cfgWith(32), cfgWith(20), 16, 16, false, maxProcsNotApplied},
+		{"key removed after narrowing", cfgWith(32), cfgWith(0), 32, 32, true, maxProcsLostNarrowing},
+		// Removing a cap that never bound changes nothing, not even after a
+		// restart, so there is nothing to warn about.
+		{"key removed but never applied", cfgWith(32), cfgWith(0), 16, 16, false, maxProcsUnchanged},
+		// The warning fires once, when the key is deleted. A later reload that
+		// only touches an unrelated key must not repeat it: maxProcsApplied stays
+		// set for the life of the process.
+		{"key already absent on a later reload", cfgWith(0), cfgWith(0), 8, 8, true, maxProcsUnchanged},
+		{"key never set", cfgWith(0), cfgWith(0), 256, 256, false, maxProcsUnchanged},
+		{"no previous config", nil, cfgWith(64), 32, 32, false, maxProcsNotApplied},
+		{"new config without common", cfgWith(32), &Config{}, 32, 32, true, maxProcsUnchanged},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyMaxProcsReload(tc.previous, tc.conf, tc.prev, tc.now, tc.narrowed)
+			if got != tc.want {
+				t.Fatalf("classify = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommonConfMaxProcsYAML(t *testing.T) {
+	var cfg CommonConf
+	require.NoError(t, yaml.Unmarshal([]byte("max_procs: 32\n"), &cfg))
+	assert.Equal(t, 32, cfg.MaxProcs)
+
+	var unset CommonConf
+	require.NoError(t, yaml.Unmarshal([]byte("http_port: 8089\n"), &unset))
+	assert.Equal(t, 0, unset.MaxProcs, "unset max_procs must stay 0 (= runtime default)")
 }
 
 func TestNestedLogSettingsUseSnakeCaseOnRoundTrip(t *testing.T) {

@@ -18,6 +18,14 @@ common:
   # template_center_addr: "http://127.0.0.1:8090"
   # Per-call max concurrency for rootfs artifact distribution. Default 4.
   # distribution_workers: 4
+  # Lower the Go scheduler width (GOMAXPROCS). 0 = runtime default: one P per
+  # available CPU, or the cgroup CPU quota on Go 1.25+. Only ever lowers, never
+  # raises, so a value copied from the range below cannot over-subscribe a
+  # CPU-limited pod. CubeMaster is I/O bound, so on a many-core bare-metal host
+  # the default mostly widens GC mark fan-out and per-P pool shards; 16-32 is
+  # the recommended range there. Takes effect on reload when narrowed; raising
+  # it back needs a restart.
+  # max_procs: 32
 
 log:
   module: "cubemaster"
