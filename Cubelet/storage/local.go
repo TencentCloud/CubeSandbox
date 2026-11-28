@@ -1324,7 +1324,7 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflo
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
 	}
 	sizes := normalizeRootfsSizes(size)
-	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
+	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()), result)
 	if err != nil {
 		log.G(ctx).Errorf("derive v2 default-medium from template fail: %v", err)
 		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "derive v2 default-medium from template fail: %v", err)
@@ -1439,7 +1439,7 @@ func optionalCreateContextBackend(opts *workflow.CreateContext) string {
 	return backend
 }
 
-func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64) (*cowVolume, error) {
+func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64, result *StorageInfo) (*cowVolume, error) {
 	backend := createContextStorageBackend(opts)
 	store, err := l.storeForBackend(backend)
 	if err != nil {
@@ -1458,7 +1458,76 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
 	// attach the package snap as the live disk — S3 snaps are RO and Commit
 	// requires a volume source (volume follows sandbox lifecycle).
+	volume, err := store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+	if err == nil || !errors.Is(err, ErrCowObjectAlreadyExists) ||
+		!staleResumeRootfsReplaceable(store, opts, sandboxID, result) {
+		return volume, err
+	}
+	// A resume that failed after this derive left sb-<id>-rootfs-gen0 behind,
+	// and the reflink backend cannot confirm where an existing object came
+	// from, so every retry fails the same way (#1847). The object may be half
+	// written: drop it and derive a fresh one from the pause snapshot, which
+	// stays untouched.
+	//
+	// The failed attempt's VM can outlive its rollback: when the runtime does
+	// not exit in time the failover keeps the PAUSED row but leaves the VM
+	// running on this disk, and the PAUSED row only knows the runtime of the
+	// pause, not of that attempt. So keep the object while any process on the
+	// host still has it open or mapped, or while the scan cannot tell; the retry
+	// after that VM is gone replaces it.
+	//
+	// The scan and the delete are not atomic, and the lifecycle lock does not
+	// cover the earlier attempt's shim: a process that opens the object between
+	// the scan and the delete would still lose it. The check narrows that risk;
+	// it does not rule it out.
+	name := SandboxRootfsName(sandboxID, 0)
+	path, resolveErr := store.ResolveDevPath(ctx, name, cowKindSnapshot)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("%w; resolving the existing copy failed: %v", err, resolveErr)
+	}
+	if pids, holdErr := fileHolders(procRoot, path); holdErr != nil || len(pids) != 0 {
+		if holdErr == nil {
+			holdErr = fmt.Errorf("still in use by pid %v", pids)
+		}
+		log.G(ctx).Warnf("resume %s: keeping %s left by an earlier resume: %v", sandboxID, name, holdErr)
+		return nil, fmt.Errorf("%w; keeping it: %v", err, holdErr)
+	}
+	if delErr := store.DeleteByKind(ctx, name, cowKindSnapshot); delErr != nil {
+		return nil, fmt.Errorf("%w; removing the stale copy failed: %v", err, delErr)
+	}
+	log.G(ctx).Warnf("resume %s: removed %s left by an earlier failed resume, deriving it again from template %s",
+		sandboxID, name, templateID)
 	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+// staleResumeRootfsReplaceable reports whether an existing sb-<id>-rootfs-gen0
+// may be considered for deletion and a fresh derive. It holds only for a
+// same-node resume of a local PAUSED sandbox on a reflink store (xfs or jfs);
+// the caller still checks that no process has the object open:
+//   - PausedTombstone is set only when that PAUSED row exists. The resume
+//     holds the sandbox lifecycle lock for the whole create, and the failover
+//     of an earlier failed resume runs synchronously under it, so no other
+//     create or destroy can be using the object.
+//   - S3 reuses its writable volume on a retry and keeps its own semantics.
+//   - A second Default emptyDir volume of this same create collides with the
+//     rootfs derived a moment ago; that one must not be deleted.
+func staleResumeRootfsReplaceable(store cow.Store, opts *workflow.CreateContext, sandboxID string, result *StorageInfo) bool {
+	if store == nil || store.Name() != cow.NameXfsCow || !opts.IsPauseResume() {
+		return false
+	}
+	paused := opts.PausedTombstone
+	if paused == nil || opts.PausedTombstoneGuard == nil || paused.SandboxID != sandboxID {
+		return false
+	}
+	name := SandboxRootfsName(sandboxID, 0)
+	if result != nil {
+		for _, v := range result.Volumes {
+			if v != nil && v.VolumeName == name {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
@@ -1473,7 +1542,7 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.Crea
 			return err
 		}
 		sizes := normalizeRootfsSizes(size)
-		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
+		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()), result)
 		if err != nil {
 			log.G(ctx).Errorf("allocate cubebox storage fail:%v", err)
 			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubebox storage fail:%v", err)
