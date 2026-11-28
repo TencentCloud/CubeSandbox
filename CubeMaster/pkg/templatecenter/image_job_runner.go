@@ -71,8 +71,14 @@ func distributionFailure(expected, ready int32, distErr error) error {
 //
 // builtFreshArtifact tells the failure paths whether this call owns the
 // artifact (and may therefore delete it) or merely reused an existing one.
-// The returned error mirrors what was written into the job row; the job status
-// is always persisted, so callers may simply log it.
+// Every terminal branch attempts to write the job row; if that write fails,
+// the job can remain RUNNING and is handled by the reconciler, so callers may
+// simply log the returned error. The returned error can wrap the raw cause (driver errors with
+// internal hosts, table names): callers must only log it and never surface it
+// to users. On the create persistErr path the job row's error_message carries
+// a sanitized message instead (see markDefinitionFailedOnPersistErr); the
+// other failure branches in this function still write the raw error to the
+// job row, which the build-status API returns as `message`.
 func finishTemplateImageJobAfterArtifact(
 	ctx context.Context,
 	jobID string,
@@ -191,10 +197,19 @@ func finishTemplateImageJobAfterArtifact(
 		JobID:      jobID,
 	})
 	claimWarning := ""
+	// Set only on the create persistErr path; markDefinitionFailedOnPersistErr
+	// always returns a non-empty message.
+	jobErrMsg := ""
 	var finalizeSpan trace.Span
 	finalizeCtx := ctx
 	if persistErr != nil {
 		err = persistErr
+		// Only a CREATE owns the definition it just wrote. Other operations
+		// (e.g. a TC-forwarded REDO) also reach this path and keep the
+		// previous behaviour: only the job fails.
+		if jobRecord.Operation == JobOperationCreate {
+			jobErrMsg, err = markDefinitionFailedOnPersistErr(ctx, req.TemplateID, jobID, len(readyTargets), persistErr)
+		}
 	} else {
 		finalizeCtx, finalizeSpan = telemetry.StartIfTraced(ctx, telemetry.SpanTemplateFinalize,
 			trace.WithAttributes(
@@ -210,13 +225,21 @@ func finishTemplateImageJobAfterArtifact(
 				logger.Errorf("cleanup fresh rootfs artifact after create template error fail: %v", cleanupErr)
 			}
 		}
-		_ = updateTemplateImageJob(ctx, jobID, map[string]any{
+		if jobErrMsg == "" {
+			jobErrMsg = err.Error()
+		}
+		// If this write fails the job stays RUNNING; on the create persistErr
+		// path the definition may already be FAILED, and a normal delete is
+		// then blocked by the active job until the TC reconciler times it out.
+		if writeErr := updateTemplateImageJob(ctx, jobID, map[string]any{
 			"status":          JobStatusFailed,
 			"phase":           JobPhaseCreatingTemplate,
 			"progress":        100,
 			"template_status": StatusFailed,
-			"error_message":   err.Error(),
-		})
+			"error_message":   jobErrMsg,
+		}); writeErr != nil {
+			logger.Errorf("record terminal job failure fail, job=%s: %v", jobID, writeErr)
+		}
 		return err
 	}
 	resultPayload, _ := json.Marshal(info)
@@ -253,6 +276,50 @@ func finishTemplateImageJobAfterArtifact(
 		return fmt.Errorf("template creation failed: %s", errorMessage)
 	}
 	return nil
+}
+
+// markDefinitionFailedOnPersistErr marks the template definition as FAILED
+// after replica persistence fails on a CREATE, but only while this job is
+// still the template's active CREATE (see publishCreateFailedIfJobActive).
+// If the template was force-deleted and re-created under the same ID in the
+// meantime, the definition belongs to a newer generation and is left alone.
+//
+// It returns two values:
+//   - userMsg: a sanitized, user-readable message. The definition's
+//     last_error is returned by GET /templates/:id, and the job row's
+//     error_message column is returned as `message` by
+//     GET /templates/:id/builds/:bid/status, so callers must write only
+//     userMsg to the job row.
+//   - err: the raw error chain (persistErr, joined with the publish error if
+//     any) for logs and for the caller's return value only.
+//
+// ErrTemplateNotFound from the publish is suppressed: a concurrent normal
+// delete must not be turned into a second failure. The job row still gets the
+// sanitized userMsg; persistErr only reaches the return value.
+func markDefinitionFailedOnPersistErr(
+	ctx context.Context,
+	templateID, jobID string,
+	readyTargetCount int,
+	persistErr error,
+) (userMsg string, err error) {
+	log.G(ctx).Errorf("replica persist error, template=%s job=%s err=%v", templateID, jobID, persistErr)
+	userMsg = fmt.Sprintf(
+		"failed to persist replica records on up to %d target node(s); see CubeMaster logs for job %s",
+		readyTargetCount, jobID,
+	)
+	err = persistErr
+	published, updErr := publishCreateFailedIfJobActive(ctx, templateID, jobID, userMsg)
+	if updErr != nil {
+		log.G(ctx).Errorf("mark template definition FAILED after replica persist error, template=%s job=%s err=%v", templateID, jobID, updErr)
+		if !errors.Is(updErr, ErrTemplateNotFound) {
+			err = errors.Join(err, fmt.Errorf("mark template definition failed: %w", updErr))
+			userMsg += "; template status could not be updated"
+		}
+		invalidateTemplateCaches(templateID)
+	} else if !published {
+		log.G(ctx).Errorf("job %s is no longer the active CREATE of template %s; definition status left unchanged", jobID, templateID)
+	}
+	return userMsg, err
 }
 
 func errorString(err error) string {

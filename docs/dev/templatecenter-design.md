@@ -66,6 +66,122 @@ Phase (`phase`) tracks the pipeline step (PULLING / BUILDING / UPLOADING /
 DISTRIBUTING). BUILT is terminal for the build itself; the resume pipeline
 (§3.5) then registers the artifact and distributes it.
 
+### 3.2a Definition states
+
+`t_cube_template_definition.status` tracks the user-visible template
+lifecycle, independently of the build job row above.
+
+New definition rows are always created as `kind=template`, starting at
+**PENDING** (`ensureTemplateDefinitionWithOptions`). Snapshot and pause
+snapshot lifecycles are tracked in `t_cube_snapshot` and
+`t_cube_pause_snapshot`. Legacy `kind='snapshot'` and `kind='pause_snapshot'`
+rows can still remain in this table: migration
+`20260824120000_backfill_snapshot_tables.sql` copies them into the new tables
+but does not delete them.
+
+A legacy row left at CREATING counts as an in-progress build for
+`hasActiveDefinitionBuild`. How to remove it depends on the backfill:
+
+- If the row was copied into `t_cube_snapshot`, `DeleteTemplateWithOptions`
+  routes the ID to `DeleteSnapshot`, which ignores `Force` and rejects
+  CREATING. Wait for the snapshot timeout reconciler to mark the snapshot
+  FAILED, then delete it normally.
+- If the backfill did not copy the row, the template delete path applies: a
+  normal delete is rejected and only a force delete removes it.
+
+```
+PENDING  ─┬─→ READY             every replica READY
+          ├─→ PARTIALLY_READY   at least one replica READY, at least one not
+          └─→ FAILED            the aggregate says no replica READY, or
+                                replica persistence failed on create
+                                (persistErr, see caveat below), or a force
+                                delete interrupted the build
+
+any state ──→ (row removed)     delete hard-deletes the definition and its
+                                replica rows; there is no DELETED state for
+                                definitions
+```
+
+READY / PARTIALLY_READY / FAILED are re-entered by `redo`, which publishes
+a fresh aggregate status from the same summary rules on success.
+
+On a replica persistence failure (persistErr) during **create**, the
+definition is published FAILED with a sanitized message, but only while that
+job is still the template's active, non-terminal CREATE
+(`publishCreateFailedIfJobActive` checks the job row in the same transaction).
+If the template was force-deleted and re-created under the same ID in the
+meantime, the new generation's definition is left alone. If the job built a
+fresh artifact, that artifact and its replica rows are then cleaned up
+(`cleanupArtifactFully` deletes only rows with `cleanup_required=false`; rows
+with `cleanup_required=true` are kept for the replica-cleanup reconciler). Redo
+and other operations are not changed by this: on persistErr they still fail
+only the job (follow-up).
+
+Known residual (follow-up): TC's stale-job sweep (`failStaleJobs`) marks a
+RUNNING job FAILED after an hour without progress, whatever its phase,
+including DISTRIBUTING and CREATING_TEMPLATE. If distribution or replica
+creation runs past that and then hits persistErr, the job is already terminal,
+`publishCreateFailedIfJobActive` does not write, and the definition stays
+PENDING with the job FAILED, as before this change.
+
+Caveat: persistErr can be partial, because rows are upserted per node. If the
+create adopted an existing artifact (`builtFreshArtifact == false`), or the
+cleanup fails, READY rows of the nodes that did persist can remain next to the
+FAILED definition. A FAILED definition therefore does not guarantee that no
+usable replica exists. To keep deletes safe, `shouldCheckInUse` still runs
+the in-use check for a FAILED definition while any READY replica row remains;
+a FAILED definition with no READY row skips it, as before. This guard covers
+the delete path only. The re-submit branch over a FAILED definition in
+`submitTemplateFromImage` / `SubmitTemplateCommit` cleans up replicas without
+an in-use check, but it is not reachable through the normal API: request
+validation always generates a new template ID (`request_validation.go`).
+
+Invariants:
+
+- PENDING (and CREATING, on legacy rows) is treated as an in-progress build by
+  `hasActiveDefinitionBuild`; a normal (non-force) delete is rejected with
+  `ErrTemplateAttemptInProgress`. A force delete first marks the definition FAILED
+  (`UpdateDefinitionStatus`) and then removes the row.
+- Writing only the job row's `template_status` does not update the
+  definition. The create persistErr path publishes FAILED through
+  `publishCreateFailedIfJobActive`. Other failures still write only the job
+  row, and are not covered yet. Redo persistErr and redo
+  `refreshTemplateReplicaSummary` / `GetTemplateInfo` errors leave the
+  definition at whatever status it had, so the outcome depends on it:
+  - definition PENDING + job FAILED, if the definition was still PENDING
+    (the same shape as a create whose finalize publish fails);
+  - definition READY + job FAILED, if the template was READY. This is worse
+    than a stuck PENDING: the template still looks usable and can still
+    schedule sandboxes;
+  - definition untouched: `prepareRedoTemplateReplicas` fails before the
+    definition is written at all.
+- A concurrent delete is not turned into a second failure. Once it has
+  hard-deleted the definition row, both writers (`publishTemplateStatusWithAlias`
+  and `publishCreateFailedIfJobActive`) get `ErrTemplateNotFound`. A force
+  delete first marks the job FAILED and only then removes the definition; in
+  that window `publishCreateFailedIfJobActive` sees a terminal job and returns
+  `published=false` with no error, leaving the definition alone. Both writers
+  also reject a DELETING definition, but that check is defensive: no current
+  writer sets a definition to DELETING.
+- Alias claim on publish is gated on `status != FAILED`: READY and
+  PARTIALLY_READY claim the requested alias, FAILED skips the claim. Skipping
+  the claim does not release an alias the template already holds. A manual
+  alias set (`SetTemplateAlias`) is stricter and requires READY.
+- Sandbox creation does not check the definition status. It only requires a
+  READY replica on a healthy node (`EnsureTemplateLocalityReady`), so the
+  definition status is a user-visible summary and not a scheduling gate.
+- Both error texts are public: the definition's `last_error` is returned as
+  `last_error` by `GET /templates/:id`, and the job row's `error_message`
+  column is returned as `message` by `GET /templates/:id/builds/:bid/status`.
+  Only the create persistErr path is sanitized: it writes user-readable text
+  to the job row, and to the definition when the publish
+  succeeds (if the publish fails, only the job row is updated, with
+  "; template status could not be updated" appended unless the definition is
+  gone), and its raw error goes to CubeMaster logs only. Other failure
+  branches of `finishTemplateImageJobAfterArtifact` (distribution failure,
+  job reload, redo prepare, definition registration, and redo persistErr)
+  still write the raw error to the job row (follow-up).
+
 ### 3.3 Error mapping
 
 CubeMaster also exposes `POST /cube/template/migrate` (CLI spelling: `tpl merge`) to migrate a legacy READY template artifact from CubeMaster local disk into TC-managed storage. In operational documentation, the wording should stay consistent: **`tpl merge` solves historical artifact storage convergence, while `tpl redo` solves node-side redistribution / rebuild when needed.** The typical case is that historical artifacts still live on local disk and the cluster later enables `s3Backed=true`, so those artifacts must be migrated from local disk into S3-backed storage. If the same maintenance window also needs to repopulate target nodes, run `tpl redo` after `tpl merge` completes.
