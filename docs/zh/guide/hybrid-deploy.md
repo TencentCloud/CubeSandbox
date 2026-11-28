@@ -46,7 +46,7 @@
 - **硬件规格**：单节点最低 **4C8G**、系统盘 ≥ 50 GB；生产环境建议 **16C32G+** 并挂载独立数据盘。
 - **文件系统（硬性要求）**：`/data/cubelet` 必须位于 **XFS** 文件系统上（`df -T /data/cubelet` 输出为 `xfs`），否则 `install-compute.sh` 预检会直接中止。生产环境建议为每台计算节点挂载独立数据盘并格式化为 XFS。
 - **容器运行时（必需）**：已安装并运行 **Docker**（**不支持 Snap 版 Docker**）。即使计算节点不跑控制面容器，`cube-egress` 仍以宿主机网络 Docker 容器形态运行。
-- **cgroup 与内核**：cgroup v2 需启用 `cpu` 控制器（或使用 cgroup v1），且需要 **root** 权限执行安装。
+- **cgroup 与内核**：Linux 内核版本 **≥ 5.4**（`uname -r`），cgroup v2 需启用 `cpu` 控制器（或使用 cgroup v1），且需要 **root** 权限执行安装。
 - **版本一致**：物理机 / 虚拟机使用的发布包（`cube-sandbox-one-click-<version>.tar.gz`）应与 Kubernetes Helm Chart 使用的组件镜像版本保持一致。
 
 ### 2.3 网络连通性与端口矩阵
@@ -741,7 +741,7 @@ helmTest:
 
 2. **宿主机系统软件包（无内网 apt / dnf 源时提前安装）**：
    - 若内网已有软件源且包含 Docker Engine（非 Snap 版），可跳过本项。
-   - 若完全无软件源，需提前离线安装 **Docker Engine（非 Snap）**、`e2fsprogs`、`util-linux`、`s3fs`、`jq`，以及在宿主机无 `systemd-resolved` 时安装 `dnsmasq`（完整清单见[离线部署指南 — 步骤 2](./offline-deploy.md#步骤-2提前安装系统软件包无内网源时)）。
+   - 若完全无软件源，需提前离线安装 **Docker Engine（非 Snap）**、`e2fsprogs`、`util-linux`、`s3fs`、`jq`，以及在宿主机无 `systemd-resolved` 时安装 `dnsmasq`（完整清单见[离线部署指南 — 1.3 准备宿主机系统软件包](./offline-deploy.md#preinstall-os-packages)）。
 
 3. **计算节点容器镜像（`cube-egress` 必需）**：
 

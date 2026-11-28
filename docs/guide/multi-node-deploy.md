@@ -37,6 +37,7 @@ You must have a working control node deployed via the [Self-Build Deployment Gui
 Each compute node must meet the same hardware and software requirements as the control node:
 
 - **Physical machine or bare-metal server** (nested virtualization is not supported)
+- **Linux kernel ≥ 5.4** (`uname -r`)
 - **x86_64** or **aarch64** (ARM64) architecture with **KVM enabled** (`ls /dev/kvm`)
 - **Docker** installed and running
 - **Time synchronization** enabled on every cluster node, including the control node and all compute nodes, using `chrony`, `ntpd`, `systemd-timesyncd`, PTP, or another suitable time synchronization solution

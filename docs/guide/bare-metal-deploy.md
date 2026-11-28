@@ -11,6 +11,7 @@ If you plan to use Cube Sandbox in a production environment, please refer to the
 ## Prerequisites
 
 - **x86_64** or **aarch64** (ARM64) Linux machine
+- **Linux kernel ≥ 5.4** (`uname -r`)
 - `/dev/kvm` present and read/writable (`ls -la /dev/kvm`)
 - **Root access**
 - **Docker** installed and running
