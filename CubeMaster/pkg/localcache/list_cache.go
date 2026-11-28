@@ -42,6 +42,12 @@ func DeleteSandboxCache(sandboxID string) {
 	listCache.Delete(sandboxID)
 }
 
+// CompareAndDeleteSandboxCache removes the entry for sandboxID only if it is
+// still old, so an entry written concurrently by a list or a resume survives.
+func CompareAndDeleteSandboxCache(sandboxID string, old *SandboxCache) bool {
+	return listCache.CompareAndDelete(sandboxID, old)
+}
+
 func SetSandboxCache(sandboxID string, cache *SandboxCache) {
 	if cache == nil {
 		return
