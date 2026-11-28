@@ -156,3 +156,26 @@ func TestReadProcessIdentityAtReadsTheGivenProcRoot(t *testing.T) {
 	assert.NotEqual(t, uint64(777), host.StartTime)
 	assert.Equal(t, LivenessAlive, host.Status())
 }
+
+func TestProcessIdentityStatusWithErrorPreservesReadFailure(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "4242")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	stat := filepath.Join(dir, "stat")
+	require.NoError(t, os.Mkdir(stat, 0o755))
+	id := ProcessIdentity{Pid: 4242, StartTime: 777, procRoot: root}
+	status, err := id.StatusWithError()
+	require.Equal(t, LivenessUnknown, status)
+	var pathErr *os.PathError
+	require.ErrorAs(t, err, &pathErr)
+	require.Equal(t, stat, pathErr.Path)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = WaitIdentityGone(ctx, id)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorAs(t, err, &pathErr)
+	require.NoError(t, os.Remove(stat))
+	status, err = id.StatusWithError()
+	require.Equal(t, LivenessGone, status)
+	require.NoError(t, err)
+}

@@ -7,7 +7,10 @@ use crate::coredump::{
     CoredumpMemoryRegion, CoredumpMemoryRegions, DumpState, GuestDebuggableError,
 };
 use crate::migration::{memory_blob_to_path, url_to_path};
-use crate::pagemap_anon::{filter_memory_ranges_by_pagemap_anon, host_page_size};
+use crate::pagemap_anon::{
+    filter_memory_ranges_by_pagemap_anon, host_page_size, scan_frozen_pages, FrozenPagemap,
+};
+use crate::snapshot_prefault;
 use crate::soft_dirty::{
     clear_soft_dirty, filter_memory_ranges_by_anon_and_soft_dirty, probe_soft_dirty_support,
 };
@@ -154,6 +157,177 @@ mod memory_snapshot_file_tests {
         assert!(target.path.exists());
 
         fs::remove_dir_all(dir_path).unwrap();
+    }
+
+    #[test]
+    fn incremental_writer_rejects_restore_source_aliases_before_any_page_write() {
+        use super::{GuestMemoryMmap, MemoryManager};
+        use crate::pagemap_anon::host_page_size;
+        use crate::snapshot_resident::regular_file_id;
+        use std::fs::File;
+        use vm_memory::{Bytes, FileOffset, GuestAddress, GuestRegionMmap, MmapRegion};
+        use vm_migration::protocol::{MemoryRange, MemoryRangeTable};
+
+        let dir = unique_temp_path("alias");
+        fs::create_dir(&dir).unwrap();
+        let base_path = dir.join("base");
+        let alias_path = dir.join("hardlink");
+        let distinct_path = dir.join("distinct");
+        let page = host_page_size() as usize;
+        let original = vec![0x41; 2 * page];
+        fs::write(&base_path, &original).unwrap();
+        fs::hard_link(&base_path, &alias_path).unwrap();
+        fs::write(&distinct_path, &original).unwrap();
+        let source = File::open(&base_path).unwrap();
+        let identity = regular_file_id(&source).unwrap();
+        assert!(identity.is_some());
+        let mapping = MmapRegion::build(
+            Some(FileOffset::new(source, 0)),
+            2 * page,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let guest: GuestMemoryMmap =
+            vm_memory::GuestMemoryMmap::from_regions(vec![GuestRegionMmap::new(
+                mapping,
+                GuestAddress(0),
+            )
+            .unwrap()])
+            .unwrap();
+        guest
+            .write_slice(&vec![0x73; page], GuestAddress(page as u64))
+            .unwrap();
+        let mut layout = MemoryRangeTable::default();
+        layout.push(MemoryRange {
+            gpa: 0,
+            length: (2 * page) as u64,
+        });
+        assert_eq!(guest.read_obj::<u8>(GuestAddress(0)).unwrap(), 0x41);
+        let capture = crate::pagemap_anon::scan_frozen_pages(&guest, &layout, true).unwrap();
+
+        // This is the same writer as Pause. The mandatory write would modify
+        // the second page, even with capture/restore hints switched off.
+        for path in [&base_path, &alias_path] {
+            let target = MemorySnapshotFile {
+                path: path.clone(),
+                external: true,
+            };
+            for selection in [None, Some(&capture)] {
+                let err = MemoryManager::write_pagemap_anon_snapshot(
+                    &guest, &layout, identity, &target, selection, true,
+                )
+                .unwrap_err();
+                assert!(err.to_string().contains("aliases the live restore source"));
+                assert_eq!(fs::read(&base_path).unwrap(), original);
+            }
+        }
+
+        // A separate ordinary copy is a valid incremental base even when its
+        // blocks are not reflink-shared. It still receives the mandatory page.
+        let target = MemorySnapshotFile {
+            path: distinct_path.clone(),
+            external: true,
+        };
+        MemoryManager::write_pagemap_anon_snapshot(
+            &guest,
+            &layout,
+            identity,
+            &target,
+            Some(&capture),
+            true,
+        )
+        .unwrap();
+        let mut expected = original.clone();
+        expected[page..].fill(0x73);
+        assert_eq!(fs::read(&distinct_path).unwrap(), expected);
+        assert_eq!(fs::read(&base_path).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn frozen_pause_scans_each_region_once_and_recovers_from_partial_capture_failure() {
+        use super::{GuestMemoryMmap, MemoryManager};
+        use crate::pagemap_anon::{host_page_size, scan_frozen_pages, with_pagemap_probe};
+        use vm_memory::{Bytes, GuestAddress};
+        use vm_migration::protocol::{MemoryRange, MemoryRangeTable};
+
+        let page = host_page_size() as usize;
+        let zones = [
+            (GuestAddress(0), page),
+            (GuestAddress(4 * page as u64), page),
+        ];
+        let guest = GuestMemoryMmap::from_ranges(&zones).unwrap();
+        let other = GuestMemoryMmap::from_ranges(&zones).unwrap();
+        let mut layout = MemoryRangeTable::default();
+        for (i, &(gpa, size)) in zones.iter().enumerate() {
+            guest.write_slice(&[0xab + i as u8], gpa).unwrap();
+            layout.push(MemoryRange {
+                gpa: gpa.0,
+                length: size as u64,
+            });
+        }
+        let path = unique_temp_path("frozen-pagemap");
+        let target = MemorySnapshotFile {
+            path: path.clone(),
+            external: true,
+        };
+        let clean = vec![0; 2 * page];
+        let mut expected = clean.clone();
+        expected[0] = 0xab;
+        expected[page] = 0xac;
+
+        // A failure on the second region must discard the entire partial capture.
+        // The writer then scans both regions and writes both mandatory pages.
+        for (fail_at, expected_reads) in [(0, 2), (2, 4)] {
+            fs::write(&path, &clean).unwrap();
+            let (result, reads) = with_pagemap_probe(fail_at, || {
+                let captured = scan_frozen_pages(&guest, &layout, true).ok();
+                assert_eq!(captured.is_some(), fail_at == 0);
+                MemoryManager::write_pagemap_anon_snapshot(
+                    &guest,
+                    &layout,
+                    None,
+                    &target,
+                    captured.as_ref(),
+                    true,
+                )
+            });
+            result.unwrap();
+            assert_eq!(reads, expected_reads);
+            assert_eq!(fs::read(&path).unwrap(), expected);
+        }
+
+        // The other frozen layout has identical GPAs but different host RAM.
+        // It must not suppress a fresh scan, or the modified pages would be lost.
+        let wrong = scan_frozen_pages(&other, &layout, true).unwrap();
+        fs::write(&path, &clean).unwrap();
+        let (result, reads) = with_pagemap_probe(0, || {
+            MemoryManager::write_pagemap_anon_snapshot(
+                &guest,
+                &layout,
+                None,
+                &target,
+                Some(&wrong),
+                true,
+            )
+        });
+        result.unwrap();
+        assert_eq!(reads, 2);
+        assert_eq!(fs::read(&path).unwrap(), expected);
+
+        // An error in the mandatory fallback still fails the snapshot before writing.
+        fs::write(&path, &clean).unwrap();
+        let (result, reads) = with_pagemap_probe(2, || {
+            MemoryManager::write_pagemap_anon_snapshot(&guest, &layout, None, &target, None, false)
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to filter memory"));
+        assert_eq!(reads, 2);
+        assert_eq!(fs::read(&path).unwrap(), clean);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -307,6 +481,8 @@ pub struct MemoryManager {
     sgx_epc_region: Option<SgxEpcRegion>,
     user_provided_zones: bool,
     snapshot_memory_ranges: MemoryRangeTable,
+    private_snapshot_restore: bool,
+    restore_source: Option<(u64, u64)>,
     /// Whether the soft-dirty tracker is currently armed (i.e. the previous
     /// snapshot cycle ended with a successful `clear_soft_dirty()`, so the
     /// pagemap bit-55 set this cycle reflects only writes that happened
@@ -1043,6 +1219,15 @@ impl MemoryManager {
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         trace_scoped!("MemoryManager::new");
 
+        let private_snapshot_restore = restore_data.is_some() && snap_file.is_some();
+        // Keep the identity even with hints disabled: required incremental
+        // writes must never modify the image backing this live private VM.
+        let restore_source = match (restore_data, snap_file.as_ref()) {
+            (Some(_), Some(file)) => {
+                crate::snapshot_resident::regular_file_id(file).map_err(Error::SnapshotOpen)?
+            }
+            _ => None,
+        };
         let user_provided_zones = config.size == 0;
 
         let mmio_address_space_size = mmio_address_space_size(phys_bits);
@@ -1294,6 +1479,8 @@ impl MemoryManager {
             sgx_epc_region: None,
             user_provided_zones,
             snapshot_memory_ranges: MemoryRangeTable::default(),
+            private_snapshot_restore,
+            restore_source,
             soft_dirty_armed: AtomicBool::new(false),
             memory_zones,
             guest_ram_mappings: Vec::new(),
@@ -1372,6 +1559,11 @@ impl MemoryManager {
                 mm.lock()
                     .unwrap()
                     .fill_saved_regions(memory_file_target.path, mem_snapshot.memory_ranges)?;
+            } else if !prefault {
+                if let Some((hints, workers)) = SnapshotPrefaultHints::load(snapshot) {
+                    let memory = mm.lock().unwrap().guest_memory.memory();
+                    hints.populate(&memory, &mem_snapshot.memory_ranges, workers);
+                }
             }
 
             Ok(mm)
@@ -2176,6 +2368,23 @@ impl MemoryManager {
         Ok(table)
     }
 
+    pub(crate) fn capture_incremental_pages(&self, for_pause: bool) -> Option<FrozenPagemap> {
+        if !self.private_snapshot_restore || self.dirty_log {
+            return None;
+        }
+        match scan_frozen_pages(
+            &self.guest_memory.memory(),
+            &self.snapshot_memory_ranges,
+            for_pause,
+        ) {
+            Ok(pages) => Some(pages),
+            Err(error) => {
+                warn!("Skipping snapshot working set: {}", error);
+                None
+            }
+        }
+    }
+
     pub fn snapshot_data(&self) -> MemoryManagerSnapshotData {
         MemoryManagerSnapshotData {
             memory_ranges: self.snapshot_memory_ranges.clone(),
@@ -2334,90 +2543,82 @@ impl MemoryManager {
 
     pub fn save_range_to_file(
         &self,
-        mut memory_file: &File,
+        memory_file: &File,
         range: &MemoryRange,
         file_offset: u64,
     ) -> result::Result<(), MigratableError> {
-        let guest_memory = self.guest_memory.memory();
-        let mut offset: u64 = 0;
-
-        if file_offset != 0 {
-            memory_file
-                .seek(SeekFrom::Start(file_offset))
-                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-        }
-        // Here we are manually handling the retry in case we can't read
-        // the whole region at once because we can't use the implementation
-        // from vm-memory::GuestMemory of write_all_to() as it is not
-        // following the correct behavior. For more info about this issue
-        // see: https://github.com/rust-vmm/vm-memory/issues/174
-        loop {
-            let bytes_written = guest_memory
-                .write_volatile_to(
-                    GuestAddress(range.gpa + offset),
-                    &mut memory_file.as_fd(),
-                    (range.length - offset) as usize,
-                )
-                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-            offset += bytes_written as u64;
-
-            if offset == range.length {
-                break;
-            }
-        }
-
-        Ok(())
+        write_guest_range(&self.guest_memory.memory(), memory_file, range, file_offset)
     }
 
-    /// Save a pagemap_anon incremental snapshot.
-    ///
-    /// This method creates a full snapshot by merging the base snapshot with
-    /// pagemap_anon-filtered anonymous pages (CoW pages) from current VM memory.
-    /// Only pages that Guest actually wrote to (triggering Copy-on-Write from
-    /// the MAP_PRIVATE mmap) are saved from guest memory; non-anonymous pages
-    /// When a base snapshot exists at the destination, the file is opened in
-    /// read-write mode and only the anonymous (CoW) pages are overwritten;
-    /// non-anonymous regions keep their original content from the base.
-    ///
-    /// When no base snapshot exists (cold start), a new file is created and
-    /// only anonymous pages are written; non-anonymous regions are left as
-    /// holes (zeros) in the pre-allocated file.
-    ///
-    /// The resulting snapshot file is in the same format as a regular full
-    /// snapshot and can be restored without any special handling.
-    fn send_pagemap_anon_memory(
+    /// Update an existing incremental base with anonymous and swapped guest pages.
+    /// A verified private XFS clone can also receive selected resident pages from
+    /// the frozen guest. Both paths produce a full-size, restorable memory image.
+    pub(crate) fn send_pagemap_anon_memory(
         &self,
         destination_url: &str,
         memory_vol_url: &Option<String>,
+        captured: Option<&FrozenPagemap>,
+        write_resident: bool,
     ) -> result::Result<(), MigratableError> {
         if self.snapshot_memory_ranges.is_empty() {
             return Ok(());
         }
+        let target =
+            MemorySnapshotFile::from_snapshot_url(destination_url, memory_vol_url.as_deref())?;
+        Self::write_pagemap_anon_snapshot(
+            &self.guest_memory.memory(),
+            &self.snapshot_memory_ranges,
+            self.restore_source,
+            &target,
+            captured,
+            write_resident,
+        )
+    }
 
-        let guest_memory = self.guest_memory.memory();
-
-        // Classify CoW anonymous pages from pagemap bit 61 (`PM_FILE`): a page
-        // is saved when it is swapped, or present without `PM_FILE`.
-        let (filtered_ranges, stats) =
-            filter_memory_ranges_by_pagemap_anon(&guest_memory, &self.snapshot_memory_ranges)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Failed to filter memory with pagemap_anon: {}",
-                        e
-                    ))
-                })?;
+    fn write_pagemap_anon_snapshot(
+        guest_memory: &GuestMemoryMmap,
+        image_layout: &MemoryRangeTable,
+        restore_source: Option<(u64, u64)>,
+        memory_file_target: &MemorySnapshotFile,
+        captured: Option<&FrozenPagemap>,
+        write_resident: bool,
+    ) -> result::Result<(), MigratableError> {
+        // Only in-process data from this frozen Pause can replace the mandatory
+        // scan. Never derive the write set from optional snapshot metadata.
+        let scanned;
+        let captured = captured.filter(|p| p.matches(guest_memory, image_layout));
+        let (filtered_ranges, stats, resident) = match captured {
+            Some(pages) => (
+                pages.dirty.as_slice(),
+                &pages.stats,
+                if write_resident {
+                    pages.resident.as_deref().unwrap_or_default()
+                } else {
+                    &[]
+                },
+            ),
+            None => {
+                scanned = filter_memory_ranges_by_pagemap_anon(guest_memory, image_layout)
+                    .map_err(|e| {
+                        MigratableError::MigrateSend(anyhow!(
+                            "Failed to filter memory with pagemap_anon: {}",
+                            e
+                        ))
+                    })?;
+                (scanned.0.regions(), &scanned.1, &[][..])
+            }
+        };
 
         info!(
-            "PagemapAnon snapshot: total={} bytes ({} pages), anon={} bytes ({} pages), savings={:.1}%",
+            "PagemapAnon snapshot: total={} bytes ({} pages), anon={} bytes ({} pages), savings={:.1}% reused_frozen_scan={}",
             stats.total_bytes,
             stats.total_pages,
             stats.saved_bytes,
             stats.anon_pages,
-            stats.savings_percentage()
+            stats.savings_percentage(),
+            captured.is_some()
         );
 
-        let memory_file_target =
-            MemorySnapshotFile::from_snapshot_url(destination_url, memory_vol_url.as_deref())?;
         if !memory_file_target.path().exists() {
             return Err(MigratableError::MigrateSend(anyhow!(
                 "Base snapshot file not found at {:?}, incremental (pagemap_anon) snapshot requires an existing base file",
@@ -2430,23 +2631,73 @@ impl MemoryManager {
             memory_file_target.path()
         );
         let memory_file = memory_file_target.open_read_write()?;
+        if let Some(source) = restore_source {
+            let target_id = crate::snapshot_resident::regular_file_id(&memory_file)
+                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+            if target_id == Some(source) {
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "incremental snapshot target aliases the live restore source"
+                )));
+            }
+        }
 
         // Build a GPA-to-file-offset mapping for calculating offsets.
         let mut gpa_to_file_offset: Vec<(u64, u64, u64)> = Vec::new();
         let mut offset = 0_u64;
-        for range in self.snapshot_memory_ranges.regions() {
+        for range in image_layout.regions() {
             gpa_to_file_offset.push((range.gpa, range.length, offset));
             offset += range.length;
         }
 
-        // Write only anonymous pages to the snapshot file.
-        // With a base, non-anon regions already have the correct content.
-        // Without a base, non-anon regions are zeros (sparse holes).
-        let align = snapshot_write_align(&memory_file);
-        for (range, file_off) in
-            snapshot_file_writes(filtered_ranges.regions(), &gpa_to_file_offset, align)?
-        {
-            self.save_range_to_file(&memory_file, &range, file_off)?;
+        // Verify clone sharing before any guest write dirties the destination,
+        // then write through the same open descriptor.
+        let verification = std::time::Instant::now();
+        let warm_target = !resident.is_empty()
+            && restore_source.is_some_and(|source| {
+                match crate::snapshot_resident::verify_clone(
+                    guest_memory,
+                    image_layout,
+                    source,
+                    &memory_file,
+                ) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        info!(
+                            "SNAPSHOT_RESIDENT written=0 reason={} verify_us={}",
+                            error,
+                            verification.elapsed().as_micros()
+                        );
+                        false
+                    }
+                }
+            });
+
+        let verify_us = verification.elapsed().as_micros();
+
+        if warm_target {
+            let started = std::time::Instant::now();
+            let (written, completed, writes) = write_verified_snapshot(
+                guest_memory,
+                &memory_file,
+                resident,
+                filtered_ranges,
+                &gpa_to_file_offset,
+            )?;
+            info!(
+                "SNAPSHOT_RESIDENT written={} ranges={} us={} verify_us={} combined_writes={} phase=required_and_resident",
+                written,
+                completed,
+                started.elapsed().as_micros(),
+                verify_us,
+                writes
+            );
+        } else {
+            let align = snapshot_write_align(&memory_file);
+            for (range, file_off) in
+                snapshot_file_writes(filtered_ranges, &gpa_to_file_offset, align)?
+            {
+                write_guest_range(guest_memory, &memory_file, &range, file_off)?;
+            }
         }
 
         info!(
@@ -2517,7 +2768,7 @@ impl MemoryManager {
             // Write a full anon-page (pagemap_anon) snapshot. This already
             // matches what `send_pagemap_anon_memory` does and it produces
             // a self-contained snapshot file.
-            self.send_pagemap_anon_memory(destination_url, memory_vol_url)?;
+            self.send_pagemap_anon_memory(destination_url, memory_vol_url, None, false)?;
 
             // Probe + arm. `probe_soft_dirty_support()` writes "4" to
             // /proc/self/clear_refs, which both detects kernel support
@@ -2637,6 +2888,112 @@ impl MemoryManager {
             length
         )))
     }
+}
+
+fn write_guest_range(
+    guest_memory: &GuestMemoryMmap,
+    mut memory_file: &File,
+    range: &MemoryRange,
+    file_offset: u64,
+) -> result::Result<(), MigratableError> {
+    let mut offset: u64 = 0;
+
+    if file_offset != 0 {
+        memory_file
+            .seek(SeekFrom::Start(file_offset))
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+    }
+    // Here we are manually handling the retry in case we can't read
+    // the whole region at once because we can't use the implementation
+    // from vm-memory::GuestMemory of write_all_to() as it is not
+    // following the correct behavior. For more info about this issue
+    // see: https://github.com/rust-vmm/vm-memory/issues/174
+    loop {
+        let bytes_written = guest_memory
+            .write_volatile_to(
+                GuestAddress(range.gpa + offset),
+                &mut memory_file.as_fd(),
+                (range.length - offset) as usize,
+            )
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        if bytes_written == 0 {
+            return Err(MigratableError::MigrateSend(
+                io::Error::from(io::ErrorKind::WriteZero).into(),
+            ));
+        }
+        offset += bytes_written as u64;
+
+        if offset == range.length {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Write required and optional resident data in file-offset order on a verified clone.
+/// Returns the optional byte and range counts and the number of combined output ranges.
+pub(super) fn write_verified_snapshot(
+    memory: &GuestMemoryMmap,
+    mut memory_file: &File,
+    resident: &[MemoryRange],
+    dirty: &[MemoryRange],
+    layout: &[(u64, u64, u64)],
+) -> result::Result<(u64, usize, usize), MigratableError> {
+    if dirty.iter().any(|r| r.gpa.checked_add(r.length).is_none()) {
+        return Err(MigratableError::MigrateSend(anyhow!(
+            "invalid required GPA range"
+        )));
+    }
+    let mut writes = snapshot_file_writes(dirty, layout, 0)?;
+    let ranges: Vec<_> = crate::snapshot_resident::budget(resident).collect();
+    if ranges.iter().any(|r| r.gpa.checked_add(r.length).is_none()) {
+        return Err(MigratableError::MigrateSend(anyhow!(
+            "invalid resident GPA range"
+        )));
+    }
+    // The authoritative scan defines the required data. A hint which overlaps
+    // it may be stale, so discard the entire optional run.
+    let dirty = crate::snapshot_prefault::guest_ranges(dirty);
+    let mut resident_bytes = 0;
+    let mut resident_runs = 0;
+    for (range, offset) in snapshot_file_writes(&ranges, layout, 0)? {
+        let first = dirty.partition_point(|d| d.end <= range.gpa);
+        if dirty
+            .get(first)
+            .is_some_and(|d| d.start < range.gpa + range.length)
+        {
+            continue;
+        }
+        resident_bytes += range.length;
+        resident_runs += 1;
+        writes.push((range, offset));
+    }
+    // Layout offsets ascend even when guest zones arrive in a different
+    // GPA order. Adjacent zones can be distinct guest VMAs.
+    writes.sort_unstable_by_key(|(_, offset)| *offset);
+    writes.dedup_by(|(next, offset), (prev, prev_offset)| {
+        if prev.gpa.checked_add(prev.length) == Some(next.gpa)
+            && prev_offset.checked_add(prev.length) == Some(*offset)
+            && layout
+                .binary_search_by_key(offset, |&(_, _, start)| start)
+                .is_err()
+        {
+            prev.length += next.length;
+            true
+        } else {
+            false
+        }
+    });
+    for (range, offset) in &writes {
+        if *offset == 0 {
+            memory_file
+                .seek(SeekFrom::Start(0))
+                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        }
+        write_guest_range(memory, memory_file, range, *offset)?;
+    }
+    Ok((resident_bytes, resident_runs, writes.len()))
 }
 
 const FUSE_SNAPSHOT_WRITE_ALIGN: u64 = 1 << 20;
@@ -3164,6 +3521,129 @@ pub struct MemoryManagerSnapshotData {
     next_hotplug_slot: usize,
 }
 
+// A separate optional section keeps old snapshots readable and prevents a
+// damaged hint list from invalidating the memory manager's required state.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SnapshotPrefaultHints<R = Vec<MemoryRange>> {
+    write: R,
+    read: R,
+}
+
+impl FrozenPagemap {
+    pub(crate) fn add_hints_to(&self, snapshot: &mut Snapshot) {
+        let Some(read) = self.resident.as_deref() else {
+            return;
+        };
+        if self.dirty.is_empty() && read.is_empty() {
+            return;
+        }
+        let hints = SnapshotPrefaultHints {
+            write: self.dirty.as_slice(),
+            read,
+        };
+        match SnapshotDataSection::new_from_state(SnapshotPrefaultHints::ID, &hints) {
+            Ok(section) => snapshot.add_data_section(section),
+            Err(error) => warn!("Skipping snapshot prefault hints: {}", error),
+        }
+    }
+}
+
+impl SnapshotPrefaultHints {
+    const ID: &'static str = "memory-prefault";
+
+    fn load(snapshot: &Snapshot) -> Option<(Self, usize)> {
+        let section = snapshot.snapshot_data.get("memory-prefault-section")?;
+        let workers = snapshot_prefault::worker_count();
+        if workers == 0 {
+            return None;
+        }
+        Self::decode(section).map(|hints| (hints, workers))
+    }
+
+    fn decode(section: &SnapshotDataSection) -> Option<Self> {
+        // A range with two u64 fields takes at most 58 compact JSON bytes.
+        if section.snapshot.len() > snapshot_prefault::MAX_RANGES * 64 + 64 {
+            warn!("Skipping oversized snapshot prefault section");
+            return None;
+        }
+        match section.to_state::<Self>() {
+            Ok(hints) if hints.write.len() + hints.read.len() <= snapshot_prefault::MAX_RANGES => {
+                Some(hints)
+            }
+            _ => {
+                warn!("Skipping invalid snapshot prefault section");
+                None
+            }
+        }
+    }
+
+    fn populate(&self, memory: &GuestMemoryMmap, saved: &MemoryRangeTable, workers: usize) {
+        // Fast restore maps the snapshot fd privately only on an exact GPA
+        // and size match. Other RAM may have a different backing file.
+        let regions: Vec<_> = saved
+            .regions()
+            .iter()
+            .filter_map(|range| {
+                let gpa = GuestAddress(range.gpa);
+                let region = memory.find_region(gpa)?;
+                if region.start_addr() != gpa || region.len() != range.length {
+                    return None;
+                }
+                Some((region, region.file_offset()?.start()))
+            })
+            .collect();
+        if let Some(file) = regions.first().and_then(|(region, _)| region.file_offset()) {
+            snapshot_prefault::populate(&regions, file.file(), &self.write, &self.read, workers);
+        }
+    }
+}
+
+#[cfg(test)]
+mod prefault_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn missing_or_damaged_hints_leave_the_required_state_readable() {
+        let mut snapshot = Snapshot::new_from_state(MEMORY_MANAGER_SNAPSHOT_ID, &42u32).unwrap();
+        assert!(SnapshotPrefaultHints::load(&snapshot).is_none());
+
+        let hints = SnapshotPrefaultHints {
+            write: vec![MemoryRange {
+                gpa: 4096,
+                length: 8192,
+            }],
+            read: vec![MemoryRange {
+                gpa: 0,
+                length: 4096,
+            }],
+        };
+        snapshot.add_data_section(
+            SnapshotDataSection::new_from_state(SnapshotPrefaultHints::ID, &hints).unwrap(),
+        );
+        let serialized = serde_json::to_vec(&snapshot).unwrap();
+        let mut restored: Snapshot = serde_json::from_slice(&serialized).unwrap();
+        let section = restored
+            .snapshot_data
+            .get_mut("memory-prefault-section")
+            .unwrap();
+        let decoded = SnapshotPrefaultHints::decode(section).unwrap();
+        assert_eq!(
+            (decoded.write[0].gpa, decoded.write[0].length),
+            (4096, 8192)
+        );
+        assert_eq!((decoded.read[0].gpa, decoded.read[0].length), (0, 4096));
+
+        section.snapshot = "{".to_owned();
+        assert!(SnapshotPrefaultHints::decode(section).is_none());
+        assert_eq!(
+            restored
+                .to_state::<u32>(MEMORY_MANAGER_SNAPSHOT_ID)
+                .unwrap(),
+            42
+        );
+    }
+}
+
 impl Snapshottable for MemoryManager {
     fn id(&self) -> String {
         MEMORY_MANAGER_SNAPSHOT_ID.to_string()
@@ -3284,7 +3764,12 @@ impl Transportable for MemoryManager {
 
         match config.snapshot_type {
             SnapshotType::Incremental => {
-                self.send_pagemap_anon_memory(destination_url, &config.memory_vol_url)?;
+                self.send_pagemap_anon_memory(
+                    destination_url,
+                    &config.memory_vol_url,
+                    None,
+                    false,
+                )?;
             }
             SnapshotType::SoftDirty => {
                 self.send_soft_dirty_memory(destination_url, &config.memory_vol_url)?;

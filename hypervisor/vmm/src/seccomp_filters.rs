@@ -332,6 +332,23 @@ fn create_vmm_ioctl_seccomp_rule_common(
         and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_SUSPEND)?],
     ];
 
+    // Query XFS inode flags and extents only in opted-in VMM processes.
+    if crate::snapshot_resident::enabled() {
+        common_rules.extend(or![
+            and![Cond::new(
+                1,
+                ArgLen::Dword,
+                Eq,
+                crate::snapshot_resident::FIEMAP
+            )?],
+            and![Cond::new(
+                1,
+                ArgLen::Dword,
+                Eq,
+                crate::snapshot_resident::FSGETXATTR
+            )?],
+        ]);
+    }
     let hypervisor_rules = create_vmm_ioctl_seccomp_rule_hypervisor(hypervisor_type)?;
 
     common_rules.extend(hypervisor_rules);
@@ -497,7 +514,7 @@ fn pty_foreground_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, Backend
 fn vmm_thread_rules(
     hypervisor_type: HypervisorType,
 ) -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
-    Ok(vec![
+    let mut rules = vec![
         (libc::SYS_accept4, vec![]),
         #[cfg(target_arch = "x86_64")]
         (libc::SYS_access, vec![]),
@@ -694,7 +711,11 @@ fn vmm_thread_rules(
         // Async log.
         (libc::SYS_sched_yield, vec![]),
         (libc::SYS_setsockopt, vec![]),
-    ])
+    ];
+    if crate::snapshot_resident::enabled() {
+        rules.push((crate::snapshot_resident::CACHESTAT, vec![]));
+    }
+    Ok(rules)
 }
 
 #[cfg(feature = "kvm")]

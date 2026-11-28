@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -637,4 +638,47 @@ func TestWaitReplacedSandboxGoneStillRefusesAVerifiableLiveRuntime(t *testing.T)
 	require.Error(t, err)
 	assert.False(t, pendingIntentOnlyError(t, err),
 		"a runtime we can prove is alive is refused, not deferred")
+}
+
+// A transient first-read failure must reach the same bounded wait as a live
+// identity, rather than becoming a permanent unresolved snapshot.
+func TestRuntimeEvidenceRetriesInitiallyUnknownIdentity(t *testing.T) {
+	for _, recover := range []bool{true, false} {
+		t.Run(strconv.FormatBool(recover), func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "4242")
+			require.NoError(t, os.Mkdir(dir, 0o755))
+			stat := filepath.Join(dir, "stat")
+			require.NoError(t, os.WriteFile(stat, []byte("4242 (shim) S "+strings.Repeat("0 ", 18)+"777\n"), 0o644))
+			id, err := utils.ReadProcessIdentityAt(root, 4242)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(stat, []byte("malformed"), 0o644))
+			require.Equal(t, utils.LivenessUnknown, id.Status())
+			ev := sandboxRuntimeEvidence{}
+			ev.addRuntimeIdentity(id)
+			require.Len(t, ev.identities, 1)
+			require.Empty(t, ev.unresolved)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- waitSandboxRuntimeGone(ctx, "sb-unknown", ev) }()
+			select {
+			case err := <-done:
+				t.Fatalf("gate returned before recovery/deadline: %v", err)
+			case <-time.After(25 * time.Millisecond):
+			}
+			if recover {
+				require.NoError(t, os.Remove(stat))
+			}
+			err = <-done
+			if recover {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.Contains(t, err.Error(), "4242")
+				require.Contains(t, err.Error(), "777")
+				require.Contains(t, err.Error(), "stat")
+			}
+		})
+	}
 }

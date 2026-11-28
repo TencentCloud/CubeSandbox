@@ -85,6 +85,8 @@ mod pci_segment;
 pub mod seccomp_filters;
 mod serial_manager;
 mod sigwinch_listener;
+mod snapshot_prefault;
+mod snapshot_resident;
 pub mod soft_dirty;
 pub mod vm;
 pub mod vm_config;
@@ -709,7 +711,7 @@ impl Vmm {
         snapshot_config: &SnapshotConfig,
     ) -> result::Result<(), VmError> {
         self.vm_pause()?;
-        self.vm_snapshot(snapshot_config)?;
+        self.vm_snapshot(snapshot_config, true)?;
         // Stop phase, before the reply: the baseline teardown runs here
         // in full -- workers woken (the resume kick may surface pending
         // requests, as on the delete path), vcpus joined, then the drop
@@ -764,7 +766,11 @@ impl Vmm {
         self.vm_restore(restore_cfg)
     }
 
-    fn vm_snapshot(&mut self, snapshot_config: &SnapshotConfig) -> result::Result<(), VmError> {
+    fn vm_snapshot(
+        &mut self,
+        snapshot_config: &SnapshotConfig,
+        pause: bool,
+    ) -> result::Result<(), VmError> {
         // Config-only snapshot: the guest keeps running and only the VM
         // configuration is serialized. `Vm::snapshot()` requires a paused VM
         // and would also produce state and memory, so it must not be entered.
@@ -776,7 +782,7 @@ impl Vmm {
             vm.snapshot()
                 .map_err(VmError::Snapshot)
                 .and_then(|snapshot| {
-                    vm.send(&snapshot, snapshot_config)
+                    vm.send_frozen_snapshot(&snapshot, snapshot_config, pause)
                         .map_err(VmError::SnapshotSend)
                 })
         } else {
@@ -2144,7 +2150,7 @@ impl Vmm {
                                 }
                                 ApiRequest::VmSnapshot(snapshot_data) => {
                                     let response = self
-                                        .vm_snapshot(&snapshot_data)
+                                        .vm_snapshot(&snapshot_data, false)
                                         .map_err(ApiError::VmSnapshot)
                                         .map(|_| ApiResponsePayload::Empty);
 

@@ -150,6 +150,9 @@ pub enum PagemapAnonError {
 
     #[error("Memory region not aligned to page boundary")]
     NotPageAligned,
+
+    #[error("Guest working set exceeds the snapshot prefault range limit")]
+    TooManyPrefaultRanges,
 }
 
 /// Result type for pagemap_anon operations
@@ -185,7 +188,35 @@ pub fn get_anon_pages(host_addr: u64, length: u64) -> Result<Vec<bool>> {
     Ok(scan_pagemap_cow_anon(host_addr, length)?.0)
 }
 
+#[cfg(test)]
+thread_local! {
+    static PAGEMAP_PROBE: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_pagemap_probe<R>(fail_at: usize, operation: impl FnOnce() -> R) -> (R, usize) {
+    PAGEMAP_PROBE.with(|probe| {
+        assert!(probe.replace(Some((0, fail_at))).is_none());
+        let result = operation();
+        let (calls, _) = probe.take().unwrap();
+        (result, calls)
+    })
+}
+
 fn read_pagemap_entries(host_addr: u64, length: u64) -> Result<Vec<u64>> {
+    #[cfg(test)]
+    if PAGEMAP_PROBE.with(|p| {
+        let Some((calls, fail_at)) = p.get() else {
+            return false;
+        };
+        p.set(Some((calls + 1, fail_at)));
+        calls + 1 == fail_at
+    }) {
+        return Err(PagemapAnonError::ReadFailed {
+            path: "/proc/self/pagemap".to_owned(),
+            source: io::Error::from_raw_os_error(libc::EIO),
+        });
+    }
     let page_size = host_page_size();
     if host_addr % page_size != 0 {
         return Err(PagemapAnonError::NotPageAligned);
@@ -237,6 +268,114 @@ pub(crate) fn scan_pagemap_cow_anon(host_addr: u64, length: u64) -> Result<(Vec<
     }
 
     Ok((result, swapped_pages))
+}
+
+/// Per-operation classification of the frozen guest. The required CoW list is
+/// never bounded by the optional hint limit and never comes from serialized metadata.
+pub(crate) struct FrozenPagemap {
+    pub(crate) dirty: Vec<MemoryRange>,
+    pub(crate) stats: PagemapAnonStats,
+    pub(crate) resident: Option<Vec<MemoryRange>>,
+    // Host address, GPA and length in image order. These also prevent reuse
+    // for different mappings that happen to have the same guest addresses.
+    layout: Vec<(usize, u64, u64)>,
+}
+
+impl FrozenPagemap {
+    fn new() -> Self {
+        Self {
+            dirty: Vec::new(),
+            stats: PagemapAnonStats::default(),
+            resident: Some(Vec::new()),
+            layout: Vec::new(),
+        }
+    }
+
+    pub(crate) fn matches<B: vm_memory::bitmap::Bitmap + 'static>(
+        &self,
+        memory: &GuestMemoryMmap<B>,
+        layout: &MemoryRangeTable,
+    ) -> bool {
+        self.layout.len() == layout.regions().len()
+            && self
+                .layout
+                .iter()
+                .zip(layout.regions())
+                .all(|(&(host, gpa, len), range)| {
+                    range.gpa == gpa
+                        && range.length == len
+                        && len % host_page_size() == 0
+                        && memory
+                            .get_host_address(GuestAddress(gpa))
+                            .ok()
+                            .map(|p| p as usize)
+                            == Some(host)
+                })
+    }
+
+    fn collect(
+        &mut self,
+        range: &MemoryRange,
+        entries: &[u64],
+        page: u64,
+        preserve_dirty: bool,
+    ) -> Result<()> {
+        self.stats.total_bytes += range.length;
+        self.stats.total_pages += entries.len() as u64;
+        let first_dirty = self.dirty.len();
+        let first_read = self.resident.as_ref().map_or(0, Vec::len);
+        for (i, &entry) in entries.iter().enumerate() {
+            let (spans, first) = if pagemap_entry_is_cow_anon(entry) {
+                self.stats.anon_pages += 1;
+                self.stats.saved_bytes += page;
+                self.stats.swapped_pages += u64::from(entry & PAGEMAP_SWAPPED_BIT != 0);
+                (&mut self.dirty, first_dirty)
+            } else if entry & PAGEMAP_PRESENT_BIT != 0 {
+                let Some(read) = self.resident.as_mut() else {
+                    continue;
+                };
+                (read, first_read)
+            } else {
+                continue;
+            };
+            let offset = i as u64 * page;
+            let gpa = range.gpa + offset;
+            let length = (range.length - offset).min(page);
+            if let Some(prev) = spans[first..].last_mut() {
+                if prev.gpa.checked_add(prev.length) == Some(gpa) {
+                    prev.length += length;
+                    continue;
+                }
+            }
+            spans.push(MemoryRange { gpa, length });
+            if self.resident.as_ref().is_some_and(|read| {
+                self.dirty.len() + read.len() > crate::snapshot_prefault::MAX_RANGES
+            }) {
+                if !preserve_dirty {
+                    return Err(PagemapAnonError::TooManyPrefaultRanges);
+                }
+                self.resident = None;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn scan_frozen_pages<B: vm_memory::bitmap::Bitmap + 'static>(
+    memory: &GuestMemoryMmap<B>,
+    ranges: &MemoryRangeTable,
+    preserve_dirty: bool,
+) -> Result<FrozenPagemap> {
+    let mut pages = FrozenPagemap::new();
+    for range in ranges.regions() {
+        let host = memory
+            .get_host_address(GuestAddress(range.gpa))
+            .map_err(|_| PagemapAnonError::GetHostAddressFailed)?;
+        let entries = read_pagemap_entries(host as u64, range.length)?;
+        pages.collect(range, &entries, host_page_size(), preserve_dirty)?;
+        pages.layout.push((host as usize, range.gpa, range.length));
+    }
+    Ok(pages)
 }
 
 /// Filter memory ranges by pagemap_anon, returning only ranges with anonymous (CoW) pages.
@@ -338,6 +477,135 @@ mod tests {
     fn test_pagemap_anon_stats_zero_total() {
         let stats = PagemapAnonStats::default();
         assert_eq!(stats.savings_percentage(), 0.0);
+    }
+
+    #[test]
+    fn prefault_hints_distinguish_written_resident_and_absent_pages() {
+        let resident = PAGEMAP_PRESENT_BIT | PAGEMAP_FILE_BIT;
+        let entries = [
+            resident,
+            resident,
+            PAGEMAP_PRESENT_BIT,
+            PAGEMAP_SWAPPED_BIT,
+            0,
+            resident,
+        ];
+        for page in [4096, 65536] {
+            let mut pages = FrozenPagemap::new();
+            let source = MemoryRange {
+                gpa: page,
+                length: 5 * page + 1,
+            };
+            pages.collect(&source, &entries, page, true).unwrap();
+            let spans = |ranges: &[MemoryRange]| {
+                ranges.iter().map(|r| (r.gpa, r.length)).collect::<Vec<_>>()
+            };
+            assert_eq!(spans(&pages.dirty), [(3 * page, 2 * page)]);
+            assert_eq!(
+                spans(pages.resident.as_ref().unwrap()),
+                [(page, 2 * page), (6 * page, 1)]
+            );
+        }
+    }
+
+    #[test]
+    fn adjacent_mapping_edges_stay_separate_for_incremental_writes() {
+        let page = 4096;
+        let mut pages = FrozenPagemap::new();
+        for gpa in [0, page] {
+            pages
+                .collect(
+                    &MemoryRange { gpa, length: page },
+                    &[PAGEMAP_PRESENT_BIT | PAGEMAP_FILE_BIT],
+                    page,
+                    true,
+                )
+                .unwrap();
+        }
+        let reads = pages.resident.unwrap();
+        assert_eq!(reads.len(), 2);
+        assert_eq!((reads[0].gpa, reads[1].gpa), (0, page));
+    }
+
+    #[test]
+    fn fragmented_hints_never_truncate_required_ranges_or_statistics() {
+        let count = crate::snapshot_prefault::MAX_RANGES + 1;
+        let page = 4096;
+        let entries: Vec<_> = (0..2 * count)
+            .map(|i| {
+                if i % 2 == 0 {
+                    PAGEMAP_SWAPPED_BIT
+                } else {
+                    PAGEMAP_PRESENT_BIT | PAGEMAP_FILE_BIT
+                }
+            })
+            .collect();
+        let source = MemoryRange {
+            gpa: 0,
+            length: entries.len() as u64 * page,
+        };
+        let mut pages = FrozenPagemap::new();
+        pages.collect(&source, &entries, page, true).unwrap();
+        assert!(pages.resident.is_none());
+        assert_eq!(pages.dirty.len(), count);
+        assert!(pages
+            .dirty
+            .iter()
+            .enumerate()
+            .all(|(i, r)| r.gpa == 2 * i as u64 * page && r.length == page));
+        assert_eq!(pages.stats.anon_pages, count as u64);
+        assert_eq!(pages.stats.swapped_pages, count as u64);
+        assert_eq!(pages.stats.saved_bytes, count as u64 * page);
+        assert_eq!(pages.stats.total_bytes, source.length);
+        // A caller only serializing hints still stops at the original range bound.
+        assert!(matches!(
+            FrozenPagemap::new().collect(&source, &entries, page, false),
+            Err(PagemapAnonError::TooManyPrefaultRanges)
+        ));
+    }
+
+    #[test]
+    fn snapshot_hints_leave_file_backed_pages_out_of_the_write_set() {
+        use std::io::Write;
+        use vm_memory::{FileOffset, GuestRegionMmap, MmapRegion};
+        use vmm_sys_util::tempfile::TempFile;
+
+        let page = host_page_size() as usize;
+        let mut file = TempFile::new().unwrap().into_file();
+        file.write_all(&vec![37; 2 * page]).unwrap();
+        let mapping = MmapRegion::build(
+            Some(FileOffset::new(file, 0)),
+            2 * page,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE,
+        )
+        .unwrap();
+        let region = GuestRegionMmap::new(mapping, GuestAddress(0)).unwrap();
+        let memory: crate::GuestMemoryMmap = GuestMemoryMmap::from_regions(vec![region]).unwrap();
+        let base = memory.get_host_address(GuestAddress(0)).unwrap();
+        // SAFETY: both pages belong to this live writable private mapping.
+        unsafe {
+            assert_eq!(std::ptr::read_volatile(base), 37);
+            std::ptr::write_volatile(base.add(page), 41);
+        }
+        let mut ranges = MemoryRangeTable::default();
+        ranges.push(MemoryRange {
+            gpa: 0,
+            length: (2 * page) as u64,
+        });
+        let capture = scan_frozen_pages(&memory, &ranges, true).unwrap();
+        let write = capture.dirty;
+        let read = capture.resident.unwrap();
+        let (saved, _) = filter_memory_ranges_by_pagemap_anon(&memory, &ranges).unwrap();
+        for (ranges, start) in [
+            (&write[..], page as u64),
+            (&read[..], 0),
+            (saved.regions(), page as u64),
+        ] {
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(ranges[0].gpa, start);
+            assert_eq!(ranges[0].length, page as u64);
+        }
     }
 
     #[test]

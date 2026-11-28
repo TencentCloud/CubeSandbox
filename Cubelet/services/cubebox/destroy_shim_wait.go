@@ -376,15 +376,7 @@ func (l *local) collectRuntimeEvidence(ctx context.Context, sb *cubeboxstore.Cub
 			identity = &id
 		}
 
-		switch identity.Status() {
-		case utils.LivenessGone:
-			// Provably finished — including the case where the pid number now
-			// belongs to someone else entirely.
-		case utils.LivenessUnknown:
-			ev.markUnresolved("pid %d recorded in %s has no verifiable identity", c.pid, c.source)
-		default:
-			ev.identities = append(ev.identities, *identity)
-		}
+		ev.addRuntimeIdentity(*identity)
 	}
 
 	// A shim was started for this sandbox but its pid never made it into the
@@ -588,6 +580,15 @@ func waitSandboxRuntimeGone(ctx context.Context, sandboxID string, ev sandboxRun
 			sandboxID, strings.Join(msgs, "; "))
 	}
 	return nil
+}
+
+// addRuntimeIdentity retains verifiable identities even if the first /proc
+// read fails. The bounded wait retries Unknown and still refuses cleanup if
+// identity cannot be established before the deadline.
+func (ev *sandboxRuntimeEvidence) addRuntimeIdentity(identity utils.ProcessIdentity) {
+	if identity.Status() != utils.LivenessGone {
+		ev.identities = append(ev.identities, identity)
+	}
 }
 
 // waitReplacedSandboxGone blocks until the sandbox being replaced has no
