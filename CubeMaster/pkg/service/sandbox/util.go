@@ -271,7 +271,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	if err := checkParam(req); err != nil {
 		return nil, err
 	}
-	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: annotation_count=%d volumes_before_inject=%d",
+	log.G(ctx).Debugf("[hostdir] ConstructCubeletReq: annotation_count=%d volumes_before_inject=%d",
 		len(req.Annotations), len(req.Volumes))
 
 	// Normalize the sandbox idle timeout into a concrete value.
@@ -296,12 +296,16 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		out.Backend = b
 		out.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
-	log.G(ctx).Infof(
-		"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
-		req.InstanceType,
-		req.NetworkType,
-		formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
-	)
+	if log.IsDebug() {
+		// Arguments are evaluated before Debugf decides to drop the entry, and this
+		// one formats the config with fmt verbs, so guard the call itself.
+		log.G(ctx).Debugf(
+			"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
+			req.InstanceType,
+			req.NetworkType,
+			formatConstructCubeNetworkConfig(out.CubeNetworkConfig),
+		)
+	}
 
 	err = checkAndGetAnnotation(req, out)
 	if err != nil {
@@ -311,7 +315,7 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 	if err = injectHostDirMounts(ctx, req); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
 	}
-	log.G(ctx).Infof("[hostdir] ConstructCubeletReq: volumes_after_inject=%d", len(req.Volumes))
+	log.G(ctx).Debugf("[hostdir] ConstructCubeletReq: volumes_after_inject=%d", len(req.Volumes))
 
 	if err = injectPluginVolumeMounts(ctx, req); err != nil {
 		return nil, ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
@@ -1216,38 +1220,19 @@ func redactToken(token string) string {
 	return "***REDACTED***"
 }
 
-func simplePrintCreateCubeSandboxReq(req *types.CreateCubeSandboxReq) string {
-	tmp := types.CreateCubeSandboxReq{
-		Request: req.Request,
-		InsId:   req.InsId,
-		InsIp:   req.InsIp,
-		Labels:  req.Labels,
+// firstImage returns the image reference of the first container, for the info
+// level create log. It is deliberately Image.Image only: ImageSpec.Name is the
+// registry *username*, not an image reference (it is carried to cubelet as
+// constants.CubeAnnotationsImageName, i.e. "cube.master.image.username", and
+// cubelet masks it as credential material). Falling back to it would label a
+// username as an image and put auth material in the info stream. It is empty
+// when the request carries no image reference, which is what an operator sees
+// in that case rather than a misleading placeholder.
+func firstImage(req *types.CreateCubeSandboxReq) string {
+	if req == nil || len(req.Containers) == 0 || req.Containers[0] == nil || req.Containers[0].Image == nil {
+		return ""
 	}
-	for _, v := range req.Containers {
-		tmp.Containers = append(tmp.Containers, &types.Container{
-			Name: v.Name,
-			Resources: &types.Resource{
-				Cpu: v.Resources.Cpu,
-				Mem: v.Resources.Mem,
-			},
-		})
-	}
-	for _, v := range req.Volumes {
-		if v.VolumeSource == nil {
-			continue
-		}
-		if v.VolumeSource.HostDirVolumeSources != nil {
-			tmp.Volumes = append(tmp.Volumes, &types.Volume{
-				Name: v.Name,
-				VolumeSource: &types.VolumeSource{
-					HostDirVolumeSources: &types.HostDirVolumeSources{
-						VolumeSources: v.VolumeSource.HostDirVolumeSources.VolumeSources,
-					},
-				},
-			})
-		}
-	}
-	return utils.InterfaceToString(tmp)
+	return req.Containers[0].Image.Image
 }
 
 func dealSecurity(volume *types.VolumeSource) *types.VolumeSource {
