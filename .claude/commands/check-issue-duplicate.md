@@ -112,7 +112,7 @@ Use this format for the comment:
 
 [If not compliant:]
 <!-- issue-compliance -->
-This issue doesn't fully meet our [contributing guidelines](../blob/master/CONTRIBUTING.md).
+This issue doesn't fully meet our [contributing guidelines](../../CONTRIBUTING.md).
 
 **What needs to be fixed:**
 - [specific reasons]
