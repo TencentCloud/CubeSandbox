@@ -55,7 +55,7 @@ be nonblank and unique; they identify subscriptions, not sandboxes.
 | `allowed_cidrs` | empty | At most 64 valid CIDRs for private/loopback destinations |
 | `subscriptions` | empty | At most 64 subscriptions |
 | `subscriptions[].enabled` | `false` | Subscription switch |
-| `subscriptions[].id`, `.url`, `.events` | unset | Required; ID ≤1024 bytes, URL ≤4096 bytes, 1–6 distinct supported events |
+| `subscriptions[].id`, `.url`, `.events` | unset | Required; ID ≤1024 bytes, URL ≤4096 bytes, 1–16 distinct supported events |
 
 These count limits do not bound process RSS. Global enable with no active
 subscription does no capture or delivery work. Disabled operation skips
@@ -71,6 +71,21 @@ notification preparation; enabling still uses CPU and memory.
 | `sandbox.lifecycle.checkpointed` | The executing snapshot job completes local work and persists READY, before its final query. A later query failure does not retract notification; querying READY does not publish again. |
 | `sandbox.lifecycle.updated` | Public SetTimeout/Refresh returns a usable finite deadline, or the existing node network update succeeds. A best-effort spec write failure does not undo node network success. |
 | `sandbox.lifecycle.killed` | The existing synchronous destruction call or asynchronous destroy handler succeeds, including existing tolerant/warning-only cases. Queue acceptance alone does not publish. |
+| `template.lifecycle.build.started` | A build job is accepted and forwarded to CubeTemplateCenter, before the image pull. `build_mode` is `remote:<instance_type>` for a forwarded build or `redo:<instance_type>` for a redistribution. |
+| `template.lifecycle.build.completed` | The post-build step registers the artifact and the template reaches READY, whether the build ran locally or was resumed after a Master restart. |
+| `template.lifecycle.build.failed` | Any path that persists FAILED: the builder status callback, a resume after restart, the BUILT reconciler, or a failure before the job ever reached the builder. Published only after the FAILED row is written. |
+| `template.lifecycle.deleted` | Template job cleanup succeeds for every target, immediately before the delete call returns. |
+| `template.lifecycle.migrated` | A redo redistributes the template and the job ends READY. A redo that fails or rolls back publishes nothing, so a subscriber never sees a migration that was reverted. |
+| `template.lifecycle.snapshot.created` | The snapshot job persists READY and its replica is registered — the same boundary as `checkpointed`, but identified by `snapshot_id` so it can be correlated with `snapshot.deleted`. |
+| `template.lifecycle.snapshot.deleted` | The snapshot delete job removes the snapshot files and its record. |
+| `template.lifecycle.snapshot.rollback.completed` | The rollback job commits the new generation. |
+| `volume.lifecycle.created` | The volume plugin creates the backend and the volume row is committed. `event_data.volume_driver` names the plugin. |
+| `volume.lifecycle.deleted` | The volume plugin destroys the backend and the row is hard-deleted. A volume still attached on any node is refused before either step, so no event is published. |
+
+Template, snapshot and volume events are Cube extensions: E2B defines only the
+sandbox lifecycle, so a stock E2B consumer will not subscribe to them. They
+carry `sandbox_template_id`, `snapshot_id` and `volume_id` respectively, and
+`restore` rejects an event whose identifying id is missing.
 
 Pause/checkpoint mean **local success** for both XFS and S3, not completed S3
 upload, remote durability or cross-node recoverability. Later upload status does
@@ -127,7 +142,7 @@ complete E2B field/operation parity. Paths below are relative to the JSON root.
 | --- | --- | --- |
 | `id` | UUID captured at success | Stable event deduplication key |
 | `version` | Always `"v2"` | Not the feature release/signature version |
-| `type` | One of the six full names | Exact matching |
+| `type` | One of the sixteen full names | Exact matching |
 | `timestamp` | Capture time, UTC RFC3339Nano | Not HTTP send time or execution start |
 | `sandbox_id` | Actual response/request sandbox ID | Not an E2B execution ID |
 | `sandbox_template_id` | Trusted create resolution or already-read spec; otherwise `""` | Timeout/network/killed do not query to fill it |

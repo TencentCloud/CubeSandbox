@@ -658,6 +658,16 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 	success = true
 	publishCheckpoint(ctx)
+	// The snapshot row is READY and its replica registered, so this is the
+	// boundary template.lifecycle.snapshot.created is contracted to fire on --
+	// the same moment as checkpointed, but identified by the snapshot instead of
+	// the sandbox so a subscriber can correlate it with snapshot.deleted.
+	// Notification absent means delivery was disabled when the job started, so
+	// there is nothing to publish and no identity to attribute it to.
+	if notification, ok := checkpointNotificationFrom(ctx); ok {
+		PublishSnapshotCreated(ctx, snapshotID, sandboxID, notification.templateID,
+			firstNonEmpty(strings.TrimSpace(createReq.Backend), constants.SnapshotBackendXFS))
+	}
 	logger.Infof("snapshot create finished successfully")
 	return nil
 }
@@ -946,6 +956,7 @@ func runSnapshotRollbackJob(ctx context.Context, jobID, sandboxID, snapshotID, n
 		telemetry.End(registerSpan, nil)
 	}
 	activeSpan = nil
+	PublishSnapshotRollback(ctx, snapshotID, sandboxID, newGen)
 	return nil
 }
 
@@ -1116,6 +1127,7 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 		return err
 	}
 	success = true
+	PublishSnapshotDeleted(ctx, snapshotID, "", "")
 	return nil
 }
 

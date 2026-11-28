@@ -31,10 +31,30 @@ type LifecycleFields struct {
 	EndAtMS               int64
 	KillReason            string
 	Network               *NetworkFields
+
+	// Template lifecycle fields
+	SourceImageRef string
+	InstanceType   string
+	BuildMode      string
+	ArtifactID     string
+	ReadyNodeCount int32
+	ErrorMsg       string
+
+	// Snapshot lifecycle fields
+	NewGen uint32
+
+	// Volume lifecycle fields
+	VolumeDriver string
 }
 
 func validateFields(f LifecycleFields) error {
-	if len(f.KillReason) > maxStringBytes || validateNetwork(f.Network) != nil || f.TooLarge || len(f.Metadata) > maxMetadataEntries || len(f.CPU) > 128 || len(f.Memory) > 128 || len(f.PauseMode) > 16 || len(f.ResumeMode) > 16 {
+	if len(f.KillReason) > maxStringBytes || validateNetwork(f.Network) != nil || f.TooLarge ||
+		len(f.Metadata) > maxMetadataEntries ||
+		len(f.CPU) > 128 || len(f.Memory) > 128 ||
+		len(f.PauseMode) > 16 || len(f.ResumeMode) > 16 ||
+		len(f.SourceImageRef) > maxStringBytes || len(f.InstanceType) > 128 ||
+		len(f.BuildMode) > 16 || len(f.ArtifactID) > maxStringBytes ||
+		len(f.ErrorMsg) > maxStringBytes || len(f.VolumeDriver) > 16 {
 		return ErrCaptureTooLarge
 	}
 	total := 0
@@ -63,6 +83,12 @@ func cloneFields(f LifecycleFields) LifecycleFields {
 	f.Network = cloneNetwork(f.Network)
 	f.CPU = strings.Clone(f.CPU)
 	f.Memory = strings.Clone(f.Memory)
+	f.SourceImageRef = strings.Clone(f.SourceImageRef)
+	f.InstanceType = strings.Clone(f.InstanceType)
+	f.BuildMode = strings.Clone(f.BuildMode)
+	f.ArtifactID = strings.Clone(f.ArtifactID)
+	f.ErrorMsg = strings.Clone(f.ErrorMsg)
+	f.VolumeDriver = strings.Clone(f.VolumeDriver)
 	return f
 }
 
@@ -71,6 +97,50 @@ func cloneFields(f LifecycleFields) LifecycleFields {
 // every cube.master.* key).
 func IsUserMetadataKey(key string) bool {
 	return key != "host-mount" && key != constants.Caller && !strings.HasPrefix(key, "cube.master.")
+}
+
+// TemplateLifecycleOpts carries the template build context a subscriber needs
+// to correlate build.started with build.completed/failed. Every field is
+// optional: a template event is identified by its template id, not by these.
+type TemplateLifecycleOpts struct {
+	SourceImageRef string
+	InstanceType   string
+	BuildMode      string
+	ArtifactID     string
+	ReadyNodeCount int32
+	ErrorMsg       string
+	NewGen         uint32
+	Metadata       map[string]string
+}
+
+func PrepareTemplateLifecycle(opts TemplateLifecycleOpts) LifecycleFields {
+	f := LifecycleFields{
+		SourceImageRef: opts.SourceImageRef,
+		InstanceType:   opts.InstanceType,
+		BuildMode:      opts.BuildMode,
+		ArtifactID:     opts.ArtifactID,
+		ReadyNodeCount: opts.ReadyNodeCount,
+		ErrorMsg:       opts.ErrorMsg,
+		NewGen:         opts.NewGen,
+	}
+	if opts.Metadata != nil {
+		f.Metadata = opts.Metadata
+	}
+	if validateFields(f) != nil {
+		return LifecycleFields{TooLarge: true}
+	}
+	return cloneFields(f)
+}
+
+// PrepareVolumeLifecycle carries the driver a volume was created with. It is
+// the only attribute a subscriber needs to route the event, and it cannot be
+// recovered from the volume id afterwards.
+func PrepareVolumeLifecycle(driver string) LifecycleFields {
+	f := LifecycleFields{VolumeDriver: driver}
+	if validateFields(f) != nil {
+		return LifecycleFields{TooLarge: true}
+	}
+	return cloneFields(f)
 }
 
 // UserMetadata must run before template merging. The request constructor's
@@ -156,7 +226,19 @@ func quantityInteger(raw string, memory bool) *int64 {
 }
 func mapLifecycle(c *CapturedEvent) *ProtocolEventData {
 	f := cloneFields(c.input.Fields)
-	p := &ProtocolEventData{SandboxMetadata: f.Metadata, PauseMode: f.PauseMode, ResumeMode: f.ResumeMode}
+	p := &ProtocolEventData{
+		SandboxMetadata: f.Metadata,
+		PauseMode:       f.PauseMode,
+		ResumeMode:      f.ResumeMode,
+		SourceImageRef:  f.SourceImageRef,
+		InstanceType:    f.InstanceType,
+		BuildMode:       f.BuildMode,
+		ArtifactID:      f.ArtifactID,
+		ReadyNodeCount:  f.ReadyNodeCount,
+		ErrorMsg:        f.ErrorMsg,
+		NewGen:          f.NewGen,
+		VolumeDriver:    f.VolumeDriver,
+	}
 	if c.input.Type == TypeUpdated {
 		if f.EndAtMS > 0 {
 			v := time.UnixMilli(f.EndAtMS).UTC().Format(time.RFC3339)
@@ -204,6 +286,30 @@ func (h *PublisherHolder) Enabled() bool {
 	return !off
 }
 func (h *PublisherHolder) PublishContext(ctx context.Context, kind, sandbox, template string, f LifecycleFields) {
+	h.publish(ctx, CaptureInput{Type: kind, SandboxID: sandbox, TemplateID: template, Fields: f})
+}
+
+// PublishSnapshotContext publishes a snapshot lifecycle event. Snapshot events
+// are identified by the snapshot they describe, not by a template: carrying the
+// snapshot id in TemplateID would make snapshot.deleted indistinguishable from
+// a template event on the wire.
+//
+// template may still be set: a snapshot taken from a sandbox started from a
+// template is that template's fork, so both ids are actionable.
+func (h *PublisherHolder) PublishSnapshotContext(ctx context.Context, kind, sandbox, template, snapshot string, f LifecycleFields) {
+	h.publish(ctx, CaptureInput{Type: kind, SandboxID: sandbox, TemplateID: template, SnapshotID: snapshot, Fields: f})
+}
+
+// PublishVolumeContext publishes a volume lifecycle event. A volume is its own
+// resource: it has no sandbox or template, and its id is the only identity a
+// subscriber needs to correlate created with deleted.
+func (h *PublisherHolder) PublishVolumeContext(ctx context.Context, kind, volume string, f LifecycleFields) {
+	h.publish(ctx, CaptureInput{Type: kind, VolumeID: volume, Fields: f})
+}
+
+// publish fills in the identity every event shares. The entry points above
+// differ only in which resource ids they carry.
+func (h *PublisherHolder) publish(ctx context.Context, in CaptureInput) {
 	s := h.slot.Load()
 	if s == nil {
 		return
@@ -211,10 +317,34 @@ func (h *PublisherHolder) PublishContext(ctx context.Context, kind, sandbox, tem
 	if _, off := s.publisher.(NopPublisher); off {
 		return
 	}
-	ev, err := Capture(CaptureInput{ID: uuid.New(), Type: kind, Origin: OriginFromContext(ctx), SandboxID: sandbox, TemplateID: template, OccurredAt: time.Now(), Fields: f})
+	in.ID = uuid.New()
+	in.Origin = OriginFromContext(ctx)
+	in.BuildID = BuildIDFromContext(ctx)
+	in.OccurredAt = time.Now()
+	ev, err := Capture(in)
 	if err == nil {
 		s.publisher.TryPublish(ev)
 	}
+}
+
+type buildIDKey struct{}
+
+// WithBuildID carries a build (job) id to the capture, so template build events
+// can be correlated with the job that produced them.
+func WithBuildID(ctx context.Context, buildID string) context.Context {
+	if strings.TrimSpace(buildID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, buildIDKey{}, buildID)
+}
+
+// BuildIDFromContext returns the build id attached by WithBuildID, if any.
+func BuildIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(buildIDKey{}).(string)
+	return id
 }
 
 type originKey struct{}

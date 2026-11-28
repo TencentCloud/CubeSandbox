@@ -23,6 +23,8 @@ type CaptureInput struct {
 	Origin      Origin
 	SandboxID   string
 	TemplateID  string
+	SnapshotID  string
+	VolumeID    string
 	ExecutionID string
 	BuildID     string
 	TeamID      string
@@ -39,7 +41,7 @@ func validateCapture(in CaptureInput) error {
 	// Check size before scanning strings, including whitespace validation.
 	for _, s := range []string{
 		in.Type, string(in.Origin), in.SandboxID, in.TemplateID,
-		in.ExecutionID, in.BuildID, in.TeamID,
+		in.SnapshotID, in.VolumeID, in.ExecutionID, in.BuildID, in.TeamID,
 	} {
 		if len(s) > maxStringBytes {
 			return ErrCaptureTooLarge
@@ -48,8 +50,22 @@ func validateCapture(in CaptureInput) error {
 	if err := validateFields(in.Fields); err != nil {
 		return err
 	}
-	if in.ID == uuid.Nil || in.OccurredAt.IsZero() ||
-		!validType(in.Type) || strings.TrimSpace(in.SandboxID) == "" {
+	if in.ID == uuid.Nil || in.OccurredAt.IsZero() || !validType(in.Type) {
+		return ErrInvalidEvent
+	}
+	if IsSandboxEvent(in.Type) && strings.TrimSpace(in.SandboxID) == "" {
+		return ErrInvalidEvent
+	}
+	if IsTemplateEvent(in.Type) && strings.TrimSpace(in.TemplateID) == "" {
+		return ErrInvalidEvent
+	}
+	// A snapshot event is identified by the snapshot, not by a template: either
+	// id may be present, but a subscriber that filters on snapshot_id must never
+	// receive an event without one.
+	if IsSnapshotEvent(in.Type) && strings.TrimSpace(in.SnapshotID) == "" {
+		return ErrInvalidEvent
+	}
+	if IsVolumeEvent(in.Type) && strings.TrimSpace(in.VolumeID) == "" {
 		return ErrInvalidEvent
 	}
 	if !in.Origin.Allows(in.Type) {
@@ -77,6 +93,8 @@ func Capture(in CaptureInput) (*CapturedEvent, error) {
 	in.Type = strings.Clone(in.Type)
 	in.Origin = Origin(strings.Clone(string(in.Origin)))
 	in.TemplateID = strings.Clone(in.TemplateID)
+	in.SnapshotID = strings.Clone(in.SnapshotID)
+	in.VolumeID = strings.Clone(in.VolumeID)
 	in.SandboxID = strings.Clone(in.SandboxID)
 	in.ExecutionID = strings.Clone(in.ExecutionID)
 	in.BuildID = strings.Clone(in.BuildID)

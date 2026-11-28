@@ -143,19 +143,30 @@ func TestCheckpointFinalBoundary(t *testing.T) {
 					require.Empty(t, p.Events())
 					return
 				}
-				select {
-				case c := <-p.Events():
-					d, e := webhook.MapToProtocol(c)
-					require.NoError(t, e)
-					ev, e := webhook.Encode(c, d)
-					require.NoError(t, e)
-					var b map[string]any
-					require.NoError(t, json.Unmarshal(ev.Body(), &b))
-					require.Equal(t, "original-template", b["sandbox_template_id"])
-					require.Equal(t, webhook.TypeCheckpointed, ev.Type())
-				default:
-					t.Fatal("missing checkpoint")
+				// One success boundary, two views of it: the sandbox checkpoint
+				// and the snapshot resource it produced.
+				readEvent := func() (string, map[string]any) {
+					t.Helper()
+					select {
+					case c := <-p.Events():
+						d, e := webhook.MapToProtocol(c)
+						require.NoError(t, e)
+						ev, e := webhook.Encode(c, d)
+						require.NoError(t, e)
+						var b map[string]any
+						require.NoError(t, json.Unmarshal(ev.Body(), &b))
+						return ev.Type(), b
+					default:
+						t.Fatal("missing checkpoint")
+						return "", nil
+					}
 				}
+				eventType, body := readEvent()
+				require.Equal(t, webhook.TypeCheckpointed, eventType)
+				require.Equal(t, "original-template", body["sandbox_template_id"])
+				eventType, body = readEvent()
+				require.Equal(t, webhook.TypeSnapshotCreated, eventType)
+				require.Equal(t, "snap-new", body["snapshot_id"])
 				_, e = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip", "")
 				require.NoError(t, e)
 				require.Empty(t, p.Events())
@@ -200,7 +211,8 @@ func TestCheckpointUploadResult(t *testing.T) {
 			webhooktest.ReconcileUpload(t, db, constants.SnapshotTableName, "snap-new", terminal, p)
 			_, err = executeSnapshotCreateJob(context.Background(), &sandboxtypes.TemplateImageJobInfo{Status: JobStatusReady}, nil, "sb", "node", "ip", "")
 			require.NoError(t, err)
-			require.Len(t, p.Events(), 1)
+			// checkpointed and snapshot.created, neither retracted nor repeated.
+			require.Len(t, p.Events(), 2)
 		})
 	}
 }
