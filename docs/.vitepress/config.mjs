@@ -196,6 +196,7 @@ export default withMermaid(defineConfig({
                     { text: 'FAQ', link: '/guide/kubernetes/faq' }
                   ]
                 },
+                { text: 'Hybrid Deployment (Recommended)', link: '/guide/hybrid-deploy' },
                 { text: 'Tencent Cloud Cluster (Terraform)', link: '/guide/tencentcloud-terraform-deploy' },
                 { text: 'Offline Deployment', link: '/guide/offline-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' },
@@ -445,6 +446,7 @@ export default withMermaid(defineConfig({
                     { text: '常见问题', link: '/zh/guide/kubernetes/faq' }
                   ]
                 },
+                { text: '混合部署（推荐）', link: '/zh/guide/hybrid-deploy' },
                 { text: '腾讯云集群（Terraform）', link: '/zh/guide/tencentcloud-terraform-deploy' },
                 { text: '离线部署', link: '/zh/guide/offline-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' },
