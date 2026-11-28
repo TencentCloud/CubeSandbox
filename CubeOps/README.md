@@ -201,6 +201,18 @@ RBAC is reserved for future use — currently any valid JWT grants full access.
 
 ### Warehouse
 
+Warehouse import workers assign a fresh token to each claim and check it on
+subsequent updates. Older CubeOps replicas update jobs without checking the
+token and leave the previous token in place when they take over a job. A
+worker from either version can therefore overwrite the other worker's state
+during a mixed-version rollout.
+
+Before upgrading or rolling back CubeOps, pause new imports and wait for
+all pending and running imports to finish. Resume imports once every replica
+runs the target version. Older binaries can use the database with the
+`claim_token` column in place. If you also roll back the migration, stop
+all replicas that use the column before running `Down`.
+
 CubeOps leaves S3 bucket lifecycle configuration to the bucket owner. It
 cleans up abandoned temporary uploads under `warehouse/uploads/` and
 aborts stale multipart uploads under `warehouse/`. When upgrading an

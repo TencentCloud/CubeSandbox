@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
 )
 
@@ -35,10 +36,10 @@ const (
 
 type importStore interface {
 	ListImportWork(ctx context.Context, staleAfter time.Duration) ([]store.ImportJob, error)
-	ClaimImportJob(ctx context.Context, id string, staleAfter time.Duration) (bool, error)
-	UpdateImportJob(ctx context.Context, id, status, errMsg string, bytesTotal int64) error
-	TouchImportJob(ctx context.Context, id string) (bool, error)
-	RequeueImportJob(ctx context.Context, id string) error
+	ClaimImportJob(ctx context.Context, id, token string, staleAfter time.Duration) (bool, error)
+	UpdateImportJob(ctx context.Context, id, token, status, errMsg string, bytesTotal int64) error
+	TouchImportJob(ctx context.Context, id, token string) (bool, error)
+	RequeueImportJob(ctx context.Context, id, token string) error
 	GetImportJob(ctx context.Context, id string) (*store.ImportJob, error)
 	InsertWarehouseItem(ctx context.Context, item store.WarehouseItem) (inserted bool, err error)
 	GetWarehouseItem(ctx context.Context, arch, component, version string) (*store.WarehouseItem, error)
@@ -64,7 +65,7 @@ type Importer struct {
 	executeCount    atomic.Int64
 
 	heldMu sync.Mutex
-	held   map[string]struct{}
+	held   map[string]string // job ID to its current claim token
 
 	lastGC  time.Time
 	gcEvery time.Duration
@@ -90,7 +91,7 @@ func newImporter(s importStore, blobs BlobStore, fetch FetchConfig, workDir stri
 		wake:            make(chan struct{}, 1),
 		claimStaleAfter: DefaultImportClaimStaleAfter,
 		uploadTTL:       DefaultUploadTTL,
-		held:            map[string]struct{}{},
+		held:            make(map[string]string),
 		lastGC:          time.Now(),
 		gcEvery:         blobstoreGCInterval,
 	}
@@ -125,22 +126,19 @@ func (im *Importer) Run(ctx context.Context) {
 // wait out claimStaleAfter.
 func (im *Importer) ReleaseHeld(ctx context.Context) {
 	im.heldMu.Lock()
-	ids := make([]string, 0, len(im.held))
-	for id := range im.held {
-		ids = append(ids, id)
-	}
-	im.held = map[string]struct{}{}
+	held := im.held
+	im.held = make(map[string]string)
 	im.heldMu.Unlock()
-	for _, id := range ids {
-		if err := im.store.RequeueImportJob(ctx, id); err != nil {
+	for id, token := range held {
+		if err := im.store.RequeueImportJob(ctx, id, token); err != nil {
 			slog.Warn("requeue import job on shutdown", "id", id, "error", err)
 		}
 	}
 }
 
-func (im *Importer) markHeld(id string) {
+func (im *Importer) markHeld(id, token string) {
 	im.heldMu.Lock()
-	im.held[id] = struct{}{}
+	im.held[id] = token
 	im.heldMu.Unlock()
 }
 
@@ -167,7 +165,8 @@ func (im *Importer) drain(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		claimed, err := im.store.ClaimImportJob(ctx, job.ID, im.staleAfter())
+		token := uuid.NewString()
+		claimed, err := im.store.ClaimImportJob(ctx, job.ID, token, im.staleAfter())
 		if err != nil {
 			slog.Error("claim import job", "id", job.ID, "error", err)
 			continue
@@ -175,8 +174,8 @@ func (im *Importer) drain(ctx context.Context) {
 		if !claimed {
 			continue
 		}
-		im.markHeld(job.ID)
-		im.runJob(ctx, job)
+		im.markHeld(job.ID, token)
+		im.runJob(ctx, job, token)
 		im.unmarkHeld(job.ID)
 	}
 	im.sweepUploads(ctx)
@@ -322,15 +321,19 @@ func (im *Importer) reconcileBlobsLocked(ctx context.Context) {
 	}
 }
 
-func (im *Importer) runJob(ctx context.Context, job store.ImportJob) {
-	bytesTotal, err := im.execute(ctx, job)
+func (im *Importer) runJob(ctx context.Context, job store.ImportJob, token string) {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go im.heartbeat(runCtx, cancel, job.ID, token)
+
+	bytesTotal, err := im.execute(runCtx, job)
 	if err != nil {
 		slog.Error("import job failed", "id", job.ID, "error", err)
-		_ = im.store.UpdateImportJob(ctx, job.ID, store.ImportFailed, err.Error(), bytesTotal)
+		_ = im.store.UpdateImportJob(ctx, job.ID, token, store.ImportFailed, err.Error(), bytesTotal)
 		im.releaseUpload(ctx, job)
 		return
 	}
-	_ = im.store.UpdateImportJob(ctx, job.ID, store.ImportSucceeded, "", bytesTotal)
+	_ = im.store.UpdateImportJob(ctx, job.ID, token, store.ImportSucceeded, "", bytesTotal)
 	im.releaseUpload(ctx, job)
 }
 
@@ -346,9 +349,6 @@ func (im *Importer) execute(ctx context.Context, job store.ImportJob) (int64, er
 	if im.blobs == nil {
 		return 0, fmt.Errorf("warehouse blob store is not configured")
 	}
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
-	go im.heartbeat(runCtx, runCancel, job.ID)
 
 	work := filepath.Join(im.workDir, "import-"+job.ID)
 	defer os.RemoveAll(work)
@@ -366,7 +366,7 @@ func (im *Importer) execute(ctx context.Context, job store.ImportJob) (int64, er
 		if strings.TrimSpace(job.SourceRef) == "" {
 			return 0, fmt.Errorf("uploaded archive missing")
 		}
-		n, err := im.copyObjectToFile(runCtx, job.SourceRef, archive)
+		n, err := im.copyObjectToFile(ctx, job.SourceRef, archive)
 		if err != nil {
 			return 0, err
 		}
@@ -392,17 +392,17 @@ func (im *Importer) execute(ctx context.Context, job store.ImportJob) (int64, er
 	}
 
 	for _, item := range extracted {
-		if runCtx.Err() != nil {
-			return bytesTotal, runCtx.Err()
+		if ctx.Err() != nil {
+			return bytesTotal, ctx.Err()
 		}
-		if err := im.installExtracted(runCtx, job, item); err != nil {
+		if err := im.installExtracted(ctx, job, item); err != nil {
 			return bytesTotal, err
 		}
 	}
 	return bytesTotal, nil
 }
 
-func (im *Importer) heartbeat(ctx context.Context, cancel context.CancelFunc, id string) {
+func (im *Importer) heartbeat(ctx context.Context, cancel context.CancelFunc, id, token string) {
 	defer cancel()
 	ticker := time.NewTicker(importHeartbeatInterval)
 	defer ticker.Stop()
@@ -411,7 +411,7 @@ func (im *Importer) heartbeat(ctx context.Context, cancel context.CancelFunc, id
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ok, err := im.store.TouchImportJob(ctx, id)
+			ok, err := im.store.TouchImportJob(ctx, id, token)
 			if err != nil {
 				slog.Warn("touch import job", "id", id, "error", err)
 				continue

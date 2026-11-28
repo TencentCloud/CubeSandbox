@@ -5,11 +5,13 @@ package warehouse
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeOps/internal/store"
@@ -60,15 +62,17 @@ func TestExecuteClearsLeftoverWorkDir(t *testing.T) {
 }
 
 type fakeImportStore struct {
-	mu         sync.Mutex
-	job        store.ImportJob
-	siblings   []store.ImportJob
-	claimed    bool
-	updates    []string
-	inserted   int
-	insertKeys []string
-	items      map[string]store.WarehouseItem
-	insertFn   func(store.WarehouseItem) (bool, error)
+	mu           sync.Mutex
+	job          store.ImportJob
+	siblings     []store.ImportJob
+	claimTokens  map[string]string
+	failedToken  string
+	requeueToken string
+	updates      []string
+	inserted     int
+	insertKeys   []string
+	items        map[string]store.WarehouseItem
+	insertFn     func(store.WarehouseItem) (bool, error)
 }
 
 func warehouseItemKey(arch, component, version string) string {
@@ -89,47 +93,68 @@ func (f *fakeImportStore) ListImportWork(context.Context, time.Duration) ([]stor
 	return []store.ImportJob{job}, nil
 }
 
-func (f *fakeImportStore) ClaimImportJob(context.Context, string, time.Duration) (bool, error) {
+func (f *fakeImportStore) ClaimImportJob(_ context.Context, id, token string, staleAfter time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.claimed {
-		return false, nil
-	}
-	f.claimed = true
-	f.job.Status = store.ImportRunning
-	return true, nil
+	claimed := false
+	f.eachJob(func(job *store.ImportJob) {
+		stale := job.Status == store.ImportRunning && time.Since(job.UpdatedAt) > staleAfter
+		if job.ID == id && (job.Status == store.ImportPending || stale) {
+			job.Status = store.ImportRunning
+			job.UpdatedAt = time.Now()
+			if f.claimTokens == nil {
+				f.claimTokens = make(map[string]string)
+			}
+			f.claimTokens[id] = token
+			claimed = true
+		}
+	})
+	return claimed, nil
 }
 
-func (f *fakeImportStore) UpdateImportJob(_ context.Context, id, status, _ string, _ int64) error {
+func (f *fakeImportStore) ownsJob(job *store.ImportJob, id, token string) bool {
+	owner, claimed := f.claimTokens[id]
+	return job.ID == id && job.Status == store.ImportRunning && claimed && token == owner
+}
+
+func (f *fakeImportStore) UpdateImportJob(_ context.Context, id, token, status, _ string, _ int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.updates = append(f.updates, status)
+	if id == f.job.ID && status == store.ImportFailed {
+		f.failedToken = token
+	}
 	f.eachJob(func(job *store.ImportJob) {
-		if job.ID == id {
+		if f.ownsJob(job, id, token) {
+			f.updates = append(f.updates, status)
 			job.Status = status
 		}
 	})
 	return nil
 }
 
-func (f *fakeImportStore) TouchImportJob(_ context.Context, id string) (bool, error) {
+func (f *fakeImportStore) TouchImportJob(_ context.Context, id, token string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ok := false
 	f.eachJob(func(job *store.ImportJob) {
-		if job.ID == id && job.Status == store.ImportRunning {
+		if f.ownsJob(job, id, token) {
+			job.UpdatedAt = time.Now()
 			ok = true
 		}
 	})
 	return ok, nil
 }
 
-func (f *fakeImportStore) RequeueImportJob(_ context.Context, id string) error {
+func (f *fakeImportStore) RequeueImportJob(_ context.Context, id, token string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if id == f.job.ID {
+		f.requeueToken = token
+	}
 	f.eachJob(func(job *store.ImportJob) {
-		if job.ID == id && job.Status == store.ImportRunning {
+		if f.ownsJob(job, id, token) {
 			job.Status = store.ImportPending
+			delete(f.claimTokens, id)
 		}
 	})
 	return nil
@@ -253,7 +278,7 @@ func TestDrainClaimsOnce(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if !fake.claimed {
+	if fake.claimTokens[fake.job.ID] == "" {
 		t.Fatal("job was not claimed")
 	}
 	if len(fake.updates) != 1 || fake.updates[0] != store.ImportSucceeded {
@@ -262,6 +287,74 @@ func TestDrainClaimsOnce(t *testing.T) {
 	if fake.inserted == 0 {
 		t.Fatal("winner did not insert warehouse items")
 	}
+}
+
+// Hold the download open while the two replicas renew or lose their claims.
+type pausedImportDownload struct {
+	BlobStore
+	resume <-chan struct{}
+}
+
+func (b pausedImportDownload) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.resume:
+		return b.BlobStore.Get(ctx, key)
+	}
+}
+
+func TestDrainAfterLeaseTakeover(t *testing.T) {
+	archive := buildFakeOneClick(t, filepath.Join(t.TempDir(), "pkg"), "v0.6.0")
+	blobs := NewMemBlobStore()
+	key := putUpload(t, blobs, archive)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		fake := &fakeImportStore{job: store.ImportJob{
+			ID: "takeover", Source: SourceUpload, SourceRef: key,
+			Tag: "v0.6.0", Arch: ArchAMD64, Status: store.ImportPending,
+		}}
+		first := newImporter(fake, pausedImportDownload{BlobStore: blobs}, FetchConfig{}, t.TempDir(), time.Minute)
+		resume := make(chan struct{})
+		next := newImporter(fake, pausedImportDownload{BlobStore: blobs, resume: resume}, FetchConfig{}, t.TempDir(), time.Minute)
+
+		go first.drain(ctx)
+		synctest.Wait()
+		firstToken := fake.claimTokens[fake.job.ID]
+		time.Sleep(importHeartbeatInterval)
+		synctest.Wait()
+		if firstToken == "" || !fake.job.UpdatedAt.Equal(time.Now()) || fake.job.Status != store.ImportRunning {
+			t.Fatalf("first worker did not renew its claim: %+v", fake.job)
+		}
+
+		// Model the first replica pausing long enough for another replica to claim its job.
+		fake.job.UpdatedAt = time.Now().Add(-DefaultImportClaimStaleAfter - time.Second)
+		go next.drain(ctx)
+		synctest.Wait()
+		if current := fake.claimTokens[fake.job.ID]; current == "" || current == firstToken {
+			t.Fatal("takeover did not assign a fresh token")
+		}
+		first.ReleaseHeld(ctx)
+		if fake.requeueToken != firstToken || fake.job.Status != store.ImportRunning {
+			t.Fatalf("old worker requeued with token %q; job status %q", fake.requeueToken, fake.job.Status)
+		}
+
+		time.Sleep(importHeartbeatInterval)
+		synctest.Wait()
+		if fake.failedToken != firstToken || fake.job.Status != store.ImportRunning {
+			t.Fatalf("lost claim reported failure with token %q; job status %q", fake.failedToken, fake.job.Status)
+		}
+		if _, err := blobs.Stat(ctx, key); err != nil {
+			t.Fatalf("upload unavailable to current worker: %v", err)
+		}
+
+		close(resume)
+		synctest.Wait()
+		if fake.job.Status != store.ImportSucceeded {
+			t.Fatalf("current worker finished with status %q", fake.job.Status)
+		}
+	})
 }
 
 func TestExecuteInsertsWhenObjectMissingRow(t *testing.T) {
@@ -338,12 +431,12 @@ func TestRunJobDeletesUploadWhenNoLiveSiblings(t *testing.T) {
 	src := buildFakeOneClick(t, filepath.Join(root, "pkg"), "v0.6.0")
 	blobs := NewMemBlobStore()
 	key := putUpload(t, blobs, src)
-	fake := &fakeImportStore{job: store.ImportJob{
+	fake := &fakeImportStore{claimTokens: map[string]string{"job-a": "claim-a"}, job: store.ImportJob{
 		ID: "job-a", Source: SourceUpload, SourceRef: key,
 		Tag: "v0.6.0", Arch: ArchAMD64, Status: store.ImportRunning,
 	}}
 	im := newImporter(fake, blobs, FetchConfig{}, t.TempDir(), time.Minute)
-	im.runJob(context.Background(), fake.job)
+	im.runJob(context.Background(), fake.job, "claim-a")
 	if _, err := blobs.Stat(context.Background(), key); !IsNotExist(err) {
 		t.Fatalf("upload left after last job: %v", err)
 	}
@@ -362,13 +455,16 @@ func TestRunJobKeepsUploadWhileSiblingLive(t *testing.T) {
 		ID: "job-b", Source: SourceUpload, SourceRef: key,
 		Tag: "v0.6.0", Arch: ArchARM64, Status: store.ImportPending,
 	}
-	fake := &fakeImportStore{job: jobA, siblings: []store.ImportJob{jobB}}
+	fake := &fakeImportStore{claimTokens: map[string]string{jobA.ID: "claim-a"}, job: jobA, siblings: []store.ImportJob{jobB}}
 	im := newImporter(fake, blobs, FetchConfig{}, t.TempDir(), time.Minute)
-	im.runJob(context.Background(), jobA)
+	im.runJob(context.Background(), jobA, "claim-a")
 	if _, err := blobs.Stat(context.Background(), key); err != nil {
 		t.Fatalf("upload removed while sibling pending: %v", err)
 	}
-	im.runJob(context.Background(), jobB)
+	if ok, err := fake.ClaimImportJob(context.Background(), jobB.ID, "claim-b", time.Minute); err != nil || !ok {
+		t.Fatalf("claim second import: ok=%v err=%v", ok, err)
+	}
+	im.runJob(context.Background(), jobB, "claim-b")
 	if _, err := blobs.Stat(context.Background(), key); !IsNotExist(err) {
 		t.Fatalf("upload left after last sibling: %v", err)
 	}
@@ -404,9 +500,9 @@ func TestSweepUploadsTTL(t *testing.T) {
 }
 
 func TestReleaseHeldRequeues(t *testing.T) {
-	fake := &fakeImportStore{job: store.ImportJob{ID: "held-1", Status: store.ImportRunning}}
+	fake := &fakeImportStore{claimTokens: map[string]string{"held-1": "claim-1"}, job: store.ImportJob{ID: "held-1", Status: store.ImportRunning}}
 	im := newImporter(fake, NewMemBlobStore(), FetchConfig{}, t.TempDir(), time.Minute)
-	im.markHeld("held-1")
+	im.markHeld("held-1", "claim-1")
 	im.ReleaseHeld(context.Background())
 	got, err := fake.GetImportJob(context.Background(), "held-1")
 	if err != nil {

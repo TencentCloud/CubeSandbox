@@ -222,16 +222,16 @@ func (s *Store) ListImportWork(ctx context.Context, staleAfter time.Duration) ([
 }
 
 // ClaimImportJob atomically takes a pending job, or a running job that has
-// been stale longer than staleAfter. Returns true when this caller owns it.
-func (s *Store) ClaimImportJob(ctx context.Context, id string, staleAfter time.Duration) (bool, error) {
+// been stale longer than staleAfter. The caller supplies a fresh token for each claim.
+func (s *Store) ClaimImportJob(ctx context.Context, id, token string, staleAfter time.Duration) (bool, error) {
 	res := s.db.WithContext(ctx).Exec(
 		`UPDATE t_component_import_job
-		 SET status = ?, updated_at = CURRENT_TIMESTAMP
+		 SET status = ?, claim_token = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND (
 		   status = ?
 		   OR (status = ? AND `+olderThanDurationSQL("updated_at")+`)
 		 )`,
-		ImportRunning, id, ImportPending, ImportRunning, staleAfterSeconds(staleAfter),
+		ImportRunning, token, id, ImportPending, ImportRunning, staleAfterSeconds(staleAfter),
 	)
 	if res.Error != nil {
 		return false, fmt.Errorf("claim import job: %w", res.Error)
@@ -276,10 +276,11 @@ func (s *Store) ListImportJobs(ctx context.Context, limit, offset int) ([]Import
 	return jobs, int(total), nil
 }
 
-func (s *Store) UpdateImportJob(ctx context.Context, id, status, errMsg string, bytesTotal int64) error {
+func (s *Store) UpdateImportJob(ctx context.Context, id, token, status, errMsg string, bytesTotal int64) error {
 	res := s.db.WithContext(ctx).Exec(
-		`UPDATE t_component_import_job SET status = ?, error = ?, bytes_total = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		status, nullIfEmpty(errMsg), bytesTotal, id,
+		`UPDATE t_component_import_job SET status = ?, error = ?, bytes_total = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND status = ? AND claim_token = ?`,
+		status, nullIfEmpty(errMsg), bytesTotal, id, ImportRunning, token,
 	)
 	if res.Error != nil {
 		return fmt.Errorf("update import job: %w", res.Error)
@@ -288,11 +289,11 @@ func (s *Store) UpdateImportJob(ctx context.Context, id, status, errMsg string, 
 }
 
 // TouchImportJob refreshes updated_at for a still-running import. Returns
-// false when this replica no longer owns the job (status is not running).
-func (s *Store) TouchImportJob(ctx context.Context, id string) (bool, error) {
+// false when this claim no longer owns the job.
+func (s *Store) TouchImportJob(ctx context.Context, id, token string) (bool, error) {
 	res := s.db.WithContext(ctx).Exec(
-		`UPDATE t_component_import_job SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
-		id, ImportRunning,
+		`UPDATE t_component_import_job SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ? AND claim_token = ?`,
+		id, ImportRunning, token,
 	)
 	if res.Error != nil {
 		return false, fmt.Errorf("touch import job: %w", res.Error)
@@ -302,10 +303,11 @@ func (s *Store) TouchImportJob(ctx context.Context, id string) (bool, error) {
 
 // RequeueImportJob returns a running job to pending so another replica can
 // pick it up immediately (used on graceful shutdown).
-func (s *Store) RequeueImportJob(ctx context.Context, id string) error {
+func (s *Store) RequeueImportJob(ctx context.Context, id, token string) error {
 	res := s.db.WithContext(ctx).Exec(
-		`UPDATE t_component_import_job SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
-		ImportPending, id, ImportRunning,
+		`UPDATE t_component_import_job SET status = ?, claim_token = NULL, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND status = ? AND claim_token = ?`,
+		ImportPending, id, ImportRunning, token,
 	)
 	if res.Error != nil {
 		return fmt.Errorf("requeue import job: %w", res.Error)
