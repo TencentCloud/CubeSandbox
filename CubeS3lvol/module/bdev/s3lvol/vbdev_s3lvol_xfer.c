@@ -1299,24 +1299,12 @@ s3lvol_export_inflight_pinning(struct s3lvol_lvstore *lvs,
 	return false;
 }
 
-/* A drain runs one at a time per lvstore (s3_flusher_drain answers -EBUSY while
- * another one is in progress), so two exports of the same lvstore started close
- * together have the second one refused. Retry instead of failing: the drain in
- * progress is what the second export needed anyway, and it finishes in seconds.
- *
- * The window matters because the alternative is silent from the caller's side.
- * rcow_export_snapshot answers with the uuid before the drain runs, so a drain
- * that fails takes the export down asynchronously -- and export_report() then
- * drops the in-flight marker, leaving nothing in the registry, so asking
- * rcow_get_snapshot_status about that uuid reads "does not exist". Observed in
- * production: two exports 8 ms apart, both refused, the third one 13 s later
- * succeeded.
- *
- * The retry budget is a worst-case bound, not a target. A drain is held not
- * only by another export but also by a decouple that is still materialising:
- * a full-volume import measured 3m43s, and the materialisation always finishes
- * -- so the window is 30 minutes, retried every 500ms, and only an lvstore
- * that never drains reports a failure.
+/* Retry budget for a decouple that is still materialising, and for a derive
+ * that is still queued behind one. A full-volume import measured 3m43s, and
+ * the materialisation does finish, so the window is 30 minutes, retried every
+ * 500ms. Export does not take the exclusive lvstore drain. It flushes the
+ * one snapshot, which returns immediately when that snapshot is already clean,
+ * and waits on the same budget while a hot prepare refuses that flush.
  */
 #define EXPORT_DRAIN_RETRY_US    (500 * 1000)
 #define EXPORT_DRAIN_MAX_RETRIES (30 * 60 * 1000 / 500)
@@ -1332,9 +1320,11 @@ struct export_ctx {
 	 * Only meaningful for a zero-copy export; a copy owes nobody anything. */
 	uint64_t expires_at;
 
-	/* Set only while waiting to retry a drain that was refused. */
-	struct spdk_poller       *drain_retry_poller;
-	uint32_t                  drain_retries;
+	/* Set only while waiting to retry a publish that a hot prepare refused.
+	 * The uuid is already the caller's, so failing on the spot would leave
+	 * it to read as "no such export" for a prepare that may yet be resumed. */
+	struct spdk_poller       *publish_retry_poller;
+	uint32_t                  publish_retries;
 
 	s3lvol_export_cb          cb_fn;
 	void                     *cb_arg;
@@ -1342,8 +1332,8 @@ struct export_ctx {
 
 static void export_copy(struct export_ctx *ctx);
 static void export_ref(struct export_ctx *ctx);
-static void export_drain(struct export_ctx *ctx);
-static void export_drained(void *cb_arg, int status);
+static void export_publish(struct export_ctx *ctx);
+static void export_chunks_published(void *cb_arg, int status);
 
 static void
 export_report(struct export_ctx *ctx, int status)
@@ -1381,11 +1371,7 @@ export_report(struct export_ctx *ctx, int status)
 	if (ctx->channel) {
 		spdk_bs_free_io_channel(ctx->channel);
 	}
-
-	/* Only set when a drain retry was pending, which cannot be the case here --
-	 * the retry path either resubmits or reports, never both. Unregistered
-	 * defensively so a future path out cannot leak a poller. */
-	spdk_poller_unregister(&ctx->drain_retry_poller);
+	spdk_poller_unregister(&ctx->publish_retry_poller);
 
 	/* Drop the in-flight marker no matter how it ended. From here the uuid is
 	 * either a durable export (the registry has it) or gone (NONE). */
@@ -1979,12 +1965,12 @@ export_ref(struct export_ctx *ctx)
 		return;
 	}
 	if (rc == -EIO) {
-		/* The lvstore was flushed before this walk, so a cluster with no
-		 * committed mapping means something is wrong with the chunk map rather
-		 * than with the ordering. Copying still works -- it reads through
-		 * blobstore, which assembles from the WAL and the overlay too. */
-		SPDK_ERRLOG("Export %s: a chunk has no committed mapping even after "
-			    "flushing '%s'. Exporting by copying instead.\n",
+		/* This snapshot's chunks were flushed before the walk. A cluster with
+		 * no committed mapping is a chunk map problem, not an in-flight PUT.
+		 * Copying still works -- it reads through blobstore, which assembles
+		 * from the overlay too. */
+		SPDK_ERRLOG("Export %s: a chunk has no committed mapping in '%s'. "
+			    "Exporting by copying instead.\n",
 			    ctx->info.export_uuid, s3lvol_lvstore_get_name(ctx->lvs));
 		export_copy(ctx);
 		return;
@@ -1992,114 +1978,6 @@ export_ref(struct export_ctx *ctx)
 	if (rc != 0) {
 		export_report(ctx, rc);
 	}
-}
-
-/* The one thing an export genuinely has to wait for.
- *
- * It is tempting to walk first and flush only if some cluster turns out to have no
- * mapping yet -- the snapshot is usually taken well before the export, so the
- * periodic flush has usually dealt with it. That does not work, and the way it
- * fails is quiet.
- *
- * s3_chunk_map_lookup() shows committed mappings, where committed means the
- * journal record is durable -- not that the object is in S3 and holds the whole
- * chunk. A chunk written in several pieces gets an entry as soon as the first
- * piece is flushed, and its valid_bytes grows as the rest arrive. So a walk that
- * runs while the flusher is still working finds every lookup succeeding and
- * records uuids for objects that are still in flight, or that will never exist at
- * all because the next flush of that chunk supersedes them. The importer then
- * reads a 404, or a chunk that is short.
- *
- * Measured: an 8 MiB region exported mid-flush produced a manifest naming 8
- * objects holding 2.75 MiB, one of which was never uploaded under that uuid.
- * Nothing failed on the exporting side.
- *
- * There is no cheap test for "this entry is finished", because a partially written
- * chunk is perfectly legitimate -- valid_bytes below chunk_size is the normal
- * state of a sparse volume, not a symptom. So the flush is unconditional, and it
- * is what the handoff pays for the guarantee that every uuid it names is durable.
- *
- * After the snapshot, not before: a write landing between a flush and the snapshot
- * would be in the snapshot with nothing to name it. */
-static void
-export_drain(struct export_ctx *ctx)
-{
-	s3lvol_lvstore_flush(ctx->lvs, 0, export_drained, ctx);
-}
-
-/* One-shot: unregisters itself, then resubmits the drain. */
-static int
-export_drain_retry(void *arg)
-{
-	struct export_ctx *ctx = arg;
-
-	spdk_poller_unregister(&ctx->drain_retry_poller);
-	export_drain(ctx);
-	return SPDK_POLLER_BUSY;
-}
-
-static void
-export_drained(void *cb_arg, int status)
-{
-	struct export_ctx *ctx = cb_arg;
-
-	/* Somebody else's drain is running. Wait for it and ask again: a drain that
-	 * completes is exactly what this export was waiting for, so the retry
-	 * normally succeeds on the first attempt. Bounded so an lvstore that never
-	 * finishes draining reports a failure instead of retrying forever. */
-	if (status == -EBUSY && ctx->drain_retries < EXPORT_DRAIN_MAX_RETRIES) {
-		if (ctx->drain_retries == 0) {
-			/* Once, not once per attempt: fifty lines a tenth of a second
-			 * apart would bury whatever else the node is saying. One line is
-			 * enough to tell an export that is waiting from one that is
-			 * stuck, and to say when the waiting started. */
-			SPDK_NOTICELOG("Export %s of snapshot '%s' is waiting for another "
-				       "drain of lvstore '%s' to finish\n",
-				       ctx->info.export_uuid, ctx->info.snapshot_name,
-				       s3lvol_lvstore_get_name(ctx->lvs));
-		}
-		ctx->drain_retries++;
-		ctx->drain_retry_poller = SPDK_POLLER_REGISTER(export_drain_retry, ctx,
-							      EXPORT_DRAIN_RETRY_US);
-		if (ctx->drain_retry_poller) {
-			return;
-		}
-		/* Could not even wait; fall through and report the -EBUSY. */
-		SPDK_ERRLOG("Export %s could not schedule a drain retry\n",
-			    ctx->info.export_uuid);
-	}
-
-	if (status != 0) {
-		char waited[80] = "";
-
-		/* How long it waited, not just that it did: "busy" after five seconds
-		 * of retrying is a different problem from "busy" on the first ask. */
-		if (ctx->drain_retries > 0) {
-			snprintf(waited, sizeof(waited),
-				 " (still busy after %" PRIu32 " ms across %" PRIu32
-				 " retr%s)",
-				 ctx->drain_retries * (EXPORT_DRAIN_RETRY_US / 1000),
-				 ctx->drain_retries,
-				 ctx->drain_retries == 1 ? "y" : "ies");
-		}
-		SPDK_ERRLOG("Export %s could not drain lvstore '%s' before exporting "
-			    "snapshot '%s': %s%s\n",
-			    ctx->info.export_uuid, s3lvol_lvstore_get_name(ctx->lvs),
-			    ctx->info.snapshot_name, spdk_strerror(-status), waited);
-		export_report(ctx, status);
-		return;
-	}
-
-	if (ctx->drain_retries > 0) {
-		SPDK_NOTICELOG("Export %s drained '%s' after %" PRIu32 " retr%s "
-			       "(%" PRIu32 " ms)\n",
-			       ctx->info.export_uuid,
-			       s3lvol_lvstore_get_name(ctx->lvs), ctx->drain_retries,
-			       ctx->drain_retries == 1 ? "y" : "ies",
-			       ctx->drain_retries * (EXPORT_DRAIN_RETRY_US / 1000));
-	}
-
-	export_ref(ctx);
 }
 
 static void
@@ -2175,9 +2053,12 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 	 * writes to those clusters. This used to snapshot on the caller's behalf,
 	 * which put a blob freeze and three metadata syncs inside the handoff, gave
 	 * the export a snapshot nobody asked for, and left it behind on every
-	 * failure path. Whoever schedules the handoff already knows when the volume
-	 * is quiet; taking the snapshot is their call, and taking it early is what
-	 * makes the drain below usually unnecessary. */
+	 * failure path. create snapshot publishes its own chunks before it
+	 * returns. This export still flushes the snapshot once: a snapshot
+	 * created by an older target, or one whose publish failed and was
+	 * kept, can still have a chunk map that names the previous object.
+	 * A clean snapshot completes that flush inline. It is not the
+	 * exclusive lvstore drain, so two exports do not answer -EBUSY. */
 	if (!spdk_blob_is_read_only(snapshot->blob)) {
 		SPDK_ERRLOG("'%s' is a writable volume; export takes a snapshot. "
 			    "Create one first.\n", snapshot->name);
@@ -2233,9 +2114,8 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 	ctx->cb_fn    = cb_fn;
 	ctx->cb_arg   = cb_arg;
 
-	/* Filled in here rather than in export_fill_src, which only runs once the
-	 * drain is past: everything that reports a failure names the snapshot, and
-	 * the drain is one of the things that can fail. */
+	/* Filled in here rather than in export_fill_src: everything that reports a
+	 * failure names the snapshot, including a walk that fails immediately. */
 	snprintf(ctx->info.snapshot_name, sizeof(ctx->info.snapshot_name), "%s",
 		 snapshot->name);
 
@@ -2286,7 +2166,7 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 		return -EBUSY;
 	}
 
-	/* Registered before the drain, which can complete synchronously: the export
+	/* Registered before the walk, which can complete synchronously: the export
 	 * has to be observable, and the snapshot protected, from here on. */
 	if (export_inflight_add(lvs, ctx->info.export_uuid, snapshot->name) != 0) {
 		SPDK_ERRLOG("Export %s of snapshot '%s' could not be registered as in "
@@ -2298,14 +2178,79 @@ s3lvol_lvol_export(struct s3lvol_lvstore *lvs, struct spdk_lvol *snapshot,
 
 	/* Hand the uuid back before the export finishes: the caller owns the
 	 * identifier from this moment and may poll it with rcow_get_snapshot_status
-	 * while the drain/walk runs in the background. Read from ctx before the
-	 * drain, which may free it. */
+	 * while the walk runs in the background. Read from ctx before the walk,
+	 * which may free it. */
 	if (uuid_out && uuid_out_len > 0) {
 		snprintf(uuid_out, uuid_out_len, "%s", ctx->info.export_uuid);
 	}
 
-	export_drain(ctx);
+	/* On this thread, as the old lvstore drain was: s3lvol_lvol_flush asserts
+	 * the lvstore owner. A clean snapshot returns before this call does. */
+	export_publish(ctx);
 	return 0;
+}
+
+static void
+export_publish(struct export_ctx *ctx)
+{
+	s3lvol_lvol_flush(ctx->snapshot, 0, export_chunks_published, ctx);
+}
+
+/* One-shot: unregisters itself, then asks again. */
+static int
+export_publish_retry(void *arg)
+{
+	struct export_ctx *ctx = arg;
+
+	spdk_poller_unregister(&ctx->publish_retry_poller);
+	export_publish(ctx);
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+export_chunks_published(void *cb_arg, int status)
+{
+	struct export_ctx *ctx = cb_arg;
+
+	/* -EBUSY is only a hot prepare holding the flusher. It ends in a resume,
+	 * after which the publish succeeds, or in the SIGKILL of this process,
+	 * after which nothing here matters. Waiting for either keeps the uuid
+	 * the caller already holds alive, which an immediate failure would not:
+	 * it would read as "no such export" from then on. The budget is the
+	 * one the old lvstore drain used for the same refusal. */
+	if (status == -EBUSY && ctx->publish_retries < EXPORT_DRAIN_MAX_RETRIES) {
+		if (ctx->publish_retries == 0) {
+			SPDK_NOTICELOG("Export %s of snapshot '%s' is waiting for a "
+				       "hot prepare to release the flusher\n",
+				       ctx->info.export_uuid,
+				       ctx->info.snapshot_name);
+		}
+		ctx->publish_retries++;
+		ctx->publish_retry_poller = SPDK_POLLER_REGISTER(
+			export_publish_retry, ctx, EXPORT_DRAIN_RETRY_US);
+		if (ctx->publish_retry_poller) {
+			return;
+		}
+		SPDK_ERRLOG("Export %s could not schedule a publish retry\n",
+			    ctx->info.export_uuid);
+	}
+
+	if (status != 0) {
+		SPDK_ERRLOG("Export %s could not publish snapshot '%s' before "
+			    "walking its chunk map: %s (after %" PRIu32 " retr%s)\n",
+			    ctx->info.export_uuid, ctx->info.snapshot_name,
+			    spdk_strerror(-status), ctx->publish_retries,
+			    ctx->publish_retries == 1 ? "y" : "ies");
+		export_report(ctx, status);
+		return;
+	}
+	if (ctx->publish_retries > 0) {
+		SPDK_NOTICELOG("Export %s published snapshot '%s' after %" PRIu32
+			       " retr%s\n", ctx->info.export_uuid,
+			       ctx->info.snapshot_name, ctx->publish_retries,
+			       ctx->publish_retries == 1 ? "y" : "ies");
+	}
+	export_ref(ctx);
 }
 
 /* ==========================================================================

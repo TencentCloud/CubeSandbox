@@ -44,6 +44,22 @@
 #define S3_FLUSHER_HEAD_SCAN_RECORDS 1024u
 #define S3_FLUSHER_HEAD_MAX_IN_FLIGHT 32u
 
+struct flush_chunk_target {
+	uint64_t chunk_index;
+	uint64_t target_seq;
+};
+
+struct flush_chunks_waiter {
+	uint64_t                        deadline;
+	uint64_t                        created;
+	s3_flusher_cb                   cb_fn;
+	void                           *cb_arg;
+	uint32_t                        cursor;
+	uint32_t                        count;
+	TAILQ_ENTRY(flush_chunks_waiter) link;
+	struct flush_chunk_target       targets[];
+};
+
 struct s3_flusher {
 	struct s3_overlay          *overlay;
 
@@ -67,6 +83,11 @@ struct s3_flusher {
 	/* Reversible scheduling gate used by attach and hot prepare. */
 	bool                        suspended;
 	bool                        resume_pending;
+
+	/* Tick at which `suspended` was last set. A chunk waiter's budget is for
+	 * uploads, and none can start under the gate, so the time spent behind
+	 * it is handed back to every waiter when the gate lifts. */
+	uint64_t                    suspended_at;
 
 	s3_flusher_cb drain_cb;
 	void *drain_arg;
@@ -102,6 +123,8 @@ struct s3_flusher {
 	bool                        super_sync_active;
 	bool                        super_sync_again;
 
+	TAILQ_HEAD(, flush_chunks_waiter) chunk_waiters;
+
 	struct s3_flusher_stats     stats;
 };
 
@@ -114,7 +137,47 @@ struct flush_req {
 };
 
 static void flusher_check_drain(struct s3_flusher *f);
+static void flusher_check_chunk_waiters(struct s3_flusher *f);
 static void flusher_check_suspend(struct s3_flusher *f);
+
+static int
+flush_chunk_target_cmp(const void *a, const void *b)
+{
+	uint64_t x = ((const struct flush_chunk_target *)a)->chunk_index;
+	uint64_t y = ((const struct flush_chunk_target *)b)->chunk_index;
+
+	return (x > y) - (x < y);
+}
+
+/* Lift the scheduling gate. Every way `suspended` goes false comes through
+ * here so that chunk waiters get back the time the gate held them.
+ *
+ * Without that, a snapshot taken within S3_FLUSHER_ATTACH_GRACE_US of an
+ * attach spent its whole S3_FLUSHER_DRAIN_TIMEOUT_US behind a hold that is
+ * exactly as long, and timed out without one upload having been allowed to
+ * start. Not counting the hold cannot make the wait unbounded: the attach
+ * hold has its own resume timer, a hot prepare refuses new flushes and ends
+ * in a resume or a SIGKILL, and destroy fails every waiter. */
+static void
+flusher_unsuspend(struct s3_flusher *f)
+{
+	struct flush_chunks_waiter *w;
+	uint64_t now;
+
+	if (!f->suspended) {
+		return;
+	}
+	f->suspended = false;
+	now = spdk_get_ticks();
+	TAILQ_FOREACH(w, &f->chunk_waiters, link) {
+		/* Only the part of the hold this waiter sat through. */
+		uint64_t since = spdk_max(f->suspended_at, w->created);
+
+		if (now > since) {
+			w->deadline += now - since;
+		}
+	}
+}
 
 /* ==========================================================================
  * WAL truncation
@@ -258,6 +321,8 @@ flusher_upload_done(void *cb_arg, int status)
 	}
 
 	s3_flusher_kick(f);
+	/* kick() ends with flusher_check_chunk_waiters(), so the waiters have
+	 * already seen this round's flush_end. */
 	flusher_check_suspend(f);
 }
 
@@ -417,6 +482,7 @@ s3_flusher_kick(struct s3_flusher *f)
 	}
 
 	flusher_check_drain(f);
+	flusher_check_chunk_waiters(f);
 }
 
 static int
@@ -424,8 +490,10 @@ flusher_poll(void *arg)
 {
 	struct s3_flusher *f = arg;
 
-	if (f->in_flight == 0 && !s3_overlay_has_dirty(f->overlay)) {
+	if (f->in_flight == 0 && !s3_overlay_has_dirty(f->overlay) &&
+	    TAILQ_EMPTY(&f->chunk_waiters)) {
 		flusher_check_drain(f);
+		flusher_check_chunk_waiters(f);
 		flusher_check_suspend(f);
 		return SPDK_POLLER_IDLE;
 	}
@@ -434,7 +502,16 @@ flusher_poll(void *arg)
 	 * through its deadline, so both have to be re-checked on every tick, not
 	 * just when an upload completes. */
 	flusher_check_drain(f);
+	flusher_check_chunk_waiters(f);
 	flusher_check_suspend(f);
+
+	/* Suspended with nothing in flight, kick() starts no round, so the tick
+	 * did nothing but check deadlines. Reporting it BUSY made a reactor
+	 * look saturated for the whole attach hold whenever a snapshot was
+	 * waiting on it. */
+	if (f->suspended && f->in_flight == 0) {
+		return SPDK_POLLER_IDLE;
+	}
 
 	s3_flusher_kick(f);
 	return SPDK_POLLER_BUSY;
@@ -528,7 +605,7 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	}
 	/* A drain supersedes an established scheduling hold: it explicitly asks
 	 * for dirty data to be uploaded and has its own completion boundary. */
-	f->suspended = false;
+	flusher_unsuspend(f);
 
 	/* And a *pending* suspend, symmetrically. A suspend whose callback has not
 	 * fired means uploads are in flight -- flusher_check_suspend() clears
@@ -563,6 +640,153 @@ s3_flusher_drain(struct s3_flusher *f, uint64_t timeout_us,
 	f->drain_expired = false;
 
 	/* Push everything through rather than waiting for the poller tick. */
+	s3_flusher_kick(f);
+}
+
+/* Runs on every tick and every upload completion while a waiter exists, on
+ * the owner thread, so its cost matters. Each waiter's targets are sorted and
+ * its cursor only moves forward: a call probes the chunks that finished since
+ * the last one, each once, plus one probe that fails and stops the walk. A
+ * probe is O(1) for a chunk the upload freed, and at most blocks_per_chunk
+ * otherwise, stopping at the first block still at or below its target. A
+ * passed target cannot fall back -- later writes carry higher seqs -- so the
+ * cursor never revisits a chunk, and a waiter's total cost is about
+ * blocks_per_chunk per chunk plus one failed probe per call, not a rescan of
+ * the overlay. */
+static void
+flusher_check_chunk_waiters(struct s3_flusher *f)
+{
+	struct flush_chunks_waiter *w, *tmp;
+	TAILQ_HEAD(, flush_chunks_waiter) done;
+	uint64_t now = 0;
+
+	if (TAILQ_EMPTY(&f->chunk_waiters)) {
+		return;
+	}
+
+	TAILQ_INIT(&done);
+	TAILQ_FOREACH_SAFE(w, &f->chunk_waiters, link, tmp) {
+		while (w->cursor < w->count &&
+		       s3_overlay_chunk_flushed_through(
+			       f->overlay,
+			       w->targets[w->cursor].chunk_index,
+			       w->targets[w->cursor].target_seq)) {
+			w->cursor++;
+		}
+		if (w->cursor == w->count) {
+			TAILQ_REMOVE(&f->chunk_waiters, w, link);
+			TAILQ_INSERT_TAIL(&done, w, link);
+			continue;
+		}
+		if (now == 0) {
+			now = spdk_get_ticks();
+		}
+		/* Not while the gate is closed: nothing can upload, so the clock
+		 * is not running against this waiter. flusher_unsuspend() moves
+		 * the deadline out by however long the gate stayed shut. */
+		if (f->stopping || (!f->suspended && now >= w->deadline)) {
+			TAILQ_REMOVE(&f->chunk_waiters, w, link);
+			TAILQ_INSERT_TAIL(&done, w, link);
+		}
+	}
+
+	while ((w = TAILQ_FIRST(&done)) != NULL) {
+		s3_flusher_cb cb_fn = w->cb_fn;
+		void *cb_arg = w->cb_arg;
+		int status = (w->cursor == w->count) ? 0 :
+			     (f->stopping ? -ESHUTDOWN : -ETIMEDOUT);
+
+		TAILQ_REMOVE(&done, w, link);
+		free(w);
+		if (cb_fn) {
+			cb_fn(cb_arg, status);
+		}
+	}
+}
+
+void
+s3_flusher_flush_chunks(struct s3_flusher *f,
+			const uint64_t *chunks, uint32_t num_chunks,
+			uint64_t timeout_us,
+			s3_flusher_cb cb_fn, void *cb_arg)
+{
+	struct flush_chunks_waiter *w;
+	uint32_t dirty_count = 0;
+
+	if (!f || (num_chunks > 0 && !chunks)) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -EINVAL);
+		}
+		return;
+	}
+	if (f->stopping) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -ESHUTDOWN);
+		}
+		return;
+	}
+	if (num_chunks == 0) {
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+
+	/* Sized for every chunk asked about rather than counted first: counting
+	 * meant a second prepare() per chunk, and prepare() is not free -- it
+	 * marks the chunk urgent and may enqueue it. A list that turns out to be
+	 * mostly clean costs one oversized allocation, freed below. */
+	w = calloc(1, sizeof(*w) +
+		      (size_t)num_chunks * sizeof(w->targets[0]));
+	if (!w) {
+		if (cb_fn) {
+			cb_fn(cb_arg, -ENOMEM);
+		}
+		return;
+	}
+	for (uint32_t i = 0; i < num_chunks; i++) {
+		w->targets[i].chunk_index = chunks[i];
+	}
+	/* Callers build the list from cluster maps, and a snapshot chain or a
+	 * cluster smaller than a chunk names the same chunk more than once.
+	 * Sorted so duplicates are adjacent, which also lets the waiter check
+	 * walk the overlay in index order. */
+	qsort(w->targets, num_chunks, sizeof(w->targets[0]),
+	      flush_chunk_target_cmp);
+
+	for (uint32_t i = 0; i < num_chunks; i++) {
+		uint64_t chunk_index = w->targets[i].chunk_index;
+		uint64_t target_seq = 0;
+
+		if (i > 0 && chunk_index == w->targets[i - 1].chunk_index) {
+			continue;
+		}
+		if (s3_overlay_flush_chunk_prepare(f->overlay, chunk_index,
+						   &target_seq)) {
+			w->targets[dirty_count].chunk_index = chunk_index;
+			w->targets[dirty_count].target_seq = target_seq;
+			dirty_count++;
+		}
+	}
+	if (dirty_count == 0) {
+		free(w);
+		if (cb_fn) {
+			cb_fn(cb_arg, 0);
+		}
+		return;
+	}
+	w->count = dirty_count;
+
+	if (timeout_us == 0) {
+		timeout_us = S3_FLUSHER_DRAIN_TIMEOUT_US;
+	}
+	w->created = spdk_get_ticks();
+	w->deadline = w->created +
+		      (timeout_us * spdk_get_ticks_hz()) / 1000000;
+	w->cb_fn = cb_fn;
+	w->cb_arg = cb_arg;
+
+	TAILQ_INSERT_TAIL(&f->chunk_waiters, w, link);
 	s3_flusher_kick(f);
 }
 
@@ -630,7 +854,9 @@ flusher_check_suspend(struct s3_flusher *f)
 	/* Only a hold that completed with nobody releasing it leaves uploads
 	 * gated. Every other outcome -- expired, cancelled, or released by an
 	 * earlier resume -- means the caller must not treat them as held. */
-	f->suspended = (status == 0);
+	if (status != 0) {
+		flusher_unsuspend(f);
+	}
 	cb_fn(cb_arg, status);
 	if (!f->suspended) {
 		s3_flusher_kick(f);
@@ -659,6 +885,7 @@ s3_flusher_suspend(struct s3_flusher *f, uint64_t timeout_us,
 	/* Stop scheduling before waiting: existing uploads and their final WAL
 	 * super update may complete, but no new upload can enter the gap. */
 	f->suspended = true;
+	f->suspended_at = spdk_get_ticks();
 	f->suspend_cb = cb_fn;
 	f->suspend_arg = cb_arg;
 	f->suspend_expired = false;
@@ -678,7 +905,7 @@ s3_flusher_resume(struct s3_flusher *f)
 		f->resume_pending = true;
 		return;
 	}
-	f->suspended = false;
+	flusher_unsuspend(f);
 	s3_flusher_kick(f);
 }
 
@@ -734,6 +961,7 @@ s3_flusher_create(struct s3_overlay *overlay, struct s3_wal *wal,
 	f->wal        = wal;
 	f->upload_fn  = upload_fn;
 	f->upload_ctx = upload_ctx;
+	TAILQ_INIT(&f->chunk_waiters);
 
 	f->max_concurrent = flusher_max_concurrent(opts);
 	period_us = (opts && opts->poll_period_us) ?
@@ -769,6 +997,7 @@ s3_flusher_destroy(struct s3_flusher *f)
 	}
 
 	f->stopping = true;
+	flusher_check_chunk_waiters(f);
 
 	/* An upload completion would call back into a freed flusher. The caller
 	 * has to drain first; same reasoning as s3_chunk_map_destroy(). */

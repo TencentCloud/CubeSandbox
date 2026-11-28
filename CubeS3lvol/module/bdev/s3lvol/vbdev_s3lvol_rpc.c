@@ -837,10 +837,18 @@ SPDK_RPC_REGISTER("rcow_create_lvol", rpc_rcow_create_lvol,
 /* ==========================================================================
  * rcow_create_snapshot / rcow_create_clone
  *
- * Neither copies data in S3 -- a snapshot freezes the origin's cluster list into
- * a read-only blob, a clone points at the parent's clusters, and the existing
- * chunk objects keep being referenced. What that means for the reply is that
- * these return as soon as the metadata is written, not after any transfer.
+ * Neither copies the cluster list into new S3 objects. A snapshot freezes the
+ * origin's cluster list into a read-only blob, then publishes that blob's
+ * chunks and the blobstore metadata naming them before this RPC returns, so
+ * the snapshot no longer depends on the write-back ring. A clone points at the
+ * parent's clusters and returns once its metadata is written; those clusters
+ * were published when the parent snapshot was created.
+ *
+ * create_snapshot under a name that is already the origin's direct parent, with
+ * nothing written to the origin since, publishes that snapshot and answers with
+ * it. That is how a caller retries an attempt whose reply it never got: the
+ * snapshot from that attempt cannot be deleted, so -EEXIST would leave it
+ * stranded. Any other existing name is still -EEXIST.
  * ========================================================================== */
 
 struct rpc_lvol_derive {

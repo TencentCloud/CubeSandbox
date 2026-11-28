@@ -163,8 +163,8 @@ s3lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 		 * earlier writes before issuing FLUSH, so no further work is needed.
 		 *
 		 * FUA is handled the same way by the ordinary write completion
-		 * above. Full S3 drains remain explicit control-plane operations for
-		 * export, unload and graceful shutdown. */
+		 * above. Publishing chunks to S3 is a snapshot and export concern,
+		 * not a guest journal commit. */
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
 		break;
 	case SPDK_BDEV_IO_TYPE_RESET:

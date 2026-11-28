@@ -14,6 +14,9 @@
 #   round 1  create, write pattern A, unload cleanly, exit
 #   round 2  attach, verify A survived, write pattern B, then SIGKILL
 #   round 3  attach, verify *both* A and B survived
+#   round 5  write D, snapshot, SIGKILL, delete the write-back ring, attach,
+#            and read D back through the snapshot -- which create_snapshot
+#            promises no longer needs the ring once it has returned
 #
 # Round 2's clean-attach check and round 3's crash-attach check fail for
 # completely different reasons, and collapsing them would make a failure
@@ -104,6 +107,13 @@ ZERO_OFF_4K=$((C_OFF_MB * 256 + 16))
 UNMAP_OFF_4K=$(((C_OFF_MB + 2) * 256 + 16))
 ZERO_LEN_4K=32
 FUA_OFF_4K=$((72 * 256 + 16))
+# Round 5: written just before a snapshot, so it is still in the write-back ring
+# when the snapshot is taken. Past everything the earlier rounds touch (3d
+# writes up to 96 MiB).
+D_OFF_MB=128
+D_LEN_MB=8
+SNAP5_NAME="r5snap"
+CLONE5_NAME="r5clone"
 RECOVERY_FLUSH_MAX_CONCURRENT="${S3LVOL_RECOVERY_FLUSH_MAX_CONCURRENT:-1}"
 
 # Interval the round-3 attach asks for, and how long to wait for that trigger to
@@ -234,6 +244,19 @@ target_alive()
 	[ -n "${TGT_PID}" ] && kill -0 "${TGT_PID}" 2>/dev/null
 }
 
+# Both places this lvstore's write-back ring can live: the per-uid directory,
+# and the flat legacy name an older target used. Derived the way the target
+# derives it, by the helper the operational scripts already share.
+writeback_ring_paths()
+{
+	local leaf
+
+	leaf="$(. "${REPO_ROOT}/scripts/rcow_common.sh" &&
+		rcow_writeback_shm_leaf "${LVS_NAME}")" || return 1
+	[ -n "${leaf}" ] || return 1
+	printf '%s\n' "/dev/shm/s3lvol-wb-$(id -u)/${leaf}" "/dev/shm/${leaf}"
+}
+
 check_target()
 {
 	local step="$1"
@@ -317,7 +340,7 @@ export_and_connect()
 	fi
 	${RPC} nvmf_create_subsystem "${NQN}" -a -s S3RC00000000000001 \
 		>/dev/null 2>&1 || { fail "nvmf_create_subsystem"; return 1; }
-	${RPC} nvmf_subsystem_add_ns "${NQN}" "${LVS_NAME}/${LVOL_NAME}" \
+	${RPC} nvmf_subsystem_add_ns "${NQN}" "${LVS_NAME}/${EXPORT_LVOL:-${LVOL_NAME}}" \
 		>/dev/null 2>&1 || { fail "nvmf_subsystem_add_ns"; return 1; }
 	${RPC} nvmf_subsystem_add_listener "${NQN}" \
 		-t tcp -a "${LISTEN_ADDR}" -s "${LISTEN_PORT}" \
@@ -503,6 +526,8 @@ dd if=/dev/urandom of="${WORKDIR}/pat_a.bin" bs=1M count=${A_LEN_MB} status=none
 dd if=/dev/urandom of="${WORKDIR}/pat_b.bin" bs=1M count=${B_LEN_MB} status=none
 dd if=/dev/urandom of="${WORKDIR}/pat_c.bin" bs=1M count=${C_LEN_MB} status=none
 dd if=/dev/urandom of="${WORKDIR}/pat_fua.bin" bs=4K count=1 status=none
+dd if=/dev/urandom of="${WORKDIR}/pat_d.bin" bs=1M count=${D_LEN_MB} status=none
+D_HASH="$(sha256sum "${WORKDIR}/pat_d.bin" | cut -d' ' -f1)"
 A_HASH="$(sha256sum "${WORKDIR}/pat_a.bin" | cut -d' ' -f1)"
 B_HASH="$(sha256sum "${WORKDIR}/pat_b.bin" | cut -d' ' -f1)"
 C_HASH="$(sha256sum "${WORKDIR}/pat_c.bin" | cut -d' ' -f1)"
@@ -1232,6 +1257,143 @@ fi
 if grep -q 'waiting for the checkpoint' "${TGT_LOG}"; then
 	info "round 3: the unload caught a checkpoint in flight and waited for it"
 fi
+
+# ==========================================================================
+# [5] A snapshot survives losing the write-back ring
+#
+# What create_snapshot promises once it returns: the snapshot no longer needs
+# the ring. Before, it froze the cluster list and returned, leaving the frozen
+# data -- and the blob pages that name it -- wherever the flusher had got to.
+# A crash followed by the loss of /dev/shm (a reboot, or an operator purging
+# the ring) then lost data the caller had been told was snapshotted, or the
+# snapshot itself.
+#
+# So: write D with no FLUSH, snapshot, SIGKILL at once, delete the ring, and
+# read the snapshot back through a clone. Every byte of it has to come from S3.
+# Deleting the ring is the step that separates this from round 3: there, the
+# ring is what recovery reads; here, nothing may depend on it.
+# ==========================================================================
+echo
+echo "[5] snapshot, crash, lose the write-back ring, read the snapshot back"
+
+kill -TERM "${TGT_PID}" 2>/dev/null
+for _ in $(seq 50); do
+	kill -0 "${TGT_PID}" 2>/dev/null || break
+	sleep 0.1
+done
+kill -KILL "${TGT_PID}" 2>/dev/null || true
+wait "${TGT_PID}" 2>/dev/null || true
+TGT_PID=""
+
+start_target || exit 1
+attach_local_dev || exit 1
+if ! raw_rpc rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+		"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" \
+		>/dev/null 2>"${WORKDIR}/cos_config_r5.err"; then
+	fail "rcow_add_s3_config (round 5)"
+	exit 1
+fi
+# 3d unloaded cleanly, so no force. An hour-long interval: a checkpoint here
+# would upload nothing the snapshot depends on, but keeps the log quiet.
+if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","checkpoint_interval_sec":3600}' \
+		"${LVS_NAME}" "${BUCKET}" "${WAL_BDEV}")" \
+		>/dev/null 2>"${WORKDIR}/attach5.err"; then
+	fail "round 5: rcow_attach_lvstore"
+	sed 's/^/       /' "${WORKDIR}/attach5.err"
+	exit 1
+fi
+LVS_EXISTS=1
+pass "round 5: lvstore attached"
+
+export_and_connect || exit 1
+if ! dd if="${WORKDIR}/pat_d.bin" of="${NVME_DEV}" bs=1M count=${D_LEN_MB} \
+		seek=${D_OFF_MB} oflag=direct status=none 2>"${WORKDIR}/dd_d.err"; then
+	fail "round 5: writing pattern D"
+	sed 's/^/       /' "${WORKDIR}/dd_d.err"
+	exit 1
+fi
+D_PENDING="$(wal_stat overlay_bytes)"
+if [ "${S3LVOL_TEST_SKIP_RECOVERY_QUANTITY:-0}" -eq 1 ]; then
+	info "round 5: ${D_PENDING} bytes not yet in S3 before the snapshot (floor skipped)"
+elif [ "${D_PENDING}" != "missing" ] && [ "${D_PENDING}" -gt 0 ] 2>/dev/null; then
+	pass "round 5: ${D_PENDING} bytes of D were not yet in S3 when the snapshot was asked for"
+else
+	fail "round 5: nothing of D was left to upload (${D_PENDING}); the snapshot has nothing to publish"
+	info "the flusher kept up, so this round would pass on a target that publishes nothing"
+fi
+
+if ! raw_rpc rcow_create_snapshot "$(printf '{"lvol_name":"%s","snapshot_name":"%s"}' \
+		"${LVOL_NAME}" "${SNAP5_NAME}")" \
+		>/dev/null 2>"${WORKDIR}/snap5.err"; then
+	fail "round 5: rcow_create_snapshot"
+	sed 's/^/       /' "${WORKDIR}/snap5.err"
+	exit 1
+fi
+pass "round 5: snapshot '${SNAP5_NAME}' returned"
+
+# Nothing between the reply and the kill, as in round 2: a stats call or an
+# nvme disconnect first would give the flusher seconds to cover for a snapshot
+# that did not publish.
+kill -KILL "${TGT_PID}" 2>/dev/null
+wait "${TGT_PID}" 2>/dev/null || true
+TGT_PID=""
+disconnect_nvme
+
+RING_REMOVED=0
+if RING_PATHS="$(writeback_ring_paths)"; then
+	while IFS= read -r ring; do
+		if [ -f "${ring}" ] && [ ! -L "${ring}" ]; then
+			rm -f -- "${ring}" && RING_REMOVED=$((RING_REMOVED + 1))
+		fi
+	done <<<"${RING_PATHS}"
+fi
+if [ "${RING_REMOVED}" -gt 0 ]; then
+	pass "round 5: SIGKILLed and removed the write-back ring"
+else
+	fail "round 5: found no write-back ring to remove; nothing here tests losing it"
+	exit 1
+fi
+
+start_target || exit 1
+attach_local_dev || exit 1
+if ! raw_rpc rcow_add_s3_config "$(printf '{"namespace":"%s","endpoint":"%s","bucket":"%s","region":"%s"%s}' \
+		"${BUCKET}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${S3LVOL_EXTRA_JSON}")" \
+		>/dev/null 2>"${WORKDIR}/cos_config_r5b.err"; then
+	fail "rcow_add_s3_config (round 5, after losing the ring)"
+	exit 1
+fi
+if ! raw_rpc rcow_attach_lvstore "$(printf '{"lvs_name":"%s","namespace":"%s","wal_bdev":"%s","force":true,"checkpoint_interval_sec":3600}' \
+		"${LVS_NAME}" "${BUCKET}" "${WAL_BDEV}")" \
+		>"${WORKDIR}/attach5b.json" 2>"${WORKDIR}/attach5b.err"; then
+	fail "round 5: attach with the ring gone"
+	sed 's/^/       /' "${WORKDIR}/attach5b.err"
+	check_target "round 5, attaching without a ring" || exit 1
+	exit 1
+fi
+pass "round 5: attached with a fresh, empty ring"
+
+if grep -q "\"bdev_name\": \"${LVS_NAME}/${SNAP5_NAME}\"" "${WORKDIR}/attach5b.json"; then
+	pass "round 5: snapshot '${SNAP5_NAME}' came back without the ring"
+else
+	fail "round 5: snapshot '${SNAP5_NAME}' is missing after losing the ring"
+	info "its blob pages were still only in the ring when create_snapshot returned"
+	exit 1
+fi
+
+if ! raw_rpc rcow_create_clone "$(printf '{"snapshot_name":"%s","clone_name":"%s"}' \
+		"${SNAP5_NAME}" "${CLONE5_NAME}")" \
+		>/dev/null 2>"${WORKDIR}/clone5.err"; then
+	fail "round 5: cloning the recovered snapshot"
+	sed 's/^/       /' "${WORKDIR}/clone5.err"
+	exit 1
+fi
+EXPORT_LVOL="${CLONE5_NAME}" export_and_connect || exit 1
+verify_region d "${D_OFF_MB}" "${D_LEN_MB}" "${D_HASH}" || true
+# Written in round 1 and published long before; read through the same clone
+# so a snapshot that came back with the wrong cluster list is caught too.
+verify_region a "${A_OFF_MB}" "${A_LEN_MB}" "${A_HASH}" || true
+check_target "round 5, reading the snapshot back" || exit 1
+disconnect_nvme
 
 echo
 echo "=== result: ${PASS} passed, ${FAIL} failed ==="

@@ -79,6 +79,10 @@ const SNAPSHOT_RECOVERY_ATTEMPTS: u32 = 6;
 /// Deadline for the guest freeze RPC; must exceed the agent's own 30 s timeout.
 const FREEZE_RPC_TIMEOUT: Duration = Duration::from_secs(35);
 
+/// Deadline for writing the frozen rootfs disk's host page cache back to the
+/// device. Well inside the 300 s freeze lease armed before the freeze.
+const ROOTFS_HOST_FLUSH_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// RPC context for guest freeze/thaw calls; the ttrpc client applies the
 /// context timeout to the response wait, so this bounds the call.
 fn freeze_rpc_context() -> Context {
@@ -1649,6 +1653,9 @@ impl SandBox {
         let mut snapshot_dir = PathBuf::from(spec_dir);
         snapshot_dir.push("snapshot");
         let capture_result: CResult<()> = async {
+            if let (SnapshotHold::Rootfs { .. }, Some(path)) = (&hold, rootfs_host_path) {
+                self.flush_rootfs_host_cache(path).await?;
+            }
             stdfs::create_dir_all(&snapshot_dir).map_err(|e| e.to_string())?;
             let hypervisor = ch.lock().await;
             hypervisor
@@ -1890,6 +1897,46 @@ impl SandBox {
             .into());
         }
         Ok(())
+    }
+
+    /// Writes the rootfs disk's host page cache back to the device.
+    ///
+    /// The guest mounts blk-cube ext4 with barrier=0, so neither FIFREEZE nor
+    /// any later journal commit sends a virtio FLUSH: the freeze only turns
+    /// into WRITE requests, which a buffered hypervisor backend completes into
+    /// the host page cache. A filesystem-only capture does not pause the VM
+    /// either, so the hypervisor's pause-time flush never runs. Without this,
+    /// the storage snapshot taken next is cut below a cache that still holds
+    /// the frozen filesystem's last writes.
+    ///
+    /// fsync() on any descriptor of a block device writes back the device's
+    /// shared page cache and then flushes the device, and on a regular file
+    /// does the same for that file, so this holds whichever backs the disk.
+    async fn flush_rootfs_host_cache(&self, path: &str) -> CResult<()> {
+        let started = Instant::now();
+        let target = path.to_string();
+        let task = tokio::task::spawn_blocking(move || {
+            stdfs::File::open(&target).and_then(|file| file.sync_all())
+        });
+        match tokio::time::timeout(ROOTFS_HOST_FLUSH_TIMEOUT, task).await {
+            Ok(Ok(Ok(()))) => {
+                infof!(
+                    self.log,
+                    "flushed host cache of rootfs disk {path} in {:?}",
+                    started.elapsed()
+                );
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => {
+                Err(format!("flush host cache of rootfs disk {path} failed: {e}").into())
+            }
+            Ok(Err(e)) => Err(format!("flush host cache of rootfs disk {path} failed: {e}").into()),
+            Err(_) => Err(format!(
+                "flush host cache of rootfs disk {path} timed out after {}s",
+                ROOTFS_HOST_FLUSH_TIMEOUT.as_secs()
+            )
+            .into()),
+        }
     }
 
     async fn thaw_rootfs(&self, mount_point: &str) -> CResult<()> {
