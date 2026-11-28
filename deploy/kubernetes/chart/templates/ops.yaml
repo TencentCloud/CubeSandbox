@@ -3,6 +3,12 @@
 {{- $wh := .Values.cubeOps.warehouse | default dict }}
 {{- $opsS3 := .Values.cubeOps.s3 | default dict }}
 {{- $workDir := .Values.cubeOps.workDir | default "/var/tmp/cubeops-warehouse" }}
+{{- $inventoryEnv := false }}
+{{- range .Values.cubeOps.env }}
+  {{- if eq .name "CUBE_OPS_SPLIT_NODE_INVENTORY" }}
+    {{- $inventoryEnv = true }}
+  {{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,6 +52,10 @@ spec:
             {{- include "cube.timezoneEnv" . | nindent 12 }}
             - name: CUBE_OPS_BIND
               value: {{ .Values.cubeOps.bind | quote }}
+            {{- if not $inventoryEnv }}
+            - name: CUBE_OPS_SPLIT_NODE_INVENTORY
+              value: {{ .Values.cubeOps.splitNodeInventory | default false | quote }}
+            {{- end }}
             # ops-agent push channel: node-local agents listen on the compute
             # nodes at .Values.opsAgent.port.
             - name: CUBE_OPS_OPSAGENT_PORT

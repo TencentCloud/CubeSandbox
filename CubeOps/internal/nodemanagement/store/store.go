@@ -84,11 +84,12 @@ type NodeStore interface {
 }
 
 type gormNodeStore struct {
-	db *gorm.DB
+	db             *gorm.DB
+	splitInventory bool
 }
 
-func NewNodeStore(db *gorm.DB) NodeStore {
-	return &gormNodeStore{db: db}
+func NewNodeStore(db *gorm.DB, splitInventory bool) NodeStore {
+	return &gormNodeStore{db: db, splitInventory: splitInventory}
 }
 
 func (s *gormNodeStore) UpsertRegistration(ctx context.Context, reg *NodeRegistration) error {
@@ -298,35 +299,6 @@ func (s *gormNodeStore) BumpClusterQuotaFollowers(ctx context.Context) (int64, e
 		Where("node_id <> ? AND paused_resource_release_ratio IS NULL", ClusterQuotaSentinelID).
 		Update("revision", gorm.Expr("revision + 1"))
 	return res.RowsAffected, res.Error
-}
-
-func (s *gormNodeStore) UpsertStatus(ctx context.Context, status *NodeStatus) error {
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "node_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"conditions_json", "images_json", "local_templates_json",
-			"heartbeat_unix", "heartbeat_received_unix", "healthy", "updated_at",
-		}),
-	}).Create(status).Error
-}
-
-func (s *gormNodeStore) GetStatus(ctx context.Context, nodeID string) (*NodeStatus, error) {
-	var st NodeStatus
-	if err := s.db.WithContext(ctx).Where("node_id = ?", nodeID).First(&st).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return &st, nil
-}
-
-func (s *gormNodeStore) ListStatuses(ctx context.Context) ([]NodeStatus, error) {
-	var sts []NodeStatus
-	if err := s.db.WithContext(ctx).Find(&sts).Error; err != nil {
-		return nil, err
-	}
-	return sts, nil
 }
 
 func (s *gormNodeStore) WriteComponentVersions(ctx context.Context, nodeID string, versions []model.ComponentVersion, inventoryIncomplete bool) error {

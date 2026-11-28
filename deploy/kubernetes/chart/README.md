@@ -703,6 +703,13 @@ cubeNode:
 
 ## WebUI and CubeOps
 
+Keep `cubeOps.splitNodeInventory=false` during a rolling CubeOps upgrade.
+After all instances support split inventory, set it to `true` to avoid
+rewriting unchanged image and template inventories on each heartbeat.
+An explicit `CUBE_OPS_SPLIT_NODE_INVENTORY` entry in `cubeOps.env` takes
+precedence. See the [CubeOps upgrade and rollback instructions](../../../CubeOps/README.md#node-inventory-during-a-rolling-upgrade)
+for schema migration, backup, and binary rollback requirements.
+
 `webui.enabled=true` delivers the one-click WebUI by default and **requires** `cubeOps.enabled=true`:
 
 - `cube-webui` image packages one-click `webui/dist` static assets;
