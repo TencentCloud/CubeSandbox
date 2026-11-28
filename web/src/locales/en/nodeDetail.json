@@ -7,7 +7,7 @@
     "versions": "Component Versions",
     "localTemplates": "Local Templates",
     "localTemplatesDesc": "Template replicas cached on this node. Click to view template details.",
-    "sandboxes": "Running Sandboxes",
+    "sandboxes": "Node Sandboxes",
     "sandboxesDesc": "Sandbox instances currently scheduled on this node."
   },
   "fields": {

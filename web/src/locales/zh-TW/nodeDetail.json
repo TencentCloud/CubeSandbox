@@ -7,7 +7,7 @@
     "versions": "元件版本",
     "localTemplates": "本地範本",
     "localTemplatesDesc": "已快取到該節點的範本副本，點選可檢視範本詳細資料。",
-    "sandboxes": "執行中沙箱",
+    "sandboxes": "節點沙箱",
     "sandboxesDesc": "當前排程到該節點的沙箱執行個體。"
   },
   "fields": {
