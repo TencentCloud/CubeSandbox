@@ -130,8 +130,10 @@ const (
 	// CubeAnnotationCreateTimeEnvVars stores the serialized create-time env map
 	// that CubeMaster passes to cubelet for envd initialization.
 	CubeAnnotationCreateTimeEnvVars = "cube.master.internal.create_time_env_vars"
-	CubeAnnotationEnableIvshmem     = "cube.master.enable_ivshmem"
-	CubeAnnotationCgroupMode        = "cube.master.cgroup_mode"
+	// CubeAnnotationRuntimeCAEnv stores template CA defaults for envd commands.
+	CubeAnnotationRuntimeCAEnv  = "cube.master.runtime.ca_env"
+	CubeAnnotationEnableIvshmem = "cube.master.enable_ivshmem"
+	CubeAnnotationCgroupMode    = "cube.master.cgroup_mode"
 
 	CubeAnnotationsVirtiofsCache = "cube.master.virtiofs.cache"
 

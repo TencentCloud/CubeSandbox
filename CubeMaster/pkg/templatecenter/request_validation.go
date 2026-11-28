@@ -128,6 +128,11 @@ func normalizeTemplateImageRequest(req *types.CreateTemplateFromImageReq) (*type
 		return nil, errors.New("writable_layer_size is required")
 	}
 	cloned := *req
+	caEnvVars, err := normalizeRuntimeCAEnvNames(req.CubeCAEnvVars)
+	if err != nil {
+		return nil, err
+	}
+	cloned.CubeCAEnvVars = caEnvVars
 	cloned.SourceImageRef = sourceImageRef
 	resources := templateResources(req)
 	resolvedQos, err := qos.ResolveTemplate(req.Qos, resources)

@@ -27,17 +27,17 @@
 // public HTTPS endpoint a workload talks to. PEM bundles are designed
 // to be concatenated.
 //
-// Distroless / scratch seeding: an image that ships NEITHER a ca-bundle
-// file NOR any anchor directory (e.g. gcr.io/distroless/static, FROM
-// scratch) has no trust store to append to. Rather than fail the build,
+// Bundle seeding: an image that ships no ca-bundle file (e.g.
+// gcr.io/distroless/static, FROM scratch, or an anchor-only rootfs)
+// has no PEM bundle for application runtimes. Rather than fail the build,
 // we *seed* the canonical bundle path (seedBundlePath) from scratch with
 // just the CubeEgress root. This is safe and sufficient precisely
 // because CubeEgress is the egress MITM: it re-signs every outbound TLS
 // connection with this root, so the workload only needs to trust this
 // one CA — it does not need the public Mozilla set (egress to the wider
 // internet is brokered by CubeEgress, not made directly). Seeding only
-// kicks in when nothing else exists and the CA is not already present,
-// so it never clobbers an image's own roots.
+// kicks in when no usable bundle exists, so it never clobbers a bundle
+// containing an image's own roots.
 package cube_egress_ca
 
 import (
@@ -55,6 +55,11 @@ import (
 // Result describes the outcome of a bake. Callers persist these onto
 // the RootfsArtifact row for audit / debug.
 type Result struct {
+	// BundlePath is the absolute in-guest path of a bundle containing the CA.
+	// It is also set for an idempotent bake; anchor directories alone are not
+	// usable by runtimes that consume a PEM bundle directly.
+	BundlePath string
+
 	// Baked is true iff at least one bundle or anchor write (or seed)
 	// succeeded this pass. A baked=false result with no error means
 	// every target was already up-to-date (idempotent no-op); the caller
@@ -84,9 +89,9 @@ type Result struct {
 	SkippedReasons []string
 
 	// Seeded is true iff the bake created a fresh ca-bundle from scratch
-	// at seedBundlePath because the image carried no trust store of its
-	// own (distroless / scratch). When Seeded is true, Baked is also
-	// true. Surfaced in the bake log line for diagnostics; not persisted
+	// at seedBundlePath because the image carried no usable PEM bundle,
+	// including images with only anchor directories. When Seeded is true,
+	// Baked is also true. Surfaced in the bake log line for diagnostics; not persisted
 	// separately to the DB because Baked + TargetsWritten + image
 	// metadata are sufficient to infer how the trust root landed.
 	Seeded bool
@@ -97,9 +102,9 @@ type Result struct {
 // project for the CubeEgress root.
 const AnchorFileName = "cube-egress-root.crt"
 
-// bundleFiles is the closed list of ca-bundle files we append to. Order
-// is informational; each is tried independently. Paths are relative to
-// rootfsDir.
+// bundleFiles is the closed list of ca-bundle files we append to. Each is
+// tried independently; the first usable bundle becomes BundlePath for
+// application runtimes. Paths are relative to rootfsDir.
 var bundleFiles = []string{
 	// Debian/Ubuntu, also Alpine when ca-certificates is installed.
 	"etc/ssl/certs/ca-certificates.crt",
@@ -123,12 +128,12 @@ var anchorDirs = []string{
 }
 
 // seedBundlePath is the bundle file we *create* from scratch when an
-// image has no trust store of its own (distroless / scratch). It is the
+// image has no usable PEM bundle, even if it has anchor directories. It is the
 // Debian/Ubuntu canonical path, which is also Go's first-choice probe
 // location (crypto/x509) and the value distroless images point
 // SSL_CERT_FILE at — so seeding here is picked up by the widest set of
 // runtimes. It is intentionally identical to bundleFiles[0]: the append
-// pass runs first and, on a distroless image, records it "missing"; the
+// pass runs first and, on an image without a bundle, records it "missing"; the
 // seed pass then creates it.
 const seedBundlePath = "etc/ssl/certs/ca-certificates.crt"
 
@@ -141,7 +146,7 @@ const seedBundlePath = "etc/ssl/certs/ca-certificates.crt"
 // in this image are NOT errors — they're recorded in
 // Result.SkippedReasons.
 //
-// Distroless / scratch images that ship no bundle and no anchor dir are
+// Images without a usable PEM bundle, including anchor-only rootfs, are
 // not skipped: Bake seeds seedBundlePath with the CA (Result.Seeded set)
 // so the trust root still lands. See the package doc for why this is
 // safe under the CubeEgress MITM model.
@@ -166,11 +171,6 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 	canonical := pem.EncodeToMemory(caBlock)
 
 	res := Result{Fingerprint: fingerprint}
-	// caPresent tracks whether the CA already lives in some bundle/anchor
-	// (idempotent no-op). It gates the distroless seed so a re-bake of an
-	// already-seeded image doesn't fabricate a second copy.
-	caPresent := false
-
 	for _, rel := range bundleFiles {
 		full := filepath.Join(rootfsDir, rel)
 		written, reason, err := appendBundle(full, canonical, caBlock.Bytes)
@@ -181,8 +181,8 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 			res.TargetsWritten++
 			res.Baked = true
 		}
-		if reason == "present" {
-			caPresent = true
+		if (written || reason == "present") && res.BundlePath == "" {
+			res.BundlePath = "/" + rel
 		}
 		if reason != "" {
 			res.SkippedReasons = append(res.SkippedReasons, rel+": "+reason)
@@ -199,31 +199,28 @@ func Bake(rootfsDir string, caPEM []byte) (Result, error) {
 			res.TargetsWritten++
 			res.Baked = true
 		}
-		if reason == "present" {
-			caPresent = true
-		}
 		if reason != "" {
 			res.SkippedReasons = append(res.SkippedReasons, rel+": "+reason)
 		}
 	}
 
-	// Distroless / scratch fallback: the image had no trust store to
-	// append to and the CA isn't already present anywhere, so seed the
-	// canonical bundle from scratch. Safe under the CubeEgress MITM model
-	// (see package doc) and never clobbers an image's own roots because
-	// it only runs when nothing else matched.
-	if !res.Baked && !caPresent {
+	// A rootfs with only anchors still needs a PEM bundle for runtimes.
+	// Seed only when no usable bundle was found; never replace existing roots.
+	if res.BundlePath == "" {
 		full := filepath.Join(rootfsDir, seedBundlePath)
 		written, reason, err := seedBundle(full, canonical)
 		if err != nil {
 			return res, fmt.Errorf("cube_egress_ca: seed %s: %w", seedBundlePath, err)
 		}
 		if written {
+			res.BundlePath = "/" + seedBundlePath
 			res.TargetsWritten++
 			res.Baked = true
 			res.Seeded = true
 			res.SkippedReasons = append(res.SkippedReasons,
-				seedBundlePath+": seeded (image shipped no trust store)")
+				seedBundlePath+": seeded (image shipped no CA bundle)")
+		} else if reason == "present" {
+			res.BundlePath = "/" + seedBundlePath
 		} else if reason != "" {
 			res.SkippedReasons = append(res.SkippedReasons, seedBundlePath+": "+reason)
 		}

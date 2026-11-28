@@ -99,6 +99,7 @@ tokio = { version = "1", features = ["full"] }
 axum-test = "14"
 # InMemorySpanExporter, for asserting on spans without an exporter endpoint.
 opentelemetry_sdk = { version = "0.30", features = ["testing"] }
+serde_norway = "0.9"
 
 [profile.release]
 # Maximize single-binary performance

@@ -1739,12 +1739,6 @@ components:
       type: object
       description: Request body for POST /sandboxes/{id}/snapshots.
       properties:
-        ttlSeconds:
-          type:
-          - integer
-          - 'null'
-          format: int64
-          description: Lifetime from READY in seconds; omitted or zero means no expiration.
         backend:
           type:
           - string
@@ -1769,6 +1763,12 @@ components:
           type:
           - string
           - 'null'
+        ttlSeconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Lifetime from READY in seconds; omitted or zero means no expiration.
     CreateTemplateRequest:
       type: object
       description: Body for POST /templates (create from image).
@@ -1820,6 +1820,16 @@ components:
           format: int32
           description: CPU in millicores, e.g. 2000 means 2000m.
           minimum: 0
+        cube_ca_env_vars:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: |-
+            Replace the default CA bundle environment variable names. Omitted or null
+            uses defaults; an empty list disables automatic variables. Names must
+            match [A-Za-z_][A-Za-z0-9_]* and accept a PEM bundle file path as their value.
         denyOut:
           type:
           - array
@@ -1937,6 +1947,13 @@ components:
           description: |-
             Whether CubeMaster bakes the CubeEgress root CA into the template rootfs.
             Omitted or null defaults to true on CubeMaster.
+        with_cube_ca_env:
+          type:
+          - boolean
+          - 'null'
+          description: |-
+            Configure application CA environment defaults when CA baking is enabled.
+            False keeps CA baking without automatic runtime environment variables.
         writableLayerSize:
           type:
           - string
@@ -2227,6 +2244,11 @@ components:
           type:
           - string
           - 'null'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Persisted internet-access flag; absent when the spec was not read.
         clientID:
           type: string
         cpuCount:
@@ -2247,8 +2269,18 @@ components:
           type: string
           format: date-time
           description: Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
+        endAtStatus:
+          type:
+          - string
+          - 'null'
+          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
         envdVersion:
           type: string
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Persisted lifecycle config; absent when the spec was not read.
         memoryMB:
           type: integer
           format: int32
@@ -2257,6 +2289,13 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
+            description: |-
+              Persisted egress config; absent when the spec was not read or when it
+              carried only egress rules (rules never appear on the wire).
         restartStatus:
           oneOf:
           - type: 'null'
@@ -2276,28 +2315,6 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
-        allowInternetAccess:
-          type:
-          - boolean
-          - 'null'
-          description: Persisted internet-access flag; absent when the spec was not read.
-        endAtStatus:
-          type:
-          - string
-          - 'null'
-          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
-        lifecycle:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/SandboxLifecycleConfig'
-            description: Persisted lifecycle config; absent when the spec was not read.
-        network:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
-            description: |-
-              Persisted egress config; absent when the spec was not read or when it
-              carried only egress rules (rules never appear on the wire).
     LivenessHTTPGet:
       type: object
       required:
@@ -2896,6 +2913,11 @@ components:
           type:
           - string
           - 'null'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Persisted internet-access flag; absent when the spec was not read.
         clientID:
           type: string
         configuredQos:
@@ -2924,6 +2946,11 @@ components:
           type: string
           format: date-time
           description: Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
+        endAtStatus:
+          type:
+          - string
+          - 'null'
+          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
         envdAccessToken:
           type:
           - string
@@ -2933,6 +2960,11 @@ components:
         errorReason:
           type: string
           description: Stored status or exit reason for the primary container. Omitted when unavailable.
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Persisted lifecycle config; absent when the spec was not read.
         memoryMB:
           type: integer
           format: int32
@@ -2941,6 +2973,13 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
+            description: |-
+              Persisted egress config; absent when the spec was not read or when it
+              carried only egress rules (rules never appear on the wire).
         restartStatus:
           oneOf:
           - type: 'null'
@@ -2960,28 +2999,6 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/SandboxVolumeMount'
-        allowInternetAccess:
-          type:
-          - boolean
-          - 'null'
-          description: Persisted internet-access flag; absent when the spec was not read.
-        endAtStatus:
-          type:
-          - string
-          - 'null'
-          description: '"deadline" | "never" | "unknown"; absent when the backend did not report it.'
-        lifecycle:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/SandboxLifecycleConfig'
-            description: Persisted lifecycle config; absent when the spec was not read.
-        network:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/SandboxNetworkConfigEcho'
-            description: |-
-              Persisted egress config; absent when the spec was not read or when it
-              carried only egress rules (rules never appear on the wire).
     SandboxLifecycleConfig:
       type: object
       description: |-
@@ -3096,7 +3113,6 @@ components:
               L7 egress rules. Accepts CubeSandbox's ordered rule array and E2B's
               host-keyed transform map for compatibility. Both are normalized to the
               ordered internal rule model.
-
     SandboxNetworkConfigEcho:
       type: object
       description: |-
@@ -3208,16 +3224,16 @@ components:
       - names
       - mode
       properties:
-        expiresAt:
-          type:
-          - string
-          - 'null'
-          format: date-time
         backend:
           type:
           - string
           - 'null'
           description: CoW backend that produced this snapshot (xfs | s3).
+        expiresAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
         mode:
           $ref: '#/components/schemas/SnapshotMode'
           description: Snapshot artifact mode. Always one of full | fs-only.
@@ -3241,17 +3257,17 @@ components:
       - status
       - mode
       properties:
-        expiresAt:
-          type:
-          - string
-          - 'null'
-          format: date-time
         backend:
           type:
           - string
           - 'null'
           description: CoW backend that produced this snapshot (xfs | s3).
         createdAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        expiresAt:
           type:
           - string
           - 'null'
