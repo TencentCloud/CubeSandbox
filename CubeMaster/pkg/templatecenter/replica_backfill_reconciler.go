@@ -63,9 +63,16 @@ var (
 	backfillLatestJob = func(ctx context.Context, templateID string) (*models.TemplateImageJob, error) {
 		return getLatestCreateRedoImageJobByTemplateIDTx(store.db.WithContext(ctx), templateID)
 	}
+	backfillPlacementScope = func(ctx context.Context, templateID string) ([]string, error) {
+		records, err := listCreateRedoImageJobsByTemplateIDTx(store.db.WithContext(ctx), templateID)
+		if err != nil {
+			return nil, err
+		}
+		return placementScopeFromJobs(records)
+	}
 	backfillArtifact        = getRootfsArtifactByID
 	backfillReplicas        = ListReplicas
-	backfillResolveNodes    = resolveTemplateNodes
+	backfillResolveNodes    = resolveBackfillNodes
 	backfillDistribute      = distributeRootfsArtifactToNodes
 	backfillPlacements      = listArtifactNodePlacements
 	backfillCreateReplica   = createReplicaOnNode
@@ -73,6 +80,83 @@ var (
 	backfillGetDefinition   = GetDefinition
 	backfillCleanupReplicas = cleanupTemplateReplicasOnNodes
 )
+
+// placementScopeFromJobs derives where a redone template belongs from its
+// create/redo jobs, newest first: the latest create's scope plus the nodes of
+// every redo after it. A create without a scope, or no create on record,
+// means every in-scope node (nil).
+func placementScopeFromJobs(records []models.TemplateImageJob) ([]string, error) {
+	var redoScopes [][]string
+	for _, record := range records {
+		req, err := unmarshalTemplateImageJobRequest(record.RequestJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s job %s request: %w", strings.ToLower(record.Operation), record.JobID, err)
+		}
+		if !strings.EqualFold(record.Operation, JobOperationCreate) {
+			redoScopes = append(redoScopes, req.DistributionScope)
+			continue
+		}
+		if len(req.DistributionScope) == 0 {
+			return nil, nil
+		}
+		seen := make(map[string]struct{})
+		var scope []string
+		add := func(items []string) {
+			for _, item := range items {
+				if item = strings.TrimSpace(item); item == "" {
+					continue
+				}
+				if _, ok := seen[item]; ok {
+					continue
+				}
+				seen[item] = struct{}{}
+				scope = append(scope, item)
+			}
+		}
+		add(req.DistributionScope)
+		for i := len(redoScopes) - 1; i >= 0; i-- {
+			add(redoScopes[i])
+		}
+		return scope, nil
+	}
+	return nil, nil
+}
+
+// resolveBackfillNodes is resolveTemplateNodes without the all-or-nothing
+// scope check. A stored scope is a snapshot of the nodes that existed when
+// the job ran; once one of them leaves or turns unhealthy, the strict check
+// would fail the template on every tick and stop backfill to the nodes that
+// are still in scope. Entries without a healthy match are skipped instead.
+func resolveBackfillNodes(instanceType string, scope []string) ([]*node.Node, error) {
+	nodes := healthyTemplateNodes(instanceType)
+	if len(nodes) == 0 {
+		return nil, ErrNoTemplateNodes
+	}
+	allowed := make(map[string]struct{}, len(scope))
+	for _, item := range scope {
+		if item = strings.TrimSpace(item); item != "" {
+			allowed[item] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return nodes, nil
+	}
+	selected := make([]*node.Node, 0, len(nodes))
+	for _, item := range nodes {
+		if item == nil {
+			continue
+		}
+		_, byID := allowed[item.ID()]
+		_, byIP := allowed[item.HostIP()]
+		if byID || byIP {
+			selected = append(selected, item)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, ErrNoTemplateNodes
+	}
+	return selected, nil
+}
 
 // reconcileTemplateReplicaBackfill pushes READY templates to healthy nodes
 // that lack a READY replica. Runs inside the image-job reconcile pass.
@@ -125,6 +209,17 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 	req, err := unmarshalTemplateImageJobRequest(job.RequestJSON)
 	if err != nil {
 		return fmt.Errorf("decode job request snapshot: %w", err)
+	}
+	// A redo persists the nodes it rebuilt on as its scope. That is a
+	// one-off target list, not the template's placement: keeping it alone
+	// would stop every node that joins after the redo from being backfilled.
+	// Dropping it would lose the nodes a redo moved the template to.
+	if strings.EqualFold(job.Operation, JobOperationRedo) {
+		scope, scopeErr := backfillPlacementScope(ctx, def.TemplateID)
+		if scopeErr != nil {
+			return fmt.Errorf("load placement scope: %w", scopeErr)
+		}
+		req.DistributionScope = scope
 	}
 	// jfs templates live on the shared volume: nodes never build their own
 	// replica, so replica rows say nothing about ext4 coverage — only the

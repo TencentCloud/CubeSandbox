@@ -203,3 +203,59 @@ func TestBackfillTemplateReplicasJFSSkipsFullyPlaced(t *testing.T) {
 		t.Fatalf("distribute calls = %d, want 0 (coverage is complete)", len(recorder.calls))
 	}
 }
+
+// A redo records the nodes it rebuilt on as its request scope. The sweep must
+// use the template's placement scope (create scope plus redo nodes), or a node
+// that joins after the redo is never backfilled.
+func TestBackfillAfterRedoUsesPlacementScope(t *testing.T) {
+	stubRemoteTier(t, true, servableProbe(http.StatusPartialContent, "rfs-jfs"))
+	raw, err := json.Marshal(&sandboxtypes.CreateTemplateFromImageReq{
+		Backend: "jfs", InstanceType: "cubebox", SourceImageRef: "docker.io/library/nginx:latest", WritableLayerSize: "4Gi",
+		DistributionScope: []string{"node-a"}, // the redo's target list
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	artifact := &models.RootfsArtifact{
+		ArtifactID: "rfs-jfs", Status: ArtifactStatusReady, Ext4SHA256: "deadbeef",
+		Ext4SizeBytes: 1024, DownloadToken: "tok", MasterNodeIP: "http://cube-master:8089",
+	}
+	nodes := []*node.Node{testNode("node-a", "10.0.0.1"), testNode("node-new", "10.0.0.4")}
+	placements := []models.ArtifactNodePlacement{{ArtifactID: "rfs-jfs", NodeID: "node-a", NodeIP: "10.0.0.1"}}
+	def := backfillDefinition{TemplateID: "tpl-1", InstanceType: "cubebox", RootfsArtifactID: "rfs-jfs"}
+
+	for _, tc := range []struct {
+		name      string
+		operation string
+		create    []string
+		want      []string
+	}{
+		{name: "redo, unscoped or no create job", operation: JobOperationRedo, want: nil},
+		{name: "redo, scoped create", operation: JobOperationRedo, create: []string{"node-a", "node-new"}, want: []string{"node-a", "node-new"}},
+		{name: "create keeps its own scope", operation: JobOperationCreate, want: []string{"node-a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := &models.TemplateImageJob{JobID: "job-1", Operation: tc.operation, RequestJSON: string(raw)}
+			stubBackfillSeams(t, job, artifact, nodes, placements)
+			origScope, origResolve := backfillPlacementScope, backfillResolveNodes
+			t.Cleanup(func() { backfillPlacementScope, backfillResolveNodes = origScope, origResolve })
+			backfillPlacementScope = func(context.Context, string) ([]string, error) { return tc.create, nil }
+			var gotScope []string
+			backfillResolveNodes = func(_ string, scope []string) ([]*node.Node, error) {
+				gotScope = scope
+				return nodes, nil
+			}
+			if err := backfillTemplateReplicas(context.Background(), def); err != nil {
+				t.Fatalf("backfillTemplateReplicas: %v", err)
+			}
+			if len(gotScope) != len(tc.want) {
+				t.Fatalf("resolve scope = %v, want %v", gotScope, tc.want)
+			}
+			for i := range tc.want {
+				if gotScope[i] != tc.want[i] {
+					t.Fatalf("resolve scope = %v, want %v", gotScope, tc.want)
+				}
+			}
+		})
+	}
+}
