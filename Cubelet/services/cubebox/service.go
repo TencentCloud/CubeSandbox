@@ -247,6 +247,7 @@ func init() {
 			}()
 
 			go s.destroyDeadContainers()
+			go s.reclaimAbandonedImports(ic.Context)
 
 			return s, nil
 		},
@@ -390,7 +391,12 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	}
 	// Cross-node restore: the disk describing what to run is not on this
 	// node yet, and the reads below expect it.
-	preparedCtx, prepareErr := prepareCrossNodeRestore(ctx, req)
+	preparedCtx, importClaim, prepareErr := prepareCrossNodeRestore(ctx, req)
+	if importClaim != nil {
+		// Runs after every other deferred step of this Create, including the
+		// workflow's failover destroy, so ownership is final when asked.
+		defer s.finishSandboxImport(ctx, importClaim, rsp)
+	}
 	if prepareErr != nil {
 		rsp.Ret.RetMsg = prepareErr.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed

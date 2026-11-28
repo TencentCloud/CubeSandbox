@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -17,6 +18,18 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
+
+// crossNodeStoreReadyWait bounds how long a cross-node restore waits for this
+// node's S3／JFS Store to finish initializing. The request context still
+// applies; this only keeps a node whose backend never comes up from holding
+// the restore for the caller's whole budget.
+const crossNodeStoreReadyWait = 90 * time.Second
+
+// waitCrossNodeStoreReadyFn is swapped in tests.
+var waitCrossNodeStoreReadyFn = storage.WaitStoreReady
+
+// claimSandboxImportFn is swapped in tests.
+var claimSandboxImportFn = storage.ClaimSandboxImport
 
 // isCrossNodeRestore reports Master's verdict that it placed this restore on
 // a node holding no replica of the package. Only Master can know this, so
@@ -46,13 +59,17 @@ func isCrossNodeRestore(ann map[string]string) bool {
 // The rootfs and memory are left to the storage plugin, which imports them
 // under the same sandbox-private naming once the create is under way, so a
 // create that dies halfway leaves only disks destroy already knows about.
-func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (context.Context, error) {
+//
+// The metadata disk is imported before any sandbox record exists, so destroy
+// cannot know about it yet. The returned claim covers that gap: the caller
+// must Finish it when the Create returns, whether or not this succeeded.
+func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (context.Context, *storage.SandboxImportClaim, error) {
 	if req == nil {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	ann := req.GetAnnotations()
 	if !isCrossNodeRestore(ann) {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	// Everything below is rejection rather than fallback: Master already
 	// said the package is not on this node, so anything missing here makes
@@ -60,28 +77,38 @@ func prepareCrossNodeRestore(ctx context.Context, req *cubebox.RunCubeSandboxReq
 	// later on what would look like a corrupt catalog.
 	backend, err := storageBackendFromAnnotations(ann)
 	if err != nil {
-		return ctx, fmt.Errorf("cross-node restore backend: %w", err)
+		return ctx, nil, fmt.Errorf("cross-node restore backend: %w", err)
 	}
 	if !storage.CrossNodeImportBackend(backend) {
-		return ctx, fmt.Errorf("cross-node restore needs the s3 backend, got %s", backend)
+		return ctx, nil, fmt.Errorf("cross-node restore needs the s3 backend, got %s", backend)
 	}
 	if cow.ParseRemoteUUIDs(ann[constants.MasterAnnotationSnapshotRemoteUUIDs]).Empty() {
-		return ctx, fmt.Errorf("cross-node restore carries no remote_uuids")
+		return ctx, nil, fmt.Errorf("cross-node restore carries no remote_uuids")
 	}
 	sandboxID, err := ensureCrossNodeSandboxID(req)
 	if err != nil {
-		return ctx, err
+		return ctx, nil, err
 	}
 	imp := storage.CrossNodeSandboxImport(req.GetAnnotations())
 	if imp == nil {
-		return ctx, fmt.Errorf("cross-node restore of %s is incomplete", sandboxID)
+		return ctx, nil, fmt.Errorf("cross-node restore of %s is incomplete", sandboxID)
+	}
+	// Master may place a restore here because this node was just added for
+	// it, and a new node is schedulable before its remote-backed Store is
+	// published. Wait out that window rather than fail the import on it.
+	if err := waitCrossNodeStoreReadyFn(ctx, backend, crossNodeStoreReadyWait); err != nil {
+		return ctx, nil, fmt.Errorf("cross-node restore of %s: %s storage unavailable: %w", sandboxID, backend, err)
+	}
+	claim, err := claimSandboxImportFn(sandboxID, backend)
+	if err != nil {
+		return ctx, nil, fmt.Errorf("cross-node restore of %s: %w", sandboxID, err)
 	}
 	dir, err := imp.EnsureMetadata(ctx)
 	if err != nil {
-		return ctx, fmt.Errorf("import metadata for cross-node restore of %s: %w", sandboxID, err)
+		return ctx, claim, fmt.Errorf("import metadata for cross-node restore of %s: %w", sandboxID, err)
 	}
 	log.G(ctx).Infof("cross-node restore %s: imported metadata at %s", sandboxID, dir)
-	return ctx, nil
+	return ctx, claim, nil
 }
 
 // ensureCrossNodeSandboxID pins the id this restore will run under, minting

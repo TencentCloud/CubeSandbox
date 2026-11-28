@@ -140,6 +140,13 @@ var (
 				Describe: "s3 node-local metadata base volume",
 			},
 		},
+		{
+			BucketDefine: &multimetadb.BucketDefine{
+				Name:     sandboxImportBucket,
+				DbName:   "storage",
+				Describe: "cross-node restore imports not yet owned by a sandbox",
+			},
+		},
 	}
 	nfsBucketName  = "nfs/v1"
 	failoverNfsDir = "nfsfailoverdir"
