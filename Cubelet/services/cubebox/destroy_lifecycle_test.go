@@ -13,10 +13,13 @@ import (
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/semaphore"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -112,6 +115,30 @@ func destroySandboxWithContextForTest(t *testing.T, s *service, ctx context.Cont
 	})
 	require.NoError(t, err)
 	return rsp
+}
+
+func TestDestroyContinuesIncomingTrace(t *testing.T) {
+	rec, flush := setupSnapshotTracer(t)
+	sb := newCubeboxWithStatusForTest("traced-delete", cubeboxstore.Status{
+		StartedAt: time.Now().Add(-time.Minute).UnixNano(),
+	})
+	sb.FirstContainer().Container = &fakeDestroyContainer{}
+	s, _, _ := newDestroyLifecycleServiceForTest(sb)
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("traceparent", rollbackTraceparent))
+
+	rsp := destroySandboxWithContextForTest(t, s, ctx, sb.ID)
+	require.Equal(t, errorcode.ErrorCode_Success, rsp.GetRet().GetRetCode())
+	flush()
+
+	spans := rec.named(telemetry.SpanDelete)
+	require.Len(t, spans, 1)
+	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", spans[0].Parent().TraceID().String())
+	assert.Equal(t, "00f067aa0ba902b7", spans[0].Parent().SpanID().String())
+	assert.Contains(t, spans[0].Attributes(), attribute.String(telemetry.AttrSandboxID, sb.ID))
+	code, ok := retCodeAttr(spans[0])
+	require.True(t, ok)
+	assert.Equal(t, int(rsp.GetRet().GetRetCode()), code)
 }
 
 func TestDestroyRunningSandboxDoesNotResume(t *testing.T) {

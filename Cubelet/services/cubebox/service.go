@@ -775,6 +775,9 @@ func getAllocatedPort(createInfo *workflow.CreateContext) []*cubebox.PortMapping
 }
 
 func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRequest) (*cubebox.DestroyCubeSandboxResponse, error) {
+	ctx, span := telemetry.StartIfTraced(telemetry.ExtractGRPC(ctx), telemetry.SpanDelete,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String(telemetry.AttrSandboxID, req.GetSandboxID())))
 	if s.restarts != nil {
 		s.restarts.Stop(req.GetSandboxID())
 	}
@@ -784,6 +787,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 		ExtInfo:   map[string][]byte{},
 	}
+	defer func() { telemetry.EndWithCode(span, int(rsp.GetRet().GetRetCode())) }()
 	start := time.Now()
 	destroyInfo := &workflow.DestroyContext{
 		DestroyInfo: req,

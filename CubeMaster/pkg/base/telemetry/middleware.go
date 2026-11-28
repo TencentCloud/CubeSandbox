@@ -15,6 +15,7 @@ import (
 )
 
 var tracedRoutes = map[string]bool{
+	"DELETE /cube/sandbox":                    true,
 	"POST /cube/sandbox":                      true,
 	"POST /cube/sandbox/commit":               true,
 	"POST /cube/sandbox/rollback":             true,
@@ -26,7 +27,7 @@ var tracedRoutes = map[string]bool{
 
 func GinMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Method != http.MethodPost || !tracedRoutes[c.Request.Method+" "+c.FullPath()] {
+		if !tracedRoutes[c.Request.Method+" "+c.FullPath()] {
 			c.Next()
 			return
 		}
