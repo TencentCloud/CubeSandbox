@@ -94,6 +94,7 @@ func startImageJobReconciler(ctx context.Context) {
 		return
 	}
 	imageJobReconcileOnce.Do(func() {
+		startBackfillNodeTrigger(ctx)
 		go func() {
 			runImageJobReconcilePass(detachTemplateImageJobContext(ctx, "image_job_reconcile", nil))
 			ticker := time.NewTicker(imageJobReconcileInterval)
@@ -160,14 +161,21 @@ func runImageJobReconcilePass(ctx context.Context) {
 // lock, so only one CubeMaster replica sweeps per tick. Mirrors the artifact-GC
 // locking discipline, including discarding the pinned connection whenever the
 // lock state becomes unknown.
-func withImageJobReconcileLock(ctx context.Context, fn func() error) (retErr error) {
+func withImageJobReconcileLock(ctx context.Context, fn func() error) error {
+	_, err := withImageJobReconcileLockHeld(ctx, fn)
+	return err
+}
+
+// withImageJobReconcileLockHeld is withImageJobReconcileLock that also
+// reports whether this replica held the lock and ran fn.
+func withImageJobReconcileLockHeld(ctx context.Context, fn func() error) (held bool, retErr error) {
 	conn, err := store.db.WithContext(ctx).DB()
 	if err != nil {
-		return fmt.Errorf("resolve sql db: %w", err)
+		return false, fmt.Errorf("resolve sql db: %w", err)
 	}
 	sqlConn, err := conn.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("pin connection: %w", err)
+		return false, fmt.Errorf("pin connection: %w", err)
 	}
 	defer func() {
 		if closeErr := sqlConn.Close(); closeErr != nil {
@@ -182,11 +190,11 @@ func withImageJobReconcileLock(ctx context.Context, fn func() error) (retErr err
 
 	locked, err := trySessionLock(sess, imageJobReconcileLock)
 	if err != nil {
-		return errors.Join(fmt.Errorf("acquire lock: %w", err), discardPinnedSession(sess))
+		return false, errors.Join(fmt.Errorf("acquire lock: %w", err), discardPinnedSession(sess))
 	}
 	if !locked {
 		// Another replica is sweeping; nothing to do this tick.
-		return nil
+		return false, nil
 	}
 	defer func() {
 		released, releaseErr := releaseSessionLock(sess, imageJobReconcileLock)
@@ -199,7 +207,7 @@ func withImageJobReconcileLock(ctx context.Context, fn func() error) (retErr err
 		}
 	}()
 
-	return fn()
+	return true, fn()
 }
 
 // stuckImageJob is the projection the sweep needs.
